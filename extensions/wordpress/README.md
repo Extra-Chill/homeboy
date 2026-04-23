@@ -125,6 +125,31 @@ The WordPress test framework provides factories for creating test data:
 | `HOMEBOY_SKIP_TESTS` | Skip PHPUnit tests | `0` |
 | `HOMEBOY_DEBUG` | Show debug output | `0` |
 
+### Test Backend
+
+The extension supports two test execution backends:
+
+| Backend | Description | Default |
+|---------|-------------|---------|
+| `host` | PHPUnit with host PHP + wp-phpunit + SQLite/MySQL | Yes |
+| `playground` | PHPUnit inside WordPress Playground (PHP-WASM + SQLite) | No |
+
+```bash
+# Switch a component to Playground backend
+homeboy component set my-plugin test_backend playground
+
+# Switch back to host backend
+homeboy component set my-plugin test_backend host
+```
+
+The Playground backend is **opt-in** and does not affect the default host
+backend. It boots a WordPress Playground instance, mounts the plugin, and
+runs PHPUnit inside PHP-WASM. No host PHP or MySQL is required.
+
+**Limitations (Phase 1):**
+- WordPress version is pinned to match the wp-phpunit package (currently 6.9.x).
+- Custom `db.php` drop-ins may conflict with Playground's built-in SQLite integration.
+
 ### Database Options
 
 The extension supports MySQL or SQLite for tests. The default is **`auto`**: the
@@ -172,7 +197,12 @@ Files that can be safely removed after migration:
 ```
 wordpress/
 ├── scripts/
-│   ├── test-runner.sh      # Main test orchestration
+│   ├── test/
+│   │   ├── test-runner.sh              # Main test orchestration (host backend)
+│   │   ├── test-runner-playground.sh   # Playground backend runner
+│   │   ├── generate-config.sh          # WordPress config generation
+│   │   ├── parse-test-results.sh       # Result parsing for homeboy core
+│   │   └── parse-test-failures.sh      # Failure parsing for homeboy core
 │   ├── build.sh            # Production build script
 │   ├── lint.sh             # Standalone linting
 │   └── generate-config.sh  # WordPress config generation
@@ -182,7 +212,7 @@ wordpress/
 ├── phpcs.xml.dist          # PHPCS configuration
 ├── .eslintrc.json          # ESLint configuration
 ├── composer.json           # PHP dependencies
-└── package.json            # Node dependencies
+└── package.json            # Node dependencies (ESLint + @wp-playground/cli)
 ```
 
 ## Blocking vs Advisory

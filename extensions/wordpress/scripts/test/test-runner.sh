@@ -98,6 +98,7 @@ if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
 
     # Parse settings from JSON using jq
     if [ -n "$SETTINGS_JSON" ] && [ "$SETTINGS_JSON" != "{}" ]; then
+        TEST_BACKEND=$(printf '%s' "$SETTINGS_JSON" | jq -r '.test_backend // "host"')
         DATABASE_TYPE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.database_type // "auto"')
         # MySQL settings (explicit configuration takes priority over ambient discovery)
         SETTINGS_MYSQL_HOST=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_host // ""')
@@ -105,11 +106,20 @@ if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
         SETTINGS_MYSQL_USER=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_user // ""')
         SETTINGS_MYSQL_PASSWORD=$(printf '%s' "$SETTINGS_JSON" | jq -r '.mysql_password // ""')
     else
+        TEST_BACKEND="host"
         DATABASE_TYPE="auto"
         SETTINGS_MYSQL_HOST=""
         SETTINGS_MYSQL_DATABASE=""
         SETTINGS_MYSQL_USER=""
         SETTINGS_MYSQL_PASSWORD=""
+    fi
+
+    # Dispatch to Playground backend if configured
+    if [ "$TEST_BACKEND" = "playground" ]; then
+        echo "Test backend: playground (WordPress Playground, PHP-WASM + SQLite)"
+        export HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH"
+        export HOMEBOY_SETTINGS_JSON="${SETTINGS_JSON:-}"
+        exec bash "${SCRIPT_DIR}/test-runner-playground.sh" "$@"
     fi
 else
     # Called directly (e.g., from composer test in component directory)
@@ -121,6 +131,7 @@ else
     PLUGIN_PATH="$COMPONENT_PATH"
     COMPONENT_ID="$(basename "$COMPONENT_PATH")"  # Derive component ID from directory name
     DATABASE_TYPE="auto"  # Auto-detect MySQL, fall back to SQLite
+    TEST_BACKEND="host"   # Default to host backend when called directly
 
     # Set component environment variables for bootstrap
     export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"

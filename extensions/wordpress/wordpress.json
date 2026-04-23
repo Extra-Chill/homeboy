@@ -343,11 +343,18 @@
       "description": "WordPress user for WP-CLI commands (email, login, or ID). When configured, automatically appended as --user flag."
     },
     {
+      "id": "test_backend",
+      "label": "Test Backend",
+      "type": "string",
+      "default": "host",
+      "description": "Test execution backend. 'host' (default) runs PHPUnit with host PHP + wp-phpunit. 'playground' runs inside WordPress Playground (PHP-WASM + embedded SQLite)."
+    },
+    {
       "id": "database_type",
       "label": "Database Type",
       "type": "string",
       "default": "auto",
-      "description": "Database backend for tests. 'auto' (default) tries MySQL first, falls back to SQLite. Use 'mysql' or 'sqlite' to force a specific backend."
+      "description": "Database backend for tests (host backend only). 'auto' tries MySQL first, falls back to SQLite. Ignored when test_backend is 'playground'."
     },
     {
       "id": "mysql_host",
