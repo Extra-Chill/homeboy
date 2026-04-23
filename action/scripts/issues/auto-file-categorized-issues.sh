@@ -336,6 +336,94 @@ FIXEOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# fetch_existing_issues CMD_TYPE
+#
+# Fetch all open issues for a command type, paginating through all pages.
+# Returns JSON array: [{number, title}, ...]
+# ─────────────────────────────────────────────────────────────────────────────
+
+fetch_existing_issues() {
+  local cmd_type="$1"
+  local result
+  result=$(gh api "repos/${REPO}/issues?state=open&labels=${cmd_type}&per_page=100" \
+    --paginate \
+    --jq '[.[] | {number: .number, title: .title}]' 2>/dev/null)
+
+  if [ -z "${result}" ]; then
+    echo "[]"
+  else
+    echo "${result}"
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# close_duplicate_issues EXISTING_ISSUES CMD_TYPE COMP_ID TITLE_PREFIX
+#
+# When multiple open issues match the same category, close all but the oldest
+# (lowest issue number). Returns the issue number to keep.
+#
+# This handles the race condition where concurrent CI runs create duplicate
+# issues for the same category before either run sees the other's issue.
+# ─────────────────────────────────────────────────────────────────────────────
+
+close_duplicate_issues() {
+  local existing_issues="$1"
+  local cmd_type="$2"
+  local comp_id="$3"
+  local title_prefix="$4"
+
+  local matching
+  matching=$(echo "${existing_issues}" | jq -c --arg prefix "${title_prefix}" --arg comp "in ${comp_id}" \
+    '[.[] | select(.title | startswith($prefix) and contains($comp))] | sort_by(.number)')
+
+  local match_count
+  match_count=$(echo "${matching}" | jq 'length')
+
+  if [ "${match_count}" -le 1 ]; then
+    # Zero or one match — no duplicates to close
+    echo "${matching}" | jq -r 'first | .number // empty'
+    return
+  fi
+
+  # Keep the oldest (lowest number), close the rest
+  local keep_number
+  keep_number=$(echo "${matching}" | jq -r 'first | .number')
+  local dupe_numbers
+  dupe_numbers=$(echo "${matching}" | jq -r --arg keep "${keep_number}" '.[1:] | .[].number')
+
+  while IFS= read -r dupe_num; do
+    [ -z "${dupe_num}" ] && continue
+
+    local dupe_title
+    dupe_title=$(echo "${matching}" | jq -r --argjson n "${dupe_num}" '.[] | select(.number == $n) | .title')
+
+    local close_comment="Closing as duplicate of #${keep_number} — consolidated by the code factory pipeline.
+
+This issue was superseded by a concurrent CI run that created a matching issue. Going forward, a single issue per category is maintained and updated on each CI run."
+
+    if gh api "repos/${REPO}/issues/${dupe_num}/comments" \
+      --method POST \
+      --field body="${close_comment}" > /dev/null 2>&1; then
+      :
+    else
+      echo "::warning::Failed to comment on duplicate issue #${dupe_num}"
+    fi
+
+    if gh api "repos/${REPO}/issues/${dupe_num}" \
+      --method PATCH \
+      --field state="closed" \
+      --field state_reason="not_planned" > /dev/null 2>&1; then
+      echo "  Closed duplicate issue #${dupe_num}: ${dupe_title} (keeping #${keep_number})"
+      TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + 1))
+    else
+      echo "::warning::Failed to close duplicate issue #${dupe_num}: ${dupe_title}"
+    fi
+  done <<< "${dupe_numbers}"
+
+  echo "${keep_number}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # close_resolved_issues CMD_TYPE COMP_ID CURRENT_KINDS_TEXT
 #
 # Close issues for categories that no longer have findings.
@@ -348,8 +436,7 @@ close_resolved_issues() {
   local closed=0
 
   local existing_issues
-  existing_issues=$(gh api "repos/${REPO}/issues?state=open&labels=${cmd_type}&per_page=100" \
-    --jq '[.[] | {number: .number, title: .title}]' 2>/dev/null || echo "[]")
+  existing_issues=$(fetch_existing_issues "${cmd_type}")
 
   while IFS= read -r ISSUE_LINE; do
     [ -z "${ISSUE_LINE}" ] && continue
@@ -442,10 +529,9 @@ file_categorized_issues() {
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
 
-  # Fetch existing open issues for this command type
+  # Fetch existing open issues for this command type (paginated)
   local existing_issues
-  existing_issues=$(gh api "repos/${REPO}/issues?state=open&labels=${cmd_type}&per_page=100" \
-    --jq '[.[] | {number: .number, title: .title}]' 2>/dev/null || echo "[]")
+  existing_issues=$(fetch_existing_issues "${cmd_type}")
 
   local kinds
   kinds=$(echo "${findings_json}" | jq -r '.groups | keys[]')
@@ -465,14 +551,14 @@ file_categorized_issues() {
       issue_title="${cmd_type}: ${kind_label} in ${comp_id}"
       title_prefix="${cmd_type}: "
       # Match any issue for this cmd_type + component (aggregate issues update any existing)
-      existing_number=$(echo "${existing_issues}" | jq -r --arg prefix "${cmd_type}: " --arg comp "in ${comp_id}" \
-        '[.[] | select(.title | startswith($prefix) and contains($comp))] | first | .number // empty' 2>/dev/null || true)
+      # Close duplicates from concurrent runs, keep the oldest
+      existing_number=$(close_duplicate_issues "${existing_issues}" "${cmd_type}" "${comp_id}" "${title_prefix}")
     else
       kind_label=$(echo "${KIND}" | tr '_' ' ')
       issue_title="${cmd_type}: ${kind_label} in ${comp_id} (${count})"
       title_prefix="${cmd_type}: ${kind_label} in ${comp_id}"
-      existing_number=$(echo "${existing_issues}" | jq -r --arg prefix "${title_prefix}" \
-        '[.[] | select(.title | startswith($prefix))] | first | .number // empty' 2>/dev/null || true)
+      # Close duplicates from concurrent runs, keep the oldest
+      existing_number=$(close_duplicate_issues "${existing_issues}" "${cmd_type}" "${comp_id}" "${title_prefix}")
     fi
 
     # Build the findings table (only for non-aggregate issues with actual findings)
