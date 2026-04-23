@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.10.16] - 2026-04-23
+
+### Changed
+- playground test discovery — recursive + phpunit.xml.dist-aware
+
 ## [2.10.15] - 2026-04-23
 
 ### Changed
