@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.3] - 2026-04-23
+
+### Fixed
+- three auto-issue filing bugs causing stale counts
+
 ## [1.16.2] - 2026-04-22
 
 ### Changed
