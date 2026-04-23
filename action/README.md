@@ -26,7 +26,7 @@ jobs:
         with:
           extension: wordpress
           commands: lint,test
-          php-version: '8.2'
+          php-version: '8.3'
 ```
 
 ### Continuous Release
@@ -154,7 +154,7 @@ Use these outputs to gate downstream jobs:
     extension: wordpress
     commands: lint
     args: --errors-only
-    php-version: '8.2'
+    php-version: '8.3'
 ```
 
 ### Full Suite with Audit
@@ -164,7 +164,7 @@ Use these outputs to gate downstream jobs:
   with:
     extension: wordpress
     commands: lint,test,audit
-    php-version: '8.2'
+    php-version: '8.3'
     node-version: '20'
 ```
 
@@ -175,7 +175,7 @@ Use these outputs to gate downstream jobs:
   with:
     extension: wordpress
     commands: lint,test,audit
-    php-version: '8.2'
+    php-version: '8.3'
     scope: 'changed'
 ```
 
@@ -223,7 +223,7 @@ All three jobs write to the **same PR comment** automatically.
   with:
     extension: wordpress
     commands: lint,test
-    php-version: '8.2'
+    php-version: '8.3'
     autofix: 'true'
 ```
 
@@ -246,7 +246,7 @@ For fork PRs, Homeboy Action now attempts the same direct-to-PR autofix flow fir
   with:
     extension: wordpress
     commands: lint,test,audit
-    php-version: '8.2'
+    php-version: '8.3'
     autofix: 'true'
     autofix-open-pr: 'true'
     auto-issue: 'true'
@@ -341,6 +341,8 @@ Use two workflows:
    - separate release workflow uses `commands: release`
    - quality gate before release
 
+> **Avoid cron-based release triggers.** A `schedule` cron fires every 15 minutes regardless of whether there are new commits — that's 96 unnecessary CI runs per day. Push-to-main triggers the release pipeline only when there's actually something to release.
+
 ### Scope behavior
 
 `scope: 'changed'` is a thin wrapper around the Homeboy CLI. On PRs, the action resolves the base SHA and passes `--changed-since <base-sha>` to Homeboy for `audit`, `lint`, and `test`.
@@ -376,6 +378,20 @@ When multiple jobs invoke Homeboy Action on the same PR, they **merge into one s
 - Extensions must be installable via `homeboy extension install`
 - For WordPress: PHP must be available (use `php-version` input or set up separately)
 - Repository must include `homeboy.json` at root with a top-level `id`
+
+### WordPress PHP compatibility
+
+Set `php-version` to match your project's `composer.json` constraint. Modern WordPress plugin development targets **PHP 8.3+** — PHPUnit 12 and many current dependencies require it.
+
+```yaml
+php-version: '8.3'
+```
+
+If CI fails with `requires php >= X.Y`, either:
+- Set `php-version` to `X.Y` or higher in your workflow, or
+- Adjust the dependency constraint in `composer.json`
+
+Common mismatch: PHPUnit 12 requires PHP >= 8.3. If your workflow uses `php-version: '8.2'`, either upgrade to 8.3 or pin PHPUnit to `^11` in `require-dev`.
 
 ## License
 
