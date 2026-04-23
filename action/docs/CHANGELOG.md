@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.5] - 2026-04-23
+
+### Changed
+- replace Python normalize_audit_json with jq
+
 ## [1.16.4] - 2026-04-23
 
 ### Fixed
