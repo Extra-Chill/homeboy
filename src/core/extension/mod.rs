@@ -344,9 +344,10 @@ pub fn run_fingerprint_script(
         "content": content,
     });
 
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(script_path.to_string_lossy().as_ref())
+    // Invoke the script directly so its shebang resolves the interpreter.
+    // Wrapping with `sh -c <script>` bypasses `#!/usr/bin/env bash` and runs
+    // under POSIX sh — which breaks scripts using bash-only features. See #1276.
+    let output = std::process::Command::new(&script_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -522,9 +523,10 @@ pub fn run_refactor_script(
         return None;
     }
 
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(script_path.to_string_lossy().as_ref())
+    // Invoke the script directly so its shebang resolves the interpreter.
+    // Wrapping with `sh -c <script>` bypasses `#!/usr/bin/env bash` and runs
+    // under POSIX sh — which breaks scripts using bash-only features. See #1276.
+    let output = std::process::Command::new(&script_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

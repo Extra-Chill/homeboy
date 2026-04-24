@@ -443,14 +443,11 @@ pub fn extract_contracts(path: &Path, root: &Path) -> Result<Option<FileContract
         )
     })?;
 
-    let mut child = std::process::Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                "sh {}",
-                crate::engine::shell::quote_path(&script_path.to_string_lossy())
-            ),
-        ])
+    // Invoke the script directly so its shebang resolves the interpreter.
+    // Wrapping with `sh <script>` bypasses `#!/usr/bin/env bash` and runs
+    // under POSIX sh — which breaks scripts using bash-only features like
+    // process substitution (`done < <(...)`). See #1276.
+    let mut child = std::process::Command::new(&script_path)
         .current_dir(root)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
