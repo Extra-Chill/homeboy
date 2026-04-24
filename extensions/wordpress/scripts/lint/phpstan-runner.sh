@@ -9,7 +9,7 @@ source "${DEPENDENCY_HELPER}"
 # Standalone PHP static analysis script using PHPStan
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
 # Supports skip via HOMEBOY_SKIP_PHPSTAN=1
-# Supports level override via HOMEBOY_PHPSTAN_LEVEL (default: 5)
+# Supports level override via HOMEBOY_PHPSTAN_LEVEL (default: 7, matches phpstan.neon.dist)
 # NOTE: PHPStan always analyzes the full codebase (ignores HOMEBOY_LINT_GLOB)
 # because it needs the complete type graph to detect collateral damage from
 # changes (broken call sites, type mismatches in untouched files, etc.)
@@ -91,12 +91,22 @@ fi
 generate_dependency_config() {
     local tmpfile
     local has_dependencies=0
+    local has_baseline=0
 
     tmpfile=$(homeboy_mktemp 'phpstan-dependencies-XXXXXX.neon')
 
     {
         printf '%s\n' 'includes:'
         printf '    - %s\n' "$PHPSTAN_CONFIG"
+        # Component baseline: PHPStan 2.x removed the `--baseline` CLI flag, so
+        # the baseline file must be pulled in via `includes:` in the neon. We
+        # do this here (rather than via --baseline) so every invocation path
+        # (summary, full, retry) picks it up automatically through the single
+        # config include chain.
+        if [ -f "$COMPONENT_BASELINE" ]; then
+            printf '    - %s\n' "$COMPONENT_BASELINE"
+            has_baseline=1
+        fi
         printf '%s\n' ''
         printf '%s\n' 'parameters:'
         printf '%s\n' '    scanDirectories:'
@@ -108,7 +118,7 @@ generate_dependency_config() {
         done < <(homeboy_resolve_validation_dependency_paths "$PLUGIN_PATH")
     } > "$tmpfile"
 
-    if [ "$has_dependencies" -eq 1 ]; then
+    if [ "$has_dependencies" -eq 1 ] || [ "$has_baseline" -eq 1 ]; then
         printf '%s\n' "$tmpfile"
     else
         rm -f "$tmpfile"
@@ -148,19 +158,27 @@ echo "Running PHPStan static analysis..."
 phpstan_args=(analyse)
 phpstan_args+=(--configuration="$PHPSTAN_BASE_CONFIG")
 
-# Level override (default: 5)
-PHPSTAN_LEVEL="${HOMEBOY_PHPSTAN_LEVEL:-5}"
+# Level resolution:
+#   - HOMEBOY_PHPSTAN_LEVEL env override wins (for ad-hoc bumps / CI matrix runs).
+#   - Otherwise, default to 7 which matches the `level:` key in phpstan.neon.dist.
+#
+# Previously this script hardcoded 5 as a fallback, which shadowed the neon
+# config whenever the env var wasn't set (`--level` on CLI overrides neon).
+# That made config-driven level changes invisible to the harness. The fallback
+# must now track what the neon declares (level 7, set in homeboy-extensions#225).
+# Keep them in sync when bumping further.
+PHPSTAN_LEVEL="${HOMEBOY_PHPSTAN_LEVEL:-7}"
 phpstan_args+=(--level="$PHPSTAN_LEVEL")
 
 # Memory limit (default: 2G)
 phpstan_args+=(--memory-limit=2G)
 
-# Include component baseline if it exists
-if [ -f "$COMPONENT_BASELINE" ]; then
-    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: Using component baseline: $COMPONENT_BASELINE"
-    fi
-    phpstan_args+=(--baseline="$COMPONENT_BASELINE")
+# Component baseline: if <component>/phpstan-baseline.neon exists, it's pulled
+# in via `includes:` in the generated dependency/autoload neon (see
+# generate_dependency_config). PHPStan 2.x removed the `--baseline` CLI flag,
+# so inclusion via neon is the only supported path.
+if [ -f "$COMPONENT_BASELINE" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+    echo "DEBUG: Component baseline will be pulled in via includes: $COMPONENT_BASELINE"
 fi
 
 # Include component/dependency autoloaders if they exist
@@ -284,9 +302,9 @@ if [ -n "$PHPSTAN_MAX_PROCESSES" ] || [ -n "$PHPSTAN_PHP_VERSION" ]; then
     phpstan_args+=(--configuration="$PHPSTAN_TMPCONFIG")
     phpstan_args+=(--level="$PHPSTAN_LEVEL")
     phpstan_args+=(--memory-limit=2G)
-    if [ -f "$COMPONENT_BASELINE" ]; then
-        phpstan_args+=(--baseline="$COMPONENT_BASELINE")
-    fi
+    # Baseline is pulled in via neon includes (PHPSTAN_TMPCONFIG includes
+    # PHPSTAN_BASE_CONFIG which includes COMPONENT_BASELINE when present),
+    # so there's no --baseline CLI flag to pass (removed in PHPStan 2.x).
     if [ -f "$COMPOSITE_AUTOLOAD" ]; then
         phpstan_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
     fi
@@ -362,7 +380,8 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         echo "Parallel worker failure detected, retrying single-process (--debug)..."
         prepare_phpstan_retry_config > /dev/null
         retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress --debug)
-        [ -f "$COMPONENT_BASELINE" ] && retry_args+=(--baseline="$COMPONENT_BASELINE")
+        # Baseline is pulled in via PHPSTAN_TMPCONFIG → PHPSTAN_BASE_CONFIG
+        # → COMPONENT_BASELINE include chain (no --baseline CLI flag in PHPStan 2.x).
         [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
         retry_args+=(.)
         stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
@@ -721,7 +740,7 @@ if [ "$full_exit" -ne 0 ] && \
     echo "Parallel worker failure detected, retrying single-process (--debug)..."
     prepare_phpstan_retry_config > /dev/null
     retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress --debug)
-    [ -f "$COMPONENT_BASELINE" ] && retry_args+=(--baseline="$COMPONENT_BASELINE")
+    # Baseline pulled in via PHPSTAN_TMPCONFIG include chain, same as summary-mode retry.
     [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
     retry_args+=(.)
     set +e
