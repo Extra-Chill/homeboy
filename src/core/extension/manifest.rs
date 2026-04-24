@@ -291,6 +291,8 @@ pub struct ExtensionManifest {
     pub lint: Option<LintConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test: Option<TestConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bench: Option<BenchConfig>,
     /// Post-write verify command used as a safety gate after `refactor --from ...`
     /// autofix writes to disk. If the command exits non-zero, the written files
     /// are reverted and the fixes are reclassified as declined. See #1167.
@@ -344,6 +346,13 @@ impl ExtensionManifest {
             .is_some()
     }
 
+    pub fn has_bench(&self) -> bool {
+        self.bench
+            .as_ref()
+            .and_then(|c| c.extension_script.as_ref())
+            .is_some()
+    }
+
     pub fn lint_script(&self) -> Option<&str> {
         self.lint
             .as_ref()
@@ -358,6 +367,12 @@ impl ExtensionManifest {
 
     pub fn test_script(&self) -> Option<&str> {
         self.test
+            .as_ref()
+            .and_then(|c| c.extension_script.as_deref())
+    }
+
+    pub fn bench_script(&self) -> Option<&str> {
+        self.bench
             .as_ref()
             .and_then(|c| c.extension_script.as_deref())
     }
@@ -682,6 +697,12 @@ pub struct LintConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_script: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension_script: Option<String>,
 }

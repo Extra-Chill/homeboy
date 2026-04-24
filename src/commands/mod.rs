@@ -248,6 +248,7 @@ pub fn finalize_set_spec(
 pub mod api;
 pub mod audit;
 pub mod auth;
+pub mod bench;
 pub mod build;
 pub mod changelog;
 pub mod changes;
@@ -313,6 +314,7 @@ pub(crate) fn run_json(
         crate::Commands::Init(args) => dispatch!(args, global, init),
         crate::Commands::Status(args) => dispatch!(args, global, status),
         crate::Commands::Test(args) => dispatch!(args, global, test),
+        crate::Commands::Bench(args) => dispatch!(args, global, bench),
         crate::Commands::Lint(args) => dispatch!(args, global, lint),
         crate::Commands::Project(args) => dispatch!(args, global, project),
         crate::Commands::Ssh(args) => dispatch!(args, global, ssh),

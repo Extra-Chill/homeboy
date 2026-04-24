@@ -199,6 +199,7 @@ impl ExecutionContext {
             ExtensionCapability::Lint => manifest.lint_script(),
             ExtensionCapability::Test => manifest.test_script(),
             ExtensionCapability::Build => manifest.build_script(),
+            ExtensionCapability::Bench => manifest.bench_script(),
         }
         .map(|s| s.to_string())
         .or_else(|| {
@@ -218,6 +219,7 @@ impl ExecutionContext {
                         ExtensionCapability::Lint => "lint",
                         ExtensionCapability::Test => "test",
                         ExtensionCapability::Build => "build",
+                        ExtensionCapability::Bench => "bench",
                     }
                 ),
                 None,

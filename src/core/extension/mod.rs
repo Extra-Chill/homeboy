@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod build;
 mod execution;
 pub mod grammar;
@@ -22,12 +23,13 @@ pub use runtime_helper::RUNNER_STEPS_ENV;
 
 // Re-export manifest types
 pub use manifest::{
-    ActionConfig, ActionType, AuditCapability, AutofixVerifyConfig, BuildConfig, CliConfig,
-    DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride, DeployVerification,
-    DiscoveryConfig, DocTarget, ExecutableCapability, ExtensionManifest, FeatureContextRule,
-    HttpMethod, InputConfig, LintConfig, OutputConfig, OutputSchema, PlatformCapability,
-    ProvidesConfig, RequirementsConfig, RuntimeConfig, ScriptsConfig, SelectOption, SettingConfig,
-    SinceTagConfig, TestConfig, TestMappingConfig, VersionPatternConfig,
+    ActionConfig, ActionType, AuditCapability, AutofixVerifyConfig, BenchConfig, BuildConfig,
+    CliConfig, DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride,
+    DeployVerification, DiscoveryConfig, DocTarget, ExecutableCapability, ExtensionManifest,
+    FeatureContextRule, HttpMethod, InputConfig, LintConfig, OutputConfig, OutputSchema,
+    PlatformCapability, ProvidesConfig, RequirementsConfig, RuntimeConfig, ScriptsConfig,
+    SelectOption, SettingConfig, SinceTagConfig, TestConfig, TestMappingConfig,
+    VersionPatternConfig,
 };
 
 // Re-export version types
@@ -117,6 +119,7 @@ pub enum ExtensionCapability {
     Lint,
     Test,
     Build,
+    Bench,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +150,7 @@ fn capability_label(capability: ExtensionCapability) -> &'static str {
         ExtensionCapability::Lint => "lint",
         ExtensionCapability::Test => "test",
         ExtensionCapability::Build => "build",
+        ExtensionCapability::Bench => "bench",
     }
 }
 
@@ -155,6 +159,7 @@ fn manifest_has_capability(manifest: &ExtensionManifest, capability: ExtensionCa
         ExtensionCapability::Lint => manifest.has_lint(),
         ExtensionCapability::Test => manifest.has_test(),
         ExtensionCapability::Build => manifest.has_build(),
+        ExtensionCapability::Bench => manifest.has_bench(),
     }
 }
 
@@ -260,10 +265,11 @@ pub fn resolve_execution_context(
         ExtensionCapability::Lint => manifest.lint_script(),
         ExtensionCapability::Test => manifest.test_script(),
         ExtensionCapability::Build => manifest.build_script(),
+        ExtensionCapability::Bench => manifest.bench_script(),
     }
     .map(|s| s.to_string())
     // Build's extension_script is optional (builds can use local scripts or command templates),
-    // so we allow an empty script_path for Build. Lint/Test require it.
+    // so we allow an empty script_path for Build. Lint/Test/Bench require it.
     .or_else(|| {
         if capability == ExtensionCapability::Build {
             Some(String::new())

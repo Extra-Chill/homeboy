@@ -20,9 +20,9 @@ mod help_topics;
 
 use commands::utils::{args, entity_suggest, response as output, tty};
 use commands::{
-    api, audit, auth, build, changelog, changes, cli, component, config, db, deploy, extension,
-    file, fleet, git, init, lint, logs, project, refactor, release, scaffold, server, ssh, status,
-    test, transfer, undo, upgrade, validate, version,
+    api, audit, auth, bench, build, changelog, changes, cli, component, config, db, deploy,
+    extension, file, fleet, git, init, lint, logs, project, refactor, release, scaffold, server,
+    ssh, status, test, transfer, undo, upgrade, validate, version,
 };
 use homeboy::extension::load_all_extensions;
 
@@ -54,6 +54,8 @@ enum Commands {
     Server(server::ServerArgs),
     /// Run tests for a component
     Test(test::TestArgs),
+    /// Run performance benchmarks for a component
+    Bench(bench::BenchArgs),
     /// Lint a component
     Lint(lint::LintArgs),
     /// Database operations

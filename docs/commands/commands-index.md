@@ -3,6 +3,7 @@
 - [api](api.md)
 - [audit](audit.md) — code convention drift and structural analysis
 - [auth](auth.md)
+- [bench](bench.md) — performance benchmarks + p95 regression ratchet
 - [build](build.md)
 - [changelog](changelog.md)
 - [changes](changes.md)

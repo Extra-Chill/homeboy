@@ -241,6 +241,7 @@
 - `build`
 - `lint`
 - `test`
+- `bench`
 - `actions`
 - `hooks`
 - `settings`

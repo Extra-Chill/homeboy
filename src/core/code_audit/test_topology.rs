@@ -373,6 +373,7 @@ JSON
             build: None,
             lint: None,
             test: None,
+            bench: None,
             actions: vec![],
             hooks: std::collections::HashMap::new(),
             settings: vec![],

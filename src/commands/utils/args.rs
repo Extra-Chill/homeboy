@@ -126,6 +126,23 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
             ],
         ),
         (
+            "bench",
+            "",
+            &[
+                "--iterations",
+                "--baseline",
+                "--ignore-baseline",
+                "--ratchet",
+                "--regression-threshold",
+                "--setting",
+                "--path",
+                "--json-summary",
+                "--json",
+                "--help",
+                "-h",
+            ],
+        ),
+        (
             "scaffold",
             "test",
             &["--file", "--write", "--path", "--json", "--help", "-h"],

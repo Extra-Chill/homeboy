@@ -455,6 +455,7 @@ pub(crate) fn validate_capability_script_exists(
             super::ExtensionCapability::Lint => "lint",
             super::ExtensionCapability::Test => "test",
             super::ExtensionCapability::Build => "build",
+            super::ExtensionCapability::Bench => "bench",
         };
 
         return Err(Error::validation_invalid_argument(
