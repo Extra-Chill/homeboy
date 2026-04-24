@@ -243,9 +243,15 @@ fn resolve_validate_command(root: &Path, changed_files: &[PathBuf]) -> Option<St
             let script_path = std::path::Path::new(ext_path).join(script_rel);
 
             if script_path.exists() {
-                // Build the command: pass root and changed files as JSON on stdin
+                // Invoke via `bash` rather than `sh`: the bundled
+                // extension scripts (e.g. validate-syntax.sh) declare
+                // `#!/usr/bin/env bash` and use bash-only constructs
+                // like `< <(...)` process substitution. On macOS
+                // /bin/sh is bash in sh-compat mode, which disables
+                // those constructs and fails with a syntax error.
+                // See https://github.com/Extra-Chill/homeboy/issues/1276.
                 return Some(format!(
-                    "sh {}",
+                    "bash {}",
                     crate::engine::shell::quote_path(&script_path.to_string_lossy())
                 ));
             }
