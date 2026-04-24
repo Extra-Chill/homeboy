@@ -18,7 +18,10 @@ pub mod exec_context;
 
 // Re-export runner types
 pub use runner::{ExtensionRunner, RunnerOutput};
-pub use runner_contract::RunnerStepFilter;
+pub use runner_contract::{
+    phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
+    PhaseFailureCategory, PhaseReport, PhaseStatus, RunnerStepFilter, VerificationPhase,
+};
 pub use runtime_helper::RUNNER_STEPS_ENV;
 
 // Re-export manifest types
