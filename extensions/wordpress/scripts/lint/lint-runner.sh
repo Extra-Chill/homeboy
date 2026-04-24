@@ -553,6 +553,24 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
         echo "$summary"
     fi
 
+    # Prominent auto-fix nudge: when PHPCS reports auto-fixable findings, surface
+    # a dedicated call-to-action block so developers see them before pushing.
+    # This closes the behavior gap where warnings fire but the warn-only exit 0
+    # lets auto-fixable findings slip through to reviewers (homeboy-extensions#229).
+    fixable_count=$(echo "$json_output" | php -r '
+        $json = json_decode(file_get_contents("php://stdin"), true);
+        echo (int) ($json["totals"]["fixable"] ?? 0);
+    ' 2>/dev/null || echo "0")
+
+    if [ -n "$fixable_count" ] && [ "$fixable_count" -gt 0 ] 2>/dev/null; then
+        fix_target="${HOMEBOY_COMPONENT_ID:-${HOMEBOY_PROJECT_ID:-<component>}}"
+        echo ""
+        echo "============================================"
+        echo "AUTO-FIXABLE: ${fixable_count} lint finding(s) can be fixed automatically."
+        echo "  Run:  homeboy refactor --from lint --write ${fix_target}"
+        echo "============================================"
+    fi
+
     # Write annotations sidecar JSON for CI inline comments
     if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
         echo "$json_output" | php -r '
