@@ -19,6 +19,13 @@
 #   HOMEBOY_OUTPUT_DIR    — directory with command log files
 #   COMPONENT_NAME        — component ID
 #   COMMANDS              — comma-separated list of commands that were run
+#   EXPECTED_COMMANDS     — optional; comma-separated list of command types
+#                           expected to run across the full workflow (e.g.
+#                           "audit,lint,test"). Used to scope the orphan-
+#                           reconciliation step so that workflows which split
+#                           audit/lint/test across separate invocations do
+#                           not close each other's issues. Defaults to
+#                           COMMANDS when empty.
 #   RESULTS               — JSON object with pass/fail per command
 #   AUTOFIX_ATTEMPTED     — whether autofix was tried before filing
 #   AUTOFIX_PR_CREATED    — whether an autofix PR was opened
@@ -751,11 +758,35 @@ done
 # If a command was removed from the workflow, its issues are never updated or
 # closed because the main loop only processes commands that ran this time.
 # Close any open issues for command types that were NOT in this CI run.
+#
+# Scope: workflows that split audit/lint/test across separate invocations
+# (e.g. one step per command + a final autofix step) must pass the full set
+# as `expected-commands` so each invocation only reconciles command types
+# that no invocation in the workflow will handle. Without it, an invocation
+# running only `audit` would treat every open lint/test issue as orphaned
+# and close it — even though a sibling invocation will file lint/test
+# issues seconds later.
+#
+# Default (EXPECTED_COMMANDS empty): fall back to COMMANDS so single-command
+# invocations still reconcile siblings the bot once owned but no longer runs.
+
+if [ -n "${EXPECTED_COMMANDS:-}" ]; then
+  IFS=',' read -ra EXPECTED_CMD_ARRAY <<< "${EXPECTED_COMMANDS}"
+  # Normalize whitespace on each element
+  for i in "${!EXPECTED_CMD_ARRAY[@]}"; do
+    EXPECTED_CMD_ARRAY[$i]=$(echo "${EXPECTED_CMD_ARRAY[$i]}" | xargs)
+  done
+else
+  EXPECTED_CMD_ARRAY=("${CMD_ARRAY[@]}")
+fi
 
 ALL_CMD_TYPES=('audit' 'lint' 'test')
 for CMD_TYPE in "${ALL_CMD_TYPES[@]}"; do
-  # Skip if this command type was processed in the main loop
-  if echo ",${CMD_ARRAY[*]}," | grep -q ",${CMD_TYPE},"; then
+  # Skip if this command type is expected somewhere in the workflow.
+  # Force comma separator when joining the expected array so the haystack
+  # matches the ",${CMD_TYPE}," needle regardless of ambient IFS.
+  EXPECTED_JOINED=$(IFS=','; echo "${EXPECTED_CMD_ARRAY[*]}")
+  if echo ",${EXPECTED_JOINED}," | grep -q ",${CMD_TYPE},"; then
     continue
   fi
   echo "Reconciling orphaned ${CMD_TYPE} issues for ${COMP_ID}..."

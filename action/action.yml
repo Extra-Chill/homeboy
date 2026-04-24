@@ -40,6 +40,10 @@ inputs:
     description: 'Override commands to run. If empty, inferred from event context: PR/push/manual → audit,lint,test; cron → release.'
     required: false
     default: ''
+  expected-commands:
+    description: 'Full set of command types expected to run across the workflow (e.g. "audit,lint,test"). Used by auto-issue reconciliation to avoid closing issues owned by sibling invocations when a workflow splits audit/lint/test across separate steps. Defaults to `commands` when empty.'
+    required: false
+    default: ''
   component:
     description: 'Component name override. Auto-detected from homeboy.json if not set.'
     required: false
@@ -526,6 +530,7 @@ runs:
         GH_TOKEN: ${{ inputs.app-token || github.token }}
         RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
+        EXPECTED_COMMANDS: ${{ inputs.expected-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-prepare-nonpr.outputs.committed }}

@@ -113,6 +113,7 @@ Use these outputs to gate downstream jobs:
 | `extension` | No | | Extension ID (e.g. `wordpress`, `rust`, `node`) |
 | `extension-source` | No | `Extra-Chill/homeboy-extensions` | Git URL to install the extension from |
 | `commands` | No | `lint,test` | Comma-separated commands to run |
+| `expected-commands` | No | *(falls back to `commands`)* | Full set of command types expected to run across the workflow (e.g. `audit,lint,test`). Set this on every invocation when a workflow splits audit/lint/test across separate steps, otherwise each invocation will close sibling invocations' issues during reconciliation. |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
