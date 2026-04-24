@@ -500,6 +500,17 @@ pub(crate) fn detect_intra_method_duplicates(fingerprints: &[&FileFingerprint]) 
                         }
                     }
 
+                    // Suppress structural-syntax-only windows. Match-arm tails
+                    // (`},`, `)?;`, `Ok((...))`, closing brace, bare-identifier
+                    // struct-literal fields) repeat naturally across sibling
+                    // dispatch branches in `run_*` functions — they're not
+                    // merge artifacts or copy-paste, they're Rust syntax.
+                    // A block is worth flagging only if it contains at least
+                    // one logic-bearing line.
+                    if is_structural_syntax_only(&normalized, first_norm_idx, match_len) {
+                        continue;
+                    }
+
                     // Convert body-relative line numbers to 1-indexed file lines
                     let first_file_line = body_start + 1 + first.0 + 1;
                     let other_file_line = body_start + 1 + other.0 + 1;
@@ -602,6 +613,123 @@ fn normalize_line(line: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+/// Return true when the window `normalized[start..start+len]` is pure
+/// syntactic scaffolding with no logic-bearing content.
+///
+/// A window is scaffolding when **every** line is one of:
+/// - pure punctuation closers (`}`, `},`, `)?;`, etc.)
+/// - a single identifier, optionally trailed by `,` (struct-literal or
+///   destructuring fields)
+/// - common match-arm glue (`=> {`, `} => {`)
+///
+/// **and** none of the lines contain logic signals (`=`, `let `, `if `,
+/// `for `, `while `, `match `, `return`, or a function-call shape
+/// `foo(` / `foo::bar(`). If a single line in the window carries any
+/// logic signal, the window is not scaffolding and gets flagged normally.
+///
+/// Match-arm tails (`)?;`, `Ok((x, 0))`, struct-literal closers) repeated
+/// across sibling arms of a dispatch `match` are structural noise, not
+/// duplication — this filter stops them from tripping the detector.
+fn is_structural_syntax_only(
+    normalized: &[(usize, String)],
+    start: usize,
+    len: usize,
+) -> bool {
+    let end = (start + len).min(normalized.len());
+    if start >= end {
+        return false;
+    }
+    let window = &normalized[start..end];
+
+    // If any line in the window looks logical, window is not scaffolding.
+    if window.iter().any(|(_, line)| has_logic_signal(line)) {
+        return false;
+    }
+
+    // Every line must match a known scaffolding shape.
+    window
+        .iter()
+        .all(|(_, line)| is_scaffolding_line(line))
+}
+
+/// Lines that look like they do real work: assignment, control flow, or
+/// a user function call that isn't a dispatch-return wrapper.
+fn has_logic_signal(normalized: &str) -> bool {
+    let t = normalized.trim();
+
+    // Assignment or `let` binding.
+    if t.contains(" = ") || t.starts_with("let ") {
+        return true;
+    }
+
+    // Control flow keywords (normalized to lowercase by the caller).
+    for kw in ["if ", "for ", "while ", "match ", "return ", "loop ", "?;"] {
+        if t.contains(kw) && !matches!(t, ")?;" | "})?;") {
+            return true;
+        }
+    }
+
+    // Function / method calls that aren't bare dispatch-return wrappers.
+    // `ok(...)`, `err(...)`, `some(...)`, `none` by themselves are scaffolding
+    // (return-tail on a match arm); anything else with parens is real work.
+    if t.contains('(') {
+        let before_paren = t.split('(').next().unwrap_or("");
+        let head = before_paren.trim_end_matches(':').trim_end_matches(':');
+        let head = head.trim();
+        let is_return_wrapper = matches!(head, "ok" | "err" | "some")
+            || head.ends_with(" ok")
+            || head.ends_with(" err")
+            || head.ends_with(" some");
+        if !is_return_wrapper {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Does this normalized line match a known scaffolding shape?
+fn is_scaffolding_line(normalized: &str) -> bool {
+    let t = normalized.trim();
+    if t.is_empty() {
+        return true;
+    }
+
+    // Pure-punctuation closers: `}`, `},`, `)?;`, `))`, etc.
+    if t.chars().all(|c| matches!(c, '}' | ')' | '?' | ';' | ',' | '(')) {
+        return true;
+    }
+
+    // Bare identifier (optionally trailing comma) — struct-literal field or
+    // destructure.
+    let core = t.trim_end_matches(',');
+    if !core.is_empty()
+        && core
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return true;
+    }
+
+    // Dispatch-return tails: `ok(...)`, `err(...)`, `some(...)`, `none`
+    // (optionally with trailing `?`, `;`, `,`).
+    let core = t.trim_end_matches([',', ';', '?']);
+    if core == "none"
+        || core.starts_with("ok(")
+        || core.starts_with("err(")
+        || core.starts_with("some(")
+    {
+        return true;
+    }
+
+    // Match-arm glue.
+    if t.ends_with("=> {") || t == "} => {" || t == "_ => {" {
+        return true;
+    }
+
+    false
 }
 
 // ============================================================================
@@ -1479,6 +1607,157 @@ mod tests {
             !findings.is_empty(),
             "Should detect duplicated block in Rust function"
         );
+    }
+
+    #[test]
+    fn intra_method_ignores_match_arm_tail_scaffolding() {
+        // Sibling dispatch arms in a `run_*` match share a boilerplate tail:
+        //   )?;
+        //   Ok((Variant(output), 0))
+        //   }
+        //   OtherArm::Name { ... } => {
+        //
+        // After normalization these look like 5+ identical lines across arms,
+        // but they're Rust syntax, not duplicated logic. The scaffolding
+        // filter should suppress the finding.
+        //
+        // Each arm body here is intentionally one unique line plus the
+        // scaffolding tail — so the only thing that repeats is scaffolding.
+        let content = "\
+fn run_pr(args: PrArgs) -> Result {
+    match args.command {
+        PrCommand::Create {
+            comp_create,
+        } => {
+            do_create_thing(comp_create);
+            Ok((GitCommandOutput::Pr(output), 0))
+        }
+        PrCommand::Edit {
+            comp_edit,
+        } => {
+            do_edit_thing(comp_edit);
+            Ok((GitCommandOutput::Pr(output), 0))
+        }
+        PrCommand::Comment {
+            comp_comment,
+        } => {
+            do_comment_thing(comp_comment);
+            Ok((GitCommandOutput::Pr(output), 0))
+        }
+    }
+}
+";
+        let mut fp = make_fingerprint("src/commands/git.rs", &["run_pr"], &[]);
+        fp.content = content.to_string();
+
+        let findings = detect_intra_method_duplicates(&[&fp]);
+        assert!(
+            findings.is_empty(),
+            "Match-arm tail scaffolding should not be flagged as duplication; got {} finding(s): {:?}",
+            findings.len(),
+            findings.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn intra_method_still_flags_real_duplication_with_scaffolding_tails() {
+        // If the repeated block contains real logic (a `let` + a call that
+        // isn't an Ok/Err wrapper), we should still flag it even when it's
+        // surrounded by structural lines.
+        let content = "\
+fn process_twice() -> Result {
+    let items = load_items()?;
+    let validator = Validator::new();
+    let processor = Processor::new();
+    let output = processor.run(&items);
+    save_output(&output)?;
+
+    let items = load_items()?;
+    let validator = Validator::new();
+    let processor = Processor::new();
+    let output = processor.run(&items);
+    save_output(&output)?;
+
+    Ok(())
+}
+";
+        let mut fp = make_fingerprint("src/core/pipeline.rs", &["process_twice"], &[]);
+        fp.content = content.to_string();
+
+        let findings = detect_intra_method_duplicates(&[&fp]);
+        assert!(
+            !findings.is_empty(),
+            "Real duplication with logic lines should still be detected"
+        );
+    }
+
+    #[test]
+    fn scaffolding_line_classifier() {
+        // Positive cases (structural).
+        for line in &[
+            "}",
+            "},",
+            ")",
+            ")?;",
+            "))",
+            "))?",
+            "path,",
+            "component_id,",
+            "path",
+            "ok((gitcommandoutput::pr(output), 0))",
+            "ok(output)",
+            "err(e)",
+            "none",
+            "} => {",
+            "_ => {",
+            "foo => {",
+        ] {
+            assert!(
+                is_scaffolding_line(line),
+                "Expected scaffolding: {:?}",
+                line
+            );
+        }
+
+        // Negative cases (real logic).
+        for line in &[
+            "let x = foo();",
+            "x = y + 1",
+            "if x.is_empty() {",
+            "for item in items {",
+            "compute(&items)?",
+            ".stdout(std::process::stdio::null())",
+        ] {
+            assert!(
+                !is_scaffolding_line(line) || has_logic_signal(line),
+                "Expected logic: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn logic_signal_detector() {
+        assert!(has_logic_signal("let x = foo();"));
+        assert!(has_logic_signal("x = 1"));
+        assert!(has_logic_signal("if cond {"));
+        assert!(has_logic_signal("for x in y {"));
+        assert!(has_logic_signal("while true {"));
+        assert!(has_logic_signal("match thing {"));
+        assert!(has_logic_signal("return x"));
+        assert!(has_logic_signal(".stdout(something())"));
+        assert!(has_logic_signal("compute(&items)"));
+
+        // Return wrappers are NOT logic (they're structural tail expressions).
+        assert!(!has_logic_signal("ok(())"));
+        assert!(!has_logic_signal("ok((output, 0))"));
+        assert!(!has_logic_signal("err(e)"));
+        assert!(!has_logic_signal("some(x)"));
+        assert!(!has_logic_signal("none"));
+
+        // Pure punctuation is not logic.
+        assert!(!has_logic_signal("}"));
+        assert!(!has_logic_signal(")?;"));
     }
 
     #[test]
