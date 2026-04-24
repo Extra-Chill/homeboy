@@ -268,6 +268,7 @@ pub mod logs;
 pub mod project;
 pub mod refactor;
 pub mod release;
+pub mod rig;
 pub mod scaffold;
 pub mod server;
 pub mod ssh;
@@ -339,6 +340,7 @@ pub(crate) fn run_json(
         crate::Commands::Scaffold(args) => dispatch!(args, global, scaffold),
         crate::Commands::Audit(args) => dispatch!(args, global, audit),
         crate::Commands::Refactor(args) => dispatch!(args, global, refactor),
+        crate::Commands::Rig(args) => dispatch!(args, global, rig),
         crate::Commands::Undo(args) => dispatch!(args, global, undo),
         crate::Commands::Auth(args) => dispatch!(args, global, auth),
         crate::Commands::Api(args) => dispatch!(args, global, api),

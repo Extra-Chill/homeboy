@@ -70,6 +70,32 @@ pub fn backups() -> Result<PathBuf> {
     Ok(homeboy()?.join("backups"))
 }
 
+/// Rigs directory (~/.config/homeboy/rigs/)
+pub fn rigs() -> Result<PathBuf> {
+    Ok(homeboy()?.join("rigs"))
+}
+
+/// Rig config file path (~/.config/homeboy/rigs/{id}.json)
+pub fn rig_config(id: &str) -> Result<PathBuf> {
+    Ok(rigs()?.join(format!("{}.json", id)))
+}
+
+/// Rig state directory (~/.config/homeboy/rigs/{id}.state/)
+/// Holds service PIDs, logs, and last check results.
+pub fn rig_state_dir(id: &str) -> Result<PathBuf> {
+    Ok(rigs()?.join(format!("{}.state", id)))
+}
+
+/// Rig state file (~/.config/homeboy/rigs/{id}.state/state.json)
+pub fn rig_state_file(id: &str) -> Result<PathBuf> {
+    Ok(rig_state_dir(id)?.join("state.json"))
+}
+
+/// Rig service logs directory (~/.config/homeboy/rigs/{id}.state/logs/)
+pub fn rig_logs_dir(id: &str) -> Result<PathBuf> {
+    Ok(rig_state_dir(id)?.join("logs"))
+}
+
 /// Extension directory path
 pub fn extension(id: &str) -> Result<PathBuf> {
     Ok(extensions()?.join(id))
