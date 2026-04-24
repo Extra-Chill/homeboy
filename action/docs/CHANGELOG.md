@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.7] - 2026-04-24
+
+### Changed
+- migrate auto-file-issue and open-autofix-pr to `homeboy git` primitives
+
 ## [1.16.6] - 2026-04-23
 
 ### Fixed
