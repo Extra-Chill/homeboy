@@ -346,16 +346,30 @@ mod positional_tests {
 }
 
 // ============================================================================
-// BaselineArgs: --baseline + --ignore-baseline
+// BaselineArgs: --baseline + --ignore-baseline + --ratchet
 // ============================================================================
 
+/// Shared baseline-lifecycle flags flattened into every command that
+/// participates in the baseline engine (audit, lint, test, bench).
+///
+/// Historically these lived as separate fields on each command's CLI args
+/// struct; merging them into one group removes the duplicated
+/// `[baseline, ignore_baseline]` and `[json_summary, ratchet]` field
+/// patterns the audit detector flags (#1483). Lint has no ratchet semantics
+/// today — it simply leaves `ratchet` at the default.
 #[derive(Args, Debug, Clone, Default)]
 pub struct BaselineArgs {
+    /// Persist the current run as the new baseline.
     #[arg(long)]
     pub baseline: bool,
 
+    /// Skip baseline comparison for this run.
     #[arg(long)]
     pub ignore_baseline: bool,
+
+    /// Auto-update the baseline when the current run improves on it.
+    #[arg(long)]
+    pub ratchet: bool,
 }
 
 // ============================================================================

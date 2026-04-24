@@ -1,12 +1,29 @@
-//! Runner report shape tests for `src/core/rig/runner.rs`.
+//! Tests for `src/core/rig/runner.rs`.
 //!
-//! The `run_up` / `run_check` / `run_down` / `run_status` functions integrate
-//! real services + filesystem state and are validated by the manual smoke
-//! in #1468. This module covers the report serialization contract consumers
-//! (CLI JSON envelope, scheduled jobs) rely on.
+//! Two layers:
+//!
+//! - Report shape tests (originally authored in #1468) — verify the JSON
+//!   envelope contract that CLI JSON output and scheduled jobs depend on.
+//! - End-to-end tests for `run_up` / `run_check` / `run_down` / `run_status`
+//!   against a minimal spec with no pipeline and no services. These exercise
+//!   the bookkeeping path (state file write, report assembly) without
+//!   spinning up real services. Richer integration is still smoke-tested
+//!   manually per #1468's README.
+//!
+//! Each end-to-end test isolates `HOME` to a tempdir so the shared rig state
+//! file doesn't bleed across tests or the developer's real `~/.config`.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+use tempfile::TempDir;
 
 use crate::rig::pipeline::PipelineOutcome;
-use crate::rig::runner::{CheckReport, RigStatusReport, ServiceStatusReport, UpReport};
+use crate::rig::runner::{
+    run_check, run_down, run_status, run_up, CheckReport, RigStatusReport, ServiceStatusReport,
+    UpReport,
+};
+use crate::rig::spec::RigSpec;
 
 fn empty_pipeline(name: &str) -> PipelineOutcome {
     PipelineOutcome {
@@ -16,6 +33,47 @@ fn empty_pipeline(name: &str) -> PipelineOutcome {
         failed: 0,
     }
 }
+
+fn minimal_spec(id: &str) -> RigSpec {
+    RigSpec {
+        id: id.to_string(),
+        description: format!("{} fixture", id),
+        components: HashMap::new(),
+        services: HashMap::new(),
+        symlinks: Vec::new(),
+        pipeline: HashMap::new(),
+    }
+}
+
+/// Serializes `HOME` env-var mutation across rig runner tests so concurrent
+/// test threads can't clobber each other's state-file target. `paths::homeboy()`
+/// reads `HOME` at call time, so the guard must stay alive for the full
+/// duration of anything that reads/writes rig state.
+fn home_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Run `body` with `HOME` pointed at a fresh tempdir, restoring the prior
+/// value when `body` returns. Held under a process-wide mutex so parallel
+/// tests don't race on the shared env var.
+fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
+    let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let prior = std::env::var("HOME").ok();
+    let dir = TempDir::new().expect("create tempdir");
+    std::env::set_var("HOME", dir.path());
+    let result = body(&dir);
+    match prior {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+    drop(guard);
+    result
+}
+
+// ------------------------------------------------------------------
+// Report shape tests (preserved from #1468)
+// ------------------------------------------------------------------
 
 #[test]
 fn test_up_report_serializes_success_flag() {
@@ -80,4 +138,71 @@ fn test_service_status_report_emits_pid_when_running() {
     let json = serde_json::to_string(&report).expect("serialize");
     assert!(json.contains("\"pid\":4321"));
     assert!(json.contains("\"started_at\":\"2026-04-24T13:00:00Z\""));
+}
+
+// ------------------------------------------------------------------
+// End-to-end tests: each top-level runner entry point
+// ------------------------------------------------------------------
+
+#[test]
+fn test_run_up() {
+    with_isolated_home(|_dir| {
+        let rig = minimal_spec("run-up-fixture");
+        let report = run_up(&rig).expect("run_up succeeds with empty pipeline");
+        assert_eq!(report.rig_id, "run-up-fixture");
+        assert!(report.success, "empty pipeline should report success");
+        assert_eq!(report.pipeline.passed, 0);
+        assert_eq!(report.pipeline.failed, 0);
+    });
+}
+
+#[test]
+fn test_run_check() {
+    with_isolated_home(|_dir| {
+        let rig = minimal_spec("run-check-fixture");
+        let report = run_check(&rig).expect("run_check succeeds with empty pipeline");
+        assert_eq!(report.rig_id, "run-check-fixture");
+        assert!(report.success, "empty pipeline should pass check");
+        assert_eq!(report.pipeline.failed, 0);
+
+        // Side effect: check writes last_check + last_check_result to state.
+        let status = run_status(&rig).expect("run_status reads back state");
+        assert_eq!(status.last_check_result.as_deref(), Some("pass"));
+        assert!(status.last_check.is_some(), "last_check timestamp recorded");
+    });
+}
+
+#[test]
+fn test_run_down() {
+    with_isolated_home(|_dir| {
+        let rig = minimal_spec("run-down-fixture");
+        let report = run_down(&rig).expect("run_down succeeds with no services");
+        assert_eq!(report.rig_id, "run-down-fixture");
+        assert!(
+            report.stopped.is_empty(),
+            "no services declared, nothing to stop"
+        );
+        assert!(
+            report.pipeline.is_none(),
+            "no `down` pipeline declared, so no outcome reported"
+        );
+        assert!(report.success, "empty teardown is trivially successful");
+    });
+}
+
+#[test]
+fn test_run_status() {
+    with_isolated_home(|_dir| {
+        let rig = minimal_spec("run-status-fixture");
+        let status = run_status(&rig).expect("run_status succeeds with empty state");
+        assert_eq!(status.rig_id, "run-status-fixture");
+        assert_eq!(status.description, "run-status-fixture fixture");
+        assert!(status.services.is_empty(), "no services declared");
+        assert!(
+            status.last_up.is_none(),
+            "never brought up, so no timestamp"
+        );
+        assert!(status.last_check.is_none());
+        assert!(status.last_check_result.is_none());
+    });
 }

@@ -22,9 +22,7 @@ pub struct AuditRunWorkflowArgs {
     pub exclude_kinds: Vec<code_audit::AuditFinding>,
     pub only_labels: Vec<String>,
     pub exclude_labels: Vec<String>,
-    pub ratchet: bool,
-    pub baseline: bool,
-    pub ignore_baseline: bool,
+    pub baseline_flags: crate::engine::baseline::BaselineFlags,
     pub changed_since: Option<String>,
     pub json_summary: bool,
 }
@@ -85,7 +83,7 @@ pub fn run_main_audit_workflow(
     }
 
     // --baseline: save current state
-    if args.baseline {
+    if args.baseline_flags.baseline {
         return run_baseline_save(result, &args);
     }
 
@@ -177,7 +175,7 @@ fn run_comparison_workflow(
     args: &AuditRunWorkflowArgs,
 ) -> crate::Result<AuditRunWorkflowResult> {
     // Try file-based baseline
-    if !args.ignore_baseline {
+    if !args.baseline_flags.ignore_baseline {
         if let Some(existing_baseline) = baseline::load_baseline(Path::new(&result.source_path)) {
             return build_comparison_output(result, existing_baseline, args);
         }

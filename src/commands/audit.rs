@@ -26,10 +26,6 @@ pub struct AuditArgs {
     #[arg(long = "exclude", value_name = "kind")]
     pub exclude: Vec<String>,
 
-    /// Update baseline when findings are resolved (ratchet forward).
-    #[arg(long)]
-    pub ratchet: bool,
-
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
 
@@ -104,9 +100,11 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         exclude_kinds,
         only_labels: args.only,
         exclude_labels: args.exclude,
-        ratchet: args.ratchet,
-        baseline: args.baseline_args.baseline,
-        ignore_baseline: args.baseline_args.ignore_baseline,
+        baseline_flags: homeboy::engine::baseline::BaselineFlags {
+            baseline: args.baseline_args.baseline,
+            ignore_baseline: args.baseline_args.ignore_baseline,
+            ratchet: args.baseline_args.ratchet,
+        },
         changed_since: args.changed_since,
         json_summary: args.json_summary,
     })?;
@@ -243,12 +241,12 @@ mod tests {
                 path: None,
             },
             conventions: false,
-            ratchet: false,
             only: vec![],
             exclude: vec![],
             baseline_args: BaselineArgs {
                 baseline: false,
                 ignore_baseline: true,
+                ratchet: false,
             },
             changed_since: None,
             json_summary: false,

@@ -102,8 +102,11 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             sniffs: args.sniffs.clone(),
             exclude_sniffs: args.exclude_sniffs.clone(),
             category: args.category.clone(),
-            baseline: args.baseline_args.baseline,
-            ignore_baseline: args.baseline_args.ignore_baseline,
+            baseline_flags: homeboy::engine::baseline::BaselineFlags {
+                baseline: args.baseline_args.baseline,
+                ignore_baseline: args.baseline_args.ignore_baseline,
+                ratchet: args.baseline_args.ratchet,
+            },
         },
         &run_dir,
     )?;

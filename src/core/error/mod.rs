@@ -413,7 +413,10 @@ impl Error {
         let reason = reason.into();
         Self::new(
             ErrorCode::RigPipelineFailed,
-            format!("Rig '{}' pipeline step '{}' failed: {}", rig_id, step, reason),
+            format!(
+                "Rig '{}' pipeline step '{}' failed: {}",
+                rig_id, step, reason
+            ),
             serde_json::json!({
                 "rig_id": rig_id,
                 "step": step,

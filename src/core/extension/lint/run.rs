@@ -5,6 +5,7 @@
 //! this module owns all business logic and returns a structured result.
 
 use crate::component::Component;
+use crate::engine::baseline::BaselineFlags;
 use crate::engine::run_dir::{self, RunDir};
 use crate::extension::lint::baseline::{self as lint_baseline, LintFinding};
 use crate::extension::lint::build_lint_runner;
@@ -29,8 +30,7 @@ pub struct LintRunWorkflowArgs {
     pub sniffs: Option<String>,
     pub exclude_sniffs: Option<String>,
     pub category: Option<String>,
-    pub baseline: bool,
-    pub ignore_baseline: bool,
+    pub baseline_flags: BaselineFlags,
 }
 
 /// Result of the main lint workflow — ready for report assembly.
@@ -135,7 +135,7 @@ pub fn run_main_lint_workflow(
 
     hints.push("Full options: homeboy docs commands/lint".to_string());
 
-    if !args.baseline && baseline_comparison.is_none() {
+    if !args.baseline_flags.baseline && baseline_comparison.is_none() {
         hints.push(format!(
             "Save lint baseline: homeboy lint {} --baseline",
             args.component_label
@@ -222,7 +222,7 @@ fn process_baseline(
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
 
-    if args.baseline {
+    if args.baseline_flags.baseline {
         let saved = lint_baseline::save_baseline(source_path, &args.component_id, lint_findings)?;
         eprintln!(
             "[lint] Baseline saved to {} ({} findings)",
@@ -231,7 +231,7 @@ fn process_baseline(
         );
     }
 
-    if !args.baseline && !args.ignore_baseline {
+    if !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline {
         if let Some(existing) = lint_baseline::load_baseline(source_path) {
             let comparison = lint_baseline::compare(lint_findings, &existing);
 

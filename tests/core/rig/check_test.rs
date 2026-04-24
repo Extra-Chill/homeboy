@@ -22,9 +22,7 @@ fn minimal_rig() -> RigSpec {
 fn test_evaluate_rejects_empty_spec() {
     let rig = minimal_rig();
     let err = evaluate(&rig, &CheckSpec::default()).expect_err("empty spec rejected");
-    assert!(err
-        .message
-        .contains("must specify one of"));
+    assert!(err.message.contains("must specify one of"));
 }
 
 #[test]
@@ -36,9 +34,7 @@ fn test_evaluate_rejects_multiple_probes() {
         ..Default::default()
     };
     let err = evaluate(&rig, &spec).expect_err("multiple probes rejected");
-    assert!(err
-        .message
-        .contains("must specify exactly one of"));
+    assert!(err.message.contains("must specify exactly one of"));
 }
 
 #[test]

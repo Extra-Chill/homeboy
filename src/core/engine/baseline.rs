@@ -53,6 +53,28 @@ pub trait Fingerprintable {
     fn context_label(&self) -> String;
 }
 
+/// CLI-driven baseline lifecycle flags passed into workflow-layer args.
+///
+/// Shared by `audit`, `lint`, `test`, and `bench` so their inner
+/// `WorkflowArgs` don't each re-inline the same triplet (#1483 audit:
+/// RepeatedFieldPattern for `[baseline, ignore_baseline]` and
+/// `[json_summary, ratchet]`).
+///
+/// Semantics:
+/// - `baseline`: persist current state as the new baseline.
+/// - `ignore_baseline`: skip baseline comparison for this run.
+/// - `ratchet`: auto-update the baseline when the current run improves on it.
+///   Lint has no ratchet semantics today and simply leaves this `false`.
+///
+/// All default to `false`. Commands enforce mutual exclusivity at the CLI
+/// layer when it matters (`--baseline` vs `--ignore-baseline`).
+#[derive(Debug, Clone, Default)]
+pub struct BaselineFlags {
+    pub baseline: bool,
+    pub ignore_baseline: bool,
+    pub ratchet: bool,
+}
+
 pub struct BaselineConfig {
     root: PathBuf,
     key: String,

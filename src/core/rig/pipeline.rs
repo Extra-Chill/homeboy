@@ -15,9 +15,7 @@ use serde::Serialize;
 use super::check;
 use super::expand::expand_vars;
 use super::service;
-use super::spec::{
-    ComponentSpec, GitOp, PipelineStep, RigSpec, ServiceOp, SymlinkOp, SymlinkSpec,
-};
+use super::spec::{ComponentSpec, GitOp, PipelineStep, RigSpec, ServiceOp, SymlinkOp, SymlinkSpec};
 use crate::error::{Error, Result};
 
 /// Result of one pipeline step.
@@ -187,12 +185,7 @@ fn run_build_step(rig: &RigSpec, component_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_git_step(
-    rig: &RigSpec,
-    component_id: &str,
-    op: GitOp,
-    extra_args: &[String],
-) -> Result<()> {
+fn run_git_step(rig: &RigSpec, component_id: &str, op: GitOp, extra_args: &[String]) -> Result<()> {
     let (_, path) = resolve_component_path(rig, component_id)?;
 
     // Build the argv — op-specific base plus user-supplied extras.
@@ -248,11 +241,7 @@ fn run_service_step(rig: &RigSpec, service_id: &str, op: ServiceOp) -> Result<()
         ServiceOp::Stop => service::stop(rig, service_id),
         ServiceOp::Health => {
             let spec = rig.services.get(service_id).ok_or_else(|| {
-                Error::rig_service_failed(
-                    &rig.id,
-                    service_id,
-                    "service not declared in rig spec",
-                )
+                Error::rig_service_failed(&rig.id, service_id, "service not declared in rig spec")
             })?;
             if let Some(health) = &spec.health {
                 check::evaluate(rig, health)?;
@@ -304,11 +293,7 @@ fn run_command_step(
         return Err(Error::rig_pipeline_failed(
             &rig.id,
             "command",
-            format!(
-                "`{}` exited {}",
-                expanded,
-                status.code().unwrap_or(-1)
-            ),
+            format!("`{}` exited {}", expanded, status.code().unwrap_or(-1)),
         ));
     }
     Ok(())
@@ -436,9 +421,9 @@ fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> String {
             .clone()
             .unwrap_or_else(|| truncate(&expand_vars(rig, cmd), 80)),
         PipelineStep::Symlink { op } => format!("symlink {}", serialize_symlink_op(*op)),
-        PipelineStep::Check { label, .. } => {
-            label.clone().unwrap_or_else(|| format!("check #{}", idx + 1))
-        }
+        PipelineStep::Check { label, .. } => label
+            .clone()
+            .unwrap_or_else(|| format!("check #{}", idx + 1)),
     }
 }
 

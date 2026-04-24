@@ -1,4 +1,5 @@
 use crate::component::Component;
+use crate::engine::baseline::BaselineFlags;
 use crate::engine::run_dir::{self, RunDir};
 use crate::extension::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
 use crate::extension::test::baseline::{self, TestBaselineComparison, TestCounts};
@@ -21,9 +22,7 @@ pub struct TestRunWorkflowArgs {
     pub coverage: bool,
     pub coverage_min: Option<f64>,
     pub analyze: bool,
-    pub baseline: bool,
-    pub ignore_baseline: bool,
-    pub ratchet: bool,
+    pub baseline_flags: BaselineFlags,
     pub changed_since: Option<String>,
     pub json_summary: bool,
     pub passthrough_args: Vec<String>,
@@ -193,7 +192,7 @@ pub fn run_main_test_workflow(
         None
     };
 
-    if args.baseline {
+    if args.baseline_flags.baseline {
         if let Some(ref counts) = test_counts {
             let _ = baseline::save_baseline(source_path, &args.component_id, counts)?;
         }
@@ -202,7 +201,7 @@ pub fn run_main_test_workflow(
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
 
-    if !args.baseline && !args.ignore_baseline {
+    if !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline {
         if let Some(ref counts) = test_counts {
             let resolved_baseline = baseline::load_baseline(source_path).or_else(|| {
                 args.changed_since.as_ref().and_then(|git_ref| {
@@ -216,7 +215,7 @@ pub fn run_main_test_workflow(
                 if comparison.regression {
                     baseline_exit_override = Some(1);
                 } else if (comparison.passed_delta > 0 || comparison.failed_delta < 0)
-                    && args.ratchet
+                    && args.baseline_flags.ratchet
                 {
                     let _ = baseline::save_baseline(source_path, &args.component_id, counts);
                 }
@@ -249,14 +248,14 @@ pub fn run_main_test_workflow(
         ));
     }
 
-    if test_counts.is_some() && !args.baseline && baseline_comparison.is_none() {
+    if test_counts.is_some() && !args.baseline_flags.baseline && baseline_comparison.is_none() {
         hints.push(format!(
             "Save test baseline: homeboy test {} --baseline",
             args.component_id
         ));
     }
 
-    if baseline_comparison.is_some() && !args.ratchet {
+    if baseline_comparison.is_some() && !args.baseline_flags.ratchet {
         hints.push(format!(
             "Auto-update baseline on improvement: homeboy test {} --ratchet",
             args.component_id

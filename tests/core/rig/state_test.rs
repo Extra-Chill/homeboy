@@ -39,10 +39,7 @@ fn test_state_round_trips_with_service() {
         Some(12345)
     );
     assert_eq!(
-        parsed
-            .services
-            .get("tarball")
-            .map(|s| s.status.as_str()),
+        parsed.services.get("tarball").map(|s| s.status.as_str()),
         Some("running")
     );
 }

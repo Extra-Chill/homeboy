@@ -5,13 +5,12 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::component::Component;
+use crate::engine::baseline::BaselineFlags;
 use crate::engine::run_dir::{self, RunDir};
+use crate::error::Result;
 use crate::extension::bench::baseline::{self, BenchBaselineComparison};
 use crate::extension::bench::parsing::{self, BenchResults};
-use crate::extension::{
-    resolve_execution_context, ExtensionCapability, ExtensionRunner,
-};
-use crate::error::Result;
+use crate::extension::{resolve_execution_context, ExtensionCapability, ExtensionRunner};
 
 #[derive(Debug, Clone)]
 pub struct BenchRunWorkflowArgs {
@@ -20,9 +19,7 @@ pub struct BenchRunWorkflowArgs {
     pub path_override: Option<String>,
     pub settings: Vec<(String, String)>,
     pub iterations: u64,
-    pub baseline: bool,
-    pub ignore_baseline: bool,
-    pub ratchet: bool,
+    pub baseline_flags: BaselineFlags,
     pub regression_threshold_percent: f64,
     pub json_summary: bool,
     pub passthrough_args: Vec<String>,
@@ -75,7 +72,7 @@ pub fn run_main_bench_workflow(
         "failed"
     };
 
-    if args.baseline {
+    if args.baseline_flags.baseline {
         if let Some(ref r) = parsed {
             let _ = baseline::save_baseline(source_path, &args.component_id, r)?;
         }
@@ -84,15 +81,14 @@ pub fn run_main_bench_workflow(
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
 
-    if !args.baseline && !args.ignore_baseline {
+    if !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline {
         if let Some(ref r) = parsed {
             if let Some(existing) = baseline::load_baseline(source_path) {
-                let comparison =
-                    baseline::compare(r, &existing, args.regression_threshold_percent);
+                let comparison = baseline::compare(r, &existing, args.regression_threshold_percent);
 
                 if comparison.regression {
                     baseline_exit_override = Some(1);
-                } else if comparison.has_improvements && args.ratchet {
+                } else if comparison.has_improvements && args.baseline_flags.ratchet {
                     let _ = baseline::save_baseline(source_path, &args.component_id, r);
                 }
 
@@ -102,13 +98,13 @@ pub fn run_main_bench_workflow(
     }
 
     let mut hints = Vec::new();
-    if parsed.is_some() && !args.baseline && baseline_comparison.is_none() {
+    if parsed.is_some() && !args.baseline_flags.baseline && baseline_comparison.is_none() {
         hints.push(format!(
             "Save bench baseline: homeboy bench {} --baseline",
             args.component_id
         ));
     }
-    if baseline_comparison.is_some() && !args.ratchet {
+    if baseline_comparison.is_some() && !args.baseline_flags.ratchet {
         hints.push(format!(
             "Auto-update baseline on improvement: homeboy bench {} --ratchet",
             args.component_id

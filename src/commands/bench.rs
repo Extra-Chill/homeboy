@@ -25,10 +25,6 @@ pub struct BenchArgs {
     #[command(flatten)]
     baseline_args: BaselineArgs,
 
-    /// Auto-update the baseline when scenarios improve (p95 got faster)
-    #[arg(long)]
-    ratchet: bool,
-
     /// p95 regression tolerance as a percentage. A scenario regresses when
     /// its current p95_ms exceeds baseline.p95_ms * (1 + threshold/100).
     #[arg(long, value_name = "PERCENT", default_value_t = DEFAULT_REGRESSION_THRESHOLD_PERCENT)]
@@ -140,9 +136,11 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchCommandOutpu
                 })
                 .collect(),
             iterations: args.iterations,
-            baseline: args.baseline_args.baseline,
-            ignore_baseline: args.baseline_args.ignore_baseline,
-            ratchet: args.ratchet,
+            baseline_flags: homeboy::engine::baseline::BaselineFlags {
+                baseline: args.baseline_args.baseline,
+                ignore_baseline: args.baseline_args.ignore_baseline,
+                ratchet: args.baseline_args.ratchet,
+            },
             regression_threshold_percent: args.regression_threshold,
             json_summary: args.json_summary,
             passthrough_args,
@@ -201,7 +199,10 @@ mod tests {
         ];
         assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
 
-        let args = vec!["--regression-threshold=10".to_string(), "--keep".to_string()];
+        let args = vec![
+            "--regression-threshold=10".to_string(),
+            "--keep".to_string(),
+        ];
         assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
     }
 

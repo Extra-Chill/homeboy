@@ -29,10 +29,6 @@ pub struct TestArgs {
     #[command(flatten)]
     baseline_args: BaselineArgs,
 
-    /// Auto-update baseline when test results improve (ratchet forward)
-    #[arg(long)]
-    ratchet: bool,
-
     /// Analyze test failures — cluster by root cause and suggest fixes
     #[arg(long)]
     analyze: bool,
@@ -183,9 +179,11 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             coverage: args.coverage,
             coverage_min: args.coverage_min,
             analyze: args.analyze,
-            baseline: args.baseline_args.baseline,
-            ignore_baseline: args.baseline_args.ignore_baseline,
-            ratchet: args.ratchet,
+            baseline_flags: homeboy::engine::baseline::BaselineFlags {
+                baseline: args.baseline_args.baseline,
+                ignore_baseline: args.baseline_args.ignore_baseline,
+                ratchet: args.baseline_args.ratchet,
+            },
             changed_since: args.changed_since.clone(),
             json_summary: args.json_summary,
             passthrough_args: passthrough_args.clone(),
