@@ -72,14 +72,47 @@ code 1.
 
 - **PHPCS** — `phpcs.xml.dist` applies WordPress Coding Standards (PSR-4
   adjustments applied). Text domain is auto-detected from the plugin
-  header.
-- **PHPStan** — `phpstan.neon.dist` runs static analysis with WordPress +
-  WP-CLI + WooCommerce stubs. Critical-only by default.
+  header. When PHPCS reports auto-fixable findings, the runner surfaces a
+  prominent CTA showing the exact `homeboy refactor` command to clean
+  them up.
+- **PHPStan** — `phpstan.neon.dist` runs static analysis at **level 7**
+  with WordPress + WP-CLI + WooCommerce stubs. Level 7 unlocks argument
+  type flow analysis (catches `false` / `null` leaking into strict-typed
+  callees). `missingType.*` identifiers are suppressed by default to keep
+  the signal-to-noise ratio high. Tests are analyzed alongside source.
 - **ESLint** — runs only when JS/JSX/TS/TSX files exist in the component.
   WordPress ESLint config.
 
 Components must not ship local `phpcs.xml`, `phpstan.neon`, or `.eslintrc`
-— the extension owns the standards.
+— the extension owns the standards. The one exception is PHPStan
+baselines (see below).
+
+### PHPStan baselines
+
+Components with a lot of pre-existing findings can capture a baseline to
+keep the harness green while fixing findings incrementally. Generate one
+from inside the component directory:
+
+```bash
+path/to/extension/vendor/bin/phpstan analyse \
+    --configuration=path/to/extension/phpstan.neon.dist \
+    --level=7 --memory-limit=2G \
+    --generate-baseline=phpstan-baseline.neon \
+    .
+```
+
+Commit the resulting `phpstan-baseline.neon` at the component root. The
+runner detects it and pulls it into the analysis via `includes:`. New
+code must not add new findings — existing findings are grandfathered in,
+and new ones fail the run. Delete the baseline to ratchet toward full
+cleanup.
+
+### Level override
+
+`HOMEBOY_PHPSTAN_LEVEL=8 homeboy test <component>` bumps one-off without
+changing the default. `HOMEBOY_SKIP_PHPSTAN=1` runs a critical-only
+check that still blocks `function.notFound` / `class.notFound` (guaranteed
+runtime fatals) regardless of the skip.
 
 ## Debug output
 
