@@ -1,10 +1,12 @@
 mod changes;
 mod commits;
+mod github;
 mod operations;
 mod primitives;
 
 pub use changes::*;
 pub use commits::*;
+pub use github::*;
 pub use operations::*;
 pub use primitives::*;
 
@@ -75,7 +77,7 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::R
     Ok(())
 }
 
-fn resolve_target(
+pub(super) fn resolve_target(
     component_id: Option<&str>,
     path_override: Option<&str>,
 ) -> crate::error::Result<(String, String)> {

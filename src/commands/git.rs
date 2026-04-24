@@ -1,7 +1,11 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::git::{self, GitOutput};
+use homeboy::git::{
+    self, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GitOutput, IssueCreateOptions,
+    IssueFindOptions, IssueState, PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions,
+    PrState,
+};
 use homeboy::BulkResult;
 
 use crate::commands::version;
@@ -100,6 +104,190 @@ enum GitCommand {
         #[arg(short, long)]
         message: Option<String>,
     },
+    /// Manage GitHub issues for a component
+    Issue(IssueArgs),
+    /// Manage GitHub pull requests for a component
+    Pr(PrArgs),
+}
+
+// ---------------------------------------------------------------------------
+// `git issue` subcommand tree
+// ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct IssueArgs {
+    #[command(subcommand)]
+    command: IssueCommand,
+}
+
+#[derive(Subcommand)]
+enum IssueCommand {
+    /// Create a new issue
+    Create {
+        /// Component ID
+        component_id: String,
+
+        /// Issue title
+        #[arg(short, long)]
+        title: String,
+
+        /// Issue body (markdown). Prefer --body-file for long content.
+        #[arg(short, long, conflicts_with = "body_file")]
+        body: Option<String>,
+
+        /// Read body from a file ("-" for stdin)
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
+
+        /// Issue label (repeatable)
+        #[arg(short, long)]
+        label: Vec<String>,
+    },
+    /// Comment on an existing issue
+    Comment {
+        /// Component ID
+        component_id: String,
+
+        /// Issue number
+        #[arg(short, long)]
+        number: u64,
+
+        /// Comment body (markdown). Prefer --body-file for long content.
+        #[arg(short, long, conflicts_with = "body_file")]
+        body: Option<String>,
+
+        /// Read body from a file ("-" for stdin)
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
+    },
+    /// Find issues matching filters (dedup primitive)
+    Find {
+        /// Component ID
+        component_id: String,
+
+        /// Exact title match
+        #[arg(short, long)]
+        title: Option<String>,
+
+        /// Required label (repeatable — all labels must be present)
+        #[arg(short, long)]
+        label: Vec<String>,
+
+        /// State filter: open (default), closed, all
+        #[arg(short, long, default_value = "open")]
+        state: String,
+
+        /// Max results (default 30)
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// `git pr` subcommand tree
+// ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct PrArgs {
+    #[command(subcommand)]
+    command: PrCommand,
+}
+
+#[derive(Subcommand)]
+enum PrCommand {
+    /// Create a new pull request
+    Create {
+        /// Component ID
+        component_id: String,
+
+        /// Base branch (target of the PR)
+        #[arg(short, long)]
+        base: String,
+
+        /// Head branch (source of the PR)
+        #[arg(short = 'H', long)]
+        head: String,
+
+        /// PR title
+        #[arg(short, long)]
+        title: String,
+
+        /// PR body (markdown). Prefer --body-file for long content.
+        #[arg(short = 'B', long, conflicts_with = "body_file")]
+        body: Option<String>,
+
+        /// Read body from a file ("-" for stdin)
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
+
+        /// Open as draft
+        #[arg(long)]
+        draft: bool,
+    },
+    /// Edit an existing PR's title or body
+    Edit {
+        /// Component ID
+        component_id: String,
+
+        /// PR number
+        #[arg(short, long)]
+        number: u64,
+
+        /// New title
+        #[arg(short, long)]
+        title: Option<String>,
+
+        /// New body (markdown)
+        #[arg(short = 'B', long, conflicts_with = "body_file")]
+        body: Option<String>,
+
+        /// Read body from a file ("-" for stdin)
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
+    },
+    /// Find PRs matching filters
+    Find {
+        /// Component ID
+        component_id: String,
+
+        /// Base branch filter
+        #[arg(short, long)]
+        base: Option<String>,
+
+        /// Head branch filter
+        #[arg(short = 'H', long)]
+        head: Option<String>,
+
+        /// State filter: open (default), closed, merged, all
+        #[arg(short, long, default_value = "open")]
+        state: String,
+
+        /// Max results (default 30)
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
+    },
+    /// Post a comment on a PR (supports sticky-comment keys)
+    Comment {
+        /// Component ID
+        component_id: String,
+
+        /// PR number
+        #[arg(short, long)]
+        number: u64,
+
+        /// Comment body (markdown). Prefer --body-file for long content.
+        #[arg(short = 'B', long, conflicts_with = "body_file")]
+        body: Option<String>,
+
+        /// Read body from a file ("-" for stdin)
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
+
+        /// Optional sticky-comment key. When set, an existing comment with this
+        /// marker is updated in place instead of a new one being posted.
+        #[arg(short, long)]
+        key: Option<String>,
+    },
 }
 
 #[derive(Serialize)]
@@ -107,6 +295,9 @@ enum GitCommand {
 pub enum GitCommandOutput {
     Single(GitOutput),
     Bulk(BulkResult<GitOutput>),
+    Issue(GithubIssueOutput),
+    Pr(GithubPrOutput),
+    Find(GithubFindOutput),
 }
 
 pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<GitCommandOutput> {
@@ -260,5 +451,226 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
             let exit_code = output.exit_code;
             Ok((GitCommandOutput::Single(output), exit_code))
         }
+        GitCommand::Issue(args) => run_issue(args),
+        GitCommand::Pr(args) => run_pr(args),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `git issue` dispatch
+// ---------------------------------------------------------------------------
+
+fn run_issue(args: IssueArgs) -> CmdResult<GitCommandOutput> {
+    match args.command {
+        IssueCommand::Create {
+            component_id,
+            title,
+            body,
+            body_file,
+            label,
+        } => {
+            let body = resolve_body(body, body_file)?.unwrap_or_default();
+            let output = git::issue_create(
+                Some(&component_id),
+                IssueCreateOptions {
+                    title,
+                    body,
+                    labels: label,
+                },
+            )?;
+            Ok((GitCommandOutput::Issue(output), 0))
+        }
+        IssueCommand::Comment {
+            component_id,
+            number,
+            body,
+            body_file,
+        } => {
+            let body = resolve_body(body, body_file)?.ok_or_else(|| {
+                homeboy::Error::validation_invalid_argument(
+                    "body",
+                    "Comment body is required (--body or --body-file)",
+                    None,
+                    None,
+                )
+            })?;
+            let output = git::issue_comment(Some(&component_id), number, &body)?;
+            Ok((GitCommandOutput::Issue(output), 0))
+        }
+        IssueCommand::Find {
+            component_id,
+            title,
+            label,
+            state,
+            limit,
+        } => {
+            let state = parse_issue_state(&state)?;
+            let output = git::issue_find(
+                Some(&component_id),
+                IssueFindOptions {
+                    title,
+                    labels: label,
+                    state,
+                    limit,
+                },
+            )?;
+            Ok((GitCommandOutput::Find(output), 0))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `git pr` dispatch
+// ---------------------------------------------------------------------------
+
+fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
+    match args.command {
+        PrCommand::Create {
+            component_id,
+            base,
+            head,
+            title,
+            body,
+            body_file,
+            draft,
+        } => {
+            let body = resolve_body(body, body_file)?.unwrap_or_default();
+            let output = git::pr_create(
+                Some(&component_id),
+                PrCreateOptions {
+                    base,
+                    head,
+                    title,
+                    body,
+                    draft,
+                },
+            )?;
+            Ok((GitCommandOutput::Pr(output), 0))
+        }
+        PrCommand::Edit {
+            component_id,
+            number,
+            title,
+            body,
+            body_file,
+        } => {
+            let body = resolve_body(body, body_file)?;
+            let output = git::pr_edit(
+                Some(&component_id),
+                PrEditOptions {
+                    number,
+                    title,
+                    body,
+                },
+            )?;
+            Ok((GitCommandOutput::Pr(output), 0))
+        }
+        PrCommand::Find {
+            component_id,
+            base,
+            head,
+            state,
+            limit,
+        } => {
+            let state = parse_pr_state(&state)?;
+            let output = git::pr_find(
+                Some(&component_id),
+                PrFindOptions {
+                    base,
+                    head,
+                    state,
+                    limit,
+                },
+            )?;
+            Ok((GitCommandOutput::Find(output), 0))
+        }
+        PrCommand::Comment {
+            component_id,
+            number,
+            body,
+            body_file,
+            key,
+        } => {
+            let body = resolve_body(body, body_file)?.ok_or_else(|| {
+                homeboy::Error::validation_invalid_argument(
+                    "body",
+                    "Comment body is required (--body or --body-file)",
+                    None,
+                    None,
+                )
+            })?;
+            let output = git::pr_comment(
+                Some(&component_id),
+                PrCommentOptions { number, body, key },
+            )?;
+            Ok((GitCommandOutput::Pr(output), 0))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Small input helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve a body argument from either inline `--body` or a file path.
+/// Returns `Ok(None)` if neither is set. Supports `-` for stdin.
+fn resolve_body(
+    inline: Option<String>,
+    file: Option<String>,
+) -> homeboy::Result<Option<String>> {
+    if let Some(body) = inline {
+        return Ok(Some(body));
+    }
+    let Some(path) = file else {
+        return Ok(None);
+    };
+
+    if path == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+            homeboy::Error::internal_io(
+                format!("Failed to read body from stdin: {}", e),
+                Some("stdin".into()),
+            )
+        })?;
+        return Ok(Some(buf));
+    }
+
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        homeboy::Error::internal_io(
+            format!("Failed to read body file: {}", e),
+            Some(path.clone()),
+        )
+    })?;
+    Ok(Some(content))
+}
+
+fn parse_issue_state(s: &str) -> homeboy::Result<IssueState> {
+    match s {
+        "open" => Ok(IssueState::Open),
+        "closed" => Ok(IssueState::Closed),
+        "all" => Ok(IssueState::All),
+        other => Err(homeboy::Error::validation_invalid_argument(
+            "state",
+            format!("Unknown issue state '{}'", other),
+            None,
+            Some(vec!["Use one of: open, closed, all".into()]),
+        )),
+    }
+}
+
+fn parse_pr_state(s: &str) -> homeboy::Result<PrState> {
+    match s {
+        "open" => Ok(PrState::Open),
+        "closed" => Ok(PrState::Closed),
+        "merged" => Ok(PrState::Merged),
+        "all" => Ok(PrState::All),
+        other => Err(homeboy::Error::validation_invalid_argument(
+            "state",
+            format!("Unknown PR state '{}'", other),
+            None,
+            Some(vec!["Use one of: open, closed, merged, all".into()]),
+        )),
     }
 }
