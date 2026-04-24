@@ -144,6 +144,81 @@ fn test_spec_check_step_with_command_probe() {
 }
 
 #[test]
+fn test_spec_build_step_parses() {
+    let json = r#"{
+        "id": "r",
+        "components": { "studio": { "path": "/tmp/studio" } },
+        "pipeline": {
+            "up": [
+                { "kind": "build", "component": "studio", "label": "compile studio" }
+            ]
+        }
+    }"#;
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    let steps = spec.pipeline.get("up").unwrap();
+    match &steps[0] {
+        PipelineStep::Build { component, label } => {
+            assert_eq!(component, "studio");
+            assert_eq!(label.as_deref(), Some("compile studio"));
+        }
+        other => panic!("expected Build, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_spec_git_step_parses_with_args() {
+    use crate::rig::spec::GitOp;
+    let json = r#"{
+        "id": "r",
+        "components": { "studio": { "path": "/tmp/studio" } },
+        "pipeline": {
+            "sync": [
+                {
+                    "kind": "git",
+                    "component": "studio",
+                    "op": "pull",
+                    "args": ["origin", "trunk"]
+                }
+            ]
+        }
+    }"#;
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    let steps = spec.pipeline.get("sync").unwrap();
+    match &steps[0] {
+        PipelineStep::Git {
+            component,
+            op,
+            args,
+            ..
+        } => {
+            assert_eq!(component, "studio");
+            assert_eq!(*op, GitOp::Pull);
+            assert_eq!(args, &vec!["origin".to_string(), "trunk".to_string()]);
+        }
+        other => panic!("expected Git, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_spec_git_op_current_branch_kebab_serializes() {
+    use crate::rig::spec::GitOp;
+    let json = r#"{
+        "id": "r",
+        "components": { "studio": { "path": "/tmp/studio" } },
+        "pipeline": {
+            "check": [
+                { "kind": "git", "component": "studio", "op": "current-branch" }
+            ]
+        }
+    }"#;
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    match &spec.pipeline.get("check").unwrap()[0] {
+        PipelineStep::Git { op, .. } => assert_eq!(*op, GitOp::CurrentBranch),
+        other => panic!("expected Git, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_spec_round_trip_preserves_shape() {
     let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
     let re_serialized = serde_json::to_string(&spec).expect("serialize");

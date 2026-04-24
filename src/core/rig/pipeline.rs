@@ -15,7 +15,9 @@ use serde::Serialize;
 use super::check;
 use super::expand::expand_vars;
 use super::service;
-use super::spec::{PipelineStep, RigSpec, ServiceOp, SymlinkOp, SymlinkSpec};
+use super::spec::{
+    ComponentSpec, GitOp, PipelineStep, RigSpec, ServiceOp, SymlinkOp, SymlinkSpec,
+};
 use crate::error::{Error, Result};
 
 /// Result of one pipeline step.
@@ -114,6 +116,13 @@ pub fn run_pipeline(rig: &RigSpec, name: &str, fail_fast: bool) -> Result<Pipeli
 fn run_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
     match step {
         PipelineStep::Service { id, op } => run_service_step(rig, id, *op),
+        PipelineStep::Build { component, .. } => run_build_step(rig, component),
+        PipelineStep::Git {
+            component,
+            op,
+            args,
+            ..
+        } => run_git_step(rig, component, *op, args),
         PipelineStep::Command {
             cmd,
             cwd,
@@ -123,6 +132,111 @@ fn run_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
         PipelineStep::Symlink { op } => run_symlink_step(rig, *op),
         PipelineStep::Check { spec, .. } => check::evaluate(rig, spec),
     }
+}
+
+/// Resolve a component reference from the rig spec and return its expanded
+/// absolute path. Centralized so `build` and `git` steps share the error
+/// surface and spec validation.
+fn resolve_component_path(rig: &RigSpec, component_id: &str) -> Result<(ComponentSpec, String)> {
+    let component = rig.components.get(component_id).ok_or_else(|| {
+        Error::rig_pipeline_failed(
+            &rig.id,
+            "build",
+            format!(
+                "component '{}' not declared in rig `components` map",
+                component_id
+            ),
+        )
+    })?;
+    let path = expand_vars(rig, &component.path);
+    Ok((component.clone(), path))
+}
+
+fn run_build_step(rig: &RigSpec, component_id: &str) -> Result<()> {
+    let (_, path) = resolve_component_path(rig, component_id)?;
+    let (result, exit_code) = crate::build::run_with_path(component_id, &path)?;
+
+    if exit_code != 0 {
+        let detail = match &result {
+            crate::build::BuildResult::Single(output) => {
+                let tail = output
+                    .output
+                    .stderr
+                    .lines()
+                    .rev()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if tail.trim().is_empty() {
+                    format!("exit {}", exit_code)
+                } else {
+                    format!("exit {} — {}", exit_code, tail)
+                }
+            }
+            crate::build::BuildResult::Bulk(_) => format!("exit {}", exit_code),
+        };
+        return Err(Error::rig_pipeline_failed(
+            &rig.id,
+            "build",
+            format!("build {} failed: {}", component_id, detail),
+        ));
+    }
+    Ok(())
+}
+
+fn run_git_step(
+    rig: &RigSpec,
+    component_id: &str,
+    op: GitOp,
+    extra_args: &[String],
+) -> Result<()> {
+    let (_, path) = resolve_component_path(rig, component_id)?;
+
+    // Build the argv — op-specific base plus user-supplied extras.
+    let base_args: Vec<String> = match op {
+        GitOp::Status => vec!["status".into(), "--porcelain=v1".into()],
+        GitOp::Pull => vec!["pull".into()],
+        GitOp::Fetch => vec!["fetch".into()],
+        GitOp::Checkout => vec!["checkout".into()],
+        GitOp::CurrentBranch => vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+    };
+    let mut full_args: Vec<String> = base_args;
+    for arg in extra_args {
+        full_args.push(expand_vars(rig, arg));
+    }
+    let arg_refs: Vec<&str> = full_args.iter().map(String::as_str).collect();
+
+    let output = crate::git::execute_git_for_release(&path, &arg_refs).map_err(|e| {
+        Error::rig_pipeline_failed(
+            &rig.id,
+            "git",
+            format!("spawn `git {}` in {}: {}", full_args.join(" "), path, e),
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let code = output.status.code().unwrap_or(-1);
+        return Err(Error::rig_pipeline_failed(
+            &rig.id,
+            "git",
+            format!(
+                "`git {}` in {} exited {}{}",
+                full_args.join(" "),
+                path,
+                code,
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                }
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn run_service_step(rig: &RigSpec, service_id: &str, op: ServiceOp) -> Result<()> {
@@ -291,6 +405,8 @@ fn verify_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<()> {
 fn step_kind(step: &PipelineStep) -> &'static str {
     match step {
         PipelineStep::Service { .. } => "service",
+        PipelineStep::Build { .. } => "build",
+        PipelineStep::Git { .. } => "git",
         PipelineStep::Command { .. } => "command",
         PipelineStep::Symlink { .. } => "symlink",
         PipelineStep::Check { .. } => "check",
@@ -300,6 +416,22 @@ fn step_kind(step: &PipelineStep) -> &'static str {
 fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> String {
     match step {
         PipelineStep::Service { id, op } => format!("service {} {}", id, serialize_op(*op)),
+        PipelineStep::Build { component, label } => label
+            .clone()
+            .unwrap_or_else(|| format!("build {}", component)),
+        PipelineStep::Git {
+            component,
+            op,
+            args,
+            label,
+        } => label.clone().unwrap_or_else(|| {
+            let joined = if args.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", args.join(" "))
+            };
+            format!("git {} {}{}", serialize_git_op(*op), component, joined)
+        }),
         PipelineStep::Command { cmd, label, .. } => label
             .clone()
             .unwrap_or_else(|| truncate(&expand_vars(rig, cmd), 80)),
@@ -307,6 +439,16 @@ fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> String {
         PipelineStep::Check { label, .. } => {
             label.clone().unwrap_or_else(|| format!("check #{}", idx + 1))
         }
+    }
+}
+
+fn serialize_git_op(op: GitOp) -> &'static str {
+    match op {
+        GitOp::Status => "status",
+        GitOp::Pull => "pull",
+        GitOp::Fetch => "fetch",
+        GitOp::Checkout => "checkout",
+        GitOp::CurrentBranch => "current-branch",
     }
 }
 

@@ -116,7 +116,47 @@ pub enum PipelineStep {
         op: ServiceOp,
     },
 
-    /// Run an arbitrary shell command. Used for builds, rebuilds, cleanups.
+    /// Delegate to `homeboy build`.
+    ///
+    /// Rigs should prefer `build` over `command` for component builds so they
+    /// pick up the component's declared `scripts.build`, extension hooks, and
+    /// error-formatting surface instead of shelling out blindly. Component
+    /// path is resolved from the rig's `components` map, so the component
+    /// doesn't need to be registered in homeboy's global registry.
+    Build {
+        /// Component ID — must exist in the rig's `components` map.
+        component: String,
+        /// Human-readable label shown during execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
+    /// Delegate to `homeboy git`.
+    ///
+    /// Wraps homeboy's own git primitive with a path override so rigs can
+    /// operate on unregistered checkouts. Supports the subset of operations
+    /// rigs actually need (MVP): `status`, `pull`, `fetch`, `checkout`,
+    /// `current-branch`. More can land as follow-up.
+    Git {
+        /// Component ID — must exist in the rig's `components` map.
+        component: String,
+        /// Operation name.
+        op: GitOp,
+        /// Extra git arguments, appended after the op-specific base args
+        /// (e.g. `pull` with `["origin", "trunk"]` runs `git pull origin trunk`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+        /// Human-readable label shown during execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
+    /// Run an arbitrary shell command — escape hatch for operations that
+    /// don't map to a homeboy primitive (waits, custom tooling, probes).
+    ///
+    /// Prefer `build` / `git` / `check` over `command` wherever they fit:
+    /// typed steps pick up homeboy's existing error mapping, extension
+    /// hooks, and registry awareness for free.
     Command {
         /// Shell command to execute. Runs via `sh -c` (or `cmd /C` on Windows).
         #[serde(rename = "command")]
@@ -147,6 +187,22 @@ pub enum PipelineStep {
         #[serde(flatten)]
         spec: CheckSpec,
     },
+}
+
+/// Git operation supported by a rig `git` step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitOp {
+    /// `git status --porcelain=v1`. Passes if exit 0.
+    Status,
+    /// `git pull [args...]`.
+    Pull,
+    /// `git fetch [args...]`.
+    Fetch,
+    /// `git checkout [args...]`.
+    Checkout,
+    /// `git rev-parse --abbrev-ref HEAD` — returns current branch in logs.
+    CurrentBranch,
 }
 
 /// Service operation in a pipeline step.

@@ -56,7 +56,7 @@ A symlink the rig maintains.
 
 ## `PipelineStep`
 
-Tagged union via the `kind` discriminator. Four shapes:
+Tagged union via the `kind` discriminator. Six shapes. **Prefer the typed primitives (`build`, `git`, `check`) over generic `command` wherever they fit — typed steps reuse homeboy's existing build/git plumbing, error mapping, and extension hooks rather than shelling out blindly.**
 
 ### `service`
 
@@ -68,19 +68,45 @@ Tagged union via the `kind` discriminator. Four shapes:
 
 `start` is idempotent — a running PID is reused. `stop` sends SIGTERM with 5s grace then SIGKILL. `health` evaluates the service's `health` check and verifies the PID is live.
 
+### `build`
+
+```jsonc
+{ "kind": "build", "component": "wordpress-playground", "label": "playground tarballs" }
+```
+
+Delegates to `homeboy build`, using the component's path from the rig's `components` map. The component does NOT need to be registered in homeboy's global component registry — path override wins. Build semantics (extension-registered build scripts, error formatting, structured result) are inherited from `homeboy::build::run_with_path`. Exit code non-zero fails the step with the stderr tail in the pipeline outcome.
+
+### `git`
+
+```jsonc
+{
+  "kind": "git",
+  "component": "studio",
+  "op": "pull",
+  "args": ["origin", "trunk"],
+  "label": "pull studio trunk"
+}
+```
+
+Delegates to homeboy's git primitive (`git::execute_git_for_release` under the hood). Operation set: `status`, `pull`, `fetch`, `checkout`, `current-branch`. `args` are appended after the op-specific base args, so `op: pull` with `args: ["origin", "trunk"]` runs `git pull origin trunk`. Variable expansion applies to `args` entries.
+
+Stacked combined-fixes workflows are a future phase (see Homeboy #1462 `homeboy stack`) — for MVP, use repeated `git checkout` + `git pull` + `git` with `args: ["cherry-pick", "<sha>"]` as a workaround.
+
 ### `command`
 
 ```jsonc
 {
   "kind": "command",
-  "command": "npx nx run-many --target=package-for-self-hosting",
+  "command": "sleep 2",
   "cwd": "${components.wordpress-playground.path}",
   "env": { "NODE_ENV": "development" },
-  "label": "build playground tarballs"
+  "label": "wait for tarballs"
 }
 ```
 
 Runs via `sh -c`. `cwd`, `command`, and `env` values all support variable expansion. `label` is optional; without it, the command string itself is used in status output.
+
+**Escape hatch — use sparingly.** If a step maps to `build`, `git`, or `check`, use those instead. Generic commands lose homeboy's error formatting, extension integration, and structured output.
 
 ### `symlink`
 
