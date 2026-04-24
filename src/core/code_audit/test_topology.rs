@@ -337,8 +337,20 @@ JSON
         )
         .expect("script should be written");
 
-        // Keep the command invocation test deterministic by stubbing shell execution,
-        // not filesystem permissions. `sh -c <path>` works with readable script files.
+        // `run_topology_script` invokes the script directly (not via `sh <script>`)
+        // so the shebang resolves the interpreter — see #1276 / commit 343386a0.
+        // Direct invocation requires the execute bit on Unix; chmod +x or the
+        // spawn fails with EACCES and the assertion below sees 0 artifacts.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path)
+                .expect("script metadata should be readable")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms)
+                .expect("script should become executable");
+        }
 
         let extension = ExtensionManifest {
             id: "test-ext".to_string(),
