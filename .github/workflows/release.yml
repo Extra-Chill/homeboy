@@ -57,6 +57,7 @@ jobs:
         with:
           source: '.'
           commands: release
+          expected-commands: audit,lint,test
           release-dry-run: 'true'
 
       - name: Decide whether to release
@@ -144,6 +145,7 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: audit
+          expected-commands: audit,lint,test
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
@@ -178,6 +180,7 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: lint
+          expected-commands: audit,lint,test
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
@@ -212,6 +215,7 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: test
+          expected-commands: audit,lint,test
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
@@ -259,6 +263,7 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: audit,lint,test
+          expected-commands: audit,lint,test
           autofix: 'true'
           autofix-mode: always
           autofix-open-pr: 'true'
@@ -303,6 +308,7 @@ jobs:
         with:
           source: '.'
           commands: release
+          expected-commands: audit,lint,test
           release-dry-run: ${{ inputs.dry-run || 'false' }}
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
