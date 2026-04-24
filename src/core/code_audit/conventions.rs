@@ -177,6 +177,10 @@ pub enum AuditFinding {
     /// Docblock `@deprecated X.Y.Z` tag is older than the configured age
     /// threshold relative to the component's current version.
     DeprecationAge,
+    /// `function_exists` / `class_exists` / `defined` guard on a symbol that is
+    /// guaranteed to exist given plugin requirements, explicit bootstrap
+    /// `require`s, or the WordPress core version baseline.
+    DeadGuard,
 }
 
 impl AuditFinding {
@@ -221,6 +225,7 @@ impl AuditFinding {
             "repeated_field_pattern",
             "repeated_literal_shape",
             "deprecation_age",
+            "dead_guard",
         ]
     }
 }

@@ -20,6 +20,7 @@ mod compiler_warnings;
 pub(crate) mod conventions;
 pub(crate) mod core_fingerprint;
 mod dead_code;
+mod dead_guard;
 mod deprecation_age;
 mod discovery;
 pub mod docs;
@@ -34,6 +35,7 @@ mod layer_ownership;
 pub(crate) mod naming;
 mod repeated_literal_shape;
 pub mod report;
+mod requirements;
 pub mod run;
 mod shadow_modules;
 mod signatures;
@@ -559,6 +561,19 @@ fn audit_internal(
             deprecation_findings.len()
         );
         all_findings.extend(deprecation_findings);
+    }
+
+    // Phase 4q: Dead guard detection — flag function_exists/class_exists/defined
+    // guards on symbols guaranteed to exist given plugin requirements, composer
+    // dependencies, and bootstrap requires.
+    let dead_guard_findings = dead_guard::run(&all_fingerprints, root);
+    if !dead_guard_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Dead guards: {} finding(s) (guards on guaranteed-available symbols)",
+            dead_guard_findings.len()
+        );
+        all_findings.extend(dead_guard_findings);
     }
 
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,
