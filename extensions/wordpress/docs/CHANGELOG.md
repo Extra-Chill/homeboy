@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.12.0] - 2026-04-24
+
+### Added
+- surface auto-fixable lint findings as prominent CTA
+
 ## [2.11.0] - 2026-04-23
 
 ### Added
