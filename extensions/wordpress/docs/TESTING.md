@@ -114,6 +114,46 @@ changing the default. `HOMEBOY_SKIP_PHPSTAN=1` runs a critical-only
 check that still blocks `function.notFound` / `class.notFound` (guaranteed
 runtime fatals) regardless of the skip.
 
+### Strict `empty()` / `isset()` enforcement (opt-in)
+
+By default, PHPStan at level 7 already catches the *provably wrong* uses
+of `empty()` / `isset()` via built-in rules (`empty.variable`,
+`empty.offset`, `isset.variable`, `isset.offset`, `isset.property`).
+That covers every case where PHPStan can prove the check is redundant
+or a bug.
+
+Teams that want to **ban all uses of `empty()`** — matching the
+[WordPress/performance plugin's stance][wp-perf-1803] — can opt in to
+[`phpstan/phpstan-strict-rules`][strict-rules] locally. Install it per
+component:
+
+```bash
+composer require --dev phpstan/phpstan-strict-rules
+```
+
+Then add a component-local `phpstan.neon` pointing at the strict rules:
+
+```neon
+includes:
+    - vendor/phpstan/phpstan-strict-rules/rules.neon
+```
+
+This enables `empty.notAllowed` plus ~20 other strict rules
+(`disallowedLooseComparison`, `booleansInConditions`, `uselessCast`,
+`noVariableVariables`, etc.). Generating a baseline first is strongly
+recommended — real-world components typically light up with hundreds to
+thousands of findings across the whole strict set.
+
+This is not shipped as a default because the strict-rules package
+activates a broad set of toggles that can't be disabled from the
+consumer config (`checkDynamicProperties`, `reportMaybesInMethodSignatures`,
+etc.), producing an order-of-magnitude finding explosion on most
+codebases. Opt-in keeps the default honest while leaving the door open
+for teams that want full enforcement.
+
+[wp-perf-1803]: https://github.com/WordPress/performance/pull/1803
+[strict-rules]: https://github.com/phpstan/phpstan-strict-rules
+
 ## Debug output
 
 The Playground runner writes a structured log to
