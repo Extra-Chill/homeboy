@@ -29,6 +29,9 @@ pub enum ErrorCode {
     FleetNotFound,
     ExtensionNotFound,
     DocsTopicNotFound,
+    RigNotFound,
+    RigPipelineFailed,
+    RigServiceFailed,
 
     SshServerInvalid,
     SshIdentityFileNotFound,
@@ -70,6 +73,9 @@ impl ErrorCode {
             ErrorCode::FleetNotFound => "fleet.not_found",
             ErrorCode::ExtensionNotFound => "extension.not_found",
             ErrorCode::DocsTopicNotFound => "docs.topic_not_found",
+            ErrorCode::RigNotFound => "rig.not_found",
+            ErrorCode::RigPipelineFailed => "rig.pipeline_failed",
+            ErrorCode::RigServiceFailed => "rig.service_failed",
 
             ErrorCode::SshServerInvalid => "ssh.server_invalid",
             ErrorCode::SshIdentityFileNotFound => "ssh.identity_file_not_found",
@@ -391,6 +397,51 @@ impl Error {
 
     pub fn fleet_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
         Self::entity_not_found(ErrorCode::FleetNotFound, "Fleet", id, suggestions)
+    }
+
+    pub fn rig_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
+        Self::entity_not_found(ErrorCode::RigNotFound, "Rig", id, suggestions)
+    }
+
+    pub fn rig_pipeline_failed(
+        rig_id: impl Into<String>,
+        step: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        let rig_id = rig_id.into();
+        let step = step.into();
+        let reason = reason.into();
+        Self::new(
+            ErrorCode::RigPipelineFailed,
+            format!("Rig '{}' pipeline step '{}' failed: {}", rig_id, step, reason),
+            serde_json::json!({
+                "rig_id": rig_id,
+                "step": step,
+                "reason": reason,
+            }),
+        )
+    }
+
+    pub fn rig_service_failed(
+        rig_id: impl Into<String>,
+        service_id: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        let rig_id = rig_id.into();
+        let service_id = service_id.into();
+        let reason = reason.into();
+        Self::new(
+            ErrorCode::RigServiceFailed,
+            format!(
+                "Rig '{}' service '{}' failed: {}",
+                rig_id, service_id, reason
+            ),
+            serde_json::json!({
+                "rig_id": rig_id,
+                "service_id": service_id,
+                "reason": reason,
+            }),
+        )
     }
 
     pub fn docs_topic_not_found(topic: impl Into<String>) -> Self {

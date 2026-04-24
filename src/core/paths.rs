@@ -70,6 +70,32 @@ pub fn backups() -> Result<PathBuf> {
     Ok(homeboy()?.join("backups"))
 }
 
+/// Rigs directory (~/.config/homeboy/rigs/)
+pub fn rigs() -> Result<PathBuf> {
+    Ok(homeboy()?.join("rigs"))
+}
+
+/// Rig config file path (~/.config/homeboy/rigs/{id}.json)
+pub fn rig_config(id: &str) -> Result<PathBuf> {
+    Ok(rigs()?.join(format!("{}.json", id)))
+}
+
+/// Rig state directory (~/.config/homeboy/rigs/{id}.state/)
+/// Holds service PIDs, logs, and last check results.
+pub fn rig_state_dir(id: &str) -> Result<PathBuf> {
+    Ok(rigs()?.join(format!("{}.state", id)))
+}
+
+/// Rig state file (~/.config/homeboy/rigs/{id}.state/state.json)
+pub fn rig_state_file(id: &str) -> Result<PathBuf> {
+    Ok(rig_state_dir(id)?.join("state.json"))
+}
+
+/// Rig service logs directory (~/.config/homeboy/rigs/{id}.state/logs/)
+pub fn rig_logs_dir(id: &str) -> Result<PathBuf> {
+    Ok(rig_state_dir(id)?.join("logs"))
+}
+
 /// Extension directory path
 pub fn extension(id: &str) -> Result<PathBuf> {
     Ok(extensions()?.join(id))
@@ -207,5 +233,54 @@ mod tests {
     fn resolve_path_handles_relative() {
         let result = resolve_path_string("/base", "relative/path");
         assert_eq!(result, "/base/relative/path");
+    }
+
+    #[test]
+    fn test_rigs_path_under_homeboy_dir() {
+        let path = rigs().expect("rigs path resolves");
+        assert!(path.ends_with("rigs"), "got {}", path.display());
+        assert!(path.parent().expect("parent").ends_with("homeboy"));
+    }
+
+    #[test]
+    fn test_rig_config_uses_id_filename() {
+        let path = rig_config("studio-dev").expect("rig_config resolves");
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("studio-dev.json")
+        );
+    }
+
+    #[test]
+    fn test_rig_state_dir_uses_state_suffix() {
+        let path = rig_state_dir("studio-dev").expect("rig_state_dir resolves");
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("studio-dev.state")
+        );
+    }
+
+    #[test]
+    fn test_rig_state_file_nested_under_state_dir() {
+        let path = rig_state_file("studio-dev").expect("rig_state_file resolves");
+        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("state.json"));
+        assert_eq!(
+            path.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str()),
+            Some("studio-dev.state")
+        );
+    }
+
+    #[test]
+    fn test_rig_logs_dir_nested_under_state_dir() {
+        let path = rig_logs_dir("studio-dev").expect("rig_logs_dir resolves");
+        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("logs"));
+        assert_eq!(
+            path.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str()),
+            Some("studio-dev.state")
+        );
     }
 }

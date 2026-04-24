@@ -15,6 +15,7 @@ pub mod output;
 pub mod project;
 pub mod refactor;
 pub mod release;
+pub mod rig;
 pub mod scaffold;
 pub mod server;
 pub mod upgrade;

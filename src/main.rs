@@ -21,8 +21,8 @@ mod help_topics;
 use commands::utils::{args, entity_suggest, response as output, tty};
 use commands::{
     api, audit, auth, bench, build, changelog, changes, cli, component, config, db, deploy,
-    extension, file, fleet, git, init, lint, logs, project, refactor, release, scaffold, server,
-    ssh, status, test, transfer, undo, upgrade, validate, version,
+    extension, file, fleet, git, init, lint, logs, project, refactor, release, rig, scaffold,
+    server, ssh, status, test, transfer, undo, upgrade, validate, version,
 };
 use homeboy::extension::load_all_extensions;
 
@@ -106,6 +106,9 @@ enum Commands {
     Audit(audit::AuditArgs),
     /// Structural refactoring (rename terms across codebase)
     Refactor(refactor::RefactorArgs),
+    /// Manage local dev rigs (reproducible multi-component environments)
+    #[command(visible_alias = "rigs")]
+    Rig(rig::RigArgs),
     /// Undo the last write operation (audit fix, refactor, etc.)
     Undo(undo::UndoArgs),
     /// Authenticate with a project's API
