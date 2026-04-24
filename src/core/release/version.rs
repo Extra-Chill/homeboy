@@ -296,16 +296,14 @@ pub(crate) fn validate_and_finalize_changelog(
     if changelog_changed {
         local_files::local().write(&changelog_path, &finalized_changelog)?;
     } else if component.changelog_target.is_some() {
-        let changelog_file = component.changelog_target.as_deref().unwrap_or("CHANGELOG.md");
+        let changelog_file = component
+            .changelog_target
+            .as_deref()
+            .unwrap_or("CHANGELOG.md");
         let version_targets_list: Vec<String> = component
             .version_targets
             .as_ref()
-            .map(|targets| {
-                targets
-                    .iter()
-                    .map(|t| format!("  - {}", t.file))
-                    .collect()
-            })
+            .map(|targets| targets.iter().map(|t| format!("  - {}", t.file)).collect())
             .unwrap_or_default();
 
         return Err(Error::validation_invalid_argument(

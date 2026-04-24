@@ -200,12 +200,7 @@ fn suggest_helper_name(shape: &Shape) -> String {
         return "success_envelope(...)".to_string();
     }
 
-    let joined = keys
-        .iter()
-        .take(3)
-        .copied()
-        .collect::<Vec<_>>()
-        .join("_");
+    let joined = keys.iter().take(3).copied().collect::<Vec<_>>().join("_");
     format!("build_{}(...)", joined)
 }
 
@@ -732,7 +727,12 @@ mod tests {
         }
         let refs: Vec<&FileFingerprint> = files.iter().collect();
         let findings = detect_repeated_literal_shapes(&refs);
-        assert_eq!(findings.len(), 1, "expected exactly one finding, got {:?}", findings);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one finding, got {:?}",
+            findings
+        );
         let f = &findings[0];
         assert_eq!(f.kind, AuditFinding::RepeatedLiteralShape);
         assert_eq!(f.severity, Severity::Info);
