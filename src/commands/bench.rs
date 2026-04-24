@@ -201,7 +201,10 @@ mod tests {
         ];
         assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
 
-        let args = vec!["--regression-threshold=10".to_string(), "--keep".to_string()];
+        let args = vec![
+            "--regression-threshold=10".to_string(),
+            "--keep".to_string(),
+        ];
         assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
     }
 

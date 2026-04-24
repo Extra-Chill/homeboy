@@ -63,7 +63,10 @@ impl generic::Fingerprintable for BenchScenarioSnapshot {
         self.id.clone()
     }
     fn description(&self) -> String {
-        format!("p95 {:.2}ms (p50 {:.2}ms, mean {:.2}ms)", self.p95_ms, self.p50_ms, self.mean_ms)
+        format!(
+            "p95 {:.2}ms (p50 {:.2}ms, mean {:.2}ms)",
+            self.p95_ms, self.p50_ms, self.mean_ms
+        )
     }
     fn context_label(&self) -> String {
         self.id.clone()

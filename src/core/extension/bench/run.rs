@@ -6,12 +6,10 @@ use serde::Serialize;
 
 use crate::component::Component;
 use crate::engine::run_dir::{self, RunDir};
+use crate::error::Result;
 use crate::extension::bench::baseline::{self, BenchBaselineComparison};
 use crate::extension::bench::parsing::{self, BenchResults};
-use crate::extension::{
-    resolve_execution_context, ExtensionCapability, ExtensionRunner,
-};
-use crate::error::Result;
+use crate::extension::{resolve_execution_context, ExtensionCapability, ExtensionRunner};
 
 #[derive(Debug, Clone)]
 pub struct BenchRunWorkflowArgs {
@@ -87,8 +85,7 @@ pub fn run_main_bench_workflow(
     if !args.baseline && !args.ignore_baseline {
         if let Some(ref r) = parsed {
             if let Some(existing) = baseline::load_baseline(source_path) {
-                let comparison =
-                    baseline::compare(r, &existing, args.regression_threshold_percent);
+                let comparison = baseline::compare(r, &existing, args.regression_threshold_percent);
 
                 if comparison.regression {
                     baseline_exit_override = Some(1);
