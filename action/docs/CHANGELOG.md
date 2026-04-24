@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.8] - 2026-04-24
+
+### Fixed
+- scope orphan reconciliation to expected-commands
+
 ## [1.16.7] - 2026-04-24
 
 ### Changed
