@@ -1,5 +1,84 @@
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
+
+/// Shared verification phase vocabulary for isolated commands and composed runners.
+///
+/// `homeboy lint`, `homeboy audit`, and `homeboy test` stay independent. A
+/// future composed command can run these phases in canonical order while reusing
+/// the same phase reports and exit-code semantics.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum VerificationPhase {
+    Syntax,
+    Lint,
+    Typecheck,
+    Audit,
+    Test,
+}
+
+impl VerificationPhase {
+    pub fn canonical_order() -> [Self; 5] {
+        [
+            Self::Syntax,
+            Self::Lint,
+            Self::Typecheck,
+            Self::Audit,
+            Self::Test,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PhaseStatus {
+    Passed,
+    Failed,
+    Error,
+    Skipped,
+    NotRun,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PhaseFailureCategory {
+    Findings,
+    Infrastructure,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PhaseReport {
+    pub phase: VerificationPhase,
+    pub status: PhaseStatus,
+    pub exit_code: Option<i32>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PhaseFailure {
+    pub phase: VerificationPhase,
+    pub category: PhaseFailureCategory,
+    pub summary: String,
+}
+
+pub fn phase_status_from_exit_code(exit_code: i32) -> PhaseStatus {
+    if exit_code == 0 {
+        PhaseStatus::Passed
+    } else if exit_code >= 2 {
+        PhaseStatus::Error
+    } else {
+        PhaseStatus::Failed
+    }
+}
+
+pub fn phase_failure_category_from_exit_code(exit_code: i32) -> PhaseFailureCategory {
+    if exit_code >= 2 {
+        PhaseFailureCategory::Infrastructure
+    } else {
+        PhaseFailureCategory::Findings
+    }
+}
+
 /// Generic step filter contract for extension runner scripts.
 #[derive(Debug, Clone, Default)]
 pub struct RunnerStepFilter {
@@ -121,6 +200,35 @@ mod tests {
         let env = filter.to_env_pairs();
         assert!(env.iter().any(|(k, v)| k == "HOMEBOY_STEP" && v == "a"));
         assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "b"));
+    }
+
+    #[test]
+    fn verification_phase_order_is_canonical() {
+        assert_eq!(
+            VerificationPhase::canonical_order(),
+            [
+                VerificationPhase::Syntax,
+                VerificationPhase::Lint,
+                VerificationPhase::Typecheck,
+                VerificationPhase::Audit,
+                VerificationPhase::Test,
+            ]
+        );
+    }
+
+    #[test]
+    fn phase_exit_codes_are_classified() {
+        assert_eq!(phase_status_from_exit_code(0), PhaseStatus::Passed);
+        assert_eq!(phase_status_from_exit_code(1), PhaseStatus::Failed);
+        assert_eq!(phase_status_from_exit_code(2), PhaseStatus::Error);
+        assert_eq!(
+            phase_failure_category_from_exit_code(1),
+            PhaseFailureCategory::Findings
+        );
+        assert_eq!(
+            phase_failure_category_from_exit_code(2),
+            PhaseFailureCategory::Infrastructure
+        );
     }
 }
 

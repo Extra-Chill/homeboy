@@ -7,6 +7,10 @@ are expected to write, and what exit codes mean.
 This is the authoritative reference for extension authors wiring a new
 runner and for core maintainers improving the cross-extension surface.
 
+For the cross-command verification phase model (`syntax`, `lint`, `typecheck`,
+`audit`, `test`), see
+[`docs/development/contracts/verification-phases.md`](../development/contracts/verification-phases.md).
+
 ## Capability model
 
 Each extension declares scripts per-capability in its manifest
@@ -14,7 +18,7 @@ Each extension declares scripts per-capability in its manifest
 
 | Capability | Manifest field | Typical script | Invoked by |
 |------------|---------------|----------------|------------|
-| `lint` | `lint.extension_script` | `scripts/lint/lint-runner.sh` | `homeboy lint`, also chained by `test` |
+| `lint` | `lint.extension_script` | `scripts/lint/lint-runner.sh` | `homeboy lint` |
 | `test` | `test.extension_script` | `scripts/test/test-runner.sh` | `homeboy test` |
 | `build` | `build.extension_script` | `scripts/build/build.sh` | `homeboy build`, `homeboy release` |
 | `audit` | *built-in to core* | n/a | `homeboy audit` |
@@ -228,12 +232,14 @@ yet — this is a follow-up deliverable, not a current reference.
 Invokes the extension's `test.extension_script` with context env vars
 set. The script is expected to:
 
-1. Run lint as a prerequisite (unless `HOMEBOY_SKIP_LINT=1` or
-   `--skip-lint`). Most runners dispatch to `lint-runner.sh` internally.
-2. Run the test tool (PHPUnit, cargo test, etc.).
-3. Write results sidecar if `HOMEBOY_TEST_RESULTS_FILE` is set.
-4. Write failures sidecar if `HOMEBOY_TEST_FAILURES_FILE` is set.
-5. Exit per the convention above.
+1. Run the test harness only (PHPUnit, cargo test, npm test, etc.).
+2. Write results sidecar if `HOMEBOY_TEST_RESULTS_FILE` is set.
+3. Write failures sidecar if `HOMEBOY_TEST_FAILURES_FILE` is set.
+4. Exit per the convention above.
+
+`homeboy test` does not run lint or audit. Those are separate primitive
+commands (`homeboy lint`, `homeboy audit`) that composed workflows can run
+alongside test when they need a full verification sequence.
 
 Core handles baseline comparison, coverage threshold enforcement,
 test-drift detection, and analysis mode — extensions don't implement
