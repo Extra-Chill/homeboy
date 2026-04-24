@@ -472,16 +472,32 @@ pub(crate) fn generate_orphaned_test_fixes(
 
         // Fallback: delete the orphaned test if no rename candidate found.
         //
-        // Safety gate: if the corresponding source file no longer exists at all,
-        // the test is unambiguously orphaned — there's no source to reference.
-        // In that case, skip the manual_only gate and allow automated removal.
+        // Safety gate: we only auto-delete when we can confirm the finding
+        // refers to a real test file whose matching source file no longer
+        // exists. When `test_file_to_source_path` returns `None`, the
+        // finding's file is not shaped like a test path — which historically
+        // happened when the detector emitted a source-file finding for a
+        // production method named `test_*` (see Extra-Chill/homeboy#1471).
+        // In that case we refuse to act and surface the anomaly via
+        // `skipped` rather than silently auto-deleting a production method.
         //
-        // If the source file still exists (method was deleted but file remains),
-        // the test might be testing behavior via other code paths, so keep it
-        // manual-only for human review.
-        let source_file_exists = test_file_to_source_path(&finding.file)
-            .map(|p| root.join(p).exists())
-            .unwrap_or(false);
+        // If the derived source path exists, the test might still be
+        // exercising valid behavior through another code path → manual-only.
+        // If the derived source path is absent, the test is unambiguously
+        // orphaned → auto-delete.
+        let Some(derived_source_path) = test_file_to_source_path(&finding.file) else {
+            skipped.push(SkippedFile {
+                file: finding.file.clone(),
+                reason: format!(
+                    "Orphaned-test finding has non-test path shape `{}` — refusing to \
+                     auto-delete `{}`. Detector may be emitting source-file findings; \
+                     see Extra-Chill/homeboy#1471.",
+                    finding.file, test_method
+                ),
+            });
+            continue;
+        };
+        let source_file_exists = root.join(&derived_source_path).exists();
 
         let ins = insertion_with_primitive(
             RefactorPrimitive::RemoveOrphanedTest,
@@ -858,6 +874,74 @@ mod tests {
         assert!(
             fixes[0].insertions[0].manual_only,
             "Should be manual-only when source file still exists"
+        );
+    }
+
+    #[test]
+    fn generate_orphaned_test_fixes_refuses_source_path_finding() {
+        // Regression for Extra-Chill/homeboy#1471: the detector historically
+        // emitted findings whose `.file` was a SOURCE path (e.g.
+        // `src/core/extension/manifest.rs`) when a production method was
+        // named with the test prefix. The generator's `test_file_to_source_path`
+        // returned `None` on the source path, the previous `unwrap_or(false)`
+        // safety gate collapsed to "source doesn't exist → auto-delete", and
+        // the production method got deleted.
+        //
+        // After the fix the generator must refuse to act on findings whose
+        // file shape isn't recognisable as a test path. Upstream detector
+        // fix (production methods split into `test_methods`) makes such
+        // findings impossible in practice, but this backstop protects
+        // against any future detector regression emitting the same shape.
+        let dir = tempfile::tempdir().unwrap();
+        let source_file = dir.path().join("src/core/extension/manifest.rs");
+        std::fs::create_dir_all(source_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source_file,
+            "impl Foo {\n    pub fn test_script(&self) -> Option<&str> { None }\n}\n",
+        )
+        .unwrap();
+
+        let mut result = empty_result();
+        result.source_path = dir.path().to_string_lossy().to_string();
+        result.findings.push(Finding {
+            convention: "test_coverage".to_string(),
+            severity: Severity::Warning,
+            file: "src/core/extension/manifest.rs".to_string(),
+            description:
+                "Test method 'test_script' references 'script' which no longer exists in the source"
+                    .to_string(),
+            suggestion: "Remove".to_string(),
+            kind: AuditFinding::OrphanedTest,
+        });
+
+        let mut fixes: Vec<Fix> = Vec::new();
+        let mut skipped: Vec<SkippedFile> = Vec::new();
+        generate_orphaned_test_fixes(&result, dir.path(), &mut fixes, &mut skipped);
+
+        assert!(
+            fixes.is_empty(),
+            "Generator MUST NOT emit a fix for a source-file finding. Got: {:?}",
+            fixes
+                .iter()
+                .flat_map(|f| &f.insertions)
+                .map(|i| &i.description)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            skipped.len(),
+            1,
+            "Generator must record the refusal in `skipped`"
+        );
+        assert!(
+            skipped[0].reason.contains("non-test path shape"),
+            "Skip reason should explain the refusal. Got: {}",
+            skipped[0].reason
+        );
+        assert!(
+            skipped[0].reason.contains("#1471"),
+            "Skip reason should reference the tracking issue so future \
+             regressions are traceable. Got: {}",
+            skipped[0].reason
         );
     }
 

@@ -13,7 +13,27 @@ pub struct FileFingerprint {
     /// Language detected from extension.
     pub language: Language,
     /// Method/function names found in the file.
+    ///
+    /// Excludes inline test functions — those that have a `#[test]` (or
+    /// framework-specific test) attribute are tracked separately in
+    /// `test_methods`. A production method whose name happens to start with
+    /// a test-convention prefix (e.g. `ExtensionManifest::test_script()`)
+    /// still lives here, where it belongs.
     pub methods: Vec<String>,
+    /// Inline test method names, prefixed per `TestMappingConfig.method_prefix`.
+    ///
+    /// Populated ONLY for functions with an explicit test attribute (e.g.
+    /// `#[test]` in Rust) when the core grammar engine fingerprints the file.
+    /// Extension-script fingerprinting (PHP/JS/TS) leaves this empty because
+    /// those languages have no structural test marker — callers that care
+    /// about the non-inline case fall back to filtering `methods` by prefix.
+    ///
+    /// This exists so a production method named `test_foo()` is never
+    /// confused with an inline `#[test] fn test_foo()`. Without this field
+    /// the orphaned-test detector emitted source-file findings that
+    /// downstream autofix treated as deletable test functions — see
+    /// Extra-Chill/homeboy#1471.
+    pub test_methods: Vec<String>,
     /// Registration calls found (e.g., add_action, register_rest_route).
     pub registrations: Vec<String>,
     /// Class or struct name if found.
@@ -107,6 +127,10 @@ fn fingerprint_via_extension(
         relative_path: relative_path.to_string(),
         language,
         methods: output.methods,
+        // Extension-script fingerprinting does not distinguish test methods
+        // structurally — callers fall back to prefix-filter on `methods` when
+        // `test_methods` is empty and `inline_tests` is false.
+        test_methods: Vec::new(),
         registrations: output.registrations,
         type_name: output.type_name,
         type_names: output.type_names,

@@ -248,6 +248,7 @@ mod tests {
             relative_path: path.to_string(),
             language: super::super::conventions::Language::Rust,
             methods: methods.iter().map(|s| s.to_string()).collect(),
+            test_methods: vec![],
             registrations: vec![],
             type_name: None,
             type_names: vec![],

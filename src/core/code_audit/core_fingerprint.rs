@@ -288,6 +288,17 @@ pub fn fingerprint_from_grammar(
     let functions = extract_functions(&symbols, &lines, &impl_contexts, test_range, grammar);
 
     // --- Methods list ---
+    //
+    // Production methods and inline test methods are kept in SEPARATE lists so
+    // a production method whose name begins with the test prefix (e.g.
+    // `ExtensionManifest::test_script()`) is never confused with an inline
+    // `#[test] fn test_script()`. See Extra-Chill/homeboy#1471 for the bug
+    // this separation prevents.
+    //
+    // `methods` holds non-test functions. `test_methods` holds test functions
+    // (those with an explicit `#[test]` attribute) with the test prefix
+    // normalized on — this is the canonical form the test-coverage detector
+    // expects.
     let mut methods = Vec::new();
     let mut seen_methods = HashSet::new();
     for f in &functions {
@@ -299,13 +310,16 @@ pub fn fingerprint_from_grammar(
             seen_methods.insert(f.name.clone());
         }
     }
-    // Add test methods with test_ prefix.
+
+    // Collect test methods separately.
     //
-    // Only include functions that have an explicit #[test] attribute.
-    // Functions inside #[cfg(test)] modules without #[test] are helpers
-    // (factories, fixtures, grammar builders) — not actual tests. Including
-    // them causes the orphaned test detector to flag them when no matching
-    // source method exists.
+    // Only functions with an explicit `#[test]` attribute qualify. Helpers
+    // inside `#[cfg(test)]` modules without `#[test]` (factories, fixtures,
+    // grammar builders) are deliberately excluded — including them would
+    // cause the orphaned-test detector to flag them when no matching source
+    // method exists.
+    let mut test_methods = Vec::new();
+    let mut seen_test_methods = HashSet::new();
     for f in &functions {
         if f.is_test && f.has_test_attr {
             let prefixed = if f.name.starts_with("test_") {
@@ -313,9 +327,9 @@ pub fn fingerprint_from_grammar(
             } else {
                 format!("test_{}", f.name)
             };
-            if !seen_methods.contains(&prefixed) {
-                methods.push(prefixed.clone());
-                seen_methods.insert(prefixed);
+            if !seen_test_methods.contains(&prefixed) {
+                test_methods.push(prefixed.clone());
+                seen_test_methods.insert(prefixed);
             }
         }
     }
@@ -421,6 +435,7 @@ pub fn fingerprint_from_grammar(
         relative_path: relative_path.to_string(),
         language,
         methods,
+        test_methods,
         registrations,
         type_name,
         type_names,
@@ -1708,8 +1723,13 @@ mod tests {
             !fp.method_hashes.contains_key("test_real_fn"),
             "Test functions should not be in method_hashes"
         );
-        // Test method should still be in the methods list
-        assert!(fp.methods.contains(&"test_real_fn".to_string()));
+        // Test method lives in `test_methods`, not `methods`, so a production
+        // method named `test_*` can't be confused with an inline `#[test]`.
+        assert!(fp.test_methods.contains(&"test_real_fn".to_string()));
+        assert!(
+            !fp.methods.contains(&"test_real_fn".to_string()),
+            "Inline #[test] functions must not leak into `methods`"
+        );
     }
 
     #[test]
@@ -2021,25 +2041,43 @@ mod tests {
         let fp = fingerprint_from_grammar(content, &grammar, "src/core/engine/edit_op.rs")
             .expect("fingerprint should succeed");
 
-        // test_from_insertion has #[test] → should be in methods as "test_from_insertion"
+        // test_from_insertion has #[test] → should be in `test_methods`,
+        // and NOT in `methods` (production methods list).
         assert!(
-            fp.methods.contains(&"test_from_insertion".to_string()),
-            "Actual #[test] function should be in methods list. Methods: {:?}",
+            fp.test_methods.contains(&"test_from_insertion".to_string()),
+            "Actual #[test] function should be in test_methods. test_methods: {:?}",
+            fp.test_methods
+        );
+        assert!(
+            !fp.methods.contains(&"test_from_insertion".to_string()),
+            "Inline #[test] functions must not leak into `methods`. Methods: {:?}",
             fp.methods
         );
 
-        // test_insertion is a helper (no #[test]) → should NOT be in methods list
+        // test_insertion is a helper (no #[test]) → should NOT be in either
+        // list; it's neither a production method nor an inline test.
         assert!(
             !fp.methods.contains(&"test_insertion".to_string()),
             "Helper fn test_insertion() without #[test] should NOT be in methods. Methods: {:?}",
             fp.methods
         );
+        assert!(
+            !fp.test_methods.contains(&"test_insertion".to_string()),
+            "Helper fn test_insertion() without #[test] should NOT be in test_methods. test_methods: {:?}",
+            fp.test_methods
+        );
 
-        // rust_grammar is a helper (no #[test]) → should NOT be in methods as test_rust_grammar
+        // rust_grammar is a helper (no #[test]) → should NOT appear with or
+        // without a test_ prefix in either list.
         assert!(
             !fp.methods.contains(&"test_rust_grammar".to_string()),
             "Helper fn rust_grammar() without #[test] should NOT be in methods. Methods: {:?}",
             fp.methods
+        );
+        assert!(
+            !fp.test_methods.contains(&"test_rust_grammar".to_string()),
+            "Helper fn rust_grammar() without #[test] should NOT be in test_methods. test_methods: {:?}",
+            fp.test_methods
         );
 
         // from_insertion is a real source method → should be in methods list

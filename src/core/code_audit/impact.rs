@@ -142,6 +142,9 @@ pub(crate) fn fingerprint_from_git_ref(
         relative_path: relative_path.to_string(),
         language,
         methods: output.methods,
+        // Extension-script fingerprinting does not structurally distinguish
+        // test methods — callers fall back to prefix filtering on `methods`.
+        test_methods: Vec::new(),
         registrations: output.registrations,
         type_name: output.type_name,
         type_names: output.type_names,

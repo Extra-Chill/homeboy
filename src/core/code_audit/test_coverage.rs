@@ -77,13 +77,13 @@ pub(crate) fn analyze_test_coverage(
         // For inline test languages (Rust), check for #[cfg(test)] in the source file itself
         if config.inline_tests {
             // Rust convention: tests can be inline in the same file.
-            // The fingerprint script extracts test methods from #[cfg(test)] modules
-            // and includes them in the methods list with their original names.
-            // Test methods matching method_prefix (e.g., "test_") indicate inline tests.
-            let has_inline_tests = source_fp
-                .methods
-                .iter()
-                .any(|m| m.starts_with(&config.method_prefix));
+            // The core grammar engine extracts functions with `#[test]` into the
+            // fingerprint's `test_methods` list (prefix normalized on). Reading
+            // the structural list rather than filtering `.methods` by name is
+            // what prevents production methods named `test_*` (like
+            // `ExtensionManifest::test_script`) from being classified as tests
+            // — see Extra-Chill/homeboy#1471.
+            let has_inline_tests = !source_fp.test_methods.is_empty();
 
             if !test_file_exists && !has_inline_tests {
                 if let Some(ref test_path) = expected_test_path {
@@ -108,35 +108,40 @@ pub(crate) fn analyze_test_coverage(
             // Check method coverage: combine inline test methods + dedicated test file methods
             let mut covered_methods: HashSet<&str> = HashSet::new();
 
-            // Inline test methods in the source file
-            for method in &source_fp.methods {
+            // Inline test methods — authored with `#[test]`, tracked separately
+            // from production methods so prefix-string ambiguity can't leak.
+            for method in &source_fp.test_methods {
                 if let Some(source_method) = method.strip_prefix(&config.method_prefix) {
                     covered_methods.insert(source_method);
                 }
             }
 
-            // Methods from dedicated test file
-            if let Some(test_fingerprint) = test_fp {
-                for method in &test_fingerprint.methods {
-                    if let Some(source_method) = method.strip_prefix(&config.method_prefix) {
-                        covered_methods.insert(source_method);
-                    }
-                }
+            // Methods from dedicated test file — for Rust, these are also
+            // structural (top-level `#[test]` functions in `tests/`). For
+            // extension-fingerprinted languages the core list is empty so we
+            // fall back to the prefix filter on `.methods`.
+            let dedicated_test_methods: Vec<&str> = if let Some(test_fingerprint) = test_fp {
+                collect_test_method_refs(test_fingerprint, config)
             } else if let Some(test_methods) = &disk_test_methods {
-                for method in test_methods {
-                    if let Some(source_method) = method.strip_prefix(&config.method_prefix) {
-                        covered_methods.insert(source_method);
-                    }
+                test_methods
+                    .iter()
+                    .filter(|m| m.starts_with(&config.method_prefix))
+                    .map(|m| m.as_str())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for method in dedicated_test_methods {
+                if let Some(source_method) = method.strip_prefix(&config.method_prefix) {
+                    covered_methods.insert(source_method);
                 }
             }
 
-            // Build set of non-test source method names for orphaned test detection
-            let source_methods: HashSet<&str> = source_fp
-                .methods
-                .iter()
-                .filter(|m| !m.starts_with(&config.method_prefix))
-                .map(|m| m.as_str())
-                .collect();
+            // Build set of source method names for orphaned test detection.
+            // Test methods already live in `source_fp.test_methods` — `.methods`
+            // contains only non-test functions, so no prefix filter needed.
+            let source_methods: HashSet<&str> =
+                source_fp.methods.iter().map(|m| m.as_str()).collect();
 
             // Find source methods without tests (Check 2: MissingTestMethod)
             for method in &source_methods {
@@ -167,10 +172,15 @@ pub(crate) fn analyze_test_coverage(
             // Check 4a: Orphaned test methods (inline) — test methods whose
             // source method no longer exists. This catches tests left behind
             // when a function is deleted from the source.
+            //
+            // We pass `source_fp.test_methods` directly rather than filtering
+            // `source_fp.methods` by prefix. The detector historically used the
+            // prefix filter and emitted source-file findings for production
+            // methods named `test_*` — see Extra-Chill/homeboy#1471.
             find_orphaned_test_methods(
                 &mut findings,
                 &source_fp.relative_path,
-                &collect_test_methods_from_fp(source_fp, config),
+                &source_fp.test_methods,
                 &source_methods,
                 config,
             );
@@ -491,11 +501,39 @@ fn is_skipped_path(path: &str, config: &TestMappingConfig) -> bool {
 }
 
 /// Collect test method names from a fingerprint.
+///
+/// Prefers the structural `test_methods` list populated by the core grammar
+/// engine (Rust `#[test]` functions). Falls back to filtering `.methods` by
+/// the configured test prefix for extension-script fingerprints (PHP/JS/TS)
+/// that don't distinguish test functions structurally.
+///
+/// A production method named `test_foo()` in a source file is NOT considered
+/// a test method by this helper, because only the structural list is consulted
+/// when it's populated.
 fn collect_test_methods_from_fp(fp: &FileFingerprint, config: &TestMappingConfig) -> Vec<String> {
+    if !fp.test_methods.is_empty() {
+        return fp.test_methods.clone();
+    }
     fp.methods
         .iter()
         .filter(|m| m.starts_with(&config.method_prefix))
         .cloned()
+        .collect()
+}
+
+/// Collect test method names as borrowed `&str`s (same semantics as
+/// `collect_test_methods_from_fp`, borrowed for coverage-set building).
+fn collect_test_method_refs<'a>(
+    fp: &'a FileFingerprint,
+    config: &TestMappingConfig,
+) -> Vec<&'a str> {
+    if !fp.test_methods.is_empty() {
+        return fp.test_methods.iter().map(|m| m.as_str()).collect();
+    }
+    fp.methods
+        .iter()
+        .filter(|m| m.starts_with(&config.method_prefix))
+        .map(|m| m.as_str())
         .collect()
 }
 
@@ -613,11 +651,46 @@ mod tests {
         }
     }
 
+    /// Build a fingerprint for tests.
+    ///
+    /// For **source-file paths** (not under `tests/`), methods that start
+    /// with the conventional test prefix are split into `test_methods`,
+    /// mirroring what the core grammar engine does with `#[test]` functions.
+    /// This preserves backwards-compatibility with existing fixtures that mix
+    /// source methods and inline test methods into a single vec.
+    ///
+    /// For **test-file paths** (under `tests/` / `__tests__/` / matching
+    /// language-specific test suffixes), all methods stay in `.methods`. This
+    /// mirrors the extension-script fingerprint protocol (PHP/JS/TS) which
+    /// does not distinguish `#[test]`-attributed functions.
+    ///
+    /// For tests that need to model the specific case "production method with
+    /// a `test_` prefixed name" (e.g. `ExtensionManifest::test_script`), use
+    /// `make_fp_split` and pass an empty `test_methods` vec.
     fn make_fp(path: &str, methods: Vec<&str>) -> FileFingerprint {
+        let mut fp = FileFingerprint {
+            relative_path: path.to_string(),
+            language: Language::Rust,
+            ..Default::default()
+        };
+        let is_test_file = crate::core::code_audit::walker::is_test_path(path);
+        for m in methods {
+            if !is_test_file && m.starts_with("test_") {
+                fp.test_methods.push(m.to_string());
+            } else {
+                fp.methods.push(m.to_string());
+            }
+        }
+        fp
+    }
+
+    /// Build a fingerprint with explicit `methods` and `test_methods` splits.
+    fn make_fp_split(path: &str, methods: Vec<&str>, test_methods: Vec<&str>) -> FileFingerprint {
         FileFingerprint {
             relative_path: path.to_string(),
             language: Language::Rust,
             methods: methods.into_iter().map(String::from).collect(),
+            test_methods: test_methods.into_iter().map(String::from).collect(),
             ..Default::default()
         }
     }
@@ -1257,6 +1330,74 @@ mod tests {
             orphaned.is_empty(),
             "Scenario test names should NOT be flagged as orphaned. Flagged: {:?}",
             orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn production_method_with_test_prefix_not_flagged_orphaned() {
+        // Regression for Extra-Chill/homeboy#1471: `ExtensionManifest::test_script()`
+        // and `test_mapping()` are production accessors on a manifest struct —
+        // public methods whose names happen to start with `test_`. They are
+        // NOT `#[test]` functions. The detector used to flag them as orphaned
+        // because `collect_test_methods_from_fp` filtered `.methods` by name
+        // prefix, ignoring the structural `has_test_attr` signal. The
+        // generator then auto-deleted them. Bug occurred three times in 26
+        // hours (#1176 → #1183 → bench PR #1385 force-push reverts) until
+        // this fix split test methods into their own `test_methods` vec.
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_prod_test_prefix");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core/extension")).unwrap();
+
+        // Model ExtensionManifest: production methods with `test_` names, no
+        // inline tests. `test_methods` is empty (these are NOT #[test]).
+        let source = make_fp_split(
+            "src/core/extension/manifest.rs",
+            vec![
+                "lint_script",
+                "build_script",
+                "test_script",  // production accessor, looks like a test prefix
+                "test_mapping", // production accessor, looks like a test prefix
+                "autofix_verify",
+            ],
+            vec![], // no inline #[test] functions
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
+            })
+            .collect();
+
+        assert!(
+            orphaned.is_empty(),
+            "Production methods named test_* must not be flagged as orphaned tests. \
+             Flagged: {:?}",
+            orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+
+        // They should also not show up as missing-test findings for the
+        // *nonexistent* source methods `script` / `mapping`.
+        let missing_methods_referencing_stub: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::MissingTestMethod
+                    && (f.description.contains("'script'") || f.description.contains("'mapping'"))
+            })
+            .collect();
+        assert!(
+            missing_methods_referencing_stub.is_empty(),
+            "test_script and test_mapping must not be interpreted as covering \
+             source methods named 'script' / 'mapping'. Found: {:?}",
+            missing_methods_referencing_stub
+                .iter()
+                .map(|f| &f.description)
+                .collect::<Vec<_>>()
         );
 
         let _ = std::fs::remove_dir_all(&dir);
