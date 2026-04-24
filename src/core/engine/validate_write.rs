@@ -243,11 +243,13 @@ fn resolve_validate_command(root: &Path, changed_files: &[PathBuf]) -> Option<St
             let script_path = std::path::Path::new(ext_path).join(script_rel);
 
             if script_path.exists() {
-                // Build the command: pass root and changed files as JSON on stdin
-                return Some(format!(
-                    "sh {}",
-                    crate::engine::shell::quote_path(&script_path.to_string_lossy())
-                ));
+                // Invoke the script directly so its shebang resolves the interpreter.
+                // Wrapping with `sh <script>` bypasses `#!/usr/bin/env bash` and runs
+                // under POSIX sh — which breaks scripts using bash-only features like
+                // process substitution (`done < <(...)`). See #1276.
+                return Some(
+                    crate::engine::shell::quote_path(&script_path.to_string_lossy()).to_string(),
+                );
             }
         }
     }
@@ -343,6 +345,61 @@ mod tests {
         let result = validate_write(dir.path(), &[], &rollback).expect("should succeed");
         assert!(result.success);
         assert_eq!(result.files_checked, 0);
+    }
+
+    /// Regression test for #1276.
+    ///
+    /// Extension-script validation commands must be invokable under `sh -c ...`
+    /// **without** a `sh` interpreter prefix — the script's shebang
+    /// (`#!/usr/bin/env bash`) has to resolve the interpreter so scripts using
+    /// bash-only features (process substitution, arrays, etc.) work.
+    ///
+    /// Before the fix, resolve_validate_command emitted `sh <path>` which
+    /// bypassed the shebang and ran the script under POSIX sh — on macOS that's
+    /// bash-3.2 in sh-compat mode, which rejects `done < <(...)` with a syntax
+    /// error. The gate was silently broken for every wordpress-extension user.
+    #[test]
+    fn extension_script_runs_under_its_shebang_not_posix_sh() {
+        let dir = TempDir::new().expect("temp dir");
+        let script_path = dir.path().join("validate-bash-only.sh");
+
+        // Bash-only process-substitution form that fails under POSIX sh but
+        // works under bash (the script's declared interpreter).
+        let script_body = "#!/usr/bin/env bash\n\
+             set -euo pipefail\n\
+             count=0\n\
+             while IFS= read -r -d '' _f; do count=$((count + 1)); done < <(printf 'a\\0b\\0')\n\
+             echo \"count=$count\"\n";
+        fs::write(&script_path, script_body).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        // Mimic what resolve_validate_command emits for an extension script —
+        // the quoted path with no `sh ` prefix — and run it the same way
+        // validate_write does.
+        let command = crate::engine::shell::quote_path(&script_path.to_string_lossy());
+        let output = std::process::Command::new("sh")
+            .args(["-c", &command])
+            .output()
+            .expect("should spawn");
+
+        assert!(
+            output.status.success(),
+            "shebang-invoked script failed: stdout={:?} stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("count=2"),
+            "expected bash process substitution to succeed, got: {stdout:?}"
+        );
     }
 
     #[test]

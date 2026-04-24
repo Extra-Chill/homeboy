@@ -186,10 +186,12 @@ fn resolve_format_command(root: &Path, changed_files: &[PathBuf]) -> Option<Stri
             let script_path = std::path::Path::new(ext_path).join(script_rel);
 
             if script_path.exists() {
-                return Some(format!(
-                    "sh {}",
-                    crate::engine::shell::quote_path(&script_path.to_string_lossy())
-                ));
+                // Invoke the script directly so its shebang resolves the interpreter.
+                // Wrapping with `sh <script>` bypasses `#!/usr/bin/env bash` and runs
+                // under POSIX sh — which breaks scripts using bash-only features. See #1276.
+                return Some(
+                    crate::engine::shell::quote_path(&script_path.to_string_lossy()).to_string(),
+                );
             }
         }
     }

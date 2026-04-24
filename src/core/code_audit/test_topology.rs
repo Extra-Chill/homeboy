@@ -180,8 +180,10 @@ fn run_topology_script(
         return Vec::new();
     }
 
-    let output = std::process::Command::new("sh")
-        .arg(script_path.to_string_lossy().as_ref())
+    // Invoke the script directly so its shebang resolves the interpreter.
+    // Wrapping with `sh <script>` bypasses `#!/usr/bin/env bash` and runs
+    // under POSIX sh — which breaks scripts using bash-only features. See #1276.
+    let output = std::process::Command::new(&script_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
