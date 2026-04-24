@@ -82,14 +82,7 @@ pub fn run_check(rig: &RigSpec) -> Result<CheckReport> {
 
     let mut state = RigState::load(&rig.id)?;
     state.last_check = Some(now_rfc3339());
-    state.last_check_result = Some(
-        if outcome.is_success() {
-            "pass"
-        } else {
-            "fail"
-        }
-        .to_string(),
-    );
+    state.last_check_result = Some(if outcome.is_success() { "pass" } else { "fail" }.to_string());
     state.save(&rig.id)?;
 
     Ok(CheckReport {
@@ -137,10 +130,7 @@ pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
             ServiceStatus::Stopped => ("stopped", None),
             ServiceStatus::Stale(pid) => ("stale", Some(pid)),
         };
-        let started_at = state
-            .services
-            .get(id)
-            .and_then(|s| s.started_at.clone());
+        let started_at = state.services.get(id).and_then(|s| s.started_at.clone());
         services.push(ServiceStatusReport {
             id: id.clone(),
             status: status_str.to_string(),

@@ -47,10 +47,7 @@ fn test_expand_vars_component_path() {
 fn test_expand_vars_env_variable() {
     std::env::set_var("RIG_EXPAND_TEST_VAR", "hello");
     let rig = rig_with("t", HashMap::new());
-    assert_eq!(
-        expand_vars(&rig, "x=${env.RIG_EXPAND_TEST_VAR}"),
-        "x=hello"
-    );
+    assert_eq!(expand_vars(&rig, "x=${env.RIG_EXPAND_TEST_VAR}"), "x=hello");
 }
 
 #[test]

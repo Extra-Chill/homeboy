@@ -263,7 +263,10 @@ mod tests {
     #[test]
     fn test_rig_state_file_nested_under_state_dir() {
         let path = rig_state_file("studio-dev").expect("rig_state_file resolves");
-        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("state.json"));
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("state.json")
+        );
         assert_eq!(
             path.parent()
                 .and_then(|p| p.file_name())

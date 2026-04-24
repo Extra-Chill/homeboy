@@ -1806,7 +1806,9 @@ body
         );
         // Footer markers present, one blank line before start marker, trailing
         // newline after end marker.
-        assert!(out.contains("<!-- homeboy:footer:start -->\ntooling versions block\n<!-- homeboy:footer:end -->\n"));
+        assert!(out.contains(
+            "<!-- homeboy:footer:start -->\ntooling versions block\n<!-- homeboy:footer:end -->\n"
+        ));
         // Footer appears after the last section's :end marker.
         let last_section_end = out.find("<!-- homeboy:section-key=lint:end -->").unwrap();
         let footer_start = out.find("<!-- homeboy:footer:start -->").unwrap();
@@ -1967,6 +1969,9 @@ tooling
 <!-- homeboy:footer:end -->
 ";
         let sections = parse_comment_sections(body);
-        assert_eq!(sections, vec![("lint".to_string(), "lint body".to_string())]);
+        assert_eq!(
+            sections,
+            vec![("lint".to_string(), "lint body".to_string())]
+        );
     }
 }
