@@ -2,9 +2,10 @@
 
 use super::checks::{CheckResult, CheckStatus};
 use super::conventions::AuditFinding;
+use serde::ser::{SerializeStruct, Serializer};
 
 /// An actionable finding from the code audit.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct Finding {
     /// The convention this finding relates to.
     pub convention: String,
@@ -20,6 +21,23 @@ pub struct Finding {
     pub kind: AuditFinding,
 }
 
+impl serde::Serialize for Finding {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("Finding", 7)?;
+        state.serialize_field("convention", &self.convention)?;
+        state.serialize_field("severity", &self.severity)?;
+        state.serialize_field("file", &self.file)?;
+        state.serialize_field("description", &self.description)?;
+        state.serialize_field("suggestion", &self.suggestion)?;
+        state.serialize_field("kind", &self.kind)?;
+        state.serialize_field("confidence", &self.kind.confidence())?;
+        state.end()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -27,6 +45,57 @@ pub enum Severity {
     Warning,
     /// Pattern is unclear — needs investigation.
     Info,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingConfidence {
+    /// Derived from parser output, compiler output, or explicit file-system facts.
+    Structural,
+    /// Derived from whole-codebase reference or ownership graph analysis.
+    Graph,
+    /// Derived from naming, shape, similarity, or convention heuristics.
+    Heuristic,
+}
+
+impl Default for FindingConfidence {
+    fn default() -> Self {
+        Self::Heuristic
+    }
+}
+
+impl FindingConfidence {
+    /// Only structural findings are eligible for unattended mutation by default.
+    pub fn allows_automated_refactor(self) -> bool {
+        matches!(self, Self::Structural)
+    }
+}
+
+impl AuditFinding {
+    /// Confidence tier for downstream enforcement and autofix policy.
+    pub fn confidence(&self) -> FindingConfidence {
+        match self {
+            // Direct facts from parser/compiler/filesystem output.
+            AuditFinding::MissingImport
+            | AuditFinding::CompilerWarning
+            | AuditFinding::BrokenDocReference
+            | AuditFinding::StaleDocReference => FindingConfidence::Structural,
+
+            // Depends on cross-file reference resolution or declared ownership maps.
+            AuditFinding::UnusedParameter
+            | AuditFinding::IgnoredParameter
+            | AuditFinding::UnreferencedExport
+            | AuditFinding::OrphanedInternal
+            | AuditFinding::LayerOwnershipViolation
+            | AuditFinding::DeprecationAge
+            | AuditFinding::DeadGuard => FindingConfidence::Graph,
+
+            // Convention, naming, body-shape, and similarity findings remain review-only.
+            _ => FindingConfidence::Heuristic,
+        }
+    }
 }
 
 /// Build findings from check results.
@@ -182,5 +251,43 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Info);
         assert_eq!(findings[0].kind, AuditFinding::NamingMismatch);
+    }
+
+    #[test]
+    fn finding_serializes_confidence_from_kind() {
+        let finding = Finding {
+            convention: "compiler".to_string(),
+            severity: Severity::Warning,
+            file: "src/lib.rs".to_string(),
+            description: "unused import".to_string(),
+            suggestion: "remove it".to_string(),
+            kind: AuditFinding::CompilerWarning,
+        };
+
+        let json = serde_json::to_value(&finding).expect("serialize finding");
+
+        assert_eq!(json["confidence"], "structural");
+    }
+
+    #[test]
+    fn finding_confidence_tiers_classify_known_risk_levels() {
+        assert_eq!(
+            AuditFinding::CompilerWarning.confidence(),
+            FindingConfidence::Structural
+        );
+        assert_eq!(
+            AuditFinding::UnreferencedExport.confidence(),
+            FindingConfidence::Graph
+        );
+        assert_eq!(
+            AuditFinding::OrphanedTest.confidence(),
+            FindingConfidence::Heuristic
+        );
+        assert!(AuditFinding::CompilerWarning
+            .confidence()
+            .allows_automated_refactor());
+        assert!(!AuditFinding::OrphanedTest
+            .confidence()
+            .allows_automated_refactor());
     }
 }

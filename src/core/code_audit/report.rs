@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::code_audit::{
-    baseline, AuditFinding, CodeAuditResult, ConventionReport, DirectoryConvention, Severity,
+    baseline, AuditFinding, CodeAuditResult, ConventionReport, DirectoryConvention,
+    FindingConfidence, Severity,
 };
 use serde::Serialize;
 
@@ -35,6 +36,7 @@ pub struct AuditSummaryFinding {
     pub file: String,
     pub convention: String,
     pub kind: AuditFinding,
+    pub confidence: FindingConfidence,
     pub severity: Severity,
     pub description: String,
     pub suggestion: String,
@@ -136,6 +138,7 @@ pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSum
             file: f.file.clone(),
             convention: f.convention.clone(),
             kind: f.kind.clone(),
+            confidence: f.kind.confidence(),
             severity: f.severity.clone(),
             description: f.description.clone(),
             suggestion: f.suggestion.clone(),
@@ -211,12 +214,12 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
             });
             entry.total += 1;
 
-            if insertion.manual_only {
-                manual_only += 1;
-                entry.manual_only += 1;
-            } else {
+            if insertion.auto_apply {
                 automated_count += 1;
                 entry.automated += 1;
+            } else {
+                manual_only += 1;
+                entry.manual_only += 1;
             }
         }
     }
@@ -230,12 +233,12 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
         });
         entry.total += 1;
 
-        if new_file.manual_only {
-            manual_only += 1;
-            entry.manual_only += 1;
-        } else {
+        if new_file.auto_apply {
             automated_count += 1;
             entry.automated += 1;
+        } else {
+            manual_only += 1;
+            entry.manual_only += 1;
         }
     }
 

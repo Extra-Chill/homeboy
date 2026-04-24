@@ -1,6 +1,6 @@
 use crate::code_audit::report::{build_audit_summary, compute_fixability, finding_kind_key};
 use crate::code_audit::test_helpers::{empty_result, make_finding};
-use crate::code_audit::{AuditFinding, Severity};
+use crate::code_audit::{AuditFinding, FindingConfidence, Severity};
 
 #[test]
 fn test_build_audit_summary_empty_result() {
@@ -28,6 +28,21 @@ fn test_build_audit_summary_counts_severities() {
     assert_eq!(summary.warnings, 2);
     assert_eq!(summary.info, 1);
     assert_eq!(summary.exit_code, 1);
+}
+
+#[test]
+fn test_build_audit_summary_includes_finding_confidence() {
+    let mut result = empty_result();
+    result.findings.push(make_finding(Severity::Warning));
+    result.findings[0].kind = AuditFinding::OrphanedTest;
+
+    let summary = build_audit_summary(&result, 1);
+
+    assert_eq!(summary.top_findings.len(), 1);
+    assert_eq!(
+        summary.top_findings[0].confidence,
+        FindingConfidence::Heuristic
+    );
 }
 
 #[test]

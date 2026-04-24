@@ -278,8 +278,8 @@ pub struct PolicySummary {
     pub auto_apply_new_files: usize,
     pub blocked_insertions: usize,
     pub blocked_new_files: usize,
-    /// Fixes dropped in write mode because they were manual-only and not eligible
-    /// for automated `refactor --from ...` writes.
+    /// Fixes dropped in write mode because every edit was manual/review-only
+    /// and not eligible for automated `refactor --from ...` writes.
     pub dropped_manual_only: usize,
 }
 

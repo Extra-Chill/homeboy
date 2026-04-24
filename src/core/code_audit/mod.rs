@@ -60,7 +60,7 @@ pub use compare::{
 };
 pub use conventions::{AuditFinding, Convention, Deviation, Language, Outlier};
 pub use duplication::DuplicateGroup;
-pub use findings::{Finding, Severity};
+pub use findings::{Finding, FindingConfidence, Severity};
 pub use fingerprint::FileFingerprint;
 pub use report::AuditCommandOutput;
 pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs, AuditRunWorkflowResult};
