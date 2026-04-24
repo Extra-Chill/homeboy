@@ -197,3 +197,7 @@ pub struct CheckSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_exit: Option<i32>,
 }
+
+#[cfg(test)]
+#[path = "../../../tests/core/rig/spec_test.rs"]
+mod spec_test;

@@ -332,3 +332,7 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{}…", &s[..max])
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/core/rig/pipeline_test.rs"]
+mod pipeline_test;

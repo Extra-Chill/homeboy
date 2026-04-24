@@ -1,9 +1,5 @@
-//! Smoke tests for rig spec parsing + state round-tripping.
-//!
-//! Kept scope-limited to pure parsing/serialization to avoid touching real
-//! `~/.config/homeboy/rigs/` during test runs. End-to-end tests that exercise
-//! the service supervisor and `rig up` live in the manual validation flow
-//! described in the PR body.
+//! Spec parsing tests — serde round-trips, pipeline step discriminants,
+//! service-kind parsing. Covers `src/core/rig/spec.rs`.
 
 use crate::rig::{PipelineStep, RigSpec, ServiceKind, ServiceSpec, SymlinkSpec};
 
@@ -49,7 +45,7 @@ const STUDIO_PLAYGROUND_SPEC: &str = r#"{
 }"#;
 
 #[test]
-fn parses_studio_playground_spec() {
+fn test_spec_parses_studio_playground_fixture() {
     let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
     assert_eq!(spec.id, "studio-playground-dev");
     assert_eq!(spec.components.len(), 2);
@@ -61,7 +57,7 @@ fn parses_studio_playground_spec() {
 }
 
 #[test]
-fn service_spec_http_static_kind_roundtrips() {
+fn test_spec_http_static_service_kind_roundtrips() {
     let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
     let svc = spec.services.get("tarball-server").expect("service");
     assert_eq!(svc.kind, ServiceKind::HttpStatic);
@@ -73,18 +69,18 @@ fn service_spec_http_static_kind_roundtrips() {
 }
 
 #[test]
-fn pipeline_steps_discriminate_correctly() {
+fn test_spec_pipeline_steps_discriminate_correctly() {
     let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
     let up = spec.pipeline.get("up").unwrap();
-    matches!(up[0], PipelineStep::Service { .. });
-    matches!(up[1], PipelineStep::Symlink { .. });
+    assert!(matches!(up[0], PipelineStep::Service { .. }));
+    assert!(matches!(up[1], PipelineStep::Symlink { .. }));
 
     let check = spec.pipeline.get("check").unwrap();
-    matches!(check[2], PipelineStep::Check { .. });
+    assert!(matches!(check[2], PipelineStep::Check { .. }));
 }
 
 #[test]
-fn symlink_spec_fields_parse() {
+fn test_spec_symlink_fields_parse() {
     let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
     let link: &SymlinkSpec = &spec.symlinks[0];
     assert_eq!(link.link, "~/.local/bin/studio");
@@ -92,7 +88,7 @@ fn symlink_spec_fields_parse() {
 }
 
 #[test]
-fn minimal_spec_with_only_required_fields_parses() {
+fn test_spec_minimal_only_required_fields() {
     let json = r#"{"id": "tiny"}"#;
     let spec: RigSpec = serde_json::from_str(json).expect("parse");
     assert_eq!(spec.id, "tiny");
@@ -103,7 +99,7 @@ fn minimal_spec_with_only_required_fields_parses() {
 }
 
 #[test]
-fn command_service_kind_parses() {
+fn test_spec_command_service_kind() {
     let json = r#"{
         "id": "r",
         "services": {
@@ -120,7 +116,7 @@ fn command_service_kind_parses() {
 }
 
 #[test]
-fn check_step_with_command_kind_parses() {
+fn test_spec_check_step_with_command_probe() {
     let json = r#"{
         "id": "r",
         "pipeline": {
@@ -148,7 +144,7 @@ fn check_step_with_command_kind_parses() {
 }
 
 #[test]
-fn round_trip_preserves_shape() {
+fn test_spec_round_trip_preserves_shape() {
     let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
     let re_serialized = serde_json::to_string(&spec).expect("serialize");
     let re_parsed: RigSpec = serde_json::from_str(&re_serialized).expect("reparse");

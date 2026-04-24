@@ -159,3 +159,7 @@ pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
         last_check_result: state.last_check_result,
     })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/core/rig/runner_test.rs"]
+mod runner_test;

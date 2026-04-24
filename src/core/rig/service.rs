@@ -236,3 +236,7 @@ fn pid_alive(pid: u32) -> bool {
     }
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/core/rig/service_test.rs"]
+mod service_test;

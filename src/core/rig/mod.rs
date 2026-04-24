@@ -16,16 +16,12 @@
 //! bench composition, spec sharing.
 
 pub mod check;
-pub(crate) mod expand;
+pub mod expand;
 pub mod pipeline;
 pub mod runner;
 pub mod service;
 pub mod spec;
 pub mod state;
-
-#[cfg(test)]
-#[path = "../../../tests/core/rig_spec_test.rs"]
-mod rig_spec_test;
 
 pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
 pub use runner::{

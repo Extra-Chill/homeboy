@@ -102,3 +102,7 @@ impl RigState {
 pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
+
+#[cfg(test)]
+#[path = "../../../tests/core/rig/state_test.rs"]
+mod state_test;

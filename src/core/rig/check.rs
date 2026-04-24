@@ -161,3 +161,7 @@ fn command_check(rig: &RigSpec, cmd: &str, expect_exit: i32) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../../tests/core/rig/check_test.rs"]
+mod check_test;
