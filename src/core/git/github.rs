@@ -354,7 +354,11 @@ pub fn issue_find(
     ensure_gh_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-    let limit = if options.limit == 0 { 30 } else { options.limit };
+    let limit = if options.limit == 0 {
+        30
+    } else {
+        options.limit
+    };
     let mut args: Vec<String> = vec![
         "issue".into(),
         "list".into(),
@@ -393,10 +397,7 @@ pub fn issue_find(
 // ---------------------------------------------------------------------------
 
 /// Open a new pull request.
-pub fn pr_create(
-    component_id: Option<&str>,
-    options: PrCreateOptions,
-) -> Result<GithubPrOutput> {
+pub fn pr_create(component_id: Option<&str>, options: PrCreateOptions) -> Result<GithubPrOutput> {
     let (id, repo) = resolve_component_github(component_id)?;
     ensure_gh_ready()?;
 
@@ -507,7 +508,11 @@ pub fn pr_find(component_id: Option<&str>, options: PrFindOptions) -> Result<Git
     ensure_gh_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-    let limit = if options.limit == 0 { 30 } else { options.limit };
+    let limit = if options.limit == 0 {
+        30
+    } else {
+        options.limit
+    };
     let mut args: Vec<String> = vec![
         "pr".into(),
         "list".into(),
@@ -906,7 +911,9 @@ fn run_gh(args: &[String]) -> Result<String> {
     let output = Command::new("gh")
         .args(args.iter().map(|s| s.as_str()))
         .output()
-        .map_err(|e| Error::internal_io(format!("Failed to invoke gh: {}", e), Some("gh".into())))?;
+        .map_err(|e| {
+            Error::internal_io(format!("Failed to invoke gh: {}", e), Some("gh".into()))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1302,7 +1309,10 @@ mod tests {
 
     #[test]
     fn marker_format_is_stable() {
-        assert_eq!(marker_for_key("ci-status"), "<!-- homeboy:key=ci-status -->");
+        assert_eq!(
+            marker_for_key("ci-status"),
+            "<!-- homeboy:key=ci-status -->"
+        );
     }
 
     #[test]

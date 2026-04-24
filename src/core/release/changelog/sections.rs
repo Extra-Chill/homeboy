@@ -229,7 +229,6 @@ pub(super) fn ensure_next_section(content: &str, aliases: &[String]) -> Result<(
     Ok((out, true))
 }
 
-
 pub(super) fn append_item_to_subsection(
     content: &str,
     aliases: &[String],

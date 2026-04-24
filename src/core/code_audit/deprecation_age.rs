@@ -217,9 +217,7 @@ fn find_following_symbol(content: &str, tag_offset: usize) -> Option<String> {
 ///
 /// Keys borrow from the fingerprints to avoid cloning identifier
 /// strings for every call site in the codebase.
-fn build_reference_counts<'a>(
-    fingerprints: &'a [&FileFingerprint],
-) -> HashMap<&'a str, usize> {
+fn build_reference_counts<'a>(fingerprints: &'a [&FileFingerprint]) -> HashMap<&'a str, usize> {
     let mut counts: HashMap<&'a str, usize> = HashMap::new();
     for fp in fingerprints {
         for name in &fp.internal_calls {

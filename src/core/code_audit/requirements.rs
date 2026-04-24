@@ -78,11 +78,7 @@ pub fn find_plugin_main_file(root: &Path) -> Option<PathBuf> {
             continue;
         };
         // Check first ~50 lines for "Plugin Name:" marker.
-        if content
-            .lines()
-            .take(50)
-            .any(|l| l.contains("Plugin Name:"))
-        {
+        if content.lines().take(50).any(|l| l.contains("Plugin Name:")) {
             return Some(path);
         }
     }
@@ -270,9 +266,7 @@ fn seed_vendor_symbols_from_path(symbols: &mut KnownSymbols, path: &Path) {
     let p = path.to_string_lossy().replace('\\', "/");
 
     // Action Scheduler — loaded by `vendor/woocommerce/action-scheduler/action-scheduler.php`.
-    if p.contains("action-scheduler/action-scheduler.php")
-        || p.ends_with("/action-scheduler.php")
-    {
+    if p.contains("action-scheduler/action-scheduler.php") || p.ends_with("/action-scheduler.php") {
         seed_action_scheduler_symbols(symbols);
     }
 }

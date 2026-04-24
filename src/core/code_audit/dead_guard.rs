@@ -133,11 +133,7 @@ fn extract_guards(content: &str) -> Vec<Guard> {
             _ => continue,
         };
         let line = line_of_offset(content, cap.get(0).map(|m| m.start()).unwrap_or(0));
-        out.push(Guard {
-            kind,
-            symbol,
-            line,
-        });
+        out.push(Guard { kind, symbol, line });
     }
     out
 }

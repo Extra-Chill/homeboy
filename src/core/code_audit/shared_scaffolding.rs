@@ -66,11 +66,7 @@ fn detect_shared_scaffolding(fingerprints: &[&FileFingerprint]) -> Vec<Finding> 
             continue;
         }
         let subtree = subtree_root(&fp.relative_path);
-        shapes.push(ClassShape {
-            fp,
-            shape,
-            subtree,
-        });
+        shapes.push(ClassShape { fp, shape, subtree });
     }
 
     // Group by (subtree, shape).
@@ -105,8 +101,8 @@ fn detect_shared_scaffolding(fingerprints: &[&FileFingerprint]) -> Vec<Finding> 
         // projected single base-class body. Approximate: AVG_METHOD_LOC per method.
         let total_methods = shape.len();
         let class_body_loc = total_methods * AVG_METHOD_LOC;
-        let estimated_loc_reduction = class_body_loc
-            .saturating_mul(members.len().saturating_sub(1));
+        let estimated_loc_reduction =
+            class_body_loc.saturating_mul(members.len().saturating_sub(1));
 
         let method_list: Vec<String> = shape
             .iter()
@@ -121,11 +117,7 @@ fn detect_shared_scaffolding(fingerprints: &[&FileFingerprint]) -> Vec<Finding> 
 
         let member_preview: String = if member_files.len() > 6 {
             let first: Vec<&str> = member_files.iter().take(5).copied().collect();
-            format!(
-                "{} (+{} more)",
-                first.join(", "),
-                member_files.len() - 5
-            )
+            format!("{} (+{} more)", first.join(", "), member_files.len() - 5)
         } else {
             member_files.join(", ")
         };
@@ -180,11 +172,7 @@ fn build_shape_signature(fp: &FileFingerprint) -> Vec<(String, String)> {
     fp.methods
         .iter()
         .map(|m| {
-            let vis = fp
-                .visibility
-                .get(m)
-                .cloned()
-                .unwrap_or_default();
+            let vis = fp.visibility.get(m).cloned().unwrap_or_default();
             (m.clone(), vis)
         })
         .collect()
@@ -222,10 +210,7 @@ fn subtree_root(relative_path: &str) -> String {
 /// Returns `(mean_similarity, identical_method_body_count)`. The identical
 /// count is the number of (method, member) cells whose hash matches the most
 /// common hash for that method — used only for human-readable reporting.
-fn mean_body_similarity(
-    members: &[&ClassShape],
-    shape: &[(String, String)],
-) -> (f64, usize) {
+fn mean_body_similarity(members: &[&ClassShape], shape: &[(String, String)]) -> (f64, usize) {
     if members.is_empty() || shape.is_empty() {
         return (0.0, 0);
     }
@@ -322,8 +307,16 @@ mod tests {
 
         let fps = vec![
             make_class("inc/Abilities/Chat/ChatAbility.php", "ChatAbility", shape),
-            make_class("inc/Abilities/AgentPing/SendPingAbility.php", "SendPingAbility", shape),
-            make_class("inc/Abilities/Engine/RunEngineAbility.php", "RunEngineAbility", shape),
+            make_class(
+                "inc/Abilities/AgentPing/SendPingAbility.php",
+                "SendPingAbility",
+                shape,
+            ),
+            make_class(
+                "inc/Abilities/Engine/RunEngineAbility.php",
+                "RunEngineAbility",
+                shape,
+            ),
             make_class(
                 "inc/Abilities/Content/CreateContentAbility.php",
                 "CreateContentAbility",
@@ -381,9 +374,21 @@ mod tests {
         };
 
         let fps = vec![
-            mk("inc/Abilities/A/AAbility.php", "AAbility", ["c1", "r1", "e1"]),
-            mk("inc/Abilities/B/BAbility.php", "BAbility", ["c2", "r2", "e2"]),
-            mk("inc/Abilities/C/CAbility.php", "CAbility", ["c3", "r3", "e3"]),
+            mk(
+                "inc/Abilities/A/AAbility.php",
+                "AAbility",
+                ["c1", "r1", "e1"],
+            ),
+            mk(
+                "inc/Abilities/B/BAbility.php",
+                "BAbility",
+                ["c2", "r2", "e2"],
+            ),
+            mk(
+                "inc/Abilities/C/CAbility.php",
+                "CAbility",
+                ["c3", "r3", "e3"],
+            ),
         ];
         let refs: Vec<&FileFingerprint> = fps.iter().collect();
 
@@ -426,10 +431,7 @@ mod tests {
             subtree_root("inc/Abilities/Chat/ChatAbility.php"),
             "inc/Abilities"
         );
-        assert_eq!(
-            subtree_root("src/core/audit/mod.rs"),
-            "src/core"
-        );
+        assert_eq!(subtree_root("src/core/audit/mod.rs"), "src/core");
         assert_eq!(subtree_root("top_level.php"), ".");
         assert_eq!(subtree_root("just_dir/file.php"), "just_dir");
     }
