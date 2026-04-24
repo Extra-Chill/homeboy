@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.13.0] - 2026-04-24
+
+### Added
+- PHPStan level 7 + include tests + fix baseline integration
+
 ## [2.12.0] - 2026-04-24
 
 ### Added
