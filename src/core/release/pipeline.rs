@@ -594,10 +594,8 @@ fn build_semver_recommendation(
 
     // Explicit version strings (e.g. "2.0.0") skip semver keyword parsing.
     // The version is used verbatim — no underbump check, no rank comparison.
-    let is_explicit_version = requested_bump.contains('.')
-        && requested_bump
-            .split('.')
-            .all(|p| p.parse::<u32>().is_ok());
+    let is_explicit_version =
+        requested_bump.contains('.') && requested_bump.split('.').all(|p| p.parse::<u32>().is_ok());
 
     if is_explicit_version {
         let range = latest_tag
@@ -743,7 +741,6 @@ pub(super) fn resolve_tag_and_commits(
         }
     }
 }
-
 
 /// Fetch from remote and fast-forward if behind.
 ///
