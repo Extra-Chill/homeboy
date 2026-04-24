@@ -685,7 +685,6 @@ mod tests {
     }
 
     /// Build a fingerprint with explicit `methods` and `test_methods` splits.
-    #[allow(dead_code)]
     fn make_fp_split(path: &str, methods: Vec<&str>, test_methods: Vec<&str>) -> FileFingerprint {
         FileFingerprint {
             relative_path: path.to_string(),
