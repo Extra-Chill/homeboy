@@ -255,6 +255,11 @@ pub enum PrCommentMode {
         /// comments (e.g. `## Homeboy Results — \`<component>\``). Preserved
         /// from existing comments on merge.
         header: Option<String>,
+        /// Optional footer block written after the last section on fresh
+        /// comments (e.g. a `<details><summary>Tooling versions</summary>`
+        /// block). Preserved from existing comments on merge when the caller
+        /// does not pass one explicitly; overwritten when the caller does.
+        footer: Option<String>,
         /// Optional explicit section ordering. Sections listed here come first
         /// in the given order; any other sections are appended alphabetically.
         /// `None` = pure alphabetical.
@@ -592,6 +597,7 @@ pub fn pr_comment(component_id: Option<&str>, options: PrCommentOptions) -> Resu
             comment_key,
             section_key,
             header,
+            footer,
             section_order,
         } => pr_comment_sectioned(
             id,
@@ -601,6 +607,7 @@ pub fn pr_comment(component_id: Option<&str>, options: PrCommentOptions) -> Resu
             comment_key,
             section_key,
             header,
+            footer,
             section_order,
         ),
     }
@@ -717,6 +724,7 @@ fn pr_comment_sectioned(
     comment_key: String,
     section_key: String,
     header: Option<String>,
+    footer: Option<String>,
     section_order: Option<Vec<String>>,
 ) -> Result<GithubPrOutput> {
     // 1. Fetch every matching comment (with bodies) — we need the bodies to
@@ -734,6 +742,7 @@ fn pr_comment_sectioned(
             header.as_deref(),
             &sections,
             section_order.as_deref(),
+            footer.as_deref(),
         );
         let repo_flag = format!("{}/{}", repo.owner, repo.repo);
         let args: Vec<String> = vec![
@@ -768,15 +777,19 @@ fn pr_comment_sectioned(
 
     let mut merged: Vec<(String, String)> = Vec::new();
     let mut discovered_header: Option<String> = header.clone();
+    let mut discovered_footer: Option<String> = footer.clone();
     for comment in &matches {
         let parsed = parse_comment_sections(&comment.body);
         for (k, v) in parsed {
             merged = merge_section(merged, &k, v);
         }
-        // First comment wins the header (in ascending id order = lowest id),
-        // but only if caller didn't pass one explicitly.
+        // First comment wins the header / footer (in ascending id order =
+        // lowest id), but only if caller didn't pass one explicitly.
         if discovered_header.is_none() {
             discovered_header = extract_header(&comment.body);
+        }
+        if discovered_footer.is_none() {
+            discovered_footer = extract_footer(&comment.body);
         }
     }
     // Current invocation wins last.
@@ -787,6 +800,7 @@ fn pr_comment_sectioned(
         discovered_header.as_deref(),
         &merged,
         section_order.as_deref(),
+        discovered_footer.as_deref(),
     );
 
     // Idempotency: byte-compare rendered to canonical's existing body.
@@ -1085,6 +1099,27 @@ fn extract_header(body: &str) -> Option<String> {
     }
 }
 
+/// Extract the footer block of a comment — content between
+/// `<!-- homeboy:footer:start -->` and `<!-- homeboy:footer:end -->`.
+///
+/// Used to preserve an existing footer when merging. Only the NEW marker
+/// format is recognized; legacy `homeboy-action-*` bodies have no footer
+/// convention, so legacy-parse → `None` (no regression — footer is simply
+/// absent and the next render will omit it unless the caller opts in).
+fn extract_footer(body: &str) -> Option<String> {
+    const START: &str = "<!-- homeboy:footer:start -->";
+    const END: &str = "<!-- homeboy:footer:end -->";
+    let start_idx = body.find(START)?;
+    let after_start = &body[start_idx + START.len()..];
+    let end_idx = after_start.find(END)?;
+    let inner = after_start[..end_idx].trim_matches('\n');
+    if inner.is_empty() {
+        None
+    } else {
+        Some(inner.to_string())
+    }
+}
+
 /// Merge `(section_key, body)` into `sections`. Replaces any existing entry
 /// for `section_key`, preserving the original position; otherwise appends.
 pub fn merge_section(
@@ -1109,6 +1144,8 @@ pub fn merge_section(
 /// - `sections` → section map. Insertion order is preserved only when
 ///   `explicit_order` is `None`; otherwise explicit-ordered keys come first
 ///   in the given order, and any remaining keys follow alphabetically.
+/// - `footer` → optional block written after the last section, wrapped in
+///   dedicated `<!-- homeboy:footer:start|end -->` markers.
 /// - Output is always newline-normalized with a trailing newline and uses the
 ///   **new** marker format. Re-rendering a legacy-parsed body produces
 ///   new-format output (migration path).
@@ -1117,6 +1154,7 @@ pub fn render_comment(
     header: Option<&str>,
     sections: &[(String, String)],
     explicit_order: Option<&[String]>,
+    footer: Option<&str>,
 ) -> String {
     let ordered = order_sections(sections, explicit_order);
 
@@ -1131,6 +1169,10 @@ pub fn render_comment(
         }
     }
 
+    let has_footer = footer
+        .map(|f| !f.trim_matches('\n').is_empty())
+        .unwrap_or(false);
+
     for (idx, (key, body)) in ordered.iter().enumerate() {
         out.push_str(&format!("<!-- homeboy:section-key={}:start -->\n", key));
         let body_trimmed = body.trim_matches('\n');
@@ -1139,10 +1181,24 @@ pub fn render_comment(
             out.push('\n');
         }
         out.push_str(&format!("<!-- homeboy:section-key={}:end -->", key));
+        // Blank line between sections, and between the last section and a
+        // footer block. Trailing newline on the last line of the comment.
         if idx + 1 < ordered.len() {
+            out.push_str("\n\n");
+        } else if has_footer {
             out.push_str("\n\n");
         } else {
             out.push('\n');
+        }
+    }
+
+    if let Some(f) = footer {
+        let f = f.trim_matches('\n');
+        if !f.is_empty() {
+            out.push_str("<!-- homeboy:footer:start -->\n");
+            out.push_str(f);
+            out.push('\n');
+            out.push_str("<!-- homeboy:footer:end -->\n");
         }
     }
 
@@ -1497,7 +1553,7 @@ never-ends
             ("lint".to_string(), "lint body".to_string()),
             ("test".to_string(), "test body".to_string()),
         ];
-        let out = render_comment("ci:homeboy", Some("## Header"), &sections, None);
+        let out = render_comment("ci:homeboy", Some("## Header"), &sections, None, None);
         assert!(out.starts_with("<!-- homeboy:comment-key=ci:homeboy -->\n"));
         assert!(out.contains("## Header"));
         assert!(out.contains("<!-- homeboy:section-key=lint:start -->"));
@@ -1514,7 +1570,7 @@ never-ends
             ("audit".to_string(), "audit body\nmulti-line".to_string()),
             ("lint".to_string(), "lint body".to_string()),
         ];
-        let rendered = render_comment("ci:x", None, &sections, None);
+        let rendered = render_comment("ci:x", None, &sections, None, None);
         let reparsed = parse_comment_sections(&rendered);
 
         // Alphabetical default → audit before lint.
@@ -1531,7 +1587,7 @@ never-ends
             ("audit".to_string(), "a".to_string()),
             ("lint".to_string(), "l".to_string()),
         ];
-        let out = render_comment("k", None, &sections, None);
+        let out = render_comment("k", None, &sections, None, None);
         let audit_pos = out.find("section-key=audit:start").unwrap();
         let lint_pos = out.find("section-key=lint:start").unwrap();
         let test_pos = out.find("section-key=test:start").unwrap();
@@ -1547,7 +1603,7 @@ never-ends
             ("test".to_string(), "t".to_string()),
         ];
         let order = vec!["lint".to_string(), "test".to_string(), "audit".to_string()];
-        let out = render_comment("k", None, &sections, Some(&order));
+        let out = render_comment("k", None, &sections, Some(&order), None);
         let lint_pos = out.find("section-key=lint:start").unwrap();
         let test_pos = out.find("section-key=test:start").unwrap();
         let audit_pos = out.find("section-key=audit:start").unwrap();
@@ -1565,7 +1621,7 @@ never-ends
         ];
         // Only lint+test in explicit order — zeta and alpha are "unknown".
         let order = vec!["lint".to_string(), "test".to_string()];
-        let out = render_comment("k", None, &sections, Some(&order));
+        let out = render_comment("k", None, &sections, Some(&order), None);
 
         let lint_pos = out.find("section-key=lint:start").unwrap();
         let test_pos = out.find("section-key=test:start").unwrap();
@@ -1585,7 +1641,7 @@ never-ends
         // `test` is in the order but not present in sections — should not appear
         // in output.
         let order = vec!["test".to_string(), "lint".to_string()];
-        let out = render_comment("k", None, &sections, Some(&order));
+        let out = render_comment("k", None, &sections, Some(&order), None);
         assert!(!out.contains("section-key=test:start"));
         assert!(out.contains("section-key=lint:start"));
     }
@@ -1637,6 +1693,7 @@ never-ends
             "ci:homeboy",
             Some("## Homeboy Results — `homeboy`"),
             &sections,
+            None,
             None,
         );
 
@@ -1731,5 +1788,185 @@ body
     fn pr_comment_mode_default_is_fresh() {
         let opts = PrCommentOptions::default();
         assert_eq!(opts.mode, PrCommentMode::Fresh);
+    }
+
+    // ---------------------------------------------------------------------
+    // Footer primitive tests (#1470)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn render_comment_writes_footer_block_after_last_section() {
+        let sections = vec![("lint".to_string(), "lint body".to_string())];
+        let out = render_comment(
+            "ci:x",
+            Some("## Header"),
+            &sections,
+            None,
+            Some("tooling versions block"),
+        );
+        // Footer markers present, one blank line before start marker, trailing
+        // newline after end marker.
+        assert!(out.contains("<!-- homeboy:footer:start -->\ntooling versions block\n<!-- homeboy:footer:end -->\n"));
+        // Footer appears after the last section's :end marker.
+        let last_section_end = out.find("<!-- homeboy:section-key=lint:end -->").unwrap();
+        let footer_start = out.find("<!-- homeboy:footer:start -->").unwrap();
+        assert!(last_section_end < footer_start);
+        // Exactly one blank line (=\n\n) between section end and footer start.
+        let between = &out[last_section_end..footer_start];
+        assert!(between.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn render_comment_without_footer_omits_footer_markers() {
+        let sections = vec![("lint".to_string(), "lint body".to_string())];
+        let out = render_comment("ci:x", None, &sections, None, None);
+        assert!(!out.contains("homeboy:footer:start"));
+        assert!(!out.contains("homeboy:footer:end"));
+    }
+
+    #[test]
+    fn render_comment_empty_footer_string_omits_footer_markers() {
+        // Passing Some("") or Some("\n") should behave like None — no footer.
+        let sections = vec![("lint".to_string(), "lint body".to_string())];
+        for probe in ["", "\n", "\n\n"] {
+            let out = render_comment("ci:x", None, &sections, None, Some(probe));
+            assert!(
+                !out.contains("homeboy:footer:start"),
+                "footer markers should be omitted for empty footer '{:?}'",
+                probe
+            );
+        }
+    }
+
+    #[test]
+    fn extract_footer_reads_block_between_markers() {
+        let body = "\
+<!-- homeboy:comment-key=ci:x -->
+## Header
+
+<!-- homeboy:section-key=lint:start -->
+lint body
+<!-- homeboy:section-key=lint:end -->
+
+<!-- homeboy:footer:start -->
+tooling block line 1
+tooling block line 2
+<!-- homeboy:footer:end -->
+";
+        assert_eq!(
+            extract_footer(body),
+            Some("tooling block line 1\ntooling block line 2".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_footer_returns_none_when_markers_absent() {
+        let body = "\
+<!-- homeboy:comment-key=ci:x -->
+<!-- homeboy:section-key=lint:start -->
+body
+<!-- homeboy:section-key=lint:end -->
+";
+        assert_eq!(extract_footer(body), None);
+    }
+
+    #[test]
+    fn extract_footer_returns_none_for_legacy_marker_bodies() {
+        // Legacy homeboy-action bodies had no footer convention. Parse →
+        // None so the renderer omits the footer block unless the caller opts in.
+        let body = "\
+<!-- homeboy-action-results:key=ci:x -->
+## Legacy Header
+
+<!-- homeboy-action-section:key=lint:start -->
+body
+<!-- homeboy-action-section:key=lint:end -->
+";
+        assert_eq!(extract_footer(body), None);
+    }
+
+    #[test]
+    fn extract_footer_empty_inner_returns_none() {
+        let body = "\
+<!-- homeboy:footer:start -->
+<!-- homeboy:footer:end -->
+";
+        assert_eq!(extract_footer(body), None);
+    }
+
+    #[test]
+    fn render_comment_round_trips_footer_through_parse() {
+        // Rendering with a footer, then extract_footer on the output, should
+        // return the same footer content.
+        let sections = vec![("lint".to_string(), "body".to_string())];
+        let footer = "- Homeboy CLI: `1.2.3`\n- Action: `repo@v1`";
+        let rendered = render_comment("ci:x", None, &sections, None, Some(footer));
+        assert_eq!(extract_footer(&rendered), Some(footer.to_string()));
+        // And sections should still round-trip.
+        let parsed = parse_comment_sections(&rendered);
+        assert_eq!(parsed, vec![("lint".to_string(), "body".to_string())]);
+    }
+
+    #[test]
+    fn render_comment_footer_with_multiple_sections_alphabetical() {
+        // Footer sits after the last section regardless of section ordering.
+        let sections = vec![
+            ("lint".to_string(), "l".to_string()),
+            ("audit".to_string(), "a".to_string()),
+            ("test".to_string(), "t".to_string()),
+        ];
+        let out = render_comment("ci:x", None, &sections, None, Some("FTR"));
+        // Alphabetical order: audit, lint, test; footer last.
+        let audit_pos = out.find("section-key=audit:end").unwrap();
+        let lint_pos = out.find("section-key=lint:end").unwrap();
+        let test_pos = out.find("section-key=test:end").unwrap();
+        let footer_pos = out.find("homeboy:footer:start").unwrap();
+        assert!(audit_pos < lint_pos);
+        assert!(lint_pos < test_pos);
+        assert!(test_pos < footer_pos);
+    }
+
+    #[test]
+    fn render_comment_footer_with_explicit_section_order() {
+        let sections = vec![
+            ("audit".to_string(), "a".to_string()),
+            ("lint".to_string(), "l".to_string()),
+        ];
+        let order = vec!["lint".to_string(), "audit".to_string()];
+        let out = render_comment("ci:x", None, &sections, Some(&order), Some("FTR"));
+        let lint_pos = out.find("section-key=lint:end").unwrap();
+        let audit_pos = out.find("section-key=audit:end").unwrap();
+        let footer_pos = out.find("homeboy:footer:start").unwrap();
+        assert!(lint_pos < audit_pos);
+        assert!(audit_pos < footer_pos);
+    }
+
+    #[test]
+    fn render_comment_footer_content_trimmed_of_surrounding_newlines() {
+        // A footer passed with leading/trailing newlines should render cleanly
+        // (no double blank lines).
+        let sections = vec![("lint".to_string(), "body".to_string())];
+        let out = render_comment("ci:x", None, &sections, None, Some("\n\nFTR\n\n"));
+        assert!(out.contains("<!-- homeboy:footer:start -->\nFTR\n<!-- homeboy:footer:end -->\n"));
+        assert!(!out.contains("start -->\n\nFTR"));
+        assert!(!out.contains("FTR\n\n<!-- homeboy:footer:end"));
+    }
+
+    #[test]
+    fn parse_sections_ignores_footer_block() {
+        // A comment with both sections and a footer should parse only the
+        // sections — the footer is not a section.
+        let body = "\
+<!-- homeboy:comment-key=ci:x -->
+<!-- homeboy:section-key=lint:start -->
+lint body
+<!-- homeboy:section-key=lint:end -->
+
+<!-- homeboy:footer:start -->
+tooling
+<!-- homeboy:footer:end -->
+";
+        let sections = parse_comment_sections(body);
+        assert_eq!(sections, vec![("lint".to_string(), "lint body".to_string())]);
     }
 }

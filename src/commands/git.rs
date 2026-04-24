@@ -301,8 +301,11 @@ enum PrCommand {
     ///    merges `--body` into section `<inner>` of the shared comment tagged
     ///    `<!-- homeboy:comment-key=<outer> -->`. Other sections are preserved.
     ///    `--header` sets the line printed after the outer marker on new
-    ///    comments. `--section-order` pins section ordering (CSV of keys);
-    ///    default is alphabetical.
+    ///    comments; `--footer` / `--footer-file` sets a block printed after
+    ///    the last section (e.g. a tooling-versions <details> block). Both
+    ///    are preserved from existing comments on merge when omitted.
+    ///    `--section-order` pins section ordering (CSV of keys); default is
+    ///    alphabetical.
     ///
     /// Modes 2 and 3 are mutually exclusive. `--key` with `--comment-key` or
     /// `--section-key` is an error.
@@ -343,6 +346,19 @@ enum PrCommand {
         /// are preserved on merge.
         #[arg(long, requires = "comment_key")]
         header: Option<String>,
+
+        /// Sectioned mode: optional footer block written after the last
+        /// section (e.g. a tooling-versions <details> block). Existing
+        /// footers are preserved on merge when this is omitted; passing
+        /// --footer or --footer-file overwrites the preserved footer.
+        /// Mutually exclusive with --footer-file.
+        #[arg(long, requires = "comment_key", conflicts_with = "footer_file")]
+        footer: Option<String>,
+
+        /// Sectioned mode: read footer content from a file ("-" for stdin).
+        /// Mutually exclusive with --footer.
+        #[arg(long, requires = "comment_key", value_name = "PATH")]
+        footer_file: Option<String>,
 
         /// Sectioned mode: CSV of section keys in desired order. Sections
         /// listed here come first in the given order; others are appended
@@ -673,6 +689,8 @@ fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             comment_key,
             section_key,
             header,
+            footer,
+            footer_file,
             section_order,
             path,
         } => {
@@ -685,17 +703,23 @@ fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
                 )
             })?;
 
+            // --footer / --footer-file share resolve_body; clap guarantees at
+            // most one is set. `None` → preserve existing footer on merge.
+            let footer = resolve_body(footer, footer_file)?;
+
             let mode = match (key, comment_key, section_key) {
                 (Some(k), None, None) => PrCommentMode::StickyWholeBody { key: k },
                 (None, Some(ck), Some(sk)) => PrCommentMode::Sectioned {
                     comment_key: ck,
                     section_key: sk,
                     header,
+                    footer,
                     section_order,
                 },
                 (None, None, None) => {
-                    // Header / section_order without the pair — clap already
-                    // caught this via `requires = "comment_key"`, but double-check.
+                    // Header / footer / section_order without the pair — clap
+                    // already caught this via `requires = "comment_key"`, but
+                    // double-check.
                     PrCommentMode::Fresh
                 }
                 // Remaining cases are impossible due to clap `requires` /
