@@ -31,6 +31,7 @@ pub(crate) mod impact;
 pub(crate) mod import_matching;
 mod layer_ownership;
 pub(crate) mod naming;
+mod repeated_literal_shape;
 pub mod report;
 pub mod run;
 mod shadow_modules;
@@ -535,6 +536,17 @@ fn audit_internal(
             field_pattern_findings.len()
         );
         all_findings.extend(field_pattern_findings);
+    }
+
+    // Phase 4u: Repeated inline array literal shape detection.
+    let literal_shape_findings = repeated_literal_shape::run(&all_fingerprints);
+    if !literal_shape_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Literal shapes: {} finding(s) (repeated inline array literals)",
+            literal_shape_findings.len()
+        );
+        all_findings.extend(literal_shape_findings);
     }
 
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,

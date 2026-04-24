@@ -170,6 +170,10 @@ pub enum AuditFinding {
     /// Multiple structs define the same field group — candidates for extraction
     /// into a shared type and flattening/embedding.
     RepeatedFieldPattern,
+    /// Inline array/object literal shape (ordered keys + value kinds) appears
+    /// many times across the codebase — candidate for extraction into a helper
+    /// constructor (e.g. `error_envelope($error, $message)`).
+    RepeatedLiteralShape,
 }
 
 impl AuditFinding {
@@ -212,6 +216,7 @@ impl AuditFinding {
             "missing_wrapper_declaration",
             "shadow_module",
             "repeated_field_pattern",
+            "repeated_literal_shape",
         ]
     }
 }
