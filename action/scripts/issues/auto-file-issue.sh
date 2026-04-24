@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 
+# File (or comment on) an issue describing a CI failure.
+#
+# Uses `homeboy git issue` primitives:
+#   - `issue find --title ... --label ci-failure --state open` for dedup
+#   - `issue comment --number N` to add a follow-up to an existing issue
+#   - `issue create --title ... --body-file ... --label ci-failure` otherwise
+#
+# Primitives: Extra-Chill/homeboy#1334 (issue/PR CRUD), #1368 (--path flag).
+# Migration tracked in: Extra-Chill/homeboy-action#138.
+
 set -euo pipefail
+
+source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
 compact_summary() {
   local command="$1"
@@ -21,7 +33,8 @@ summary_json_for() {
 }
 
 REPO="${GITHUB_REPOSITORY}"
-COMP_ID="${COMPONENT_NAME:-$(basename "${GITHUB_REPOSITORY}")}"
+COMP_ID="$(resolve_component_id)"
+WORKSPACE="$(resolve_workspace)"
 OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 WORKFLOW_NAME="${GITHUB_WORKFLOW:-workflow}"
@@ -92,115 +105,122 @@ TOOLING_MD+="- Action: \`${HOMEBOY_ACTION_REPOSITORY}@${HOMEBOY_ACTION_REF}\`"$'
 
 ISSUE_TITLE="CI failure: ${SCOPE_LABEL} • ${WORKFLOW_NAME} • ${GITHUB_EVENT_NAME} • ${REF_LABEL}"
 
-EXISTING_ISSUE=$(gh api "repos/${REPO}/issues" \
-  --jq "[.[] | select(.state == \"open\" and .title == \"${ISSUE_TITLE}\" and (.labels[]?.name == \"ci-failure\"))] | first | .number // empty" \
-  2>/dev/null || true)
+# Dedup: is there already an open ci-failure issue with this exact title?
+# `issue find --title --label --state` does the exact-match + all-of-labels
+# filtering that the previous `gh api ... --jq` line reinvented.
+EXISTING_ISSUE=$(homeboy git issue find "${COMP_ID}" \
+  --path "${WORKSPACE}" \
+  --title "${ISSUE_TITLE}" \
+  --label ci-failure \
+  --state open \
+  --limit 1 2>/dev/null \
+  | jq -r '.data.items[0].number // empty' 2>/dev/null || true)
 
 if [ -n "${EXISTING_ISSUE}" ]; then
   echo "Found existing open issue #${EXISTING_ISSUE} — adding comment instead of creating new issue"
 
-  COMMENT="### CI failure on ${TRIGGER_CONTEXT}"$'\n\n'
-  COMMENT+="### Primary failure"$'\n\n'
-  if [ -n "${PRIMARY_COMMAND}" ]; then
-    COMMENT+="- Command: \`homeboy ${PRIMARY_COMMAND}\`"$'\n'
-  fi
-  if [ -n "${PRIMARY_SUMMARY}" ]; then
-    COMMENT+="- Summary: ${PRIMARY_SUMMARY}"$'\n'
-  else
-    COMMENT+="- Summary: structured failure summary unavailable"$'\n'
-  fi
+  COMMENT_FILE="$(mktemp)"
+  trap 'rm -f "${COMMENT_FILE}"' EXIT
 
-  if [ -n "${SECONDARY_CMDS_MD}" ]; then
-    COMMENT+=$'\n'"### Secondary findings"$'\n\n'
-    COMMENT+="${SECONDARY_CMDS_MD}"
-  fi
-
-  COMMENT+=$'\n'"### Tooling versions"$'\n\n'
-  COMMENT+="${TOOLING_MD}"$'\n'
-
-  if [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
-    COMMENT+=$'\n'"### Autofix outcome"$'\n\n'
-    COMMENT+="- Safe autofix pass was attempted before filing this issue."$'\n'
-    COMMENT+="- Remaining failures are likely non-mechanical and need human decision-making."$'\n'
-    if [ "${AUTOFIX_PR_CREATED}" = "true" ]; then
-      COMMENT+="- Autofix PR was created, but unresolved failures still require follow-up."$'\n'
+  {
+    printf '### CI failure on %s\n\n' "${TRIGGER_CONTEXT}"
+    printf '### Primary failure\n\n'
+    if [ -n "${PRIMARY_COMMAND}" ]; then
+      printf -- '- Command: `homeboy %s`\n' "${PRIMARY_COMMAND}"
     fi
-  fi
+    if [ -n "${PRIMARY_SUMMARY}" ]; then
+      printf -- '- Summary: %s\n' "${PRIMARY_SUMMARY}"
+    else
+      printf -- '- Summary: structured failure summary unavailable\n'
+    fi
 
-  COMMENT+="### Triage order"$'\n\n'
-  COMMENT+="1. Fix \`${PRIMARY_COMMAND:-first failing command}\`"$'\n'
-  COMMENT+="2. Re-run CI"$'\n'
-  COMMENT+="3. Re-evaluate secondary failures"$'\n\n'
+    if [ -n "${SECONDARY_CMDS_MD}" ]; then
+      printf '\n### Secondary findings\n\n%s' "${SECONDARY_CMDS_MD}"
+    fi
 
-  COMMENT+="**Failed commands:**"$'\n'
-  COMMENT+="${FAILED_CMDS_MD}"$'\n'
-  COMMENT+="**Run:** ${RUN_URL}"$'\n'
+    printf '\n### Tooling versions\n\n%s\n' "${TOOLING_MD}"
 
-  gh api "repos/${REPO}/issues/${EXISTING_ISSUE}/comments" \
-    --method POST \
-    --field body="${COMMENT}" > /dev/null
+    if [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
+      printf '\n### Autofix outcome\n\n'
+      printf -- '- Safe autofix pass was attempted before filing this issue.\n'
+      printf -- '- Remaining failures are likely non-mechanical and need human decision-making.\n'
+      if [ "${AUTOFIX_PR_CREATED}" = "true" ]; then
+        printf -- '- Autofix PR was created, but unresolved failures still require follow-up.\n'
+      fi
+    fi
+
+    printf '### Triage order\n\n'
+    printf '1. Fix `%s`\n' "${PRIMARY_COMMAND:-first failing command}"
+    printf '2. Re-run CI\n'
+    printf '3. Re-evaluate secondary failures\n\n'
+
+    printf '**Failed commands:**\n%s\n' "${FAILED_CMDS_MD}"
+    printf '**Run:** %s\n' "${RUN_URL}"
+  } > "${COMMENT_FILE}"
+
+  homeboy git issue comment "${COMP_ID}" \
+    --path "${WORKSPACE}" \
+    --number "${EXISTING_ISSUE}" \
+    --body-file "${COMMENT_FILE}" >/dev/null
 
   echo "Comment added to issue #${EXISTING_ISSUE}"
 else
   echo "Creating new issue..."
 
-  BODY="## CI Failure Report"$'\n\n'
-  BODY+="**Component:** \`${COMP_ID}\`"$'\n'
-  BODY+="**Workflow:** \`${WORKFLOW_NAME}\`"$'\n'
-  BODY+="**Scope:** \`${SCOPE_LABEL}\`"$'\n'
-  BODY+="**Ref:** \`${REF_LABEL}\`"$'\n'
-  BODY+="**Trigger:** \`${GITHUB_EVENT_NAME}\` on ${TRIGGER_CONTEXT}"$'\n'
-  BODY+="**Binary:** ${BINARY_SOURCE}"$'\n'
-  BODY+="**Run:** ${RUN_URL}"$'\n\n'
+  BODY_FILE="$(mktemp)"
+  trap 'rm -f "${BODY_FILE}"' EXIT
 
-  BODY+="### Tooling versions"$'\n\n'
-  BODY+="${TOOLING_MD}"$'\n'
+  {
+    printf '## CI Failure Report\n\n'
+    printf '**Component:** `%s`\n' "${COMP_ID}"
+    printf '**Workflow:** `%s`\n' "${WORKFLOW_NAME}"
+    printf '**Scope:** `%s`\n' "${SCOPE_LABEL}"
+    printf '**Ref:** `%s`\n' "${REF_LABEL}"
+    printf '**Trigger:** `%s` on %s\n' "${GITHUB_EVENT_NAME}" "${TRIGGER_CONTEXT}"
+    printf '**Binary:** %s\n' "${BINARY_SOURCE}"
+    printf '**Run:** %s\n\n' "${RUN_URL}"
 
-  if [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
-    BODY+=$'\n'"### Autofix outcome"$'\n\n'
-    BODY+="- Safe autofix pass was attempted before filing this issue."$'\n'
-    BODY+="- Remaining failures are likely non-mechanical and need human decision-making."$'\n'
-    if [ "${AUTOFIX_PR_CREATED}" = "true" ]; then
-      BODY+="- Autofix PR was created, but unresolved failures still require follow-up."$'\n'
+    printf '### Tooling versions\n\n%s\n' "${TOOLING_MD}"
+
+    if [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
+      printf '\n### Autofix outcome\n\n'
+      printf -- '- Safe autofix pass was attempted before filing this issue.\n'
+      printf -- '- Remaining failures are likely non-mechanical and need human decision-making.\n'
+      if [ "${AUTOFIX_PR_CREATED}" = "true" ]; then
+        printf -- '- Autofix PR was created, but unresolved failures still require follow-up.\n'
+      fi
     fi
-  fi
 
-  BODY+="### Primary failure"$'\n\n'
-  if [ -n "${PRIMARY_COMMAND}" ]; then
-    BODY+="- Command: \`homeboy ${PRIMARY_COMMAND}\`"$'\n'
-  fi
-  if [ -n "${PRIMARY_SUMMARY}" ]; then
-    BODY+="- Summary: ${PRIMARY_SUMMARY}"$'\n'
-  else
-    BODY+="- Summary: structured failure summary unavailable"$'\n'
-  fi
+    printf '### Primary failure\n\n'
+    if [ -n "${PRIMARY_COMMAND}" ]; then
+      printf -- '- Command: `homeboy %s`\n' "${PRIMARY_COMMAND}"
+    fi
+    if [ -n "${PRIMARY_SUMMARY}" ]; then
+      printf -- '- Summary: %s\n' "${PRIMARY_SUMMARY}"
+    else
+      printf -- '- Summary: structured failure summary unavailable\n'
+    fi
 
-  if [ -n "${SECONDARY_CMDS_MD}" ]; then
-    BODY+=$'\n'"### Secondary findings"$'\n\n'
-    BODY+="${SECONDARY_CMDS_MD}"
-  fi
+    if [ -n "${SECONDARY_CMDS_MD}" ]; then
+      printf '\n### Secondary findings\n\n%s' "${SECONDARY_CMDS_MD}"
+    fi
 
-  BODY+=$'\n'"### Triage order"$'\n\n'
-  BODY+="1. Fix \`${PRIMARY_COMMAND:-first failing command}\`"$'\n'
-  BODY+="2. Re-run CI"$'\n'
-  BODY+="3. Re-evaluate secondary failures"$'\n\n'
+    printf '\n### Triage order\n\n'
+    printf '1. Fix `%s`\n' "${PRIMARY_COMMAND:-first failing command}"
+    printf '2. Re-run CI\n'
+    printf '3. Re-evaluate secondary failures\n\n'
 
-  BODY+="### Failed Commands"$'\n\n'
-  BODY+="${FAILED_CMDS_MD}"$'\n'
+    printf '### Failed Commands\n\n%s\n' "${FAILED_CMDS_MD}"
 
-  BODY+="---"$'\n'
-  BODY+="*Filed automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action)*"
+    printf '%s\n' '---'
+    printf '%s' '*Filed automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action)*'
+  } > "${BODY_FILE}"
 
-  gh api "repos/${REPO}/issues" \
-    --method POST \
-    --field title="${ISSUE_TITLE}" \
-    --field body="${BODY}" \
-    --field "labels[]=ci-failure" > /dev/null 2>&1 || {
-    gh api "repos/${REPO}/issues" \
-      --method POST \
-      --field title="${ISSUE_TITLE}" \
-      --field body="${BODY}" > /dev/null
-  }
+  homeboy git issue create "${COMP_ID}" \
+    --path "${WORKSPACE}" \
+    --title "${ISSUE_TITLE}" \
+    --body-file "${BODY_FILE}" \
+    --label ci-failure >/dev/null
 
   echo "Issue created: ${ISSUE_TITLE}"
 fi
