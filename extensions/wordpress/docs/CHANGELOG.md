@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.14.0] - 2026-04-25
+
+### Added
+- add bench capability dispatcher (Phase 4 of #214)
+
 ## [2.13.1] - 2026-04-25
 
 ### Changed
