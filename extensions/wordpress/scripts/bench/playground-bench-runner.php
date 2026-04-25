@@ -83,7 +83,18 @@ require_once '/homeboy-extension/scripts/lib/playground-bootstrap.php';
 pg_install_diagnostics_handlers();
 
 // Stages 1-4: shared boot path, identical to test runner.
-$config_path = pg_run_boot_stage();
+//
+// Component-declared wp-config defines are forwarded as a JSON-encoded
+// associative array via the {{WP_CONFIG_DEFINES_JSON}} placeholder. The
+// dispatcher reads the `wp_config_defines` setting from the merged
+// settings JSON and passes it through; an empty object ("{}") is the
+// no-op case. Decode here and hand to pg_run_boot_stage().
+$wp_config_defines_raw = '{{WP_CONFIG_DEFINES_JSON}}';
+$wp_config_defines = json_decode($wp_config_defines_raw, true);
+if (!is_array($wp_config_defines)) {
+    $wp_config_defines = [];
+}
+$config_path = pg_run_boot_stage(['extra_defines' => $wp_config_defines]);
 pg_run_install_stage(['config_path' => $config_path]);
 pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
 pg_run_load_component_stage(['plugin_path' => $plugin_path]);

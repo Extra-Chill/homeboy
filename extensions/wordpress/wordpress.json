@@ -341,6 +341,13 @@
       "type": "string",
       "default": "",
       "description": "WordPress user for WP-CLI commands (email, login, or ID). When configured, automatically appended as --user flag."
+    },
+    {
+      "id": "wp_config_defines",
+      "label": "wp-config additions",
+      "type": "object",
+      "default": {},
+      "description": "Map of CONSTANT_NAME => value appended to the Playground wp-tests-config.php as additional define() statements. Lets a component declare wp-config-level constants (mode flags, debug toggles, custom paths) without shipping a custom drop-in. Values preserve PHP type via var_export() — booleans, integers, and nulls round-trip cleanly. Reserved canonical names (DB_NAME, ABSPATH, etc.) cannot be overridden."
     }
   ]
 }

@@ -144,6 +144,27 @@ function pg_install_diagnostics_handlers() {
  *
  * Required $cfg keys: (none)
  *
+ * Optional $cfg keys:
+ *   - extra_defines: associative array of `CONSTANT => value` appended to
+ *     wp-tests-config.php as additional `define()` statements. Lets a
+ *     component declare its own wp-config-level constants without shipping
+ *     a custom drop-in or duplicating boot logic. Values preserve their
+ *     PHP type (booleans, integers, nulls, strings) via `var_export()`,
+ *     so `["MY_FLAG" => true]` renders as `define('MY_FLAG', true)` and
+ *     not `define('MY_FLAG', 'true')`.
+ *
+ *     The dispatcher (test-runner-playground.sh / bench-runner-playground.sh)
+ *     extracts these from the component's settings JSON (the
+ *     `wp_config_defines` setting on the wordpress extension) and forwards
+ *     them through the runner template via a sed substitution placeholder.
+ *
+ *     Reserved constant names (DB_NAME, ABSPATH, table_prefix, etc — anything
+ *     defined unconditionally in the canonical config above) cannot be
+ *     overridden because PHP's `define()` is single-assignment. A component
+ *     attempting to override one will get a PHP NOTICE for the duplicate
+ *     define and the canonical value wins. Components that need to vary
+ *     these should be filing a separate gap, not working around this seam.
+ *
  * Side effect: defines $config_path under the caller's scope by writing to
  * /tmp/wp-tests-config.php (the canonical location wp-phpunit's install.php
  * expects). The path is also returned so callers don't have to hard-code it.
@@ -154,7 +175,7 @@ function pg_run_boot_stage(array $cfg = []): string {
     pg_stage_begin('boot');
     try {
         $config_path = '/tmp/wp-tests-config.php';
-        file_put_contents($config_path, <<<'CONFIG'
+        $config = <<<'CONFIG'
 <?php
 $table_prefix = 'wptests_';
 define('DB_NAME', ':memory:');
@@ -170,8 +191,29 @@ define('ABSPATH', '/wordpress/');
 define('FS_CHMOD_FILE', 0644);
 define('FS_CHMOD_DIR', 0755);
 define('FS_METHOD', 'direct');
-CONFIG
-        );
+CONFIG;
+
+        $extra_defines = $cfg['extra_defines'] ?? [];
+        if (!empty($extra_defines) && is_array($extra_defines)) {
+            $config .= "\n\n// Component-declared wp_config_defines.\n";
+            foreach ($extra_defines as $name => $value) {
+                if (!is_string($name) || !preg_match('/^[A-Z_][A-Z0-9_]*$/i', $name)) {
+                    pg_log("NOTICE: skipping invalid wp_config_defines key: " . var_export($name, true));
+                    continue;
+                }
+                // var_export preserves PHP type — true/false/int/null/string
+                // all round-trip cleanly. Arrays and objects round-trip too,
+                // though wp-config rarely needs them.
+                $config .= sprintf(
+                    "if (!defined('%s')) { define('%s', %s); }\n",
+                    $name,
+                    $name,
+                    var_export($value, true)
+                );
+            }
+        }
+
+        file_put_contents($config_path, $config);
 
         require_once '/homeboy-extension/vendor/autoload.php';
         pg_stage_ok('boot');

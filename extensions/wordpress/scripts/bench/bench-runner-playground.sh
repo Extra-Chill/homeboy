@@ -126,6 +126,23 @@ if type homeboy_export_validation_dependency_paths &>/dev/null; then
 fi
 DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
 
+# Extract `wp_config_defines` from the merged settings JSON. The component
+# declares its own additional wp-config defines under
+# `extensions.wordpress.settings.wp_config_defines`; homeboy core merges
+# them into HOMEBOY_SETTINGS_JSON and the runner appends them to
+# wp-tests-config.php during pg_run_boot_stage().
+#
+# Default to an empty object when unset/malformed — pg_run_boot_stage
+# treats {} as "no extra defines" (no-op for components that don't need
+# the seam, which is the canonical case).
+WP_CONFIG_DEFINES_JSON="{}"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
+    if [ -n "$extracted" ]; then
+        WP_CONFIG_DEFINES_JSON="$extracted"
+    fi
+fi
+
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
 
 # ---------------------------------------------------------------------------
@@ -213,6 +230,11 @@ if [ ! -f "$TEMPLATE" ]; then
 fi
 
 WRAPPER_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/pg-bench-runner.XXXXXX")
+# Use ASCII SOH (\x01) as the sed delimiter for the JSON substitution so
+# embedded `|` / `/` / `,` in user-supplied wp_config_defines values don't
+# need escaping. The other placeholders use `|` (their values never contain
+# a pipe in practice — slugs, integers, and POSIX paths only).
+WP_CONFIG_DEFINES_DELIM=$(printf '\1')
 sed \
     -e "s|{{PLUGIN_SLUG}}|${PLUGIN_SLUG}|g" \
     -e "s|{{COMPONENT_ID}}|${COMPONENT_ID}|g" \
@@ -222,6 +244,7 @@ sed \
     -e "s|{{INSTANCE_ID}}|${INSTANCE_ID}|g" \
     -e "s|{{CONCURRENCY}}|${CONCURRENCY}|g" \
     -e "s|{{RESULT_SUFFIX}}|${RESULT_SUFFIX}|g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
 echo "Running performance benchmarks via WordPress Playground..."

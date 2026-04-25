@@ -134,6 +134,19 @@ if type homeboy_export_validation_dependency_paths &>/dev/null; then
 fi
 DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
 
+# Extract `wp_config_defines` from the merged settings JSON. The component
+# declares its own additional wp-config defines under
+# `extensions.wordpress.settings.wp_config_defines`; homeboy core merges
+# them into HOMEBOY_SETTINGS_JSON and the runner appends them to
+# wp-tests-config.php during pg_run_boot_stage().
+WP_CONFIG_DEFINES_JSON="{}"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
+    if [ -n "$extracted" ]; then
+        WP_CONFIG_DEFINES_JSON="$extracted"
+    fi
+fi
+
 PLUGIN_SLUG="$(basename "$PLUGIN_PATH")"
 MOUNT_ARGS=()
 
@@ -203,9 +216,13 @@ if [ ! -f "$TEMPLATE" ]; then
 fi
 
 WRAPPER_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/pg-runner.XXXXXX")
+# ASCII SOH delimiter for the JSON substitution — values may contain `|`
+# safely without shell escaping.
+WP_CONFIG_DEFINES_DELIM=$(printf '\1')
 sed \
     -e "s|{{PLUGIN_SLUG}}|${PLUGIN_SLUG}|g" \
     -e "s|{{PLAYGROUND_DEP_MOUNTS}}|${PLAYGROUND_DEP_MOUNTS}|g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
 echo "Running PHPUnit tests via WordPress Playground..."

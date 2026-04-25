@@ -63,7 +63,16 @@ $tests_dir = '/homeboy-extension/vendor/wp-phpunit/wp-phpunit';
 $plugin_path = '/wordpress/wp-content/plugins/{{PLUGIN_SLUG}}';
 
 // Stage: boot — render wp-tests-config.php + load composer autoload.
-$config_path = pg_run_boot_stage();
+//
+// Component-declared wp-config defines flow through the
+// {{WP_CONFIG_DEFINES_JSON}} placeholder. Empty object is the no-op
+// default for components that don't need the seam.
+$wp_config_defines_raw = '{{WP_CONFIG_DEFINES_JSON}}';
+$wp_config_defines = json_decode($wp_config_defines_raw, true);
+if (!is_array($wp_config_defines)) {
+    $wp_config_defines = [];
+}
+$config_path = pg_run_boot_stage(['extra_defines' => $wp_config_defines]);
 
 // Stage: install — wp-phpunit install.php creates WP tables in-process.
 pg_run_install_stage(['config_path' => $config_path, 'tests_dir' => $tests_dir]);
