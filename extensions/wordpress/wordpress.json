@@ -320,6 +320,9 @@
   "test": {
     "extension_script": "scripts/test/test-runner.sh"
   },
+  "bench": {
+    "extension_script": "scripts/bench/bench-runner.sh"
+  },
   "testing": {
     "backend": "playground",
     "description": "All tests run inside WordPress Playground (PHP-WASM + embedded SQLite). Zero host setup required."
