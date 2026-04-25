@@ -25,11 +25,13 @@ pub mod state;
 
 pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
 pub use runner::{
-    run_check, run_down, run_status, run_up, CheckReport, DownReport, RigStatusReport, UpReport,
+    run_check, run_down, run_status, run_up, snapshot_state, CheckReport, ComponentSnapshot,
+    DownReport, RigStateSnapshot, RigStatusReport, UpReport,
 };
 pub use service::ServiceStatus;
 pub use spec::{
-    CheckSpec, ComponentSpec, PipelineStep, RigSpec, ServiceKind, ServiceSpec, SymlinkSpec,
+    BenchSpec, CheckSpec, ComponentSpec, PipelineStep, RigSpec, ServiceKind, ServiceSpec,
+    SymlinkSpec,
 };
 pub use state::{RigState, ServiceState};
 

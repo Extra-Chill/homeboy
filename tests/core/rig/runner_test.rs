@@ -20,10 +20,10 @@ use tempfile::TempDir;
 
 use crate::rig::pipeline::PipelineOutcome;
 use crate::rig::runner::{
-    run_check, run_down, run_status, run_up, CheckReport, RigStatusReport, ServiceStatusReport,
-    UpReport,
+    run_check, run_down, run_status, run_up, snapshot_state, CheckReport, RigStatusReport,
+    ServiceStatusReport, UpReport,
 };
-use crate::rig::spec::RigSpec;
+use crate::rig::spec::{ComponentSpec, RigSpec};
 
 fn empty_pipeline(name: &str) -> PipelineOutcome {
     PipelineOutcome {
@@ -42,6 +42,7 @@ fn minimal_spec(id: &str) -> RigSpec {
         services: HashMap::new(),
         symlinks: Vec::new(),
         pipeline: HashMap::new(),
+        bench: None,
     }
 }
 
@@ -205,4 +206,54 @@ fn test_run_status() {
         assert!(status.last_check.is_none());
         assert!(status.last_check_result.is_none());
     });
+}
+
+#[test]
+fn test_snapshot_state() {
+    // Spec carries two components with non-existent paths. `snapshot_state`
+    // should still emit one entry per component (sorted by ID) with the
+    // expanded path captured and `sha`/`branch` left as `None` because
+    // git won't resolve in a non-repo directory. This is the contract for
+    // `homeboy bench --rig` against rigs that include components on
+    // ephemeral or read-only paths.
+    let mut components = HashMap::new();
+    components.insert(
+        "studio".to_string(),
+        ComponentSpec {
+            path: "/tmp/homeboy-snapshot-test-not-a-repo-z".to_string(),
+            stack: None,
+            branch: None,
+        },
+    );
+    components.insert(
+        "playground".to_string(),
+        ComponentSpec {
+            path: "/tmp/homeboy-snapshot-test-not-a-repo-a".to_string(),
+            stack: None,
+            branch: None,
+        },
+    );
+    let rig = RigSpec {
+        id: "snapshot-fixture".to_string(),
+        description: String::new(),
+        components,
+        services: HashMap::new(),
+        symlinks: Vec::new(),
+        pipeline: HashMap::new(),
+        bench: None,
+    };
+
+    let snapshot = snapshot_state(&rig);
+    assert_eq!(snapshot.rig_id, "snapshot-fixture");
+    assert!(!snapshot.captured_at.is_empty(), "timestamp populated");
+    let ids: Vec<&str> = snapshot.components.keys().map(|s| s.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["playground", "studio"],
+        "BTreeMap key order is alphabetical, independent of HashMap insertion order"
+    );
+    for entry in snapshot.components.values() {
+        assert!(entry.sha.is_none(), "non-repo path has no HEAD SHA");
+        assert!(entry.branch.is_none(), "non-repo path has no branch");
+    }
 }

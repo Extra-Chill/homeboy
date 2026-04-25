@@ -237,9 +237,10 @@ impl Default for PrCommentOptions {
 }
 
 /// Which comment-posting flow to run. Mutually exclusive shapes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PrCommentMode {
     /// Plain append. No marker. No find-or-update.
+    #[default]
     Fresh,
     /// Single-section sticky comment (PR #1334). The `body` is treated as the
     /// whole comment body; the marker `<!-- homeboy:key=<key> -->` is prepended.
@@ -265,12 +266,6 @@ pub enum PrCommentMode {
         /// `None` = pure alphabetical.
         section_order: Option<Vec<String>>,
     },
-}
-
-impl Default for PrCommentMode {
-    fn default() -> Self {
-        PrCommentMode::Fresh
-    }
 }
 
 /// Parameters for commenting on an existing issue.

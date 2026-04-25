@@ -1,15 +1,19 @@
-//! Top-level rig operations: `up`, `check`, `down`, `status`.
+//! Top-level rig operations: `up`, `check`, `down`, `status`, `snapshot`.
 //!
 //! Each function returns a report struct that the CLI layer serializes to
 //! JSON. Reports are the contract — they should be stable across minor
 //! homeboy versions.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
+use super::expand::expand_vars;
 use super::pipeline::{run_pipeline, PipelineOutcome};
 use super::service::{self, ServiceStatus};
 use super::spec::RigSpec;
 use super::state::{now_rfc3339, RigState};
+use crate::engine::command::run_in_optional;
 use crate::error::Result;
 
 /// Report from `rig up`.
@@ -148,6 +152,72 @@ pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
         last_check: state.last_check,
         last_check_result: state.last_check_result,
     })
+}
+
+/// Captured component state for one entry in a rig's components map.
+///
+/// Captured at the start of every `homeboy rig bench` run so bench results
+/// can be tagged with the exact code state they were measured against.
+/// Without this, bench-to-bench comparisons can't distinguish "the code got
+/// slower" from "I'm comparing against a different commit." Surfaced in
+/// the bench command output alongside the bench result; persisting into
+/// the baseline JSON is a follow-up (see Extra-Chill/homeboy#1466 docs).
+#[derive(Debug, Clone, Serialize)]
+pub struct ComponentSnapshot {
+    /// Resolved filesystem path (after `~` / `${env.X}` / `${components.X}`
+    /// expansion). Useful for humans reviewing a snapshot offline.
+    pub path: String,
+    /// `git rev-parse HEAD` for the path's repo. `None` if the path is not
+    /// a git repo or the command fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    /// `git rev-parse --abbrev-ref HEAD` — current branch name, or `HEAD`
+    /// for detached. `None` if the path is not a git repo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+/// Snapshot of every component in a rig at a moment in time. Sorted by
+/// component ID for stable output (BTreeMap).
+#[derive(Debug, Clone, Serialize)]
+pub struct RigStateSnapshot {
+    pub rig_id: String,
+    pub captured_at: String,
+    pub components: BTreeMap<String, ComponentSnapshot>,
+}
+
+/// Capture the current state of every component in a rig.
+///
+/// Resolves each `ComponentSpec.path` (with `${env.X}` / `${components.X}`
+/// / `~` expansion), then queries git for HEAD SHA and current branch.
+/// Components whose paths aren't git repos are still included with `sha`
+/// / `branch` set to `None` — bench results should still record they were
+/// part of the rig at measurement time.
+pub fn snapshot_state(rig: &RigSpec) -> RigStateSnapshot {
+    let mut components = BTreeMap::new();
+    for (id, comp) in &rig.components {
+        let expanded = expand_vars(rig, &comp.path);
+        let resolved = shellexpand::tilde(&expanded).into_owned();
+        let sha = run_in_optional(&resolved, "git", &["rev-parse", "HEAD"])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let branch = run_in_optional(&resolved, "git", &["rev-parse", "--abbrev-ref", "HEAD"])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        components.insert(
+            id.clone(),
+            ComponentSnapshot {
+                path: resolved,
+                sha,
+                branch,
+            },
+        );
+    }
+    RigStateSnapshot {
+        rig_id: rig.id.clone(),
+        captured_at: now_rfc3339(),
+        components,
+    }
 }
 
 #[cfg(test)]

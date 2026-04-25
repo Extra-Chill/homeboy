@@ -34,6 +34,25 @@ pub struct RigSpec {
     /// `check`, and `down`; future phases will add `sync`, `bench`, etc.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub pipeline: HashMap<String, Vec<PipelineStep>>,
+
+    /// Bench composition settings (`homeboy rig bench`). Optional — only
+    /// populated when the rig is meant to drive a benchmark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench: Option<BenchSpec>,
+}
+
+/// Bench composition for a rig. Currently minimal — pins which component
+/// `homeboy rig bench` benchmarks when no explicit `--component` flag is
+/// passed. Matrix expansion + custom precheck + per-component overrides
+/// are deferred to follow-ups (see Extra-Chill/homeboy#1466 follow-up
+/// issues).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchSpec {
+    /// Component ID to benchmark when `homeboy rig bench <rig>` is invoked
+    /// without `--component`. Optional — `--component` is required at the
+    /// CLI when this isn't set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_component: Option<String>,
 }
 
 /// Component reference inside a rig spec. Decoupled from the global component

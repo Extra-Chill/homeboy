@@ -570,7 +570,7 @@ fn starts_with_ci(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
         return false;
     }
     for (k, nb) in needle.iter().enumerate() {
-        if bytes[i + k].to_ascii_lowercase() != nb.to_ascii_lowercase() {
+        if !bytes[i + k].eq_ignore_ascii_case(nb) {
             return false;
         }
     }

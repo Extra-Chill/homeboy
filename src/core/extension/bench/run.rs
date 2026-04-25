@@ -23,6 +23,11 @@ pub struct BenchRunWorkflowArgs {
     pub regression_threshold_percent: f64,
     pub json_summary: bool,
     pub passthrough_args: Vec<String>,
+    /// Optional rig identifier when bench was invoked via `--rig <id>`.
+    /// Threads through to the baseline storage key so rig-pinned and
+    /// unpinned baselines stay in separate slots inside `homeboy.json`.
+    /// `None` preserves the original baseline shape exactly.
+    pub rig_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,9 +77,11 @@ pub fn run_main_bench_workflow(
         "failed"
     };
 
+    let rig_id = args.rig_id.as_deref();
+
     if args.baseline_flags.baseline {
         if let Some(ref r) = parsed {
-            let _ = baseline::save_baseline(source_path, &args.component_id, r)?;
+            let _ = baseline::save_baseline(source_path, &args.component_id, r, rig_id)?;
         }
     }
 
@@ -83,13 +90,13 @@ pub fn run_main_bench_workflow(
 
     if !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline {
         if let Some(ref r) = parsed {
-            if let Some(existing) = baseline::load_baseline(source_path) {
+            if let Some(existing) = baseline::load_baseline(source_path, rig_id) {
                 let comparison = baseline::compare(r, &existing, args.regression_threshold_percent);
 
                 if comparison.regression {
                     baseline_exit_override = Some(1);
                 } else if comparison.has_improvements && args.baseline_flags.ratchet {
-                    let _ = baseline::save_baseline(source_path, &args.component_id, r);
+                    let _ = baseline::save_baseline(source_path, &args.component_id, r, rig_id);
                 }
 
                 baseline_comparison = Some(comparison);
@@ -97,17 +104,22 @@ pub fn run_main_bench_workflow(
         }
     }
 
+    let bench_invocation = match rig_id {
+        Some(id) => format!("homeboy bench {} --rig {}", args.component_id, id),
+        None => format!("homeboy bench {}", args.component_id),
+    };
+
     let mut hints = Vec::new();
     if parsed.is_some() && !args.baseline_flags.baseline && baseline_comparison.is_none() {
         hints.push(format!(
-            "Save bench baseline: homeboy bench {} --baseline",
-            args.component_id
+            "Save bench baseline: {} --baseline",
+            bench_invocation
         ));
     }
     if baseline_comparison.is_some() && !args.baseline_flags.ratchet {
         hints.push(format!(
-            "Auto-update baseline on improvement: homeboy bench {} --ratchet",
-            args.component_id
+            "Auto-update baseline on improvement: {} --ratchet",
+            bench_invocation
         ));
     }
     if let Some(ref cmp) = baseline_comparison {

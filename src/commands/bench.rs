@@ -4,10 +4,10 @@ use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::engine::run_dir::RunDir;
 use homeboy::extension::bench as extension_bench;
 use homeboy::extension::bench::{
-    from_main_workflow, BenchCommandOutput, BenchRunWorkflowArgs,
-    DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+    BenchCommandOutput, BenchRunWorkflowArgs, DEFAULT_REGRESSION_THRESHOLD_PERCENT,
 };
 use homeboy::extension::ExtensionCapability;
+use homeboy::rig;
 
 use super::utils::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
@@ -43,6 +43,17 @@ pub struct BenchArgs {
     /// Print compact machine-readable summary (for CI wrappers)
     #[arg(long)]
     json_summary: bool,
+
+    /// Run bench against a homeboy rig. When set, `rig check` runs first
+    /// and aborts the bench on failure; the rig's component states (git
+    /// SHA + branch) are captured into the bench output; and the
+    /// baseline is stored under a rig-scoped key so rig-pinned and
+    /// unpinned baselines don't collide.
+    ///
+    /// If the rig spec declares `bench.default_component`, the positional
+    /// component argument is optional — the rig's default fills in.
+    #[arg(long, value_name = "RIG_ID")]
+    rig: Option<String>,
 }
 
 /// Filter out homeboy-owned flags from trailing args before passing to
@@ -103,7 +114,42 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 }
 
 pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchCommandOutput> {
-    let effective_id = args.comp.resolve_id()?;
+    let passthrough_args = filter_homeboy_flags(&args.args);
+
+    // When `--rig <id>` is set, the rig pre-flight runs first: load the
+    // spec, run `rig check` (abort on any failure), and capture component
+    // state (git SHA + branch). The captured state both flows into the
+    // baseline storage key (so rig and bare baselines stay separate) and
+    // gets attached to the bench output (so consumers can attribute
+    // future regressions to specific component commits).
+    let (rig_id, rig_snapshot, default_component_id) = match args.rig.as_deref() {
+        None => (None, None, None),
+        Some(rig_id) => {
+            let rig_spec = rig::load(rig_id)?;
+            let check_report = rig::run_check(&rig_spec)?;
+            if !check_report.success {
+                return Err(homeboy::Error::rig_pipeline_failed(
+                    &rig_spec.id,
+                    "check",
+                    "rig check failed; refusing to run bench against an unhealthy rig",
+                ));
+            }
+            let snapshot = rig::snapshot_state(&rig_spec);
+            let default = rig_spec
+                .bench
+                .as_ref()
+                .and_then(|b| b.default_component.clone());
+            (Some(rig_spec.id.clone()), Some(snapshot), default)
+        }
+    };
+
+    // Component resolution: explicit positional > rig.bench.default_component
+    // > auto-detect from CWD (the existing PositionalComponentArgs path).
+    let effective_id = match (args.comp.id(), default_component_id) {
+        (Some(id), _) => id.to_string(),
+        (None, Some(default)) => default,
+        (None, None) => args.comp.resolve_id()?,
+    };
 
     let ctx = execution_context::resolve(&ResolveOptions::with_capability(
         &effective_id,
@@ -113,7 +159,6 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchCommandOutpu
     ))?;
 
     let run_dir = RunDir::create()?;
-    let passthrough_args = filter_homeboy_flags(&args.args);
 
     let workflow = extension_bench::run_main_bench_workflow(
         &ctx.component,
@@ -144,11 +189,15 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchCommandOutpu
             regression_threshold_percent: args.regression_threshold,
             json_summary: args.json_summary,
             passthrough_args,
+            rig_id: rig_id.clone(),
         },
         &run_dir,
     )?;
 
-    Ok(from_main_workflow(workflow))
+    Ok(extension_bench::from_main_workflow_with_rig(
+        workflow,
+        rig_snapshot,
+    ))
 }
 
 #[cfg(test)]

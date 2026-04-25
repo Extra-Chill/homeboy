@@ -30,6 +30,20 @@ use super::parsing::{BenchResults, BenchScenario};
 
 const BASELINE_KEY: &str = "bench";
 
+/// Resolve the baseline storage key for a given rig context.
+///
+/// - `None` → `"bench"` (the historic, unpinned baseline). Same shape and
+///   path as before this change so existing baselines load unchanged.
+/// - `Some("studio-playground-dev")` → `"bench.rig.studio-playground-dev"`
+///   so rig-pinned runs don't collide with bare ones, and different rigs
+///   keep their own histories side by side under the same `homeboy.json`.
+fn baseline_key_for(rig_id: Option<&str>) -> String {
+    match rig_id {
+        None => BASELINE_KEY.to_string(),
+        Some(id) => format!("{}.rig.{}", BASELINE_KEY, id),
+    }
+}
+
 /// Default regression threshold: 5% p95_ms slowdown flags a regression.
 pub const DEFAULT_REGRESSION_THRESHOLD_PERCENT: f64 = 5.0;
 
@@ -48,7 +62,7 @@ pub struct BenchScenarioSnapshot {
 }
 
 impl BenchScenarioSnapshot {
-    pub fn from_scenario(scenario: &BenchScenario) -> Self {
+    pub(crate) fn from_scenario(scenario: &BenchScenario) -> Self {
         Self {
             id: scenario.id.clone(),
             p95_ms: scenario.metrics.p95_ms,
@@ -119,6 +133,7 @@ pub fn save_baseline(
     source_path: &Path,
     component_id: &str,
     results: &BenchResults,
+    rig_id: Option<&str>,
 ) -> Result<std::path::PathBuf> {
     let snapshots: Vec<BenchScenarioSnapshot> = results
         .scenarios
@@ -129,12 +144,14 @@ pub fn save_baseline(
         scenarios: snapshots.clone(),
         iterations: results.iterations,
     };
-    let config = BaselineConfig::new(source_path, BASELINE_KEY);
+    let key = baseline_key_for(rig_id);
+    let config = BaselineConfig::new(source_path, key);
     generic::save(&config, component_id, &snapshots, metadata)
 }
 
-pub fn load_baseline(source_path: &Path) -> Option<BenchBaseline> {
-    let config = BaselineConfig::new(source_path, BASELINE_KEY);
+pub fn load_baseline(source_path: &Path, rig_id: Option<&str>) -> Option<BenchBaseline> {
+    let key = baseline_key_for(rig_id);
+    let config = BaselineConfig::new(source_path, key);
     generic::load::<BenchBaselineMetadata>(&config)
         .ok()
         .flatten()
@@ -261,9 +278,9 @@ mod tests {
     fn save_and_load_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
         let run = results(vec![scenario("a", 100.0), scenario("b", 200.0)]);
-        save_baseline(dir.path(), "demo", &run).unwrap();
+        save_baseline(dir.path(), "demo", &run, None).unwrap();
 
-        let loaded = load_baseline(dir.path()).unwrap();
+        let loaded = load_baseline(dir.path(), None).unwrap();
         assert_eq!(loaded.context_id, "demo");
         assert_eq!(loaded.metadata.iterations, 10);
         assert_eq!(loaded.metadata.scenarios.len(), 2);
@@ -275,8 +292,8 @@ mod tests {
     fn no_regression_when_flat() {
         let dir = tempfile::tempdir().unwrap();
         let baseline_run = results(vec![scenario("a", 100.0)]);
-        save_baseline(dir.path(), "demo", &baseline_run).unwrap();
-        let baseline = load_baseline(dir.path()).unwrap();
+        save_baseline(dir.path(), "demo", &baseline_run, None).unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
 
         let current = results(vec![scenario("a", 100.0)]);
         let comparison = compare(&current, &baseline, 5.0);
@@ -290,8 +307,14 @@ mod tests {
     #[test]
     fn four_percent_slower_does_not_regress_at_five_percent_threshold() {
         let dir = tempfile::tempdir().unwrap();
-        save_baseline(dir.path(), "demo", &results(vec![scenario("a", 100.0)])).unwrap();
-        let baseline = load_baseline(dir.path()).unwrap();
+        save_baseline(
+            dir.path(),
+            "demo",
+            &results(vec![scenario("a", 100.0)]),
+            None,
+        )
+        .unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
 
         let current = results(vec![scenario("a", 104.0)]);
         let comparison = compare(&current, &baseline, 5.0);
@@ -304,8 +327,14 @@ mod tests {
     #[test]
     fn six_percent_slower_regresses_at_five_percent_threshold() {
         let dir = tempfile::tempdir().unwrap();
-        save_baseline(dir.path(), "demo", &results(vec![scenario("a", 100.0)])).unwrap();
-        let baseline = load_baseline(dir.path()).unwrap();
+        save_baseline(
+            dir.path(),
+            "demo",
+            &results(vec![scenario("a", 100.0)]),
+            None,
+        )
+        .unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
 
         let current = results(vec![scenario("a", 106.0)]);
         let comparison = compare(&current, &baseline, 5.0);
@@ -321,8 +350,14 @@ mod tests {
     #[test]
     fn improvement_is_flagged_not_regression() {
         let dir = tempfile::tempdir().unwrap();
-        save_baseline(dir.path(), "demo", &results(vec![scenario("a", 100.0)])).unwrap();
-        let baseline = load_baseline(dir.path()).unwrap();
+        save_baseline(
+            dir.path(),
+            "demo",
+            &results(vec![scenario("a", 100.0)]),
+            None,
+        )
+        .unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
 
         let current = results(vec![scenario("a", 80.0)]);
         let comparison = compare(&current, &baseline, 5.0);
@@ -336,8 +371,14 @@ mod tests {
     #[test]
     fn new_scenario_is_tracked() {
         let dir = tempfile::tempdir().unwrap();
-        save_baseline(dir.path(), "demo", &results(vec![scenario("a", 100.0)])).unwrap();
-        let baseline = load_baseline(dir.path()).unwrap();
+        save_baseline(
+            dir.path(),
+            "demo",
+            &results(vec![scenario("a", 100.0)]),
+            None,
+        )
+        .unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
 
         let current = results(vec![scenario("a", 100.0), scenario("b", 50.0)]);
         let comparison = compare(&current, &baseline, 5.0);
@@ -354,9 +395,10 @@ mod tests {
             dir.path(),
             "demo",
             &results(vec![scenario("a", 100.0), scenario("b", 50.0)]),
+            None,
         )
         .unwrap();
-        let baseline = load_baseline(dir.path()).unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
 
         let current = results(vec![scenario("a", 100.0)]);
         let comparison = compare(&current, &baseline, 5.0);
@@ -368,8 +410,14 @@ mod tests {
     #[test]
     fn threshold_percent_is_configurable() {
         let dir = tempfile::tempdir().unwrap();
-        save_baseline(dir.path(), "demo", &results(vec![scenario("a", 100.0)])).unwrap();
-        let baseline = load_baseline(dir.path()).unwrap();
+        save_baseline(
+            dir.path(),
+            "demo",
+            &results(vec![scenario("a", 100.0)]),
+            None,
+        )
+        .unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
 
         // 8% slower: passes at 10% threshold, fails at 5%.
         let current = results(vec![scenario("a", 108.0)]);
@@ -380,8 +428,8 @@ mod tests {
     #[test]
     fn zero_baseline_p95_does_not_panic_or_always_regress() {
         let dir = tempfile::tempdir().unwrap();
-        save_baseline(dir.path(), "demo", &results(vec![scenario("a", 0.0)])).unwrap();
-        let baseline = load_baseline(dir.path()).unwrap();
+        save_baseline(dir.path(), "demo", &results(vec![scenario("a", 0.0)]), None).unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
 
         // Even a non-trivial current p95 should not be flagged as a
         // regression when the baseline was effectively zero — that
@@ -395,6 +443,37 @@ mod tests {
     #[test]
     fn load_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(load_baseline(dir.path()).is_none());
+        assert!(load_baseline(dir.path(), None).is_none());
+    }
+
+    #[test]
+    fn rig_pinned_baseline_isolated_from_unpinned() {
+        // The point of `rig_id`: same component, two baselines side by
+        // side under different `homeboy.json` keys. Saving rig-pinned
+        // must not overwrite the unpinned baseline, and loading from one
+        // namespace must not surface entries from the other.
+        let dir = tempfile::tempdir().unwrap();
+
+        let unpinned_run = results(vec![scenario("workload", 100.0)]);
+        let pinned_run = results(vec![scenario("workload", 200.0)]);
+
+        save_baseline(dir.path(), "demo", &unpinned_run, None).unwrap();
+        save_baseline(
+            dir.path(),
+            "demo",
+            &pinned_run,
+            Some("studio-playground-dev"),
+        )
+        .unwrap();
+
+        let unpinned = load_baseline(dir.path(), None).expect("unpinned baseline present");
+        assert_eq!(unpinned.metadata.scenarios[0].p95_ms, 100.0);
+
+        let pinned = load_baseline(dir.path(), Some("studio-playground-dev"))
+            .expect("rig-pinned baseline present");
+        assert_eq!(pinned.metadata.scenarios[0].p95_ms, 200.0);
+
+        // Different rig identifier returns None — no cross-rig leakage.
+        assert!(load_baseline(dir.path(), Some("other-rig")).is_none());
     }
 }

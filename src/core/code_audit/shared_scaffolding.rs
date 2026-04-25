@@ -228,10 +228,8 @@ fn mean_body_similarity(members: &[&ClassShape], shape: &[(String, String)]) -> 
         // Count occurrences of each concrete hash; None is "missing" and does
         // not count toward any bucket.
         let mut counts: HashMap<&str, usize> = HashMap::new();
-        for h in &hashes {
-            if let Some(h) = h {
-                *counts.entry(*h).or_insert(0) += 1;
-            }
+        for h in hashes.iter().flatten() {
+            *counts.entry(*h).or_insert(0) += 1;
         }
 
         // Similarity for this method = size of the largest identical-hash bucket
@@ -305,7 +303,7 @@ mod tests {
             ("execute", "public", "exec_b"),
         ];
 
-        let fps = vec![
+        let fps = [
             make_class("inc/Abilities/Chat/ChatAbility.php", "ChatAbility", shape),
             make_class(
                 "inc/Abilities/AgentPing/SendPingAbility.php",
@@ -373,7 +371,7 @@ mod tests {
             )
         };
 
-        let fps = vec![
+        let fps = [
             mk(
                 "inc/Abilities/A/AAbility.php",
                 "AAbility",
@@ -410,7 +408,7 @@ mod tests {
             ("execute", "public", "exec_h"),
         ];
 
-        let fps = vec![
+        let fps = [
             make_class("inc/Abilities/A/AAbility.php", "AAbility", shape),
             make_class("inc/Abilities/B/BAbility.php", "BAbility", shape),
         ];
