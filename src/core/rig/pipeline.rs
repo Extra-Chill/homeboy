@@ -7,7 +7,7 @@
 //! a `PipelineOutcome` with overall success/failure.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
@@ -339,7 +339,7 @@ fn ensure_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<()> {
         })?;
     }
 
-    std::os::unix::fs::symlink(&target_path, &link_path).map_err(|e| {
+    create_symlink(&target_path, &link_path).map_err(|e| {
         Error::rig_pipeline_failed(
             &rig.id,
             "symlink",
@@ -352,6 +352,22 @@ fn ensure_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    // Rigs are Unix-only by design (see core/rig/service.rs). Windows users
+    // who reach this path get a clear error from rig_pipeline_failed instead
+    // of a compile failure.
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "rig symlinks are not supported on this platform (Unix only)",
+    ))
 }
 
 fn verify_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<()> {
