@@ -7,6 +7,9 @@
         <testsuite name="WordPress Extension Tests">
             <directory>tests/</directory>
         </testsuite>
+        <testsuite name="HomeboyWordPress Sniff Tests">
+            <directory suffix="UnitTest.php">HomeboyWordPress/Tests/</directory>
+        </testsuite>
     </testsuites>
 
     <php>

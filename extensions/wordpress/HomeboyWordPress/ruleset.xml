@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<ruleset xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         name="HomeboyWordPress"
+         xsi:noNamespaceSchemaLocation="../vendor/squizlabs/php_codesniffer/phpcs.xsd">
+    <description><![CDATA[
+        Custom PHPCS sniffs for the homeboy-extensions WordPress module.
+        Implements WordPress handbook rules that aren't covered by upstream PHPCS or WPCS.
+
+        Sniffs:
+          - HomeboyWordPress.Commenting.MultiLineInlineComment.ConsecutiveSingleLine
+              Flags 2+ consecutive `//` lines that should be a slash-star block.
+          - HomeboyWordPress.Commenting.MultiLineInlineComment.DoubleAsteriskNonDocBlock
+              Flags `/**` blocks used for prose (must use a single asterisk per
+              WP inline-docs section 5.2; double asterisk is reserved for DocBlocks).
+
+        Opt-in usage. The host phpcs.xml.dist registers this standard with
+        severity 0 so the rule is silent by default. Promote per-error-code in
+        your own ruleset:
+
+            <rule ref="HomeboyWordPress.Commenting.MultiLineInlineComment.ConsecutiveSingleLine">
+                <severity>5</severity>
+            </rule>
+
+        Or run on demand without touching the host ruleset:
+
+            phpcs --sniffs=HomeboyWordPress.Commenting.MultiLineInlineComment <files>
+    ]]></description>
+</ruleset>

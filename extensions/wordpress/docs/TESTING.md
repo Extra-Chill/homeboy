@@ -114,6 +114,49 @@ changing the default. `HOMEBOY_SKIP_PHPSTAN=1` runs a critical-only
 check that still blocks `function.notFound` / `class.notFound` (guaranteed
 runtime fatals) regardless of the skip.
 
+### Multi-line comment style (opt-in)
+
+Custom sniff `HomeboyWordPress.Commenting.MultiLineInlineComment` enforces
+[WordPress Inline Documentation Standards section 5.2][wp-docs-5.2]:
+
+- **`ConsecutiveSingleLine`** — flags 2+ adjacent `//` lines that should be
+  a `/* ... */` block comment. Auto-fixable.
+- **`DoubleAsteriskNonDocBlock`** — flags `/**` blocks used for prose, not
+  for declarations. The double-asterisk form is reserved for DocBlocks per
+  WP handbook; bare prose should start with a single asterisk. Auto-fixable.
+
+Both detections skip `// phpcs:`, `// translators:`, `//phpstan-`, `//psalm-`
+annotations, end-of-line trailing comments, and runs that look entirely like
+commented-out code (deferred to `Squiz.PHP.CommentedOutCode`).
+
+The sniff is **registered but off by default** to avoid a flag-day on
+existing projects. Three ways to opt in:
+
+1. Promote a single error code in your project ruleset:
+
+   ```xml
+   <rule ref="HomeboyWordPress.Commenting.MultiLineInlineComment.ConsecutiveSingleLine">
+       <severity>5</severity>
+   </rule>
+   ```
+
+2. Promote the whole sniff:
+
+   ```xml
+   <rule ref="HomeboyWordPress.Commenting.MultiLineInlineComment">
+       <severity>5</severity>
+   </rule>
+   ```
+
+3. Run on demand without touching the host ruleset:
+
+   ```bash
+   vendor/bin/phpcs --sniffs=HomeboyWordPress.Commenting.MultiLineInlineComment src/
+   vendor/bin/phpcbf --sniffs=HomeboyWordPress.Commenting.MultiLineInlineComment src/
+   ```
+
+[wp-docs-5.2]: https://developer.wordpress.org/coding-standards/inline-documentation-standards/php/#5-2-multi-line-comments
+
 ### Strict `empty()` / `isset()` enforcement (opt-in)
 
 By default, PHPStan at level 7 already catches the *provably wrong* uses

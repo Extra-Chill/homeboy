@@ -20,6 +20,16 @@
         <exclude name="Squiz.Functions.MultiLineFunctionDeclaration"/>
     </rule>
 
+    <!--
+        Custom homeboy-extensions sniffs (WP handbook rules not covered by WPCS).
+        Registered but opt-in: severity 0 keeps the rule off by default. Promote
+        a specific error code via the snippet at the top of HomeboyWordPress/ruleset.xml
+        in your project ruleset, or run on demand via the phpcs sniffs flag.
+    -->
+    <rule ref="HomeboyWordPress">
+        <severity>0</severity>
+    </rule>
+
     <!-- PHP 7.4+ compatibility -->
     <config name="testVersion" value="7.4-"/>
 
