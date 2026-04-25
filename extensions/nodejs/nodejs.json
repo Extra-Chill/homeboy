@@ -1,31 +1,41 @@
 {
   "name": "Node.js",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "icon": "server.rack",
-  "description": "Node.js project type with PM2 integration",
+  "description": "Node.js project type — discovery, audit grammar, and npm release lifecycle",
   "author": "Extra Chill",
   "platform": {
     "discovery": {
-      "find_command": "find /home -name 'package.json' -type f 2>/dev/null | xargs grep -l '\"main\"' 2>/dev/null",
+      "find_command": "find /home -name 'package.json' -type f 2>/dev/null | xargs grep -l '\"name\"' 2>/dev/null",
       "base_path_transform": "dirname",
       "display_name_command": "cd {{basePath}} && node -e \"console.log(require('./package.json').name)\" 2>/dev/null || basename {{basePath}}"
     },
-    "default_pinned_files": ["package.json", "ecosystem.config.js", ".env.example"],
-    "default_pinned_logs": ["logs/combined.log", "logs/err.log", "logs/out.log"],
-    "database": {
-      "cli": {
-        "tables_command": "MYSQL_PWD='{{db_password}}' mysql -u{{db_user}} -h{{db_host}} {{db_name}} -e 'SHOW TABLE STATUS'",
-        "describe_command": "MYSQL_PWD='{{db_password}}' mysql -u{{db_user}} -h{{db_host}} {{db_name}} -e 'DESCRIBE {{table}}'",
-        "query_command": "MYSQL_PWD='{{db_password}}' mysql -u{{db_user}} -h{{db_host}} {{db_name}} -e '{{query}}'"
+    "default_pinned_files": ["package.json", "tsconfig.json", ".npmrc", ".env.example"]
+  },
+  "component_type": {
+    "version_targets": [
+      {
+        "file": "package.json",
+        "pattern": "\"version\":\\s*\"([0-9.]+)\""
       }
+    ]
+  },
+  "settings": [
+    {
+      "id": "access",
+      "label": "Publish Access",
+      "type": "string",
+      "default": "public",
+      "description": "npm publish access level: 'public' or 'restricted'"
+    },
+    {
+      "id": "registry",
+      "label": "npm Registry",
+      "type": "string",
+      "default": "https://registry.npmjs.org",
+      "description": "npm registry URL for publishing"
     }
-  },
-  "cli": {
-    "tool": "pm2",
-    "display_name": "PM2",
-    "command_template": "{{cliPath}} {{args}} {{projectId}}",
-    "default_cli_path": "pm2"
-  },
+  ],
   "audit": {
     "feature_patterns": [
       "app\\.get\\(['\"]([^'\"]+)['\"]",
@@ -41,6 +51,7 @@
       "app\\.use\\(['\"]([^'\"]+)['\"]",
       "export (?:default )?class (\\w+)",
       "export (?:default )?function (\\w+)",
+      "export (?:default )?const (\\w+)",
       "module\\.exports\\s*=\\s*(?:class\\s+|)(\\w+)",
       "mongoose\\.model\\(['\"]([^'\"]+)['\"]",
       "program\\.command\\(['\"]([^'\"]+)['\"]",
@@ -62,6 +73,7 @@
       "app\\.use\\(": "Middleware",
       "export (?:default )?class": "Exported Classes",
       "export (?:default )?function": "Exported Functions",
+      "export (?:default )?const": "Exported Constants",
       "module\\.exports": "Module Exports",
       "mongoose\\.model": "Mongoose Models",
       "program\\.command": "CLI Commands",
@@ -90,6 +102,11 @@
         "heading": "## Functions",
         "template": "- `{name}` — `{source_file}` (line {line})"
       },
+      "Exported Constants": {
+        "file": "architecture.md",
+        "heading": "## Constants",
+        "template": "- `{name}` — `{source_file}` (line {line})"
+      },
       "Module Exports": {
         "file": "architecture.md",
         "heading": "## Module Exports",
@@ -114,7 +131,50 @@
   },
   "build": {
     "cleanup_paths": [
-      "node_extensions"
+      "node_modules",
+      "dist"
     ]
-  }
+  },
+  "actions": [
+    {
+      "id": "release.package",
+      "label": "Package release artifacts",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/build.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.build",
+      "label": "Build package",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/build.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.validate",
+      "label": "Validate package",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/validate.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.publish",
+      "label": "Publish to npm registry",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/publish.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    }
+  ]
 }
