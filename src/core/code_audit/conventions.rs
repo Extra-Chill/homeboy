@@ -181,6 +181,21 @@ pub enum AuditFinding {
     /// guaranteed to exist given plugin requirements, explicit bootstrap
     /// `require`s, or the WordPress core version baseline.
     DeadGuard,
+    /// Code that exists because of a tracked upstream bug — workaround/polyfill/
+    /// shim/hack comments paired with an issue/PR/Trac reference, or
+    /// `version_compare(...) <` guards against known constants.
+    ///
+    /// Distinct from `LegacyComment`: `LegacyComment` flags any stale phrasing
+    /// regardless of whether a tracker exists. `UpstreamWorkaround` requires
+    /// BOTH a workaround marker AND a concrete reference (URL or ticket), so
+    /// findings are actionable: check the linked issue, see if the upstream
+    /// fix has shipped, then remove the local workaround. Per the
+    /// fix-upstream-first rule, workarounds should never outlive their cause.
+    ///
+    /// Severity scales by tier:
+    /// - Marker + reference (Tier A) → `Severity::Warning`
+    /// - `version_compare` guard (Tier B) → `Severity::Info`
+    UpstreamWorkaround,
     /// A group of classes in the same directory subtree share the same overall
     /// method-shape (same method names + visibilities + order) and have high
     /// per-method body similarity — candidates for a shared base class.
@@ -230,6 +245,7 @@ impl AuditFinding {
             "repeated_literal_shape",
             "deprecation_age",
             "dead_guard",
+            "upstream_workaround",
             "shared_scaffolding",
         ]
     }
