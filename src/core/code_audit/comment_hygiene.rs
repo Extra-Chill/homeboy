@@ -101,8 +101,9 @@ fn extract_comments(fp: &FileFingerprint) -> Vec<(usize, &str)> {
         .enumerate()
         .filter_map(|(idx, line)| {
             let trimmed = line.trim_start();
-            let is_slash =
-                trimmed.starts_with("//") && !trimmed.starts_with("///") && !trimmed.starts_with("//!");
+            let is_slash = trimmed.starts_with("//")
+                && !trimmed.starts_with("///")
+                && !trimmed.starts_with("//!");
             let is_hash = allow_hash && trimmed.starts_with('#') && !trimmed.starts_with("#!");
             if is_slash || is_hash {
                 Some((

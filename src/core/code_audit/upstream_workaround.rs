@@ -190,9 +190,7 @@ fn block_has_marker(raw: &str, lower: &str) -> bool {
         .unwrap_or("")
         .trim_start()
         .to_lowercase();
-    LEADING_MARKERS
-        .iter()
-        .any(|l| leading_line.starts_with(l))
+    LEADING_MARKERS.iter().any(|l| leading_line.starts_with(l))
 }
 
 // ============================================================================
@@ -211,7 +209,11 @@ fn scan_version_guards(fp: &FileFingerprint) -> Vec<Finding> {
             continue;
         }
         let m = caps.get(0).unwrap();
-        let line_number = fp.content[..m.start()].chars().filter(|c| *c == '\n').count() + 1;
+        let line_number = fp.content[..m.start()]
+            .chars()
+            .filter(|c| *c == '\n')
+            .count()
+            + 1;
         findings.push(Finding {
             convention: "comment_hygiene".to_string(),
             severity: Severity::Info,

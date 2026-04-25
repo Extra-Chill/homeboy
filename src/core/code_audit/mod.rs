@@ -16,7 +16,6 @@ mod checks;
 pub mod codebase_map;
 mod comment_blocks;
 mod comment_hygiene;
-mod upstream_workaround;
 pub mod compare;
 mod compiler_warnings;
 pub(crate) mod conventions;
@@ -47,6 +46,7 @@ mod structural;
 mod test_coverage;
 pub(crate) mod test_mapping;
 mod test_topology;
+mod upstream_workaround;
 pub(crate) mod walker;
 mod wrapper_inference;
 
