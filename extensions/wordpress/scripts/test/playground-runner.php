@@ -49,112 +49,30 @@ ini_set('display_startup_errors', '1');
 $result_file = '/wordpress/wp-content/plugins/{{PLUGIN_SLUG}}/.pg-test-result.txt';
 $current_stage = 'preboot';
 
-function pg_log($msg) {
-    global $result_file;
-    file_put_contents($result_file, $msg . "\n", FILE_APPEND);
-}
+// pg_log / pg_stage_* helpers + the diagnostics handlers + the four shared
+// bootstrap stages (boot, install, load_deps, load_component) live in the
+// extracted lib so the bench runner can reuse the same boot path and any
+// future runner kind inherits it for free. Every consumer reading the same
+// `boot` and `install` stage code is the only honest way to compare timings
+// across runners (a regression in install must be visible to all of them).
+require_once '/homeboy-extension/scripts/lib/playground-bootstrap.php';
 
-function pg_stage_begin($stage) {
-    global $current_stage;
-    $current_stage = $stage;
-    pg_log("STAGE_BEGIN:$stage");
-}
-
-function pg_stage_ok($stage) {
-    pg_log("STAGE_OK:$stage");
-}
-
-function pg_stage_fail($stage, Throwable $e) {
-    $msg = get_class($e) . ': ' . $e->getMessage()
-        . ' at ' . $e->getFile() . ':' . $e->getLine();
-    pg_log("STAGE_FAIL:$stage:$msg");
-    // Also dump trace for debugging; bash runner will print it under failure.
-    pg_log("TRACE:");
-    foreach (explode("\n", $e->getTraceAsString()) as $line) {
-        pg_log("  $line");
-    }
-}
-
-// Capture non-fatal warnings/notices so they don't vanish into the void.
-set_error_handler(function ($severity, $message, $file, $line) {
-    if (!(error_reporting() & $severity)) {
-        return false;
-    }
-    $label = [
-        E_WARNING => 'WARNING',
-        E_NOTICE => 'NOTICE',
-        E_DEPRECATED => 'DEPRECATED',
-        E_USER_WARNING => 'USER_WARNING',
-        E_USER_NOTICE => 'USER_NOTICE',
-        E_USER_DEPRECATED => 'USER_DEPRECATED',
-        E_STRICT => 'STRICT',
-    ][$severity] ?? "E_$severity";
-    pg_log("NOTICE:$label: $message at $file:$line");
-    return false; // let PHP's default handler also run
-});
-
-register_shutdown_function(function () {
-    global $current_stage;
-    $error = error_get_last();
-    if ($error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
-        pg_log("STAGE_FATAL:$current_stage:{$error['message']} at {$error['file']}:{$error['line']}");
-    }
-});
+pg_install_diagnostics_handlers();
 
 $tests_dir = '/homeboy-extension/vendor/wp-phpunit/wp-phpunit';
 $plugin_path = '/wordpress/wp-content/plugins/{{PLUGIN_SLUG}}';
 
-// ---------------------------------------------------------------------------
-// Stage: boot
-// ---------------------------------------------------------------------------
-pg_stage_begin('boot');
-try {
-    $config_path = '/tmp/wp-tests-config.php';
-    file_put_contents($config_path, <<<'CONFIG'
-<?php
-$table_prefix = 'wptests_';
-define('DB_NAME', ':memory:');
-define('DB_USER', 'root');
-define('DB_PASSWORD', '');
-define('DB_HOST', 'localhost');
-define('DB_CHARSET', 'utf8');
-define('WP_TESTS_DOMAIN', 'example.org');
-define('WP_TESTS_EMAIL', 'admin@example.org');
-define('WP_TESTS_TITLE', 'Test Blog');
-define('WP_PHP_BINARY', 'php');
-define('ABSPATH', '/wordpress/');
-define('FS_CHMOD_FILE', 0644);
-define('FS_CHMOD_DIR', 0755);
-define('FS_METHOD', 'direct');
-CONFIG
-    );
+// Stage: boot — render wp-tests-config.php + load composer autoload.
+$config_path = pg_run_boot_stage();
 
-    require_once '/homeboy-extension/vendor/autoload.php';
-    pg_stage_ok('boot');
-} catch (Throwable $e) {
-    pg_stage_fail('boot', $e);
-    exit(1);
-}
-
-// ---------------------------------------------------------------------------
-// Stage: install (wp-phpunit install.php creates WP tables in-process)
-// ---------------------------------------------------------------------------
-pg_stage_begin('install');
-try {
-    $argv = ['install.php', $config_path, 'no_ms_tests', 'no_core_tests'];
-    $_SERVER['argv'] = $argv;
-    require_once "$tests_dir/includes/install.php";
-    while (ob_get_level() > 0) {
-        @ob_end_clean();
-    }
-    pg_stage_ok('install');
-} catch (Throwable $e) {
-    pg_stage_fail('install', $e);
-    exit(1);
-}
+// Stage: install — wp-phpunit install.php creates WP tables in-process.
+pg_run_install_stage(['config_path' => $config_path, 'tests_dir' => $tests_dir]);
 
 // ---------------------------------------------------------------------------
 // Stage: load_fixtures (test case classes, mock mailer, harness filters)
+//
+// Stays inline — PHPUnit-specific. Other runner kinds (bench, future
+// integration runners) don't need wp-phpunit's testcase scaffolding.
 // ---------------------------------------------------------------------------
 pg_stage_begin('load_fixtures');
 try {
@@ -197,72 +115,11 @@ try {
     exit(1);
 }
 
-// ---------------------------------------------------------------------------
-// Stage: load_deps (dependency plugin bootstrap files)
-// ---------------------------------------------------------------------------
-pg_stage_begin('load_deps');
-try {
-    $dep_paths = '{{PLAYGROUND_DEP_MOUNTS}}';
-    if (!empty($dep_paths)) {
-        foreach (explode("\n", $dep_paths) as $dep_mount) {
-            $dep_mount = trim($dep_mount);
-            if (empty($dep_mount)) {
-                continue;
-            }
-            $dep_files = glob("$dep_mount/*.php") ?: [];
-            foreach ($dep_files as $df) {
-                if (strpos(file_get_contents($df), 'Plugin Name:') !== false) {
-                    require_once $df;
-                    break;
-                }
-            }
-        }
-    }
-    pg_stage_ok('load_deps');
-} catch (Throwable $e) {
-    pg_stage_fail('load_deps', $e);
-    exit(1);
-}
+// Stage: load_deps — load Plugin-Name-headed entry files for declared deps.
+pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
 
-// ---------------------------------------------------------------------------
-// Stage: load_component (plugin or theme under test)
-// ---------------------------------------------------------------------------
-pg_stage_begin('load_component');
-try {
-    $style_css = "$plugin_path/style.css";
-    if (file_exists($style_css) && strpos(file_get_contents($style_css), 'Theme Name:') !== false) {
-        pg_log("THEME_DETECTED");
-        $fn_php = "$plugin_path/functions.php";
-        if (file_exists($fn_php)) {
-            require_once $fn_php;
-        }
-    } else {
-        $loaded = false;
-        $main_files = glob("$plugin_path/*.php") ?: [];
-        foreach ($main_files as $mf) {
-            // db.php is a WordPress drop-in, not a plugin entry file. It's
-            // already been loaded by wp-settings.php earlier in the request
-            // lifecycle. Including it again would re-run its side effects
-            // (define() warnings, $wpdb re-init) for no reason.
-            if (basename($mf) === 'db.php') {
-                continue;
-            }
-            if (strpos(file_get_contents($mf), 'Plugin Name:') !== false) {
-                pg_log("PLUGIN_DETECTED " . basename($mf));
-                require_once $mf;
-                $loaded = true;
-                break;
-            }
-        }
-        if (!$loaded) {
-            pg_log("NOTICE:no plugin entry file with 'Plugin Name:' header found in $plugin_path");
-        }
-    }
-    pg_stage_ok('load_component');
-} catch (Throwable $e) {
-    pg_stage_fail('load_component', $e);
-    exit(1);
-}
+// Stage: load_component — load the plugin or theme under test.
+pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 
 // ---------------------------------------------------------------------------
 // Stage: discover_tests

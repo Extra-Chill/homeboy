@@ -1,0 +1,308 @@
+<?php
+/**
+ * Shared Playground bootstrap helpers.
+ *
+ * Extracted from scripts/test/playground-runner.php so any runner that boots
+ * WordPress inside Playground (PHPUnit tests, performance benchmarks, future
+ * runner kinds) can reuse the same boot path. A regression in `boot` /
+ * `install` / `load_deps` / `load_component` should affect every consumer
+ * identically — that only holds if every consumer goes through the same
+ * code.
+ *
+ * Stages provided:
+ *   - boot           — render wp-tests-config.php, load composer autoloader
+ *   - install        — wp-phpunit install.php (creates WP + tables in-process)
+ *   - load_deps      — load Plugin-Name-headed entry files for declared deps
+ *   - load_component — load the plugin/theme under test
+ *
+ * Stages NOT provided (caller's responsibility):
+ *   - load_fixtures  — PHPUnit-specific testcase classes; only test runner needs them
+ *   - discover_*     — caller-specific (PHPUnit test discovery vs bench workload discovery)
+ *   - load_*         — caller-specific
+ *   - run_*          — caller-specific (PHPUnit::run vs bench iteration loop)
+ *
+ * GLOBAL CONTRACT
+ *
+ * Callers MUST define the following globals before requiring this file (or
+ * the boot path will write to /dev/null and stage fatals will lose
+ * attribution):
+ *
+ *   $result_file   — absolute path the structured log is appended to
+ *   $current_stage — string, initial value "preboot" (mutated by pg_stage_begin)
+ *
+ * The shutdown handler reads $current_stage to attribute fatal errors. The
+ * pg_log() / pg_stage_*() helpers append to $result_file. Both are kept as
+ * globals (not passed-by-value) so existing callers don't need argument
+ * threading at every site — relocation is the goal of this extraction, not
+ * an API redesign.
+ *
+ * STAGE EXECUTORS
+ *
+ * Each stage executor takes a $cfg array and:
+ *   - calls pg_stage_begin($stage)
+ *   - performs the stage's work inside try/catch
+ *   - calls pg_stage_ok($stage) on success, pg_stage_fail($stage, $e) + exit(1) on Throwable
+ *
+ * Required $cfg keys are documented per stage. Unknown keys are ignored —
+ * callers can pass extra keys that downstream stages need without the
+ * upstream stages having to know about them.
+ */
+
+// ---------------------------------------------------------------------------
+// Diagnostics: structured log helpers + error/shutdown handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * Append a line to the structured log.
+ *
+ * Reads the global $result_file the caller defined before requiring this
+ * file. Each call appends one line; the bash runners parse the log
+ * line-by-line using the prefixes defined in pg_stage_*().
+ */
+function pg_log($msg) {
+    global $result_file;
+    file_put_contents($result_file, $msg . "\n", FILE_APPEND);
+}
+
+/**
+ * Mark the start of a bootstrap stage.
+ *
+ * Updates the global $current_stage so the shutdown handler can attribute
+ * fatal errors to the right stage even when an exit happens mid-stage.
+ */
+function pg_stage_begin($stage) {
+    global $current_stage;
+    $current_stage = $stage;
+    pg_log("STAGE_BEGIN:$stage");
+}
+
+/** Mark a stage as completed cleanly. */
+function pg_stage_ok($stage) {
+    pg_log("STAGE_OK:$stage");
+}
+
+/**
+ * Mark a stage as failed with a caught Throwable. Logs the message + a
+ * stack trace; callers typically `exit(1)` immediately after to keep the
+ * shutdown handler from layering its own STAGE_FATAL line on top.
+ */
+function pg_stage_fail($stage, Throwable $e) {
+    $msg = get_class($e) . ': ' . $e->getMessage()
+        . ' at ' . $e->getFile() . ':' . $e->getLine();
+    pg_log("STAGE_FAIL:$stage:$msg");
+    pg_log("TRACE:");
+    foreach (explode("\n", $e->getTraceAsString()) as $line) {
+        pg_log("  $line");
+    }
+}
+
+/**
+ * Install the global error + shutdown handlers used by all Playground
+ * runners. Idempotent — safe to call once per runner script.
+ *
+ * - Warning/notice handler captures non-fatal output to the structured log
+ *   so it doesn't vanish into Playground's stderr (which is hard to surface
+ *   from the host shell). Returns false so PHP's default handler still runs.
+ * - Shutdown handler emits a STAGE_FATAL line with the current stage when
+ *   an uncatchable error (E_ERROR / E_PARSE / E_CORE_ERROR / E_COMPILE_ERROR)
+ *   ends the script. Without this, the bash runner sees an empty result file
+ *   and can't attribute the failure.
+ */
+function pg_install_diagnostics_handlers() {
+    set_error_handler(function ($severity, $message, $file, $line) {
+        if (!(error_reporting() & $severity)) {
+            return false;
+        }
+        $label = [
+            E_WARNING => 'WARNING',
+            E_NOTICE => 'NOTICE',
+            E_DEPRECATED => 'DEPRECATED',
+            E_USER_WARNING => 'USER_WARNING',
+            E_USER_NOTICE => 'USER_NOTICE',
+            E_USER_DEPRECATED => 'USER_DEPRECATED',
+            E_STRICT => 'STRICT',
+        ][$severity] ?? "E_$severity";
+        pg_log("NOTICE:$label: $message at $file:$line");
+        return false;
+    });
+
+    register_shutdown_function(function () {
+        global $current_stage;
+        $error = error_get_last();
+        if ($error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+            pg_log("STAGE_FATAL:$current_stage:{$error['message']} at {$error['file']}:{$error['line']}");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Stage executors
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the `boot` stage: render wp-tests-config.php and load composer autoload.
+ *
+ * Required $cfg keys: (none)
+ *
+ * Side effect: defines $config_path under the caller's scope by writing to
+ * /tmp/wp-tests-config.php (the canonical location wp-phpunit's install.php
+ * expects). The path is also returned so callers don't have to hard-code it.
+ *
+ * @return string Path to the generated wp-tests-config.php.
+ */
+function pg_run_boot_stage(array $cfg = []): string {
+    pg_stage_begin('boot');
+    try {
+        $config_path = '/tmp/wp-tests-config.php';
+        file_put_contents($config_path, <<<'CONFIG'
+<?php
+$table_prefix = 'wptests_';
+define('DB_NAME', ':memory:');
+define('DB_USER', 'root');
+define('DB_PASSWORD', '');
+define('DB_HOST', 'localhost');
+define('DB_CHARSET', 'utf8');
+define('WP_TESTS_DOMAIN', 'example.org');
+define('WP_TESTS_EMAIL', 'admin@example.org');
+define('WP_TESTS_TITLE', 'Test Blog');
+define('WP_PHP_BINARY', 'php');
+define('ABSPATH', '/wordpress/');
+define('FS_CHMOD_FILE', 0644);
+define('FS_CHMOD_DIR', 0755);
+define('FS_METHOD', 'direct');
+CONFIG
+        );
+
+        require_once '/homeboy-extension/vendor/autoload.php';
+        pg_stage_ok('boot');
+        return $config_path;
+    } catch (Throwable $e) {
+        pg_stage_fail('boot', $e);
+        exit(1);
+    }
+}
+
+/**
+ * Run the `install` stage: invoke wp-phpunit's install.php in-process.
+ *
+ * Boots WordPress AND creates the test database tables without spawning a
+ * subprocess (which Playground's PHP-WASM doesn't natively support pre-#3481).
+ *
+ * Required $cfg keys:
+ *   - config_path: absolute path to the wp-tests-config.php produced by
+ *     pg_run_boot_stage(). Pass the return value of that function.
+ *
+ * Optional $cfg keys:
+ *   - tests_dir: vendor path to wp-phpunit. Defaults to the canonical
+ *     '/homeboy-extension/vendor/wp-phpunit/wp-phpunit'.
+ */
+function pg_run_install_stage(array $cfg) {
+    pg_stage_begin('install');
+    try {
+        $tests_dir = $cfg['tests_dir'] ?? '/homeboy-extension/vendor/wp-phpunit/wp-phpunit';
+        $config_path = $cfg['config_path'];
+        $argv = ['install.php', $config_path, 'no_ms_tests', 'no_core_tests'];
+        $_SERVER['argv'] = $argv;
+        require_once "$tests_dir/includes/install.php";
+        while (ob_get_level() > 0) {
+            @ob_end_clean();
+        }
+        pg_stage_ok('install');
+    } catch (Throwable $e) {
+        pg_stage_fail('install', $e);
+        exit(1);
+    }
+}
+
+/**
+ * Run the `load_deps` stage: require Plugin-Name-headed entry files for
+ * every dependency the host runner declared via mount paths.
+ *
+ * The host bash runner translates HOMEBOY_WORDPRESS_DEPENDENCY_PATHS into
+ * mount points like /wordpress/wp-content/plugins/<dep>/, then writes the
+ * resulting paths into a newline-separated list which gets sed'd into the
+ * runner template at {{PLAYGROUND_DEP_MOUNTS}}. This stage parses that list
+ * and loads each dependency's main plugin file.
+ *
+ * Required $cfg keys:
+ *   - dep_mounts: newline-separated string of dependency mount paths
+ *     inside the Playground VFS. Empty string is fine — no-op.
+ */
+function pg_run_load_deps_stage(array $cfg) {
+    pg_stage_begin('load_deps');
+    try {
+        $dep_paths = $cfg['dep_mounts'] ?? '';
+        if (!empty($dep_paths)) {
+            foreach (explode("\n", $dep_paths) as $dep_mount) {
+                $dep_mount = trim($dep_mount);
+                if (empty($dep_mount)) {
+                    continue;
+                }
+                $dep_files = glob("$dep_mount/*.php") ?: [];
+                foreach ($dep_files as $df) {
+                    if (strpos(file_get_contents($df), 'Plugin Name:') !== false) {
+                        require_once $df;
+                        break;
+                    }
+                }
+            }
+        }
+        pg_stage_ok('load_deps');
+    } catch (Throwable $e) {
+        pg_stage_fail('load_deps', $e);
+        exit(1);
+    }
+}
+
+/**
+ * Run the `load_component` stage: load the plugin or theme under test.
+ *
+ * Detects whether the component is a theme (style.css with `Theme Name:`
+ * header) or a plugin (any *.php with `Plugin Name:` header) and loads the
+ * appropriate entry file. The `db.php` drop-in is explicitly skipped — it's
+ * already loaded by wp-settings.php earlier in the request lifecycle and
+ * including it again would re-run its side effects.
+ *
+ * Required $cfg keys:
+ *   - plugin_path: absolute path inside the Playground VFS, typically
+ *     '/wordpress/wp-content/plugins/<slug>'.
+ */
+function pg_run_load_component_stage(array $cfg) {
+    pg_stage_begin('load_component');
+    try {
+        $plugin_path = $cfg['plugin_path'];
+        $style_css = "$plugin_path/style.css";
+        if (file_exists($style_css) && strpos(file_get_contents($style_css), 'Theme Name:') !== false) {
+            pg_log("THEME_DETECTED");
+            $fn_php = "$plugin_path/functions.php";
+            if (file_exists($fn_php)) {
+                require_once $fn_php;
+            }
+        } else {
+            $loaded = false;
+            $main_files = glob("$plugin_path/*.php") ?: [];
+            foreach ($main_files as $mf) {
+                // db.php is a WordPress drop-in, not a plugin entry file. It's
+                // already been loaded by wp-settings.php earlier in the request
+                // lifecycle. Including it again would re-run its side effects
+                // (define() warnings, $wpdb re-init) for no reason.
+                if (basename($mf) === 'db.php') {
+                    continue;
+                }
+                if (strpos(file_get_contents($mf), 'Plugin Name:') !== false) {
+                    pg_log("PLUGIN_DETECTED " . basename($mf));
+                    require_once $mf;
+                    $loaded = true;
+                    break;
+                }
+            }
+            if (!$loaded) {
+                pg_log("NOTICE:no plugin entry file with 'Plugin Name:' header found in $plugin_path");
+            }
+        }
+        pg_stage_ok('load_component');
+    } catch (Throwable $e) {
+        pg_stage_fail('load_component', $e);
+        exit(1);
+    }
+}
