@@ -1,6 +1,13 @@
 # Homeboy
 
-The code factory that audits for slop, lints, tests, refactors, updates your changelog, and releases a new version in CI. If it can be fixed mechanically, Homeboy will find it and fix it without human input.
+Code factory + fleet ops CLI. Audits for slop, lints, tests, refactors, releases, deploys, manages dev rigs, and ratchets performance benchmarks — all with a stable JSON envelope so AI agents and CI scripts can drive it without screen-scraping. If it can be fixed mechanically, Homeboy will find it and fix it without human input.
+
+Homeboy ships four pillars from one binary:
+
+- **Code Factory** — `audit` / `lint` / `test` / `refactor` / `release` with the autofix loop.
+- **Fleet & Ops** — `deploy`, `ssh`, `file`, `db`, `logs`, `transfer`, `server`, `project`, `component`, `fleet`.
+- **Dev Rig** — `rig` + `rig-spec` for reproducible, code-defined local dev environments.
+- **Bench** — performance benchmarks with baseline ratchet, sibling of `lint` / `test` / `build`.
 
 ## How It Works
 
@@ -92,7 +99,7 @@ jobs:
 
 That's it. PRs get quality checks with autofix. Main gets continuous releases. See [code-factory.md](docs/code-factory.md) for the full pipeline architecture with quality gates, baseline ratchet, and autofix loops.
 
-## What Homeboy Checks
+## Capabilities
 
 ### Audit
 
@@ -121,6 +128,27 @@ Structural improvements with safety tiers:
 
 - **Safe** — deterministic fixes auto-applied with preflight validation (imports, registrations, namespace fixes, visibility changes, doc updates)
 - **PlanOnly** — method stubs, function removals (human review required)
+
+### Rig
+
+Code-defined, reproducible local dev environments. A rig is a JSON spec at `~/.config/homeboy/rigs/<id>.json` that captures everything a dev setup needs — which components, which background services, which symlinks, which pre-flight invariants — and a linear pipeline that materializes it.
+
+- **Service supervision** — `http-static` and `command` service kinds run detached, tracked by PID, logs captured per service
+- **Pipeline steps** — `service`, `command`, `symlink`, `check`, `git`, `build`. Typed primitives reuse Homeboy's existing build/git plumbing instead of shelling out blindly.
+- **Git ops (MVP)** — `status`, `pull`, `fetch`, `checkout`, `current-branch`. `rebase` / `cherry-pick` are deferred.
+- **Verbs** — `rig up` materializes the env, `rig check` reports health without fail-fast, `rig down` tears it down, `rig status` reports running services and last run timestamps.
+- **Variable expansion** — `${components.<id>.path}`, `${env.<NAME>}`, and `~` work across `cwd`, `command`, `link`, `target`, and check fields.
+
+The use case: cross-repo setups that today live as wiki runbooks (Studio + Playground combined-fixes, WordPress core + Gutenberg dev, sandbox + tunnel, etc).
+
+### Bench
+
+Performance benchmarks as a first-class capability, sibling of `lint` / `test` / `build`. Extensions provide the runner; Homeboy owns regression detection and the baseline ratchet.
+
+- **Baseline storage** — per-scenario snapshots stored in `homeboy.json` under `baselines.bench`. `--baseline` saves, `--ratchet` auto-updates on improvement, `--ignore-baseline` skips comparison.
+- **Regression policy** — runners declare `metric_policies` for arbitrary metrics (latency, throughput, error rate, memory). Direction (`lower_is_better` / `higher_is_better`) and percent/absolute tolerances are per-metric. Legacy fallback compares `p95_ms` with `--regression-threshold` (default 5%).
+- **Rig-pinned baselines** — `--rig <id>` keys the baseline as `bench.rig.<id>` so per-environment runs don't fight each other.
+- **Strict envelope** — runner output schema is locked at the top level; scenario-level extras are tolerated for diagnostics. Regressions exit `1` regardless of the runner's own exit code.
 
 ## The Autofix Loop
 
@@ -156,6 +184,8 @@ Deploy components to servers, manage SSH connections, run remote commands, tail 
 
 ## Commands
 
+### Code Factory
+
 | Command | What it does |
 |---------|-------------|
 | `audit` | Discover conventions, flag drift, autofix. Baseline ratchet. |
@@ -163,19 +193,54 @@ Deploy components to servers, manage SSH connections, run remote commands, tail 
 | `test` | Run tests. Drift detection for renamed/deleted symbols. |
 | `refactor` | Structural renaming, decomposition, and auto-refactor with safety tiers. |
 | `release` | Automated version bump + changelog + tag + push from conventional commits. |
-| `deploy` | Push components to projects. Single, multi-project, fleet, or shared. |
 | `version` | Semantic version management with configurable file targets. |
 | `changelog` | Add/finalize categorized changelog entries. |
 | `changes` | Show commits and diffs since last version tag. |
-| `status` | Repo state overview: uncommitted, needs-bump, ready. |
 | `build` | Build a component using its configured build command. |
 | `git` | Component-aware git operations. |
+| `status` | Repo state overview: uncommitted, needs-bump, ready, docs-only. |
+
+### Fleet & Ops
+
+| Command | What it does |
+|---------|-------------|
+| `deploy` | Push components to projects. Single, multi-project, fleet, or shared. |
 | `ssh` | Managed SSH connections to configured servers. |
 | `file` | Remote file operations: list, read, write, find, grep. |
 | `db` | Remote database queries, search, and tunneling. |
 | `logs` | Remote log viewing and searching with live tailing. |
 | `transfer` | File transfer between servers or local/remote. |
+| `server` | Manage server connection definitions. |
+| `project` | Manage project definitions and their server bindings. |
+| `component` | Manage component definitions (plugins, themes, CLIs, libraries). |
 | `fleet` | Create and manage named groups of projects. |
+
+### Dev Rig
+
+| Command | What it does |
+|---------|-------------|
+| `rig` | Bring up / tear down / health-check reproducible local dev environments. |
+| `rig-spec` | Inspect and validate the JSON spec format used by `rig`. |
+
+### Bench
+
+| Command | What it does |
+|---------|-------------|
+| `bench` | Run performance benchmarks with baseline ratchet and regression gating. |
+
+### Meta
+
+| Command | What it does |
+|---------|-------------|
+| `init` | Deprecated alias for `status --full`. |
+| `auth` | Authenticate with a project's API; credentials stored in OS keychain. |
+| `api` | Direct authenticated calls against a project's API. |
+| `audit-rules` | Inspect and manage audit rules and confidence gating. |
+| `extension` | Install, list, and update extensions. |
+| `list` | List registered components, projects, servers, fleets. |
+| `config` | Read and write Homeboy configuration. |
+| `supports` | Machine-readable CLI capability checks for shell wrappers. |
+| `upgrade` | Self-upgrade the homeboy binary. |
 | `docs` | Browse embedded documentation. All docs ship in the binary. |
 
 Extensions add platform-specific commands at runtime (e.g., `homeboy wp` for WordPress, `homeboy cargo` for Rust).
