@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Node.js bench runner for `homeboy bench`.
+#
+# Discovers `bench/**/*.bench.{ts,mjs,js}` workloads under the component
+# root, runs each via the bench-runner.mjs harness, and writes the
+# BenchResults JSON envelope homeboy core expects.
+#
+# Standard env vars (set by homeboy core):
+#   HOMEBOY_EXTENSION_PATH       — path to this extension
+#   HOMEBOY_COMPONENT_PATH       — path to the Node.js project
+#   HOMEBOY_COMPONENT_ID         — component identifier
+#   HOMEBOY_BENCH_ITERATIONS     — iterations per workload (default 10)
+#   HOMEBOY_BENCH_RESULTS_FILE   — where core wants the envelope written
+#   HOMEBOY_DEBUG                — verbose output
+
+if ((BASH_VERSINFO[0] < 4)); then
+    echo "ERROR: bash 4.0+ required (found ${BASH_VERSION})" >&2
+    case "$(uname -s)" in
+        Darwin) echo "  brew install bash" >&2 ;;
+    esac
+    exit 1
+fi
+
+FAILED_STEP=""
+FAILURE_OUTPUT=""
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/resolve-context.sh
+source "${SCRIPT_DIR}/../lib/resolve-context.sh"
+homeboy_resolve_context
+homeboy_require_package_json
+
+print_failure_summary() {
+    if [ -n "$FAILED_STEP" ]; then
+        echo ""
+        echo "============================================"
+        echo "BENCH FAILED: $FAILED_STEP"
+        echo "============================================"
+        if [ -n "$FAILURE_OUTPUT" ]; then
+            echo ""
+            echo "Error details:"
+            echo "$FAILURE_OUTPUT"
+        fi
+    fi
+}
+trap print_failure_summary EXIT
+
+ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
+RESULTS_FILE="${HOMEBOY_BENCH_RESULTS_FILE:-${PROJECT_PATH}/.node-bench-results.json}"
+BENCH_DIR="${PROJECT_PATH}/bench"
+
+# No workloads → emit an empty-but-valid envelope so core's parser doesn't
+# treat the absence as a crash. Same shape as the WP runner's no-tests-bench
+# path.
+if [ ! -d "$BENCH_DIR" ]; then
+    echo ""
+    echo "⚠ No bench/ directory found at ${BENCH_DIR}"
+    echo "  Skipping bench run — nothing to measure."
+    echo ""
+    cat > "$RESULTS_FILE" <<EMPTY
+{"component_id":"${COMPONENT_ID}","iterations":0,"scenarios":[]}
+EMPTY
+    exit 0
+fi
+
+# Locate a tsx-capable runner. tsx unifies .ts/.mjs/.js workload loading
+# so workload authors don't have to think about transpilation. We look for
+# tsx in the component's own node_modules first (so it pins to whatever
+# version the project uses), then fall back to npx.
+TSX_BIN=""
+if [ -x "${PROJECT_PATH}/node_modules/.bin/tsx" ]; then
+    TSX_BIN="${PROJECT_PATH}/node_modules/.bin/tsx"
+elif command -v tsx >/dev/null 2>&1; then
+    TSX_BIN="tsx"
+elif command -v npx >/dev/null 2>&1; then
+    TSX_BIN="npx --yes tsx"
+else
+    FAILED_STEP="tsx not available"
+    FAILURE_OUTPUT="Install tsx: npm i -D tsx (in ${PROJECT_PATH}) or globally."
+    exit 1
+fi
+
+export HOMEBOY_BENCH_RESULTS_FILE="$RESULTS_FILE"
+export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
+export HOMEBOY_COMPONENT_PATH="$PROJECT_PATH"
+export HOMEBOY_BENCH_ITERATIONS="$ITERATIONS"
+
+echo "Running Node.js benchmarks..."
+echo "  Component: ${COMPONENT_ID} (${PROJECT_PATH})"
+echo "  Iterations: ${ITERATIONS}"
+
+cd "$PROJECT_PATH"
+
+set +e
+# shellcheck disable=SC2086 # word-splitting is intentional for npx --yes tsx
+$TSX_BIN "${SCRIPT_DIR}/bench-runner.mjs"
+runner_exit=$?
+set -e
+
+if [ $runner_exit -ne 0 ]; then
+    FAILED_STEP="bench-runner.mjs exited with code $runner_exit"
+    exit $runner_exit
+fi
+
+if [ ! -f "$RESULTS_FILE" ]; then
+    FAILED_STEP="Bench completed but no results file at $RESULTS_FILE"
+    exit 1
+fi
+
+echo ""
+echo "Node.js bench run complete."

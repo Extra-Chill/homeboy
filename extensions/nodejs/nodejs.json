@@ -130,10 +130,20 @@
     }
   },
   "build": {
+    "extension_script": "scripts/build/build-runner.sh",
     "cleanup_paths": [
       "node_modules",
       "dist"
     ]
+  },
+  "lint": {
+    "extension_script": "scripts/lint/lint-runner.sh"
+  },
+  "test": {
+    "extension_script": "scripts/test/test-runner.sh"
+  },
+  "bench": {
+    "extension_script": "scripts/bench/bench-runner.sh"
   },
   "actions": [
     {
