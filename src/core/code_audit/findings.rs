@@ -189,6 +189,27 @@ mod tests {
     }
 
     #[test]
+    fn test_build_findings() {
+        let results = vec![CheckResult {
+            convention_name: "Step Types".to_string(),
+            status: CheckStatus::Drift,
+            conforming_count: 2,
+            total_count: 3,
+            outliers: vec![Outlier {
+                file: "agent-ping.php".to_string(),
+                noisy: false,
+                deviations: vec![Deviation {
+                    kind: AuditFinding::MissingMethod,
+                    description: "Missing method: validate".to_string(),
+                    suggestion: "Add validate()".to_string(),
+                }],
+            }],
+        }];
+
+        assert_eq!(build_findings(&results).len(), 1);
+    }
+
+    #[test]
     fn fragmented_produces_no_findings() {
         // Fragmented conventions (< 50% confidence) are suppressed.
         // The convention metadata still appears in the report, but individual
@@ -289,5 +310,24 @@ mod tests {
         assert!(!AuditFinding::OrphanedTest
             .confidence()
             .allows_automated_refactor());
+    }
+
+    #[test]
+    fn test_confidence() {
+        assert_eq!(
+            AuditFinding::CompilerWarning.confidence(),
+            FindingConfidence::Structural
+        );
+        assert_eq!(
+            AuditFinding::OrphanedTest.confidence(),
+            FindingConfidence::Heuristic
+        );
+    }
+
+    #[test]
+    fn test_allows_automated_refactor() {
+        assert!(FindingConfidence::Structural.allows_automated_refactor());
+        assert!(!FindingConfidence::Graph.allows_automated_refactor());
+        assert!(!FindingConfidence::Heuristic.allows_automated_refactor());
     }
 }

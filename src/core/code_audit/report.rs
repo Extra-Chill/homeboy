@@ -203,29 +203,8 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
     let mut automated_count = 0usize;
     let mut manual_only = 0usize;
     let mut by_kind: BTreeMap<String, FixabilityKindBreakdown> = BTreeMap::new();
-
-    for fix in &fix_result.fixes {
-        for insertion in &fix.insertions {
-            let kind_key = finding_kind_key(&insertion.finding);
-            let entry = by_kind.entry(kind_key).or_insert(FixabilityKindBreakdown {
-                total: 0,
-                automated: 0,
-                manual_only: 0,
-            });
-            entry.total += 1;
-
-            if insertion.auto_apply {
-                automated_count += 1;
-                entry.automated += 1;
-            } else {
-                manual_only += 1;
-                entry.manual_only += 1;
-            }
-        }
-    }
-
-    for new_file in &fix_result.new_files {
-        let kind_key = finding_kind_key(&new_file.finding);
+    let mut count_fixability = |finding: &AuditFinding, auto_apply: bool| {
+        let kind_key = finding_kind_key(finding);
         let entry = by_kind.entry(kind_key).or_insert(FixabilityKindBreakdown {
             total: 0,
             automated: 0,
@@ -233,13 +212,23 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
         });
         entry.total += 1;
 
-        if new_file.auto_apply {
+        if auto_apply {
             automated_count += 1;
             entry.automated += 1;
         } else {
             manual_only += 1;
             entry.manual_only += 1;
         }
+    };
+
+    for fix in &fix_result.fixes {
+        for insertion in &fix.insertions {
+            count_fixability(&insertion.finding, insertion.auto_apply);
+        }
+    }
+
+    for new_file in &fix_result.new_files {
+        count_fixability(&new_file.finding, new_file.auto_apply);
     }
 
     let fixable_count = automated_count + manual_only;

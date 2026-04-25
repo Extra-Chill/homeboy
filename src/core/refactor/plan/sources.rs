@@ -1320,6 +1320,11 @@ mod tests {
     }
 
     #[test]
+    fn test_analyze_stage_overlaps() {
+        assert!(analyze_stage_overlaps(&[]).is_empty());
+    }
+
+    #[test]
     fn analyze_stage_overlaps_ignores_disjoint_files() {
         let stages = vec![
             SourceStageSummary {
@@ -1395,6 +1400,45 @@ mod tests {
     }
 
     #[test]
+    fn test_summarize_source_totals() {
+        let totals = summarize_source_totals(&[], 0);
+
+        assert_eq!(totals.stages_with_edits, 0);
+        assert_eq!(totals.total_edits, 0);
+        assert_eq!(totals.total_files_selected, 0);
+    }
+
+    #[test]
+    fn test_lint_refactor_request() {
+        let root = PathBuf::from("/tmp/homeboy-lint-refactor-request");
+        let request = lint_refactor_request(
+            test_component(&root),
+            root,
+            vec![("key".to_string(), "value".to_string())],
+            LintSourceOptions::default(),
+            true,
+        );
+
+        assert_eq!(request.sources, vec!["lint".to_string()]);
+        assert!(request.write);
+    }
+
+    #[test]
+    fn test_build_test_refactor_request() {
+        let root = PathBuf::from("/tmp/homeboy-test-refactor-request");
+        let request = build_test_refactor_request(
+            test_component(&root),
+            root,
+            Vec::new(),
+            TestSourceOptions::default(),
+            false,
+        );
+
+        assert_eq!(request.sources, vec!["test".to_string()]);
+        assert!(!request.write);
+    }
+
+    #[test]
     fn collect_refactor_sources_audit_write_uses_audit_refactor_engine() {
         let root = tmp_dir("audit-write");
         fs::create_dir_all(root.join("commands")).unwrap();
@@ -1441,6 +1485,34 @@ mod tests {
             .any(|warning| warning.starts_with("audit refactor: ")));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_collect_refactor_sources() {
+        let _collect: fn(RefactorSourceRequest) -> crate::Result<RefactorSourceRun> =
+            collect_refactor_sources;
+    }
+
+    #[test]
+    fn test_run_lint_refactor() {
+        let _run: fn(
+            Component,
+            PathBuf,
+            Vec<(String, String)>,
+            LintSourceOptions,
+            bool,
+        ) -> crate::Result<RefactorSourceRun> = run_lint_refactor;
+    }
+
+    #[test]
+    fn test_run_test_refactor() {
+        let _run: fn(
+            Component,
+            PathBuf,
+            Vec<(String, String)>,
+            TestSourceOptions,
+            bool,
+        ) -> crate::Result<RefactorSourceRun> = run_test_refactor;
     }
 
     #[test]
@@ -1529,6 +1601,14 @@ mod tests {
                 .expect("sources should normalize");
 
         assert_eq!(normalized, vec!["audit", "lint", "test"]);
+    }
+
+    #[test]
+    fn test_normalize_sources() {
+        assert_eq!(
+            normalize_sources(&["test".to_string()]).unwrap(),
+            vec!["test"]
+        );
     }
 
     #[test]

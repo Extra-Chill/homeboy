@@ -198,6 +198,16 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_fix_policy() {
+        let mut result = result_with(insertion(AuditFinding::CompilerWarning));
+
+        let summary = apply_fix_policy(&mut result, false, &FixPolicy::default());
+
+        assert_eq!(summary.visible_insertions, 1);
+        assert_eq!(summary.auto_apply_insertions, 1);
+    }
+
+    #[test]
     fn heuristic_findings_are_dropped_in_write_mode() {
         let mut result = result_with(insertion(AuditFinding::OrphanedTest));
 
