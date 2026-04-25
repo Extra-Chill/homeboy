@@ -19,6 +19,7 @@ use regex::Regex;
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use super::idiomatic::is_trivial_method;
 use super::test_mapping::{
     build_source_name_index, partition_fingerprints, source_to_test_path, test_to_source_path,
 };
@@ -416,66 +417,6 @@ fn is_critical(path: &str, config: &TestMappingConfig) -> bool {
         .critical_patterns
         .iter()
         .any(|pattern| path.contains(pattern))
-}
-
-/// Trivial methods that don't warrant individual test coverage findings.
-fn is_trivial_method(name: &str) -> bool {
-    let trivial = [
-        // Rust core trait methods
-        "new",
-        "default",
-        "from",
-        "into",
-        "clone",
-        "fmt",
-        "display",
-        "eq",
-        "hash",
-        "drop",
-        // Rust common conversions
-        "as_str",
-        "as_ref",
-        "as_mut",
-        "to_string",
-        "to_str",
-        "to_owned",
-        // Rust common accessors
-        "is_empty",
-        "len",
-        "iter",
-        // Serde
-        "serialize",
-        "deserialize",
-        // Builder pattern
-        "build",
-        "builder",
-        // PHP magic methods
-        "__construct",
-        "__destruct",
-        "__toString",
-        "__clone",
-        "get_instance",
-        "getInstance",
-        // Test lifecycle methods (PHPUnit / WP_UnitTestCase)
-        // These are optional overrides inherited from the base test class —
-        // not every test class needs to define them.
-        "set_up",
-        "tear_down",
-        "set_up_before_class",
-        "tear_down_after_class",
-        "setUp",
-        "tearDown",
-        "setUpBeforeClass",
-        "tearDownAfterClass",
-    ];
-    if trivial.contains(&name) {
-        return true;
-    }
-    // Prefix-based rules: simple getters/accessors/predicates
-    if name.starts_with("get_") || name.starts_with("is_") || name.starts_with("has_") {
-        return true;
-    }
-    false
 }
 
 /// Check if a method should be flagged based on its visibility.
