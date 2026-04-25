@@ -147,7 +147,17 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     fi
 fi
 
-PLUGIN_SLUG="$(basename "$PLUGIN_PATH")"
+# PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
+# mount the component-under-test. When homeboy core tells us the canonical
+# component id (HOMEBOY_COMPONENT_ID), use it — basename($PLUGIN_PATH)
+# breaks for git-worktree checkouts (`<repo>@<branch-slug>`) and any
+# workspace where the on-disk directory name diverges from the canonical
+# slug. See bench-runner-playground.sh for the full rationale.
+if [ -n "${COMPONENT_ID:-}" ]; then
+    PLUGIN_SLUG="$COMPONENT_ID"
+else
+    PLUGIN_SLUG="$(basename "$PLUGIN_PATH")"
+fi
 MOUNT_ARGS=()
 
 MOUNT_ARGS+=("--mount" "${PLUGIN_PATH}:/wordpress/wp-content/plugins/${PLUGIN_SLUG}")

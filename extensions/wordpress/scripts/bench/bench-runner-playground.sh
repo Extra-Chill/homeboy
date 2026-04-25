@@ -76,8 +76,24 @@ else
     COMPONENT_ID="$(basename "$PLUGIN_PATH")"
 fi
 
-PLUGIN_SLUG="$(basename "$PLUGIN_PATH")"
-COMPONENT_ID="${COMPONENT_ID:-$PLUGIN_SLUG}"
+# PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
+# mount the component-under-test. The historical default was
+# `basename($PLUGIN_PATH)`, which works for canonical plugin checkouts
+# whose directory name equals the plugin slug. It breaks for git-worktree
+# checkouts (`<repo>@<branch-slug>` convention) and for any workspace where
+# the on-disk directory name diverges from the canonical slug — the wrong
+# wp-content/plugins/ path makes plugin-internal asset URLs, intra-plugin
+# require_once paths, and `Requires Plugins:` resolution all fail.
+#
+# When homeboy core tells us the canonical component id (HOMEBOY_COMPONENT_ID),
+# use it. Fall back to basename only when no id is set (direct invocation
+# from a CWD that isn't a registered component).
+if [ -n "${COMPONENT_ID:-}" ]; then
+    PLUGIN_SLUG="$COMPONENT_ID"
+else
+    PLUGIN_SLUG="$(basename "$PLUGIN_PATH")"
+    COMPONENT_ID="$PLUGIN_SLUG"
+fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: [bench:playground] Extension path: $EXTENSION_PATH"
