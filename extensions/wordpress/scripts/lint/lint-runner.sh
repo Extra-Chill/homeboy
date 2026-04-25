@@ -72,6 +72,17 @@ RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context
 
+homeboy_mktemp() {
+    local template="$1"
+    local tmpdir="${HOMEBOY_CACHE_DIR:-${TMPDIR:-/tmp}}"
+
+    if [ -d "$tmpdir" ] && [ -w "$tmpdir" ]; then
+        mktemp "${tmpdir%/}/${template}" 2>/dev/null && return 0
+    fi
+
+    mktemp 2>/dev/null
+}
+
 # Merge additional findings (e.g. PHPStan) into the HOMEBOY_LINT_FINDINGS_FILE.
 # Appends entries from a JSON array file into the existing findings sidecar,
 # so the identity-based baseline ratchet sees findings from all linters.
@@ -765,7 +776,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     # Create temp file for PHPStan findings if baseline sidecar is active
     _PHPSTAN_FINDINGS_TMPFILE=""
     if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
-        _PHPSTAN_FINDINGS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/phpstan-findings-XXXXXX.json")
+        _PHPSTAN_FINDINGS_TMPFILE=$(homeboy_mktemp 'phpstan-findings.XXXXXX')
     fi
 
     # Run PHPStan (warn-only - does not affect exit code)
@@ -855,7 +866,7 @@ run_phpstan() {
 # Create temp file for PHPStan findings if baseline sidecar is active
 _PHPSTAN_FINDINGS_TMPFILE=""
 if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
-    _PHPSTAN_FINDINGS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/phpstan-findings-XXXXXX.json")
+    _PHPSTAN_FINDINGS_TMPFILE=$(homeboy_mktemp 'phpstan-findings.XXXXXX')
 fi
 
 # Run PHPStan (warn-only - does not affect exit code)

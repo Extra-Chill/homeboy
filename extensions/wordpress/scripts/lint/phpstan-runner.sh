@@ -71,7 +71,7 @@ homeboy_mktemp() {
     local tmpdir="${HOMEBOY_CACHE_DIR:-${TMPDIR:-/tmp}}"
 
     if [ -d "$tmpdir" ] && [ -w "$tmpdir" ]; then
-        mktemp "${tmpdir}/${template}" 2>/dev/null && return 0
+        mktemp "${tmpdir%/}/${template}" 2>/dev/null && return 0
     fi
 
     mktemp 2>/dev/null
@@ -93,7 +93,7 @@ generate_dependency_config() {
     local has_dependencies=0
     local has_baseline=0
 
-    tmpfile=$(homeboy_mktemp 'phpstan-dependencies-XXXXXX.neon')
+    tmpfile=$(homeboy_mktemp 'phpstan-dependencies.XXXXXX')
 
     {
         printf '%s\n' 'includes:'
@@ -186,7 +186,7 @@ generate_composite_autoload() {
     local tmpfile
     local component_autoload="${PLUGIN_PATH}/vendor/autoload.php"
 
-    tmpfile=$(homeboy_mktemp 'homeboy-phpstan-autoload-XXXXXX.php')
+    tmpfile=$(homeboy_mktemp 'homeboy-phpstan-autoload.XXXXXX')
 
     {
         printf '%s\n' '<?php'
@@ -271,7 +271,7 @@ PHPSTAN_TMPCONFIG=""
 generate_phpstan_config() {
     local max_processes="${1:-}"
     local tmpfile
-    tmpfile=$(homeboy_mktemp 'phpstan-XXXXXX.neon')
+    tmpfile=$(homeboy_mktemp 'phpstan.XXXXXX')
     {
         printf 'includes:\n'
         printf '    - %s\n' "${PHPSTAN_BASE_CONFIG}"
@@ -366,7 +366,7 @@ prepare_phpstan_retry_config() {
 if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     set +e
     # Capture stderr separately to show PHPStan errors if it fails
-    stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
+    stderr_file=$(homeboy_mktemp 'phpstan-stderr.XXXXXX')
     json_output=$("$PHPSTAN_BIN" "${phpstan_args[@]}" --error-format=json 2>"$stderr_file")
     json_exit=$?
     stderr_output=$(cat "$stderr_file")
@@ -384,7 +384,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         # → COMPONENT_BASELINE include chain (no --baseline CLI flag in PHPStan 2.x).
         [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
         retry_args+=(.)
-        stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
+        stderr_file=$(homeboy_mktemp 'phpstan-stderr.XXXXXX')
         # PHPStan --debug mode has a known interaction with --autoload-file
         # where running from a CWD different than the analysed path causes
         # analysis to stop after the first file (exit 0 with no results).
@@ -645,7 +645,7 @@ fi
 if [ "$PHPSTAN_CRITICAL_ONLY" -eq 1 ]; then
     echo "Running PHPStan critical-only check (style checks skipped)..."
     set +e
-    stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
+    stderr_file=$(homeboy_mktemp 'phpstan-stderr.XXXXXX')
     json_output=$("$PHPSTAN_BIN" "${phpstan_args[@]}" --error-format=json 2>"$stderr_file")
     full_exit=$?
     stderr_output=$(cat "$stderr_file")
@@ -717,8 +717,8 @@ set +e
 # inspecting stderr alone misses the failure signature. We print the captured
 # streams below once the exit code is known — this keeps things simple and
 # avoids race conditions with `tee` in process substitution.
-stdout_file=$(homeboy_mktemp 'phpstan-stdout-XXXXXX.log')
-stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
+stdout_file=$(homeboy_mktemp 'phpstan-stdout.XXXXXX')
+stderr_file=$(homeboy_mktemp 'phpstan-stderr.XXXXXX')
 "$PHPSTAN_BIN" "${phpstan_args[@]}" >"$stdout_file" 2>"$stderr_file"
 full_exit=$?
 stdout_output=$(cat "$stdout_file")
@@ -744,8 +744,8 @@ if [ "$full_exit" -ne 0 ] && \
     [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
     retry_args+=(.)
     set +e
-    retry_stdout_file=$(homeboy_mktemp 'phpstan-stdout-XXXXXX.log')
-    retry_stderr_file=$(homeboy_mktemp 'phpstan-stderr-XXXXXX.log')
+    retry_stdout_file=$(homeboy_mktemp 'phpstan-stdout.XXXXXX')
+    retry_stderr_file=$(homeboy_mktemp 'phpstan-stderr.XXXXXX')
     # PHPStan --debug + --autoload-file + CWD != analysed path causes analysis
     # to stop after the first file. Work around by running from inside
     # $PLUGIN_PATH and passing `.` as the positional path argument.

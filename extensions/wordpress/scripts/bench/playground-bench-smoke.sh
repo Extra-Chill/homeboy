@@ -41,7 +41,7 @@ if [ ! -d "${EXTENSION_PATH}/vendor/wp-phpunit" ]; then
     exit 1
 fi
 
-RESULTS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/bench-smoke-results.XXXXXX.json")
+RESULTS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/bench-smoke-results.XXXXXX")
 
 echo "============================================"
 echo "Playground bench harness smoke test"

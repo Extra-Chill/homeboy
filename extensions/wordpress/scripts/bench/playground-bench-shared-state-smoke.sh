@@ -43,7 +43,7 @@ if [ ! -d "${EXTENSION_PATH}/vendor/wp-phpunit" ]; then
     exit 1
 fi
 
-RESULTS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/bench-shared-smoke.XXXXXX.json")
+RESULTS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/bench-shared-smoke.XXXXXX")
 SHARED_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/bench-shared-smoke.XXXXXX")
 
 cleanup() {

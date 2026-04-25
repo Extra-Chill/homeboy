@@ -212,7 +212,7 @@ if [ ! -f "$TEMPLATE" ]; then
     exit 1
 fi
 
-WRAPPER_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/pg-bench-runner.XXXXXX.php")
+WRAPPER_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/pg-bench-runner.XXXXXX")
 sed \
     -e "s|{{PLUGIN_SLUG}}|${PLUGIN_SLUG}|g" \
     -e "s|{{COMPONENT_ID}}|${COMPONENT_ID}|g" \
