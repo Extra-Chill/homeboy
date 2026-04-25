@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.17.1] - 2026-04-25
+
+### Fixed
+- plugin slug honors HOMEBOY_COMPONENT_ID instead of basename
+
 ## [2.17.0] - 2026-04-25
 
 ### Added
