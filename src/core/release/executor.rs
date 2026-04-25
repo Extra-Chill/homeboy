@@ -253,7 +253,14 @@ pub(crate) fn run_git_tag(
 
 /// Push commits (and tags) to the remote.
 pub(crate) fn run_git_push(component: &Component, component_id: &str) -> Result<ReleaseStepResult> {
-    let output = crate::git::push_at(Some(component_id), true, Some(&component.local_path))?;
+    let output = crate::git::push_at(
+        Some(component_id),
+        crate::git::PushOptions {
+            tags: true,
+            force_with_lease: false,
+        },
+        Some(&component.local_path),
+    )?;
     let data = serde_json::to_value(output)
         .map_err(|e| Error::internal_json(e.to_string(), Some("git push output".to_string())))?;
     Ok(step_success("git.push", "git.push", Some(data), Vec::new()))

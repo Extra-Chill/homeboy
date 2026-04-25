@@ -625,7 +625,13 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
 
     if !tag_exists_remote {
         log_status!("recover", "Pushing to remote...");
-        let push_result = git::push(Some(&input.component_id), true)?;
+        let push_result = git::push(
+            Some(&input.component_id),
+            git::PushOptions {
+                tags: true,
+                force_with_lease: false,
+            },
+        )?;
         if !push_result.success {
             return Err(Error::git_command_failed(format!(
                 "Failed to push: {}",

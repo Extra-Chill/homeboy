@@ -216,12 +216,26 @@ pub enum GitOp {
     Status,
     /// `git pull [args...]`.
     Pull,
+    /// `git push [args...]`. Use `args` for `--force-with-lease`,
+    /// `--follow-tags`, etc. Plain `--force` is intentionally NOT
+    /// blocked at the rig layer — rigs can be reproduced or reverted, so
+    /// the safety boundary lives at the CLI surface.
+    Push,
     /// `git fetch [args...]`.
     Fetch,
     /// `git checkout [args...]`.
     Checkout,
     /// `git rev-parse --abbrev-ref HEAD` — returns current branch in logs.
     CurrentBranch,
+    /// `git rebase [<onto>]`. Default with no `args` rebases onto
+    /// `@{upstream}`. Use `args` to specify the upstream ref or extra
+    /// rebase flags.
+    Rebase,
+    /// `git cherry-pick <refs...>`. `args` is the list of commit refs to
+    /// pick (SHAs, branches, ranges). PR-number expansion via `gh` is a
+    /// CLI-only convenience and not modelled at the rig step level —
+    /// resolve PR numbers to SHAs in the rig spec.
+    CherryPick,
 }
 
 /// Service operation in a pipeline step.

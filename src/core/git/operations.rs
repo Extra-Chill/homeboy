@@ -265,6 +265,8 @@ struct BulkIdsInput {
     component_ids: Vec<String>,
     #[serde(default)]
     tags: bool,
+    #[serde(default)]
+    force_with_lease: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -742,23 +744,35 @@ pub fn commit_from_json(id: Option<&str>, json_spec: &str) -> Result<CommitJsonO
     Ok(CommitJsonOutput::Single(output))
 }
 
+/// Options for [`push`].
+#[derive(Debug, Clone, Default)]
+pub struct PushOptions {
+    /// Push tags as well (`--follow-tags`).
+    pub tags: bool,
+    /// Use `--force-with-lease` for safe force-pushes (e.g. after a rebase).
+    /// Deliberately the only force flavour exposed — never plain `--force`.
+    pub force_with_lease: bool,
+}
+
 /// Push local commits for a component.
-pub fn push(component_id: Option<&str>, tags: bool) -> Result<GitOutput> {
-    push_at(component_id, tags, None)
+pub fn push(component_id: Option<&str>, options: PushOptions) -> Result<GitOutput> {
+    push_at(component_id, options, None)
 }
 
 /// Like [`push`] but with an explicit path override for git operations.
 pub fn push_at(
     component_id: Option<&str>,
-    tags: bool,
+    options: PushOptions,
     path_override: Option<&str>,
 ) -> Result<GitOutput> {
     let (id, path) = resolve_target(component_id, path_override)?;
-    let args: Vec<&str> = if tags {
-        vec!["push", "--follow-tags"]
-    } else {
-        vec!["push"]
-    };
+    let mut args: Vec<&str> = vec!["push"];
+    if options.tags {
+        args.push("--follow-tags");
+    }
+    if options.force_with_lease {
+        args.push("--force-with-lease");
+    }
     let output = execute_git(&path, &args).map_err(|e| Error::git_command_failed(e.to_string()))?;
     Ok(GitOutput::from_output(id, path, "push", output))
 }
@@ -774,8 +788,15 @@ pub fn push_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
         )
     })?;
     let push_tags = input.tags;
+    let force_with_lease = input.force_with_lease;
     Ok(run_bulk_ids(&input.component_ids, "push", |id| {
-        push(Some(id), push_tags)
+        push(
+            Some(id),
+            PushOptions {
+                tags: push_tags,
+                force_with_lease,
+            },
+        )
     }))
 }
 
@@ -790,6 +811,189 @@ pub fn pull_at(component_id: Option<&str>, path_override: Option<&str>) -> Resul
     let output =
         execute_git(&path, &["pull"]).map_err(|e| Error::git_command_failed(e.to_string()))?;
     Ok(GitOutput::from_output(id, path, "pull", output))
+}
+
+/// Options for [`rebase`].
+#[derive(Debug, Clone, Default)]
+pub struct RebaseOptions {
+    /// Upstream / target ref to rebase onto. `None` defaults to the
+    /// current branch's tracked upstream (`@{upstream}`), matching
+    /// `git pull --rebase` semantics.
+    pub onto: Option<String>,
+    /// `git rebase --continue` after manual conflict resolution. Mutually
+    /// exclusive with `abort` at the CLI layer.
+    pub continue_: bool,
+    /// `git rebase --abort` to bail out of an in-progress rebase.
+    pub abort: bool,
+}
+
+/// Rebase the current branch onto another ref.
+///
+/// Default behaviour (no `onto`) is `git rebase @{upstream}`, which drops
+/// commits whose patch-id matches a commit already in upstream — the
+/// standard rebase merged-commit dedup. Squash-merged PRs (different
+/// patch-id) are NOT dropped by default; that case will land in a
+/// follow-up via `gh`-aware PR drop.
+///
+/// On conflict, the operation returns a `GitOutput { success: false }`
+/// with stderr from git. The caller resolves with raw `git`, then runs
+/// `homeboy git rebase --continue` or `--abort`. No state-machine
+/// orchestration in MVP.
+pub fn rebase(component_id: Option<&str>, options: RebaseOptions) -> Result<GitOutput> {
+    rebase_at(component_id, options, None)
+}
+
+/// Like [`rebase`] but with an explicit path override.
+pub fn rebase_at(
+    component_id: Option<&str>,
+    options: RebaseOptions,
+    path_override: Option<&str>,
+) -> Result<GitOutput> {
+    let (id, path) = resolve_target(component_id, path_override)?;
+
+    let args: Vec<String> = if options.abort {
+        vec!["rebase".into(), "--abort".into()]
+    } else if options.continue_ {
+        vec!["rebase".into(), "--continue".into()]
+    } else {
+        let mut a = vec!["rebase".into()];
+        if let Some(onto) = options.onto.as_deref() {
+            a.push(onto.to_string());
+        }
+        // No `onto` arg → bare `git rebase` rebases onto @{upstream}.
+        a
+    };
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output =
+        execute_git(&path, &arg_refs).map_err(|e| Error::git_command_failed(e.to_string()))?;
+    Ok(GitOutput::from_output(id, path, "rebase", output))
+}
+
+/// Options for [`cherry_pick`].
+#[derive(Debug, Clone, Default)]
+pub struct CherryPickOptions {
+    /// Commit refs to cherry-pick. Accepts SHAs, branches, ranges
+    /// (`<sha1>..<sha2>`). Empty when `continue_` or `abort` is set.
+    pub refs: Vec<String>,
+    /// Cherry-pick all commits from a GitHub PR (one or more). Resolved
+    /// via `gh pr view <n> --json commits`. Each PR's commits are picked
+    /// in oldest-to-newest order. Combinable with `refs`; PR commits are
+    /// expanded first and then concatenated with explicit refs.
+    pub prs: Vec<u64>,
+    /// `git cherry-pick --continue` after manual conflict resolution.
+    pub continue_: bool,
+    /// `git cherry-pick --abort` to bail out of an in-progress pick.
+    pub abort: bool,
+}
+
+/// Cherry-pick one or more commits onto the current branch.
+///
+/// On conflict, returns `GitOutput { success: false }` with git's stderr.
+/// Resolve manually, then run with `--continue` or `--abort`.
+pub fn cherry_pick(component_id: Option<&str>, options: CherryPickOptions) -> Result<GitOutput> {
+    cherry_pick_at(component_id, options, None)
+}
+
+/// Like [`cherry_pick`] but with an explicit path override.
+pub fn cherry_pick_at(
+    component_id: Option<&str>,
+    options: CherryPickOptions,
+    path_override: Option<&str>,
+) -> Result<GitOutput> {
+    let (id, path) = resolve_target(component_id, path_override)?;
+
+    if options.abort {
+        let output = execute_git(&path, &["cherry-pick", "--abort"])
+            .map_err(|e| Error::git_command_failed(e.to_string()))?;
+        return Ok(GitOutput::from_output(id, path, "cherry-pick", output));
+    }
+    if options.continue_ {
+        let output = execute_git(&path, &["cherry-pick", "--continue"])
+            .map_err(|e| Error::git_command_failed(e.to_string()))?;
+        return Ok(GitOutput::from_output(id, path, "cherry-pick", output));
+    }
+
+    // Expand any PR numbers into commit SHAs via `gh`. PR commits come
+    // before explicit refs in argv order so the user's positional args
+    // can fine-tune ordering by interleaving — but in practice most
+    // callers pass either `--pr` or `<refs>`, not both.
+    let mut refs: Vec<String> = Vec::new();
+    for pr in &options.prs {
+        let pr_commits = resolve_pr_commits(&path, *pr)?;
+        refs.extend(pr_commits);
+    }
+    refs.extend(options.refs.iter().cloned());
+
+    if refs.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "refs",
+            "cherry-pick requires at least one commit ref or --pr <number>",
+            None,
+            Some(vec![
+                "Provide a commit ref: homeboy git cherry-pick <sha>".to_string(),
+                "Or pick a PR: homeboy git cherry-pick --pr <number>".to_string(),
+            ]),
+        ));
+    }
+
+    let mut args: Vec<String> = vec!["cherry-pick".into()];
+    args.extend(refs);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output =
+        execute_git(&path, &arg_refs).map_err(|e| Error::git_command_failed(e.to_string()))?;
+    Ok(GitOutput::from_output(id, path, "cherry-pick", output))
+}
+
+/// Resolve a GitHub PR number to its list of commit SHAs (oldest first)
+/// using `gh pr view`. Used by [`cherry_pick`] to expand `--pr <n>`.
+fn resolve_pr_commits(path: &str, pr: u64) -> Result<Vec<String>> {
+    let output = std::process::Command::new("gh")
+        .args(["pr", "view", &pr.to_string(), "--json", "commits"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| {
+            Error::git_command_failed(format!(
+                "gh pr view {}: {} (is `gh` installed and authenticated?)",
+                pr, e
+            ))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::git_command_failed(format!(
+            "gh pr view {} failed: {}",
+            pr,
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
+        Error::validation_invalid_json(
+            e,
+            Some(format!("parse `gh pr view {} --json commits`", pr)),
+            Some(stdout.chars().take(200).collect()),
+        )
+    })?;
+
+    let commits = parsed
+        .get("commits")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            Error::git_command_failed(format!(
+                "gh pr view {} returned JSON without a `commits` array",
+                pr
+            ))
+        })?;
+
+    let mut shas = Vec::with_capacity(commits.len());
+    for commit in commits {
+        let oid = commit.get("oid").and_then(|v| v.as_str()).ok_or_else(|| {
+            Error::git_command_failed(format!("gh pr view {} returned a commit without `oid`", pr))
+        })?;
+        shas.push(oid.to_string());
+    }
+    Ok(shas)
 }
 
 /// Pull multiple components from JSON spec.
@@ -1213,6 +1417,225 @@ mod tests {
         assert!(
             !super::super::is_workdir_clean(path),
             "Expected invalid path to return false"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // rebase / cherry-pick / push --force-with-lease tests
+    //
+    // These shell out to real git in tempdirs. They exercise the wiring
+    // (option struct → argv → execute_git → GitOutput) end-to-end without
+    // touching the homeboy registry. `--path` keeps resolve_target out of
+    // the registry path so the tests don't need HOME isolation.
+    // ------------------------------------------------------------------
+
+    /// Create a fresh git repo with a single committed file. Returns the
+    /// TempDir (drop-cleanup) and the repo path as a String.
+    fn init_repo_with_initial_commit() -> (tempfile::TempDir, String) {
+        use std::fs;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_string_lossy().to_string();
+
+        Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&path)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        fs::write(dir.path().join("README.md"), "initial\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-q", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    #[test]
+    fn rebase_against_self_is_a_noop_success() {
+        let (_dir, path) = init_repo_with_initial_commit();
+
+        // Rebase onto HEAD — always a no-op, exit 0.
+        let out = rebase_at(
+            None,
+            RebaseOptions {
+                onto: Some("HEAD".to_string()),
+                ..Default::default()
+            },
+            Some(&path),
+        )
+        .expect("rebase_at");
+
+        assert!(out.success, "rebase HEAD should succeed: {:?}", out.stderr);
+        assert_eq!(out.action, "rebase");
+        assert_eq!(out.path, path);
+    }
+
+    #[test]
+    fn rebase_abort_outside_of_rebase_is_an_error() {
+        let (_dir, path) = init_repo_with_initial_commit();
+
+        // git rebase --abort with no rebase in progress fails. We surface
+        // that via GitOutput { success: false, stderr } — NOT via Err —
+        // because the caller may want to inspect the message.
+        let out = rebase_at(
+            None,
+            RebaseOptions {
+                abort: true,
+                ..Default::default()
+            },
+            Some(&path),
+        )
+        .expect("rebase_at returns Ok with failed GitOutput");
+
+        assert!(!out.success);
+        assert_ne!(out.exit_code, 0);
+        assert!(
+            out.stderr.contains("rebase") || out.stderr.contains("No rebase"),
+            "expected stderr to mention rebase: {:?}",
+            out.stderr
+        );
+    }
+
+    #[test]
+    fn cherry_pick_picks_a_commit_from_another_branch() {
+        use std::fs;
+        let (dir, path) = init_repo_with_initial_commit();
+
+        // Create a side branch with a unique commit.
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "side"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        fs::write(dir.path().join("from-side.txt"), "side\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-q", "-m", "side commit"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        let side_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        // Switch back to main; pick the side commit.
+        Command::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let out = cherry_pick_at(
+            None,
+            CherryPickOptions {
+                refs: vec![side_sha.clone()],
+                ..Default::default()
+            },
+            Some(&path),
+        )
+        .expect("cherry_pick_at");
+
+        assert!(
+            out.success,
+            "cherry-pick should succeed: stderr={:?}",
+            out.stderr
+        );
+        assert!(
+            dir.path().join("from-side.txt").exists(),
+            "cherry-picked file should exist on main"
+        );
+    }
+
+    #[test]
+    fn cherry_pick_with_no_refs_and_no_pr_errors() {
+        let (_dir, path) = init_repo_with_initial_commit();
+
+        // Empty refs + no PR + not continue/abort → user-facing error,
+        // NOT a `git cherry-pick` invocation.
+        let err = cherry_pick_at(None, CherryPickOptions::default(), Some(&path))
+            .expect_err("cherry_pick with empty refs should Err");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("at least one commit ref") || msg.contains("--pr"),
+            "expected helpful error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn cherry_pick_abort_outside_of_pick_is_a_failed_output() {
+        let (_dir, path) = init_repo_with_initial_commit();
+
+        let out = cherry_pick_at(
+            None,
+            CherryPickOptions {
+                abort: true,
+                ..Default::default()
+            },
+            Some(&path),
+        )
+        .expect("cherry_pick_at returns Ok with failed GitOutput");
+
+        assert!(!out.success);
+        assert_ne!(out.exit_code, 0);
+    }
+
+    #[test]
+    fn push_options_force_with_lease_includes_flag() {
+        // We can't test the real push (no remote) but we can verify that
+        // push_at with force_with_lease=true at least invokes git with
+        // the right argv. With no remote configured, git push fails —
+        // we check stderr to confirm the flag flowed through and the
+        // failure is the expected "no remote" failure, not a wiring bug.
+        let (_dir, path) = init_repo_with_initial_commit();
+
+        let out = push_at(
+            None,
+            PushOptions {
+                tags: false,
+                force_with_lease: true,
+            },
+            Some(&path),
+        )
+        .expect("push_at");
+
+        assert!(!out.success, "push without remote should fail");
+        // The failure message is from git, not us — but it should at
+        // least mention the absence of a remote / upstream rather than
+        // anything about an unknown flag.
+        assert!(
+            !out.stderr.contains("unknown option") && !out.stderr.contains("invalid argument"),
+            "--force-with-lease should be a known flag, got: {}",
+            out.stderr
         );
     }
 }

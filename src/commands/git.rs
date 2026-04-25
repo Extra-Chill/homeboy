@@ -2,9 +2,10 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::git::{
-    self, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrOutput, IssueCommentOptions,
-    IssueCreateOptions, IssueFindOptions, IssueState, PrCommentMode, PrCommentOptions,
-    PrCreateOptions, PrEditOptions, PrFindOptions, PrState,
+    self, CherryPickOptions, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrOutput,
+    IssueCommentOptions, IssueCreateOptions, IssueFindOptions, IssueState, PrCommentMode,
+    PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
+    RebaseOptions,
 };
 use homeboy::BulkResult;
 
@@ -95,8 +96,84 @@ enum GitCommand {
         #[arg(long)]
         tags: bool,
 
+        /// Use `--force-with-lease` for safe force-pushes (e.g. after a
+        /// rebase). Refuses to overwrite the remote if it has commits the
+        /// local ref hasn't seen. Plain `--force` is intentionally not
+        /// exposed.
+        #[arg(long)]
+        force_with_lease: bool,
+
         /// Workspace path to operate on directly. Useful for unregistered
         /// checkouts (CI runners, ad-hoc clones, worktrees).
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Rebase the current branch onto another ref.
+    ///
+    /// Default (no `--onto`) rebases onto the current branch's tracked
+    /// upstream (`@{upstream}`), same semantics as `git pull --rebase`.
+    /// Git's default rebase drops commits whose patch-id matches a commit
+    /// already in upstream — squash-merged PRs are NOT dropped (different
+    /// patch-id); that case will land in a follow-up.
+    ///
+    /// On conflict, the operation returns a failed result with git's
+    /// stderr. Resolve manually, then re-run with `--continue` or
+    /// `--abort`.
+    Rebase {
+        /// Component ID. When omitted, auto-detected from CWD.
+        component_id: Option<String>,
+
+        /// Target ref to rebase onto. Defaults to the current branch's
+        /// tracked upstream (`@{upstream}`).
+        #[arg(long, value_name = "REF")]
+        onto: Option<String>,
+
+        /// Continue an in-progress rebase after manual conflict resolution.
+        /// Mutually exclusive with `--abort`.
+        #[arg(long, conflicts_with = "abort")]
+        r#continue: bool,
+
+        /// Abort an in-progress rebase and return to the pre-rebase state.
+        #[arg(long)]
+        abort: bool,
+
+        /// Workspace path to operate on directly.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Cherry-pick one or more commits onto the current branch.
+    ///
+    /// Accepts SHAs, branch names, and ranges (`<a>..<b>`) as positional
+    /// args. Use `--pr <n>` to pick all commits from a GitHub PR via `gh`.
+    /// Both can be combined.
+    ///
+    /// On conflict, returns a failed result. Resolve manually, then
+    /// re-run with `--continue` or `--abort`.
+    CherryPick {
+        /// Component ID. When omitted, auto-detected from CWD.
+        #[arg(long, short)]
+        component_id: Option<String>,
+
+        /// Commit refs to pick: SHAs, branches, ranges (`<a>..<b>`).
+        /// Multiple positional args allowed.
+        #[arg(value_name = "REF")]
+        refs: Vec<String>,
+
+        /// Cherry-pick all commits from a GitHub PR (repeatable).
+        /// Resolved via `gh pr view <n> --json commits`.
+        #[arg(long, value_name = "NUMBER")]
+        pr: Vec<u64>,
+
+        /// Continue an in-progress cherry-pick after manual conflict
+        /// resolution. Mutually exclusive with `--abort`.
+        #[arg(long, conflicts_with = "abort")]
+        r#continue: bool,
+
+        /// Abort an in-progress cherry-pick.
+        #[arg(long)]
+        abort: bool,
+
+        /// Workspace path to operate on directly.
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
@@ -518,6 +595,7 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
             json,
             component_id,
             tags,
+            force_with_lease,
             path,
         } => {
             if let Some(spec) = json {
@@ -526,7 +604,14 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
                 return Ok((GitCommandOutput::Bulk(output), exit_code));
             }
 
-            let output = git::push_at(component_id.as_deref(), tags, path.as_deref())?;
+            let output = git::push_at(
+                component_id.as_deref(),
+                PushOptions {
+                    tags,
+                    force_with_lease,
+                },
+                path.as_deref(),
+            )?;
             let exit_code = output.exit_code;
             Ok((GitCommandOutput::Single(output), exit_code))
         }
@@ -578,6 +663,46 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
                 component_id.as_deref(),
                 Some(&final_tag),
                 message.as_deref(),
+                path.as_deref(),
+            )?;
+            let exit_code = output.exit_code;
+            Ok((GitCommandOutput::Single(output), exit_code))
+        }
+        GitCommand::Rebase {
+            component_id,
+            onto,
+            r#continue,
+            abort,
+            path,
+        } => {
+            let output = git::rebase_at(
+                component_id.as_deref(),
+                RebaseOptions {
+                    onto,
+                    continue_: r#continue,
+                    abort,
+                },
+                path.as_deref(),
+            )?;
+            let exit_code = output.exit_code;
+            Ok((GitCommandOutput::Single(output), exit_code))
+        }
+        GitCommand::CherryPick {
+            component_id,
+            refs,
+            pr,
+            r#continue,
+            abort,
+            path,
+        } => {
+            let output = git::cherry_pick_at(
+                component_id.as_deref(),
+                CherryPickOptions {
+                    refs,
+                    prs: pr,
+                    continue_: r#continue,
+                    abort,
+                },
                 path.as_deref(),
             )?;
             let exit_code = output.exit_code;

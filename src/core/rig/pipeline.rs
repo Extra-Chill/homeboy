@@ -192,9 +192,12 @@ fn run_git_step(rig: &RigSpec, component_id: &str, op: GitOp, extra_args: &[Stri
     let base_args: Vec<String> = match op {
         GitOp::Status => vec!["status".into(), "--porcelain=v1".into()],
         GitOp::Pull => vec!["pull".into()],
+        GitOp::Push => vec!["push".into()],
         GitOp::Fetch => vec!["fetch".into()],
         GitOp::Checkout => vec!["checkout".into()],
         GitOp::CurrentBranch => vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+        GitOp::Rebase => vec!["rebase".into()],
+        GitOp::CherryPick => vec!["cherry-pick".into()],
     };
     let mut full_args: Vec<String> = base_args;
     for arg in extra_args {
@@ -447,9 +450,12 @@ fn serialize_git_op(op: GitOp) -> &'static str {
     match op {
         GitOp::Status => "status",
         GitOp::Pull => "pull",
+        GitOp::Push => "push",
         GitOp::Fetch => "fetch",
         GitOp::Checkout => "checkout",
         GitOp::CurrentBranch => "current-branch",
+        GitOp::Rebase => "rebase",
+        GitOp::CherryPick => "cherry-pick",
     }
 }
 
