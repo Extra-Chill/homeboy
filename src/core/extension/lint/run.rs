@@ -114,11 +114,18 @@ pub fn run_main_lint_workflow(
     let (baseline_comparison, baseline_exit_override) =
         process_baseline(source_path, &args, &lint_findings)?;
 
-    // Hint assembly — point to refactor for fixes
+    // Hint assembly — point to the auto-fix CTA for autofixable findings.
+    //
+    // Per the contract under #1459 (issue #1507), autofixable findings never
+    // fail the run; they nudge. The CTA is rendered here in core, not by each
+    // extension's runner, so every language extension benefits from a single
+    // consistent prose. `homeboy lint --fix` is the ergonomic alias and is
+    // listed first; the canonical `homeboy refactor --from lint --write`
+    // invocation follows for users who want the longer form.
     if !lint_clean {
         hints.push(format!(
-            "Auto-fix: homeboy refactor {} --from lint --write",
-            args.component_label
+            "Auto-fix: homeboy lint {} --fix (or homeboy refactor {} --from lint --write)",
+            args.component_label, args.component_label
         ));
         hints.push("Some issues may require manual fixes".to_string());
     }

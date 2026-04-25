@@ -6,6 +6,7 @@ use homeboy::extension::lint::{
     report, run_main_lint_workflow, LintCommandOutput, LintRunWorkflowArgs,
 };
 use homeboy::extension::ExtensionCapability;
+use homeboy::refactor::plan::{run_lint_refactor, LintSourceOptions};
 
 use super::utils::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
@@ -51,6 +52,14 @@ pub struct LintArgs {
     #[arg(long)]
     pub category: Option<String>,
 
+    /// Apply auto-fixable lint findings in place.
+    ///
+    /// Thin alias for `homeboy refactor <component> --from lint --write` —
+    /// dispatches to the existing fixer pipeline so a single ergonomic flag
+    /// resolves the auto-fix CTA without re-typing the canonical invocation.
+    #[arg(long)]
+    pub fix: bool,
+
     #[command(flatten)]
     pub setting_args: SettingArgs,
 
@@ -71,6 +80,29 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         ExtensionCapability::Lint,
         args.setting_args.setting.clone(),
     ))?;
+
+    let stringified_settings: Vec<(String, String)> = ctx
+        .settings
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                },
+            )
+        })
+        .collect();
+
+    // --fix dispatches to the canonical refactor sources pipeline.
+    // The fixer pipeline already exists; this flag connects the existing wire
+    // so users don't have to re-type `homeboy refactor <component> --from lint
+    // --write` to resolve the auto-fix CTA.
+    if args.fix {
+        return run_fix(args, &ctx, effective_id, stringified_settings);
+    }
+
     let run_dir = RunDir::create()?;
 
     let workflow = run_main_lint_workflow(
@@ -80,19 +112,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             component_label: effective_id.clone(),
             component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
-            settings: ctx
-                .settings
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        },
-                    )
-                })
-                .collect(),
+            settings: stringified_settings,
             summary: args.summary,
             file: args.file.clone(),
             glob: args.glob.clone(),
@@ -114,12 +134,52 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
     Ok(report::from_main_workflow(workflow))
 }
 
+/// Dispatch `homeboy lint --fix` to the canonical refactor sources pipeline.
+///
+/// `homeboy lint --fix` is a thin alias for `homeboy refactor <component>
+/// --from lint --write`. Under the hood we invoke the same
+/// `run_lint_refactor` primitive that the refactor command uses, then wrap
+/// the result in a `LintCommandOutput` so the lint command surface returns a
+/// stable shape regardless of which mode was requested.
+///
+/// Exit code semantics: autofixable findings should never fail the run, so
+/// this path returns exit 0 unless the underlying fixer actually errored.
+fn run_fix(
+    args: LintArgs,
+    ctx: &homeboy::engine::execution_context::ExecutionContext,
+    component_label: String,
+    settings: Vec<(String, String)>,
+) -> CmdResult<LintCommandOutput> {
+    let lint_options = LintSourceOptions {
+        selected_files: None,
+        file: args.file.clone(),
+        glob: args.glob.clone(),
+        errors_only: args.errors_only,
+        sniffs: args.sniffs.clone(),
+        exclude_sniffs: args.exclude_sniffs.clone(),
+        category: args.category.clone(),
+    };
+
+    let run = run_lint_refactor(
+        ctx.component.clone(),
+        ctx.source_path.clone(),
+        settings,
+        lint_options,
+        true,
+    )?;
+
+    Ok(report::from_lint_fix(component_label, run))
+}
+
 #[cfg(test)]
 mod tests {
     use homeboy::component::Component;
     use homeboy::extension::lint as extension_lint;
     use homeboy::extension::lint::baseline::{self as lint_baseline, LintFinding};
-    use homeboy::refactor::plan::{lint_refactor_request, LintSourceOptions};
+    use homeboy::extension::lint::report;
+    use homeboy::refactor::plan::{
+        lint_refactor_request, LintSourceOptions, RefactorSourceRun, SourceTotals,
+    };
     use std::path::Path;
 
     #[test]
@@ -176,6 +236,72 @@ mod tests {
             Component::new("test".to_string(), "/tmp".to_string(), "".to_string(), None);
         let result = extension_lint::resolve_lint_command(&component);
         assert!(result.is_err());
+    }
+
+    fn fixture_refactor_run(applied: bool, files_modified: usize) -> RefactorSourceRun {
+        RefactorSourceRun {
+            component_id: "demo".to_string(),
+            source_path: "/tmp/demo".to_string(),
+            sources: vec!["lint".to_string()],
+            dry_run: !applied,
+            applied,
+            merge_strategy: "sequential_source_merge".to_string(),
+            collected_edits: Vec::new(),
+            stages: Vec::new(),
+            source_totals: SourceTotals {
+                stages_with_edits: if files_modified > 0 { 1 } else { 0 },
+                total_edits: files_modified,
+                total_files_selected: files_modified,
+            },
+            overlaps: Vec::new(),
+            files_modified,
+            changed_files: (0..files_modified)
+                .map(|i| format!("src/file_{}.rs", i))
+                .collect(),
+            fix_summary: None,
+            warnings: Vec::new(),
+            hints: Vec::new(),
+            guard_block: None,
+        }
+    }
+
+    #[test]
+    fn lint_fix_report_passes_with_zero_exit_when_fixes_applied() {
+        // The contract under #1507: autofixable findings never fail the run.
+        // Even when --fix actually modifies files, the lint command exits 0.
+        let run = fixture_refactor_run(true, 3);
+        let (output, exit_code) = report::from_lint_fix("demo".to_string(), run);
+
+        assert_eq!(exit_code, 0);
+        assert!(output.passed);
+        assert_eq!(output.status, "passed");
+        assert!(output.failure.is_none());
+
+        let autofix = output.autofix.as_ref().expect("autofix populated");
+        assert_eq!(autofix.files_modified, 3);
+        assert!(autofix.rerun_recommended);
+        assert_eq!(autofix.changed_files.len(), 3);
+
+        let hints = output.hints.as_ref().expect("hints populated");
+        assert!(
+            hints.iter().any(|h| h.contains("homeboy lint demo")),
+            "expected re-run hint pointing back at lint, got {:?}",
+            hints
+        );
+    }
+
+    #[test]
+    fn lint_fix_report_passes_when_no_fixes_needed() {
+        // When no autofixable findings exist, --fix is a clean no-op:
+        // exit 0, no autofix changes reported, friendly hint.
+        let run = fixture_refactor_run(false, 0);
+        let (output, exit_code) = report::from_lint_fix("demo".to_string(), run);
+
+        assert_eq!(exit_code, 0);
+        assert!(output.passed);
+        let autofix = output.autofix.as_ref().expect("autofix populated");
+        assert_eq!(autofix.files_modified, 0);
+        assert!(!autofix.rerun_recommended);
     }
 
     #[test]

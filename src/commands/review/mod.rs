@@ -226,6 +226,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
         sniffs: None,
         exclude_sniffs: None,
         category: None,
+        fix: false,
         setting_args: Default::default(),
         baseline_args: args.baseline_args.clone(),
         _json: Default::default(),

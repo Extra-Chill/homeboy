@@ -8,6 +8,7 @@ use crate::extension::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, VerificationPhase,
 };
+use crate::refactor::plan::RefactorSourceRun;
 use crate::refactor::AppliedRefactor;
 use serde::Serialize;
 
@@ -90,6 +91,70 @@ fn lint_phase_report(exit_code: i32, status: &str, finding_count: usize) -> Phas
             format!("lint phase {} (exit {})", status, exit_code)
         },
     }
+}
+
+/// Build a [`LintCommandOutput`] from a `homeboy lint --fix` dispatch.
+///
+/// `--fix` is a thin alias for `homeboy refactor <component> --from lint
+/// --write`, so the fix path receives a `RefactorSourceRun` rather than the
+/// usual lint workflow result. We surface the applied autofix via the existing
+/// `autofix` field on `LintCommandOutput` so consumers see a consistent shape
+/// regardless of which mode was requested.
+///
+/// Exit code semantics: autofixable findings should never fail the run, so
+/// the fix dispatch returns exit 0 even when fixes were applied. Real fixer
+/// errors propagate through `Result` and never reach this builder.
+pub fn from_lint_fix(component_label: String, run: RefactorSourceRun) -> (LintCommandOutput, i32) {
+    let exit_code = 0;
+    let phase = PhaseReport {
+        phase: VerificationPhase::Lint,
+        status: phase_status_from_exit_code(exit_code),
+        exit_code: Some(exit_code),
+        summary: if run.applied {
+            format!(
+                "lint phase auto-fix applied to {} file(s)",
+                run.files_modified
+            )
+        } else if run.files_modified > 0 {
+            "lint phase auto-fix dry run".to_string()
+        } else {
+            "lint phase auto-fix found no autofixable findings".to_string()
+        },
+    };
+
+    let mut hints = run.hints.clone();
+    if run.applied {
+        hints.push(format!(
+            "Re-run lint to confirm clean: homeboy lint {}",
+            component_label
+        ));
+    } else if run.files_modified == 0 && run.warnings.is_empty() {
+        hints.push("No autofixable findings detected.".to_string());
+    }
+    let hints = if hints.is_empty() { None } else { Some(hints) };
+
+    let autofix = AppliedRefactor {
+        files_modified: run.files_modified,
+        rerun_recommended: run.applied,
+        changed_files: run.changed_files.clone(),
+        fix_summary: run.fix_summary.clone(),
+    };
+
+    (
+        LintCommandOutput {
+            passed: true,
+            status: "passed".to_string(),
+            component: component_label,
+            exit_code,
+            phase,
+            failure: None,
+            autofix: Some(autofix),
+            hints,
+            baseline_comparison: None,
+            lint_findings: None,
+        },
+        exit_code,
+    )
 }
 
 fn lint_phase_failure(exit_code: i32, finding_count: usize) -> PhaseFailure {

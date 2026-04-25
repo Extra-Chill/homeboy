@@ -175,6 +175,7 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
                 "--sniffs",
                 "--exclude-sniffs",
                 "--category",
+                "--fix",
                 "--setting",
                 "--path",
                 "--json",
