@@ -787,9 +787,7 @@ mod tests {
         // MissingTestMethod is informational; the rule no longer drives autofix or
         // critical-path warnings. (#1518: severity demotion alongside the
         // synthesis-pipeline removal.)
-        assert!(missing_methods
-            .iter()
-            .all(|f| f.severity == Severity::Info));
+        assert!(missing_methods.iter().all(|f| f.severity == Severity::Info));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
