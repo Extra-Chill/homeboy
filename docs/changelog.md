@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.95.0] - 2026-04-25
+
+### Added
+- cross-rig comparison — same workload across multiple rigs (closes #1523)
+- add --fix flag dispatching to the canonical refactor pipeline
+
+### Fixed
+- missing_test_method recognizes descriptive test names
+
 ## [0.94.1] - 2026-04-25
 
 ### Fixed
