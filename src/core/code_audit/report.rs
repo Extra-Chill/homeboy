@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::code_audit::{
-    baseline, AuditFinding, CodeAuditResult, ConventionReport, DirectoryConvention, Severity,
+    baseline, AuditFinding, CodeAuditResult, ConventionReport, DirectoryConvention,
+    FindingConfidence, Severity,
 };
 use serde::Serialize;
 
@@ -35,6 +36,7 @@ pub struct AuditSummaryFinding {
     pub file: String,
     pub convention: String,
     pub kind: AuditFinding,
+    pub confidence: FindingConfidence,
     pub severity: Severity,
     pub description: String,
     pub suggestion: String,
@@ -136,6 +138,7 @@ pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSum
             file: f.file.clone(),
             convention: f.convention.clone(),
             kind: f.kind.clone(),
+            confidence: f.kind.confidence(),
             severity: f.severity.clone(),
             description: f.description.clone(),
             suggestion: f.suggestion.clone(),
@@ -200,29 +203,8 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
     let mut automated_count = 0usize;
     let mut manual_only = 0usize;
     let mut by_kind: BTreeMap<String, FixabilityKindBreakdown> = BTreeMap::new();
-
-    for fix in &fix_result.fixes {
-        for insertion in &fix.insertions {
-            let kind_key = finding_kind_key(&insertion.finding);
-            let entry = by_kind.entry(kind_key).or_insert(FixabilityKindBreakdown {
-                total: 0,
-                automated: 0,
-                manual_only: 0,
-            });
-            entry.total += 1;
-
-            if insertion.manual_only {
-                manual_only += 1;
-                entry.manual_only += 1;
-            } else {
-                automated_count += 1;
-                entry.automated += 1;
-            }
-        }
-    }
-
-    for new_file in &fix_result.new_files {
-        let kind_key = finding_kind_key(&new_file.finding);
+    let mut count_fixability = |finding: &AuditFinding, auto_apply: bool| {
+        let kind_key = finding_kind_key(finding);
         let entry = by_kind.entry(kind_key).or_insert(FixabilityKindBreakdown {
             total: 0,
             automated: 0,
@@ -230,13 +212,23 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
         });
         entry.total += 1;
 
-        if new_file.manual_only {
-            manual_only += 1;
-            entry.manual_only += 1;
-        } else {
+        if auto_apply {
             automated_count += 1;
             entry.automated += 1;
+        } else {
+            manual_only += 1;
+            entry.manual_only += 1;
         }
+    };
+
+    for fix in &fix_result.fixes {
+        for insertion in &fix.insertions {
+            count_fixability(&insertion.finding, insertion.auto_apply);
+        }
+    }
+
+    for new_file in &fix_result.new_files {
+        count_fixability(&new_file.finding, new_file.auto_apply);
     }
 
     let fixable_count = automated_count + manual_only;

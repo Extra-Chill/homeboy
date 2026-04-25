@@ -778,16 +778,16 @@ fn plan_audit_stage(
         let policy_summary = fixer::apply_fix_policy(&mut fix_result, false, &policy);
         let changed_files = collect_audit_changed_files(&fix_result);
 
-        // Surface findings whose collected edits are all manual-only — these
+        // Surface findings whose collected edits are all manual/review-only — these
         // are visible in preview but `--write` will decline to apply them.
         // Without this hint the divergence between dry-run and --write is
         // invisible (homeboy#1159).
-        let manual_only_count = count_manual_only_fixes(&fix_result);
-        let stage_warnings = if manual_only_count > 0 {
+        let review_only_count = count_review_only_fixes(&fix_result);
+        let stage_warnings = if review_only_count > 0 {
             vec![format!(
-                "{} finding(s) produced manual-only edits — visible in preview but will NOT be applied by --write. \
+                "{} finding(s) produced manual/review-only edits — visible in preview but will NOT be applied by --write. \
                  Resolve manually or acknowledge via baseline.",
-                manual_only_count
+                review_only_count
             )]
         } else {
             Vec::new()
@@ -1102,50 +1102,48 @@ fn run_test_stage(
     })
 }
 
-/// Count fixes whose edits are ALL manual-only — i.e., they'd be dropped
-/// entirely by `apply_fix_policy(write=true)`. Used to surface a warning
+/// Count fixes whose edits are ALL blocked from auto-apply — i.e., they'd be
+/// dropped entirely by `apply_fix_policy(write=true)`. Used to surface a warning
 /// when dry-run previews edits that `--write` will silently decline.
-/// (homeboy#1159)
-fn count_manual_only_fixes(fix_result: &fixer::FixResult) -> usize {
-    let manual_only_fixes = fix_result
+/// (homeboy#1159, homeboy#1478)
+fn count_review_only_fixes(fix_result: &fixer::FixResult) -> usize {
+    let review_only_fixes = fix_result
         .fixes
         .iter()
         .filter(|fix| {
-            !fix.insertions.is_empty() && fix.insertions.iter().all(|ins| ins.manual_only)
+            !fix.insertions.is_empty() && fix.insertions.iter().all(|ins| !ins.auto_apply)
         })
         .count();
-    let manual_only_new_files = fix_result
+    let review_only_new_files = fix_result
         .new_files
         .iter()
-        .filter(|nf| nf.manual_only)
+        .filter(|nf| !nf.auto_apply)
         .count();
-    manual_only_fixes + manual_only_new_files
+    review_only_fixes + review_only_new_files
 }
 
 /// Count only files that `--write` mode would actually modify.
 ///
-/// In dry-run mode, `apply_fix_policy` marks manual-only insertions as
-/// `auto_apply = true` so they appear in preview output — but a subsequent
-/// `--write` invocation drops any fix whose insertions are ALL manual-only
-/// (policy.rs line ~94). Counting a file here as "would be modified" when
-/// `--write` would silently decline it produces the CI deadlock described in
-/// homeboy#1159: dry-run exits 1 (triggering autofix), autofix re-runs with
-/// `--write` and applies nothing, the skipped-bot-loop guard fires, and the
-/// PR is stuck.
+/// `apply_fix_policy` keeps all policy-selected edits visible in dry-run, but
+/// `auto_apply` marks whether each edit would survive a subsequent `--write`.
+/// Counting a file here as "would be modified" when `--write` would silently
+/// decline it produces the CI deadlock described in homeboy#1159: dry-run exits
+/// 1 (triggering autofix), autofix re-runs with `--write` and applies nothing,
+/// the skipped-bot-loop guard fires, and the PR is stuck.
 ///
-/// Filter to fixes that have at least one non-manual-only insertion — the
-/// same predicate `apply_fix_policy(write=true)` uses to keep a fix. This
+/// Filter to fixes that have at least one auto-apply insertion — the same
+/// predicate `apply_fix_policy(write=true)` uses to keep a fix. This
 /// aligns dry-run `files_modified` with what a subsequent `--write` run
 /// would actually produce. New files follow the same rule.
 fn collect_audit_changed_files(fix_result: &fixer::FixResult) -> Vec<String> {
     let mut files = BTreeSet::new();
     for fix in &fix_result.fixes {
-        if fix.insertions.iter().any(|ins| !ins.manual_only) {
+        if fix.insertions.iter().any(|ins| ins.auto_apply) {
             files.insert(fix.file.clone());
         }
     }
     for new_file in &fix_result.new_files {
-        if !new_file.manual_only {
+        if new_file.auto_apply {
             files.insert(new_file.file.clone());
         }
     }
@@ -1169,12 +1167,14 @@ fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) -> Vec<FixA
     }
 
     for new_file in &fix_result.new_files {
-        entries.push(FixApplied {
-            file: new_file.file.clone(),
-            rule: format!("{:?}", new_file.finding).to_lowercase(),
-            action: Some("create".to_string()),
-            primitive: new_file.primitive.as_ref().map(auto::primitive_name),
-        });
+        if new_file.auto_apply {
+            entries.push(FixApplied {
+                file: new_file.file.clone(),
+                rule: format!("{:?}", new_file.finding).to_lowercase(),
+                action: Some("create".to_string()),
+                primitive: new_file.primitive.as_ref().map(auto::primitive_name),
+            });
+        }
     }
 
     entries
@@ -1320,6 +1320,11 @@ mod tests {
     }
 
     #[test]
+    fn test_analyze_stage_overlaps() {
+        assert!(analyze_stage_overlaps(&[]).is_empty());
+    }
+
+    #[test]
     fn analyze_stage_overlaps_ignores_disjoint_files() {
         let stages = vec![
             SourceStageSummary {
@@ -1395,6 +1400,45 @@ mod tests {
     }
 
     #[test]
+    fn test_summarize_source_totals() {
+        let totals = summarize_source_totals(&[], 0);
+
+        assert_eq!(totals.stages_with_edits, 0);
+        assert_eq!(totals.total_edits, 0);
+        assert_eq!(totals.total_files_selected, 0);
+    }
+
+    #[test]
+    fn test_lint_refactor_request() {
+        let root = PathBuf::from("/tmp/homeboy-lint-refactor-request");
+        let request = lint_refactor_request(
+            test_component(&root),
+            root,
+            vec![("key".to_string(), "value".to_string())],
+            LintSourceOptions::default(),
+            true,
+        );
+
+        assert_eq!(request.sources, vec!["lint".to_string()]);
+        assert!(request.write);
+    }
+
+    #[test]
+    fn test_build_test_refactor_request() {
+        let root = PathBuf::from("/tmp/homeboy-test-refactor-request");
+        let request = build_test_refactor_request(
+            test_component(&root),
+            root,
+            Vec::new(),
+            TestSourceOptions::default(),
+            false,
+        );
+
+        assert_eq!(request.sources, vec!["test".to_string()]);
+        assert!(!request.write);
+    }
+
+    #[test]
     fn collect_refactor_sources_audit_write_uses_audit_refactor_engine() {
         let root = tmp_dir("audit-write");
         fs::create_dir_all(root.join("commands")).unwrap();
@@ -1441,6 +1485,34 @@ mod tests {
             .any(|warning| warning.starts_with("audit refactor: ")));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_collect_refactor_sources() {
+        let _collect: fn(RefactorSourceRequest) -> crate::Result<RefactorSourceRun> =
+            collect_refactor_sources;
+    }
+
+    #[test]
+    fn test_run_lint_refactor() {
+        let _run: fn(
+            Component,
+            PathBuf,
+            Vec<(String, String)>,
+            LintSourceOptions,
+            bool,
+        ) -> crate::Result<RefactorSourceRun> = run_lint_refactor;
+    }
+
+    #[test]
+    fn test_run_test_refactor() {
+        let _run: fn(
+            Component,
+            PathBuf,
+            Vec<(String, String)>,
+            TestSourceOptions,
+            bool,
+        ) -> crate::Result<RefactorSourceRun> = run_test_refactor;
     }
 
     #[test]
@@ -1532,6 +1604,14 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_sources() {
+        assert_eq!(
+            normalize_sources(&["test".to_string()]).unwrap(),
+            vec!["test"]
+        );
+    }
+
+    #[test]
     fn normalize_sources_rejects_unknown_sources() {
         let err =
             normalize_sources(&["weird".to_string()]).expect_err("unknown source should fail");
@@ -1568,15 +1648,28 @@ mod tests {
             kind: InsertionKind::MethodStub,
             finding: AuditFinding::IntraMethodDuplicate,
             manual_only: true,
-            // In dry-run mode, `should_auto_apply(manual_only=true, write=false)`
-            // returns true so the edit stays visible for preview. That's the
-            // state `collect_audit_changed_files` must guard against.
-            auto_apply: true,
+            auto_apply: false,
             blocked_reason: Some(
                 "Blocked: manual-only edit, not eligible for --from auto-write".to_string(),
             ),
             code: String::new(),
             description: "manual-only duplicate flag".to_string(),
+        }
+    }
+
+    fn review_only_insertion() -> Insertion {
+        Insertion {
+            primitive: None,
+            kind: InsertionKind::MethodStub,
+            finding: AuditFinding::OrphanedTest,
+            manual_only: false,
+            auto_apply: false,
+            blocked_reason: Some(
+                "Blocked: heuristic confidence finding requires human review before automated writes"
+                    .to_string(),
+            ),
+            code: String::new(),
+            description: "review-only orphaned test flag".to_string(),
         }
     }
 
@@ -1612,6 +1705,22 @@ mod tests {
         assert!(
             collect_audit_changed_files(&result).is_empty(),
             "Fix with only manual-only insertions should not count as would-modify"
+        );
+    }
+
+    #[test]
+    fn collect_audit_changed_files_excludes_review_only_only_fixes() {
+        let fix = Fix {
+            file: "tests/core/process_test.rs".to_string(),
+            required_methods: Vec::new(),
+            required_registrations: Vec::new(),
+            insertions: vec![review_only_insertion()],
+            applied: false,
+        };
+        let result = fix_result_with(vec![fix], Vec::new());
+        assert!(
+            collect_audit_changed_files(&result).is_empty(),
+            "Review-only heuristic fixes should not count as would-modify"
         );
     }
 
@@ -1660,7 +1769,7 @@ mod tests {
             primitive: None,
             finding: AuditFinding::MissingMethod,
             manual_only: true,
-            auto_apply: true, // dry-run preview state
+            auto_apply: false,
             blocked_reason: Some("manual-only".to_string()),
             content: String::new(),
             description: "would create".to_string(),
@@ -1718,7 +1827,7 @@ mod tests {
             primitive: None,
             finding: AuditFinding::MissingMethod,
             manual_only: true,
-            auto_apply: true,
+            auto_apply: false,
             blocked_reason: None,
             content: String::new(),
             description: String::new(),
@@ -1727,6 +1836,6 @@ mod tests {
         let result = fix_result_with(vec![manual_fix, mixed_fix, auto_fix], vec![manual_nf]);
         // Only the entirely-manual-only fix + the manual-only new file count.
         // The mixed fix survives --write, the fully-auto fix is normal.
-        assert_eq!(count_manual_only_fixes(&result), 2);
+        assert_eq!(count_review_only_fixes(&result), 2);
     }
 }

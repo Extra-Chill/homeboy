@@ -1,6 +1,9 @@
-use crate::code_audit::report::{build_audit_summary, compute_fixability, finding_kind_key};
+use crate::code_audit::report::{
+    build_audit_summary, compute_fixability, finding_kind_key, from_main_workflow,
+    AuditCommandOutput,
+};
 use crate::code_audit::test_helpers::{empty_result, make_finding};
-use crate::code_audit::{AuditFinding, Severity};
+use crate::code_audit::{AuditFinding, FindingConfidence, Severity};
 
 #[test]
 fn test_build_audit_summary_empty_result() {
@@ -16,6 +19,15 @@ fn test_build_audit_summary_empty_result() {
 }
 
 #[test]
+fn test_build_audit_summary() {
+    let result = empty_result();
+    let summary = build_audit_summary(&result, 0);
+
+    assert_eq!(summary.total_findings, 0);
+    assert_eq!(summary.exit_code, 0);
+}
+
+#[test]
 fn test_build_audit_summary_counts_severities() {
     let mut result = empty_result();
     result.findings.push(make_finding(Severity::Warning));
@@ -28,6 +40,21 @@ fn test_build_audit_summary_counts_severities() {
     assert_eq!(summary.warnings, 2);
     assert_eq!(summary.info, 1);
     assert_eq!(summary.exit_code, 1);
+}
+
+#[test]
+fn test_build_audit_summary_includes_finding_confidence() {
+    let mut result = empty_result();
+    result.findings.push(make_finding(Severity::Warning));
+    result.findings[0].kind = AuditFinding::OrphanedTest;
+
+    let summary = build_audit_summary(&result, 1);
+
+    assert_eq!(summary.top_findings.len(), 1);
+    assert_eq!(
+        summary.top_findings[0].confidence,
+        FindingConfidence::Heuristic
+    );
 }
 
 #[test]
@@ -59,6 +86,14 @@ fn test_compute_fixability_returns_none_for_empty_result() {
     // source_path is /tmp/test which exists but has no source files to fix
     let fixability = compute_fixability(&result);
     assert!(fixability.is_none());
+}
+
+#[test]
+fn test_compute_fixability() {
+    let mut result = empty_result();
+    result.source_path = "/nonexistent/path/that/does/not/exist".to_string();
+
+    assert!(compute_fixability(&result).is_none());
 }
 
 #[test]
@@ -163,4 +198,24 @@ fn test_finding_kind_key_produces_snake_case() {
         finding_kind_key(&AuditFinding::NearDuplicate),
         "near_duplicate"
     );
+}
+
+#[test]
+fn test_finding_kind_key() {
+    assert_eq!(
+        finding_kind_key(&AuditFinding::OrphanedTest),
+        "orphaned_test"
+    );
+}
+
+#[test]
+fn test_from_main_workflow() {
+    let output = AuditCommandOutput::Summary(build_audit_summary(&empty_result(), 0));
+    let (output, exit_code) = from_main_workflow(crate::code_audit::run::AuditRunWorkflowResult {
+        output,
+        exit_code: 3,
+    });
+
+    assert_eq!(exit_code, 3);
+    assert!(matches!(output, AuditCommandOutput::Summary(_)));
 }
