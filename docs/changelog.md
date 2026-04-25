@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.94.0] - 2026-04-25
+
+### Added
+- --report=pr-comment markdown renderer (closes #1509)
+- --shared-state and --concurrency for multi-instance workloads
+- homeboy git stack — read-only stack inspection
+- scoped audit + lint + test umbrella (closes #1500)
+
+### Changed
+- skip signature_check tests when rust grammar missing
+- serialize HOME env overrides with a module-local mutex
+
 ## [0.93.0] - 2026-04-25
 
 ### Added
