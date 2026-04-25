@@ -95,3 +95,27 @@ build_section_body() {
   append_test_scope_section
   append_command_sections
 }
+
+# Build the shared `tooling` section body written at the bottom of every
+# Homeboy Results comment. This section is re-rendered idempotently by every
+# invocation of `post-pr-comment.sh` so versions always reflect the latest
+# run. Pinned last via `--section-order lint,build,test,audit,tooling`.
+#
+# Writes to stdout so the caller can redirect to a tmp file.
+build_tooling_section() {
+  local cli_version="${HOMEBOY_CLI_VERSION:-unknown}"
+  local extension_id="${HOMEBOY_EXTENSION_ID:-auto}"
+  local extension_source="${HOMEBOY_EXTENSION_SOURCE:-auto}"
+  local extension_revision="${HOMEBOY_EXTENSION_REVISION:-unknown}"
+  local action_repository="${HOMEBOY_ACTION_REPOSITORY:-unknown}"
+  local action_ref="${HOMEBOY_ACTION_REF:-unknown}"
+
+  printf '<details><summary>Tooling versions</summary>\n\n'
+  printf '%s\n' "- Homeboy CLI: \`${cli_version}\`"
+  printf '%s\n' "- Extension: \`${extension_id}\` from \`${extension_source}\`"
+  printf '%s\n' "- Extension revision: \`${extension_revision}\`"
+  printf '%s\n' "- Action: \`${action_repository}@${action_ref}\`"
+  printf '\n</details>\n\n'
+  printf '%s\n' '---'
+  printf '%s\n' "*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1*"
+}

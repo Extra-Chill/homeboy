@@ -110,23 +110,6 @@ digest_covers_command() {
   [ "${status}" = "fail" ]
 }
 
-append_tooling_json() {
-  local file_path="$1"
-  python3 -c '
-import json, os, sys
-tooling = {
-    "homeboy_cli_version": os.environ.get("HOMEBOY_CLI_VERSION", "unknown"),
-    "extension_id": os.environ.get("HOMEBOY_EXTENSION_ID", "auto"),
-    "extension_source": os.environ.get("HOMEBOY_EXTENSION_SOURCE", "auto"),
-    "extension_revision": os.environ.get("HOMEBOY_EXTENSION_REVISION", "unknown"),
-    "action_repository": os.environ.get("HOMEBOY_ACTION_REPOSITORY", "unknown"),
-    "action_ref": os.environ.get("HOMEBOY_ACTION_REF", "unknown"),
-}
-with open(sys.argv[1], "w") as f:
-    json.dump(tooling, f)
-' "${file_path}"
-}
-
 is_refactor_owning_section() {
   local section_key="${SECTION_KEY:-}"
   local section_title="${SECTION_TITLE:-}"
