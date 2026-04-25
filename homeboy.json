@@ -3,8 +3,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-04-25T18:32:43Z",
-      "item_count": 894,
+      "created_at": "2026-04-25T20:16:56Z",
+      "item_count": 884,
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "comment_hygiene::src/commands/release.rs::LegacyComment",
@@ -222,21 +222,11 @@
         "intra-method-duplication::src/core/server/client.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/server/connection.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/server/transfer.rs::IntraMethodDuplicate",
-        "near-duplication::src/core/code_audit/baseline.rs::NearDuplicate",
-        "near-duplication::src/core/defaults.rs::NearDuplicate",
-        "near-duplication::src/core/extension/grammar.rs::NearDuplicate",
-        "near-duplication::src/core/extension/grammar.rs::NearDuplicate",
-        "near-duplication::src/core/extension/test/baseline.rs::NearDuplicate",
-        "near-duplication::src/core/extension/update_check.rs::NearDuplicate",
-        "near-duplication::src/core/extension/update_check.rs::NearDuplicate",
         "near-duplication::src/core/extension/update_check.rs::NearDuplicate",
         "near-duplication::src/core/extension/update_check.rs::NearDuplicate",
         "near-duplication::src/core/extension/update_check.rs::NearDuplicate",
         "near-duplication::src/core/refactor/add.rs::NearDuplicate",
         "near-duplication::src/core/refactor/move_items/whole_file_move.rs::NearDuplicate",
-        "near-duplication::src/core/refactor/transform.rs::NearDuplicate",
-        "near-duplication::src/core/upgrade/update_check.rs::NearDuplicate",
-        "near-duplication::src/core/upgrade/update_check.rs::NearDuplicate",
         "near-duplication::src/core/upgrade/update_check.rs::NearDuplicate",
         "near-duplication::src/core/upgrade/update_check.rs::NearDuplicate",
         "near-duplication::src/core/upgrade/update_check.rs::NearDuplicate",
@@ -905,9 +895,9 @@
         "alignment_score": 0.9024389982223511,
         "known_outliers": [
           "src/commands/docs.rs",
-          "src/core/engine/undo/rollback.rs",
+          "src/core/engine/undo/entry.rs",
           "src/core/engine/undo/snapshot.rs",
-          "src/core/engine/undo/entry.rs"
+          "src/core/engine/undo/rollback.rs"
         ],
         "outliers_count": 4
       }
