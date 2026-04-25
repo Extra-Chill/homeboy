@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use super::idiomatic::is_trivial_method;
 
 /// Minimum number of locations for a function to count as duplicated.
 const MIN_DUPLICATE_LOCATIONS: usize = 2;
@@ -183,6 +184,10 @@ const GENERIC_NAMES: &[&str] = &[
 /// Minimum body line count — skip trivial functions (1-2 line bodies).
 /// Functions like `fn default_true() -> bool { true }` are too small
 /// to meaningfully refactor into shared code with a parameter.
+///
+/// Counted against `count_body_lines`, which returns the count of lines
+/// strictly between the opening and closing braces (so a single-line body
+/// is 0 and the standard three-line shape is 1).
 const MIN_BODY_LINES: usize = 3;
 
 /// Build structural hash groups from fingerprints.
@@ -224,8 +229,26 @@ fn is_command_file(path: &str) -> bool {
 
 /// Count the body lines of a function in a file's structural hash data.
 ///
-/// Uses heuristic: count lines in the content between `fn <name>` and the
-/// matching closing brace. Returns 0 if function not found or content empty.
+/// Returns the count of lines **strictly between** the line containing the
+/// opening `{` and the line containing the matching `}` — the actual body,
+/// not the wrapping span. So:
+///
+/// - `fn x() -> u32 { 0 }` (single-line body, both braces on the same line)
+///   returns **0** — there are no lines strictly between the braces.
+/// - The standard three-line shape
+///   ```text
+///   fn x() -> u32 {
+///       0
+///   }
+///   ```
+///   returns **1** — exactly the one body line.
+/// - A genuine N-statement body returns ~N.
+///
+/// Returns 0 if the function is not found or its content is empty. The
+/// previous implementation returned the **inclusive line span** from `fn`
+/// to the closing brace, which off-by-twoed three-line delegation methods
+/// like `pub fn len(&self) -> usize { self.inner.len() }` to a count of 3
+/// and slipped them past the `< MIN_BODY_LINES` filter (#1517).
 fn count_body_lines(fp: &FileFingerprint, method_name: &str) -> usize {
     let pattern = format!("fn {}", method_name);
     let lines: Vec<&str> = fp.content.lines().collect();
@@ -241,18 +264,22 @@ fn count_body_lines(fp: &FileFingerprint, method_name: &str) -> usize {
     let Some(start_idx) = start else { return 0 };
 
     let mut brace_depth = 0i32;
-    let mut found_open = false;
+    let mut open_line: Option<usize> = None;
     for (offset, line) in lines[start_idx..].iter().enumerate() {
+        let line_idx = start_idx + offset;
         for ch in line.chars() {
             if ch == '{' {
+                if open_line.is_none() {
+                    open_line = Some(line_idx);
+                }
                 brace_depth += 1;
-                found_open = true;
             } else if ch == '}' {
                 brace_depth -= 1;
+                if open_line.is_some() && brace_depth == 0 {
+                    let open = open_line.unwrap();
+                    return line_idx.saturating_sub(open).saturating_sub(1);
+                }
             }
-        }
-        if found_open && brace_depth == 0 {
-            return offset + 1;
         }
     }
 
@@ -269,8 +296,13 @@ fn count_body_lines(fp: &FileFingerprint, method_name: &str) -> usize {
 /// Filters out:
 /// - Functions already caught by exact-duplicate detection
 /// - Generic names (`run`, `list`, `show`, etc.)
+/// - Universally-idiomatic method names (`len`, `is_empty`, `iter`, `new`,
+///   `default`, `from`, `into`, `clone`, `fmt`, etc. — see
+///   `super::idiomatic::is_trivial_method`)
 /// - Command/core delegation pairs (command module ↔ core module)
-/// - Trivial functions (< 3 body lines)
+/// - Trivial functions (fewer than `MIN_BODY_LINES` body lines, where the
+///   body line count is *strictly between the braces* — so a single-line
+///   body is 0 and the standard three-line shape is 1)
 pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let structural_groups = build_structural_groups(fingerprints);
     let exact_groups = build_groups(fingerprints);
@@ -297,6 +329,18 @@ pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<F
 
         // Skip generic names
         if GENERIC_NAMES.contains(&method_name.as_str()) {
+            continue;
+        }
+
+        // Skip universally-idiomatic method names. `len`, `is_empty`, `iter`,
+        // `new`, `default`, `from`, `into`, `clone`, `fmt`, `as_str`,
+        // `to_string`, etc. are *expected* to have boilerplate-shaped bodies
+        // across unrelated types — every collection wrapper looks the same,
+        // and Clippy's `len_without_is_empty` lint actually *requires* you to
+        // pair `len` with `is_empty`. Flagging these as duplication is a
+        // false positive (#1517). Predicate is shared with `test_coverage`
+        // via `super::idiomatic::is_trivial_method`.
+        if is_trivial_method(method_name) {
             continue;
         }
 
@@ -1379,9 +1423,12 @@ mod tests {
 
     #[test]
     fn near_duplicate_detected_when_structural_match_but_exact_differs() {
-        // cache_path in two files: same structure, different constants
-        let content_a = "fn cache_path() -> Option<PathBuf> {\n    paths::homeboy().ok().map(|p| p.join(CACHE_A))\n}\n";
-        let content_b = "fn cache_path() -> Option<PathBuf> {\n    paths::homeboy().ok().map(|p| p.join(CACHE_B))\n}\n";
+        // cache_path in two files: same structure, different constants.
+        // Use a 3-body-line shape so the function clears MIN_BODY_LINES
+        // (the trivial-body filter); the structural twins differ only by
+        // the constant referenced.
+        let content_a = "fn cache_path() -> Option<PathBuf> {\n    let base = paths::homeboy().ok()?;\n    let file = base.join(CACHE_A);\n    Some(file)\n}\n";
+        let content_b = "fn cache_path() -> Option<PathBuf> {\n    let base = paths::homeboy().ok()?;\n    let file = base.join(CACHE_B);\n    Some(file)\n}\n";
 
         let fp1 = make_fp_with_content(
             "src/core/update_check.rs",
@@ -1534,6 +1581,128 @@ mod tests {
 
         let findings = detect_near_duplicates(&[&fp1, &fp2]);
         assert!(findings.is_empty(), "All-commands group should be skipped");
+    }
+
+    // ========================================================================
+    // count_body_lines — measures body lines strictly between braces (#1517)
+    // ========================================================================
+
+    #[test]
+    fn count_body_lines_zero_for_single_line_body() {
+        // `fn x() -> u32 { 0 }` — opening and closing brace on the same line.
+        // Zero lines strictly between them, so zero body lines.
+        let content = "fn x() -> u32 { 0 }\n";
+        let mut fp = make_fingerprint("src/x.rs", &["x"], &[]);
+        fp.content = content.to_string();
+
+        assert_eq!(
+            count_body_lines(&fp, "x"),
+            0,
+            "single-line body should report 0 body lines"
+        );
+    }
+
+    #[test]
+    fn count_body_lines_one_for_three_line_shape() {
+        // The standard formatter shape:
+        //   fn x() -> u32 {
+        //       0
+        //   }
+        // Exactly one line strictly between the braces.
+        let content = "fn x() -> u32 {\n    0\n}\n";
+        let mut fp = make_fingerprint("src/x.rs", &["x"], &[]);
+        fp.content = content.to_string();
+
+        assert_eq!(
+            count_body_lines(&fp, "x"),
+            1,
+            "three-line shape should report 1 body line"
+        );
+    }
+
+    #[test]
+    fn count_body_lines_counts_actual_body_statements() {
+        // Multi-line body with 4 statements between the braces.
+        let content = "fn process(items: &[Item]) -> Result {\n    let mut out = Vec::new();\n    for item in items {\n        out.push(item.clone());\n    }\n    Ok(out)\n}\n";
+        let mut fp = make_fingerprint("src/process.rs", &["process"], &[]);
+        fp.content = content.to_string();
+
+        // Lines strictly between `{` and `}`:
+        //   let mut out = Vec::new();
+        //   for item in items {
+        //       out.push(item.clone());
+        //   }
+        //   Ok(out)
+        // → 5 body lines.
+        assert_eq!(
+            count_body_lines(&fp, "process"),
+            5,
+            "should count actual body lines (5), not the wrapping span (7)"
+        );
+    }
+
+    #[test]
+    fn near_duplicate_skips_idiomatic_collection_methods() {
+        // The triggering case for #1517: every Vec/HashMap wrapper in the
+        // ecosystem defines `fn len(&self) -> usize { self.inner.len() }`,
+        // and Clippy's `len_without_is_empty` lint requires `is_empty`
+        // alongside it. Two structs each defining both methods must NOT
+        // produce near_duplicate findings.
+        let content_a = "struct A { inner: Vec<u8> }\nimpl A {\n    pub fn len(&self) -> usize {\n        self.inner.len()\n    }\n    pub fn is_empty(&self) -> bool {\n        self.inner.is_empty()\n    }\n}\n";
+        let content_b = "struct B { inner: HashMap<String, u32> }\nimpl B {\n    pub fn len(&self) -> usize {\n        self.inner.len()\n    }\n    pub fn is_empty(&self) -> bool {\n        self.inner.is_empty()\n    }\n}\n";
+
+        let fp1 = make_fp_with_content(
+            "src/core/a.rs",
+            content_a,
+            &[("len", "hash_a_len"), ("is_empty", "hash_a_emp")],
+            &[("len", "SAME_LEN"), ("is_empty", "SAME_EMP")],
+        );
+        let fp2 = make_fp_with_content(
+            "src/core/b.rs",
+            content_b,
+            &[("len", "hash_b_len"), ("is_empty", "hash_b_emp")],
+            &[("len", "SAME_LEN"), ("is_empty", "SAME_EMP")],
+        );
+
+        let findings = detect_near_duplicates(&[&fp1, &fp2]);
+        assert!(
+            findings.is_empty(),
+            "idiomatic collection-wrapper methods (`len`, `is_empty`) must not be flagged as near-duplicates; got {} finding(s): {:?}",
+            findings.len(),
+            findings.iter().map(|f| &f.description).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn near_duplicate_still_flags_real_duplicates() {
+        // Regression guard against over-suppressing: a non-trivially-named
+        // method with identical structural hash but different body hashes
+        // across two files (and a 3+ body-line shape) MUST still be flagged.
+        let content_a = "fn compute_fixability(item: &Item) -> bool {\n    let score = item.score();\n    let threshold = THRESHOLD_A;\n    score > threshold\n}\n";
+        let content_b = "fn compute_fixability(item: &Item) -> bool {\n    let score = item.score();\n    let threshold = THRESHOLD_B;\n    score > threshold\n}\n";
+
+        let fp1 = make_fp_with_content(
+            "src/core/a.rs",
+            content_a,
+            &[("compute_fixability", "hash_a")],
+            &[("compute_fixability", "SAME_STRUCT")],
+        );
+        let fp2 = make_fp_with_content(
+            "src/core/b.rs",
+            content_b,
+            &[("compute_fixability", "hash_b")],
+            &[("compute_fixability", "SAME_STRUCT")],
+        );
+
+        let findings = detect_near_duplicates(&[&fp1, &fp2]);
+        assert_eq!(
+            findings.len(),
+            2,
+            "real near-duplicates (non-idiomatic name, multi-line body, distinct body hashes) must still be flagged",
+        );
+        assert!(findings
+            .iter()
+            .all(|f| f.description.contains("compute_fixability")));
     }
 
     // ========================================================================

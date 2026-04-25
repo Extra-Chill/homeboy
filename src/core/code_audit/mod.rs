@@ -29,6 +29,7 @@ mod duplication;
 mod field_patterns;
 mod findings;
 pub mod fingerprint;
+mod idiomatic;
 pub(crate) mod impact;
 pub(crate) mod import_matching;
 mod layer_ownership;
