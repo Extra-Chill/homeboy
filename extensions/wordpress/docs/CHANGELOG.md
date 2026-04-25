@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.13.1] - 2026-04-25
+
+### Changed
+- extract Playground bootstrap helpers into shared lib
+
 ## [2.13.0] - 2026-04-24
 
 ### Added
