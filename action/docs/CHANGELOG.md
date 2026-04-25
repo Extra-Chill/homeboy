@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.9] - 2026-04-25
+
+### Changed
+- migrate to sectioned PR comment primitive (closes #141)
+
 ## [1.16.8] - 2026-04-24
 
 ### Fixed
