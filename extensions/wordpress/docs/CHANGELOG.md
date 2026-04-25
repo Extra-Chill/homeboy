@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.15.0] - 2026-04-25
+
+### Added
+- multi-line comment style sniff (closes #239)
+
 ## [2.14.0] - 2026-04-25
 
 ### Added
