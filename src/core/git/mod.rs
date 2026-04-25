@@ -3,12 +3,14 @@ mod commits;
 mod github;
 mod operations;
 mod primitives;
+mod stack;
 
 pub use changes::*;
 pub use commits::*;
 pub use github::*;
 pub use operations::*;
 pub use primitives::*;
+pub use stack::*;
 
 use std::process::Command;
 

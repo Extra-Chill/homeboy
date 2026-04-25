@@ -5,7 +5,7 @@ use homeboy::git::{
     self, CherryPickOptions, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrOutput,
     IssueCommentOptions, IssueCreateOptions, IssueFindOptions, IssueState, PrCommentMode,
     PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
-    RebaseOptions,
+    RebaseOptions, StackOptions, StackOutput,
 };
 use homeboy::BulkResult;
 
@@ -211,6 +211,39 @@ enum GitCommand {
 
         /// Workspace path to operate on directly. Useful for unregistered
         /// checkouts (CI runners, ad-hoc clones, worktrees).
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Inspect the current branch as a stack of commits over an upstream
+    /// ref, with each commit decorated by its GitHub PR status.
+    ///
+    /// Useful for combined-fixes-style maintenance branches: shows which
+    /// commits you're carrying, which have already merged upstream
+    /// (drop-candidates), and which have no PR yet. Read-only — does not
+    /// modify the repo.
+    ///
+    /// Default base is the current branch's tracked upstream
+    /// (`@{upstream}`). Pass `--base <ref>` to override.
+    Stack {
+        /// Component ID. When omitted, auto-detected from CWD.
+        component_id: Option<String>,
+
+        /// Base ref to compare against. Defaults to `@{upstream}` of the
+        /// current branch.
+        #[arg(long, value_name = "REF")]
+        base: Option<String>,
+
+        /// Skip the GitHub PR lookup pass. Use when offline, when `gh`
+        /// isn't configured, or when you only want the commit list.
+        #[arg(long)]
+        no_pr: bool,
+
+        /// Scope PR lookups to a specific GitHub repo (`owner/name`).
+        /// Defaults to inferring from the local checkout's remote.
+        #[arg(long, value_name = "OWNER/NAME")]
+        repo: Option<String>,
+
+        /// Workspace path to operate on directly.
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
@@ -490,6 +523,7 @@ pub enum GitCommandOutput {
     Issue(GithubIssueOutput),
     Pr(GithubPrOutput),
     Find(GithubFindOutput),
+    Stack(StackOutput),
 }
 
 pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<GitCommandOutput> {
@@ -707,6 +741,21 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
             )?;
             let exit_code = output.exit_code;
             Ok((GitCommandOutput::Single(output), exit_code))
+        }
+        GitCommand::Stack {
+            component_id,
+            base,
+            no_pr,
+            repo,
+            path,
+        } => {
+            let output = git::stack_at(
+                component_id.as_deref(),
+                StackOptions { base, no_pr, repo },
+                path.as_deref(),
+            )?;
+            let exit_code = if output.success { 0 } else { 1 };
+            Ok((GitCommandOutput::Stack(output), exit_code))
         }
         GitCommand::Issue(args) => run_issue(args),
         GitCommand::Pr(args) => run_pr(args),
