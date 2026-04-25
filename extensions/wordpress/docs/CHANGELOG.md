@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.16.0] - 2026-04-25
+
+### Added
+- bench shared-state + concurrency contract
+
 ## [2.15.0] - 2026-04-25
 
 ### Added
