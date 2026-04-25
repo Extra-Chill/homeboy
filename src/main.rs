@@ -22,7 +22,7 @@ use commands::utils::{args, entity_suggest, response as output, tty};
 use commands::{
     api, audit, auth, bench, build, changelog, changes, cli, component, config, db, deploy,
     extension, file, fleet, git, init, lint, logs, project, refactor, release, review, rig,
-    scaffold, server, ssh, status, test, transfer, undo, upgrade, validate, version,
+    server, ssh, status, test, transfer, undo, upgrade, validate, version,
 };
 use homeboy::extension::load_all_extensions;
 
@@ -102,8 +102,6 @@ enum Commands {
     Release(release::ReleaseArgs),
     /// Run scoped audit + lint + test umbrella against PR-style changes
     Review(review::ReviewArgs),
-    /// Scaffold files from project conventions
-    Scaffold(scaffold::ScaffoldArgs),
     /// Audit code conventions and detect architectural drift
     Audit(audit::AuditArgs),
     /// Structural refactoring (rename terms across codebase)

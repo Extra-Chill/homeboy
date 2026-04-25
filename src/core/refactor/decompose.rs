@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::scaffold::load_extension_grammar;
-use crate::extension::grammar_items;
-use crate::extension::{self, ParsedItem};
+use crate::extension::{self, grammar, grammar_items, ParsedItem};
 use crate::Result;
 
 use super::move_items::{MoveOptions, MoveResult};
@@ -348,7 +346,7 @@ fn parse_items(file: &str, content: &str) -> Option<Vec<ParsedItem>> {
 
         // Fall back to core grammar parser
         if let Some(ext_path) = &manifest.extension_path {
-            let grammar = load_extension_grammar(Path::new(ext_path), ext);
+            let grammar = grammar::load_for_extension_path(Path::new(ext_path), ext);
             if let Some(grammar) = grammar {
                 let items = grammar_items::parse_items(content, &grammar);
                 if !items.is_empty() {
@@ -1341,7 +1339,7 @@ fn validate_plan_sources(plan: &DecomposePlan, root: &Path) -> Result<()> {
     let grammar = ext.and_then(|ext| {
         let manifest = extension::find_extension_for_file_ext(ext, "refactor")?;
         let ext_path = manifest.extension_path.as_deref()?;
-        load_extension_grammar(Path::new(ext_path), ext)
+        grammar::load_for_extension_path(Path::new(ext_path), ext)
     });
 
     if let Some(grammar) = grammar {

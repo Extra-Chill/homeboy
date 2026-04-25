@@ -2,8 +2,7 @@
 
 use std::path::Path;
 
-use crate::core::scaffold::load_extension_grammar;
-use crate::extension::{self, grammar_items, ExtensionManifest, ParsedItem};
+use crate::extension::{self, grammar, grammar_items, ExtensionManifest, ParsedItem};
 
 /// Find a refactor-capable extension for a file based on its extension.
 pub(crate) fn find_refactor_extension(file_path: &str) -> Option<ExtensionManifest> {
@@ -15,7 +14,7 @@ pub(crate) fn find_refactor_extension(file_path: &str) -> Option<ExtensionManife
 pub(crate) fn core_parse_items(ext: &ExtensionManifest, content: &str) -> Option<Vec<ParsedItem>> {
     let ext_path = ext.extension_path.as_deref()?;
     let file_ext = ext.provided_file_extensions().first()?.clone();
-    let grammar = load_extension_grammar(Path::new(ext_path), &file_ext)?;
+    let grammar = grammar::load_for_extension_path(Path::new(ext_path), &file_ext)?;
     let items = grammar_items::parse_items(content, &grammar);
     if items.is_empty() {
         return None;

@@ -805,6 +805,30 @@ pub fn load_grammar_json(path: &Path) -> Result<Grammar> {
     })
 }
 
+/// Load a grammar from an extension directory.
+///
+/// Probes for `grammar.toml`, `grammar.json`, then `<language>/grammar.toml`
+/// and returns the first match. Returns `None` if no grammar file is found
+/// or parsing fails.
+pub fn load_for_extension_path(extension_path: &Path, language: &str) -> Option<Grammar> {
+    let toml_path = extension_path.join("grammar.toml");
+    if toml_path.exists() {
+        return load_grammar(&toml_path).ok();
+    }
+
+    let json_path = extension_path.join("grammar.json");
+    if json_path.exists() {
+        return load_grammar_json(&json_path).ok();
+    }
+
+    let lang_toml = extension_path.join(language).join("grammar.toml");
+    if lang_toml.exists() {
+        return load_grammar(&lang_toml).ok();
+    }
+
+    None
+}
+
 // ============================================================================
 // Convenience helpers for feature consumers
 // ============================================================================
