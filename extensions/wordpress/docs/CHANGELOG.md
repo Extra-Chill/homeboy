@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.17.0] - 2026-04-25
+
+### Added
+- wp_config_defines setting for per-component wp-config additions (#247)
+
 ## [2.16.1] - 2026-04-25
 
 ### Fixed
