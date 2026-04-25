@@ -12,7 +12,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use super::expand::expand_vars;
-use super::spec::{CheckSpec, RigSpec};
+use super::service::discover_newest;
+use super::spec::{CheckSpec, NewerThanSpec, RigSpec, TimeSource};
 use crate::error::{Error, Result};
 
 /// Run a check against the current rig state. Err on fail.
@@ -27,11 +28,14 @@ pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {
     if check.command.is_some() {
         set += 1;
     }
+    if check.newer_than.is_some() {
+        set += 1;
+    }
 
     if set == 0 {
         return Err(Error::validation_invalid_argument(
             "check",
-            "Check must specify one of `http`, `file`, or `command`",
+            "Check must specify one of `http`, `file`, `command`, or `newer_than`",
             None,
             None,
         ));
@@ -39,7 +43,7 @@ pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {
     if set > 1 {
         return Err(Error::validation_invalid_argument(
             "check",
-            "Check must specify exactly one of `http`, `file`, or `command`",
+            "Check must specify exactly one of `http`, `file`, `command`, or `newer_than`",
             None,
             None,
         ));
@@ -53,6 +57,9 @@ pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {
     }
     if let Some(cmd) = &check.command {
         return command_check(rig, cmd, check.expect_exit.unwrap_or(0));
+    }
+    if let Some(spec) = &check.newer_than {
+        return newer_than_check(rig, spec);
     }
     Ok(())
 }
@@ -160,6 +167,117 @@ fn command_check(rig: &RigSpec, cmd: &str, expect_exit: i32) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Mtime comparison: pass when `left > right` (left is newer).
+///
+/// Asymmetric "missing source" semantics:
+/// - `left = process_start` with no matching process ⇒ pass. Interpretation:
+///   no stale daemon to flag. The wiki preflight treats "no daemon" and
+///   "daemon newer than bundle" as the same ✅ state; this honors that.
+/// - Any other missing source (file doesn't exist, right-side process
+///   missing) ⇒ fail. The right side is what the left is being compared
+///   *against* — its absence breaks the question itself.
+fn newer_than_check(rig: &RigSpec, spec: &NewerThanSpec) -> Result<()> {
+    let left = resolve_time_source(rig, &spec.left, "left")?;
+    let right = resolve_time_source(rig, &spec.right, "right")?;
+
+    match (left, right) {
+        // Left process not running — nothing stale to flag.
+        (None, _) => Ok(()),
+        (Some(_), None) => Err(Error::validation_invalid_argument(
+            "check.newer_than.right",
+            "Right-side time source is missing — cannot compare against absent reference",
+            None,
+            None,
+        )),
+        (Some(l), Some(r)) => {
+            if l > r {
+                Ok(())
+            } else {
+                Err(Error::validation_invalid_argument(
+                    "check.newer_than",
+                    format!(
+                        "Left ({}) is not newer than right ({}); diff = {}s",
+                        l,
+                        r,
+                        r as i64 - l as i64
+                    ),
+                    None,
+                    None,
+                ))
+            }
+        }
+    }
+}
+
+/// Resolve a `TimeSource` to seconds since epoch, or `None` if the source
+/// is intentionally absent (only meaningful for left-side `process_start`).
+fn resolve_time_source(rig: &RigSpec, src: &TimeSource, side: &str) -> Result<Option<u64>> {
+    let mut set = 0;
+    if src.file_mtime.is_some() {
+        set += 1;
+    }
+    if src.process_start.is_some() {
+        set += 1;
+    }
+    if set == 0 {
+        return Err(Error::validation_invalid_argument(
+            format!("check.newer_than.{}", side),
+            "Time source must specify one of `file_mtime` or `process_start`",
+            None,
+            None,
+        ));
+    }
+    if set > 1 {
+        return Err(Error::validation_invalid_argument(
+            format!("check.newer_than.{}", side),
+            "Time source must specify exactly one of `file_mtime` or `process_start`",
+            None,
+            None,
+        ));
+    }
+
+    if let Some(path) = &src.file_mtime {
+        let resolved = expand_vars(rig, path);
+        let meta = std::fs::metadata(&resolved).map_err(|e| {
+            Error::validation_invalid_argument(
+                format!("check.newer_than.{}.file_mtime", side),
+                format!("Stat {} failed: {}", resolved, e),
+                None,
+                None,
+            )
+        })?;
+        let mtime = meta
+            .modified()
+            .map_err(|e| {
+                Error::validation_invalid_argument(
+                    format!("check.newer_than.{}.file_mtime", side),
+                    format!("Read mtime of {} failed: {}", resolved, e),
+                    None,
+                    None,
+                )
+            })?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| {
+                Error::validation_invalid_argument(
+                    format!("check.newer_than.{}.file_mtime", side),
+                    format!("Bad mtime on {}: {}", resolved, e),
+                    None,
+                    None,
+                )
+            })?
+            .as_secs();
+        return Ok(Some(mtime));
+    }
+
+    if let Some(disc) = &src.process_start {
+        let pattern = expand_vars(rig, &disc.pattern);
+        let proc = discover_newest(&pattern)?;
+        return Ok(proc.map(|p| p.started_at_epoch));
+    }
+
+    Ok(None)
 }
 
 #[cfg(test)]

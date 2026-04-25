@@ -29,6 +29,13 @@ pub enum ServiceStatus {
     Stale(u32),
 }
 
+/// One discovered process — its PID and start time (seconds since epoch).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredProcess {
+    pub pid: u32,
+    pub started_at_epoch: u64,
+}
+
 /// Start a service if it isn't already running. Idempotent.
 ///
 /// Returns the PID of the running (or newly started) process.
@@ -44,6 +51,37 @@ pub fn stop(rig: &RigSpec, service_id: &str) -> Result<()> {
 /// Report current service status, cross-referencing rig state with live PID.
 pub fn status(rig_id: &str, service_id: &str) -> Result<ServiceStatus> {
     platform::status(rig_id, service_id)
+}
+
+/// Find the newest process whose command line contains `pattern`.
+///
+/// Used by `external` services (`stop` discovery) and the `newer_than`
+/// check (`process_start` time source). Returns `Ok(None)` when no
+/// process matches — both callers treat that as "nothing to do."
+///
+/// Implementation: shells out to `ps -axo pid=,lstart=,args=` and filters
+/// in Rust. We pick the newest match (largest start-time) so a stale +
+/// fresh pair surfaces the fresh one to consumers (the rig wants to know
+/// "is the live daemon stale?").
+pub fn discover_newest(pattern: &str) -> Result<Option<DiscoveredProcess>> {
+    platform::discover_newest(pattern)
+}
+
+/// `discover_newest`, but returning the PID only. Convenience used by
+/// `service::stop` for the `external` kind.
+pub fn discover_external_pid(pattern: &str) -> Result<Option<u32>> {
+    Ok(discover_newest(pattern)?.map(|p| p.pid))
+}
+
+/// Parse `ps -o etime` output into total seconds.
+///
+/// Re-exported as a module-scope helper so tests in
+/// `tests/core/rig/service_test.rs` can exercise the format parser
+/// without needing to drive a real `ps` invocation. Production callers
+/// only see this through `discover_newest`.
+#[cfg(unix)]
+pub fn parse_etime_seconds(s: &str) -> Option<u64> {
+    platform::parse_etime_seconds(s)
 }
 
 #[cfg(unix)]
@@ -66,6 +104,18 @@ mod platform {
         let spec = rig.services.get(service_id).ok_or_else(|| {
             Error::rig_service_failed(&rig.id, service_id, "service not declared in rig spec")
         })?;
+
+        // External services are adopted, not spawned. Refusing here keeps the
+        // contract honest: the rig observes them, it doesn't manage their
+        // lifecycle. (`stop` is fine — sending SIGTERM to a discovered PID
+        // is a different posture than launching a process you don't own.)
+        if spec.kind == ServiceKind::External {
+            return Err(Error::rig_service_failed(
+                &rig.id,
+                service_id,
+                "external services are adopted, not spawned — `start` is not supported. Use `stop` to recycle a discovered process.",
+            ));
+        }
 
         // Idempotency: if we have a PID and it's live, no-op.
         let mut state = super::super::state::RigState::load(&rig.id)?;
@@ -135,10 +185,36 @@ mod platform {
     }
 
     pub fn stop(rig: &RigSpec, service_id: &str) -> Result<()> {
+        let spec = rig.services.get(service_id).ok_or_else(|| {
+            Error::rig_service_failed(&rig.id, service_id, "service not declared in rig spec")
+        })?;
         let mut state = super::super::state::RigState::load(&rig.id)?;
-        let pid = match state.services.get(service_id).and_then(|s| s.pid) {
-            Some(pid) => pid,
-            None => return Ok(()),
+
+        // For external services, the PID isn't in rig state — we discover it
+        // via the configured pattern. No discovery hit ⇒ nothing to stop;
+        // that's the desired posture (idempotent: "make sure it's gone").
+        let pid = if spec.kind == ServiceKind::External {
+            let pattern = spec
+                .discover
+                .as_ref()
+                .map(|d| d.pattern.clone())
+                .ok_or_else(|| {
+                    Error::rig_service_failed(
+                        &rig.id,
+                        service_id,
+                        "external service requires `discover.pattern`",
+                    )
+                })?;
+            let expanded = expand_vars(rig, &pattern);
+            match super::discover_external_pid(&expanded)? {
+                Some(pid) => pid,
+                None => return Ok(()),
+            }
+        } else {
+            match state.services.get(service_id).and_then(|s| s.pid) {
+                Some(pid) => pid,
+                None => return Ok(()),
+            }
         };
 
         if !pid_alive(pid) {
@@ -217,6 +293,17 @@ mod platform {
                 let expanded = expand_vars(rig, cmd);
                 Ok(("sh".to_string(), vec!["-c".to_string(), expanded]))
             }
+            ServiceKind::External => {
+                // Defensive: `start` short-circuits External upstream so this
+                // arm is unreachable in practice. Compiler exhaustiveness still
+                // wants it; a clear message beats `unreachable!()` if the
+                // upstream guard is ever refactored away.
+                Err(Error::rig_service_failed(
+                    &rig.id,
+                    service_id,
+                    "external services cannot be spawned — adoption-only",
+                ))
+            }
         }
     }
 
@@ -261,6 +348,105 @@ mod platform {
         }
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
+
+    /// Find processes whose argv contains `pattern`, return the newest by
+    /// start time. Uses `ps -axo pid=,etime=,args=` — `etime` (elapsed
+    /// time, format `[[DD-]HH:]MM:SS`) is implemented by both BSD `ps`
+    /// (macOS) and procps `ps` (Linux). `etimes` (integer seconds) is
+    /// procps-only, so the text format is the portable choice. Newest
+    /// match = smallest elapsed seconds.
+    pub fn discover_newest(pattern: &str) -> Result<Option<super::DiscoveredProcess>> {
+        let output = Command::new("ps")
+            .args(["-axo", "pid=,etime=,args="])
+            .output()
+            .map_err(|e| {
+                Error::internal_unexpected(format!("ps for process discovery failed: {}", e))
+            })?;
+        if !output.status.success() {
+            return Err(Error::internal_unexpected(format!(
+                "ps exited {}",
+                output.status.code().unwrap_or(-1)
+            )));
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let self_pid = std::process::id();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        let mut newest: Option<super::DiscoveredProcess> = None;
+        for line in stdout.lines() {
+            // Format: "  <pid>  <etime>  <args...>"
+            let trimmed = line.trim_start();
+            let pid_end = match trimmed.find(char::is_whitespace) {
+                Some(e) => e,
+                None => continue,
+            };
+            let pid: u32 = match trimmed[..pid_end].parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let after_pid = trimmed[pid_end..].trim_start();
+            let etime_end = match after_pid.find(char::is_whitespace) {
+                Some(e) => e,
+                None => continue,
+            };
+            let etime_str = &after_pid[..etime_end];
+            let args = after_pid[etime_end..].trim_start();
+
+            if !args.contains(pattern) {
+                continue;
+            }
+            if pid == self_pid {
+                continue;
+            }
+
+            let elapsed = match parse_etime_seconds(etime_str) {
+                Some(s) => s,
+                None => continue,
+            };
+            let started_at = now.saturating_sub(elapsed);
+            let candidate = super::DiscoveredProcess {
+                pid,
+                started_at_epoch: started_at,
+            };
+            match &newest {
+                None => newest = Some(candidate),
+                Some(curr) if candidate.started_at_epoch > curr.started_at_epoch => {
+                    newest = Some(candidate)
+                }
+                _ => {}
+            }
+        }
+        Ok(newest)
+    }
+
+    /// Parse `ps -o etime` output into total seconds.
+    ///
+    /// Accepted shapes (BSD `ps` and procps `ps` both produce these):
+    /// - `MM:SS`
+    /// - `HH:MM:SS`
+    /// - `DD-HH:MM:SS`
+    /// Anything else returns `None`.
+    pub(super) fn parse_etime_seconds(s: &str) -> Option<u64> {
+        let (days, rest) = match s.split_once('-') {
+            Some((d, r)) => (d.parse::<u64>().ok()?, r),
+            None => (0u64, s),
+        };
+        let parts: Vec<&str> = rest.split(':').collect();
+        let (h, m, sec) = match parts.as_slice() {
+            [m, s] => (0u64, m.parse::<u64>().ok()?, s.parse::<u64>().ok()?),
+            [h, m, s] => (
+                h.parse::<u64>().ok()?,
+                m.parse::<u64>().ok()?,
+                s.parse::<u64>().ok()?,
+            ),
+            _ => return None,
+        };
+        Some(days * 86_400 + h * 3_600 + m * 60 + sec)
+    }
 }
 
 #[cfg(not(unix))]
@@ -286,6 +472,10 @@ mod platform {
 
     pub fn status(rig_id: &str, service_id: &str) -> Result<ServiceStatus> {
         Err(Error::rig_service_failed(rig_id, service_id, UNSUPPORTED))
+    }
+
+    pub fn discover_newest(_pattern: &str) -> Result<Option<super::DiscoveredProcess>> {
+        Err(Error::internal_unexpected(UNSUPPORTED))
     }
 }
 

@@ -102,3 +102,112 @@ fn test_evaluate_command_unexpected_exit() {
     };
     evaluate(&rig, &spec).expect_err("`false` fails expect_exit=0");
 }
+
+#[test]
+fn test_evaluate_newer_than_left_newer_passes() {
+    use crate::rig::spec::{NewerThanSpec, TimeSource};
+    let tmp_dir = tempfile::tempdir().expect("tmpdir");
+    let older = tmp_dir.path().join("older.txt");
+    let newer = tmp_dir.path().join("newer.txt");
+    std::fs::write(&older, "x").expect("write");
+    // Sleep a beat so mtimes are distinguishable at second granularity.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&newer, "x").expect("write");
+
+    let rig = minimal_rig();
+    let spec = CheckSpec {
+        newer_than: Some(NewerThanSpec {
+            left: TimeSource {
+                file_mtime: Some(newer.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            right: TimeSource {
+                file_mtime: Some(older.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    };
+    evaluate(&rig, &spec).expect("newer left passes");
+}
+
+#[test]
+fn test_evaluate_newer_than_left_older_fails() {
+    use crate::rig::spec::{NewerThanSpec, TimeSource};
+    let tmp_dir = tempfile::tempdir().expect("tmpdir");
+    let older = tmp_dir.path().join("older.txt");
+    let newer = tmp_dir.path().join("newer.txt");
+    std::fs::write(&older, "x").expect("write");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&newer, "x").expect("write");
+
+    let rig = minimal_rig();
+    // left = older, right = newer ⇒ check fails.
+    let spec = CheckSpec {
+        newer_than: Some(NewerThanSpec {
+            left: TimeSource {
+                file_mtime: Some(older.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            right: TimeSource {
+                file_mtime: Some(newer.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    };
+    let err = evaluate(&rig, &spec).expect_err("older left fails");
+    assert!(err.message.contains("not newer"));
+}
+
+#[test]
+fn test_evaluate_newer_than_missing_left_process_passes() {
+    use crate::rig::spec::{DiscoverSpec, NewerThanSpec, TimeSource};
+    let tmp_dir = tempfile::tempdir().expect("tmpdir");
+    let bundle = tmp_dir.path().join("bundle.js");
+    std::fs::write(&bundle, "x").expect("write");
+
+    let rig = minimal_rig();
+    let spec = CheckSpec {
+        newer_than: Some(NewerThanSpec {
+            left: TimeSource {
+                process_start: Some(DiscoverSpec {
+                    // Pattern that cannot match any process — ensures None.
+                    pattern: "homeboy-test-marker-no-process-matches-this-XQZ-9999".to_string(),
+                }),
+                ..Default::default()
+            },
+            right: TimeSource {
+                file_mtime: Some(bundle.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    };
+    // Left is None ⇒ no stale daemon to flag ⇒ pass.
+    evaluate(&rig, &spec).expect("absent left process passes");
+}
+
+#[test]
+fn test_evaluate_newer_than_rejects_empty_time_source() {
+    use crate::rig::spec::{NewerThanSpec, TimeSource};
+    let rig = minimal_rig();
+    let spec = CheckSpec {
+        newer_than: Some(NewerThanSpec {
+            left: TimeSource::default(),
+            right: TimeSource::default(),
+        }),
+        ..Default::default()
+    };
+    let err = evaluate(&rig, &spec).expect_err("empty source rejected");
+    assert!(err.message.contains("must specify one of"));
+}
+
+#[test]
+fn test_evaluate_check_with_no_probe_set_lists_newer_than() {
+    let rig = minimal_rig();
+    let err = evaluate(&rig, &CheckSpec::default()).expect_err("empty rejected");
+    // Documentation drift sentinel — make sure the error names every probe
+    // so users see `newer_than` in the suggestion.
+    assert!(err.message.contains("newer_than"));
+}
