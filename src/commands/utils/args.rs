@@ -38,6 +38,19 @@ pub(crate) fn normalize_version_show(args: Vec<String>) -> Vec<String> {
     result
 }
 
+/// Flags declared on the top-level `Cli` struct as `#[arg(global = true)]`.
+///
+/// These can appear at any position in the argv (clap routes them to the
+/// parent struct regardless), so the trailing-flag normalizer below must
+/// treat them as known — otherwise it inserts a `--` separator before them
+/// and the value gets eaten by a subcommand's `last = true` capture
+/// instead of binding to `Cli::output`. The bug surfaced as homeboy#1532
+/// for `--output`.
+///
+/// Adding a new global flag to `Cli` requires adding the long form here
+/// and the equals-form lookup happens automatically.
+const GLOBAL_FLAGS: &[&str] = &["--output", "-h", "--help"];
+
 /// Auto-insert '--' separator before unknown flags for trailing_var_arg commands.
 pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
     let commands: &[(&str, &str, &[&str])] = &[
@@ -207,16 +220,34 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
     let mut found_separator = false;
     let mut insert_position: Option<usize> = None;
 
+    // A flag is "known" if the per-subcommand list owns it, OR if it's a
+    // top-level Cli global (which clap routes to the parent struct
+    // regardless of position). Without the global merge, `--output PATH`
+    // placed after the subcommand triggers the `--` insertion and gets
+    // eaten by the subcommand's `last = true` capture (homeboy#1532).
+    let is_known = |flag: &str| -> bool {
+        if known_flags.contains(&flag)
+            || known_flags
+                .iter()
+                .any(|f| flag.starts_with(&format!("{}=", f)))
+        {
+            return true;
+        }
+        if GLOBAL_FLAGS.contains(&flag) {
+            return true;
+        }
+        GLOBAL_FLAGS
+            .iter()
+            .any(|f| flag.starts_with(&format!("{}=", f)))
+    };
+
     for (i, arg) in args.iter().enumerate() {
         if arg == "--" {
             found_separator = true;
         }
         if !found_separator
             && arg.starts_with("--")
-            && !known_flags.contains(&arg.as_str())
-            && !known_flags
-                .iter()
-                .any(|f| arg.starts_with(&format!("{}=", f)))
+            && !is_known(arg.as_str())
             && insert_position.is_none()
         {
             insert_position = Some(i);
@@ -343,6 +374,129 @@ mod positional_tests {
             path: None,
         };
         assert_eq!(args.id(), Some("my-comp"));
+    }
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::normalize_trailing_flags;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `--output` placed AFTER a `last = true` subcommand must NOT trigger
+    /// the `--` separator insertion — it's a `global = true` flag on the
+    /// top-level Cli struct and clap routes it there directly. Inserting
+    /// `--` would cause the subcommand's trailing-arg capture to swallow
+    /// the value (homeboy#1532).
+    #[test]
+    fn output_after_subcommand_is_not_separated() {
+        let input = argv(&[
+            "homeboy",
+            "bench",
+            "my-comp",
+            "--output",
+            "/tmp/x.json",
+            "--iterations",
+            "1",
+        ]);
+        let expected = input.clone();
+        assert_eq!(normalize_trailing_flags(input), expected);
+    }
+
+    /// Equals form must round-trip the same way.
+    #[test]
+    fn output_equals_form_after_subcommand_is_not_separated() {
+        let input = argv(&[
+            "homeboy",
+            "bench",
+            "my-comp",
+            "--output=/tmp/x.json",
+            "--iterations",
+            "1",
+        ]);
+        let expected = input.clone();
+        assert_eq!(normalize_trailing_flags(input), expected);
+    }
+
+    /// Mirror the bench check for `test` (the other `last = true`
+    /// subcommand). Both consumers must accept post-position `--output`.
+    #[test]
+    fn output_after_test_subcommand_is_not_separated() {
+        let input = argv(&[
+            "homeboy",
+            "test",
+            "my-comp",
+            "--output",
+            "/tmp/y.json",
+            "--ratchet",
+        ]);
+        let expected = input.clone();
+        assert_eq!(normalize_trailing_flags(input), expected);
+    }
+
+    /// A genuinely unknown flag (not on the per-subcommand allow-list,
+    /// not a Cli global) STILL triggers the `--` insertion. This is the
+    /// existing trailing-arg passthrough behaviour the normalizer was
+    /// designed for; the fix must not regress it.
+    #[test]
+    fn unknown_flag_after_bench_still_separated() {
+        let input = argv(&["homeboy", "bench", "my-comp", "--unknown-flag", "value"]);
+        let expected = argv(&[
+            "homeboy",
+            "bench",
+            "my-comp",
+            "--",
+            "--unknown-flag",
+            "value",
+        ]);
+        assert_eq!(normalize_trailing_flags(input), expected);
+    }
+
+    /// `--output` mixed with an unknown flag: separator goes before the
+    /// unknown flag, NOT before `--output`. Captures the most realistic
+    /// repro from the MDI bench cook (driver script with `--output` plus
+    /// dispatcher passthrough flags).
+    #[test]
+    fn output_plus_unknown_flag_separator_before_unknown_only() {
+        let input = argv(&[
+            "homeboy",
+            "bench",
+            "my-comp",
+            "--output",
+            "/tmp/x.json",
+            "--unknown",
+            "v",
+        ]);
+        let expected = argv(&[
+            "homeboy",
+            "bench",
+            "my-comp",
+            "--output",
+            "/tmp/x.json",
+            "--",
+            "--unknown",
+            "v",
+        ]);
+        assert_eq!(normalize_trailing_flags(input), expected);
+    }
+
+    /// Pre-subcommand position must continue to work — that's the path
+    /// the existing tests + production users have relied on.
+    #[test]
+    fn output_before_subcommand_is_unchanged() {
+        let input = argv(&[
+            "homeboy",
+            "--output",
+            "/tmp/x.json",
+            "bench",
+            "my-comp",
+            "--iterations",
+            "1",
+        ]);
+        let expected = input.clone();
+        assert_eq!(normalize_trailing_flags(input), expected);
     }
 }
 
