@@ -58,8 +58,25 @@ ini_set('display_errors', '1');
 ini_set('display_startup_errors', '1');
 
 $plugin_path = '/wordpress/wp-content/plugins/{{PLUGIN_SLUG}}';
-$result_file = "$plugin_path/.pg-bench-result.txt";
+$result_file = "$plugin_path/.pg-bench-result{{RESULT_SUFFIX}}.txt";
 $current_stage = 'preboot';
+
+// Multi-instance + shared-state context (homeboy#1508).
+//
+// Workloads can opt in to concurrent-writer or crash-recovery patterns
+// by reading these constants. They're always defined; on single-instance
+// runs without --shared-state HOMEBOY_BENCH_SHARED_STATE === '' so a
+// workload can do `if (HOMEBOY_BENCH_SHARED_STATE !== '') { ... }` to
+// branch.
+if (!defined('HOMEBOY_BENCH_SHARED_STATE')) {
+    define('HOMEBOY_BENCH_SHARED_STATE', '{{SHARED_STATE_PATH}}');
+}
+if (!defined('HOMEBOY_BENCH_INSTANCE_ID')) {
+    define('HOMEBOY_BENCH_INSTANCE_ID', (int) '{{INSTANCE_ID}}');
+}
+if (!defined('HOMEBOY_BENCH_CONCURRENCY')) {
+    define('HOMEBOY_BENCH_CONCURRENCY', (int) '{{CONCURRENCY}}');
+}
 
 require_once '/homeboy-extension/scripts/lib/playground-bootstrap.php';
 
@@ -238,7 +255,7 @@ try {
 // ---------------------------------------------------------------------------
 pg_stage_begin('emit_results');
 try {
-    $results_path = "$plugin_path/.pg-bench-results.json";
+    $results_path = "$plugin_path/.pg-bench-results{{RESULT_SUFFIX}}.json";
     $envelope = [
         'component_id' => '{{COMPONENT_ID}}',
         'iterations' => $iterations_per_workload,

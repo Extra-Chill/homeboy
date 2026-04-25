@@ -149,6 +149,29 @@ fi
 
 MOUNT_ARGS+=("--mount" "${EXTENSION_PATH}:/homeboy-extension")
 
+# Shared-state mount: when homeboy core passes HOMEBOY_BENCH_SHARED_STATE,
+# we mount the host directory into Playground's VFS at a stable path
+# (/bench-shared-state) and expose that path to the workload via the
+# template. This is the on-disk substrate for concurrent-writer and
+# crash-recovery workloads — see homeboy#1508.
+SHARED_STATE_HOST="${HOMEBOY_BENCH_SHARED_STATE:-}"
+SHARED_STATE_GUEST=""
+if [ -n "$SHARED_STATE_HOST" ]; then
+    if [ ! -d "$SHARED_STATE_HOST" ]; then
+        # Homeboy core creates this dir before invocation, but if a caller
+        # invokes the dispatcher directly we still want to be helpful.
+        mkdir -p "$SHARED_STATE_HOST"
+    fi
+    SHARED_STATE_GUEST="/bench-shared-state"
+    MOUNT_ARGS+=("--mount" "${SHARED_STATE_HOST}:${SHARED_STATE_GUEST}")
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: [bench:playground] Shared state: ${SHARED_STATE_HOST} → ${SHARED_STATE_GUEST}"
+    fi
+fi
+
+INSTANCE_ID="${HOMEBOY_BENCH_INSTANCE_ID:-0}"
+CONCURRENCY="${HOMEBOY_BENCH_CONCURRENCY:-1}"
+
 PLAYGROUND_DEP_MOUNTS=""
 if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
@@ -166,8 +189,20 @@ fi
 # - .pg-bench-result.txt:   pg_log / pg_stage_* structured stage log,
 #                           used to surface bootstrap failures the same way
 #                           test runner does.
-RESULT_JSON="${PLUGIN_PATH}/.pg-bench-results.json"
-RESULT_LOG="${PLUGIN_PATH}/.pg-bench-result.txt"
+#
+# When homeboy core spawns N parallel instances (concurrency > 1) the same
+# plugin path is mounted into N concurrent Playground processes — without
+# per-instance namespacing the workers would race on these two files. Use
+# the instance suffix when CONCURRENCY > 1; keep the legacy filename for
+# single-instance so direct invocations and existing diagnostics paths
+# stay unchanged.
+if [ "${CONCURRENCY}" != "1" ]; then
+    RESULT_SUFFIX=".i${INSTANCE_ID}"
+else
+    RESULT_SUFFIX=""
+fi
+RESULT_JSON="${PLUGIN_PATH}/.pg-bench-results${RESULT_SUFFIX}.json"
+RESULT_LOG="${PLUGIN_PATH}/.pg-bench-result${RESULT_SUFFIX}.txt"
 rm -f "$RESULT_JSON" "$RESULT_LOG"
 
 TEMPLATE="${SCRIPT_DIR}/playground-bench-runner.php"
@@ -183,12 +218,19 @@ sed \
     -e "s|{{COMPONENT_ID}}|${COMPONENT_ID}|g" \
     -e "s|{{ITERATIONS}}|${ITERATIONS}|g" \
     -e "s|{{PLAYGROUND_DEP_MOUNTS}}|${PLAYGROUND_DEP_MOUNTS}|g" \
+    -e "s|{{SHARED_STATE_PATH}}|${SHARED_STATE_GUEST}|g" \
+    -e "s|{{INSTANCE_ID}}|${INSTANCE_ID}|g" \
+    -e "s|{{CONCURRENCY}}|${CONCURRENCY}|g" \
+    -e "s|{{RESULT_SUFFIX}}|${RESULT_SUFFIX}|g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
 echo "Running performance benchmarks via WordPress Playground..."
 echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
 echo "  Iterations: ${ITERATIONS}"
 echo "  Backend: playground (PHP-WASM + SQLite)"
+if [ -n "$SHARED_STATE_GUEST" ]; then
+    echo "  Shared state: ${SHARED_STATE_HOST} (instance ${INSTANCE_ID}/${CONCURRENCY})"
+fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "  Wrapper: $WRAPPER_TMPFILE"
