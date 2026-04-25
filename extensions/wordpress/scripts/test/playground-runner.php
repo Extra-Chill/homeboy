@@ -74,6 +74,26 @@ if (!is_array($wp_config_defines)) {
 }
 $config_path = pg_run_boot_stage(['extra_defines' => $wp_config_defines]);
 
+// Component-declared bench env vars (used by both bench and test runners
+// — name kept consistent across both runner kinds for symmetry). Host
+// shell env doesn't cross the wp-playground-cli sandbox boundary; the
+// dispatcher extracts `bench_env` from HOMEBOY_SETTINGS_JSON and we
+// putenv() each entry here before test fixtures load. Empty object is
+// the no-op case.
+$bench_env_raw = '{{BENCH_ENV_JSON}}';
+$bench_env = json_decode($bench_env_raw, true);
+if (is_array($bench_env)) {
+    foreach ($bench_env as $name => $value) {
+        if (is_string($name) && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $name)) {
+            $string_value = is_scalar($value) ? (string) $value : json_encode($value);
+            putenv($name . '=' . $string_value);
+            $_ENV[$name] = $string_value;
+        } else {
+            pg_log("NOTICE: skipping invalid bench_env key: " . var_export($name, true));
+        }
+    }
+}
+
 // Stage: install — wp-phpunit install.php creates WP tables in-process.
 pg_run_install_stage(['config_path' => $config_path, 'tests_dir' => $tests_dir]);
 

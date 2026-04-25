@@ -95,6 +95,34 @@ if (!is_array($wp_config_defines)) {
     $wp_config_defines = [];
 }
 $config_path = pg_run_boot_stage(['extra_defines' => $wp_config_defines]);
+
+// Component-declared bench env vars. Host shell env doesn't propagate
+// across the wp-playground-cli sandbox boundary, so workloads' getenv()
+// calls return false for anything the parent shell set. The dispatcher
+// extracts the `bench_env` setting from HOMEBOY_SETTINGS_JSON and the
+// runner calls putenv() for each entry here, before workload discovery,
+// so getenv() resolves correctly inside workloads.
+//
+// Empty object is the no-op case — components that don't declare
+// bench_env see no behavioural change.
+$bench_env_raw = '{{BENCH_ENV_JSON}}';
+$bench_env = json_decode($bench_env_raw, true);
+if (is_array($bench_env)) {
+    foreach ($bench_env as $name => $value) {
+        if (is_string($name) && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $name)) {
+            // putenv() takes "NAME=value" — coerce the value to string,
+            // var_export-style for non-scalars (workloads expect string
+            // input to getenv() per PHP convention).
+            $string_value = is_scalar($value) ? (string) $value : json_encode($value);
+            putenv($name . '=' . $string_value);
+            // Also populate $_ENV so workloads using $_ENV['NAME'] work.
+            $_ENV[$name] = $string_value;
+        } else {
+            pg_log("NOTICE: skipping invalid bench_env key: " . var_export($name, true));
+        }
+    }
+}
+
 pg_run_install_stage(['config_path' => $config_path]);
 pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
 pg_run_load_component_stage(['plugin_path' => $plugin_path]);

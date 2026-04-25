@@ -147,6 +147,21 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     fi
 fi
 
+# Extract `bench_env` from the merged settings JSON. Components declare
+# host-shell env vars that should propagate into Playground PHP-WASM under
+# `extensions.wordpress.settings.bench_env`. The dispatcher passes them
+# to the runner template; the template calls putenv() for each entry
+# before fixtures load, so test code's getenv() calls resolve correctly.
+# See bench-runner-playground.sh for the full rationale (host shell env
+# doesn't cross the wp-playground-cli sandbox boundary by default).
+BENCH_ENV_JSON="{}"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
+    if [ -n "$extracted" ]; then
+        BENCH_ENV_JSON="$extracted"
+    fi
+fi
+
 # PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
 # mount the component-under-test. When homeboy core tells us the canonical
 # component id (HOMEBOY_COMPONENT_ID), use it — basename($PLUGIN_PATH)
@@ -233,6 +248,7 @@ sed \
     -e "s|{{PLUGIN_SLUG}}|${PLUGIN_SLUG}|g" \
     -e "s|{{PLAYGROUND_DEP_MOUNTS}}|${PLAYGROUND_DEP_MOUNTS}|g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
 echo "Running PHPUnit tests via WordPress Playground..."

@@ -159,6 +159,26 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     fi
 fi
 
+# Extract `bench_env` from the merged settings JSON. Components declare
+# host-shell env vars that should propagate into Playground PHP-WASM under
+# `extensions.wordpress.settings.bench_env` in their homeboy.json:
+#
+#   { "bench_env": { "BENCH_CORPUS_SIZE": "1000", "BENCH_SEED": "42" } }
+#
+# Workloads then read them via `getenv('BENCH_CORPUS_SIZE')` as if they
+# had been set on the host shell. Without this seam, host env vars don't
+# cross the wp-playground-cli sandbox boundary — workloads' getenv() calls
+# return false regardless of what the parent shell set.
+#
+# Default `{}` is the no-op case for components that don't need the seam.
+BENCH_ENV_JSON="{}"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
+    if [ -n "$extracted" ]; then
+        BENCH_ENV_JSON="$extracted"
+    fi
+fi
+
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
 
 # ---------------------------------------------------------------------------
@@ -261,6 +281,7 @@ sed \
     -e "s|{{CONCURRENCY}}|${CONCURRENCY}|g" \
     -e "s|{{RESULT_SUFFIX}}|${RESULT_SUFFIX}|g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
 echo "Running performance benchmarks via WordPress Playground..."
