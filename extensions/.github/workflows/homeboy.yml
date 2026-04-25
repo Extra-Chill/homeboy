@@ -18,14 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         component:
-          - github
-          - homebrew
-          - kimaki
+          - go
           - nodejs
-          - openclaw
-          - plasma-shield
           - rust
-          - sweatpants
           - swift
           - wordpress
     steps:
