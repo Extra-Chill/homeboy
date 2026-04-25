@@ -227,3 +227,129 @@ fn test_spec_round_trip_preserves_shape() {
     assert_eq!(re_parsed.services.len(), spec.services.len());
     assert_eq!(re_parsed.pipeline.len(), spec.pipeline.len());
 }
+
+#[test]
+fn test_spec_patch_step_parses_full_shape() {
+    use crate::rig::spec::PatchOp;
+    let json = r#"{
+        "id": "r",
+        "components": { "playground": { "path": "/tmp/pg" } },
+        "pipeline": {
+            "up": [
+                {
+                    "kind": "patch",
+                    "component": "playground",
+                    "file": "packages/php-wasm/compile/dns_polyfill.c",
+                    "marker": "PHP-WASM-COMBINED-FIXES TSRMLS fallback",
+                    "after": "/* existing fallback */",
+                    "content": "/* PHP-WASM-COMBINED-FIXES TSRMLS fallback */\n#define TSRMLS_CC\n",
+                    "op": "apply",
+                    "label": "TSRMLS fallback"
+                }
+            ]
+        }
+    }"#;
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    match &spec.pipeline.get("up").unwrap()[0] {
+        PipelineStep::Patch {
+            component,
+            file,
+            marker,
+            after,
+            content,
+            op,
+            label,
+        } => {
+            assert_eq!(component, "playground");
+            assert_eq!(file, "packages/php-wasm/compile/dns_polyfill.c");
+            assert!(marker.contains("TSRMLS"));
+            assert!(after.is_some());
+            assert!(content.contains("TSRMLS_CC"));
+            assert_eq!(*op, PatchOp::Apply);
+            assert_eq!(label.as_deref(), Some("TSRMLS fallback"));
+        }
+        other => panic!("expected Patch, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_spec_patch_op_defaults_to_apply_when_omitted() {
+    use crate::rig::spec::PatchOp;
+    let json = r#"{
+        "id": "r",
+        "components": { "c": { "path": "/tmp/c" } },
+        "pipeline": {
+            "up": [
+                {
+                    "kind": "patch",
+                    "component": "c",
+                    "file": "x.c",
+                    "marker": "M",
+                    "content": "M\n"
+                }
+            ]
+        }
+    }"#;
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    match &spec.pipeline.get("up").unwrap()[0] {
+        PipelineStep::Patch { op, .. } => assert_eq!(*op, PatchOp::Apply),
+        other => panic!("expected Patch, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_spec_external_service_kind_with_discover() {
+    let json = r#"{
+        "id": "r",
+        "services": {
+            "studio-daemon": {
+                "kind": "external",
+                "discover": { "pattern": "wordpress-server-child.mjs" }
+            }
+        }
+    }"#;
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    let svc = spec.services.get("studio-daemon").unwrap();
+    assert_eq!(svc.kind, ServiceKind::External);
+    assert_eq!(
+        svc.discover.as_ref().unwrap().pattern,
+        "wordpress-server-child.mjs"
+    );
+}
+
+#[test]
+fn test_spec_newer_than_check_parses() {
+    let json = r#"{
+        "id": "r",
+        "components": { "studio": { "path": "/tmp/studio" } },
+        "pipeline": {
+            "check": [
+                {
+                    "kind": "check",
+                    "label": "Daemon newer than bundle",
+                    "newer_than": {
+                        "left":  { "process_start": { "pattern": "wordpress-server-child.mjs" } },
+                        "right": { "file_mtime": "${components.studio.path}/apps/cli/dist/cli/main.mjs" }
+                    }
+                }
+            ]
+        }
+    }"#;
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    match &spec.pipeline.get("check").unwrap()[0] {
+        PipelineStep::Check { spec, .. } => {
+            let nt = spec.newer_than.as_ref().expect("newer_than present");
+            assert_eq!(
+                nt.left.process_start.as_ref().unwrap().pattern,
+                "wordpress-server-child.mjs"
+            );
+            assert!(nt
+                .right
+                .file_mtime
+                .as_ref()
+                .unwrap()
+                .contains("dist/cli/main.mjs"));
+        }
+        other => panic!("expected Check, got {:?}", other),
+    }
+}

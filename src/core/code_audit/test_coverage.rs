@@ -236,9 +236,9 @@ pub(crate) fn analyze_test_coverage(
                 // token-bounded substring matches (see `test_covers_method`).
                 let mut covered_methods: HashSet<&str> = HashSet::new();
                 for source_method in source_fp.methods.iter().map(|m| m.as_str()) {
-                    let covered = test_methods.iter().any(|test| {
-                        test_covers_method(test, source_method, &config.method_prefix)
-                    });
+                    let covered = test_methods
+                        .iter()
+                        .any(|test| test_covers_method(test, source_method, &config.method_prefix));
                     if covered {
                         covered_methods.insert(source_method);
                     }

@@ -4,10 +4,13 @@
 //! checks, and a build pipeline, declared as JSON. `rig up` materializes it,
 //! `rig check` reports health, `rig down` tears it down.
 //!
-//! MVP scope (Phase 1):
+//! Phase 1 scope:
 //! - Spec schema with components, services, symlinks, and linear pipelines
-//! - Service kinds: `http-static`, `command`
-//! - Pipeline step kinds: `service`, `command`, `symlink`, `check`
+//! - Service kinds: `http-static`, `command`, `external` (adopted)
+//! - Pipeline step kinds: `service`, `build`, `git`, `command`, `symlink`,
+//!   `patch`, `check`
+//! - Check probes: `http`, `file` (+ `contains`), `command`, `newer_than`
+//!   (mtime / process-start staleness)
 //! - State file at `~/.config/homeboy/rigs/{id}.state/state.json`
 //! - CLI verbs: `list`, `show`, `up`, `check`, `down`, `status`
 //!
@@ -28,10 +31,10 @@ pub use runner::{
     run_check, run_down, run_status, run_up, snapshot_state, CheckReport, ComponentSnapshot,
     DownReport, RigStateSnapshot, RigStatusReport, UpReport,
 };
-pub use service::ServiceStatus;
+pub use service::{DiscoveredProcess, ServiceStatus};
 pub use spec::{
-    BenchSpec, CheckSpec, ComponentSpec, PipelineStep, RigSpec, ServiceKind, ServiceSpec,
-    SymlinkSpec,
+    BenchSpec, CheckSpec, ComponentSpec, DiscoverSpec, NewerThanSpec, PatchOp, PipelineStep,
+    RigSpec, ServiceKind, ServiceSpec, SymlinkSpec, TimeSource,
 };
 pub use state::{RigState, ServiceState};
 

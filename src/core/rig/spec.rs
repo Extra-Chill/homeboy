@@ -102,6 +102,29 @@ pub struct ServiceSpec {
     /// is healthy if its PID is alive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<CheckSpec>,
+
+    /// Adoption strategy for `kind = "external"` — how to find a process
+    /// the rig didn't spawn so `service.stop` can signal it. Required for
+    /// `external`, ignored for other kinds. The narrow shape here is
+    /// intentional MVP: only one discovery method (`pgrep`-style pattern
+    /// match) and only the `stop` op honors it. Full local supervision
+    /// of adopted services is tracked in Extra-Chill/homeboy#1463.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discover: Option<DiscoverSpec>,
+}
+
+/// Discovery strategy for an `external` service — how to find a PID the rig
+/// didn't spawn. The single `pattern` field matches against the process
+/// command line (`ps -o args`); `kind = "external"` services pick the
+/// newest matching PID. Multiple matches are not an error — a stale
+/// child + a fresh child is the case we care about, and the fresh one
+/// is what the rig wants to interact with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoverSpec {
+    /// Substring that must appear in the target process's command line.
+    /// Matched against `ps -o args= -p <pid>` output, so users can pin
+    /// against script paths (`wordpress-server-child.mjs`) or argv tokens.
+    pub pattern: String,
 }
 
 /// Supported service kinds. Extensions will register more in a future phase.
@@ -112,6 +135,13 @@ pub enum ServiceKind {
     HttpStatic,
     /// Arbitrary shell command. Everything else.
     Command,
+    /// Process the rig didn't spawn — discovered via `discover.pattern`.
+    /// Only `stop` is meaningful (signals the discovered PID); `start`
+    /// returns a clear error because rig isn't responsible for launching
+    /// adopted services. Use case: stale daemons that the rig needs to
+    /// recycle after a build (e.g. Studio's `wordpress-server-child.mjs`
+    /// after a Studio CLI rebuild).
+    External,
 }
 
 /// Symlink the rig maintains. Both paths support `~` expansion.
@@ -197,6 +227,50 @@ pub enum PipelineStep {
         op: SymlinkOp,
     },
 
+    /// Apply (or verify) an idempotent local-only patch to a file in a
+    /// component checkout. Use case: upstream-source patches that can't be
+    /// committed to the consumer branch because rebases would carry them
+    /// to every fresh checkout. Examples: TSRMLS_CC fallback macros on
+    /// upstream Playground C sources, build-time tweaks that aren't
+    /// upstream yet.
+    ///
+    /// Idempotency is marker-based: if `marker` is already present in
+    /// the file, the step is a no-op. If the optional `after` anchor is
+    /// set and absent from the file, the step errors instead of guessing
+    /// where to insert (file structure changed → fail loudly).
+    ///
+    /// In `verify` mode the step only confirms the marker is present
+    /// without modifying — mirrors how a `check` pipeline would `grep`
+    /// for it. Use this in `check` pipelines so a stale or unpatched
+    /// checkout is reported as a failure, not silently re-patched.
+    Patch {
+        /// Component ID — must exist in the rig's `components` map.
+        component: String,
+        /// File to patch, relative to the component's path. Tilde +
+        /// `${components.X.path}` / `${env.VAR}` expansion applies.
+        file: String,
+        /// Substring that uniquely identifies this patch in the file.
+        /// Used as the idempotency key — present means "already patched."
+        marker: String,
+        /// Optional anchor: substring that must already be in the file
+        /// for the patch to apply. The patch content is inserted on the
+        /// next line after the first occurrence. If absent and `after`
+        /// is set, the step fails (file structure changed). When `after`
+        /// is `None`, the patch is appended to the end of the file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        /// Patch content to insert. Must contain `marker` somewhere so
+        /// future runs detect it as already-applied — the step validates
+        /// this at apply time.
+        content: String,
+        /// Operation: `apply` (mutate file) or `verify` (read-only check).
+        #[serde(default = "default_patch_op")]
+        op: PatchOp,
+        /// Human-readable label shown during execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Pre-flight / health check. Non-fatal in `up` (warns), fatal in `check`.
     Check {
         /// Human-readable label.
@@ -206,6 +280,10 @@ pub enum PipelineStep {
         #[serde(flatten)]
         spec: CheckSpec,
     },
+}
+
+fn default_patch_op() -> PatchOp {
+    PatchOp::Apply
 }
 
 /// Git operation supported by a rig `git` step.
@@ -255,10 +333,22 @@ pub enum SymlinkOp {
     Verify,
 }
 
-/// A single declarative check. One-of semantics — exactly one of the fields
-/// below should be set. Validated at check-time, not parse-time, because
-/// serde flattening across tagged enums is awkward and explicit-field checks
-/// keep the spec readable.
+/// Patch operation in a pipeline step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PatchOp {
+    /// Apply the patch if its marker is absent. No-op if already applied.
+    Apply,
+    /// Read-only: pass if the marker is present, fail otherwise. Use in
+    /// `check` pipelines to surface stale or unpatched checkouts.
+    Verify,
+}
+
+/// A single declarative check. One-of semantics — exactly one of the
+/// probe fields (`http`, `file`, `command`, `newer_than`) should be set.
+/// Validated at check-time, not parse-time, because serde flattening
+/// across tagged enums is awkward and explicit-field checks keep the
+/// spec readable.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CheckSpec {
     /// HTTP GET — passes if status matches `expect_status` (default 200).
@@ -285,6 +375,43 @@ pub struct CheckSpec {
     /// Expected exit code for the `command` check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_exit: Option<i32>,
+
+    /// Mtime / staleness comparison — passes when `left` is newer than
+    /// `right`. Surfaces "I rebuilt but the daemon is still on the old
+    /// bundle" failures the wiki preflight calls out as the #1 dev-env
+    /// confusion source. If the `process_start` source resolves to no
+    /// running process, the check passes (no stale daemon to recycle).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newer_than: Option<NewerThanSpec>,
+}
+
+/// Mtime / staleness comparison check.
+///
+/// Each side picks one source. `left > right` ⇒ pass. Equal or `left < right`
+/// ⇒ fail. "Source missing" semantics differ by side: if `left` is a
+/// `process_start` and no process matches, the check passes (interpretation:
+/// no stale daemon to fight with). Any other missing source is an error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewerThanSpec {
+    pub left: TimeSource,
+    pub right: TimeSource,
+}
+
+/// A time source for `newer_than` checks. One-of semantics enforced at
+/// evaluate-time.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TimeSource {
+    /// File mtime (seconds since epoch). Path supports `~` and `${...}`
+    /// expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_mtime: Option<String>,
+
+    /// Process start time (seconds since epoch). Discovers the newest
+    /// matching process by command-line substring (`ps -o args`). When no
+    /// process matches and this source is on the `left`, the parent check
+    /// passes — there's no stale process to flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start: Option<DiscoverSpec>,
 }
 
 #[cfg(test)]
