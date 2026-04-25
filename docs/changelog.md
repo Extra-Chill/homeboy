@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.97.3] - 2026-04-25
+
+### Changed
+- cut synthesis pipelines (testgen, docs generate) and demote MissingTestMethod
+
 ## [0.97.2] - 2026-04-25
 
 ### Fixed
