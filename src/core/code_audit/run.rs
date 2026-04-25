@@ -41,7 +41,7 @@ pub fn run_main_audit_workflow(
     let result = run_audit(&args)?;
 
     // Early return: no-change shortcut already handled by run_audit returning None
-    let result = match result {
+    let mut result = match result {
         Some(r) => r,
         None => {
             return Ok(AuditRunWorkflowResult {
@@ -82,13 +82,49 @@ pub fn run_main_audit_workflow(
         });
     }
 
-    // --baseline: save current state
+    // --baseline: save current state. Saved baselines record the *full* finding
+    // set so they remain a complete reference; --only / --exclude intentionally
+    // do not narrow what gets persisted.
     if args.baseline_flags.baseline {
         return run_baseline_save(result, &args);
     }
 
+    // --only / --exclude: scope this run's findings before comparison and
+    // report assembly. The CLI flags are parsed in `parse_finding_kinds` and
+    // surfaced here as `only_kinds` / `exclude_kinds`; any filter activity
+    // also recomputes `summary.outliers_found` so the exit-code logic in
+    // `default_audit_exit_code` reflects the filtered view.
+    apply_finding_filters(&mut result, &args.only_kinds, &args.exclude_kinds);
+
     // Default: compare against baseline or return full result
     run_comparison_workflow(result, &args)
+}
+
+/// Filter `result.findings` by kind allow/deny lists and refresh
+/// `summary.outliers_found` so downstream exit-code and fixability logic
+/// agrees with what the user sees.
+///
+/// No-op when both lists are empty (the common case).
+fn apply_finding_filters(
+    result: &mut CodeAuditResult,
+    only_kinds: &[code_audit::AuditFinding],
+    exclude_kinds: &[code_audit::AuditFinding],
+) {
+    if only_kinds.is_empty() && exclude_kinds.is_empty() {
+        return;
+    }
+
+    result.findings.retain(|f| {
+        let allowed = only_kinds.is_empty() || only_kinds.contains(&f.kind);
+        let denied = exclude_kinds.contains(&f.kind);
+        allowed && !denied
+    });
+
+    // Recompute outliers_found from the filtered set. Findings count is the
+    // closest proxy available without re-running the per-convention check —
+    // this keeps `default_audit_exit_code(...) -> outliers_found > 0`
+    // honest under filtering.
+    result.summary.outliers_found = result.findings.len();
 }
 
 /// Run the audit scan (scoped or full). Returns None if changed-since found no files.
