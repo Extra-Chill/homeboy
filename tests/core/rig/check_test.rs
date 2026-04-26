@@ -211,3 +211,207 @@ fn test_evaluate_check_with_no_probe_set_lists_newer_than() {
     // so users see `newer_than` in the suggestion.
     assert!(err.message.contains("newer_than"));
 }
+
+// ─── HTTP wait-ready (Extra-Chill/homeboy#1537) ──────────────────────────────
+//
+// `service.start` returns once the child is forked, but the kernel may not
+// have called `bind()`/`listen()` yet when the next pipeline step
+// (`service.health`) fires. `http_check` retries connect-refused failures
+// for a bounded budget so single-pass `rig up` doesn't race the listener.
+// The four tests below pin both the wait-loop semantics and what we
+// deliberately do NOT retry on.
+
+/// Reserve a free TCP port by binding then dropping. Used only by tests
+/// that want to assert connect-refused behavior on an unbound port. Tests
+/// that intend to actually serve a response should use `bind_serving` so
+/// the port is held continuously and parallel tests can't steal it
+/// between reserve and serve.
+fn reserve_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local_addr").port();
+    drop(listener);
+    port
+}
+
+/// Bind a listener on an ephemeral port and return both the bound
+/// listener and its port. Caller is responsible for accepting on it
+/// (typically by passing the listener into `serve_once`). Eliminates
+/// the reserve→bind race that plagues `bind ephemeral; drop; rebind`.
+fn bind_serving() -> (std::net::TcpListener, u16) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local_addr").port();
+    (listener, port)
+}
+
+/// Spawn a one-shot HTTP/1.0 server that answers a single connection
+/// with `status` and a tiny body, then exits.
+fn serve_once(listener: std::net::TcpListener, status: u16) -> std::thread::JoinHandle<()> {
+    use std::io::{Read, Write};
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            // Drain request just enough that the client doesn't see RST.
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let body = "ok";
+            let response = format!(
+                "HTTP/1.0 {} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status,
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    })
+}
+
+#[test]
+fn test_http_check_retries_until_listener_appears() {
+    // Real-world race shape: pipeline runs `service.start` then `service.health`
+    // back-to-back. The fix's job is to absorb the bind() gap.
+    //
+    // We deliberately use `reserve_port` here (not `bind_serving`) so the
+    // port is genuinely closed at probe time — that's what reproduces the
+    // bind() race the fix targets. The handler thread re-binds after a
+    // delay; the retry loop must absorb the gap.
+    let port = reserve_port();
+    let url = format!("http://127.0.0.1:{}/", port);
+
+    let handle = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", port)).expect("rebind listener for race");
+        let server = serve_once(listener, 200);
+        // Block until the request is served so the test thread's drop
+        // doesn't kill the listener mid-handshake.
+        let _ = server.join();
+    });
+
+    let rig = minimal_rig();
+    let spec = CheckSpec {
+        http: Some(url),
+        expect_status: Some(200),
+        ..Default::default()
+    };
+    let start = std::time::Instant::now();
+    evaluate(&rig, &spec).expect("listener came up within budget");
+    let elapsed = start.elapsed();
+
+    // Sanity bounds: must have actually waited (>=400ms) and must not
+    // have run anywhere near the 10s ceiling.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(400),
+        "expected to wait for the listener; elapsed = {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "should converge well before budget exhaustion; elapsed = {:?}",
+        elapsed
+    );
+
+    let _ = handle.join();
+}
+
+#[test]
+fn test_http_check_exhausts_budget_when_nothing_ever_listens() {
+    // Inverse case: confirm we DO give up. Without a bounded budget this
+    // would hang forever; without a budget AT ALL we'd return immediately
+    // and re-introduce the original race.
+    let port = reserve_port();
+    let url = format!("http://127.0.0.1:{}/", port);
+
+    let rig = minimal_rig();
+    let spec = CheckSpec {
+        http: Some(url),
+        expect_status: Some(200),
+        ..Default::default()
+    };
+    let start = std::time::Instant::now();
+    let err = evaluate(&rig, &spec).expect_err("no listener => fail");
+    let elapsed = start.elapsed();
+
+    // Budget is 10s; allow generous slack for slow CI but cap below a
+    // pathological hang.
+    assert!(
+        elapsed >= std::time::Duration::from_secs(9),
+        "must exhaust the wait-ready budget; elapsed = {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "must not hang past the budget; elapsed = {:?}",
+        elapsed
+    );
+    // Final error should still surface as a connect failure, not a fake
+    // success or a confusing fallback.
+    assert!(
+        err.message.contains("HTTP GET") && err.message.contains("failed"),
+        "expected HTTP failure message, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn test_http_check_passes_when_listener_already_up() {
+    // No race in this case — listener is bound before the probe fires.
+    // Should return effectively instantly with no retries.
+    let (listener, port) = bind_serving();
+    let url = format!("http://127.0.0.1:{}/", port);
+    let server = serve_once(listener, 200);
+
+    let rig = minimal_rig();
+    let spec = CheckSpec {
+        http: Some(url),
+        expect_status: Some(200),
+        ..Default::default()
+    };
+    let start = std::time::Instant::now();
+    evaluate(&rig, &spec).expect("listener up => pass");
+    let elapsed = start.elapsed();
+
+    // Should be sub-second; the retry loop must not idle when the very
+    // first attempt succeeds.
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "no-race path must be near-instant; elapsed = {:?}",
+        elapsed
+    );
+
+    let _ = server.join();
+}
+
+#[test]
+fn test_http_check_does_not_retry_on_unexpected_status() {
+    // Critical contract: an HTTP-level response — even a 5xx — means the
+    // listener IS up and answering. Retrying on status mismatch would
+    // turn `http_check` into an application-level health waiter, which is
+    // a different probe (use `command` checks for that). The wait loop is
+    // strictly for the bind() race.
+    let (listener, port) = bind_serving();
+    let url = format!("http://127.0.0.1:{}/", port);
+    let server = serve_once(listener, 503); // listener up, wrong status
+
+    let rig = minimal_rig();
+    let spec = CheckSpec {
+        http: Some(url),
+        expect_status: Some(200),
+        ..Default::default()
+    };
+    let start = std::time::Instant::now();
+    let err = evaluate(&rig, &spec).expect_err("wrong status => fail immediately");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "status mismatch must not enter the wait loop; elapsed = {:?}",
+        elapsed
+    );
+    assert!(
+        err.message.contains("returned 503") && err.message.contains("expected 200"),
+        "expected status-mismatch message, got: {}",
+        err.message
+    );
+
+    let _ = server.join();
+}

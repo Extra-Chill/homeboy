@@ -64,6 +64,24 @@ pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {
     Ok(())
 }
 
+/// Total wait budget for an HTTP probe to converge on a TCP listener.
+///
+/// Closes Extra-Chill/homeboy#1537: `service.start` returns once the child
+/// is forked, but the kernel may not have called `bind()`/`listen()` yet
+/// when the next pipeline step (`service.health`) fires. Connect-refused
+/// is a clear "not ready yet" signal — we retry the request, bounded by
+/// this ceiling, before giving up. Any HTTP-level response (even 5xx)
+/// counts as "the listener is up" and short-circuits the loop, because
+/// the question this probe answers is "is the port serving?", not "is
+/// the application happy?". Application-level health belongs in a
+/// separate `command` check.
+const HTTP_WAIT_READY_BUDGET: Duration = Duration::from_secs(10);
+
+/// Per-attempt sleep between connect-refused retries. Short enough that
+/// a service that comes up in <100ms still feels instant; long enough
+/// that we don't spin the CPU against a slow-starting daemon.
+const HTTP_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+
 fn http_check(rig: &RigSpec, url: &str, expect_status: u16) -> Result<()> {
     let resolved = expand_vars(rig, url);
     let client = reqwest::blocking::Client::builder()
@@ -71,28 +89,46 @@ fn http_check(rig: &RigSpec, url: &str, expect_status: u16) -> Result<()> {
         .build()
         .map_err(|e| Error::internal_unexpected(format!("build http client: {}", e)))?;
 
-    let response = client.get(&resolved).send().map_err(|e| {
-        Error::validation_invalid_argument(
-            "check.http",
-            format!("HTTP GET {} failed: {}", resolved, e),
-            None,
-            None,
-        )
-    })?;
+    let deadline = std::time::Instant::now() + HTTP_WAIT_READY_BUDGET;
 
-    let actual = response.status().as_u16();
-    if actual != expect_status {
-        return Err(Error::validation_invalid_argument(
-            "check.http",
-            format!(
-                "HTTP GET {} returned {} (expected {})",
-                resolved, actual, expect_status
-            ),
-            None,
-            None,
-        ));
+    loop {
+        match client.get(&resolved).send() {
+            Ok(response) => {
+                let actual = response.status().as_u16();
+                if actual != expect_status {
+                    return Err(Error::validation_invalid_argument(
+                        "check.http",
+                        format!(
+                            "HTTP GET {} returned {} (expected {})",
+                            resolved, actual, expect_status
+                        ),
+                        None,
+                        None,
+                    ));
+                }
+                return Ok(());
+            }
+            Err(e) if e.is_connect() && std::time::Instant::now() < deadline => {
+                // Listener not up yet — keep waiting until the budget runs out.
+                // We deliberately do NOT retry on DNS, TLS, or read-timeout
+                // errors: those aren't startup races, they're real problems
+                // a retry loop would just paper over.
+                std::thread::sleep(HTTP_RETRY_INTERVAL);
+            }
+            Err(e) => {
+                // Either a non-connect error (DNS, TLS, read-timeout —
+                // surface verbatim) or the wait-ready budget exhausted on
+                // a still-refused connection. Either way the latest error
+                // is the most accurate diagnostic.
+                return Err(Error::validation_invalid_argument(
+                    "check.http",
+                    format!("HTTP GET {} failed: {}", resolved, e),
+                    None,
+                    None,
+                ));
+            }
+        }
     }
-    Ok(())
 }
 
 fn file_check(rig: &RigSpec, path: &str, contains: Option<&str>) -> Result<()> {
