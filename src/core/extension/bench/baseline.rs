@@ -565,6 +565,7 @@ mod tests {
                 direction: BenchMetricDirection::LowerIsBetter,
                 regression_threshold_percent: None,
                 regression_threshold_absolute: Some(0.01),
+                phase: None,
             },
         );
 
@@ -596,6 +597,7 @@ mod tests {
                 direction: BenchMetricDirection::HigherIsBetter,
                 regression_threshold_percent: Some(5.0),
                 regression_threshold_absolute: None,
+                phase: None,
             },
         );
 
@@ -631,6 +633,7 @@ mod tests {
                 direction: BenchMetricDirection::LowerIsBetter,
                 regression_threshold_percent: None,
                 regression_threshold_absolute: Some(0.0),
+                phase: None,
             },
         );
 

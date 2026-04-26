@@ -82,6 +82,18 @@ pub struct BenchMetricPolicy {
     pub regression_threshold_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regression_threshold_absolute: Option<f64>,
+    /// Optional measurement-phase tag.
+    ///
+    /// Phase is **metadata only**: it does not affect regression math
+    /// (cold and warm metrics use the same `direction` /
+    /// `regression_threshold_*` fields), but it lets report renderers
+    /// group metrics by phase so cold-start numbers don't mix with
+    /// steady-state numbers in the same row of a diff table.
+    ///
+    /// Backwards-compatible: pre-existing JSON without `phase`
+    /// deserializes as `None` and round-trips unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<BenchMetricPhase>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,6 +102,36 @@ pub enum BenchMetricDirection {
     LowerIsBetter,
     #[serde(rename = "higher_is_better", alias = "higher")]
     HigherIsBetter,
+}
+
+/// Measurement-phase tag for a metric.
+///
+/// A bench run can mix one-time setup costs (process spawn, WASM boot,
+/// dependency install) with steady-state per-iteration costs. Without
+/// this tag every metric ends up in one flat alphabetical list and a
+/// 3500ms cold-boot sits next to a 12ms warm request as though they
+/// were comparable. Phase tagging lets the report renderer group cold
+/// metrics first, warm metrics second, amortized last, so the diff
+/// reads as the actually-useful story instead of a flat dump.
+///
+/// Phase is **opt-in**: pre-existing policies without a `phase` field
+/// stay untagged and render identically to today.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum BenchMetricPhase {
+    /// One-time setup cost (process spawn, WASM boot, dependency
+    /// install). First iteration only; subsequent iterations don't pay
+    /// this cost unless the dispatcher restarts the substrate between
+    /// iterations.
+    Cold,
+    /// Steady-state per-iteration cost after warmup. The metric the
+    /// user sees on every request after the first.
+    Warm,
+    /// Synthetic blend, e.g. `(cold + N * warm) / N` for some N.
+    /// Useful for "what does the user see on first page-load"
+    /// framing where one cold request is amortized over a small
+    /// burst of warm follow-ups.
+    Amortized,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

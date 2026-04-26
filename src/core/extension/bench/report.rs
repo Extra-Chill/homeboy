@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::baseline::BenchBaselineComparison;
-use super::parsing::{BenchResults, BenchScenario};
+use super::parsing::{BenchMetricPhase, BenchResults, BenchScenario};
 use super::run::BenchRunWorkflowResult;
 use crate::rig::RigStateSnapshot;
 
@@ -118,9 +118,75 @@ pub struct RigBenchEntry {
 /// reference) / reference * 100`. The reference rig is omitted from the
 /// inner map (its delta would always be zero). A scenario or metric
 /// missing from a rig is silently skipped — no synthetic zeros.
+///
+/// `phase_groups` is the **render-order contract** for phase-aware
+/// consumers: when at least one metric policy declares a `phase` tag,
+/// this field lists metric names per phase in the canonical render
+/// order (`Cold` first, then `Warm`, then `Amortized`, then untagged
+/// metrics under `None`-keyed-as-`untagged`). Consumers that want
+/// phase-grouped tables iterate `phase_groups` instead of the
+/// `by_scenario` inner map (which stays alphabetical for stability).
+/// When **no** policy declares a phase, `phase_groups` is `None` and
+/// the JSON envelope is byte-identical to pre-phase output.
 #[derive(Serialize, Default)]
 pub struct BenchComparisonDiff {
     pub by_scenario: BTreeMap<String, BTreeMap<String, BTreeMap<String, MetricDelta>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_groups: Option<BenchPhaseGroups>,
+}
+
+/// Render-order contract for phase-aware bench-output consumers.
+///
+/// Each field lists the metric names whose policy declared the given
+/// phase, in the canonical render order: `cold` first (one-time setup
+/// costs), `warm` second (steady-state per-iteration costs),
+/// `amortized` third (synthetic blends), `untagged` last (metrics
+/// whose policy didn't declare a phase, or whose name has no policy
+/// at all).
+///
+/// Empty buckets are omitted from the JSON envelope.
+#[derive(Serialize, Default, Debug, PartialEq)]
+pub struct BenchPhaseGroups {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cold: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warm: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub amortized: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub untagged: Vec<String>,
+}
+
+impl BenchPhaseGroups {
+    /// Build a phase-grouping from a metric-policy table plus the set
+    /// of metric names that actually appear in the diff. Metric names
+    /// without a policy or without a `phase` tag fall into `untagged`.
+    /// Within each phase bucket the metric names are kept in
+    /// alphabetical order so the render is stable across runs.
+    pub fn from_policies(
+        policies: &BTreeMap<String, super::parsing::BenchMetricPolicy>,
+        metric_names: &std::collections::BTreeSet<String>,
+    ) -> Self {
+        let mut groups = BenchPhaseGroups::default();
+        for name in metric_names {
+            let phase = policies.get(name).and_then(|p| p.phase);
+            match phase {
+                Some(BenchMetricPhase::Cold) => groups.cold.push(name.clone()),
+                Some(BenchMetricPhase::Warm) => groups.warm.push(name.clone()),
+                Some(BenchMetricPhase::Amortized) => groups.amortized.push(name.clone()),
+                None => groups.untagged.push(name.clone()),
+            }
+        }
+        groups
+    }
+
+    /// True when no policy declared any phase tag — i.e. every metric
+    /// name is in the `untagged` bucket. Used to suppress the
+    /// `phase_groups` field entirely so back-compat consumers see no
+    /// change in the JSON envelope.
+    pub fn is_phaseless(&self) -> bool {
+        self.cold.is_empty() && self.warm.is_empty() && self.amortized.is_empty()
+    }
 }
 
 /// One rig's delta for one metric in one scenario.
@@ -197,7 +263,33 @@ impl BenchComparisonDiff {
             }
         }
 
-        BenchComparisonDiff { by_scenario }
+        // Derive phase grouping from the reference rig's metric
+        // policies. Phase tagging is opt-in: when no policy declares a
+        // phase, `phase_groups` stays `None` and the JSON envelope is
+        // byte-identical to pre-phase output. When at least one policy
+        // declares a phase, emit the full grouping (including an
+        // `untagged` bucket for metrics without a phase tag) so
+        // consumers have a complete render-order contract.
+        let metric_names: std::collections::BTreeSet<String> = by_scenario
+            .values()
+            .flat_map(|m| m.keys().cloned())
+            .collect();
+        let phase_groups = if metric_names.is_empty() {
+            None
+        } else {
+            let groups =
+                BenchPhaseGroups::from_policies(&ref_results.metric_policies, &metric_names);
+            if groups.is_phaseless() {
+                None
+            } else {
+                Some(groups)
+            }
+        };
+
+        BenchComparisonDiff {
+            by_scenario,
+            phase_groups,
+        }
     }
 }
 
@@ -430,3 +522,7 @@ mod tests {
         assert!(hints.iter().any(|h| h.contains("no parseable results")));
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/core/extension/bench/phase_tag_test.rs"]
+mod phase_tag_test;

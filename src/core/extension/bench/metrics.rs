@@ -104,6 +104,7 @@ impl ResolvedMetricPolicy {
                 direction: BenchMetricDirection::LowerIsBetter,
                 regression_threshold_percent: Some(default_threshold_percent),
                 regression_threshold_absolute: Some(0.0),
+                phase: None,
             },
             regression_threshold_absolute: 0.0,
             zero_baseline_is_neutral: true,
@@ -145,6 +146,7 @@ mod tests {
             direction,
             regression_threshold_percent: Some(5.0),
             regression_threshold_absolute: None,
+            phase: None,
         }
     }
 
@@ -209,6 +211,7 @@ mod tests {
                 direction: BenchMetricDirection::LowerIsBetter,
                 regression_threshold_percent: None,
                 regression_threshold_absolute: Some(0.01),
+                phase: None,
             },
         );
         let delta = resolved.compare(0.0, 0.02);
