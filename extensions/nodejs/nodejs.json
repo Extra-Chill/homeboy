@@ -130,6 +130,7 @@
     }
   },
   "build": {
+    "command_template": "bash {{script}}",
     "extension_script": "scripts/build/build-runner.sh",
     "cleanup_paths": [
       "node_modules",
