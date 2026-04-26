@@ -15,17 +15,15 @@ homeboy component [OPTIONS] <COMMAND>
 
 ```sh
 homeboy component create [OPTIONS] --local-path <path> --remote-path <path> --build-artifact <path>
-homeboy component create --from-repo <path> [--remote-path <path>]
 ```
 
-The component ID is derived from the `--local-path` (or `--from-repo`) directory name (lowercased). For example, `--local-path /path/to/extrachill-api` creates a component with ID `extrachill-api`.
+The component ID is derived from the `--local-path` directory name (lowercased). For example, `--local-path /path/to/extrachill-api` creates a component with ID `extrachill-api`.
 
 Options:
 
-- `--from-repo <path>`: create from a repo containing `homeboy.json` ([portable config](../schemas/portable-config.md)). Reads version targets, extensions, changelog, etc. from the file. CLI flags override `homeboy.json` values.
 - `--json <spec>`: JSON input spec for create/update (supports single or bulk)
 - `--skip-existing`: skip items that already exist (JSON mode only)
-- `--local-path <path>`: absolute path to local **source / git checkout** directory (required unless `--from-repo`; ID derived from directory name; `~` is expanded). Must be a git repo — not the production deploy target (see [component schema](../schemas/component-schema.md#local_path-vs-remote_path))
+- `--local-path <path>`: absolute path to local **source / git checkout** directory (required; ID derived from directory name; `~` is expanded). Must be a git repo — not the production deploy target (see [component schema](../schemas/component-schema.md#local_path-vs-remote_path))
 - `--remote-path <path>`: remote path relative to project `base_path` (required unless in `homeboy.json`)
 - `--build-artifact <path>`: build artifact path relative to `local_path` (required; must include a filename)
 - `--version-target <TARGET>`: version target in format `file` or `file::pattern` (repeatable)

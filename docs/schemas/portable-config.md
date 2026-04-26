@@ -45,17 +45,17 @@ All fields are optional. The component `id` is derived from the directory name, 
 
 ## Usage
 
-### Register from repo
+### Initialize or refresh repo config
 
 ```bash
-# Read config from homeboy.json, only need to provide machine-specific path
-homeboy component create --from-repo /path/to/repo --remote-path wp-content/plugins/my-plugin
+# Initialize repo-owned homeboy.json from supported create flags
+homeboy component create --local-path /path/to/repo --remote-path wp-content/plugins/my-plugin
 
-# If homeboy.json already includes remote_path:
-homeboy component create --from-repo /path/to/repo
+# If homeboy.json already exists, preserve unknown fields and refresh known fields
+homeboy component create --local-path /path/to/repo
 
-# Override any field from the CLI:
-homeboy component create --from-repo /path/to/repo --build-command "npm run build"
+# Override any supported field from the CLI:
+homeboy component create --local-path /path/to/repo --changelog-target "CHANGELOG.md"
 ```
 
 ### What stays local (not in homeboy.json)
