@@ -69,9 +69,16 @@ fn results_with(
 // 1a. Cold round-trips through serde with the lowercase wire form.
 #[test]
 fn phase_cold_serializes_lowercase() {
-    let p = policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Cold));
+    let p = policy(
+        BenchMetricDirection::LowerIsBetter,
+        Some(BenchMetricPhase::Cold),
+    );
     let raw = serde_json::to_string(&p).unwrap();
-    assert!(raw.contains("\"phase\":\"cold\""), "expected lowercase 'cold', got: {}", raw);
+    assert!(
+        raw.contains("\"phase\":\"cold\""),
+        "expected lowercase 'cold', got: {}",
+        raw
+    );
 
     let back: BenchMetricPolicy = serde_json::from_str(&raw).unwrap();
     assert_eq!(back.phase, Some(BenchMetricPhase::Cold));
@@ -80,9 +87,16 @@ fn phase_cold_serializes_lowercase() {
 // 1b. Warm round-trips.
 #[test]
 fn phase_warm_serializes_lowercase() {
-    let p = policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Warm));
+    let p = policy(
+        BenchMetricDirection::LowerIsBetter,
+        Some(BenchMetricPhase::Warm),
+    );
     let raw = serde_json::to_string(&p).unwrap();
-    assert!(raw.contains("\"phase\":\"warm\""), "expected lowercase 'warm', got: {}", raw);
+    assert!(
+        raw.contains("\"phase\":\"warm\""),
+        "expected lowercase 'warm', got: {}",
+        raw
+    );
 
     let back: BenchMetricPolicy = serde_json::from_str(&raw).unwrap();
     assert_eq!(back.phase, Some(BenchMetricPhase::Warm));
@@ -91,7 +105,10 @@ fn phase_warm_serializes_lowercase() {
 // 1c. Amortized round-trips.
 #[test]
 fn phase_amortized_serializes_lowercase() {
-    let p = policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Amortized));
+    let p = policy(
+        BenchMetricDirection::LowerIsBetter,
+        Some(BenchMetricPhase::Amortized),
+    );
     let raw = serde_json::to_string(&p).unwrap();
     assert!(
         raw.contains("\"phase\":\"amortized\""),
@@ -125,7 +142,10 @@ fn policy_without_phase_field_parses_as_none() {
     }"#;
     let parsed = parse_bench_results_str(raw).unwrap();
     let pol = parsed.metric_policies.get("p95_ms").unwrap();
-    assert_eq!(pol.phase, None, "missing phase field should deserialize as None");
+    assert_eq!(
+        pol.phase, None,
+        "missing phase field should deserialize as None"
+    );
     assert_eq!(pol.direction, BenchMetricDirection::LowerIsBetter);
 }
 
@@ -149,15 +169,24 @@ fn phase_groups_orders_cold_before_warm_before_amortized_before_untagged() {
     let mut policies = BTreeMap::new();
     policies.insert(
         "boot_ms".to_string(),
-        policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Cold)),
+        policy(
+            BenchMetricDirection::LowerIsBetter,
+            Some(BenchMetricPhase::Cold),
+        ),
     );
     policies.insert(
         "p95_ms".to_string(),
-        policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Warm)),
+        policy(
+            BenchMetricDirection::LowerIsBetter,
+            Some(BenchMetricPhase::Warm),
+        ),
     );
     policies.insert(
         "first_paint_ms".to_string(),
-        policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Amortized)),
+        policy(
+            BenchMetricDirection::LowerIsBetter,
+            Some(BenchMetricPhase::Amortized),
+        ),
     );
     // `error_rate` intentionally has no policy → falls into untagged.
 
@@ -208,19 +237,31 @@ fn phase_groups_sorts_within_phase_alphabetically() {
     // bucket sorts independently.
     policies.insert(
         "load_deps_ms".to_string(),
-        policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Cold)),
+        policy(
+            BenchMetricDirection::LowerIsBetter,
+            Some(BenchMetricPhase::Cold),
+        ),
     );
     policies.insert(
         "boot_ms".to_string(),
-        policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Cold)),
+        policy(
+            BenchMetricDirection::LowerIsBetter,
+            Some(BenchMetricPhase::Cold),
+        ),
     );
 
     let ref_r = results_with(
-        vec![scenario("init", &[("boot_ms", 100.0), ("load_deps_ms", 200.0)])],
+        vec![scenario(
+            "init",
+            &[("boot_ms", 100.0), ("load_deps_ms", 200.0)],
+        )],
         policies,
     );
     let other = results_with(
-        vec![scenario("init", &[("boot_ms", 110.0), ("load_deps_ms", 190.0)])],
+        vec![scenario(
+            "init",
+            &[("boot_ms", 110.0), ("load_deps_ms", 190.0)],
+        )],
         BTreeMap::new(),
     );
 
@@ -243,10 +284,7 @@ fn phase_groups_is_none_when_no_policy_declares_a_phase() {
         policy(BenchMetricDirection::LowerIsBetter, None),
     );
 
-    let ref_r = results_with(
-        vec![scenario("scenario", &[("p95_ms", 100.0)])],
-        policies,
-    );
+    let ref_r = results_with(vec![scenario("scenario", &[("p95_ms", 100.0)])], policies);
     let other = results_with(
         vec![scenario("scenario", &[("p95_ms", 110.0)])],
         BTreeMap::new(),
@@ -263,14 +301,8 @@ fn phase_groups_is_none_when_no_policy_declares_a_phase() {
 // path), phase_groups is also None.
 #[test]
 fn phase_groups_is_none_when_metric_policies_is_empty() {
-    let ref_r = results_with(
-        vec![scenario("s", &[("p95_ms", 100.0)])],
-        BTreeMap::new(),
-    );
-    let other = results_with(
-        vec![scenario("s", &[("p95_ms", 105.0)])],
-        BTreeMap::new(),
-    );
+    let ref_r = results_with(vec![scenario("s", &[("p95_ms", 100.0)])], BTreeMap::new());
+    let other = results_with(vec![scenario("s", &[("p95_ms", 105.0)])], BTreeMap::new());
 
     let diff = BenchComparisonDiff::build(("ref", &ref_r), &[("other", &other)]);
     assert!(diff.phase_groups.is_none());
@@ -282,14 +314,8 @@ fn phase_groups_is_none_when_metric_policies_is_empty() {
 // must continue to pass.
 #[test]
 fn diff_serializes_without_phase_groups_field_when_phaseless() {
-    let ref_r = results_with(
-        vec![scenario("s", &[("p95_ms", 100.0)])],
-        BTreeMap::new(),
-    );
-    let other = results_with(
-        vec![scenario("s", &[("p95_ms", 105.0)])],
-        BTreeMap::new(),
-    );
+    let ref_r = results_with(vec![scenario("s", &[("p95_ms", 100.0)])], BTreeMap::new());
+    let other = results_with(vec![scenario("s", &[("p95_ms", 105.0)])], BTreeMap::new());
 
     let diff = BenchComparisonDiff::build(("ref", &ref_r), &[("other", &other)]);
     let raw = serde_json::to_string(&diff).unwrap();
@@ -308,13 +334,13 @@ fn phase_groups_omits_empty_buckets_in_json() {
     let mut policies = BTreeMap::new();
     policies.insert(
         "boot_ms".to_string(),
-        policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Cold)),
+        policy(
+            BenchMetricDirection::LowerIsBetter,
+            Some(BenchMetricPhase::Cold),
+        ),
     );
 
-    let ref_r = results_with(
-        vec![scenario("init", &[("boot_ms", 3500.0)])],
-        policies,
-    );
+    let ref_r = results_with(vec![scenario("init", &[("boot_ms", 3500.0)])], policies);
     let other = results_with(
         vec![scenario("init", &[("boot_ms", 3000.0)])],
         BTreeMap::new(),
@@ -323,7 +349,11 @@ fn phase_groups_omits_empty_buckets_in_json() {
     let diff = BenchComparisonDiff::build(("a", &ref_r), &[("b", &other)]);
     let raw = serde_json::to_string(&diff).unwrap();
     assert!(raw.contains("\"cold\":[\"boot_ms\"]"), "got: {}", raw);
-    assert!(!raw.contains("\"warm\""), "empty warm bucket must be omitted, got: {}", raw);
+    assert!(
+        !raw.contains("\"warm\""),
+        "empty warm bucket must be omitted, got: {}",
+        raw
+    );
     assert!(
         !raw.contains("\"amortized\""),
         "empty amortized bucket must be omitted, got: {}",
@@ -344,11 +374,17 @@ fn bench_phase_groups_from_policies_buckets_correctly() {
     let mut policies = BTreeMap::new();
     policies.insert(
         "boot_ms".to_string(),
-        policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Cold)),
+        policy(
+            BenchMetricDirection::LowerIsBetter,
+            Some(BenchMetricPhase::Cold),
+        ),
     );
     policies.insert(
         "p95_ms".to_string(),
-        policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Warm)),
+        policy(
+            BenchMetricDirection::LowerIsBetter,
+            Some(BenchMetricPhase::Warm),
+        ),
     );
 
     let mut names = BTreeSet::new();
@@ -361,7 +397,10 @@ fn bench_phase_groups_from_policies_buckets_correctly() {
     assert_eq!(groups.warm, vec!["p95_ms".to_string()]);
     assert!(groups.amortized.is_empty());
     assert_eq!(groups.untagged, vec!["error_rate".to_string()]);
-    assert!(!groups.is_phaseless(), "must report phaseful when any bucket is non-empty");
+    assert!(
+        !groups.is_phaseless(),
+        "must report phaseful when any bucket is non-empty"
+    );
 }
 
 // 7. by_scenario stays alphabetical even when phase_groups is
@@ -372,11 +411,17 @@ fn by_scenario_inner_map_stays_alphabetical_when_phase_tagged() {
     let mut policies = BTreeMap::new();
     policies.insert(
         "boot_ms".to_string(),
-        policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Cold)),
+        policy(
+            BenchMetricDirection::LowerIsBetter,
+            Some(BenchMetricPhase::Cold),
+        ),
     );
     policies.insert(
         "z_warm_metric".to_string(),
-        policy(BenchMetricDirection::LowerIsBetter, Some(BenchMetricPhase::Warm)),
+        policy(
+            BenchMetricDirection::LowerIsBetter,
+            Some(BenchMetricPhase::Warm),
+        ),
     );
 
     let ref_r = results_with(

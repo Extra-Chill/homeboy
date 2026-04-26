@@ -192,12 +192,7 @@ fn test_multi_rig_user_input_wins_over_spec() {
     // User explicitly listed multiple rigs: do not consult the spec
     // at all (no rig::load), and definitely don't rewrite. Explicit
     // beats implicit.
-    let args = make_args(
-        vec!["a".to_string(), "b".to_string()],
-        false,
-        false,
-        false,
-    );
+    let args = make_args(vec!["a".to_string(), "b".to_string()], false, false, false);
     // No fixture written — confirms `rig::load` is never called.
     let result = maybe_expand_default_baseline(&args).expect("dispatch ok");
     assert!(
@@ -222,8 +217,8 @@ fn test_self_reference_loop_is_rejected() {
     with_isolated_home(|home| {
         write_rig_fixture(home, "candidate", CANDIDATE_SELF_REFERENCE);
         let args = make_args(vec!["candidate".to_string()], false, false, false);
-        let err = maybe_expand_default_baseline(&args)
-            .expect_err("self-reference must be rejected");
+        let err =
+            maybe_expand_default_baseline(&args).expect_err("self-reference must be rejected");
         let msg = format!("{}", err);
         assert!(
             msg.contains("default_baseline_rig"),
@@ -265,14 +260,8 @@ fn test_missing_candidate_rig_surfaces_load_error() {
     // failure surface for typos consistent with `bench --rig <typo>`
     // pre-PR behavior.
     with_isolated_home(|_home| {
-        let args = make_args(
-            vec!["nonexistent-rig".to_string()],
-            false,
-            false,
-            false,
-        );
-        let err = maybe_expand_default_baseline(&args)
-            .expect_err("missing rig must error");
+        let args = make_args(vec!["nonexistent-rig".to_string()], false, false, false);
+        let err = maybe_expand_default_baseline(&args).expect_err("missing rig must error");
         let msg = format!("{}", err);
         assert!(
             msg.to_lowercase().contains("nonexistent-rig")
