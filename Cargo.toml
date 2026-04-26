@@ -17,6 +17,14 @@ path = "src/lib.rs"
 name = "homeboy"
 path = "src/main.rs"
 
+# Bench binaries follow the homeboy-extensions/rust convention:
+# any [[bin]] whose name starts with `bench-` is discoverable by
+# `homeboy bench homeboy`. See src/bin/bench-*.rs for the workload
+# contract (reads HOMEBOY_BENCH_ITERATIONS, emits {timings_ns: [...]}).
+[[bin]]
+name = "bench-audit-self"
+path = "src/bin/bench-audit-self.rs"
+
 [dependencies]
 # Core library dependencies
 base64 = "0.22"
