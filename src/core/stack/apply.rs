@@ -188,14 +188,14 @@ pub fn apply(spec: &StackSpec) -> Result<ApplyOutput> {
 
 /// PR head info extracted from `gh pr view`.
 #[derive(Debug, Clone)]
-struct PrHead {
-    sha: String,
+pub(super) struct PrHead {
+    pub(super) sha: String,
     /// `<owner>/<name>` of the head repo (may differ from the PR's base repo
     /// if the PR was opened from a fork).
-    head_repo: String,
+    pub(super) head_repo: String,
     /// `https://github.com/<owner>/<name>.git` — used as fetch URL for any
     /// temp remote we add.
-    clone_url: String,
+    pub(super) clone_url: String,
 }
 
 /// One of three outcomes from a single `git cherry-pick` invocation.
@@ -206,7 +206,7 @@ pub(crate) enum CherryPickResult {
     Conflict(String),
 }
 
-fn fetch_remote_branch(path: &str, remote: &str, branch: &str) -> Result<()> {
+pub(super) fn fetch_remote_branch(path: &str, remote: &str, branch: &str) -> Result<()> {
     let output = run_git(path, &["fetch", remote, branch])?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -322,7 +322,7 @@ fn resolve_pr_head(pr: &StackPrEntry) -> Result<PrHead> {
 ///
 /// If a remote with the right URL already exists (any name), reuses it
 /// instead of adding a new one.
-fn ensure_head_remote(
+pub(super) fn ensure_head_remote(
     path: &str,
     _pr: &StackPrEntry,
     head: &PrHead,
@@ -403,7 +403,7 @@ pub(crate) fn url_matches(a: &str, b: &str) -> bool {
     }
 }
 
-fn fetch_sha(path: &str, remote: &str, sha: &str) -> Result<()> {
+pub(super) fn fetch_sha(path: &str, remote: &str, sha: &str) -> Result<()> {
     let output = run_git(path, &["fetch", remote, sha])?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -438,7 +438,7 @@ pub(crate) fn cherry_pick(path: &str, sha: &str) -> Result<CherryPickResult> {
     Ok(CherryPickResult::Conflict(combined.trim().to_string()))
 }
 
-fn run_git(path: &str, args: &[&str]) -> Result<std::process::Output> {
+pub(super) fn run_git(path: &str, args: &[&str]) -> Result<std::process::Output> {
     Command::new("git")
         .args(args)
         .current_dir(path)

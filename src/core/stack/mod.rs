@@ -30,6 +30,7 @@ pub mod apply;
 pub mod inspect;
 pub mod spec;
 pub mod status;
+pub mod sync;
 
 pub use apply::{apply, AppliedPr, ApplyOutput, PickOutcome};
 pub use inspect::{inspect, inspect_at, InspectCommit, InspectOptions, InspectOutput, InspectPr};
@@ -37,3 +38,4 @@ pub use spec::{
     exists, expand_path, list, list_ids, load, parse_git_ref, save, GitRef, StackPrEntry, StackSpec,
 };
 pub use status::{status, LocalState, StatusOutput, StatusPr};
+pub use sync::{sync, DroppedPr, SyncOutput};

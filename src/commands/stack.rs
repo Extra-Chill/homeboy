@@ -7,7 +7,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::stack::{
-    self, ApplyOutput, GitRef, InspectOptions, InspectOutput, StackPrEntry, StackSpec, StatusOutput,
+    self, ApplyOutput, GitRef, InspectOptions, InspectOutput, StackPrEntry, StackSpec,
+    StatusOutput, SyncOutput,
 };
 
 use super::CmdResult;
@@ -86,6 +87,22 @@ enum StackCommand {
         /// Stack ID.
         stack_id: String,
     },
+    /// Rebase the target branch onto fresh base AND auto-drop merged PRs
+    /// from the spec.
+    ///
+    /// `sync` is the holistic upkeep verb for a combined-fixes branch:
+    /// PRs that have been merged upstream (and whose content is in base)
+    /// are removed from the spec; everything else is cherry-picked onto
+    /// a freshly-rebuilt target. On the first cherry-pick conflict, the
+    /// in-progress pick is aborted and a manual-resolve message printed.
+    Sync {
+        /// Stack ID.
+        stack_id: String,
+        /// Print what WOULD drop and pick without mutating spec or
+        /// target branch.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Spec-less inspection of the current branch as a stack of commits.
     /// Replaces the previous `homeboy git stack` command (re-homed into
     /// the stack domain).
@@ -118,6 +135,7 @@ pub enum StackCommandOutput {
     RemovePr(StackMutationOutput),
     Apply(StackApplyOutput),
     Status(StackStatusOutput),
+    Sync(StackSyncOutput),
     Inspect(StackInspectOutput),
 }
 
@@ -165,6 +183,13 @@ pub struct StackStatusOutput {
 }
 
 #[derive(Serialize)]
+pub struct StackSyncOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub report: SyncOutput,
+}
+
+#[derive(Serialize)]
 pub struct StackInspectOutput {
     pub command: &'static str,
     #[serde(flatten)]
@@ -203,6 +228,7 @@ pub fn run(args: StackArgs, _global: &super::GlobalArgs) -> CmdResult<StackComma
         } => remove_pr(&stack_id, number, repo.as_deref()),
         StackCommand::Apply { stack_id } => apply(&stack_id),
         StackCommand::Status { stack_id } => status(&stack_id),
+        StackCommand::Sync { stack_id, dry_run } => sync(&stack_id, dry_run),
         StackCommand::Inspect {
             component_id,
             base,
@@ -404,6 +430,19 @@ fn status(stack_id: &str) -> CmdResult<StackCommandOutput> {
             report,
         }),
         0,
+    ))
+}
+
+fn sync(stack_id: &str, dry_run: bool) -> CmdResult<StackCommandOutput> {
+    let mut spec = stack::load(stack_id)?;
+    let report = stack::sync(&mut spec, dry_run)?;
+    let exit_code = if report.success { 0 } else { 1 };
+    Ok((
+        StackCommandOutput::Sync(StackSyncOutput {
+            command: "stack.sync",
+            report,
+        }),
+        exit_code,
     ))
 }
 
