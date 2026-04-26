@@ -44,6 +44,16 @@ Output is deterministic and matches each command's per-stage output.
 If neither flag is passed, all three stages run against the entire component —
 equivalent to running `audit`, `lint`, and `test` back-to-back without scope.
 
+## Component Requirements
+
+`review` delegates to `audit`, `lint`, and `test`. Lint and test stages require linked extensions that provide those capabilities; review does not run arbitrary component shell commands.
+
+Useful remediation paths when review reports missing extensions:
+
+- Link the relevant extension: `homeboy component set <id> --extension <extension_id>`
+- Inspect installed extensions: `homeboy extension list`
+- Use a rig `command` step for one-off checks that do not belong in an extension.
+
 ## Other flags
 
 - `--summary`: Forward the per-stage summary flag to each command (`--summary`

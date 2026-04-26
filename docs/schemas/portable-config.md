@@ -8,7 +8,6 @@ A `homeboy.json` file in a repo root defines portable component configuration th
 {
   "remote_path": "string",
   "build_artifact": "string",
-  "build_command": "string",
   "extract_command": "string",
   "version_targets": [
     {
@@ -71,11 +70,12 @@ homeboy component create --local-path /path/to/repo --changelog-target "CHANGELO
 |-------|-------------|
 | `remote_path` | Deploy target relative to project `base_path` |
 | `build_artifact` | Build output path relative to repo root |
-| `build_command` | Shell command to build the component |
 | `extract_command` | Post-upload command (supports `{artifact}`, `{targetDir}`) |
 | `version_targets` | Version detection patterns |
 | `changelog_target` | Path to changelog file |
 | `extensions` | Extension configuration (e.g., `{"wordpress": {}}`) |
+
+Build, lint, test, bench, and review behavior comes from linked extensions. For one-off shell commands, use a rig `command` step; component-level `build_command` is not supported.
 
 ## Precedence
 

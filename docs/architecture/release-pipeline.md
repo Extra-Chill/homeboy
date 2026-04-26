@@ -36,7 +36,7 @@ Release pipelines are defined in component configuration:
 
 #### `build`
 
-Build the component using configured `build_command`.
+Build the component using its linked extension's build support.
 
 ```json
 {
@@ -48,7 +48,7 @@ Build the component using configured `build_command`.
 }
 ```
 
-**Config options:** None (uses component build configuration)
+**Config options:** None (uses linked extension build configuration)
 
 #### `version_bump`
 

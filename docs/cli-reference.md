@@ -263,18 +263,16 @@
 - `build_artifact` — Build artifact path relative to localPath
 - `version_targets` — Version targets in the form "file" or "file::pattern" (repeatable). For complex patterns, use --version-targets @file.json to avoid shell escaping
 - `version_targets_json`
-- `build_command` — Build command to run in localPath
 - `extract_command` — Extract command to run after upload (e.g., "unzip -o {artifact} && rm {artifact}")
 - `changelog_target` — Path to changelog file relative to localPath
 - `extensions` — Extension(s) this component uses (e.g., "wordpress"). Repeatable.
 - `Show` — Display component configuration
 - `id` — Component ID
-- `Set` — Update component configuration fields  Supports dedicated flags for common fields (e.g., --local-path, --build-command) as well as --json for arbitrary updates. When combining --json with dynamic trailing flags, use '--' separator.
+- `Set` — Update component configuration fields  Supports dedicated flags for common fields (e.g., --local-path, --changelog-target) as well as --json for arbitrary updates. When combining --json with dynamic trailing flags, use '--' separator.
 - `args`
 - `local_path` — Absolute path to local source directory
 - `remote_path` — Remote path relative to project basePath
 - `build_artifact` — Build artifact path relative to localPath
-- `build_command` — Build command to run in localPath
 - `extract_command` — Extract command to run after upload (e.g., "unzip -o {artifact} && rm {artifact}")
 - `changelog_target` — Path to changelog file relative to localPath
 - `version_targets` — Version targets in the form "file" or "file::pattern" (repeatable). Same format as `component create --version-target`.

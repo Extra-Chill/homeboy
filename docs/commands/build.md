@@ -10,7 +10,7 @@ homeboy build --json '<spec>'
 
 ## Description
 
-Runs a build command for the component in the component's `local_path`.
+Resolves a build command from the component's linked extension and runs it in the component's `local_path`.
 
 ## Path Override
 
@@ -27,7 +27,13 @@ This is useful for:
 
 The override is transient — it does not modify the stored component config.
 
-Requires `build_command` to be configured on the component, or a extension with build support. If neither is set, the command errors.
+Requires exactly one linked extension with build support. Component-level `build_command` is not supported; for one-off shell builds, define a rig `command` step instead.
+
+Useful remediation paths when a component is not buildable:
+
+- Link a build-capable extension: `homeboy component set <id> --extension <extension_id>`
+- Inspect installed extensions: `homeboy extension list`
+- Use a rig `command` step for local or private build workflows that do not belong in an extension.
 
 ## Pre-Build Validation
 

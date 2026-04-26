@@ -73,7 +73,6 @@ Then read workspace docs (CLAUDE.md, README.md) for project context.
         "local_path": "...",
         "remote_path": "...",
         "build_artifact": "...",
-        "build_command": "./build.sh",
         "version_targets": [{ "file": "plugin.php", "pattern": "..." }]
       }
     ],
@@ -172,8 +171,8 @@ Repo is configured. Check for gaps and complete setup.
 
 ```bash
 # Gaps include remediation commands - run them
-homeboy component set <id> --build-command "./build.sh"
-homeboy component set <id> --changelog-targets '["CHANGELOG.md"]'
+homeboy component set <id> --extension <extension_id>
+homeboy component set <id> --changelog-target "CHANGELOG.md"
 ```
 
 ### If `managed: false` with `containedComponents`
@@ -189,15 +188,15 @@ homeboy project create "<name>" <domain> --server <server_id> --extension <exten
 
 **Component** (buildable/deployable unit):
 ```bash
-homeboy component create "<name>" --local-path "." --remote-path "<path>" --project <project_id>
-homeboy component set <id> --build-command "./build.sh" --build-artifact "build/<name>.zip"
+homeboy component create --local-path "." --remote-path "<path>" --project <project_id>
+homeboy component set <id> --extension <extension_id> --build-artifact "build/<name>.zip"
 ```
 
 ## Derivation Rules
 
 1. **name**: Directory name or from workspace docs
 2. **remotePath**: Match existing component patterns in target project
-3. **buildArtifact/buildCommand**: From build.sh, Makefile, or workspace docs
+3. **buildArtifact/extensions**: From build.sh, Makefile, or workspace docs
 4. **domain**: ASK (cannot derive locally)
 5. **server_id**: Auto-select if only one exists
 

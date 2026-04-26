@@ -11,7 +11,6 @@ Component configuration defines buildable and deployable units stored in `compon
   "local_path": "string",
   "remote_path": "string",
   "build_artifact": "string",
-  "build_command": "string",
   "extract_command": "string",
   "version_targets": [
     {
@@ -33,7 +32,6 @@ Component configuration defines buildable and deployable units stored in `compon
 - **`local_path`** (string): Absolute path to local **source / git checkout** directory, `~` is expanded
 - **`remote_path`** (string): Remote path relative to project `base_path` (the **deploy target**)
 - **`build_artifact`** (string): Build artifact path relative to `local_path`, must include filename
-- **`build_command`** (string): Shell command to execute in `local_path` during builds
 
 > **Important:** `local_path` must point to a **git repository / source checkout**, not the production deploy target. The deploy target is derived from `project.base_path + component.remote_path`. If `local_path` points to the deployed directory, builds will run inside production and uncommitted-changes checks will fail (the directory isn't a git repo). This is a common misconfiguration after server migrations.
 
@@ -49,6 +47,7 @@ Component configuration defines buildable and deployable units stored in `compon
 - **`extensions`** (object): Extension-specific settings
   - Keys are extension IDs (e.g., `"wordpress"`, `"rust"`)
   - Values are extension setting objects
+  - Build, lint, test, bench, and review support comes from linked extensions; component-level `build_command` is not supported.
 - **`release`** (object): Component-scoped release configuration
   - **`enabled`** (boolean): Whether release pipeline is enabled
   - **`steps`** (array): Release step definitions
@@ -96,7 +95,6 @@ Setting `local_path` to the same directory as the deploy target is a misconfigur
   "local_path": "/Users/dev/extrachill-api",
   "remote_path": "wp-content/plugins/extrachill-api",
   "build_artifact": "build/extrachill-api.zip",
-  "build_command": "npm run build",
   "extract_command": "unzip -o {{artifact}} && rm {{artifact}}",
   "version_targets": [
     {

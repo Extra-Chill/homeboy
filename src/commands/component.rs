@@ -69,7 +69,7 @@ enum ComponentCommand {
     },
     /// Update component configuration fields
     ///
-    /// Supports dedicated flags for common fields (e.g., --local-path, --build-command)
+    /// Supports dedicated flags for common fields (e.g., --local-path, --changelog-target)
     /// as well as --json for arbitrary updates. When combining --json with dynamic
     /// trailing flags, use '--' separator.
     #[command(visible_aliases = ["edit", "merge"])]

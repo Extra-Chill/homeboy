@@ -27,7 +27,6 @@ Options:
 - `--remote-path <path>`: remote path relative to project `base_path` (required unless in `homeboy.json`)
 - `--build-artifact <path>`: build artifact path relative to `local_path` (required; must include a filename)
 - `--version-target <TARGET>`: version target in format `file` or `file::pattern` (repeatable)
-- `--build-command <command>`: build command to run in `local_path` (required for `homeboy build`)
 - `--extract-command <command>`: command to run after upload (optional; supports `{artifact}` and `{targetDir}`)
 
 #### Extract Command Execution Context
@@ -72,10 +71,10 @@ Options:
 
 ```sh
 # Correct: explicit separator before dynamic flags
-homeboy component set my-plugin --json '{"type":"plugin"}' -- --build_command "npm run build"
+homeboy component set my-plugin --json '{"type":"plugin"}' -- --docs_dir "docs"
 
 # Incorrect: will fail with "unexpected argument"
-homeboy component set my-plugin --json '{"type":"plugin"}' --build_command "npm run build"
+homeboy component set my-plugin --json '{"type":"plugin"}' --docs_dir "docs"
 ```
 
 Notes:
@@ -96,6 +95,8 @@ Components also define extension usage via `extensions`:
 ```sh
 homeboy component set <id> --json '{"extensions": {"github": {"settings": {}}, "rust": {"settings": {}}}}'
 ```
+
+`homeboy build`, `homeboy lint`, `homeboy test`, and `homeboy review` run through linked extensions. Components do not support a standalone `build_command` field; use an extension for component workflows or a rig `command` step for one-off shell commands.
 
 ```json
 {

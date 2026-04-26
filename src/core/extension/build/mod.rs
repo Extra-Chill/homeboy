@@ -103,7 +103,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
         Err(Error::validation_invalid_argument(
             "buildCommand",
             format!(
-                "Component '{}' links a extension with build support, but no build script was found.\n\
+                "Component '{}' links an extension with build support, but no build script was found.\n\
                  Expected: extension's bundled script OR local script matching extension pattern.\n\
                  Check extension installation or add a local build.sh to the component directory.",
                 component.id
@@ -112,17 +112,22 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
             None,
         ))
     } else {
-        Err(Error::validation_invalid_argument(
+        let mut err = Error::validation_invalid_argument(
             "extensions",
             format!(
                 "Component '{}' has no linked extension with build support",
                 component.id
             ),
             Some(component.id.clone()),
-            Some(vec![
-                format!("Link an extension with build support: homeboy component set {} --extension <extension_id>", component.id),
-            ]),
-        ))
+            None,
+        );
+
+        for hint in extension::extension_guidance_hints(component, Some(ExtensionCapability::Build))
+        {
+            err = err.with_hint(hint);
+        }
+
+        Err(err)
     }
 }
 
@@ -495,5 +500,26 @@ mod tests {
         assert!(is_json_input(r#"  {"componentIds": ["a"]}"#));
         assert!(!is_json_input("extrachill-api"));
         assert!(!is_json_input("some-component-id"));
+    }
+
+    #[test]
+    fn resolve_build_command_guides_unconfigured_components() {
+        let component = Component {
+            id: "plain-package".to_string(),
+            ..Default::default()
+        };
+
+        let err = resolve_build_command(&component).unwrap_err();
+        assert!(err
+            .message
+            .contains("no linked extension with build support"));
+        assert!(err.hints.iter().any(|hint| {
+            hint.message
+                .contains("homeboy component set plain-package --extension")
+        }));
+        assert!(err.hints.iter().any(|hint| {
+            hint.message
+                .contains("component-level `build_command` is not supported")
+        }));
     }
 }

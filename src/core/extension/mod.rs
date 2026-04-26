@@ -136,16 +136,18 @@ pub struct ExtensionExecutionContext {
 }
 
 fn no_extensions_error(component: &Component) -> Error {
-    Error::validation_invalid_argument(
+    let mut err = Error::validation_invalid_argument(
         "component",
         format!("Component '{}' has no extensions configured", component.id),
         None,
         None,
-    )
-    .with_hint(format!(
-        "Add a extension: homeboy component set {} --extension <extension_id>",
-        component.id
-    ))
+    );
+
+    for hint in extension_guidance_hints(component, None) {
+        err = err.with_hint(hint);
+    }
+
+    err
 }
 
 fn capability_label(capability: ExtensionCapability) -> &'static str {
@@ -168,7 +170,7 @@ fn manifest_has_capability(manifest: &ExtensionManifest, capability: ExtensionCa
 
 fn capability_missing_error(component: &Component, capability: ExtensionCapability) -> Error {
     let capability_name = capability_label(capability);
-    Error::validation_invalid_argument(
+    let mut err = Error::validation_invalid_argument(
         "extension",
         format!(
             "Component '{}' has no linked extensions that provide {} support",
@@ -176,11 +178,36 @@ fn capability_missing_error(component: &Component, capability: ExtensionCapabili
         ),
         None,
         None,
-    )
-    .with_hint(format!(
-        "Link an extension with {} support: homeboy component set {} --extension <extension_id>",
-        capability_name, component.id
-    ))
+    );
+
+    for hint in extension_guidance_hints(component, Some(capability)) {
+        err = err.with_hint(hint);
+    }
+
+    err
+}
+
+pub(crate) fn extension_guidance_hints(
+    component: &Component,
+    capability: Option<ExtensionCapability>,
+) -> Vec<String> {
+    let link_hint = match capability {
+        Some(capability) => format!(
+            "Link an extension with {} support: homeboy component set {} --extension <extension_id>",
+            capability_label(capability),
+            component.id
+        ),
+        None => format!(
+            "Link an extension that provides the needed command support: homeboy component set {} --extension <extension_id>",
+            component.id
+        ),
+    };
+
+    vec![
+        link_hint,
+        "List installed extensions: homeboy extension list".to_string(),
+        "For one-off shell builds or checks, model the workflow as a rig `command` step; component-level `build_command` is not supported.".to_string(),
+    ]
 }
 
 fn capability_ambiguous_error(
@@ -1131,6 +1158,26 @@ mod tests {
         assert!(err.message.contains("missing-mod-b"));
         // Should have install hint for each + browse hint
         assert!(err.hints.len() >= 3);
+    }
+
+    #[test]
+    fn extension_guidance_hints_point_to_supported_paths() {
+        let comp = Component {
+            id: "plain-package".to_string(),
+            ..Default::default()
+        };
+
+        let hints = extension_guidance_hints(&comp, Some(ExtensionCapability::Build));
+
+        assert!(hints
+            .iter()
+            .any(|hint| { hint.contains("homeboy component set plain-package --extension") }));
+        assert!(hints
+            .iter()
+            .any(|hint| { hint.contains("component-level `build_command` is not supported") }));
+        assert!(hints
+            .iter()
+            .any(|hint| hint.contains("homeboy extension list")));
     }
 
     #[test]
