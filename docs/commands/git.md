@@ -14,12 +14,16 @@ Note: some subcommands accept a `--json` flag for bulk operations.
 
 ### Single Component Mode
 
-- `status <component_id>`
-- `commit <component_id> [message-or-spec] [--json <spec>] [-m <message>] [--staged-only] [--files <paths>...] [--include <paths>...] [--exclude <paths>...]`
-- `push <component_id> [--tags]`
-- `pull <component_id>`
-- `tag <component_id> [tag_name] [-m <message>]`
+- `status [component_id] [--path <path>]`
+- `commit [component_id] [message-or-spec] [--json <spec>] [-m <message>] [--staged-only] [--files <paths>...] [--include <paths>...] [--exclude <paths>...] [--path <path>]`
+- `push [component_id] [--tags] [--force-with-lease] [--path <path>]`
+- `pull [component_id] [--path <path>]`
+- `rebase [component_id] [--onto <ref>] [--continue | --abort] [--path <path>]`
+- `cherry-pick [--component-id <id>] [refs...] [--pr <number>...] [--continue | --abort] [--path <path>]`
+- `tag [component_id] [tag_name] [-m <message>] [--path <path>]`
   - If `tag_name` is omitted, Homeboy tags `v<component version>` (from `homeboy version show`).
+
+When `component_id` is omitted, Homeboy auto-detects the component from the current directory using the registry or a portable `homeboy.json`. `--path` overrides the checkout path for unregistered clones, worktrees, or CI temp directories.
 
 ### Commit Options
 
@@ -30,6 +34,13 @@ By default, `commit` stages all changes before committing. Use these flags for g
 - `--files <paths>...`: Stage and commit only the specified files.
 - `--include <paths>...`: Alias for `--files` (repeatable).
 - `--exclude <paths>...`: Stage all files except the specified paths.
+
+### Rebase and Cherry-pick
+
+- `rebase` defaults to the current branch's tracked upstream (`@{upstream}`), matching `git pull --rebase` semantics. Use `--onto <ref>` to choose a target explicitly.
+- `cherry-pick` accepts positional refs, ranges, and repeatable `--pr <number>` flags. PR numbers are resolved with `gh pr view <n> --json commits`.
+- Both subcommands support `--continue` and `--abort` after manual conflict resolution.
+- `push --force-with-lease` is exposed for the common post-rebase push path. Plain `--force` is intentionally not exposed.
 
 ### JSON Spec Mode (commit)
 
@@ -47,7 +58,7 @@ Homeboy auto-detects **single vs bulk** by checking for a top-level `components`
 
 ### Bulk Mode (--json)
 
-All subcommands except `tag` support a `--json` flag for bulk operations across multiple components.
+The status, commit, push, and pull subcommands support a `--json` flag for bulk operations across multiple components.
 
 - `status --json '<bulk_ids_input>'`
 - `commit --json '<bulk_commit_input>'` (or positional spec)
@@ -98,6 +109,7 @@ Notes:
 
 Notes:
 - `tags` field is optional (defaults to false), only used for `push`
+- `force_with_lease` is optional (defaults to false), only used for `push`
 
 ## JSON Output
 
@@ -168,6 +180,12 @@ Notes:
 ```sh
 homeboy git status extra-chill-multisite
 
+# Auto-detect from current directory or a portable homeboy.json
+homeboy git status
+
+# Operate on an unregistered worktree
+homeboy git status --path /tmp/my-worktree
+
 # CLI mode
 homeboy git commit extra-chill-multisite -m "Update docs"
 
@@ -184,7 +202,10 @@ homeboy git commit extra-chill-multisite -m "Update docs" --exclude Cargo.lock
 homeboy git commit extra-chill-multisite '{"message":"Update docs","files":["README.md"]}'
 
 homeboy git push extra-chill-multisite --tags
+homeboy git push --force-with-lease
 homeboy git pull extra-chill-multisite
+homeboy git rebase --onto origin/main
+homeboy git cherry-pick --pr 123
 homeboy git tag extra-chill-multisite v1.0.0 -m "Release 1.0.0"
 ```
 

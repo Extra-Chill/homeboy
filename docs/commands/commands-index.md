@@ -27,8 +27,8 @@
 - [rig](rig.md) — reproducible local dev environments ([spec](rig-spec.md))
 - [server](server.md)
 - [ssh](ssh.md)
+- [stack](stack.md) — combined-fixes branches from base refs plus cherry-picked PRs
 - status — actionable component overview (`--uncommitted`, `--needs-bump`, `--ready`, `--docs-only`, `--all`, `--full`)
-- [supports](supports.md) — machine-readable CLI capability checks
 - [test](test.md)
 - transfer — transfer files between servers (`<source> <destination>`, supports `-r`, `-c`, `--dry-run`, `--exclude`)
 - [upgrade](upgrade.md)

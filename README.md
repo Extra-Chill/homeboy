@@ -6,7 +6,7 @@ Homeboy ships four pillars from one binary:
 
 - **Code Factory** — `audit` / `lint` / `test` / `refactor` / `release` with the autofix loop.
 - **Fleet & Ops** — `deploy`, `ssh`, `file`, `db`, `logs`, `transfer`, `server`, `project`, `component`, `fleet`.
-- **Dev Rig** — `rig` + `rig-spec` for reproducible, code-defined local dev environments.
+- **Dev Rig** — `rig`, `rig-spec`, and `stack` for reproducible, code-defined local dev environments and combined-fixes branches.
 - **Bench** — performance benchmarks with baseline ratchet, sibling of `lint` / `test` / `build`.
 
 ## How It Works
@@ -133,9 +133,10 @@ Structural improvements with safety tiers:
 
 Code-defined, reproducible local dev environments. A rig is a JSON spec at `~/.config/homeboy/rigs/<id>.json` that captures everything a dev setup needs — which components, which background services, which symlinks, which pre-flight invariants — and a linear pipeline that materializes it.
 
-- **Service supervision** — `http-static` and `command` service kinds run detached, tracked by PID, logs captured per service
-- **Pipeline steps** — `service`, `command`, `symlink`, `check`, `git`, `build`. Typed primitives reuse Homeboy's existing build/git plumbing instead of shelling out blindly.
-- **Git ops (MVP)** — `status`, `pull`, `fetch`, `checkout`, `current-branch`. `rebase` / `cherry-pick` are deferred.
+- **Service supervision** — `http-static` and `command` service kinds run detached, while `external` services let rigs adopt and stop processes they did not spawn.
+- **Pipeline steps** — `service`, `command`, `symlink`, `shared-path`, `check`, `git`, `build`, and `patch`. Typed primitives reuse Homeboy's existing build/git plumbing instead of shelling out blindly.
+- **Git ops** — `status`, `pull`, `push`, `fetch`, `checkout`, `current-branch`, `rebase`, and `cherry-pick`.
+- **Stack specs** — `stack` materializes combined-fixes branches from a base ref plus a declared PR list, with status/sync helpers for dropping merged PRs.
 - **Verbs** — `rig up` materializes the env, `rig check` reports health without fail-fast, `rig down` tears it down, `rig status` reports running services and last run timestamps.
 - **Variable expansion** — `${components.<id>.path}`, `${env.<NAME>}`, and `~` work across `cwd`, `command`, `link`, `target`, and check fields.
 
@@ -192,12 +193,15 @@ Deploy components to servers, manage SSH connections, run remote commands, tail 
 | `lint` | Format and static analysis with autofix. |
 | `test` | Run tests. Drift detection for renamed/deleted symbols. |
 | `refactor` | Structural renaming, decomposition, and auto-refactor with safety tiers. |
+| `review` | Scoped audit + lint + test umbrella for PR-style changes. |
 | `release` | Automated version bump + changelog + tag + push from conventional commits. |
 | `version` | Semantic version management with configurable file targets. |
 | `changelog` | Add/finalize categorized changelog entries. |
 | `changes` | Show commits and diffs since last version tag. |
 | `build` | Build a component using its configured build command. |
+| `validate` | Run extension parse/compile validation without a full test suite. |
 | `git` | Component-aware git operations. |
+| `issues` | Reconcile audit findings against an issue tracker. |
 | `status` | Repo state overview: uncommitted, needs-bump, ready, docs-only. |
 
 ### Fleet & Ops
@@ -221,6 +225,7 @@ Deploy components to servers, manage SSH connections, run remote commands, tail 
 |---------|-------------|
 | `rig` | Bring up / tear down / health-check reproducible local dev environments. |
 | `rig-spec` | Inspect and validate the JSON spec format used by `rig`. |
+| `stack` | Manage combined-fixes branches from base refs plus cherry-picked PRs. |
 
 ### Bench
 
@@ -239,7 +244,7 @@ Deploy components to servers, manage SSH connections, run remote commands, tail 
 | `extension` | Install, list, and update extensions. |
 | `list` | List registered components, projects, servers, fleets. |
 | `config` | Read and write Homeboy configuration. |
-| `supports` | Machine-readable CLI capability checks for shell wrappers. |
+| `undo` | Roll back the last Homeboy write operation when an undo snapshot exists. |
 | `upgrade` | Self-upgrade the homeboy binary. |
 | `docs` | Browse embedded documentation. All docs ship in the binary. |
 

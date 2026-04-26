@@ -21,7 +21,7 @@ Reference to a local checkout of a component. Decoupled from homeboy's global co
 | Field | Type | Description |
 |---|---|---|
 | `path` | string | Filesystem path to the checkout. Supports `~` and `${env.VAR}` expansion. |
-| `stack` | string | Stack ID (Phase 2 — reserved, currently informational). |
+| `stack` | string | Stack ID associated with the component. Used by `homeboy stack`; rig pipeline integration is still explicit. |
 | `branch` | string | Expected branch hint. Documentation only in MVP. |
 
 ## `ServiceSpec`
@@ -30,7 +30,7 @@ A background process the rig manages.
 
 | Field | Type | Description |
 |---|---|---|
-| `kind` | enum | `"http-static"` or `"command"`. |
+| `kind` | enum | `"http-static"`, `"command"`, or `"external"`. |
 | `cwd` | string | Working directory. Supports variable expansion. |
 | `port` | integer | TCP port. Required for `http-static`; surfaced in status for `command`. |
 | `command` | string | Shell command for `kind: "command"`. |
@@ -41,6 +41,7 @@ A background process the rig manages.
 
 - **`http-static`** — runs `python3 -m http.server <port>` in `cwd`. The common case for dev envs that need to serve tarballs or static assets locally.
 - **`command`** — runs `sh -c <command>`. Use for anything else (docker, redis, custom dev servers, SSH tunnels).
+- **`external`** — adopts a process the rig did not spawn. Only `service.stop` is meaningful; it discovers the newest process whose command line contains `discover.pattern` and signals it. Use for stale daemons that need recycling after a build.
 
 Services are started detached (new session via `setsid`), tracked by PID in state, and logged to `~/.config/homeboy/rigs/<id>.state/logs/<service-id>.log`.
 
@@ -105,9 +106,26 @@ Delegates to `homeboy build`, using the component's path from the rig's `compone
 }
 ```
 
-Delegates to homeboy's git primitive (`git::execute_git_for_release` under the hood). Operation set: `status`, `pull`, `fetch`, `checkout`, `current-branch`. `args` are appended after the op-specific base args, so `op: pull` with `args: ["origin", "trunk"]` runs `git pull origin trunk`. Variable expansion applies to `args` entries.
+Delegates to homeboy's git primitive (`git::execute_git_for_release` under the hood). Operation set: `status`, `pull`, `push`, `fetch`, `checkout`, `current-branch`, `rebase`, and `cherry-pick`. `args` are appended after the op-specific base args, so `op: pull` with `args: ["origin", "trunk"]` runs `git pull origin trunk`. Variable expansion applies to `args` entries.
 
-Stacked combined-fixes workflows are a future phase (see Homeboy #1462 `homeboy stack`) — for MVP, use repeated `git checkout` + `git pull` + `git` with `args: ["cherry-pick", "<sha>"]` as a workaround.
+For long-lived combined-fixes branches, prefer a `homeboy stack` spec plus explicit `stack` invocations over hand-maintaining a long sequence of raw cherry-pick steps in the rig.
+
+### `patch`
+
+```jsonc
+{
+  "kind": "patch",
+  "component": "wordpress-playground",
+  "file": "packages/php-wasm/compile/php/patches/local.h",
+  "marker": "TSRMLS_CC fallback",
+  "after": "#include <php.h>",
+  "content": "/* TSRMLS_CC fallback */\n#ifndef TSRMLS_CC\n#define TSRMLS_CC\n#endif",
+  "op": "apply",
+  "label": "local TSRMLS fallback"
+}
+```
+
+Applies or verifies an idempotent local-only file patch. `marker` must appear in `content`; if the marker is already present, `apply` is a no-op. If `after` is set and missing from the file, the step fails instead of guessing where to insert. Use `op: "verify"` in `check` pipelines.
 
 ### `command`
 
@@ -159,7 +177,7 @@ Embeds a `CheckSpec` (see below). Non-fatal in `up` pipelines; fatal in `check` 
 
 ## `CheckSpec`
 
-A single declarative probe. Exactly one of the three probe fields must be set.
+A single declarative probe. Exactly one of the four probe fields must be set.
 
 ### HTTP probe
 
@@ -186,6 +204,19 @@ Passes if the file exists. If `contains` is set, also requires the file contents
 
 Runs via `sh -c`. Passes if exit code matches `expect_exit` (default `0`).
 
+### Staleness probe
+
+```jsonc
+{
+  "newer_than": {
+    "left": { "process_start": "wordpress-server-child.mjs" },
+    "right": { "file_mtime": "${components.studio.path}/dist/cli/index.js" }
+  }
+}
+```
+
+Passes when `left` is newer than `right`. Each side chooses one time source: `file_mtime` or `process_start`. If the left side is a `process_start` source and no matching process exists, the check passes because there is no stale process to flag. Other missing sources are errors.
+
 ## Variable expansion
 
 Three substitutions apply to `cwd`, `command`, `link`, `target`, shared paths, and `CheckSpec` fields:
@@ -202,7 +233,7 @@ Unknown `${...}` patterns are left literal so failures are loud and localized.
 - `check` — runs every step regardless of failures so you see every problem at once.
 - `down` — fail-fast through `down` pipeline, then stops every declared service unconditionally (belt + suspenders).
 
-MVP pipelines are linear lists. DAG pipelines with cross-component dependencies + caching land in Phase 3 (tracked as Automattic/homeboy #1464).
+Pipelines are linear lists. DAG pipelines with cross-component dependencies + caching are still a future phase (tracked as Extra-Chill/homeboy #1464).
 
 ## Example rigs
 

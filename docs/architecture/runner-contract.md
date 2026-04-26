@@ -18,9 +18,9 @@ Each extension declares scripts per-capability in its manifest
 
 | Capability | Manifest field | Typical script | Invoked by |
 |------------|---------------|----------------|------------|
-| `lint` | `lint.extension_script` | `scripts/lint/lint-runner.sh` | `homeboy lint` |
-| `test` | `test.extension_script` | `scripts/test/test-runner.sh` | `homeboy test` |
-| `build` | `build.extension_script` | `scripts/build/build.sh` | `homeboy build`, `homeboy release` |
+| `lint` | `lint.extension_script` | extension-owned lint runner | `homeboy lint` |
+| `test` | `test.extension_script` | extension-owned test runner | `homeboy test` |
+| `build` | `build.extension_script` | extension-owned build runner | `homeboy build`, `homeboy release` |
 | `audit` | *built-in to core* | n/a | `homeboy audit` |
 
 `lint`, `test`, and `build` are shell-script capabilities: extensions own

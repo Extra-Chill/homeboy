@@ -179,6 +179,10 @@
 - `docs_only` — Show only components with docs-only changes
 - `all` — Show all components regardless of current directory context
 
+### `StackArgs`
+
+- `command`
+
 ### `TestArgs`
 
 - `component` — Component name to test
@@ -592,6 +596,41 @@
 
 - `List` — List configured SSH server targets
 
+### `StackCommand`
+
+- `List` — List all installed stack specs
+- `Show` — Show a stack spec
+- `stack_id` — Stack ID
+- `Create` — Create a new stack spec
+- `stack_id` — Stack ID
+- `component` — Component identifier
+- `component_path` — Local checkout path
+- `base` — Upstream ref as `<remote>/<branch>`
+- `target` — Target branch as `<remote>/<branch>`
+- `description` — Optional human-readable description
+- `AddPr` — Append a PR entry to a stack
+- `stack_id` — Stack ID
+- `repo` — GitHub repo coordinate (`owner/name`)
+- `number` — PR number
+- `note` — Optional human-readable note
+- `RemovePr` — Remove a PR entry from a stack
+- `stack_id` — Stack ID
+- `number` — PR number
+- `repo` — Optional repo disambiguator
+- `Apply` — Materialize a stack target branch
+- `stack_id` — Stack ID
+- `Status` — Report upstream PR state and local target state
+- `stack_id` — Stack ID
+- `Sync` — Rebuild target and auto-drop merged PRs
+- `stack_id` — Stack ID
+- `dry_run` — Preview without mutating the spec or target branch
+- `Inspect` — Inspect the current branch as a stack of commits
+- `component_id` — Optional component ID, auto-detected from CWD when omitted
+- `base` — Base ref to compare against
+- `no_pr` — Skip GitHub PR lookup
+- `repo` — Scope PR lookup to one GitHub repo
+- `path` — Workspace path override
+
 ### `VersionCommand`
 
 - `Show` — Show current version (default: homeboy binary)
@@ -613,6 +652,7 @@
 - `Ssh` — SSH into a project server or configured server
 - `Server` — Manage SSH server configurations
 - `Test` — Run tests for a component
+- `Bench` — Run performance benchmarks for a component
 - `Lint` — Lint a component
 - `Db` — Database operations
 - `File` — Remote file operations
@@ -628,12 +668,18 @@
 - `Docs` — Display CLI documentation
 - `Changelog` — Changelog operations
 - `Git` — Git operations for components
+- `Issues` — Reconcile findings against an issue tracker
 - `Version` — Version management for components
 - `Build` — Build a component
+- `Validate` — Validate that code compiles/parses through extension scripts
 - `Changes` — Show changes since last version tag
 - `Release` — Plan release workflows
+- `Review` — Run scoped audit + lint + test umbrella against PR-style changes
 - `Audit` — Audit code conventions and detect architectural drift
 - `Refactor` — Structural refactoring (rename terms across codebase)
+- `Rig` — Manage local dev rigs
+- `Stack` — Manage combined-fixes branch stacks
+- `Undo` — Undo the last write operation when a snapshot exists
 - `Auth` — Authenticate with a project's API
 - `Api` — Make API requests to a project
 - `Upgrade` — Upgrade Homeboy to the latest version

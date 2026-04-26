@@ -16,7 +16,7 @@ Rigs are the missing piece between individual components (one repo, one version)
 
 **Typical consumer:** a cross-repo setup that today lives as a wiki runbook (Studio + Playground with combined-fixes, WordPress core + Gutenberg dev, a sandbox + tunnel, etc).
 
-**MVP scope (Phase 1):** linear pipelines, `http-static` and `command` service kinds, `up` / `check` / `down` / `status` / `list` / `show` verbs. See Automattic/homeboy #1461 for the phased roadmap (stack integration, DAG pipelines, extension-registered service kinds, `.app` wrappers, bench composition, spec sharing).
+**Current scope:** linear pipelines, `http-static`, `command`, and `external` service kinds, shared dependency paths, idempotent local patch steps, typed git/build/check primitives, and `up` / `check` / `down` / `status` / `list` / `show` verbs. See Extra-Chill/homeboy #1461 for the broader phased roadmap (DAG pipelines, extension-registered service kinds, `.app` wrappers, bench composition, spec sharing).
 
 ## Subcommands
 
@@ -143,5 +143,6 @@ State is ephemeral — deleting it means `rig up` will re-probe on next invocati
 ## See also
 
 - [rig-spec.md](./rig-spec.md) — full spec schema reference
+- [stack.md](./stack.md) — combined-fixes branch specs that rigs can reference
 - [fleet.md](./fleet.md) — remote multi-project equivalent (rigs are local, fleets are remote)
-- Automattic/homeboy #1461 — design + phased roadmap
+- Extra-Chill/homeboy #1461 — design + phased roadmap

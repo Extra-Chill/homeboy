@@ -16,6 +16,7 @@ Homeboy is a config-driven automation engine for development and deployment auto
 - Changes summary: [changes](commands/changes.md)
 - Reproducible local dev environments: [rig](commands/rig.md)
 - Rig spec JSON schema: [rig-spec](commands/rig-spec.md)
+- Combined-fixes branch specs: [stack](commands/stack.md)
 - Performance benchmarks with baseline ratchet: [bench](commands/bench.md)
 - API authentication scoped per project: [auth](commands/auth.md)
 - JSON output envelope: [JSON output contract](architecture/output-system.md)
