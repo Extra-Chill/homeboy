@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.19.0] - 2026-04-26
+
+### Added
+- feat(wordpress-bench): surface bootstrap stage timings as __bootstrap scenario
+
 ## [2.18.1] - 2026-04-26
 
 ### Fixed
