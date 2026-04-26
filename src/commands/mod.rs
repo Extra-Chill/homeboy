@@ -13,6 +13,35 @@ pub fn parse_key_val(s: &str) -> Result<(String, String), String> {
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
+/// Parse a `KEY=<json>` string into a (key, serde_json::Value) tuple.
+///
+/// Used by `--setting-json` for object/array/typed-scalar settings that
+/// `--setting`'s string-only coercion can't represent. JSON value can be
+/// any well-formed JSON: object, array, string (must be quoted), number,
+/// boolean, or null.
+///
+/// Examples:
+///
+///   --setting-json bench_env={"BENCH_CORPUS_SIZE":"1000"}
+///   --setting-json wp_config_defines={"MARKDOWN_DB_MODE":"primary","WP_DEBUG":true}
+///   --setting-json my_array=[1,2,3]
+///   --setting-json my_flag=true
+///   --setting-json my_string="literal"
+pub fn parse_key_json(s: &str) -> Result<(String, serde_json::Value), String> {
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid KEY=<json>: no `=` found in `{s}`"))?;
+    let key = s[..pos].to_string();
+    let raw = &s[pos + 1..];
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
+        format!(
+            "invalid JSON for setting `{key}`: {e}. Got `{raw}`. \
+             Strings must be quoted (`my_str=\"hello\"`); use --setting for unquoted strings."
+        )
+    })?;
+    Ok((key, value))
+}
+
 pub(crate) struct GlobalArgs {}
 
 /// Shared arguments for dynamic set commands.

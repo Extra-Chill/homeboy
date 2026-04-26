@@ -251,11 +251,12 @@ fn run_single(
         (None, None) => args.comp.resolve_id()?,
     };
 
-    let ctx = execution_context::resolve(&ResolveOptions::with_capability(
+    let ctx = execution_context::resolve(&ResolveOptions::with_capability_and_json(
         &effective_id,
         args.comp.path.clone(),
         ExtensionCapability::Bench,
         args.setting_args.setting.clone(),
+        args.setting_args.setting_json.clone(),
     ))?;
 
     let run_dir = RunDir::create()?;
@@ -267,17 +268,28 @@ fn run_single(
             component_label: effective_id.clone(),
             component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
+            // Split ctx.settings by JSON shape: strings flow through the
+            // legacy `settings` channel (string-coerced for downstream
+            // consumers), non-string types (objects, arrays, numbers,
+            // bools, nulls) flow through `settings_json` so type is
+            // preserved end-to-end. Without the split, non-string values
+            // would be `.to_string()`'d into JSON literals and downstream
+            // `jq -c '.field'` extractions would surface a string-encoded
+            // JSON object instead of the actual object.
             settings: ctx
                 .settings
                 .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        },
-                    )
+                .filter_map(|(k, v)| match v {
+                    serde_json::Value::String(s) => Some((k.clone(), s.clone())),
+                    _ => None,
+                })
+                .collect(),
+            settings_json: ctx
+                .settings
+                .iter()
+                .filter_map(|(k, v)| match v {
+                    serde_json::Value::String(_) => None,
+                    other => Some((k.clone(), other.clone())),
                 })
                 .collect(),
             iterations: args.iterations,

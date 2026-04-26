@@ -21,6 +21,10 @@ use super::ExtensionExecutionContext;
 pub struct ExtensionRunner {
     execution_context: ExtensionExecutionContext,
     settings_overrides: Vec<(String, String)>,
+    /// Typed-JSON setting overrides from `--setting-json key=<json>`.
+    /// Applied AFTER `settings_overrides` (so `--setting-json` wins on
+    /// conflict — strictly more expressive). See SettingArgs docstring.
+    settings_json_overrides: Vec<(String, serde_json::Value)>,
     env_vars: Vec<(String, String)>,
     script_args: Vec<String>,
     path_override: Option<String>,
@@ -49,6 +53,7 @@ impl ExtensionRunner {
         Self {
             execution_context,
             settings_overrides: Vec::new(),
+            settings_json_overrides: Vec::new(),
             env_vars: Vec::new(),
             script_args: Vec::new(),
             path_override: None,
@@ -70,6 +75,15 @@ impl ExtensionRunner {
     /// Add settings overrides from key=value pairs.
     pub fn settings(mut self, overrides: &[(String, String)]) -> Self {
         self.settings_overrides.extend(overrides.iter().cloned());
+        self
+    }
+
+    /// Add typed-JSON settings overrides from `--setting-json key=<json>`.
+    /// Preserves object/array/typed-scalar values; applied after string
+    /// overrides so JSON wins on conflict.
+    pub fn settings_json(mut self, overrides: &[(String, serde_json::Value)]) -> Self {
+        self.settings_json_overrides
+            .extend(overrides.iter().cloned());
         self
     }
 
@@ -143,6 +157,7 @@ impl ExtensionRunner {
             self.pre_loaded_component.as_ref(),
             self.path_override.as_deref(),
             &self.settings_overrides,
+            &self.settings_json_overrides,
             self.command_override.is_some(),
         )?;
 

@@ -565,11 +565,49 @@ pub struct HiddenJsonArgs {
 }
 
 // ============================================================================
-// SettingArgs: --setting key=value pairs
+// SettingArgs: --setting key=value + --setting-json key=<json>
 // ============================================================================
 
+/// Settings overrides flattened into every command that runs an extension
+/// capability (test, bench, lint, build, validate).
+///
+/// Two flags by design:
+///
+/// - `--setting key=value` (string-coerced): the original "set this string
+///   override" path. Values are always strings, mirroring how operators
+///   typically configure settings interactively. Existing callers
+///   unchanged.
+///
+/// - `--setting-json key=<json>` (typed): for object/array/typed-scalar
+///   settings that `--setting`'s string-only coercion can't represent.
+///   Required for any setting whose dispatcher consumer expects a JSON
+///   object (the wordpress extension's `wp_config_defines` and `bench_env`
+///   are the motivating cases). String coercion of an object value
+///   produces `"{\"key\":\"value\"}"` — a string containing JSON, not a
+///   JSON object — which downstream `jq -c '.field'` extractions then
+///   pass through as a string, breaking the substitution that expects an
+///   object.
+///
+/// When both flags target the same key, `--setting-json` wins (it's
+/// strictly more expressive and was specified later in the merge order).
 #[derive(Args, Debug, Clone, Default)]
 pub struct SettingArgs {
     #[arg(long, value_parser = crate::commands::parse_key_val)]
     pub setting: Vec<(String, String)>,
+
+    /// Typed-JSON setting override. Repeatable.
+    ///
+    /// Format: `--setting-json key=<json>`, where `<json>` is any
+    /// well-formed JSON value (object, array, string [must be quoted],
+    /// number, boolean, null). For string values use `--setting`; this
+    /// flag exists for object/array/typed-scalar settings that string
+    /// coercion can't represent.
+    ///
+    /// Examples:
+    ///
+    ///   --setting-json bench_env='{"BENCH_CORPUS_SIZE":"1000"}'
+    ///   --setting-json wp_config_defines='{"MARKDOWN_DB_MODE":"primary"}'
+    ///   --setting-json my_flag=true
+    #[arg(long = "setting-json", value_parser = crate::commands::parse_key_json)]
+    pub setting_json: Vec<(String, serde_json::Value)>,
 }
