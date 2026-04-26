@@ -253,7 +253,10 @@ fn maybe_expand_default_baseline(args: &BenchArgs) -> homeboy::Result<Option<Vec
     if args.rig.len() != 1 {
         return Ok(None);
     }
-    if args.baseline_args.baseline || args.baseline_args.ratchet || args.ignore_default_baseline {
+    if args.baseline_args.baseline
+        || args.baseline_args.ratchet
+        || args.ignore_default_baseline
+    {
         return Ok(None);
     }
 
