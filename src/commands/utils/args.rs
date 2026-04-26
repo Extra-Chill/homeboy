@@ -145,8 +145,10 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
                 "--iterations",
                 "--baseline",
                 "--ignore-baseline",
+                "--ignore-default-baseline",
                 "--ratchet",
                 "--regression-threshold",
+                "--rig",
                 "--setting",
                 "--path",
                 "--json-summary",
@@ -415,6 +417,25 @@ mod normalize_tests {
             "--output=/tmp/x.json",
             "--iterations",
             "1",
+        ]);
+        let expected = input.clone();
+        assert_eq!(normalize_trailing_flags(input), expected);
+    }
+
+    /// `bench` owns `--rig` and `--ignore-default-baseline`; they must
+    /// stay on clap's named-argument path, not get swallowed by the
+    /// trailing runner-args capture.
+    #[test]
+    fn bench_rig_flags_after_component_are_not_separated() {
+        let input = argv(&[
+            "homeboy",
+            "bench",
+            "my-comp",
+            "--rig",
+            "candidate",
+            "--iterations",
+            "1",
+            "--ignore-default-baseline",
         ]);
         let expected = input.clone();
         assert_eq!(normalize_trailing_flags(input), expected);
