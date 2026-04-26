@@ -52,9 +52,9 @@ RESULTS_FILE="${HOMEBOY_BENCH_RESULTS_FILE:-${PROJECT_PATH}/.node-bench-results.
 BENCH_DIR="${PROJECT_PATH}/bench"
 
 # No workloads → emit an empty-but-valid envelope so core's parser doesn't
-# treat the absence as a crash. Same shape as the WP runner's no-tests-bench
-# path.
-if [ ! -d "$BENCH_DIR" ]; then
+# treat the absence as a crash. Rig-declared extra workloads can run without
+# an in-tree bench directory, so only skip when both sources are absent.
+if [ ! -d "$BENCH_DIR" ] && [ -z "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ]; then
     echo ""
     echo "⚠ No bench/ directory found at ${BENCH_DIR}"
     echo "  Skipping bench run — nothing to measure."
@@ -86,6 +86,7 @@ export HOMEBOY_BENCH_RESULTS_FILE="$RESULTS_FILE"
 export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
 export HOMEBOY_COMPONENT_PATH="$PROJECT_PATH"
 export HOMEBOY_BENCH_ITERATIONS="$ITERATIONS"
+export HOMEBOY_BENCH_EXTRA_WORKLOADS="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
 
 echo "Running Node.js benchmarks..."
 echo "  Component: ${COMPONENT_ID} (${PROJECT_PATH})"

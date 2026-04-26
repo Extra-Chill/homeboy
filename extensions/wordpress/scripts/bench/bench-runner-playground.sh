@@ -111,7 +111,7 @@ if [ ! -f "$PLAYGROUND_CLI" ]; then
 fi
 
 BENCH_DIR="${PLUGIN_PATH}/tests/bench"
-if [ ! -d "$BENCH_DIR" ]; then
+if [ ! -d "$BENCH_DIR" ] && [ -z "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ]; then
     echo ""
     echo "⚠ No tests/bench directory found at ${BENCH_DIR}"
     echo "  Skipping bench run — nothing to measure."
@@ -202,6 +202,30 @@ fi
 
 MOUNT_ARGS+=("--mount" "${EXTENSION_PATH}:/homeboy-extension")
 
+# Rig-private workloads are host paths supplied by homeboy core through a
+# PATH-style list. Mount each file into Playground and let the PHP runner tag
+# them as `source: rig` in the BenchResults envelope.
+EXTRA_WORKLOADS_LIST=""
+if [ -n "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ]; then
+    EXTRA_WORKLOAD_INDEX=0
+    IFS=':' read -r -a EXTRA_WORKLOAD_HOSTS <<< "${HOMEBOY_BENCH_EXTRA_WORKLOADS}"
+    for extra_workload_host in "${EXTRA_WORKLOAD_HOSTS[@]}"; do
+        [ -n "$extra_workload_host" ] || continue
+        if [ ! -f "$extra_workload_host" ]; then
+            echo "Error: rig bench workload not found: $extra_workload_host" >&2
+            FAILED_STEP="Rig bench workload setup"
+            exit 1
+        fi
+        extra_workload_guest="/bench-extra-workloads/${EXTRA_WORKLOAD_INDEX}-$(basename "$extra_workload_host")"
+        MOUNT_ARGS+=("--mount" "${extra_workload_host}:${extra_workload_guest}")
+        if [ -n "$EXTRA_WORKLOADS_LIST" ]; then
+            EXTRA_WORKLOADS_LIST+=":"
+        fi
+        EXTRA_WORKLOADS_LIST+="$extra_workload_guest"
+        EXTRA_WORKLOAD_INDEX=$((EXTRA_WORKLOAD_INDEX + 1))
+    done
+fi
+
 # Shared-state mount: when homeboy core passes HOMEBOY_BENCH_SHARED_STATE,
 # we mount the host directory into Playground's VFS at a stable path
 # (/bench-shared-state) and expose that path to the workload via the
@@ -282,6 +306,7 @@ sed \
     -e "s|{{RESULT_SUFFIX}}|${RESULT_SUFFIX}|g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{EXTRA_WORKLOADS_LIST}}${WP_CONFIG_DEFINES_DELIM}${EXTRA_WORKLOADS_LIST}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
 echo "Running performance benchmarks via WordPress Playground..."

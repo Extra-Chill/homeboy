@@ -138,25 +138,43 @@ pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 // ---------------------------------------------------------------------------
 pg_stage_begin('discover_workloads');
 $workload_files = [];
+$workload_sources = [];
 try {
     $bench_dir = "$plugin_path/tests/bench";
-    if (!is_dir($bench_dir)) {
-        pg_log("NO_WORKLOAD_FILES");
-        pg_stage_ok('discover_workloads');
-    } else {
+    if (is_dir($bench_dir)) {
         $iterator = new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator($bench_dir, RecursiveDirectoryIterator::SKIP_DOTS),
             RecursiveIteratorIterator::LEAVES_ONLY
         );
         foreach ($iterator as $file) {
             if ($file->isFile() && $file->getExtension() === 'php') {
-                $workload_files[] = $file->getPathname();
+                $path = $file->getPathname();
+                $workload_files[] = $path;
+                $workload_sources[$path] = 'in_tree';
             }
         }
-        sort($workload_files);
-        pg_log("DISCOVERY: dir=$bench_dir found=" . count($workload_files));
-        pg_stage_ok('discover_workloads');
     }
+
+    $extra_workload_list = '{{EXTRA_WORKLOADS_LIST}}';
+    $extra_workloads = $extra_workload_list === '' ? [] : explode(':', $extra_workload_list);
+    foreach ($extra_workloads as $path) {
+        if (!is_string($path) || $path === '') {
+            continue;
+        }
+        if (!is_file($path) || strtolower(pathinfo($path, PATHINFO_EXTENSION)) !== 'php') {
+            pg_log("NOTICE: skipping invalid rig bench workload: " . var_export($path, true));
+            continue;
+        }
+        $workload_files[] = $path;
+        $workload_sources[$path] = 'rig';
+    }
+
+    sort($workload_files);
+    if (empty($workload_files)) {
+        pg_log("NO_WORKLOAD_FILES");
+    }
+    pg_log("DISCOVERY: dir=$bench_dir in_tree=" . count(array_filter($workload_sources, fn($source) => $source === 'in_tree')) . " rig=" . count(array_filter($workload_sources, fn($source) => $source === 'rig')));
+    pg_stage_ok('discover_workloads');
 } catch (Throwable $e) {
     pg_stage_fail('discover_workloads', $e);
     exit(1);
@@ -214,7 +232,10 @@ try {
         $basename = basename($workload_file);
         $scenario_id = pg_bench_scenario_id($basename);
         // Path relative to the plugin root for the BenchResults envelope.
-        $relative_file = substr($workload_file, strlen($plugin_path) + 1);
+        $source = $workload_sources[$workload_file] ?? 'in_tree';
+        $relative_file = $source === 'in_tree'
+            ? substr($workload_file, strlen($plugin_path) + 1)
+            : $workload_file;
 
         pg_log("WORKLOAD_BEGIN: $scenario_id ($basename)");
 
@@ -263,6 +284,7 @@ try {
         $scenarios[] = [
             'id' => $scenario_id,
             'file' => $relative_file,
+            'source' => $source,
             'iterations' => $iterations_per_workload,
             'metrics' => [
                 'mean_ms' => $mean,

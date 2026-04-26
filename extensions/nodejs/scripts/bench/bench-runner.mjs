@@ -34,7 +34,7 @@
 // bench/parsing.rs::BenchResults shape) to HOMEBOY_BENCH_RESULTS_FILE.
 
 import { readdir, writeFile, mkdir } from 'node:fs/promises';
-import { resolve, relative, basename, dirname } from 'node:path';
+import { resolve, relative, basename, dirname, delimiter } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 
@@ -138,16 +138,22 @@ async function runWorkload(file) {
 
 async function main() {
     const benchDir = resolve(PROJECT_PATH, 'bench');
-    const files = await discoverWorkloads(benchDir);
+    const inTreeFiles = (await discoverWorkloads(benchDir)).map((file) => ({ file, source: 'in_tree' }));
+    const extraFiles = (process.env.HOMEBOY_BENCH_EXTRA_WORKLOADS || '')
+        .split(delimiter)
+        .filter(Boolean)
+        .map((file) => ({ file: resolve(PROJECT_PATH, file), source: 'rig' }));
+    const files = [...inTreeFiles, ...extraFiles].sort((a, b) => a.file.localeCompare(b.file));
 
     if (DEBUG) console.error(`DEBUG: discovered ${files.length} workloads under ${benchDir}`);
 
     const scenarios = [];
     let hadError = false;
 
-    for (const file of files) {
+    for (const workload of files) {
+        const { file, source } = workload;
         const id = scenarioId(file);
-        const rel = relative(PROJECT_PATH, file);
+        const rel = source === 'in_tree' ? relative(PROJECT_PATH, file) : file;
         process.stdout.write(`WORKLOAD_BEGIN: ${id} (${basename(file)})\n`);
 
         const result = await runWorkload(file);
@@ -166,6 +172,7 @@ async function main() {
         scenarios.push({
             id,
             file: rel,
+            source,
             iterations: t.length,
             metrics: {
                 mean_ms: t.reduce((a, b) => a + b, 0) / t.length,
