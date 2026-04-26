@@ -22,7 +22,7 @@ Reference to a local checkout of a component. Decoupled from homeboy's global co
 |---|---|---|
 | `path` | string | Filesystem path to the checkout. Supports `~` and `${env.VAR}` expansion. |
 | `stack` | string | Stack ID associated with the component. Used by `homeboy stack`; rig pipeline integration is still explicit. |
-| `branch` | string | Expected branch hint. Documentation only in MVP. |
+| `branch` | string | Expected branch hint for humans reading specs and status output. |
 
 ## `ServiceSpec`
 

@@ -38,9 +38,9 @@ component. The finding description lists:
 
 ## Severity
 
-`Info` — the detector's output is plan-only. A separate fixer (planned) will
-propose a helper name derived from the key set and a list of call sites to
-rewrite. No rewrites are applied automatically.
+`Info` — the detector's output is review-only. It reports the repeated shape,
+candidate files, and estimated LOC reduction, but no automated fixer is
+registered and no rewrites are applied automatically.
 
 ## Related
 
