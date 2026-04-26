@@ -10,9 +10,8 @@ source "${DEPENDENCY_HELPER}"
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
 # Supports skip via HOMEBOY_SKIP_PHPSTAN=1
 # Supports level override via HOMEBOY_PHPSTAN_LEVEL (default: 7, matches phpstan.neon.dist)
-# NOTE: PHPStan always analyzes the full codebase (ignores HOMEBOY_LINT_GLOB)
-# because it needs the complete type graph to detect collateral damage from
-# changes (broken call sites, type mismatches in untouched files, etc.)
+# Respects scoped lint via HOMEBOY_LINT_FILE / HOMEBOY_LINT_GLOB. Unscoped lint
+# still analyzes the full component so CI keeps the full type-graph signal.
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -136,14 +135,62 @@ if [ -n "$DEPENDENCY_CONFIG" ] && [ -f "$DEPENDENCY_CONFIG" ]; then
     PHPSTAN_BASE_CONFIG="$DEPENDENCY_CONFIG"
 fi
 
-# Check if component has PHP files
-php_file_count=$(find "$PLUGIN_PATH" -type f -name "*.php" \
-    -not -path "*/vendor/*" \
-    -not -path "*/node_extensions/*" \
-    -not -path "*/build/*" \
-    -not -path "*/dist/*" \
-    -not -path "*/tests/*" \
-    2>/dev/null | wc -l | tr -d ' ')
+PHPSTAN_TARGETS=("$PLUGIN_PATH")
+PHPSTAN_SCOPED=0
+
+resolve_phpstan_targets() {
+    local matched=()
+    local target
+
+    if [ -n "${HOMEBOY_LINT_FILE:-}" ]; then
+        target="${PLUGIN_PATH}/${HOMEBOY_LINT_FILE}"
+        if [ -f "$target" ] && [[ "$target" == *.php ]]; then
+            matched+=("$target")
+        fi
+    elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
+        (
+            cd "$PLUGIN_PATH"
+            eval 'for f in '"${HOMEBOY_LINT_GLOB}"'; do [ -e "$f" ] && printf "%s\0" "$f"; done'
+        ) | while IFS= read -r -d '' target; do
+            if [ -f "${PLUGIN_PATH}/${target}" ] && [[ "$target" == *.php ]]; then
+                printf '%s\0' "${PLUGIN_PATH}/${target}"
+            elif [ -d "${PLUGIN_PATH}/${target}" ]; then
+                find "${PLUGIN_PATH}/${target}" -type f -name '*.php' -print0
+            fi
+        done
+        return
+    fi
+
+    if [ "${#matched[@]}" -gt 0 ]; then
+        printf '%s\0' "${matched[@]}"
+    fi
+}
+
+if [ -n "${HOMEBOY_LINT_FILE:-}" ] || [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
+    PHPSTAN_SCOPED=1
+    PHPSTAN_TARGETS=()
+    while IFS= read -r -d '' phpstan_target; do
+        PHPSTAN_TARGETS+=("$phpstan_target")
+    done < <(resolve_phpstan_targets)
+
+    if [ "${#PHPSTAN_TARGETS[@]}" -eq 0 ]; then
+        echo "PHPStan scoped lint: no PHP files in requested scope, skipping static analysis"
+        exit 0
+    fi
+fi
+
+# Check if the selected PHPStan target set has PHP files.
+if [ "$PHPSTAN_SCOPED" -eq 1 ]; then
+    php_file_count="${#PHPSTAN_TARGETS[@]}"
+else
+    php_file_count=$(find "$PLUGIN_PATH" -type f -name "*.php" \
+        -not -path "*/vendor/*" \
+        -not -path "*/node_extensions/*" \
+        -not -path "*/build/*" \
+        -not -path "*/dist/*" \
+        -not -path "*/tests/*" \
+        2>/dev/null | wc -l | tr -d ' ')
+fi
 
 if [ "$php_file_count" -eq 0 ]; then
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -153,6 +200,9 @@ if [ "$php_file_count" -eq 0 ]; then
 fi
 
 echo "Running PHPStan static analysis..."
+if [ "$PHPSTAN_SCOPED" -eq 1 ]; then
+    echo "PHPStan scoped lint: analyzing ${#PHPSTAN_TARGETS[@]} PHP file(s) from requested scope"
+fi
 
 # Build PHPStan arguments
 phpstan_args=(analyse)
@@ -309,12 +359,12 @@ if [ -n "$PHPSTAN_MAX_PROCESSES" ] || [ -n "$PHPSTAN_PHP_VERSION" ]; then
         phpstan_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
     fi
     phpstan_args+=(--no-progress)
-    phpstan_args+=("$PLUGIN_PATH")
+    phpstan_args+=("${PHPSTAN_TARGETS[@]}")
 fi
 
 # Add the path to analyze (only when not already set by override block above)
 if [ -z "$PHPSTAN_MAX_PROCESSES" ] && [ -z "$PHPSTAN_PHP_VERSION" ]; then
-    phpstan_args+=("$PLUGIN_PATH")
+    phpstan_args+=("${PHPSTAN_TARGETS[@]}")
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -362,6 +412,18 @@ prepare_phpstan_retry_config() {
     printf '%s\n' "$PHPSTAN_TMPCONFIG"
 }
 
+add_phpstan_retry_targets() {
+    if [ "$PHPSTAN_SCOPED" -eq 1 ]; then
+        local target rel_target
+        for target in "${PHPSTAN_TARGETS[@]}"; do
+            rel_target="${target#$PLUGIN_PATH/}"
+            retry_args+=("$rel_target")
+        done
+    else
+        retry_args+=(.)
+    fi
+}
+
 # Summary mode: get JSON output and parse it
 if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     set +e
@@ -383,7 +445,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         # Baseline is pulled in via PHPSTAN_TMPCONFIG → PHPSTAN_BASE_CONFIG
         # → COMPONENT_BASELINE include chain (no --baseline CLI flag in PHPStan 2.x).
         [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
-        retry_args+=(.)
+        add_phpstan_retry_targets
         stderr_file=$(homeboy_mktemp 'phpstan-stderr.XXXXXX')
         # PHPStan --debug mode has a known interaction with --autoload-file
         # where running from a CWD different than the analysed path causes
@@ -742,7 +804,7 @@ if [ "$full_exit" -ne 0 ] && \
     retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress --debug)
     # Baseline pulled in via PHPSTAN_TMPCONFIG include chain, same as summary-mode retry.
     [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
-    retry_args+=(.)
+    add_phpstan_retry_targets
     set +e
     retry_stdout_file=$(homeboy_mktemp 'phpstan-stdout.XXXXXX')
     retry_stderr_file=$(homeboy_mktemp 'phpstan-stderr.XXXXXX')
