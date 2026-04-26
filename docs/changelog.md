@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.102.0] - 2026-04-26
+
+### Added
+- squash-merge detection in status + sync subcommand (closes #1570, Phase 2 of #1462)
+
 ## [0.101.0] - 2026-04-26
 
 ### Added
