@@ -83,7 +83,7 @@ homeboy upgrade --force
 - `new_version`: Version after upgrade (may be null)
 - `upgraded`: Boolean indicating if upgrade was performed
 - `message`: Human-readable status message
-- `restart_required`: Boolean indicating if a restart is needed
+- `restart_required`: Boolean indicating if a restart is needed (true only for source installs)
 
 ## Exit code
 
@@ -94,8 +94,7 @@ homeboy upgrade --force
 
 - The `update` command is an alias for `upgrade` with identical behavior.
 - Version checking queries the crates.io API. Network failures are handled gracefully.
-- On Unix platforms, successful upgrades automatically restart into the new binary.
-- On non-Unix platforms, Homeboy prints a message to restart manually.
+- On Unix platforms, successful source installs automatically restart into the new binary. Binary and package-manager installs do not require a restart.
 
 ## Related
 

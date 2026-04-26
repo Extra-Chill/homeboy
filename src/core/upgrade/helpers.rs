@@ -217,7 +217,7 @@ pub fn run_upgrade_with_method(
         } else {
             "Upgrade command completed but version unchanged".to_string()
         },
-        restart_required: success,
+        restart_required: success && matches!(install_method, InstallMethod::Source),
         extensions_updated,
         extensions_skipped,
         projects_migrated,
