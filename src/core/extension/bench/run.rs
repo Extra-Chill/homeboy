@@ -22,6 +22,12 @@ pub struct BenchRunWorkflowArgs {
     pub component_id: String,
     pub path_override: Option<String>,
     pub settings: Vec<(String, String)>,
+    /// Typed-JSON setting overrides from `--setting-json key=<json>`.
+    /// Applied after `settings` (string overrides) so JSON wins on
+    /// conflict. Required for object-shaped settings like
+    /// `wp_config_defines` / `bench_env` whose dispatchers expect a JSON
+    /// object, not a JSON-string-of-an-object.
+    pub settings_json: Vec<(String, serde_json::Value)>,
     pub iterations: u64,
     pub baseline_flags: BaselineFlags,
     pub regression_threshold_percent: f64,
@@ -231,6 +237,7 @@ fn build_runner(
         .component(component.clone())
         .path_override(args.path_override.clone())
         .settings(&args.settings)
+        .settings_json(&args.settings_json)
         .with_run_dir(run_dir)
         .env("HOMEBOY_BENCH_ITERATIONS", &args.iterations.to_string())
         .script_args(&args.passthrough_args);

@@ -411,6 +411,7 @@ pub(crate) fn build_settings_json_from_manifest(
     manifest: &serde_json::Value,
     extension_settings: &[(String, serde_json::Value)],
     settings_overrides: &[(String, String)],
+    settings_json_overrides: &[(String, serde_json::Value)],
 ) -> Result<String> {
     let mut settings = serde_json::json!({});
 
@@ -435,9 +436,17 @@ pub(crate) fn build_settings_json_from_manifest(
             obj.insert(key.clone(), value.clone());
         }
 
-        // CLI overrides are always strings (from --setting key=value).
+        // String overrides from `--setting key=value` (always strings).
         for (key, value) in settings_overrides {
             obj.insert(key.clone(), serde_json::Value::String(value.clone()));
+        }
+
+        // Typed-JSON overrides from `--setting-json key=<json>` (preserves
+        // object / array / typed-scalar). Applied AFTER string overrides
+        // so `--setting-json` wins when both target the same key —
+        // typed-JSON is strictly more expressive.
+        for (key, value) in settings_json_overrides {
+            obj.insert(key.clone(), value.clone());
         }
     }
 
@@ -577,6 +586,7 @@ pub(crate) fn prepare_capability_run(
     pre_loaded_component: Option<&Component>,
     path_override: Option<&str>,
     settings_overrides: &[(String, String)],
+    settings_json_overrides: &[(String, serde_json::Value)],
     skip_script_validation: bool,
 ) -> Result<PreparedCapabilityRun> {
     let component =
@@ -594,8 +604,12 @@ pub(crate) fn prepare_capability_run(
     }
 
     let manifest = load_extension_manifest_from_dir(&execution.extension_path)?;
-    let settings_json =
-        build_settings_json_from_manifest(&manifest, &execution.settings, settings_overrides)?;
+    let settings_json = build_settings_json_from_manifest(
+        &manifest,
+        &execution.settings,
+        settings_overrides,
+        settings_json_overrides,
+    )?;
 
     Ok(PreparedCapabilityRun {
         execution,
@@ -1093,9 +1107,15 @@ mod tests {
         ];
 
         let overrides: Vec<(String, String)> = vec![];
+        let json_overrides: Vec<(String, serde_json::Value)> = vec![];
 
-        let json = build_settings_json_from_manifest(&manifest, &extension_settings, &overrides)
-            .expect("should serialize");
+        let json = build_settings_json_from_manifest(
+            &manifest,
+            &extension_settings,
+            &overrides,
+            &json_overrides,
+        )
+        .expect("should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
 
         // Array from extension settings is preserved
@@ -1121,13 +1141,75 @@ mod tests {
         let extension_settings: Vec<(String, serde_json::Value)> =
             vec![("key".to_string(), serde_json::json!(["original"]))];
         let overrides = vec![("key".to_string(), "override_value".to_string())];
+        let json_overrides: Vec<(String, serde_json::Value)> = vec![];
 
-        let json = build_settings_json_from_manifest(&manifest, &extension_settings, &overrides)
-            .expect("should serialize");
+        let json = build_settings_json_from_manifest(
+            &manifest,
+            &extension_settings,
+            &overrides,
+            &json_overrides,
+        )
+        .expect("should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
 
         // CLI override replaces the array value with a string
         assert_eq!(parsed["key"], serde_json::json!("override_value"));
+    }
+
+    #[test]
+    fn build_settings_json_typed_overrides_preserve_objects() {
+        // The whole point of --setting-json: object values stay objects,
+        // unlike --setting which would coerce them to a JSON-string-of-an-
+        // object. Mirrors the wp_config_defines / bench_env use case
+        // (homeboy-extensions #248 / #250).
+        let manifest = serde_json::json!({
+            "settings": [
+                { "id": "bench_env", "default": {} }
+            ]
+        });
+        let extension_settings: Vec<(String, serde_json::Value)> = vec![];
+        let overrides: Vec<(String, String)> = vec![];
+        let json_overrides = vec![(
+            "bench_env".to_string(),
+            serde_json::json!({"BENCH_CORPUS_SIZE": "1000"}),
+        )];
+
+        let json = build_settings_json_from_manifest(
+            &manifest,
+            &extension_settings,
+            &overrides,
+            &json_overrides,
+        )
+        .expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
+
+        // The override is the actual JSON object, not a string-encoded one.
+        assert_eq!(
+            parsed["bench_env"],
+            serde_json::json!({"BENCH_CORPUS_SIZE": "1000"})
+        );
+        assert!(parsed["bench_env"].is_object());
+    }
+
+    #[test]
+    fn build_settings_json_typed_override_wins_on_conflict() {
+        // When the same key is targeted by both --setting and --setting-json,
+        // the typed override wins (strictly more expressive, applied later).
+        let manifest = serde_json::json!({});
+        let extension_settings: Vec<(String, serde_json::Value)> = vec![];
+        let overrides = vec![("key".to_string(), "string_value".to_string())];
+        let json_overrides = vec![("key".to_string(), serde_json::json!({"nested": true}))];
+
+        let json = build_settings_json_from_manifest(
+            &manifest,
+            &extension_settings,
+            &overrides,
+            &json_overrides,
+        )
+        .expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
+
+        assert_eq!(parsed["key"], serde_json::json!({"nested": true}));
     }
 
     #[test]

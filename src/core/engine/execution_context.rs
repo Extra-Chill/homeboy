@@ -66,8 +66,14 @@ pub struct ResolveOptions {
     /// When `None`, only component + source path are resolved — no extension lookup.
     pub capability: Option<ExtensionCapability>,
 
-    /// Additional settings from `--setting key=value` flags.
+    /// Additional settings from `--setting key=value` flags (string values).
     pub settings_overrides: Vec<(String, String)>,
+
+    /// Additional settings from `--setting-json key=<json>` flags (typed
+    /// values). Applied after `settings_overrides` so JSON wins on
+    /// conflict. Required for object-shaped settings whose dispatcher
+    /// consumers expect a JSON object, not a string-coerced JSON literal.
+    pub settings_json_overrides: Vec<(String, serde_json::Value)>,
 }
 
 impl ResolveOptions {
@@ -83,6 +89,26 @@ impl ResolveOptions {
             path_override,
             capability: Some(capability),
             settings_overrides: settings,
+            settings_json_overrides: Vec::new(),
+        }
+    }
+
+    /// Create options for a command that needs an extension capability AND
+    /// typed-JSON setting overrides. Mirrors `with_capability` but accepts
+    /// the JSON overrides too.
+    pub fn with_capability_and_json(
+        component_id: &str,
+        path_override: Option<String>,
+        capability: ExtensionCapability,
+        settings: Vec<(String, String)>,
+        settings_json: Vec<(String, serde_json::Value)>,
+    ) -> Self {
+        Self {
+            component_id: Some(component_id.to_string()),
+            path_override,
+            capability: Some(capability),
+            settings_overrides: settings,
+            settings_json_overrides: settings_json,
         }
     }
 
@@ -93,6 +119,7 @@ impl ResolveOptions {
             path_override,
             capability: None,
             settings_overrides: Vec::new(),
+            settings_json_overrides: Vec::new(),
         }
     }
 }
@@ -132,11 +159,20 @@ pub fn resolve(options: &ResolveOptions) -> Result<ExecutionContext> {
     let (extension_id, extension_path, settings) = if let Some(capability) = options.capability {
         let ext_context = extension::resolve_execution_context(&component, capability)?;
         let mut settings = ext_context.settings.clone();
-        // Merge CLI overrides on top (CLI values are always strings)
+        // Merge CLI string overrides on top (CLI string values stay strings).
         for (key, value) in &options.settings_overrides {
             // Remove existing key if present (override semantics)
             settings.retain(|(k, _)| k != key);
             settings.push((key.clone(), serde_json::Value::String(value.clone())));
+        }
+        // Then merge typed-JSON overrides — these win against both
+        // manifest defaults / component settings AND --setting string
+        // overrides. Strictly more expressive: an --setting-json on the
+        // same key represents intentional type preservation that string
+        // coercion can't represent.
+        for (key, value) in &options.settings_json_overrides {
+            settings.retain(|(k, _)| k != key);
+            settings.push((key.clone(), value.clone()));
         }
         (
             Some(ext_context.extension_id.clone()),
@@ -395,6 +431,7 @@ mod tests {
                 ("mode".to_string(), "strict".to_string()),
                 ("lang".to_string(), "rust".to_string()),
             ],
+            settings_json_overrides: Vec::new(),
         };
 
         let ctx = resolve(&options).expect("resolve should succeed");
