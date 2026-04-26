@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.20.1] - 2026-04-26
+
+### Fixed
+- keep extension test paths out of component discovery
+
 ## [2.20.0] - 2026-04-26
 
 ### Added
