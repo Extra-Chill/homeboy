@@ -2,13 +2,21 @@
 #
 # File categorized GitHub issues from audit, lint, and test findings.
 #
-# Instead of one monolithic issue per CI run, creates one issue per finding
-# category (kind). Each issue is deduplicated — if an open issue for that
-# category already exists, it's updated with the new count.
+# Thin orchestrator over `homeboy issues reconcile` (homeboy v0.99+). The
+# decision logic — file new / update / close / dedupe / suppress — lives in
+# Rust with real types and tests. This script's only job is:
 #
-# This is the "code factory" pattern: unfixable findings become the
-# roadmap for improving the autofix system. Each category issue closes when
-# its fix kind gets automated.
+#   1. Normalize each command's structured JSON into the canonical
+#      findings shape (groups by category + count).
+#   2. Render markdown bodies for each group using the action's templates
+#      (autofix status, finding tables, footers).
+#   3. Pipe the canonical JSON to `homeboy issues reconcile --apply --json`
+#      and surface its plan in the run log.
+#
+# See homeboy issue #1551 for the architectural framing. This replaces
+# ~750 lines of bash + jq + `gh api` reconciliation logic with a single
+# Rust call. Every consumer of homeboy now gets the same reconciliation
+# behavior — cron jobs, pre-commit hooks, agent runners — for free.
 #
 # Supports three command types:
 #   audit  — groups by finding kind (e.g. missing_method, dead_code_marker)
@@ -20,18 +28,17 @@
 #   COMPONENT_NAME        — component ID
 #   COMMANDS              — comma-separated list of commands that were run
 #   EXPECTED_COMMANDS     — optional; comma-separated list of command types
-#                           expected to run across the full workflow (e.g.
-#                           "audit,lint,test"). Used to scope the orphan-
-#                           reconciliation step so that workflows which split
-#                           audit/lint/test across separate invocations do
-#                           not close each other's issues. Defaults to
-#                           COMMANDS when empty.
+#                           expected to run across the full workflow. Used to
+#                           scope the orphan-reconciliation step so workflows
+#                           which split audit/lint/test across separate
+#                           invocations do not close each other's issues.
+#                           Defaults to COMMANDS when empty.
 #   RESULTS               — JSON object with pass/fail per command
 #   AUTOFIX_ATTEMPTED     — whether autofix was tried before filing
 #   AUTOFIX_PR_CREATED    — whether an autofix PR was opened
 #   BINARY_SOURCE         — how homeboy was obtained (source/release/fallback)
 #
-# Requires: jq, gh, python3
+# Requires: jq, gh, python3, homeboy v0.99+
 #
 
 set -euo pipefail
@@ -42,12 +49,17 @@ OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 AUTOFIX_ATTEMPTED="${AUTOFIX_ATTEMPTED:-false}"
 
+# CI runners check out a single repo to GITHUB_WORKSPACE and don't have the
+# component registered in homeboy's global registry. Always pass --path so
+# `homeboy issues reconcile` discovers the component from its homeboy.json.
+RECONCILE_PATH="${GITHUB_WORKSPACE:-$(pwd)}"
+
 HOMEBOY_CLI_VERSION="${HOMEBOY_CLI_VERSION:-unknown}"
 HOMEBOY_EXTENSION_ID="${HOMEBOY_EXTENSION_ID:-auto}"
 HOMEBOY_ACTION_REF="${HOMEBOY_ACTION_REF:-unknown}"
 HOMEBOY_ACTION_REPOSITORY="${HOMEBOY_ACTION_REPOSITORY:-unknown}"
 
-# Track totals across all command types
+# Track totals across all command types — populated from reconcile output.
 TOTAL_ISSUES_CREATED=0
 TOTAL_ISSUES_UPDATED=0
 TOTAL_ISSUES_CLOSED=0
@@ -199,50 +211,16 @@ if analysis and analysis.get('clusters'):
 summary = data.get('summary', {})
 if summary and summary.get('failures'):
     failures = summary['failures']
-    groups = {}
-    for f in failures:
-        # Group by file
-        file_key = f.get('file', 'unknown')
-        groups.setdefault(file_key, []).append({
-            'file': file_key,
-            'description': f.get('test_name', '') + ': ' + f.get('message', ''),
-            'suggestion': ''
-        })
-    print(json.dumps({
-        'groups': {k: v for k, v in sorted(groups.items(), key=lambda x: -len(x[1]))},
-        'component_id': component,
-        'total_findings': len(failures)
-    }))
-    sys.exit(0)
-
-# Fallback: test_counts show failures — single aggregate issue
-counts = data.get('test_counts', {})
-failed = counts.get('failed', 0)
-if failed > 0:
-    total = counts.get('total', 0)
     print(json.dumps({
         'groups': {'_aggregate': []},
         'component_id': component,
-        'total_findings': failed,
+        'total_findings': failures,
         'aggregate': True,
-        'aggregate_label': str(failed) + ' failures out of ' + str(total) + ' tests'
+        'aggregate_label': str(failures) + ' test failures'
     }))
     sys.exit(0)
 
-# Baseline regression check
-bc = data.get('baseline_comparison', {})
-if bc and bc.get('regression', False):
-    delta = abs(bc.get('failed_delta', 0))
-    print(json.dumps({
-        'groups': {'_aggregate': []},
-        'component_id': component,
-        'total_findings': max(delta, 1),
-        'aggregate': True,
-        'aggregate_label': str(delta) + ' new test regressions'
-    }))
-    sys.exit(0)
-
-# Test passed or no failure info
+# Last resort: test failed but no structured failures — single aggregate issue
 if status == 'failed':
     exit_code = data.get('exit_code', 1)
     print(json.dumps({
@@ -254,7 +232,7 @@ if status == 'failed':
     }))
     sys.exit(0)
 
-# Tests passed — zero findings
+# Test passed — report zero findings (triggers auto-close of resolved issues)
 print(json.dumps({
     'groups': {},
     'component_id': component,
@@ -288,8 +266,6 @@ build_autofix_status_section() {
 
   if [ -z "${fix_data}" ] || [ "${fix_data}" = "null" ]; then
     # No fixer available for this category
-    local kind_label
-    kind_label=$(echo "${kind}" | tr '_' ' ')
     cat <<NOFIXEOF
 
 ### Autofix status
@@ -305,8 +281,6 @@ NOFIXEOF
   fix_plan_only=$(echo "${fix_data}" | jq -r '.plan_only // 0')
 
   if [ "${fix_total}" -eq 0 ]; then
-    local kind_label
-    kind_label=$(echo "${kind}" | tr '_' ' ')
     cat <<NOFIXEOF
 
 ### Autofix status
@@ -343,367 +317,218 @@ FIXEOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# fetch_existing_issues CMD_TYPE
+# render_group_body CMD_TYPE KIND COUNT FINDINGS_JSON IS_AGGREGATE AGGREGATE_LABEL
 #
-# Fetch all open issues for a command type, paginating through all pages.
-# Returns JSON array: [{number, title}, ...]
+# Render a single group's full markdown body — the same template the bash
+# was writing inline before. Output goes to stdout for capture by the
+# canonical-payload builder.
 # ─────────────────────────────────────────────────────────────────────────────
 
-fetch_existing_issues() {
+render_group_body() {
   local cmd_type="$1"
-  local result
-  result=$(gh api "repos/${REPO}/issues?state=open&labels=${cmd_type}&per_page=100" \
-    --paginate \
-    --jq '[.[] | {number: .number, title: .title}]' 2>/dev/null)
+  local kind="$2"
+  local count="$3"
+  local findings_json="$4"
+  local is_aggregate="$5"
+  local aggregate_label="$6"
 
-  if [ -z "${result}" ]; then
-    echo "[]"
-  else
-    echo "${result}"
-  fi
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# close_duplicate_issues EXISTING_ISSUES CMD_TYPE COMP_ID TITLE_PREFIX
-#
-# When multiple open issues match the same category, close all but the oldest
-# (lowest issue number). Returns the issue number to keep.
-#
-# This handles the race condition where concurrent CI runs create duplicate
-# issues for the same category before either run sees the other's issue.
-# ─────────────────────────────────────────────────────────────────────────────
-
-close_duplicate_issues() {
-  local existing_issues="$1"
-  local cmd_type="$2"
-  local comp_id="$3"
-  local title_prefix="$4"
-
-  local matching
-  matching=$(echo "${existing_issues}" | jq -c --arg prefix "${title_prefix}" --arg comp "in ${comp_id}" \
-    '[.[] | select(.title | startswith($prefix) and contains($comp))] | sort_by(.number)')
-
-  local match_count
-  match_count=$(echo "${matching}" | jq 'length')
-
-  if [ "${match_count}" -le 1 ]; then
-    # Zero or one match — no duplicates to close
-    echo "${matching}" | jq -r 'first | .number // empty'
-    return
-  fi
-
-  # Keep the oldest (lowest number), close the rest
-  local keep_number
-  keep_number=$(echo "${matching}" | jq -r 'first | .number')
-  local dupe_numbers
-  dupe_numbers=$(echo "${matching}" | jq -r --arg keep "${keep_number}" '.[1:] | .[].number')
-
-  while IFS= read -r dupe_num; do
-    [ -z "${dupe_num}" ] && continue
-
-    local dupe_title
-    dupe_title=$(echo "${matching}" | jq -r --argjson n "${dupe_num}" '.[] | select(.number == $n) | .title')
-
-    local close_comment="Closing as duplicate of #${keep_number} — consolidated by the code factory pipeline.
-
-This issue was superseded by a concurrent CI run that created a matching issue. Going forward, a single issue per category is maintained and updated on each CI run."
-
-    if gh api "repos/${REPO}/issues/${dupe_num}/comments" \
-      --method POST \
-      --field body="${close_comment}" > /dev/null 2>&1; then
-      :
-    else
-      echo "::warning::Failed to comment on duplicate issue #${dupe_num}"
-    fi
-
-    if gh api "repos/${REPO}/issues/${dupe_num}" \
-      --method PATCH \
-      --field state="closed" \
-      --field state_reason="not_planned" > /dev/null 2>&1; then
-      echo "  Closed duplicate issue #${dupe_num}: ${dupe_title} (keeping #${keep_number})"
-      TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + 1))
-    else
-      echo "::warning::Failed to close duplicate issue #${dupe_num}: ${dupe_title}"
-    fi
-  done <<< "${dupe_numbers}"
-
-  echo "${keep_number}"
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# close_resolved_issues CMD_TYPE COMP_ID CURRENT_KINDS_TEXT
-#
-# Close issues for categories that no longer have findings.
-# ─────────────────────────────────────────────────────────────────────────────
-
-close_resolved_issues() {
-  local cmd_type="$1"
-  local comp_id="$2"
-  local current_kinds="$3"
-  local closed=0
-
-  local existing_issues
-  existing_issues=$(fetch_existing_issues "${cmd_type}")
-
-  while IFS= read -r ISSUE_LINE; do
-    [ -z "${ISSUE_LINE}" ] && continue
-
-    local issue_num issue_title
-    issue_num=$(echo "${ISSUE_LINE}" | jq -r '.number')
-    issue_title=$(echo "${ISSUE_LINE}" | jq -r '.title')
-
-    # Match our component only
-    if ! echo "${issue_title}" | grep -q "in ${comp_id}"; then
-      continue
-    fi
-
-    # Extract kind_label: everything between "{cmd_type}: " and " in {component}"
-    local kind_label kind_key
-    kind_label=$(echo "${issue_title}" | sed -n "s/^${cmd_type}: \(.*\) in ${comp_id}.*/\1/p")
-    [ -z "${kind_label}" ] && continue
-
-    # Convert kind_label back to kind key (spaces → underscores)
-    kind_key=$(echo "${kind_label}" | tr ' ' '_')
-
-    # Check if this kind still has findings
-    if [ -n "${current_kinds}" ] && echo "${current_kinds}" | grep -qx "${kind_key}" 2>/dev/null; then
-      continue  # Still has findings — will be updated below
-    fi
-
-    # No findings for this category — close the issue
-    local close_comment="All **${kind_label}** findings have been resolved. Closing automatically.
-
-Resolved by the [code factory pipeline](${RUN_URL}). If findings reappear, a new issue will be filed."
-
-    if ! gh api "repos/${REPO}/issues/${issue_num}/comments" \
-      --method POST \
-      --field body="${close_comment}" > /dev/null 2>&1; then
-      echo "::warning::Failed to comment on issue #${issue_num} during close"
-    fi
-
-    if ! gh api "repos/${REPO}/issues/${issue_num}" \
-      --method PATCH \
-      --field state="closed" \
-      --field state_reason="completed" > /dev/null 2>&1; then
-      echo "::warning::Failed to close issue #${issue_num}: ${issue_title}"
-    fi
-
-    closed=$((closed + 1))
-    echo "  Closed issue #${issue_num}: ${issue_title} (zero findings remaining)"
-  done <<< "$(echo "${existing_issues}" | jq -c '.[]')"
-
-  TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + closed))
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# file_categorized_issues CMD_TYPE FINDINGS_JSON COMP_ID
-#
-# Create or update one issue per finding category.
-# ─────────────────────────────────────────────────────────────────────────────
-
-file_categorized_issues() {
-  local cmd_type="$1"
-  local findings_json="$2"
-  local comp_id="$3"
-
-  local total_findings is_aggregate
-  total_findings=$(echo "${findings_json}" | jq -r '.total_findings')
-  is_aggregate=$(echo "${findings_json}" | jq -r '.aggregate // false')
-
-  # Extract current kinds for close-resolution
-  local current_kinds=""
-  if [ "${total_findings}" != "0" ] && [ "${total_findings}" != "null" ]; then
-    current_kinds=$(echo "${findings_json}" | jq -r '.groups | keys[]' 2>/dev/null || true)
-  fi
-
-  # Close resolved issues for this command type
-  close_resolved_issues "${cmd_type}" "${comp_id}" "${current_kinds}"
-
-  if [ "${total_findings}" = "0" ] || [ "${total_findings}" = "null" ]; then
-    echo ""
-    echo "  No ${cmd_type} findings to file issues for"
-    return
-  fi
-
-  local cmd_label
+  local cmd_label kind_label
   cmd_label="$(echo "${cmd_type}" | sed 's/.*/\u&/')"  # Capitalize first letter
+  if [ "${is_aggregate}" = "true" ] && [ "${kind}" = "_aggregate" ]; then
+    kind_label="${aggregate_label}"
+  else
+    kind_label=$(echo "${kind}" | tr '_' ' ')
+  fi
 
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  Filing categorized ${cmd_type} issues for ${comp_id}"
-  echo "  Total findings: ${total_findings}"
-  echo "  Categories: $(echo "${findings_json}" | jq -r '.groups | keys | length')"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo ""
+  cat <<HEADER
+## ${cmd_label}: ${kind_label}
 
-  # Fetch existing open issues for this command type (paginated)
-  local existing_issues
-  existing_issues=$(fetch_existing_issues "${cmd_type}")
+**Component:** \`${COMP_ID}\`
+**Count:** ${count} findings
+**Last run:** ${RUN_URL}
+**Updated:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Homeboy:** \`${HOMEBOY_CLI_VERSION}\` | Action: \`${HOMEBOY_ACTION_REPOSITORY}@${HOMEBOY_ACTION_REF}\`
+HEADER
 
-  local kinds
-  kinds=$(echo "${findings_json}" | jq -r '.groups | keys[]')
+  # Findings table (skip for aggregate groups)
+  if [ "${is_aggregate}" != "true" ] || [ "${kind}" != "_aggregate" ]; then
+    local category_findings
+    category_findings=$(echo "${findings_json}" | jq -c --arg k "${kind}" '.groups[$k][:50][]')
 
-  while IFS= read -r KIND; do
-    [ -z "${KIND}" ] && continue
-
-    local count kind_label issue_title title_prefix existing_number
-    count=$(echo "${findings_json}" | jq -r --arg k "${KIND}" '.groups[$k] | length')
-
-    # For aggregate issues, use the aggregate_label and total count
-    if [ "${is_aggregate}" = "true" ] && [ "${KIND}" = "_aggregate" ]; then
-      local agg_label
-      agg_label=$(echo "${findings_json}" | jq -r '.aggregate_label // "failures"')
-      count="${total_findings}"
-      kind_label="${agg_label}"
-      issue_title="${cmd_type}: ${kind_label} in ${comp_id}"
-      title_prefix="${cmd_type}: "
-      # Match any issue for this cmd_type + component (aggregate issues update any existing)
-      # Close duplicates from concurrent runs, keep the oldest
-      existing_number=$(close_duplicate_issues "${existing_issues}" "${cmd_type}" "${comp_id}" "${title_prefix}")
-    else
-      kind_label=$(echo "${KIND}" | tr '_' ' ')
-      issue_title="${cmd_type}: ${kind_label} in ${comp_id} (${count})"
-      title_prefix="${cmd_type}: ${kind_label} in ${comp_id}"
-      # Close duplicates from concurrent runs, keep the oldest
-      existing_number=$(close_duplicate_issues "${existing_issues}" "${cmd_type}" "${comp_id}" "${title_prefix}")
-    fi
-
-    # Build the findings table (only for non-aggregate issues with actual findings)
-    local findings_table="" truncated_note=""
-    if [ "${is_aggregate}" != "true" ] || [ "${KIND}" != "_aggregate" ]; then
-      findings_table+="| File | Description | Suggestion |"$'\n'
-      findings_table+="| --- | --- | --- |"$'\n'
-
-      local category_findings
-      category_findings=$(echo "${findings_json}" | jq -c --arg k "${KIND}" '.groups[$k][:50][]')
-
+    if [ -n "${category_findings}" ]; then
+      printf '\n### Findings\n\n| File | Description | Suggestion |\n| --- | --- | --- |\n'
       while IFS= read -r FINDING; do
         [ -z "${FINDING}" ] && continue
         local file desc suggestion
         file=$(echo "${FINDING}" | jq -r '.file // "unknown"')
         desc=$(echo "${FINDING}" | jq -r '.description // "(no description)"' | sed 's/|/\\|/g')
         suggestion=$(echo "${FINDING}" | jq -r '.suggestion // ""' | sed 's/|/\\|/g')
-        findings_table+="| \`${file}\` | ${desc} | ${suggestion} |"$'\n'
+        printf '| `%s` | %s | %s |\n' "${file}" "${desc}" "${suggestion}"
       done <<< "${category_findings}"
 
       if [ "${count}" -gt 50 ]; then
-        truncated_note=$'\n'"*Showing 50 of ${count} findings. Run \`homeboy ${cmd_type} ${comp_id}\` locally for the full list.*"$'\n'
+        printf '\n*Showing 50 of %s findings. Run `homeboy %s %s` locally for the full list.*\n' \
+          "${count}" "${cmd_type}" "${COMP_ID}"
       fi
     fi
+  fi
 
-    local body_file
-    body_file=$(mktemp)
-
-    if [ -n "${existing_number}" ]; then
-      # Update existing issue body + title
-      cat > "${body_file}" <<UPDATEEOF
-## ${cmd_label}: ${kind_label}
-
-**Component:** \`${comp_id}\`
-**Count:** ${count} findings
-**Last run:** ${RUN_URL}
-**Updated:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
-**Homeboy:** \`${HOMEBOY_CLI_VERSION}\` | Action: \`${HOMEBOY_ACTION_REPOSITORY}@${HOMEBOY_ACTION_REF}\`
-UPDATEEOF
-
-      if [ -n "${findings_table}" ]; then
-        cat >> "${body_file}" <<TABLEEOF
-
-### Findings
-
-${findings_table}
-${truncated_note}
-TABLEEOF
-      fi
-
-      # Add autofix status section
-      local autofix_section
-      autofix_section=$(build_autofix_status_section "${cmd_type}" "${KIND}" "${comp_id}" "${count}" "${findings_json}")
-      if [ -n "${autofix_section}" ]; then
-        echo "${autofix_section}" >> "${body_file}"
-      fi
-
-      cat >> "${body_file}" <<'UPDATEFOOTEREOF'
-
----
-*Updated automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action) on each CI run until resolved.*
-UPDATEFOOTEREOF
-
-      if ! gh api "repos/${REPO}/issues/${existing_number}" \
-        --method PATCH \
-        --field title="${issue_title}" \
-        -F body=@"${body_file}" > /dev/null 2>&1; then
-        echo "::warning::Failed to update issue #${existing_number}: ${issue_title}"
-      fi
-
-      TOTAL_ISSUES_UPDATED=$((TOTAL_ISSUES_UPDATED + 1))
-      echo "  Updated issue #${existing_number}: ${issue_title}"
-    else
-      # Create new issue
-      cat > "${body_file}" <<ISSUEEOF
-## ${cmd_label}: ${kind_label}
-
-**Component:** \`${comp_id}\`
-**Count:** ${count} findings
-**Run:** ${RUN_URL}
-**Homeboy:** \`${HOMEBOY_CLI_VERSION}\` | Action: \`${HOMEBOY_ACTION_REPOSITORY}@${HOMEBOY_ACTION_REF}\`
-
-### Context
-
-This issue was filed automatically because \`homeboy ${cmd_type}\` found **${count}** \`${kind_label}\` findings that could not be auto-fixed.
-
-Each finding in this category represents the same class of problem. Closing this issue means either:
-1. The findings are resolved in the codebase, or
-2. A new autofix rule handles them mechanically
-ISSUEEOF
-
-      if [ -n "${findings_table}" ]; then
-        cat >> "${body_file}" <<TABLEEOF
-
-### Findings
-
-${findings_table}
-${truncated_note}
-TABLEEOF
-      fi
-
-      # Add autofix status section (per-kind fixability from audit data)
-      local autofix_section
-      autofix_section=$(build_autofix_status_section "${cmd_type}" "${KIND}" "${comp_id}" "${count}" "${findings_json}")
-      if [ -n "${autofix_section}" ]; then
-        echo "${autofix_section}" >> "${body_file}"
-      elif [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
-        cat >> "${body_file}" <<'AUTOFIXEOF'
+  # Autofix status section
+  local autofix_section
+  autofix_section=$(build_autofix_status_section "${cmd_type}" "${kind}" "${COMP_ID}" "${count}" "${findings_json}")
+  if [ -n "${autofix_section}" ]; then
+    echo "${autofix_section}"
+  elif [ "${AUTOFIX_ATTEMPTED}" = "true" ] && [ "${cmd_type}" != "audit" ]; then
+    cat <<'AUTOFIXEOF'
 
 ### Autofix status
 
 Autofix was attempted before filing this issue. These findings are **not yet mechanically fixable** — they need either a new fixer rule or manual resolution.
 AUTOFIXEOF
-      fi
+  fi
 
-      cat >> "${body_file}" <<'FOOTEREOF'
+  cat <<'FOOTEREOF'
 
 ---
-*Filed automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action). This issue updates on each CI run until resolved.*
+*Maintained automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action) on each CI run until resolved.*
 FOOTEREOF
+}
 
-      # Try with command-type label, fall back to no labels if it doesn't exist
-      gh api "repos/${REPO}/issues" \
-        --method POST \
-        --field title="${issue_title}" \
-        -F body=@"${body_file}" \
-        --field "labels[]=${cmd_type}" > /dev/null 2>&1 || \
-      gh api "repos/${REPO}/issues" \
-        --method POST \
-        --field title="${issue_title}" \
-        -F body=@"${body_file}" > /dev/null 2>&1
+# ─────────────────────────────────────────────────────────────────────────────
+# build_reconcile_input CMD_TYPE FINDINGS_JSON COMP_ID
+#
+# Translate the action's intermediate findings JSON into the input shape
+# `homeboy issues reconcile` expects:
+#
+#   {
+#     "command": "audit",
+#     "groups": {
+#       "<category>": { "count": N, "label": "...", "body": "<rendered md>" },
+#       ...
+#     }
+#   }
+#
+# Per-group `body` is rendered from the action's templates, so the reconciler
+# stays format-agnostic. Categories with `count: 0` (which would never come
+# from a real findings stream — that's reconcile's "no findings remaining"
+# row) are not emitted here; close-on-resolved is driven by the absence of
+# a category from `groups` versus its presence in the existing tracker.
+# ─────────────────────────────────────────────────────────────────────────────
 
-      TOTAL_ISSUES_CREATED=$((TOTAL_ISSUES_CREATED + 1))
-      echo "  Created issue: ${issue_title}"
+build_reconcile_input() {
+  local cmd_type="$1"
+  local findings_json="$2"
+  local _comp_id="$3"
+  local out_file="$4"
+
+  local total_findings is_aggregate aggregate_label
+  total_findings=$(echo "${findings_json}" | jq -r '.total_findings')
+  is_aggregate=$(echo "${findings_json}" | jq -r '.aggregate // false')
+  aggregate_label=$(echo "${findings_json}" | jq -r '.aggregate_label // "failures"')
+
+  local kinds
+  kinds=$(echo "${findings_json}" | jq -r '.groups | keys[]')
+
+  # Build the groups object incrementally with jq, injecting each rendered
+  # body. Start with an empty object.
+  local payload_file
+  payload_file=$(mktemp)
+  jq -n --arg cmd "${cmd_type}" '{command: $cmd, groups: {}}' > "${payload_file}"
+
+  while IFS= read -r KIND; do
+    [ -z "${KIND}" ] && continue
+
+    local count kind_label body
+    count=$(echo "${findings_json}" | jq -r --arg k "${KIND}" '.groups[$k] | length')
+    if [ "${is_aggregate}" = "true" ] && [ "${KIND}" = "_aggregate" ]; then
+      count="${total_findings}"
+      kind_label="${aggregate_label}"
+    else
+      kind_label=$(echo "${KIND}" | tr '_' ' ')
     fi
 
-    rm -f "${body_file}"
+    body=$(render_group_body "${cmd_type}" "${KIND}" "${count}" "${findings_json}" \
+      "${is_aggregate}" "${aggregate_label}")
+
+    # Merge this group into the payload.
+    local next_file
+    next_file=$(mktemp)
+    jq --arg k "${KIND}" \
+       --argjson c "${count}" \
+       --arg label "${kind_label}" \
+       --arg body "${body}" \
+       '.groups[$k] = {count: $c, label: $label, body: $body}' \
+       "${payload_file}" > "${next_file}"
+    mv "${next_file}" "${payload_file}"
   done <<< "${kinds}"
+
+  mv "${payload_file}" "${out_file}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# reconcile_command CMD_TYPE FINDINGS_JSON COMP_ID
+#
+# Build the canonical findings payload for `homeboy issues reconcile`,
+# invoke it, and surface its plan in the run log.
+# ─────────────────────────────────────────────────────────────────────────────
+
+reconcile_command() {
+  local cmd_type="$1"
+  local findings_json="$2"
+  local comp_id="$3"
+
+  local total_findings
+  total_findings=$(echo "${findings_json}" | jq -r '.total_findings')
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  Reconciling ${cmd_type} issues for ${comp_id}"
+  echo "  Total findings: ${total_findings}"
+  echo "  Categories: $(echo "${findings_json}" | jq -r '.groups | keys | length')"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+
+  local input_file
+  input_file=$(mktemp)
+  build_reconcile_input "${cmd_type}" "${findings_json}" "${comp_id}" "${input_file}"
+
+  # Sanity check: the input file must be valid JSON or homeboy will fail
+  # noisily — log the problem and bail with a useful message.
+  if ! jq empty "${input_file}" >/dev/null 2>&1; then
+    echo "::warning::Failed to build reconcile input for ${cmd_type} (malformed JSON)"
+    rm -f "${input_file}"
+    return 1
+  fi
+
+  local result_file
+  result_file=$(mktemp)
+  if ! homeboy issues reconcile "${comp_id}" \
+    --findings "${input_file}" \
+    --path "${RECONCILE_PATH}" \
+    --apply \
+    --suppress-from-config \
+    > "${result_file}" 2>&1; then
+    echo "::warning::homeboy issues reconcile failed for ${cmd_type} — see log above"
+    cat "${result_file}"
+    rm -f "${input_file}" "${result_file}"
+    return 1
+  fi
+
+  # Surface the plan + per-action outcomes.
+  echo "Plan:"
+  jq -r '.data.plan_lines[]' "${result_file}" 2>/dev/null | sed 's/^/  /'
+
+  # Update totals from the reconcile result.
+  local filed updated closed_count
+  filed=$(jq -r '[.data.result.executions[]? | select(.outcome.outcome == "filed")] | length' "${result_file}" 2>/dev/null || echo 0)
+  updated=$(jq -r '[.data.result.executions[]? | select(.outcome.outcome == "updated" or .outcome.outcome == "updated_closed")] | length' "${result_file}" 2>/dev/null || echo 0)
+  closed_count=$(jq -r '[.data.result.executions[]? | select(.outcome.outcome == "closed" or .outcome.outcome == "closed_duplicate")] | length' "${result_file}" 2>/dev/null || echo 0)
+
+  TOTAL_ISSUES_CREATED=$((TOTAL_ISSUES_CREATED + filed))
+  TOTAL_ISSUES_UPDATED=$((TOTAL_ISSUES_UPDATED + updated))
+  TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + closed_count))
+
+  rm -f "${input_file}" "${result_file}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -749,9 +574,10 @@ for CMD in "${CMD_ARRAY[@]}"; do
     local_comp_id="${COMPONENT_FROM_JSON}"
   fi
 
-  # File issues for this command type
-  file_categorized_issues "${CMD}" "${FINDINGS_JSON}" "${local_comp_id}"
-  COMMANDS_PROCESSED=$((COMMANDS_PROCESSED + 1))
+  # Reconcile this command's findings against the tracker
+  if reconcile_command "${CMD}" "${FINDINGS_JSON}" "${local_comp_id}"; then
+    COMMANDS_PROCESSED=$((COMMANDS_PROCESSED + 1))
+  fi
 done
 
 # ── Reconciliation: close orphaned issues for command types not in this run ──
@@ -769,10 +595,14 @@ done
 #
 # Default (EXPECTED_COMMANDS empty): fall back to COMMANDS so single-command
 # invocations still reconcile siblings the bot once owned but no longer runs.
+#
+# Implementation: for each orphan command type, invoke `homeboy issues
+# reconcile` with an empty groups object. Since no findings exist, every
+# open issue for that command type drops to row 3 of the contract (close
+# with reason=completed). closed-not_planned issues are left alone.
 
 if [ -n "${EXPECTED_COMMANDS:-}" ]; then
   IFS=',' read -ra EXPECTED_CMD_ARRAY <<< "${EXPECTED_COMMANDS}"
-  # Normalize whitespace on each element
   for i in "${!EXPECTED_CMD_ARRAY[@]}"; do
     EXPECTED_CMD_ARRAY[$i]=$(echo "${EXPECTED_CMD_ARRAY[$i]}" | xargs)
   done
@@ -782,15 +612,35 @@ fi
 
 ALL_CMD_TYPES=('audit' 'lint' 'test')
 for CMD_TYPE in "${ALL_CMD_TYPES[@]}"; do
-  # Skip if this command type is expected somewhere in the workflow.
-  # Force comma separator when joining the expected array so the haystack
-  # matches the ",${CMD_TYPE}," needle regardless of ambient IFS.
   EXPECTED_JOINED=$(IFS=','; echo "${EXPECTED_CMD_ARRAY[*]}")
   if echo ",${EXPECTED_JOINED}," | grep -q ",${CMD_TYPE},"; then
     continue
   fi
+  echo ""
   echo "Reconciling orphaned ${CMD_TYPE} issues for ${COMP_ID}..."
-  close_resolved_issues "${CMD_TYPE}" "${COMP_ID}" ""  # empty current_kinds = close all
+
+  # Empty groups payload triggers row-3 close-on-zero-findings for every
+  # open issue for this command type. The reconciler is a single source of
+  # truth for "what does close-on-resolved mean" — we just hand it nothing.
+  orphan_input=$(mktemp)
+  jq -n --arg cmd "${CMD_TYPE}" '{command: $cmd, groups: {}}' > "${orphan_input}"
+
+  orphan_result=$(mktemp)
+  if homeboy issues reconcile "${COMP_ID}" \
+    --findings "${orphan_input}" \
+    --path "${RECONCILE_PATH}" \
+    --apply \
+    --suppress-from-config \
+    > "${orphan_result}" 2>&1; then
+    jq -r '.data.plan_lines[]' "${orphan_result}" 2>/dev/null | sed 's/^/  /' || true
+    closed_count=$(jq -r '[.data.result.executions[]? | select(.outcome.outcome == "closed" or .outcome.outcome == "closed_duplicate")] | length' "${orphan_result}" 2>/dev/null || echo 0)
+    TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + closed_count))
+  else
+    echo "::warning::Failed to reconcile orphaned ${CMD_TYPE} issues"
+    cat "${orphan_result}"
+  fi
+
+  rm -f "${orphan_input}" "${orphan_result}"
 done
 
 echo ""
