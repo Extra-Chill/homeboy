@@ -6,7 +6,7 @@
 //! commit reachability. End-to-end reporting is verified out-of-band via
 //! the live-verify fixture spec described in the PR body.
 
-use crate::stack::status::{commit_reachable, count_revs, git_ref_exists};
+use crate::stack::status::{commit_reachable, count_revs, git_ref_exists, patch_in_base};
 use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
@@ -132,4 +132,71 @@ fn commit_reachable_none_for_unknown_sha() {
 fn commit_reachable_none_for_empty_sha() {
     let (_dir, path) = init_repo();
     assert!(commit_reachable(&path, "", "main").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// patch_in_base — squash-merge detection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn patch_in_base_detects_squash_merged_content() {
+    let (dir, path) = init_repo();
+
+    // pr-feature: the PR's "head SHA" before merge.
+    run(&path, &["checkout", "-q", "-b", "pr-feature"]);
+    let pr_head_sha =
+        write_and_commit(&dir, &path, "feature.txt", "feature\n", "PR feature commit");
+
+    // Back to base branch (still "main"); apply the SAME tree as a
+    // different commit (this is what squash-merge does upstream).
+    run(&path, &["checkout", "-q", "main"]);
+    fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
+    run(&path, &["add", "."]);
+    run(&path, &["commit", "-q", "-m", "Squash-merge PR feature"]);
+
+    // pr_head_sha is on pr-feature but NOT main; main has its own commit
+    // with the same tree. patch_in_base should detect equivalence.
+    assert_eq!(
+        commit_reachable(&path, &pr_head_sha, "main"),
+        Some(false),
+        "head SHA must not be reachable from squash-merged main"
+    );
+    assert_eq!(
+        patch_in_base(&path, &pr_head_sha, "main"),
+        Some(true),
+        "patch-id should match the squash on main"
+    );
+}
+
+#[test]
+fn patch_in_base_returns_false_when_patch_absent() {
+    let (dir, path) = init_repo();
+    run(&path, &["checkout", "-q", "-b", "pr-feature"]);
+    let pr_head_sha =
+        write_and_commit(&dir, &path, "feature.txt", "feature\n", "PR feature commit");
+
+    // main has no equivalent commit.
+    run(&path, &["checkout", "-q", "main"]);
+
+    assert_eq!(
+        patch_in_base(&path, &pr_head_sha, "main"),
+        Some(false),
+        "patch should not be in base when no equivalent commit exists"
+    );
+}
+
+#[test]
+fn patch_in_base_unknown_when_sha_not_local() {
+    let (_dir, path) = init_repo();
+    // SHA shape is valid hex but no such object exists.
+    assert_eq!(
+        patch_in_base(&path, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "main"),
+        None,
+        "absent SHA must surface as None, not Some(false)"
+    );
+    assert_eq!(
+        patch_in_base(&path, "", "main"),
+        None,
+        "empty SHA must surface as None"
+    );
 }

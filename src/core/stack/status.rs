@@ -130,7 +130,7 @@ pub fn status(spec: &StackSpec) -> Result<StatusOutput> {
     let mut merged_count = 0usize;
 
     for pr in &spec.prs {
-        let row = build_status_row(&path, target_branch, target_exists, pr);
+        let row = build_status_row(&path, target_branch, &base_ref, target_exists, pr);
         if row.upstream_state.as_deref() == Some("MERGED") {
             merged_count += 1;
         }
@@ -153,6 +153,7 @@ pub fn status(spec: &StackSpec) -> Result<StatusOutput> {
 fn build_status_row(
     path: &str,
     target_branch: &str,
+    base_ref: &str,
     target_exists: bool,
     pr: &StackPrEntry,
 ) -> StatusPr {
@@ -163,7 +164,20 @@ fn build_status_row(
             } else {
                 match commit_reachable(path, &meta.head_sha, target_branch) {
                     Some(true) => LocalState::Applied,
-                    Some(false) => LocalState::Missing,
+                    Some(false) => {
+                        // Squash-merge fallback: head SHA isn't reachable
+                        // from target, but the patch may be in base if
+                        // upstream squash-merged the PR. Treat patch-in-base
+                        // as Applied so `candidate_for_drop` fires. This
+                        // deliberately uses the BASE ref (not target) — the
+                        // question is "did upstream absorb this content?",
+                        // not "is it on target?".
+                        if patch_in_base(path, &meta.head_sha, base_ref).unwrap_or(false) {
+                            LocalState::Applied
+                        } else {
+                            LocalState::Missing
+                        }
+                    }
                     None => LocalState::Unknown,
                 }
             };
@@ -324,6 +338,40 @@ pub(crate) fn commit_reachable(path: &str, sha: &str, branch: &str) -> Option<bo
         Some(1) => Some(false),
         _ => None,
     }
+}
+
+/// Whether the PR's content is in `base_ref` via `git cherry` patch-id
+/// equivalence — handles squash-merge where the PR's head SHA is replaced
+/// with a new commit on base whose tree matches the PR's content but whose
+/// SHA is unrelated. Without this fallback, `local_state` reports `missing`
+/// for squash-merged PRs that were already cherry-picked onto target, and
+/// `candidate_for_drop` never fires for the most common GitHub merge style.
+///
+/// Returns `Some(true)` when the PR's patch-id appears in base (the `-`
+/// prefix in `git cherry` output), `Some(false)` when it doesn't, and
+/// `None` when the probe couldn't run (commit not local, git error, etc.).
+pub(crate) fn patch_in_base(path: &str, head_sha: &str, base_ref: &str) -> Option<bool> {
+    if head_sha.is_empty() {
+        return None;
+    }
+    // Confirm the SHA is actually present locally before asking git to
+    // diff against it — otherwise `git cherry` errors with a confusing
+    // "bad revision" message.
+    let lookup = run_git(path, &["cat-file", "-e", head_sha]).ok()?;
+    if !lookup.status.success() {
+        return None;
+    }
+    // `git cherry <upstream> <head>` lists every commit reachable from
+    // <head> that is NOT in <upstream>, prefixing with `+` if its patch-id
+    // isn't present in <upstream>, and `-` if it is. We pass the PR's
+    // head SHA as <head>, so the output is one line; if that line starts
+    // with `- ` the patch is already in base.
+    let output = run_git(path, &["cherry", base_ref, head_sha]).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Some(stdout.lines().any(|l| l.starts_with("- ")))
 }
 
 fn run_git(path: &str, args: &[&str]) -> Result<std::process::Output> {
