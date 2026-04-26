@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.98.0] - 2026-04-26
+
+### Added
+- migrate discovery + reference fingerprinting onto CodebaseSnapshot (slice 2 of #1492)
+- --setting-json flag for typed settings overrides
+
+### Fixed
+- wait-ready loop in service.health http_check
+
 ## [0.97.3] - 2026-04-25
 
 ### Changed
