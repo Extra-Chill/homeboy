@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::engine::codebase_scan::{self, CodebaseSnapshot, ExtensionFilter, ScanConfig};
 
 /// Extension index/entry-point filenames that should be excluded from convention
 /// sibling detection. These files organize other files rather than being
@@ -38,23 +38,47 @@ pub(crate) fn extension_provided_file_extensions() -> Vec<String> {
         .collect()
 }
 
+/// `ScanConfig` matching `walk_source_files` — extension-provided file types only.
+///
+/// Extracted so [`walk_source_files`] and [`walk_source_files_snapshot`] stay
+/// in lockstep. Both consumers walk the same set of files; only the return
+/// shape (paths vs in-memory snapshot) differs.
+fn source_scan_config() -> ScanConfig {
+    let dynamic_extensions = extension_provided_file_extensions();
+    ScanConfig {
+        extensions: ExtensionFilter::Only(dynamic_extensions),
+        ..Default::default()
+    }
+}
+
 /// Walk source files under a root, skipping common non-source directories
 /// and extension index files.
 ///
 /// Delegates to `codebase_scan::walk_files` with extension-provided file types.
 pub(crate) fn walk_source_files(root: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
-    let dynamic_extensions = extension_provided_file_extensions();
-    let config = ScanConfig {
-        extensions: ExtensionFilter::Only(dynamic_extensions),
-        ..Default::default()
-    };
-
-    let mut files = codebase_scan::walk_files(root, &config);
+    let mut files = codebase_scan::walk_files(root, &source_scan_config());
 
     // Exclude extension index files from convention sibling detection
     files.retain(|f| !is_index_file(f));
 
     Ok(files)
+}
+
+/// Build a [`CodebaseSnapshot`] of source files under a root.
+///
+/// Same selection rules as [`walk_source_files`] — extension-provided file
+/// types, post-filter on extension index files — but reads each file once
+/// during the walk and returns owned `(path, content)` pairs ready for
+/// downstream consumers (`fingerprint_content`, `FingerprintIndex`, etc.).
+///
+/// This is the entry point audit consumers should use. Slice 2 of #1492
+/// migrates `discovery::auto_discover_groups` and `fingerprint_reference_paths`
+/// onto this helper; further slices migrate refactor's `ModuleSurfaceIndex`
+/// and the symbol graph.
+pub(crate) fn walk_source_files_snapshot(root: &Path) -> CodebaseSnapshot {
+    let mut snapshot = CodebaseSnapshot::build(root, &source_scan_config());
+    snapshot.retain(|path| !is_index_file(path));
+    snapshot
 }
 
 /// Check if a relative path points to a test file using heuristic patterns.

@@ -568,9 +568,12 @@ pub fn discover_casing(root: &Path, term: &str, config: &ScanConfig) -> Vec<(Str
 /// Files that fail to read as UTF-8 are silently dropped — same behavior as the
 /// pre-snapshot `walk_files` + `std::fs::read_to_string` callsites this replaces.
 ///
-/// This is slice 1 of #1492 — pure addition, no consumer migration. The new
-/// type is opt-in primitive scaffolding; existing audit/fixability/refactor
-/// pipelines still go through `walk_files` + `fingerprint_file` directly.
+/// First introduced as opt-in scaffolding in slice 1 of #1492. As of slice 2 the
+/// audit pipeline (`code_audit::discovery::auto_discover_groups` and
+/// `fingerprint_reference_paths`) consumes snapshots directly, replacing the
+/// per-detector `walk_source_files` + `fingerprint_file` loops. Subsequent
+/// slices migrate the remaining consumers (refactor's `ModuleSurfaceIndex`,
+/// the symbol graph) onto the same shared state.
 #[derive(Debug, Clone)]
 pub struct CodebaseSnapshot {
     root: PathBuf,
@@ -616,6 +619,20 @@ impl CodebaseSnapshot {
         self.files
             .iter()
             .map(|(path, content)| (path.as_path(), content.as_str()))
+    }
+
+    /// Drop snapshot entries whose path does not match `predicate`.
+    ///
+    /// Mirrors `Vec::retain` semantics over the snapshot's `(PathBuf, String)`
+    /// entries. Used by callers that need post-walk filtering on filename
+    /// rules the underlying [`ScanConfig`] does not express — for example
+    /// excluding extension index files (`mod.rs`, `lib.rs`, `index.ts`)
+    /// from convention sibling discovery without re-walking.
+    pub fn retain<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&Path) -> bool,
+    {
+        self.files.retain(|(path, _)| predicate(path));
     }
 }
 
@@ -977,6 +994,58 @@ mod tests {
         assert!(snapshot.is_empty());
         assert_eq!(snapshot.len(), 0);
         assert_eq!(snapshot.iter().count(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_retain_drops_predicate_misses() {
+        let dir = std::env::temp_dir().join("homeboy_snapshot_retain_drop_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        std::fs::write(dir.join("keep.rs"), "kept\n").unwrap();
+        std::fs::write(dir.join("drop.rs"), "dropped\n").unwrap();
+        std::fs::write(dir.join("mod.rs"), "indexish\n").unwrap();
+
+        let mut snapshot = CodebaseSnapshot::build(&dir, &ScanConfig::default());
+        let before = snapshot.len();
+
+        // Drop anything named `mod.rs` or `drop.rs` — same shape as
+        // walker::is_index_file post-filtering.
+        snapshot.retain(|path| {
+            !matches!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some("mod.rs") | Some("drop.rs")
+            )
+        });
+
+        assert_eq!(before, 3);
+        assert_eq!(snapshot.len(), 1);
+        let names: Vec<String> = snapshot
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["keep.rs"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_retain_keeps_all_when_predicate_always_true() {
+        let dir = std::env::temp_dir().join("homeboy_snapshot_retain_noop_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        std::fs::write(dir.join("a.rs"), "a\n").unwrap();
+        std::fs::write(dir.join("b.rs"), "b\n").unwrap();
+
+        let mut snapshot = CodebaseSnapshot::build(&dir, &ScanConfig::default());
+        let before = snapshot.len();
+        snapshot.retain(|_| true);
+
+        assert_eq!(snapshot.len(), before);
+        assert_eq!(snapshot.iter().count(), before);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

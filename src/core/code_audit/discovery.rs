@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::conventions::Language;
-use super::fingerprint::{fingerprint_file, FileFingerprint};
-use super::walker::{is_test_path, walk_source_files};
+use super::fingerprint::{fingerprint_content, FileFingerprint};
+use super::walker::{is_test_path, walk_source_files_snapshot};
 
 /// Result of auto-discovering file groups.
 pub struct DiscoveryResult {
@@ -21,6 +21,11 @@ pub struct DiscoveryResult {
 ///
 /// Returns groups of (group_name, glob_pattern, files) for directories that
 /// contain 2+ files of the same language, plus counts of walked vs fingerprinted files.
+///
+/// Walks `root` once via [`walk_source_files_snapshot`] and reads each file
+/// exactly once. Fingerprinting goes through [`fingerprint_content`] so the
+/// snapshot's already-loaded content is reused — no second `read_to_string`.
+/// Slice 2 of #1492.
 pub(crate) fn auto_discover_groups(root: &Path) -> DiscoveryResult {
     let mut groups: Vec<(String, String, Vec<FileFingerprint>)> = Vec::new();
 
@@ -33,20 +38,19 @@ pub(crate) fn auto_discover_groups(root: &Path) -> DiscoveryResult {
     let mut files_walked: usize = 0;
     let mut files_fingerprinted: usize = 0;
 
-    if let Ok(walker) = walk_source_files(root) {
-        for path in walker {
-            files_walked += 1;
-            if let Some(fp) = fingerprint_file(&path, root) {
-                files_fingerprinted += 1;
-                let parent = path
-                    .parent()
-                    .and_then(|p| p.strip_prefix(root).ok())
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let file_is_test = is_test_path(&fp.relative_path);
-                let key = (parent, fp.language.clone(), file_is_test);
-                dir_files.entry(key).or_default().push(fp);
-            }
+    let snapshot = walk_source_files_snapshot(root);
+    for (path, content) in snapshot.iter() {
+        files_walked += 1;
+        if let Some(fp) = fingerprint_content(path, root, content) {
+            files_fingerprinted += 1;
+            let parent = path
+                .parent()
+                .and_then(|p| p.strip_prefix(root).ok())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let file_is_test = is_test_path(&fp.relative_path);
+            let key = (parent, fp.language.clone(), file_is_test);
+            dir_files.entry(key).or_default().push(fp);
         }
     }
 

@@ -1009,12 +1009,13 @@ fn fingerprint_reference_paths(reference_paths: &[String]) -> Vec<fingerprint::F
             continue;
         }
 
-        if let Ok(walker_iter) = walker::walk_source_files(root) {
-            for path in walker_iter {
-                if let Some(fp) = fingerprint::fingerprint_file(&path, root) {
-                    ref_fps.push(fp);
-                    total_files += 1;
-                }
+        // Slice 2 of #1492: snapshot once, fingerprint from in-memory content
+        // instead of re-reading each file inside `fingerprint_file`.
+        let snapshot = walker::walk_source_files_snapshot(root);
+        for (path, content) in snapshot.iter() {
+            if let Some(fp) = fingerprint::fingerprint_content(path, root, content) {
+                ref_fps.push(fp);
+                total_files += 1;
             }
         }
     }
