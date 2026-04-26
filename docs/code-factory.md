@@ -40,7 +40,7 @@ cron trigger (every 15 minutes)
   → version bump + changelog generation
   → cross-platform binary builds
   → publish (GitHub Releases, crates.io, Homebrew)
-  → deploy to fleet (planned)
+  → optional deploy (`homeboy release --deploy`)
 ```
 
 ## The Autofix Loop

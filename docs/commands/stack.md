@@ -108,7 +108,7 @@ Rebuilds the target branch from the fresh base and removes PRs whose content is 
 homeboy stack inspect [component-id] [--base <ref>] [--repo <owner/name>] [--no-pr] [--path <path>]
 ```
 
-Spec-less inspection of the current branch as a stack of commits over a base ref. This replaces the older `homeboy git stack` surface.
+Spec-less inspection of the current branch as a stack of commits over a base ref.
 
 ## GitHub dependency
 

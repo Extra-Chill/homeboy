@@ -173,10 +173,9 @@ Above the stages, the renderer emits a scope banner
 (`**N** finding(s) across M stage(s)`).
 
 **Out of scope for this renderer.** Action-level signals — autofix banners,
-fallback-binary warnings, tooling-version footers, scope-mode resolution
+fallback-binary warnings, tooling-version footers, and scope-mode resolution
 notes — are not present in `ReviewCommandOutput` and are not rendered. The
-GitHub Action layer continues to emit those as separate sections (or via
-`--banner` flags in a future PR).
+GitHub Action layer emits those as separate sections.
 
 Example:
 

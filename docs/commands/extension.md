@@ -14,6 +14,14 @@ homeboy extension <COMMAND>
 homeboy extension list [-p|--project <project_id>]
 ```
 
+### `show`
+
+```sh
+homeboy extension show <extension_id>
+```
+
+Print detailed manifest, runtime, compatibility, and readiness information for one installed extension.
+
 ### `run`
 
 ```sh
@@ -31,8 +39,8 @@ homeboy extension run <extension_id> [-p|--project <project_id>] [-c|--component
 ### `set`
 
 ```sh
-homeboy extension set --json <JSON>
-homeboy extension set --json '<JSON>'
+homeboy extension set [extension_id] --json <JSON> [--replace <field>]...
+homeboy extension set [extension_id] --json '<JSON>'
 ```
 
 Updates a extension manifest by merging a JSON object into the extension config.
@@ -97,6 +105,14 @@ Executes an action defined in the extension manifest.
 - For `type: "api"` actions, `--project` is required.
 - `--data` accepts a JSON array string of selected result rows (passed through to template variables like `{{selected}}`).
 
+### `exec`
+
+```sh
+homeboy extension exec <extension_id> [-c|--component <component_id>] -- <command...>
+```
+
+Runs a tool from the extension's vendor/runtime directory. When `--component` is provided, the command runs with that component's path as the working directory.
+
 ## Settings
 
 Homeboy builds an **effective settings** map for each extension by merging settings across scopes, in order (later scopes override earlier ones):
@@ -117,7 +133,7 @@ Extensions can define additional environment variables via `runtime.env` in thei
 
 `homeboy extension run` and `extension.run` pipeline steps share the same execution core (template vars, settings JSON, and env handling). Both paths keep the same CLI output contract while sharing internal execution behavior.
 
-Extension settings validation currently happens during extension execution (and may also be checked by other commands). There is no dedicated validation-only command in the CLI.
+Extension settings validation happens during extension execution and may also be checked by other commands. Use the top-level `homeboy validate [component]` command for component parse/compile validation without running the full test suite.
 
 `homeboy extension run` requires the extension to be installed/linked under the Homeboy extensions directory (discovered by scanning `<config dir>/homeboy/extensions/<extension_id>/<extension_id>.json`). There is no separate "installedModules in global config" requirement.
 
@@ -155,12 +171,16 @@ Release steps can be backed by extension actions named `release.<step_type>`.
 Top-level variants (`data.command`):
 
 - `extension.list`: `{ project_id?, extensions: ExtensionEntry[] }`
+- `extension.show`: `{ extension: ExtensionDetail }`
 - `extension.run`: `{ extension_id, project_id? }`
 - `extension.setup`: `{ extension_id }`
 - `extension.install`: `{ extension_id, source, path, linked }`
 - `extension.update`: `{ extension_id, url, path }`
+- `extension.update_all`: `{ updated: UpdateEntry[], skipped: string[] }`
 - `extension.uninstall`: `{ extension_id, path, was_linked }`
 - `extension.action`: `{ extension_id, action_id, project_id?, response }`
+- `extension.exec`: `{ extension_id, exit_code?, stdout?, stderr? }`
+- `extension.set`: `{ extension_id, updated_fields }` or `{ batch }` for JSON batch updates
 
 Extension entry (`extensions[]`):
 

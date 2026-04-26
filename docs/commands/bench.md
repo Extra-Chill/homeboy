@@ -42,23 +42,18 @@ the other capabilities.
   A p95 scenario regresses when its current `p95_ms` exceeds
   `baseline.p95_ms * (1 + threshold/100)`.
 - `--setting <key=value>`: Override component settings (may be repeated).
+- `--setting-json <key=json>`: Override component settings with typed JSON
+  values for arrays, objects, numbers, booleans, or null.
 - `--path <PATH>`: Override the component's `local_path` for this run.
 - `--json-summary`: Include a compact machine-readable summary in the
   JSON output envelope (for CI wrappers).
-- `--shared-state <DIR>`: Mount a stable storage directory across
-  iterations (and across parallel runner instances when combined with
-  `--concurrency`). Exposed to the runner as
-  `$HOMEBOY_BENCH_SHARED_STATE`. Created if it doesn't exist; never
-  cleaned up by homeboy. See "Shared State and Concurrency" below.
-- `--concurrency <N>`: Number of parallel runner instances to spawn
-  (default `1`). When `> 1`, `--shared-state` is required. Each instance
-  receives a distinct `$HOMEBOY_BENCH_INSTANCE_ID` (`0..N-1`) plus
-  `$HOMEBOY_BENCH_CONCURRENCY=N`.
 - `--rig <RIG_ID[,RIG_ID...]>`: Pin the run to one or more rigs. Single
   rig pins the rig and stores its baseline under a rig-scoped key.
   Multiple rigs (comma-separated) run the same component + workload +
   iteration count against each rig in sequence and emit a cross-rig
   comparison envelope. See "Cross-rig comparison" below.
+- `--ignore-default-baseline`: Skip automatic single-rig expansion when
+  the rig declares `bench.default_baseline_rig`.
 
 Arguments after `--` are passed verbatim to the extension's bench runner
 script (e.g., `--filter=scenario_id` for selective execution).
@@ -81,18 +76,6 @@ homeboy bench my-component --ratchet
 # Select a single scenario via passthrough args
 homeboy bench my-component -- --filter=hot_path
 
-# Concurrent-writer stress test: 4 parallel instances against a shared
-# on-disk state directory. All four runners see the same SQLite +
-# markdown files, surfacing lock contention and write loss.
-homeboy bench my-component \
-    --shared-state /tmp/bench-shared \
-    --concurrency 4
-
-# Crash-recovery / durability test: single instance, persistent state.
-# Workload kills mid-stream on iteration N; iteration N+1 boots fresh
-# against the same on-disk state and audits integrity.
-homeboy bench my-component --shared-state /tmp/bench-durability
-
 # Pin to a single rig — preflight + rig-scoped baseline
 homeboy bench studio --rig studio-trunk
 
@@ -106,48 +89,6 @@ homeboy bench studio \
     --rig trunk,combined-fixes,combined-fixes-without-3120 \
     --iterations 20
 ```
-
-## Shared State and Concurrency
-
-Two workload classes need state shared across runtime instances or
-surviving a kill:
-
-- **Concurrent writers** — N parallel processes writing against the
-  same site, surfacing lock contention and write loss under load.
-- **Crash recovery** — Start a write stream, kill mid-stream, boot a
-  fresh runtime against the same on-disk state, audit integrity.
-
-Both fit cleanly under `--shared-state <DIR>`:
-
-| Mode | `--concurrency` | `--shared-state` | Behaviour |
-|---|---|---|---|
-| Cold-iteration (default) | `1` | unset | Per-iteration cold boot, no shared state. The original bench design. |
-| Persistent single | `1` | `<DIR>` | Single runtime, but state in `<DIR>` survives across iterations. Crash-recovery workloads. |
-| Concurrent | `> 1` | `<DIR>` (required) | N parallel runners, all pointed at `<DIR>`. Lock-contention workloads. |
-| Concurrent without state | `> 1` | unset | **Rejected** — N parallel cold-boots without shared state are N independent runs. The validation error points you at `--shared-state`. |
-
-Per-instance scenarios are merged with `:i<n>` suffixed IDs in the
-aggregated output (`shared_counter:i0`, `shared_counter:i1`, …) so each
-instance's measurements stay distinguishable. The baseline ratchet works
-unchanged — a regression in instance 2 surfaces as a regression on
-`<id>:i2`, not as silent averaging across instances.
-
-### Runner contract additions
-
-When shared-state and concurrency flags are set, three additional env
-vars flow into the runner:
-
-- `HOMEBOY_BENCH_SHARED_STATE` — absolute path to the shared directory
-  (or empty string when not set). Workloads that opt into shared state
-  read or write files under this path.
-- `HOMEBOY_BENCH_INSTANCE_ID` — `0..N-1` for parallel runs, `0` for
-  single-instance.
-- `HOMEBOY_BENCH_CONCURRENCY` — `N` for parallel runs, `1` for
-  single-instance.
-
-Per-instance results are written to `bench-results-i<n>.json` under the
-run dir; homeboy core merges them into the unified `BenchResults`
-envelope before applying baseline comparison.
 
 ## Cross-rig comparison
 
@@ -181,10 +122,34 @@ reference) / reference * 100`.
   bench --rig <id> --baseline` once per rig to ratchet individually.
 - **No statistical-significance gating.** Two rigs with overlapping
   `p95_ms` distributions still produce a numeric delta. Treat single-digit
-  percent moves with skepticism. Confidence intervals are a v2 question.
-- **No matrix × rig composition.** `--matrix` and multi-`--rig` together
-  is not yet supported; pick one axis per invocation. Single-rig +
-  matrix continues to work.
+  percent moves with skepticism.
+
+### Rig bench defaults
+
+Rig specs can reduce repeated CLI arguments for common main-vs-branch
+bench workflows:
+
+```jsonc
+{
+  "bench": {
+    "default_component": "studio",
+    "default_baseline_rig": "studio-trunk"
+  },
+  "bench_workloads": {
+    "wordpress": ["~/Developer/homeboy-rigs/bench/studio-admin.php"]
+  }
+}
+```
+
+- `bench.default_component` lets `homeboy bench --rig <id>` omit the
+  positional component. With multiple rigs, every rig must agree on the
+  default unless the component is provided explicitly.
+- `bench.default_baseline_rig` upgrades `homeboy bench --rig <candidate>`
+  into `homeboy bench --rig <baseline>,<candidate>` unless the invocation
+  already lists multiple rigs, writes a baseline (`--baseline` / `--ratchet`),
+  or passes `--ignore-default-baseline`.
+- `bench_workloads` supplies rig-owned workload files keyed by extension ID.
+  Paths support `~`, `${env.NAME}`, and `${components.<id>.path}` expansion.
 
 ### Output shape (cross-rig)
 
