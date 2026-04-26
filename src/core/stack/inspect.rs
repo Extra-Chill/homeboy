@@ -4,34 +4,26 @@
 //!
 //! "Stack" here is the narrow read of the term used in the project's
 //! combined-fixes workflow: a single branch that carries N upstream PRs as
-//! cherry-picks on top of a base ref. It is NOT the broader Graphite-style
-//! "stack of my own PRs" abstraction — see the discussion in
-//! `MEMORY.md > Homeboy stack primitive` for why that whole abstraction is
-//! intentionally not built.
+//! cherry-picks on top of a base ref.
 //!
-//! `homeboy git stack` is the introspection layer on top of the rewriting
-//! verbs (`rebase` / `cherry-pick` / `push --force-with-lease`): it answers
-//! the question "what am I currently carrying?" so the user knows whether
-//! to drop merged PRs before the next rebase ritual.
+//! `homeboy stack inspect` is the spec-less introspection layer: "what am I
+//! currently carrying on this checkout?". When a stack spec exists for the
+//! same combined-fixes workflow, prefer `homeboy stack status <id>` — it
+//! also walks the commits but cross-references against the declared PR list.
 //!
-//! Performance: PR lookup uses one `gh search prs` invocation per commit.
-//! Stacks are typically <20 commits so this is fine; if it ever needs to
-//! scale we can switch to a single `gh api` GraphQL query.
+//! Performance: PR lookup uses one `gh pr list --search` invocation per
+//! commit. Stacks are typically <20 commits so this is fine; scaling past
+//! that would warrant a single `gh api` GraphQL query.
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
 use crate::error::{Error, Result};
+use crate::git::resolve_target_pub as resolve_target;
 
-use super::resolve_target;
-
-/// Per-commit detail row for the stack output. Distinct from
-/// [`super::commits::CommitInfo`] because that struct is narrower
-/// (hash + subject + category for changelog generation) — stack output
-/// needs author + date for human-readable rendering and a short SHA so
-/// downstream tooling doesn't have to recompute it.
+/// Per-commit detail row for the inspect output.
 #[derive(Debug, Clone, Serialize)]
-pub struct StackCommitDetails {
+pub struct InspectCommitDetails {
     pub sha: String,
     pub short_sha: String,
     pub subject: String,
@@ -39,9 +31,9 @@ pub struct StackCommitDetails {
     pub date: String,
 }
 
-/// Output of [`stack`].
+/// Output of [`inspect`].
 #[derive(Debug, Clone, Serialize)]
-pub struct StackOutput {
+pub struct InspectOutput {
     pub component_id: String,
     pub path: String,
     /// Branch name we inspected (current `HEAD`).
@@ -49,41 +41,36 @@ pub struct StackOutput {
     /// Upstream / base ref we compared against.
     pub base: String,
     /// Whether the base ref was auto-detected from `@{upstream}` (true) or
-    /// passed explicitly via `--base` (false). Useful for human output to
-    /// say "vs upstream/trunk" without having to repeat the user's flag.
+    /// passed explicitly via `--base` (false).
     pub base_auto_detected: bool,
     /// Commits in `base..HEAD`, ordered oldest-first (rebase order).
-    pub commits: Vec<StackCommit>,
-    /// Count of commits whose detected PR is `MERGED`. Decoration field —
-    /// callers that want a stronger "drop these" signal can read it
-    /// directly without walking `commits`.
+    pub commits: Vec<InspectCommit>,
+    /// Count of commits whose detected PR is `MERGED`.
     pub merged_count: usize,
-    /// `success` is `true` when stack inspection completed end-to-end.
-    /// PR lookups failing for individual commits don't fail the whole
-    /// command — they just leave the `pr` field unset on those commits.
+    /// `success` is `true` when inspection completed end-to-end. PR lookups
+    /// failing for individual commits don't fail the whole command — they
+    /// just leave the `pr` field unset on those commits.
     pub success: bool,
 }
 
-/// One commit in the stack, with optional PR decoration.
+/// One commit in the inspected stack, with optional PR decoration.
 #[derive(Debug, Clone, Serialize)]
-pub struct StackCommit {
+pub struct InspectCommit {
     #[serde(flatten)]
-    pub commit: StackCommitDetails,
-    /// Associated GitHub PR, if exactly one was found via `gh search prs`.
-    /// Multiple matches are recorded in `pr_lookup_note` so users know
-    /// the decoration is ambiguous rather than missing.
+    pub commit: InspectCommitDetails,
+    /// Associated GitHub PR, if exactly one was found via `gh pr list --search`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pr: Option<StackPr>,
+    pub pr: Option<InspectPr>,
     /// Diagnostic when PR lookup didn't yield exactly one match. Distinct
-    /// from "no PR" (the search itself succeeded with zero hits) so
-    /// tooling can tell "we couldn't ask" from "the answer is no".
+    /// from "no PR" (the search itself succeeded with zero hits) so tooling
+    /// can tell "we couldn't ask" from "the answer is no".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_lookup_note: Option<String>,
 }
 
-/// PR decoration on a stack commit.
+/// PR decoration on an inspected commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StackPr {
+pub struct InspectPr {
     pub number: u64,
     /// `OPEN` / `CLOSED` / `MERGED`, as `gh` reports them.
     pub state: String,
@@ -91,33 +78,29 @@ pub struct StackPr {
     pub url: String,
 }
 
-/// Options for [`stack`].
+/// Options for [`inspect`].
 #[derive(Debug, Clone, Default)]
-pub struct StackOptions {
+pub struct InspectOptions {
     /// Override the upstream ref. `None` uses the current branch's
     /// `@{upstream}`. Passing this skips the auto-detection.
     pub base: Option<String>,
-    /// Skip the GitHub PR lookup pass entirely. Useful for offline use,
-    /// for repos without `gh` configured, or when the caller just wants
-    /// the commit list.
+    /// Skip the GitHub PR lookup pass entirely.
     pub no_pr: bool,
     /// Explicit GitHub repo (`owner/name`) to scope PR lookups to.
-    /// `None` lets `gh` infer from the local checkout's remote, which
-    /// is what users normally want.
     pub repo: Option<String>,
 }
 
 /// Inspect the current branch as a stack of commits over an upstream ref.
-pub fn stack(component_id: Option<&str>, options: StackOptions) -> Result<StackOutput> {
-    stack_at(component_id, options, None)
+pub fn inspect(component_id: Option<&str>, options: InspectOptions) -> Result<InspectOutput> {
+    inspect_at(component_id, options, None)
 }
 
-/// Like [`stack`] but with an explicit path override.
-pub fn stack_at(
+/// Like [`inspect`] but with an explicit path override.
+pub fn inspect_at(
     component_id: Option<&str>,
-    options: StackOptions,
+    options: InspectOptions,
     path_override: Option<&str>,
-) -> Result<StackOutput> {
+) -> Result<InspectOutput> {
     let (id, path) = resolve_target(component_id, path_override)?;
 
     let branch = current_branch(&path)?;
@@ -125,11 +108,11 @@ pub fn stack_at(
 
     let commits = list_commits_over_base(&path, &base)?;
 
-    let mut decorated: Vec<StackCommit> = Vec::with_capacity(commits.len());
+    let mut decorated: Vec<InspectCommit> = Vec::with_capacity(commits.len());
     let mut merged_count = 0usize;
 
     for commit in commits {
-        let mut entry = StackCommit {
+        let mut entry = InspectCommit {
             commit,
             pr: None,
             pr_lookup_note: None,
@@ -157,7 +140,7 @@ pub fn stack_at(
         decorated.push(entry);
     }
 
-    Ok(StackOutput {
+    Ok(InspectOutput {
         component_id: id,
         path,
         branch,
@@ -189,7 +172,7 @@ fn resolve_base(path: &str, override_base: Option<&str>) -> Result<(String, bool
             "Current branch has no tracked upstream and --base was not provided",
             None,
             Some(vec![
-                "Pass an explicit base: homeboy git stack --base <ref>".to_string(),
+                "Pass an explicit base: homeboy stack inspect --base <ref>".to_string(),
                 "Or set tracking: git branch --set-upstream-to=<remote>/<branch>".to_string(),
             ]),
         ));
@@ -202,7 +185,7 @@ fn resolve_base(path: &str, override_base: Option<&str>) -> Result<(String, bool
             "Resolved upstream was empty",
             None,
             Some(vec![
-                "Pass an explicit base: homeboy git stack --base <ref>".to_string(),
+                "Pass an explicit base: homeboy stack inspect --base <ref>".to_string(),
             ]),
         ));
     }
@@ -229,7 +212,7 @@ fn current_branch(path: &str) -> Result<String> {
 }
 
 /// List commits in `base..HEAD`, oldest-first.
-fn list_commits_over_base(path: &str, base: &str) -> Result<Vec<StackCommitDetails>> {
+fn list_commits_over_base(path: &str, base: &str) -> Result<Vec<InspectCommitDetails>> {
     let range = format!("{}..HEAD", base);
     // Reverse so output is oldest-first (rebase order). Tab-separated
     // columns: full SHA, subject, author name, ISO date.
@@ -284,7 +267,7 @@ fn list_commits_over_base(path: &str, base: &str) -> Result<Vec<StackCommitDetai
         } else {
             sha.clone()
         };
-        commits.push(StackCommitDetails {
+        commits.push(InspectCommitDetails {
             sha,
             short_sha,
             subject,
@@ -298,19 +281,17 @@ fn list_commits_over_base(path: &str, base: &str) -> Result<Vec<StackCommitDetai
 
 /// Result of looking up a PR for a single commit SHA via `gh`.
 enum PrLookup {
-    Single(StackPr),
+    Single(InspectPr),
     None,
     Multiple(usize),
 }
 
 /// Find the PR (if any) associated with a commit SHA via
-/// `gh pr list --search <sha>`. GitHub's PR search indexes commit SHAs
-/// in the search field, so a free-text search for the SHA reliably
-/// returns the PR(s) containing that commit.
+/// `gh pr list --search <sha>`.
 ///
-/// Returns `Ok(PrLookup::None)` when no PRs match, `Ok(PrLookup::Multiple(n))`
-/// when more than one matches (decoration is intentionally skipped to avoid
-/// guessing), and `Err` when `gh` is unreachable or returns invalid JSON.
+/// GitHub's PR search indexes commit SHAs in the search field, so a
+/// free-text search for the SHA reliably returns the PR(s) containing
+/// that commit.
 fn find_pr_for_commit(path: &str, sha: &str, repo: Option<&str>) -> Result<PrLookup> {
     let mut args: Vec<String> = vec![
         "pr".into(),
@@ -351,7 +332,7 @@ fn find_pr_for_commit(path: &str, sha: &str, repo: Option<&str>) -> Result<PrLoo
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Vec<StackPr> = serde_json::from_str(&stdout).map_err(|e| {
+    let parsed: Vec<InspectPr> = serde_json::from_str(&stdout).map_err(|e| {
         Error::validation_invalid_json(
             e,
             Some(format!("parse `gh pr list --search {}`", sha)),
@@ -367,159 +348,5 @@ fn find_pr_for_commit(path: &str, sha: &str, repo: Option<&str>) -> Result<PrLoo
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    /// Create a fresh git repo with a single committed file. Mirrors the
-    /// helper in operations.rs::tests so the stack tests stay
-    /// self-contained.
-    fn init_repo() -> (TempDir, String) {
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().to_string_lossy().to_string();
-        Command::new("git")
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&path)
-            .output()
-            .expect("git init");
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        fs::write(dir.path().join("README.md"), "initial\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-q", "-m", "initial"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        (dir, path)
-    }
-
-    fn add_commit(dir: &TempDir, path: &str, file: &str, contents: &str, message: &str) {
-        fs::write(dir.path().join(file), contents).unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-q", "-m", message])
-            .current_dir(path)
-            .output()
-            .unwrap();
-    }
-
-    #[test]
-    fn empty_stack_when_branch_is_at_base() {
-        let (_dir, path) = init_repo();
-
-        let out = stack_at(
-            None,
-            StackOptions {
-                base: Some("HEAD".to_string()),
-                no_pr: true,
-                ..Default::default()
-            },
-            Some(&path),
-        )
-        .expect("stack_at");
-
-        assert_eq!(out.commits.len(), 0);
-        assert_eq!(out.base, "HEAD");
-        assert!(
-            !out.base_auto_detected,
-            "explicit --base should not auto-detect"
-        );
-        assert!(out.success);
-    }
-
-    #[test]
-    fn lists_commits_oldest_first_over_explicit_base() {
-        let (dir, path) = init_repo();
-        // Mark base before adding new commits.
-        Command::new("git")
-            .args(["tag", "base"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-
-        add_commit(&dir, &path, "a.txt", "a\n", "first new");
-        add_commit(&dir, &path, "b.txt", "b\n", "second new");
-        add_commit(&dir, &path, "c.txt", "c\n", "third new");
-
-        let out = stack_at(
-            None,
-            StackOptions {
-                base: Some("base".to_string()),
-                no_pr: true,
-                ..Default::default()
-            },
-            Some(&path),
-        )
-        .expect("stack_at");
-
-        assert_eq!(out.commits.len(), 3);
-        // Oldest-first ordering — the first new commit should be at index 0.
-        assert_eq!(out.commits[0].commit.subject, "first new");
-        assert_eq!(out.commits[1].commit.subject, "second new");
-        assert_eq!(out.commits[2].commit.subject, "third new");
-        // Each commit has a populated 7-char short_sha.
-        for c in &out.commits {
-            assert_eq!(c.commit.short_sha.len(), 7);
-            assert!(c.pr.is_none());
-            assert!(c.pr_lookup_note.is_none());
-        }
-        assert_eq!(out.merged_count, 0);
-    }
-
-    #[test]
-    fn errors_helpfully_when_no_upstream_and_no_base_arg() {
-        // Fresh repo with no remote / no @{upstream} configured.
-        let (_dir, path) = init_repo();
-
-        let err = stack_at(None, StackOptions::default(), Some(&path))
-            .expect_err("stack_at should Err without upstream or --base");
-
-        let msg = err.to_string();
-        assert!(
-            msg.contains("upstream") || msg.contains("--base"),
-            "expected helpful error, got: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn errors_when_base_ref_does_not_exist() {
-        let (_dir, path) = init_repo();
-
-        let err = stack_at(
-            None,
-            StackOptions {
-                base: Some("does-not-exist".to_string()),
-                no_pr: true,
-                ..Default::default()
-            },
-            Some(&path),
-        )
-        .expect_err("stack_at should Err on bad base ref");
-
-        let msg = err.to_string();
-        assert!(
-            msg.contains("does-not-exist") || msg.contains("not found"),
-            "expected ref-not-found error, got: {}",
-            msg
-        );
-    }
-}
+#[path = "../../../tests/core/stack/inspect_test.rs"]
+mod inspect_test;

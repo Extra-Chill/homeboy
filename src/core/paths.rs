@@ -96,6 +96,16 @@ pub fn rig_logs_dir(id: &str) -> Result<PathBuf> {
     Ok(rig_state_dir(id)?.join("logs"))
 }
 
+/// Stacks directory (~/.config/homeboy/stacks/)
+pub fn stacks() -> Result<PathBuf> {
+    Ok(homeboy()?.join("stacks"))
+}
+
+/// Stack config file path (~/.config/homeboy/stacks/{id}.json)
+pub fn stack_config(id: &str) -> Result<PathBuf> {
+    Ok(stacks()?.join(format!("{}.json", id)))
+}
+
 /// Extension directory path
 pub fn extension(id: &str) -> Result<PathBuf> {
     Ok(extensions()?.join(id))

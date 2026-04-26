@@ -3,14 +3,12 @@ mod commits;
 mod github;
 mod operations;
 mod primitives;
-mod stack;
 
 pub use changes::*;
 pub use commits::*;
 pub use github::*;
 pub use operations::*;
 pub use primitives::*;
-pub use stack::*;
 
 use std::process::Command;
 
@@ -96,6 +94,15 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::R
 ///    `homeboy git status` (and friends) work without arguments when
 ///    run from inside a checkout.
 pub(super) fn resolve_target(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+) -> crate::error::Result<(String, String)> {
+    resolve_target_pub(component_id, path_override)
+}
+
+/// Public alias of [`resolve_target`] for sibling modules (e.g. `core::stack`)
+/// that need the same git-target resolution but live outside `core::git`.
+pub fn resolve_target_pub(
     component_id: Option<&str>,
     path_override: Option<&str>,
 ) -> crate::error::Result<(String, String)> {

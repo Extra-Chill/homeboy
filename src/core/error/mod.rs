@@ -32,6 +32,8 @@ pub enum ErrorCode {
     RigNotFound,
     RigPipelineFailed,
     RigServiceFailed,
+    StackNotFound,
+    StackApplyConflict,
 
     SshServerInvalid,
     SshIdentityFileNotFound,
@@ -76,6 +78,8 @@ impl ErrorCode {
             ErrorCode::RigNotFound => "rig.not_found",
             ErrorCode::RigPipelineFailed => "rig.pipeline_failed",
             ErrorCode::RigServiceFailed => "rig.service_failed",
+            ErrorCode::StackNotFound => "stack.not_found",
+            ErrorCode::StackApplyConflict => "stack.apply_conflict",
 
             ErrorCode::SshServerInvalid => "ssh.server_invalid",
             ErrorCode::SshIdentityFileNotFound => "ssh.identity_file_not_found",
@@ -401,6 +405,37 @@ impl Error {
 
     pub fn rig_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
         Self::entity_not_found(ErrorCode::RigNotFound, "Rig", id, suggestions)
+    }
+
+    pub fn stack_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
+        Self::entity_not_found(ErrorCode::StackNotFound, "Stack", id, suggestions)
+    }
+
+    /// Cherry-pick conflict during `stack apply`. Carries the offending PR
+    /// number so callers can surface a "resume from here" message without
+    /// re-walking the spec.
+    pub fn stack_apply_conflict(
+        stack_id: impl Into<String>,
+        pr_number: u64,
+        repo: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let stack_id = stack_id.into();
+        let repo = repo.into();
+        let message = message.into();
+        Self::new(
+            ErrorCode::StackApplyConflict,
+            format!(
+                "Cherry-pick conflict in stack '{}' at PR {}#{}: {}",
+                stack_id, repo, pr_number, message
+            ),
+            serde_json::json!({
+                "stack_id": stack_id,
+                "pr_number": pr_number,
+                "repo": repo,
+                "message": message,
+            }),
+        )
     }
 
     pub fn rig_pipeline_failed(

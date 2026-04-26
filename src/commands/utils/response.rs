@@ -131,9 +131,12 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::ExtensionNotFound
         | ErrorCode::DocsTopicNotFound
         | ErrorCode::RigNotFound
+        | ErrorCode::StackNotFound
         | ErrorCode::ProjectNoActive => 4,
 
-        ErrorCode::RigPipelineFailed | ErrorCode::RigServiceFailed => 20,
+        ErrorCode::RigPipelineFailed
+        | ErrorCode::RigServiceFailed
+        | ErrorCode::StackApplyConflict => 20,
 
         ErrorCode::SshServerInvalid
         | ErrorCode::SshIdentityFileNotFound
