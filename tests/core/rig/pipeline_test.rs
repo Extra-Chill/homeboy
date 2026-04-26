@@ -76,6 +76,7 @@ mod patch {
             "c".to_string(),
             ComponentSpec {
                 path: component_path.to_string(),
+                remote_url: None,
                 stack: None,
                 branch: None,
             },

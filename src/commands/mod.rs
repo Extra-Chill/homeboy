@@ -306,6 +306,7 @@ pub mod stack;
 pub mod status;
 pub mod test;
 pub mod transfer;
+pub mod triage;
 pub mod undo;
 pub mod upgrade;
 pub mod utils;
@@ -357,6 +358,7 @@ pub(crate) fn run_json(
         crate::Commands::Fleet(args) => dispatch!(args, global, fleet),
         crate::Commands::Logs(args) => dispatch!(args, global, logs),
         crate::Commands::Transfer(args) => dispatch!(args, global, transfer),
+        crate::Commands::Triage(args) => dispatch!(args, global, triage),
         crate::Commands::Deploy(args) => dispatch!(args, global, deploy),
         crate::Commands::Component(args) => dispatch!(args, global, component),
         crate::Commands::Config(args) => dispatch!(args, global, config),

@@ -98,6 +98,11 @@ pub struct ComponentSpec {
     /// `${env.VAR}` expansion at use time.
     pub path: String,
 
+    /// Optional source repository URL. When omitted, `homeboy triage rig`
+    /// falls back to `git -C <path> remote get-url origin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
+
     /// Stack ID this component should track (Phase 2 — not enforced in MVP,
     /// but the field is reserved so existing specs don't break on upgrade).
     #[serde(default, skip_serializing_if = "Option::is_none")]

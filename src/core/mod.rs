@@ -20,6 +20,7 @@ pub mod rig;
 pub mod server;
 pub mod stack;
 pub mod top_n;
+pub mod triage;
 pub mod upgrade;
 
 // Internal extensions - not part of public API

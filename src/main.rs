@@ -22,7 +22,7 @@ use commands::utils::{args, entity_suggest, response as output, tty};
 use commands::{
     api, audit, auth, bench, build, changelog, changes, cli, component, config, db, deploy,
     extension, file, fleet, git, init, issues, lint, logs, project, refactor, release, review, rig,
-    server, ssh, stack, status, test, transfer, undo, upgrade, validate, version,
+    server, ssh, stack, status, test, transfer, triage, undo, upgrade, validate, version,
 };
 use homeboy::extension::load_all_extensions;
 
@@ -69,6 +69,8 @@ enum Commands {
     Logs(logs::LogsArgs),
     /// Transfer files between servers
     Transfer(transfer::TransferArgs),
+    /// Read-only attention report for components, projects, fleets, and rigs
+    Triage(triage::TriageArgs),
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
     /// Manage standalone component configurations
