@@ -294,6 +294,33 @@ try {
 // ---------------------------------------------------------------------------
 pg_stage_begin('emit_results');
 try {
+    // Surface bootstrap stage timings as a synthetic `__bootstrap`
+    // scenario (homeboy-extensions#255). Boot is once-per-run (the
+    // wp-playground-cli process boots once and runs every workload
+    // inside the booted process), so iterations=1 reflects reality —
+    // distribution math (p50/p95/p99) doesn't apply to N=1 measurements.
+    //
+    // Cross-run distribution comes from running the bench harness
+    // multiple times (e.g. CI on different commits), not from
+    // iterations within a single run. Reusing BenchScenario keeps
+    // baseline / regression-detection / cross-rig diff machinery
+    // working with no schema change. The `__` prefix on the scenario
+    // id makes the synthetic nature obvious in reports.
+    $bootstrap_durations = pg_stage_durations_ms();
+    $bootstrap_metrics = [];
+    foreach (['boot', 'install', 'load_deps', 'load_component'] as $stage) {
+        if (isset($bootstrap_durations[$stage])) {
+            $bootstrap_metrics["{$stage}_ms"] = $bootstrap_durations[$stage];
+        }
+    }
+    if (!empty($bootstrap_metrics)) {
+        array_unshift($scenarios, [
+            'id' => '__bootstrap',
+            'iterations' => 1,
+            'metrics' => $bootstrap_metrics,
+        ]);
+    }
+
     $results_path = "$plugin_path/.pg-bench-results{{RESULT_SUFFIX}}.json";
     $envelope = [
         'component_id' => '{{COMPONENT_ID}}',

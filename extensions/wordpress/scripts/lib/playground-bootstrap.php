@@ -65,20 +65,65 @@ function pg_log($msg) {
 }
 
 /**
+ * Module-scope stage timing storage.
+ *
+ * Stores `hrtime(true)` start times in `_starts_ns` keyed by stage name,
+ * and successful-stage durations in `_durations_ms` keyed by stage name
+ * (float milliseconds). Stages that begin but never `ok` (i.e. failed)
+ * are absent from `_durations_ms` — only successful stages have
+ * meaningful timings.
+ *
+ * Exposed via pg_stage_durations_ms() to the bench runner, which
+ * surfaces them as a synthetic `__bootstrap` scenario in the
+ * BenchResults envelope (homeboy-extensions#255).
+ */
+function &pg_stage_timings_ref(): array {
+    static $timings = ['_starts_ns' => [], '_durations_ms' => []];
+    return $timings;
+}
+
+/**
  * Mark the start of a bootstrap stage.
  *
  * Updates the global $current_stage so the shutdown handler can attribute
  * fatal errors to the right stage even when an exit happens mid-stage.
+ * Also records `hrtime(true)` for later duration calculation.
  */
 function pg_stage_begin($stage) {
     global $current_stage;
     $current_stage = $stage;
+    $timings = &pg_stage_timings_ref();
+    $timings['_starts_ns'][$stage] = hrtime(true);
     pg_log("STAGE_BEGIN:$stage");
 }
 
-/** Mark a stage as completed cleanly. */
+/**
+ * Mark a stage as completed cleanly.
+ *
+ * Computes and stores the elapsed duration in milliseconds, but only if
+ * a matching pg_stage_begin() was recorded — defensive against any
+ * caller emitting a STAGE_OK without a paired BEGIN.
+ */
 function pg_stage_ok($stage) {
+    $timings = &pg_stage_timings_ref();
+    if (isset($timings['_starts_ns'][$stage])) {
+        $elapsed_ns = hrtime(true) - $timings['_starts_ns'][$stage];
+        $timings['_durations_ms'][$stage] = $elapsed_ns / 1_000_000;
+    }
     pg_log("STAGE_OK:$stage");
+}
+
+/**
+ * Return successful-stage durations in milliseconds.
+ *
+ * Result shape: ['boot' => 1234.56, 'install' => 234.5, ...].
+ * Only stages that completed via pg_stage_ok() are included; stages
+ * that failed (pg_stage_fail / fatal shutdown) are absent because
+ * their timings would be misleading.
+ */
+function pg_stage_durations_ms(): array {
+    $timings = &pg_stage_timings_ref();
+    return $timings['_durations_ms'];
 }
 
 /**

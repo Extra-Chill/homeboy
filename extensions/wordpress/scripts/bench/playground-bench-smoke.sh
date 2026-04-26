@@ -67,7 +67,9 @@ echo "--- Results envelope ---"
 cat "$RESULTS_TMPFILE"
 echo ""
 
-# Asserts: the envelope round-trips both fixtures with all six metric keys.
+# Asserts: the envelope round-trips both fixtures with all six metric keys,
+# plus the synthetic `__bootstrap` scenario emitted by the bench runner
+# (homeboy-extensions#255).
 # Plain bash so the smoke has no extra deps.
 require_field() {
     local field="$1"
@@ -80,16 +82,18 @@ require_field() {
 require_field "component_id"
 require_field "iterations"
 require_field "scenarios"
+require_field "__bootstrap"
 require_field "noop"
 require_field "array-fill-1k"
 for metric in mean_ms p50_ms p95_ms p99_ms min_ms max_ms; do
     require_field "$metric"
 done
 
-# Both fixture workloads should be present — count `"id":` occurrences.
+# Three scenarios expected: __bootstrap + the two fixture workloads.
+# Count `"id":` occurrences.
 scenario_count=$(grep -c '"id":' "$RESULTS_TMPFILE" || true)
-if [ "$scenario_count" -ne 2 ]; then
-    echo "ERROR: expected 2 scenarios, got $scenario_count" >&2
+if [ "$scenario_count" -ne 3 ]; then
+    echo "ERROR: expected 3 scenarios (__bootstrap + 2 fixtures), got $scenario_count" >&2
     exit 1
 fi
 
