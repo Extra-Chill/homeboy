@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.11.0] - 2026-04-26
+
+### Added
+- feat(rust-bench): add bench capability to dispatch cargo workloads
+
 ## [1.10.0] - 2026-04-25
 
 ### Added
