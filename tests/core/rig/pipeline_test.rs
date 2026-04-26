@@ -280,6 +280,7 @@ mod shared_path {
             shared_paths: vec![shared],
             pipeline,
             bench: None,
+            bench_workloads: Default::default(),
         }
     }
 

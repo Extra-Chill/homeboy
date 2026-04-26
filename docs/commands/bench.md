@@ -252,16 +252,20 @@ On every run without `--baseline` or `--ignore-baseline`:
 2. If the runner declares `metric_policies`, only those metrics are
    compared. Each policy declares whether lower or higher values are
    better and optional percent/absolute tolerances.
-3. If the runner omits `metric_policies`, Homeboy keeps the historical
+3. If a policy declares `variance_aware: true`, Homeboy compares the
+   metric's raw sample distributions instead of only the summary value.
+   The summary value still appears under `metrics.<name>` for reports;
+   the per-iteration samples live under `metrics.distributions.<name>`.
+4. If the runner omits `metric_policies`, Homeboy keeps the historical
    default: compare `p95_ms` as lower-is-better with the CLI threshold.
-4. A scenario improves when any compared metric moves in the better
+5. A scenario improves when any compared metric moves in the better
    direction.
-5. Scenarios present in one run but not the other are flagged as
+6. Scenarios present in one run but not the other are flagged as
    `new_scenario_ids` / `removed_scenario_ids`. Neither state triggers
    a regression by itself — they're informational.
-6. If any scenario regressed, the command exits `1` regardless of the
+7. If any scenario regressed, the command exits `1` regardless of the
    runner's own exit code.
-7. If any scenario improved and `--ratchet` is set, the baseline is
+8. If any scenario improved and `--ratchet` is set, the baseline is
    overwritten with the current snapshot.
 
 p95 remains the default for legacy latency benchmarks because it is less
@@ -292,6 +296,13 @@ The extension's bench script must:
     "requests_per_second": {
       "direction": "higher_is_better",
       "regression_threshold_percent": 5.0
+    },
+    "agent_loop_ms": {
+      "direction": "lower_is_better",
+      "regression_threshold_percent": 10.0,
+      "variance_aware": true,
+      "min_iterations_for_variance": 20,
+      "regression_test": "mann_whitney_u"
     }
   },
   "scenarios": [
@@ -308,7 +319,11 @@ The extension's bench script must:
         "max_ms": 172.0,
         "error_rate": 0.0,
         "requests_per_second": 180.5,
-        "status_500_count": 0
+        "status_500_count": 0,
+        "agent_loop_ms": 1200.0,
+        "distributions": {
+          "agent_loop_ms": [1100.0, 1200.0, 1300.0]
+        }
       },
       "memory": { "peak_bytes": 41943040 }
     }
@@ -328,6 +343,15 @@ The extension's bench script must:
   relative movement; `regression_threshold_absolute` compares raw numeric
   movement. If both are present, a metric must exceed both tolerances to
   regress.
+- Policy `variance_aware: true` requires a matching
+  `metrics.distributions.<metric>` array on every scenario that emits the
+  metric. If `min_iterations_for_variance` is set and the sample array is
+  smaller, parsing fails before baseline comparison.
+- Policy `regression_test` accepts `point_delta`, `mann_whitney_u`, and
+  `kolmogorov_smirnov`. `point_delta` is the legacy summary-value check.
+  Variance-aware metrics default to `mann_whitney_u` when the field is
+  omitted. Mann-Whitney uses a one-sided 95% normal approximation;
+  Kolmogorov-Smirnov uses the standard 5% two-sample critical value.
 - Scenario-level unknown keys are **tolerated**, so extensions can emit
   additional metadata (tags, environment info, warmup counts) without
   breaking parsing.

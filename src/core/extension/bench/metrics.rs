@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use super::parsing::{BenchMetricDirection, BenchMetricPolicy, BenchResults};
+use super::parsing::{BenchMetricDirection, BenchMetricPolicy, BenchResults, RegressionTest};
 
 /// Per-metric delta vs baseline. Extensions can opt into comparing any
 /// numeric metric by declaring a policy in the bench results JSON.
@@ -17,6 +17,16 @@ pub struct MetricDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta_pct: Option<f64>,
     pub direction: BenchMetricDirection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regression_test: Option<RegressionTest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_samples: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_samples: Option<usize>,
+    /// Test statistic for distribution comparisons: z-score for
+    /// Mann-Whitney U, D statistic for Kolmogorov-Smirnov.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statistic: Option<f64>,
     pub regression: bool,
     pub improvement: bool,
 }
@@ -83,9 +93,97 @@ impl ResolvedMetricPolicy {
             delta,
             delta_pct,
             direction: self.policy.direction,
+            regression_test: None,
+            baseline_samples: None,
+            current_samples: None,
+            statistic: None,
             regression,
             improvement: bad_delta < 0.0,
         }
+    }
+
+    pub(crate) fn compare_distribution(
+        &self,
+        baseline_samples: &[f64],
+        current_samples: &[f64],
+    ) -> Option<MetricDelta> {
+        if baseline_samples.is_empty() || current_samples.is_empty() {
+            return None;
+        }
+
+        let baseline_value = median(baseline_samples);
+        let current_value = median(current_samples);
+        let delta = current_value - baseline_value;
+        let bad_delta = match self.policy.direction {
+            BenchMetricDirection::LowerIsBetter => delta,
+            BenchMetricDirection::HigherIsBetter => -delta,
+        };
+        let delta_pct = if baseline_value != 0.0 {
+            Some((delta / baseline_value) * 100.0)
+        } else {
+            None
+        };
+        let bad_delta_pct = if baseline_value != 0.0 {
+            Some((bad_delta / baseline_value.abs()) * 100.0)
+        } else {
+            None
+        };
+
+        let worse = bad_delta > 0.0;
+        let exceeds_absolute = bad_delta > self.regression_threshold_absolute;
+        let exceeds_percent = match self.policy.regression_threshold_percent {
+            Some(threshold) => bad_delta_pct.map(|pct| pct > threshold).unwrap_or(worse),
+            None => true,
+        };
+        let regression_test = self
+            .policy
+            .regression_test
+            .unwrap_or(RegressionTest::MannWhitneyU);
+        let statistic = match regression_test {
+            RegressionTest::PointDelta => None,
+            RegressionTest::MannWhitneyU => Some(mann_whitney_worse_z(
+                baseline_samples,
+                current_samples,
+                self.policy.direction,
+            )),
+            RegressionTest::KolmogorovSmirnov => Some(kolmogorov_smirnov_worse_d(
+                baseline_samples,
+                current_samples,
+                self.policy.direction,
+            )),
+        };
+        let significant = match regression_test {
+            RegressionTest::PointDelta => true,
+            // One-sided 95% normal approximation.
+            RegressionTest::MannWhitneyU => statistic.map(|z| z > 1.645).unwrap_or(false),
+            RegressionTest::KolmogorovSmirnov => statistic
+                .map(|d| {
+                    d > kolmogorov_smirnov_critical_value(
+                        baseline_samples.len(),
+                        current_samples.len(),
+                    )
+                })
+                .unwrap_or(false),
+        };
+
+        Some(MetricDelta {
+            name: self.name.clone(),
+            baseline_value,
+            current_value,
+            delta,
+            delta_pct,
+            direction: self.policy.direction,
+            regression_test: Some(regression_test),
+            baseline_samples: Some(baseline_samples.len()),
+            current_samples: Some(current_samples.len()),
+            statistic,
+            regression: worse && exceeds_absolute && exceeds_percent && significant,
+            improvement: bad_delta < 0.0,
+        })
+    }
+
+    pub(crate) fn variance_aware(&self) -> bool {
+        self.policy.variance_aware
     }
 
     fn custom(name: &str, policy: &BenchMetricPolicy) -> Self {
@@ -104,12 +202,96 @@ impl ResolvedMetricPolicy {
                 direction: BenchMetricDirection::LowerIsBetter,
                 regression_threshold_percent: Some(default_threshold_percent),
                 regression_threshold_absolute: Some(0.0),
+                variance_aware: false,
+                min_iterations_for_variance: None,
+                regression_test: None,
                 phase: None,
             },
             regression_threshold_absolute: 0.0,
             zero_baseline_is_neutral: true,
         }
     }
+}
+
+fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
+fn worse_scale(value: f64, direction: BenchMetricDirection) -> f64 {
+    match direction {
+        BenchMetricDirection::LowerIsBetter => value,
+        BenchMetricDirection::HigherIsBetter => -value,
+    }
+}
+
+fn mann_whitney_worse_z(
+    baseline_samples: &[f64],
+    current_samples: &[f64],
+    direction: BenchMetricDirection,
+) -> f64 {
+    let mut u = 0.0;
+    for current in current_samples {
+        let current = worse_scale(*current, direction);
+        for baseline in baseline_samples {
+            let baseline = worse_scale(*baseline, direction);
+            if current > baseline {
+                u += 1.0;
+            } else if current == baseline {
+                u += 0.5;
+            }
+        }
+    }
+    let n1 = baseline_samples.len() as f64;
+    let n2 = current_samples.len() as f64;
+    let mean = n1 * n2 / 2.0;
+    let variance = n1 * n2 * (n1 + n2 + 1.0) / 12.0;
+    if variance == 0.0 {
+        0.0
+    } else {
+        (u - mean) / variance.sqrt()
+    }
+}
+
+fn kolmogorov_smirnov_worse_d(
+    baseline_samples: &[f64],
+    current_samples: &[f64],
+    direction: BenchMetricDirection,
+) -> f64 {
+    let mut points: Vec<f64> = baseline_samples
+        .iter()
+        .chain(current_samples.iter())
+        .map(|value| worse_scale(*value, direction))
+        .collect();
+    points.sort_by(|a, b| a.total_cmp(b));
+    points.dedup_by(|a, b| a == b);
+
+    let n1 = baseline_samples.len() as f64;
+    let n2 = current_samples.len() as f64;
+    let baseline: Vec<f64> = baseline_samples
+        .iter()
+        .map(|value| worse_scale(*value, direction))
+        .collect();
+    let current: Vec<f64> = current_samples
+        .iter()
+        .map(|value| worse_scale(*value, direction))
+        .collect();
+
+    points.into_iter().fold(0.0, |max_d, point| {
+        let f_baseline = baseline.iter().filter(|value| **value <= point).count() as f64 / n1;
+        let f_current = current.iter().filter(|value| **value <= point).count() as f64 / n2;
+        max_d.max(f_baseline - f_current)
+    })
+}
+
+fn kolmogorov_smirnov_critical_value(n1: usize, n2: usize) -> f64 {
+    1.36 * (((n1 + n2) as f64) / ((n1 * n2) as f64)).sqrt()
 }
 
 pub(crate) fn resolve_metric_policies(
@@ -146,6 +328,9 @@ mod tests {
             direction,
             regression_threshold_percent: Some(5.0),
             regression_threshold_absolute: None,
+            variance_aware: false,
+            min_iterations_for_variance: None,
+            regression_test: None,
             phase: None,
         }
     }
@@ -159,7 +344,10 @@ mod tests {
                 file: None,
                 source: None,
                 iterations: 10,
-                metrics: BenchMetrics { values: metrics },
+                metrics: BenchMetrics {
+                    values: metrics,
+                    distributions: BTreeMap::new(),
+                },
                 memory: None,
             }],
             metric_policies: BTreeMap::new(),
@@ -175,6 +363,10 @@ mod tests {
             delta: 0.01,
             delta_pct: Some(100.0),
             direction: BenchMetricDirection::LowerIsBetter,
+            regression_test: None,
+            baseline_samples: None,
+            current_samples: None,
+            statistic: None,
             regression: true,
             improvement: false,
         };
@@ -212,6 +404,9 @@ mod tests {
                 direction: BenchMetricDirection::LowerIsBetter,
                 regression_threshold_percent: None,
                 regression_threshold_absolute: Some(0.01),
+                variance_aware: false,
+                min_iterations_for_variance: None,
+                regression_test: None,
                 phase: None,
             },
         );

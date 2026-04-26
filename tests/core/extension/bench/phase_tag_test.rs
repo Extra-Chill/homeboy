@@ -36,6 +36,9 @@ fn policy(direction: BenchMetricDirection, phase: Option<BenchMetricPhase>) -> B
         direction,
         regression_threshold_percent: None,
         regression_threshold_absolute: None,
+        variance_aware: false,
+        min_iterations_for_variance: None,
+        regression_test: None,
         phase,
     }
 }
@@ -50,7 +53,10 @@ fn scenario(id: &str, metrics: &[(&str, f64)]) -> BenchScenario {
         file: None,
         source: None,
         iterations: 10,
-        metrics: BenchMetrics { values },
+        metrics: BenchMetrics {
+            values,
+            distributions: BTreeMap::new(),
+        },
         memory: None,
     }
 }

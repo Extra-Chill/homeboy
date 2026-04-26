@@ -369,7 +369,10 @@ mod tests {
             file: None,
             source: None,
             iterations: 10,
-            metrics: BenchMetrics { values },
+            metrics: BenchMetrics {
+                values,
+                distributions: BTreeMap::new(),
+            },
             memory: None,
         }
     }

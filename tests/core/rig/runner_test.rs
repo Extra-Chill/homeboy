@@ -221,6 +221,7 @@ fn test_run_down_cleans_state_owned_shared_paths() {
             }],
             pipeline,
             bench: None,
+            bench_workloads: HashMap::new(),
         };
 
         let up = crate::rig::pipeline::run_pipeline(&rig, "up", true).expect("up pipeline");

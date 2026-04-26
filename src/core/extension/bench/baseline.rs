@@ -57,6 +57,8 @@ pub struct BenchScenarioSnapshot {
     pub id: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metrics: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub distributions: BTreeMap<String, Vec<f64>>,
     /// Legacy fields from the first bench baseline shape. They remain
     /// readable so existing baselines keep working, but new baselines store
     /// metrics under the generic `metrics` map.
@@ -73,6 +75,7 @@ impl BenchScenarioSnapshot {
         Self {
             id: scenario.id.clone(),
             metrics: scenario.metrics.values.clone(),
+            distributions: scenario.metrics.distributions.clone(),
             p95_ms: None,
             p50_ms: None,
             mean_ms: None,
@@ -86,6 +89,10 @@ impl BenchScenarioSnapshot {
             "mean_ms" => self.mean_ms,
             _ => None,
         })
+    }
+
+    fn distribution(&self, name: &str) -> Option<&[f64]> {
+        self.distributions.get(name).map(Vec::as_slice)
     }
 }
 
@@ -215,13 +222,26 @@ pub fn compare(
         let mut metric_deltas = Vec::new();
 
         for policy in &metric_policies {
-            let Some(baseline_value) = prior.metric_value(policy.name()) else {
-                continue;
-            };
-            let Some(current_value) = scenario.metrics.get(policy.name()) else {
-                continue;
-            };
-            metric_deltas.push(policy.compare(baseline_value, current_value));
+            if policy.variance_aware() {
+                let Some(baseline_samples) = prior.distribution(policy.name()) else {
+                    continue;
+                };
+                let Some(current_samples) = scenario.metrics.distribution(policy.name()) else {
+                    continue;
+                };
+                if let Some(delta) = policy.compare_distribution(baseline_samples, current_samples)
+                {
+                    metric_deltas.push(delta);
+                }
+            } else {
+                let Some(baseline_value) = prior.metric_value(policy.name()) else {
+                    continue;
+                };
+                let Some(current_value) = scenario.metrics.get(policy.name()) else {
+                    continue;
+                };
+                metric_deltas.push(policy.compare(baseline_value, current_value));
+            }
         }
 
         let regression = metric_deltas.iter().any(|d| d.regression);
@@ -283,6 +303,7 @@ pub fn compare(
 mod tests {
     use super::super::parsing::{
         BenchMetricDirection, BenchMetricPolicy, BenchMetrics, BenchResults, BenchScenario,
+        RegressionTest,
     };
     use super::*;
 
@@ -303,8 +324,42 @@ mod tests {
             file: None,
             source: None,
             iterations: 10,
-            metrics: BenchMetrics { values: metrics },
+            metrics: BenchMetrics {
+                values: metrics,
+                distributions: BTreeMap::new(),
+            },
             memory: None,
+        }
+    }
+
+    fn distribution_scenario(id: &str, metric: &str, samples: Vec<f64>) -> BenchScenario {
+        let value = samples.iter().sum::<f64>() / samples.len() as f64;
+        let mut values = BTreeMap::new();
+        values.insert(metric.to_string(), value);
+        let mut distributions = BTreeMap::new();
+        distributions.insert(metric.to_string(), samples);
+        BenchScenario {
+            id: id.to_string(),
+            file: None,
+            source: None,
+            iterations: 10,
+            metrics: BenchMetrics {
+                values,
+                distributions,
+            },
+            memory: None,
+        }
+    }
+
+    fn variance_policy(direction: BenchMetricDirection, test: RegressionTest) -> BenchMetricPolicy {
+        BenchMetricPolicy {
+            direction,
+            regression_threshold_percent: Some(5.0),
+            regression_threshold_absolute: None,
+            variance_aware: true,
+            min_iterations_for_variance: Some(5),
+            regression_test: Some(test),
+            phase: None,
         }
     }
 
@@ -566,6 +621,9 @@ mod tests {
                 direction: BenchMetricDirection::LowerIsBetter,
                 regression_threshold_percent: None,
                 regression_threshold_absolute: Some(0.01),
+                variance_aware: false,
+                min_iterations_for_variance: None,
+                regression_test: None,
                 phase: None,
             },
         );
@@ -598,6 +656,9 @@ mod tests {
                 direction: BenchMetricDirection::HigherIsBetter,
                 regression_threshold_percent: Some(5.0),
                 regression_threshold_absolute: None,
+                variance_aware: false,
+                min_iterations_for_variance: None,
+                regression_test: None,
                 phase: None,
             },
         );
@@ -634,6 +695,9 @@ mod tests {
                 direction: BenchMetricDirection::LowerIsBetter,
                 regression_threshold_percent: None,
                 regression_threshold_absolute: Some(0.0),
+                variance_aware: false,
+                min_iterations_for_variance: None,
+                regression_test: None,
                 phase: None,
             },
         );
@@ -647,6 +711,83 @@ mod tests {
         assert!(!comparison.regression);
         assert_eq!(comparison.scenarios[0].metric_deltas.len(), 0);
         assert_eq!(comparison.scenarios[0].p95_delta_ms, Some(100.0));
+    }
+
+    #[test]
+    fn variance_aware_metric_uses_mann_whitney_distribution_comparison() {
+        let dir = tempfile::tempdir().unwrap();
+        let metric = "agent_loop_ms";
+        let baseline_run = results(vec![distribution_scenario(
+            "agent",
+            metric,
+            vec![100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+        )]);
+        save_baseline(dir.path(), "demo", &baseline_run, None).unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
+
+        let mut policies = BTreeMap::new();
+        policies.insert(
+            metric.to_string(),
+            variance_policy(
+                BenchMetricDirection::LowerIsBetter,
+                RegressionTest::MannWhitneyU,
+            ),
+        );
+        let current = results_with_policies(
+            vec![distribution_scenario(
+                "agent",
+                metric,
+                vec![140.0, 141.0, 142.0, 143.0, 144.0, 145.0],
+            )],
+            policies,
+        );
+        let comparison = compare(&current, &baseline, 5.0);
+
+        assert!(comparison.regression);
+        let delta = &comparison.scenarios[0].metric_deltas[0];
+        assert_eq!(delta.regression_test, Some(RegressionTest::MannWhitneyU));
+        assert_eq!(delta.baseline_samples, Some(6));
+        assert_eq!(delta.current_samples, Some(6));
+        assert!(delta.statistic.unwrap() > 1.645);
+    }
+
+    #[test]
+    fn variance_aware_metric_uses_ks_distribution_comparison() {
+        let dir = tempfile::tempdir().unwrap();
+        let metric = "quality_score";
+        let baseline_run = results(vec![distribution_scenario(
+            "agent",
+            metric,
+            vec![90.0, 91.0, 92.0, 93.0, 94.0, 95.0],
+        )]);
+        save_baseline(dir.path(), "demo", &baseline_run, None).unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
+
+        let mut policies = BTreeMap::new();
+        policies.insert(
+            metric.to_string(),
+            variance_policy(
+                BenchMetricDirection::HigherIsBetter,
+                RegressionTest::KolmogorovSmirnov,
+            ),
+        );
+        let current = results_with_policies(
+            vec![distribution_scenario(
+                "agent",
+                metric,
+                vec![70.0, 71.0, 72.0, 73.0, 74.0, 75.0],
+            )],
+            policies,
+        );
+        let comparison = compare(&current, &baseline, 5.0);
+
+        assert!(comparison.regression);
+        let delta = &comparison.scenarios[0].metric_deltas[0];
+        assert_eq!(
+            delta.regression_test,
+            Some(RegressionTest::KolmogorovSmirnov)
+        );
+        assert!(delta.statistic.unwrap() > 0.7);
     }
 
     #[test]

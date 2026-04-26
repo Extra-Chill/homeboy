@@ -20,7 +20,10 @@
 //!       "metrics": {
 //!         "p95_ms": 145.0,
 //!         "status_500_count": 0,
-//!         "error_rate": 0.0
+//!         "error_rate": 0.0,
+//!         "distributions": {
+//!           "agent_loop_ms": [1000.0, 1200.0, 1400.0]
+//!         }
 //!       },
 //!       "memory": { "peak_bytes": 41943040 }
 //!     }
@@ -70,11 +73,21 @@ pub struct BenchScenario {
 pub struct BenchMetrics {
     #[serde(flatten)]
     pub values: BTreeMap<String, f64>,
+    /// Raw per-iteration samples for variance-aware metrics.
+    ///
+    /// `values` remains the single-point summary contract; distributions
+    /// are opt-in data used by variance-aware regression checks.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub distributions: BTreeMap<String, Vec<f64>>,
 }
 
 impl BenchMetrics {
     pub fn get(&self, key: &str) -> Option<f64> {
         self.values.get(key).copied()
+    }
+
+    pub fn distribution(&self, key: &str) -> Option<&[f64]> {
+        self.distributions.get(key).map(Vec::as_slice)
     }
 }
 
@@ -86,6 +99,19 @@ pub struct BenchMetricPolicy {
     pub regression_threshold_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regression_threshold_absolute: Option<f64>,
+    /// True when this metric is expected to vary between iterations.
+    ///
+    /// Variance-aware metrics must emit a matching `metrics.distributions`
+    /// entry so regression checks can compare distribution shape instead
+    /// of a single summary point.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub variance_aware: bool,
+    /// Minimum sample count needed for a meaningful variance-aware run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_iterations_for_variance: Option<u64>,
+    /// Statistical test used for variance-aware regression detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regression_test: Option<RegressionTest>,
     /// Optional measurement-phase tag.
     ///
     /// Phase is **metadata only**: it does not affect regression math
@@ -100,12 +126,27 @@ pub struct BenchMetricPolicy {
     pub phase: Option<BenchMetricPhase>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BenchMetricDirection {
     #[serde(rename = "lower_is_better", alias = "lower")]
     LowerIsBetter,
     #[serde(rename = "higher_is_better", alias = "higher")]
     HigherIsBetter,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RegressionTest {
+    /// Legacy single-point threshold comparison.
+    PointDelta,
+    /// Non-parametric rank test, useful when distributions are not Normal.
+    MannWhitneyU,
+    /// Distribution-shape test sensitive to CDF shifts.
+    KolmogorovSmirnov,
 }
 
 /// Measurement-phase tag for a metric.
@@ -161,12 +202,66 @@ pub fn parse_bench_results_file(path: &Path) -> Result<BenchResults> {
 
 /// Parse a raw JSON string into a `BenchResults`.
 pub fn parse_bench_results_str(raw: &str) -> Result<BenchResults> {
-    serde_json::from_str(raw).map_err(|e| {
+    let parsed: BenchResults = serde_json::from_str(raw).map_err(|e| {
         Error::internal_json(
             format!("Failed to parse bench results JSON: {}", e),
             Some("bench.parsing.deserialize".to_string()),
         )
-    })
+    })?;
+    validate_variance_policies(&parsed)?;
+    Ok(parsed)
+}
+
+fn validate_variance_policies(results: &BenchResults) -> Result<()> {
+    for (name, policy) in &results.metric_policies {
+        if !policy.variance_aware {
+            continue;
+        }
+        for scenario in &results.scenarios {
+            if scenario.metrics.get(name).is_none() {
+                continue;
+            }
+            let Some(samples) = scenario.metrics.distribution(name) else {
+                return Err(Error::validation_invalid_argument(
+                    "metrics.distributions",
+                    format!(
+                        "variance-aware metric `{}` in scenario `{}` must emit metrics.distributions.{}",
+                        name, scenario.id, name
+                    ),
+                    None,
+                    None,
+                ));
+            };
+            if samples.iter().any(|value| !value.is_finite()) {
+                return Err(Error::validation_invalid_argument(
+                    "metrics.distributions",
+                    format!(
+                        "variance-aware metric `{}` in scenario `{}` contains a non-finite sample",
+                        name, scenario.id
+                    ),
+                    None,
+                    None,
+                ));
+            }
+            if let Some(min) = policy.min_iterations_for_variance {
+                if samples.len() < min as usize {
+                    return Err(Error::validation_invalid_argument(
+                        "metrics.distributions",
+                        format!(
+                            "variance-aware metric `{}` in scenario `{}` has {} samples; minimum is {}",
+                            name,
+                            scenario.id,
+                            samples.len(),
+                            min
+                        ),
+                        None,
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -324,6 +419,93 @@ mod tests {
         let parsed = parse_bench_results_str(raw).unwrap();
         assert_eq!(parsed.scenarios.len(), 1);
         assert_eq!(parsed.scenarios[0].id, "scenario_one");
+    }
+
+    #[test]
+    fn parses_variance_aware_metric_distributions() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 20,
+            "metric_policies": {
+                "agent_loop_ms": {
+                    "direction": "lower_is_better",
+                    "variance_aware": true,
+                    "min_iterations_for_variance": 3,
+                    "regression_test": "mann_whitney_u"
+                }
+            },
+            "scenarios": [
+                {
+                    "id": "agent_loop",
+                    "iterations": 20,
+                    "metrics": {
+                        "agent_loop_ms": 1200.0,
+                        "distributions": {
+                            "agent_loop_ms": [1000.0, 1200.0, 1400.0]
+                        }
+                    }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+        let policy = &parsed.metric_policies["agent_loop_ms"];
+        assert!(policy.variance_aware);
+        assert_eq!(policy.regression_test, Some(RegressionTest::MannWhitneyU));
+        assert_eq!(
+            parsed.scenarios[0].metrics.distribution("agent_loop_ms"),
+            Some(&[1000.0, 1200.0, 1400.0][..])
+        );
+    }
+
+    #[test]
+    fn rejects_variance_aware_metric_without_distribution() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 20,
+            "metric_policies": {
+                "agent_loop_ms": {
+                    "direction": "lower_is_better",
+                    "variance_aware": true
+                }
+            },
+            "scenarios": [
+                {
+                    "id": "agent_loop",
+                    "iterations": 20,
+                    "metrics": { "agent_loop_ms": 1200.0 }
+                }
+            ]
+        }"#;
+
+        assert!(parse_bench_results_str(raw).is_err());
+    }
+
+    #[test]
+    fn rejects_variance_aware_metric_below_minimum_samples() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 20,
+            "metric_policies": {
+                "agent_loop_ms": {
+                    "direction": "lower_is_better",
+                    "variance_aware": true,
+                    "min_iterations_for_variance": 5
+                }
+            },
+            "scenarios": [
+                {
+                    "id": "agent_loop",
+                    "iterations": 20,
+                    "metrics": {
+                        "agent_loop_ms": 1200.0,
+                        "distributions": { "agent_loop_ms": [1000.0, 1200.0] }
+                    }
+                }
+            ]
+        }"#;
+
+        assert!(parse_bench_results_str(raw).is_err());
     }
 
     #[test]
