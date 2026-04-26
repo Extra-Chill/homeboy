@@ -70,6 +70,13 @@ pub struct BenchArgs {
     /// default (or the positional component must be provided).
     #[arg(long, value_name = "RIG_ID[,RIG_ID...]", value_delimiter = ',')]
     rig: Vec<String>,
+
+    /// Skip auto-upgrading single-rig runs into a comparison even when
+    /// the rig spec declares `bench.default_baseline_rig`. Use with
+    /// `--baseline` / `--ratchet` against a rig that normally
+    /// auto-pairs, or to bench the candidate alone.
+    #[arg(long)]
+    ignore_default_baseline: bool,
 }
 
 /// Filter out homeboy-owned flags from trailing args before passing to
@@ -83,6 +90,7 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
     const HOMEBOY_FLAGS: &[&str] = &[
         "--baseline",
         "--ignore-baseline",
+        "--ignore-default-baseline",
         "--ratchet",
         "--json-summary",
         "--json",
@@ -155,6 +163,20 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
         return Ok((BenchOutput::Single(output), exit));
     }
 
+    // Single --rig <candidate> + spec declares default_baseline_rig +
+    // user has not opted out → rewrite args.rig to the canonical
+    // [baseline, candidate] comparison shape and tail-call into the
+    // multi-rig branch below. Single source of truth for the
+    // comparison codepath, no parallel envelope or runner.
+    //
+    // The recursive call cannot loop: the second invocation has
+    // args.rig.len() == 2 and skips this expansion entirely.
+    if let Some(expanded) = maybe_expand_default_baseline(&args)? {
+        let mut expanded_args = args;
+        expanded_args.rig = expanded;
+        return run(expanded_args, _global);
+    }
+
     // --rig with one value: legacy single rig-pinned run. Same shape as
     // before this PR for `bench --rig <id>` callers (single output, rig
     // snapshot embedded). Baseline flags still honored.
@@ -211,6 +233,57 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
 
     let (output, exit) = aggregate_comparison(component, args.iterations, entries);
     Ok((BenchOutput::Comparison(output), exit))
+}
+
+/// Resolve the candidate rig's `bench.default_baseline_rig` and, when
+/// applicable, return the rewritten `[baseline, candidate]` rig list
+/// the comparison path should run. Returns `None` when no expansion
+/// applies — the caller falls through to its normal dispatch.
+///
+/// Expansion applies when ALL of the following hold:
+/// - exactly one `--rig` was passed,
+/// - that rig's spec declares a non-empty `bench.default_baseline_rig`,
+/// - none of `--baseline` / `--ratchet` / `--ignore-default-baseline`
+///   are set.
+///
+/// A spec that names itself as its own default baseline is rejected
+/// with `validation_invalid_argument` — the auto-upgrade would loop
+/// and the user almost certainly meant a different rig.
+fn maybe_expand_default_baseline(args: &BenchArgs) -> homeboy::Result<Option<Vec<String>>> {
+    if args.rig.len() != 1 {
+        return Ok(None);
+    }
+    if args.baseline_args.baseline
+        || args.baseline_args.ratchet
+        || args.ignore_default_baseline
+    {
+        return Ok(None);
+    }
+
+    let candidate = &args.rig[0];
+    let candidate_spec = rig::load(candidate)?;
+    let Some(baseline_rig_id) = candidate_spec
+        .bench
+        .as_ref()
+        .and_then(|b| b.default_baseline_rig.clone())
+    else {
+        return Ok(None);
+    };
+
+    if baseline_rig_id == *candidate {
+        return Err(homeboy::Error::validation_invalid_argument(
+            "bench.default_baseline_rig",
+            format!(
+                "rig '{}' declares itself as its own default_baseline_rig; \
+                 fix the rig spec or pass --ignore-default-baseline",
+                candidate
+            ),
+            None,
+            None,
+        ));
+    }
+
+    Ok(Some(vec![baseline_rig_id, candidate.clone()]))
 }
 
 /// Run bench once, optionally pinned to a rig, and return the standard
@@ -437,3 +510,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/core/rig/bench_default_baseline_dispatch_test.rs"]
+mod bench_default_baseline_dispatch_test;
