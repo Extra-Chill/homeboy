@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.18.1] - 2026-04-26
+
+### Fixed
+- repair lint runner tool resolution
+
 ## [2.18.0] - 2026-04-25
 
 ### Added
