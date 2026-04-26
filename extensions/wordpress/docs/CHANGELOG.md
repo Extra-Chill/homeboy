@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.20.2] - 2026-04-26
+
+### Fixed
+- scope PHPStan lint targets
+
 ## [2.20.1] - 2026-04-26
 
 ### Fixed
