@@ -18,6 +18,25 @@ echo "Setting up WordPress extension..."
 if [ -f "composer.json" ]; then
     echo "Installing PHP dependencies..."
     composer install --quiet --no-interaction
+
+    if [ -x "vendor/bin/phpcs" ]; then
+        echo "Registering PHPCS standards..."
+        phpcs_paths=()
+        for path in \
+            "${EXTENSION_PATH}/vendor/wp-coding-standards/wpcs" \
+            "${EXTENSION_PATH}/vendor/phpcsstandards/phpcsextra" \
+            "${EXTENSION_PATH}/vendor/phpcsstandards/phpcsutils" \
+            "${EXTENSION_PATH}/HomeboyWordPress"; do
+            if [ -d "$path" ]; then
+                phpcs_paths+=("$path")
+            fi
+        done
+
+        if [ "${#phpcs_paths[@]}" -gt 0 ]; then
+            installed_paths=$(IFS=','; printf '%s' "${phpcs_paths[*]}")
+            vendor/bin/phpcs --config-set installed_paths "$installed_paths" --quiet > /dev/null 2>&1
+        fi
+    fi
 fi
 
 # Install npm dependencies (Playground CLI, ESLint).

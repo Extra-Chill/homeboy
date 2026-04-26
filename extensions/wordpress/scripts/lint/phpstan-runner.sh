@@ -93,7 +93,7 @@ generate_dependency_config() {
     local has_dependencies=0
     local has_baseline=0
 
-    tmpfile=$(homeboy_mktemp 'phpstan-dependencies.XXXXXX')
+    tmpfile=$(homeboy_mktemp 'phpstan-dependencies.XXXXXX.neon')
 
     {
         printf '%s\n' 'includes:'
@@ -271,7 +271,7 @@ PHPSTAN_TMPCONFIG=""
 generate_phpstan_config() {
     local max_processes="${1:-}"
     local tmpfile
-    tmpfile=$(homeboy_mktemp 'phpstan.XXXXXX')
+    tmpfile=$(homeboy_mktemp 'phpstan.XXXXXX.neon')
     {
         printf 'includes:\n'
         printf '    - %s\n' "${PHPSTAN_BASE_CONFIG}"

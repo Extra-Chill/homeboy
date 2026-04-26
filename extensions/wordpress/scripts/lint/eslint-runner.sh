@@ -89,7 +89,10 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "Fix-only: ${HOMEBOY_FIX_ONLY:-0}"
 fi
 
-ESLINT_BIN="${EXTENSION_PATH}/node_extensions/.bin/eslint"
+ESLINT_BIN="${EXTENSION_PATH}/node_modules/.bin/eslint"
+if [ ! -f "$ESLINT_BIN" ]; then
+    ESLINT_BIN="${EXTENSION_PATH}/node_extensions/.bin/eslint"
+fi
 ESLINT_CONFIG="${EXTENSION_PATH}/.eslintrc.json"
 
 # Validate tools exist

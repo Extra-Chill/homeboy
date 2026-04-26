@@ -182,6 +182,24 @@ if [ ! -f "$PHPCS_CONFIG" ]; then
     exit 1
 fi
 
+# Composer's PHPCS installer can be bypassed in linked extension installs. Keep
+# the runner self-healing so WordPress-Extra and HomeboyWordPress always resolve.
+PHPCS_STANDARD_PATHS=()
+for phpcs_standard_path in \
+    "${EXTENSION_PATH}/vendor/wp-coding-standards/wpcs" \
+    "${EXTENSION_PATH}/vendor/phpcsstandards/phpcsextra" \
+    "${EXTENSION_PATH}/vendor/phpcsstandards/phpcsutils" \
+    "${EXTENSION_PATH}/HomeboyWordPress"; do
+    if [ -d "$phpcs_standard_path" ]; then
+        PHPCS_STANDARD_PATHS+=("$phpcs_standard_path")
+    fi
+done
+
+if [ "${#PHPCS_STANDARD_PATHS[@]}" -gt 0 ]; then
+    PHPCS_INSTALLED_PATHS=$(IFS=','; printf '%s' "${PHPCS_STANDARD_PATHS[*]}")
+    "$PHPCS_BIN" --config-set installed_paths "$PHPCS_INSTALLED_PATHS" --quiet > /dev/null 2>&1 || true
+fi
+
 # Auto-detect text domain from plugin/theme header (shared helper)
 DETECT_COMPONENT_HELPER="${HOMEBOY_RUNTIME_DETECT_COMPONENT:-${SCRIPT_DIR}/../lib/detect-component.sh}"
 # shellcheck source=../lib/detect-component.sh
