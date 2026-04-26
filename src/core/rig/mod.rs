@@ -5,10 +5,10 @@
 //! `rig check` reports health, `rig down` tears it down.
 //!
 //! Phase 1 scope:
-//! - Spec schema with components, services, symlinks, and linear pipelines
+//! - Spec schema with components, services, symlinks, shared paths, and linear pipelines
 //! - Service kinds: `http-static`, `command`, `external` (adopted)
 //! - Pipeline step kinds: `service`, `build`, `git`, `command`, `symlink`,
-//!   `patch`, `check`
+//!   `shared-path`, `patch`, `check`
 //! - Check probes: `http`, `file` (+ `contains`), `command`, `newer_than`
 //!   (mtime / process-start staleness)
 //! - State file at `~/.config/homeboy/rigs/{id}.state/state.json`
@@ -34,7 +34,7 @@ pub use runner::{
 pub use service::{DiscoveredProcess, ServiceStatus};
 pub use spec::{
     BenchSpec, CheckSpec, ComponentSpec, DiscoverSpec, NewerThanSpec, PatchOp, PipelineStep,
-    RigSpec, ServiceKind, ServiceSpec, SymlinkSpec, TimeSource,
+    RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, SymlinkSpec, TimeSource,
 };
 pub use state::{RigState, ServiceState};
 

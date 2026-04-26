@@ -30,6 +30,14 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub symlinks: Vec<SymlinkSpec>,
 
+    /// Ephemeral dependency paths a rig may borrow from another checkout.
+    ///
+    /// Unlike `symlinks`, these are safe-by-default: `ensure` only creates the
+    /// link when the path is missing, leaves real directories alone, and records
+    /// ownership so cleanup removes only links created by this rig.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_paths: Vec<SharedPathSpec>,
+
     /// Pipelines for `up`, `check`, `down`, and custom verbs. MVP uses `up`,
     /// `check`, and `down`; future phases will add `sync`, `bench`, etc.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -171,6 +179,17 @@ pub struct SymlinkSpec {
     pub target: String,
 }
 
+/// Ephemeral path borrowed from another checkout, usually dependencies such as
+/// `node_modules` that can be reused across worktrees.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedPathSpec {
+    /// Path inside the active checkout. If missing, `shared-path ensure` creates
+    /// a symlink here. If a real file/directory already exists, it is left alone.
+    pub link: String,
+    /// Existing path to borrow, usually the primary checkout's dependency dir.
+    pub target: String,
+}
+
 /// A pipeline step. Flat enum via `kind` discriminator so specs stay readable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -243,6 +262,12 @@ pub enum PipelineStep {
     Symlink {
         /// Operation: `ensure` or `verify`.
         op: SymlinkOp,
+    },
+
+    /// Ensure, verify, or clean up declared shared dependency paths.
+    SharedPath {
+        /// Operation: `ensure`, `verify`, or `cleanup`.
+        op: SharedPathOp,
     },
 
     /// Apply (or verify) an idempotent local-only patch to a file in a
@@ -349,6 +374,18 @@ pub enum ServiceOp {
 pub enum SymlinkOp {
     Ensure,
     Verify,
+}
+
+/// Shared path operation in a pipeline step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SharedPathOp {
+    /// Create missing dependency paths as symlinks to their shared targets.
+    Ensure,
+    /// Check that each dependency path is available without mutating anything.
+    Verify,
+    /// Remove only symlinks this rig created and still owns.
+    Cleanup,
 }
 
 /// Patch operation in a pipeline step.

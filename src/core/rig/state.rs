@@ -28,6 +28,11 @@ pub struct RigState {
     /// Services the rig is managing.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub services: HashMap<String, ServiceState>,
+
+    /// Shared dependency symlinks created by this rig and safe to remove on
+    /// cleanup. Keyed by expanded link path.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub shared_paths: HashMap<String, SharedPathState>,
 }
 
 /// Per-service state: PID, start time, health.
@@ -43,6 +48,16 @@ pub struct ServiceState {
 
     /// Last observed status — `"running"` / `"stopped"` / `"unknown"`.
     pub status: String,
+}
+
+/// Per-shared-path ownership marker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedPathState {
+    /// Expanded target path the rig linked to when it created the symlink.
+    pub target: String,
+
+    /// Timestamp when the symlink was created, RFC3339.
+    pub created_at: String,
 }
 
 impl RigState {

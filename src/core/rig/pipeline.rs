@@ -16,8 +16,10 @@ use super::check;
 use super::expand::expand_vars;
 use super::service;
 use super::spec::{
-    ComponentSpec, GitOp, PatchOp, PipelineStep, RigSpec, ServiceOp, SymlinkOp, SymlinkSpec,
+    ComponentSpec, GitOp, PatchOp, PipelineStep, RigSpec, ServiceOp, SharedPathOp, SharedPathSpec,
+    SymlinkOp, SymlinkSpec,
 };
+use super::state::{now_rfc3339, RigState, SharedPathState};
 use crate::error::{Error, Result};
 
 /// Result of one pipeline step.
@@ -130,6 +132,7 @@ fn run_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
             label: _,
         } => run_command_step(rig, cmd, cwd.as_deref(), env),
         PipelineStep::Symlink { op } => run_symlink_step(rig, *op),
+        PipelineStep::SharedPath { op } => run_shared_path_step(rig, *op),
         PipelineStep::Patch {
             component,
             file,
@@ -141,6 +144,14 @@ fn run_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
         } => run_patch_step(rig, component, file, marker, after.as_deref(), content, *op),
         PipelineStep::Check { spec, .. } => check::evaluate(rig, spec),
     }
+}
+
+/// Cleanup shared paths created by this rig.
+///
+/// `run_down` calls this unconditionally as a safety net, even when a spec
+/// author forgets to include an explicit `shared-path cleanup` step.
+pub fn cleanup_shared_paths(rig: &RigSpec) -> Result<()> {
+    run_shared_path_step(rig, SharedPathOp::Cleanup)
 }
 
 /// Resolve a component reference from the rig spec and return its expanded
@@ -417,6 +428,243 @@ fn verify_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<()> {
     Ok(())
 }
 
+fn run_shared_path_step(rig: &RigSpec, op: SharedPathOp) -> Result<()> {
+    if rig.shared_paths.is_empty() {
+        return Ok(());
+    }
+
+    if op == SharedPathOp::Verify {
+        for shared in &rig.shared_paths {
+            verify_shared_path(rig, shared)?;
+        }
+        return Ok(());
+    }
+
+    let mut state = RigState::load(&rig.id)?;
+    let mut state_changed = false;
+
+    for shared in &rig.shared_paths {
+        match op {
+            SharedPathOp::Ensure => {
+                ensure_shared_path(rig, shared, &mut state, &mut state_changed)?
+            }
+            SharedPathOp::Verify => verify_shared_path(rig, shared)?,
+            SharedPathOp::Cleanup => {
+                cleanup_shared_path(rig, shared, &mut state, &mut state_changed)?
+            }
+        }
+    }
+
+    if state_changed {
+        state.save(&rig.id)?;
+    }
+    Ok(())
+}
+
+fn ensure_shared_path(
+    rig: &RigSpec,
+    shared: &SharedPathSpec,
+    state: &mut RigState,
+    state_changed: &mut bool,
+) -> Result<()> {
+    let (link_path, target_path) = resolve_shared_paths(rig, shared);
+    let key = shared_path_key(&link_path);
+
+    match std::fs::symlink_metadata(&link_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let current = std::fs::read_link(&link_path).map_err(|e| {
+                Error::rig_pipeline_failed(
+                    &rig.id,
+                    "shared-path",
+                    format!("read {}: {}", link_path.display(), e),
+                )
+            })?;
+            if current == target_path {
+                if !target_path.exists() {
+                    return Err(Error::rig_pipeline_failed(
+                        &rig.id,
+                        "shared-path",
+                        format!("shared target {} does not exist", target_path.display()),
+                    ));
+                }
+                return Ok(());
+            }
+            Err(Error::rig_pipeline_failed(
+                &rig.id,
+                "shared-path",
+                format!(
+                    "{} points at {}, expected {} — refusing to replace an existing symlink",
+                    link_path.display(),
+                    current.display(),
+                    target_path.display()
+                ),
+            ))
+        }
+        Ok(_) => {
+            // Local dependencies already exist in this checkout. Leave them
+            // alone and forget any stale ownership marker for this path.
+            if state.shared_paths.remove(&key).is_some() {
+                *state_changed = true;
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if !target_path.exists() {
+                return Err(Error::rig_pipeline_failed(
+                    &rig.id,
+                    "shared-path",
+                    format!(
+                        "shared target {} does not exist for {}",
+                        target_path.display(),
+                        link_path.display()
+                    ),
+                ));
+            }
+            let parent = link_path.parent().ok_or_else(|| {
+                Error::rig_pipeline_failed(
+                    &rig.id,
+                    "shared-path",
+                    format!("{} has no parent directory", link_path.display()),
+                )
+            })?;
+            if !parent.exists() {
+                return Err(Error::rig_pipeline_failed(
+                    &rig.id,
+                    "shared-path",
+                    format!(
+                        "parent directory {} does not exist for {}",
+                        parent.display(),
+                        link_path.display()
+                    ),
+                ));
+            }
+
+            create_symlink(&target_path, &link_path).map_err(|e| {
+                Error::rig_pipeline_failed(
+                    &rig.id,
+                    "shared-path",
+                    format!(
+                        "create {} → {}: {}",
+                        link_path.display(),
+                        target_path.display(),
+                        e
+                    ),
+                )
+            })?;
+            state.shared_paths.insert(
+                key,
+                SharedPathState {
+                    target: target_path.to_string_lossy().into_owned(),
+                    created_at: now_rfc3339(),
+                },
+            );
+            *state_changed = true;
+            Ok(())
+        }
+        Err(e) => Err(Error::rig_pipeline_failed(
+            &rig.id,
+            "shared-path",
+            format!("stat {}: {}", link_path.display(), e),
+        )),
+    }
+}
+
+fn verify_shared_path(rig: &RigSpec, shared: &SharedPathSpec) -> Result<()> {
+    let (link_path, target_path) = resolve_shared_paths(rig, shared);
+    match std::fs::symlink_metadata(&link_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let current = std::fs::read_link(&link_path).map_err(|e| {
+                Error::rig_pipeline_failed(
+                    &rig.id,
+                    "shared-path",
+                    format!("read {}: {}", link_path.display(), e),
+                )
+            })?;
+            if current != target_path {
+                return Err(Error::rig_pipeline_failed(
+                    &rig.id,
+                    "shared-path",
+                    format!(
+                        "{} points at {}, expected {}",
+                        link_path.display(),
+                        current.display(),
+                        target_path.display()
+                    ),
+                ));
+            }
+            if !target_path.exists() {
+                return Err(Error::rig_pipeline_failed(
+                    &rig.id,
+                    "shared-path",
+                    format!("shared target {} does not exist", target_path.display()),
+                ));
+            }
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::rig_pipeline_failed(
+            &rig.id,
+            "shared-path",
+            format!("{} is missing", link_path.display()),
+        )),
+        Err(e) => Err(Error::rig_pipeline_failed(
+            &rig.id,
+            "shared-path",
+            format!("stat {}: {}", link_path.display(), e),
+        )),
+    }
+}
+
+fn cleanup_shared_path(
+    rig: &RigSpec,
+    shared: &SharedPathSpec,
+    state: &mut RigState,
+    state_changed: &mut bool,
+) -> Result<()> {
+    let (link_path, _target_path) = resolve_shared_paths(rig, shared);
+    let key = shared_path_key(&link_path);
+    let Some(owned) = state.shared_paths.get(&key).cloned() else {
+        return Ok(());
+    };
+    let owned_target = PathBuf::from(&owned.target);
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&link_path) {
+        if metadata.file_type().is_symlink() {
+            let current = std::fs::read_link(&link_path).map_err(|e| {
+                Error::rig_pipeline_failed(
+                    &rig.id,
+                    "shared-path",
+                    format!("read {}: {}", link_path.display(), e),
+                )
+            })?;
+            if current == owned_target {
+                std::fs::remove_file(&link_path).map_err(|e| {
+                    Error::rig_pipeline_failed(
+                        &rig.id,
+                        "shared-path",
+                        format!("remove {}: {}", link_path.display(), e),
+                    )
+                })?;
+            }
+        }
+    }
+
+    state.shared_paths.remove(&key);
+    *state_changed = true;
+    Ok(())
+}
+
+fn resolve_shared_paths(rig: &RigSpec, shared: &SharedPathSpec) -> (PathBuf, PathBuf) {
+    (
+        PathBuf::from(expand_vars(rig, &shared.link)),
+        PathBuf::from(expand_vars(rig, &shared.target)),
+    )
+}
+
+fn shared_path_key(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 /// Apply or verify an idempotent local-only patch.
 ///
 /// `apply` semantics:
@@ -535,6 +783,7 @@ fn step_kind(step: &PipelineStep) -> &'static str {
         PipelineStep::Git { .. } => "git",
         PipelineStep::Command { .. } => "command",
         PipelineStep::Symlink { .. } => "symlink",
+        PipelineStep::SharedPath { .. } => "shared-path",
         PipelineStep::Patch { .. } => "patch",
         PipelineStep::Check { .. } => "check",
     }
@@ -563,6 +812,7 @@ fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> String {
             .clone()
             .unwrap_or_else(|| truncate(&expand_vars(rig, cmd), 80)),
         PipelineStep::Symlink { op } => format!("symlink {}", serialize_symlink_op(*op)),
+        PipelineStep::SharedPath { op } => format!("shared-path {}", serialize_shared_path_op(*op)),
         PipelineStep::Patch {
             component,
             file,
@@ -608,6 +858,14 @@ fn serialize_symlink_op(op: SymlinkOp) -> &'static str {
     match op {
         SymlinkOp::Ensure => "ensure",
         SymlinkOp::Verify => "verify",
+    }
+}
+
+fn serialize_shared_path_op(op: SharedPathOp) -> &'static str {
+    match op {
+        SharedPathOp::Ensure => "ensure",
+        SharedPathOp::Verify => "verify",
+        SharedPathOp::Cleanup => "cleanup",
     }
 }
 

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::expand::expand_vars;
-use super::pipeline::{run_pipeline, PipelineOutcome};
+use super::pipeline::{cleanup_shared_paths, run_pipeline, PipelineOutcome};
 use super::service::{self, ServiceStatus};
 use super::spec::RigSpec;
 use super::state::{now_rfc3339, RigState};
@@ -105,6 +105,8 @@ pub fn run_down(rig: &RigSpec) -> Result<DownReport> {
     } else {
         None
     };
+
+    cleanup_shared_paths(rig)?;
 
     let mut stopped = Vec::new();
     for service_id in rig.services.keys() {

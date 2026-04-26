@@ -10,7 +10,7 @@ homeboy rig <COMMAND>
 
 ## Overview
 
-A rig is a named bundle of components, local services, pre-flight checks, and a linear build pipeline, described as JSON at `~/.config/homeboy/rigs/<id>.json`. `rig up` materializes the env; `rig check` reports health; `rig down` tears it down.
+A rig is a named bundle of components, local services, shared dependency paths, pre-flight checks, and a linear build pipeline, described as JSON at `~/.config/homeboy/rigs/<id>.json`. `rig up` materializes the env; `rig check` reports health; `rig down` tears it down.
 
 Rigs are the missing piece between individual components (one repo, one version) and full deployments (many repos, remote servers) — they capture the setup a dev environment needs: which commits of which components, which background services are running, which pre-flight invariants must hold.
 
@@ -90,14 +90,23 @@ See [rig-spec.md](./rig-spec.md) for the full schema. Minimal example:
     { "link": "~/.local/bin/studio", "target": "~/.local/bin/studio-dev" }
   ],
 
+  "shared_paths": [
+    {
+      "link": "${components.studio.path}/node_modules",
+      "target": "~/Developer/studio/node_modules"
+    }
+  ],
+
   "pipeline": {
     "up":    [
       { "kind": "service", "id": "tarball-server", "op": "start" },
-      { "kind": "symlink", "op": "ensure" }
+      { "kind": "symlink", "op": "ensure" },
+      { "kind": "shared-path", "op": "ensure" }
     ],
     "check": [
       { "kind": "service", "id": "tarball-server", "op": "health" },
       { "kind": "symlink", "op": "verify" },
+      { "kind": "shared-path", "op": "verify" },
       {
         "kind": "check",
         "label": "MDI drop-in intact",
@@ -106,6 +115,7 @@ See [rig-spec.md](./rig-spec.md) for the full schema. Minimal example:
       }
     ],
     "down":  [
+      { "kind": "shared-path", "op": "cleanup" },
       { "kind": "service", "id": "tarball-server", "op": "stop" }
     ]
   }
@@ -116,7 +126,7 @@ See [rig-spec.md](./rig-spec.md) for the full schema. Minimal example:
 
 Rig runtime state lives at `~/.config/homeboy/rigs/<id>.state/`:
 
-- `state.json` — service PIDs, last `up`/`check` timestamps
+- `state.json` — service PIDs, shared-path ownership markers, last `up`/`check` timestamps
 - `logs/<service-id>.log` — captured stdout/stderr per service
 
 State is ephemeral — deleting it means `rig up` will re-probe on next invocation. Never treat it as source of truth.

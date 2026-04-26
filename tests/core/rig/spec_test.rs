@@ -1,7 +1,7 @@
 //! Spec parsing tests — serde round-trips, pipeline step discriminants,
 //! service-kind parsing. Covers `src/core/rig/spec.rs`.
 
-use crate::rig::{PipelineStep, RigSpec, ServiceKind, ServiceSpec, SymlinkSpec};
+use crate::rig::{PipelineStep, RigSpec, ServiceKind, ServiceSpec, SharedPathSpec, SymlinkSpec};
 
 /// Canonical fixture matching the studio-playground-dev shape used as the
 /// first real consumer of the rig primitive.
@@ -23,14 +23,22 @@ const STUDIO_PLAYGROUND_SPEC: &str = r#"{
     "symlinks": [
         { "link": "~/.local/bin/studio", "target": "~/.local/bin/studio-dev" }
     ],
+    "shared_paths": [
+        {
+            "link": "${components.studio.path}/node_modules",
+            "target": "~/Developer/studio/node_modules"
+        }
+    ],
     "pipeline": {
         "up": [
             { "kind": "service", "id": "tarball-server", "op": "start" },
-            { "kind": "symlink", "op": "ensure" }
+            { "kind": "symlink", "op": "ensure" },
+            { "kind": "shared-path", "op": "ensure" }
         ],
         "check": [
             { "kind": "service", "id": "tarball-server", "op": "health" },
             { "kind": "symlink", "op": "verify" },
+            { "kind": "shared-path", "op": "verify" },
             {
                 "kind": "check",
                 "label": "MDI db.php drop-in survived",
@@ -39,6 +47,7 @@ const STUDIO_PLAYGROUND_SPEC: &str = r#"{
             }
         ],
         "down": [
+            { "kind": "shared-path", "op": "cleanup" },
             { "kind": "service", "id": "tarball-server", "op": "stop" }
         ]
     }
@@ -51,9 +60,10 @@ fn test_spec_parses_studio_playground_fixture() {
     assert_eq!(spec.components.len(), 2);
     assert_eq!(spec.services.len(), 1);
     assert_eq!(spec.symlinks.len(), 1);
-    assert_eq!(spec.pipeline.get("up").unwrap().len(), 2);
-    assert_eq!(spec.pipeline.get("check").unwrap().len(), 3);
-    assert_eq!(spec.pipeline.get("down").unwrap().len(), 1);
+    assert_eq!(spec.shared_paths.len(), 1);
+    assert_eq!(spec.pipeline.get("up").unwrap().len(), 3);
+    assert_eq!(spec.pipeline.get("check").unwrap().len(), 4);
+    assert_eq!(spec.pipeline.get("down").unwrap().len(), 2);
 }
 
 #[test]
@@ -74,9 +84,10 @@ fn test_spec_pipeline_steps_discriminate_correctly() {
     let up = spec.pipeline.get("up").unwrap();
     assert!(matches!(up[0], PipelineStep::Service { .. }));
     assert!(matches!(up[1], PipelineStep::Symlink { .. }));
+    assert!(matches!(up[2], PipelineStep::SharedPath { .. }));
 
     let check = spec.pipeline.get("check").unwrap();
-    assert!(matches!(check[2], PipelineStep::Check { .. }));
+    assert!(matches!(check[3], PipelineStep::Check { .. }));
 }
 
 #[test]
@@ -88,6 +99,14 @@ fn test_spec_symlink_fields_parse() {
 }
 
 #[test]
+fn test_spec_shared_path_fields_parse() {
+    let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+    let shared: &SharedPathSpec = &spec.shared_paths[0];
+    assert_eq!(shared.link, "${components.studio.path}/node_modules");
+    assert_eq!(shared.target, "~/Developer/studio/node_modules");
+}
+
+#[test]
 fn test_spec_minimal_only_required_fields() {
     let json = r#"{"id": "tiny"}"#;
     let spec: RigSpec = serde_json::from_str(json).expect("parse");
@@ -95,6 +114,7 @@ fn test_spec_minimal_only_required_fields() {
     assert!(spec.components.is_empty());
     assert!(spec.services.is_empty());
     assert!(spec.symlinks.is_empty());
+    assert!(spec.shared_paths.is_empty());
     assert!(spec.pipeline.is_empty());
 }
 

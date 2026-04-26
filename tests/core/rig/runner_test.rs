@@ -23,7 +23,7 @@ use crate::rig::runner::{
     run_check, run_down, run_status, run_up, snapshot_state, CheckReport, RigStatusReport,
     ServiceStatusReport, UpReport,
 };
-use crate::rig::spec::{ComponentSpec, RigSpec};
+use crate::rig::spec::{ComponentSpec, PipelineStep, RigSpec, SharedPathOp, SharedPathSpec};
 
 fn empty_pipeline(name: &str) -> PipelineOutcome {
     PipelineOutcome {
@@ -41,6 +41,7 @@ fn minimal_spec(id: &str) -> RigSpec {
         components: HashMap::new(),
         services: HashMap::new(),
         symlinks: Vec::new(),
+        shared_paths: Vec::new(),
         pipeline: HashMap::new(),
         bench: None,
     }
@@ -191,6 +192,46 @@ fn test_run_down() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn test_run_down_cleans_state_owned_shared_paths() {
+    with_isolated_home(|_dir| {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let target = tmp.path().join("primary-node_modules");
+        let link = tmp.path().join("worktree-node_modules");
+        std::fs::create_dir(&target).expect("target dir");
+
+        let mut pipeline = HashMap::new();
+        pipeline.insert(
+            "up".to_string(),
+            vec![PipelineStep::SharedPath {
+                op: SharedPathOp::Ensure,
+            }],
+        );
+        let rig = RigSpec {
+            id: "run-down-shared-path-fixture".to_string(),
+            description: String::new(),
+            components: HashMap::new(),
+            services: HashMap::new(),
+            symlinks: Vec::new(),
+            shared_paths: vec![SharedPathSpec {
+                link: link.to_string_lossy().into_owned(),
+                target: target.to_string_lossy().into_owned(),
+            }],
+            pipeline,
+            bench: None,
+        };
+
+        let up = crate::rig::pipeline::run_pipeline(&rig, "up", true).expect("up pipeline");
+        assert!(up.is_success());
+        assert!(link.is_symlink());
+
+        let down = run_down(&rig).expect("run_down");
+        assert!(down.success);
+        assert!(!link.exists(), "run_down removes owned shared-path symlink");
+    });
+}
+
 #[test]
 fn test_run_status() {
     with_isolated_home(|_dir| {
@@ -239,6 +280,7 @@ fn test_snapshot_state() {
         components,
         services: HashMap::new(),
         symlinks: Vec::new(),
+        shared_paths: Vec::new(),
         pipeline: HashMap::new(),
         bench: None,
     };

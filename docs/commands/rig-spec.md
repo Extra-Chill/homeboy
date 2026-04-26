@@ -11,6 +11,7 @@ JSON schema for `~/.config/homeboy/rigs/<id>.json`.
 | `components` | object | No | Map of component ID → `ComponentSpec`. |
 | `services` | object | No | Map of service ID → `ServiceSpec`. |
 | `symlinks` | array | No | List of `SymlinkSpec` entries. |
+| `shared_paths` | array | No | List of ephemeral dependency paths to borrow from another checkout. |
 | `pipeline` | object | No | Map of pipeline name → array of `PipelineStep`. |
 
 ## `ComponentSpec`
@@ -54,9 +55,25 @@ A symlink the rig maintains.
 
 `symlink ensure` creates or re-points the link; `symlink verify` checks it exists with the expected target.
 
+## `SharedPathSpec`
+
+An ephemeral dependency path the rig may borrow from another checkout. Common use: feature worktrees that do not have `node_modules`, while the primary checkout does.
+
+| Field | Type | Description |
+|---|---|---|
+| `link` | string | Path inside the active checkout. If missing, `shared-path ensure` creates a symlink here. Supports variable expansion. |
+| `target` | string | Existing path to borrow. Supports variable expansion. |
+
+Safety contract:
+
+- `ensure` creates a symlink only when `link` is missing.
+- If `link` already exists as a real file or directory, it is treated as local dependencies and left alone.
+- If `link` is a symlink to any other target, `ensure` fails instead of replacing it.
+- Cleanup removes only symlinks this rig created and recorded in rig state.
+
 ## `PipelineStep`
 
-Tagged union via the `kind` discriminator. Six shapes. **Prefer the typed primitives (`build`, `git`, `check`) over generic `command` wherever they fit — typed steps reuse homeboy's existing build/git plumbing, error mapping, and extension hooks rather than shelling out blindly.**
+Tagged union via the `kind` discriminator. **Prefer the typed primitives (`build`, `git`, `check`, `shared-path`) over generic `command` wherever they fit — typed steps reuse homeboy's existing build/git plumbing, error mapping, and extension hooks rather than shelling out blindly.**
 
 ### `service`
 
@@ -117,6 +134,16 @@ Runs via `sh -c`. `cwd`, `command`, and `env` values all support variable expans
 
 Operates on every symlink declared at the rig level. No per-step target — rig-wide intent.
 
+### `shared-path`
+
+```jsonc
+{ "kind": "shared-path", "op": "ensure" }
+{ "kind": "shared-path", "op": "verify" }
+{ "kind": "shared-path", "op": "cleanup" }
+```
+
+Operates on every `shared_paths` entry declared at the rig level. Use `ensure` before dependency-consuming commands, `verify` in `check`, and `cleanup` in `down` when you want explicit teardown. `rig down` also runs shared-path cleanup as a safety net.
+
 ### `check`
 
 ```jsonc
@@ -161,7 +188,7 @@ Runs via `sh -c`. Passes if exit code matches `expect_exit` (default `0`).
 
 ## Variable expansion
 
-Three substitutions apply to `cwd`, `command`, `link`, `target`, and `CheckSpec` fields:
+Three substitutions apply to `cwd`, `command`, `link`, `target`, shared paths, and `CheckSpec` fields:
 
 - `${components.<id>.path}` — component path from the rig spec
 - `${env.<NAME>}` — process environment variable (empty if unset)
