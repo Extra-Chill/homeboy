@@ -160,6 +160,7 @@ pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 //
 // Configuration source priority:
 //   1. Extension's /homeboy-extension/phpunit.xml.dist, if readable and parseable
+//      for component test directories
 //   2. Hardcoded defaults: suffix=Test.php, prefix=test- (covers both PHPUnit
 //      native + WordPress conventions so projects don't have to choose)
 //
@@ -206,10 +207,10 @@ try {
  * Parse the extension's phpunit.xml.dist for test-discovery directives.
  *
  * Returns [directories, suffixes, prefixes, excludes]. Absolute paths only:
- * any relative `<directory>` entry in the XML is resolved against
- * $plugin_path/tests (the component under test, NOT the extension's own
- * vendor dir — the XML's path semantics are "relative to the plugin being
- * tested").
+ * relative `<directory>` entries under tests/ are resolved against the
+ * component under test. Extension-internal suites (for example
+ * HomeboyWordPress/Tests) are ignored so extension self-tests do not leak into
+ * every component run.
  *
  * Falls back to sensible defaults if the XML is missing or unparseable.
  * Logs the reason to NOTICE so users can see which path was taken.
@@ -250,6 +251,9 @@ function pg_parse_phpunit_config($xml_path, $test_dir_default) {
     foreach ($xml->xpath('//testsuite/directory') ?: [] as $dir) {
         $raw_path = trim((string) $dir);
         if ($raw_path === '') {
+            continue;
+        }
+        if (!pg_is_component_phpunit_directory($raw_path)) {
             continue;
         }
         // Resolve relative to the plugin root (PHPUnit's own convention is
@@ -302,6 +306,16 @@ function pg_parse_phpunit_config($xml_path, $test_dir_default) {
     }
 
     return [$directories, $suffixes, $prefixes, $excludes];
+}
+
+/**
+ * Whether a phpunit.xml `<directory>` entry belongs to the component under test.
+ */
+function pg_is_component_phpunit_directory($raw_path) {
+    $normalized = str_replace('\\', '/', trim($raw_path));
+    $normalized = trim($normalized, '/');
+
+    return $normalized === 'tests' || strpos($normalized, 'tests/') === 0;
 }
 
 /**
