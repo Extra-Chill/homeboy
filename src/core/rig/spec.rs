@@ -53,6 +53,24 @@ pub struct BenchSpec {
     /// CLI when this isn't set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_component: Option<String>,
+
+    /// When set, `homeboy bench --rig <this-rig>` is automatically
+    /// upgraded into a two-rig comparison `--rig <baseline>,<this-rig>`,
+    /// with `<baseline>` resolved from this field. Closes the most
+    /// common bench shape — main vs branch — into a single-flag
+    /// invocation without per-call spec authoring.
+    ///
+    /// Ignored when:
+    /// - `--rig` already lists multiple rigs (explicit beats implicit),
+    /// - `--baseline` or `--ratchet` is passed (the user wants a
+    ///   deliberate single-rig run that writes a baseline),
+    /// - `--ignore-default-baseline` is passed (explicit opt-out).
+    ///
+    /// A rig that names itself as its own `default_baseline_rig` is
+    /// rejected at dispatch time with a clear error — fix the spec or
+    /// pass `--ignore-default-baseline`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_baseline_rig: Option<String>,
 }
 
 /// Component reference inside a rig spec. Decoupled from the global component
@@ -417,3 +435,7 @@ pub struct TimeSource {
 #[cfg(test)]
 #[path = "../../../tests/core/rig/spec_test.rs"]
 mod spec_test;
+
+#[cfg(test)]
+#[path = "../../../tests/core/rig/bench_default_baseline_spec_test.rs"]
+mod bench_default_baseline_spec_test;
