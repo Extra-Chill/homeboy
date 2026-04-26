@@ -3,8 +3,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-04-26T00:57:08Z",
-      "item_count": 718,
+      "created_at": "2026-04-26T01:39:27Z",
+      "item_count": 721,
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "comment_hygiene::src/commands/release.rs::LegacyComment",
@@ -35,6 +35,7 @@
         "dead_code::src/core/extension/lifecycle.rs::UnreferencedExport",
         "dead_code::src/core/extension/lifecycle.rs::UnreferencedExport",
         "dead_code::src/core/extension/runner.rs::UnreferencedExport",
+        "dead_code::src/core/extension/runner.rs::UnusedParameter",
         "dead_code::src/core/extension/runner_contract.rs::UnreferencedExport",
         "dead_code::src/core/extension/runner_contract.rs::UnreferencedExport",
         "dead_code::src/core/git/github.rs::UnreferencedExport",
@@ -295,6 +296,7 @@
         "structural::src/core/rig/spec.rs::HighItemCount",
         "structural::src/core/server/health.rs::HighItemCount",
         "structural::src/main.rs::HighItemCount",
+        "structural::tests/core/rig/check_test.rs::HighItemCount",
         "structural::tests/core/rig/spec_test.rs::HighItemCount",
         "test_coverage::src/core/code_audit/baseline.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/checks.rs::MissingTestMethod",
@@ -410,6 +412,7 @@
         "test_coverage::src/core/engine/edit_op.rs::MissingTestMethod",
         "test_coverage::src/core/engine/edit_op.rs::MissingTestMethod",
         "test_coverage::src/core/engine/edit_op_apply.rs::MissingTestMethod",
+        "test_coverage::src/core/engine/execution_context.rs::MissingTestMethod",
         "test_coverage::src/core/engine/execution_context.rs::MissingTestMethod",
         "test_coverage::src/core/engine/execution_context.rs::MissingTestMethod",
         "test_coverage::src/core/engine/execution_context.rs::MissingTestMethod",
