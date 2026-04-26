@@ -127,11 +127,12 @@ pub fn run(
     args: ReleaseArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ReleaseCommandOutput> {
-    let component_ids = resolve_component_ids(&args)?;
+    let positional = resolve_positional_args(&args)?;
+    let component_ids = resolve_component_ids(&args, &positional.components)?;
 
     // Resolve --bump and --major into a single bump_override.
     // --major is a deprecated alias for --bump major.
-    let bump_override = resolve_bump_override(&args);
+    let bump_override = resolve_bump_override(&args, positional.bump);
 
     // Single component: use the original single-release flow
     if component_ids.len() == 1 {
@@ -207,7 +208,10 @@ pub fn run(
 /// 1. `--project <id>` + `--outdated` — components with unreleased code commits
 /// 2. `--project <id>` — all components in the project that need a bump
 /// 3. Positional component IDs
-fn resolve_component_ids(args: &ReleaseArgs) -> homeboy::Result<Vec<String>> {
+fn resolve_component_ids(
+    args: &ReleaseArgs,
+    components: &[String],
+) -> homeboy::Result<Vec<String>> {
     if let Some(ref project_id) = args.project {
         let proj = project::load(project_id)?;
         let components = project::resolve_project_components(&proj)?;
@@ -271,7 +275,7 @@ fn resolve_component_ids(args: &ReleaseArgs) -> homeboy::Result<Vec<String>> {
     }
 
     // Positional component IDs
-    if args.components.is_empty() {
+    if components.is_empty() {
         // Try CWD-based component detection
         match component::resolve_effective(None, None, None) {
             Ok(comp) => Ok(vec![comp.id]),
@@ -280,19 +284,131 @@ fn resolve_component_ids(args: &ReleaseArgs) -> homeboy::Result<Vec<String>> {
             ])),
         }
     } else {
-        Ok(args.components.clone())
+        Ok(components.to_vec())
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PositionalReleaseArgs {
+    components: Vec<String>,
+    bump: Option<String>,
+}
+
+fn resolve_positional_args(args: &ReleaseArgs) -> homeboy::Result<PositionalReleaseArgs> {
+    let mut components = args.components.clone();
+
+    if args.project.is_some() || components.len() < 2 {
+        return Ok(PositionalReleaseArgs {
+            components,
+            bump: None,
+        });
+    }
+
+    let maybe_bump = components.last().map(|value| value.to_lowercase());
+    let Some(bump) = maybe_bump.filter(|value| is_bump_keyword(value)) else {
+        return Ok(PositionalReleaseArgs {
+            components,
+            bump: None,
+        });
+    };
+
+    if args.bump.is_some() || args.major {
+        return Err(homeboy::Error::validation_invalid_argument(
+            "bump",
+            "Use either a positional bump type or --bump/--major, not both",
+            Some(bump),
+            Some(vec![
+                "Example: homeboy release my-component patch".to_string()
+            ]),
+        ));
+    }
+
+    components.pop();
+    Ok(PositionalReleaseArgs {
+        components,
+        bump: Some(bump),
+    })
+}
+
+fn is_bump_keyword(value: &str) -> bool {
+    matches!(value, "major" | "minor" | "patch")
 }
 
 /// Resolve --bump and --major into a single bump override string.
 /// --major is a deprecated alias for --bump major.
-fn resolve_bump_override(args: &ReleaseArgs) -> Option<String> {
+fn resolve_bump_override(args: &ReleaseArgs, positional_bump: Option<String>) -> Option<String> {
     if let Some(ref bump) = args.bump {
         Some(bump.clone())
     } else if args.major {
         eprintln!("Warning: --major is deprecated. Use --bump major instead.");
         Some("major".to_string())
     } else {
-        None
+        positional_bump
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(components: &[&str]) -> ReleaseArgs {
+        ReleaseArgs::from_parts(
+            components.iter().map(|value| value.to_string()).collect(),
+            None,
+            false,
+            None,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+        )
+    }
+
+    #[test]
+    fn positional_bump_is_not_treated_as_component() {
+        let parsed = resolve_positional_args(&args(&["api", "patch"])).unwrap();
+
+        assert_eq!(parsed.components, vec!["api"]);
+        assert_eq!(parsed.bump.as_deref(), Some("patch"));
+    }
+
+    #[test]
+    fn positional_bump_applies_to_batch_components() {
+        let parsed = resolve_positional_args(&args(&["api", "web", "minor"])).unwrap();
+
+        assert_eq!(parsed.components, vec!["api", "web"]);
+        assert_eq!(parsed.bump.as_deref(), Some("minor"));
+    }
+
+    #[test]
+    fn single_component_named_like_bump_stays_component() {
+        let parsed = resolve_positional_args(&args(&["patch"])).unwrap();
+
+        assert_eq!(parsed.components, vec!["patch"]);
+        assert_eq!(parsed.bump, None);
+    }
+
+    #[test]
+    fn positional_bump_conflicts_with_explicit_bump() {
+        let mut release_args = args(&["api", "major"]);
+        release_args.bump = Some("minor".to_string());
+
+        let err = resolve_positional_args(&release_args).unwrap_err();
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("positional bump"));
+    }
+
+    #[test]
+    fn positional_bump_flows_into_bump_override() {
+        let release_args = args(&["api", "patch"]);
+        let positional = resolve_positional_args(&release_args).unwrap();
+
+        assert_eq!(
+            resolve_bump_override(&release_args, positional.bump).as_deref(),
+            Some("patch")
+        );
     }
 }
