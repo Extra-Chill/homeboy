@@ -253,11 +253,11 @@ impl ExecutionContext {
 /// Detect the git repository root for a given directory.
 ///
 /// Returns `None` if the path is not inside a git repository.
-fn detect_git_root(dir: &PathBuf) -> Option<PathBuf> {
+fn detect_git_root(dir: &std::path::Path) -> Option<PathBuf> {
     let effective_dir = if dir.is_file() {
         dir.parent()?
     } else if dir.exists() {
-        dir.as_path()
+        dir
     } else {
         // Directory doesn't exist yet — try parent
         dir.parent()?
@@ -296,7 +296,7 @@ mod tests {
             .output()
             .expect("git init");
 
-        let result = detect_git_root(&root.to_path_buf());
+        let result = detect_git_root(root);
         assert!(result.is_some());
         assert_eq!(result.unwrap(), root.canonicalize().unwrap());
     }
@@ -307,7 +307,7 @@ mod tests {
         let non_git = dir.path().join("not-a-repo");
         fs::create_dir_all(&non_git).expect("create dir");
 
-        let result = detect_git_root(&non_git.to_path_buf());
+        let result = detect_git_root(&non_git);
         // May still find a parent repo, so we just test it doesn't panic
         assert!(result.is_none() || result.is_some());
     }
@@ -347,6 +347,106 @@ mod tests {
 
         assert!(ctx.git_root.is_some());
         assert_eq!(ctx.git_root.unwrap(), root.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_capability_raw_path_reports_unsupported_shape() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+
+        let options = ResolveOptions {
+            component_id: Some(root.to_string_lossy().to_string()),
+            path_override: None,
+            capability: Some(ExtensionCapability::Lint),
+            settings_overrides: Vec::new(),
+            settings_json_overrides: Vec::new(),
+        };
+
+        let err = resolve(&options).expect_err("raw path without lint extension should fail");
+        let message = err.to_string();
+
+        assert!(
+            message.contains("has no extensions configured"),
+            "expected unsupported-shape error, got: {message}"
+        );
+        assert!(
+            !message.contains("component.not_found"),
+            "raw path should not be treated as a component id: {message}"
+        );
+    }
+
+    #[test]
+    fn test_with_capability() {
+        let options = ResolveOptions::with_capability(
+            "component-a",
+            Some("/tmp/component-a".to_string()),
+            ExtensionCapability::Lint,
+            vec![("strict".to_string(), "true".to_string())],
+        );
+
+        assert_eq!(options.component_id.as_deref(), Some("component-a"));
+        assert_eq!(options.path_override.as_deref(), Some("/tmp/component-a"));
+        assert_eq!(options.capability, Some(ExtensionCapability::Lint));
+        assert_eq!(
+            options.settings_overrides,
+            vec![("strict".to_string(), "true".to_string())]
+        );
+        assert!(options.settings_json_overrides.is_empty());
+    }
+
+    #[test]
+    fn test_with_capability_and_json() {
+        let options = ResolveOptions::with_capability_and_json(
+            "component-b",
+            None,
+            ExtensionCapability::Test,
+            vec![("mode".to_string(), "fast".to_string())],
+            vec![("threshold".to_string(), serde_json::json!(0.95))],
+        );
+
+        assert_eq!(options.component_id.as_deref(), Some("component-b"));
+        assert!(options.path_override.is_none());
+        assert_eq!(options.capability, Some(ExtensionCapability::Test));
+        assert_eq!(
+            options.settings_overrides,
+            vec![("mode".to_string(), "fast".to_string())]
+        );
+        assert_eq!(
+            options.settings_json_overrides,
+            vec![("threshold".to_string(), serde_json::json!(0.95))]
+        );
+    }
+
+    #[test]
+    fn test_working_dir() {
+        let dir = TempDir::new().expect("temp dir");
+        let ctx = ExecutionContext {
+            component: Component::default(),
+            component_id: "component".to_string(),
+            source_path: dir.path().to_path_buf(),
+            git_root: None,
+            extension_id: None,
+            extension_path: None,
+            settings: Vec::new(),
+        };
+
+        assert_eq!(ctx.working_dir(), dir.path().to_str().unwrap());
+    }
+
+    #[test]
+    fn test_log_debug() {
+        let dir = TempDir::new().expect("temp dir");
+        let ctx = ExecutionContext {
+            component: Component::default(),
+            component_id: "component".to_string(),
+            source_path: dir.path().to_path_buf(),
+            git_root: None,
+            extension_id: None,
+            extension_path: None,
+            settings: vec![("mode".to_string(), serde_json::json!("test"))],
+        };
+
+        ctx.log_debug();
     }
 
     #[test]

@@ -21,9 +21,7 @@ pub use portable::{
     portable_json, read_portable_config, write_portable_config,
 };
 pub use relationships::{associated_projects, projects_using, rename_component, shared_components};
-pub use resolution::{
-    detect_from_cwd, resolve, resolve_artifact, resolve_effective, validate_local_path,
-};
+pub use resolution::{resolve, resolve_artifact, resolve_effective, validate_local_path};
 pub use scope::{resolve_component_scope, EffectiveScope, ScopeCommand};
 pub use versioning::{
     normalize_version_pattern, parse_version_targets, validate_version_pattern,
