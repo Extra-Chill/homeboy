@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.17.2] - 2026-04-27
+
+### Fixed
+- keep reconcile policy in homeboy core
+
 ## [1.17.1] - 2026-04-27
 
 ### Fixed
