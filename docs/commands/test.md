@@ -1,25 +1,34 @@
 # Test Command
 
-Run test suites for Homeboy components/extensions.
+Run a component's extension-backed test suite.
 
 ## Synopsis
 
 ```bash
-homeboy test <component> [options]
+homeboy test [component] [options] [-- <runner-args>]
 ```
 
 ## Description
 
-The `test` command executes test suites for specified Homeboy components. It automatically discovers and runs the appropriate test infrastructure for each component type.
+The `test` command resolves the component's linked extension with `test` capability, runs its configured test runner, and applies Homeboy's baseline / ratchet handling to structured test output when available.
 
 ## Arguments
 
-- `<component>`: Name of the component to test (must have a extension configured)
+- `[component]`: Component ID. Optional when Homeboy can auto-detect a portable `homeboy.json` or registered component from the current directory.
 
 ## Options
 
 - `--skip-lint`: Skip linting before running tests
+- `--coverage`: Collect code coverage when the runner supports it
+- `--coverage-min <PERCENT>`: Fail when coverage is below this threshold; implies `--coverage`
+- `--baseline`: Persist the current test result baseline
+- `--ignore-baseline`: Skip baseline comparison for this run
+- `--ratchet`: Auto-update the baseline when the current run improves on it
+- `--drift`: Cross-reference production changes with test files
+- `--write`: Write fixes to disk for workflows that support it
+- `--since <REF>`: Git ref for drift detection (default `HEAD~10`)
 - `--setting <key=value>`: Override component settings (can be used multiple times)
+- `--setting-json <key=json>`: Override component settings with typed JSON values
 - `--path <PATH>`: Override component `local_path` for this run
 - `--changed-since <REF>`: Limit execution to impacted tests since a git ref
 - `--analyze`: Cluster and summarize failures
@@ -28,17 +37,17 @@ The `test` command executes test suites for specified Homeboy components. It aut
 ## Examples
 
 ```bash
-# Test the wordpress component with default settings
-homeboy test wordpress
+# Test the current component from a repo with homeboy.json
+homeboy test
 
-# Test wordpress with MySQL instead of SQLite
-homeboy test wordpress --setting database_type=mysql --setting mysql_host=localhost
+# Test a registered component with setting overrides
+homeboy test my-component --setting database_type=mysql --setting mysql_host=localhost
 
 # Run tests only, skip linting
-homeboy test wordpress --skip-lint
+homeboy test my-component --skip-lint
 
 # Test with multiple setting overrides
-homeboy test wordpress --setting database_type=mysql --setting mysql_database=test_db
+homeboy test my-component --setting database_type=mysql --setting mysql_database=test_db
 ```
 
 ## Passthrough Arguments
@@ -60,24 +69,12 @@ Supported arguments depend on the underlying test framework.
 For a component to be testable, it must have:
 
 - A linked extension with test support
-- A manifest file for the extension (e.g., wordpress.json)
-- A test-runner script provided by the extension (at scripts/test-runner.sh within the extension)
-
-## Supported Components
-
-Currently supported:
-
-- **wordpress**: PHPUnit-based WordPress testing with SQLite/MySQL support
+- A manifest file for the extension
+- A test runner declared by the extension's `test.extension_script`
 
 ## Settings
 
-Settings vary by component. For WordPress:
-
-- `database_type`: `"sqlite"` (default) or `"mysql"`
-- `mysql_host`: MySQL hostname (default: `"localhost"`)
-- `mysql_database`: MySQL database name (default: `"wordpress_test"`)
-- `mysql_user`: MySQL username (default: `"root"`)
-- `mysql_password`: MySQL password (default: `""`)
+Settings are extension-defined. Use `--setting key=value` for string values and `--setting-json key=<json>` when the runner expects typed values such as objects, arrays, booleans, numbers, or null.
 
 ## Output
 
@@ -102,17 +99,17 @@ Returns JSON with test results:
 
 The following environment variables are set for test runners:
 
-- `HOMEBOY_EXEC_CONTEXT_VERSION`: Protocol version (`"1"`)
-- `HOMEBOY_MODULE_ID`: Component name
-- `HOMEBOY_MODULE_PATH`: Absolute path to extension directory
+- `HOMEBOY_EXEC_CONTEXT_VERSION`: Protocol version (`"2"`)
+- `HOMEBOY_EXTENSION_ID`: Extension identifier
+- `HOMEBOY_EXTENSION_PATH`: Absolute path to extension directory
 - `HOMEBOY_PROJECT_PATH`: Absolute path to project directory
 - `HOMEBOY_COMPONENT_ID`: Component identifier
 - `HOMEBOY_COMPONENT_PATH`: Absolute path to component directory
 - `HOMEBOY_SETTINGS_JSON`: Merged settings as JSON string
+- `HOMEBOY_TEST_RESULTS_FILE`: Path where runners can write structured test results
+- `HOMEBOY_TEST_FAILURES_FILE`: Path where runners can write structured failure summaries
 
 ## Notes
 
-- Tests run in the component's environment, not the project's
-- SQLite provides fastest in-memory testing
-- MySQL testing requires a running MySQL server
-- Component settings can be configured globally via `homeboy config`
+- Tests run in the component's source directory.
+- Component settings can live in `homeboy.json`, component config, or CLI overrides depending on how the component is resolved.

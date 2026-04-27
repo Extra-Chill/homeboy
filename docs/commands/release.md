@@ -3,24 +3,30 @@
 ## Synopsis
 
 ```sh
-homeboy release <COMPONENT> <BUMP_TYPE> [OPTIONS]
+homeboy release [OPTIONS] [COMPONENTS]...
 ```
 
-Where `<BUMP_TYPE>` is `patch`, `minor`, or `major`.
+By default Homeboy auto-detects the bump from commit history. Use `--bump <major|minor|patch|VERSION>` to force a bump type or explicit version.
 
-Also available as: `homeboy version bump <COMPONENT> <BUMP_TYPE> [OPTIONS]`
+Legacy positional bump syntax is still accepted for compatibility: `homeboy release <COMPONENT> <BUMP_TYPE>`.
 
 ## Options
 
 - `--dry-run`: Preview the release plan without executing
+- `--project <PROJECT>` / `-p <PROJECT>`: Release components from a project
+- `--outdated`: With `--project`, release only components with unreleased commits
+- `--path <PATH>`: Override local path for a single-component release
 - `--deploy`: Deploy this component to all projects that use it after release
 - `--recover`: Recover from an interrupted release
 - `--skip-checks`: Skip pre-release lint/test checks
-- `--allow-underbump`: Override semver guardrail when requested bump is lower than commit-derived recommendation
+- `--bump <BUMP>`: Force `major`, `minor`, `patch`, or an explicit version like `2.0.0`
+- `--skip-publish`: Skip publish/package steps; useful when CI publishes after the tag is pushed
+- `--no-github-release`: Skip GitHub Release creation while still tagging and pushing
+- `--git-identity <IDENTITY>`: Configure git identity for release commits/tags; use `bot` or `Name <email>`
 
 ## Description
 
-`homeboy release` executes a component release: bumps version, finalizes changelog, commits, tags, and optionally pushes. Use `--dry-run` to preview the release plan without making changes.
+`homeboy release` executes component releases: detects or applies a version bump, finalizes generated changelog entries, commits, tags, pushes, and optionally publishes release artifacts. Use `--dry-run` to preview the release plan without making changes.
 
 ## Recommended Workflow
 
@@ -29,10 +35,10 @@ Also available as: `homeboy version bump <COMPONENT> <BUMP_TYPE> [OPTIONS]`
 homeboy changes <component_id>
 
 # 2. Preview the release (validates configuration, shows plan)
-homeboy release <component_id> patch --dry-run
+homeboy release <component_id> --dry-run
 
 # 3. Execute the release
-homeboy release <component_id> patch
+homeboy release <component_id>
 ```
 
 ## Release Pipeline
@@ -154,7 +160,7 @@ With `--dry-run`:
 For automation, run dry-run JSON and consume:
 
 ```sh
-homeboy release <component_id> patch --dry-run --json
+homeboy release <component_id> --dry-run --json
 ```
 
 Semver recommendation is exposed at:
@@ -184,7 +190,7 @@ Example payload:
 }
 ```
 
-Use this in CI to block accidental under-bumps before tagging/publish.
+Use this in CI to inspect Homeboy's commit-derived recommendation before tagging/publish. Pass `--bump` when automation or a maintainer needs to override the detected bump.
 
 Without `--dry-run`:
 
@@ -233,7 +239,6 @@ GitHub release CI publishes to crates.io when the repository has a `CARGO_REGIST
 secret configured.
 
 This allows safe retry after `partial_success` without manual cleanup.
-```
 
 ## Related
 

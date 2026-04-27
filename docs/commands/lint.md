@@ -1,32 +1,38 @@
 # Lint Command
 
-Lint a component using its configured extension's linting infrastructure.
+Lint a component using its linked extension's linting infrastructure.
 
 ## Synopsis
 
 ```bash
-homeboy lint <component> [options]
+homeboy lint [component] [options]
 ```
 
 ## Description
 
-The `lint` command runs code style validation for a component using the linting tools provided by its configured extension. For WordPress components, this uses PHPCS (PHP CodeSniffer) with WordPress coding standards.
+The `lint` command resolves the component's linked extension with `lint` capability and runs that extension's lint runner. Homeboy owns scoping flags, baseline / ratchet behavior, and structured output; the extension owns the language-specific tools.
 
 ## Arguments
 
-- `<component>`: Name of the component to lint
+- `[component]`: Component ID. Optional when Homeboy can auto-detect a portable `homeboy.json` or registered component from the current directory.
 
 ## Options
 
 - `--baseline`: Save current lint findings as baseline for future comparisons
 - `--ignore-baseline`: Skip baseline comparison even if baseline exists
+- `--path <PATH>`: Override component `local_path` for this run
 - `--file <path>`: Lint only a single file (path relative to component root)
 - `--glob <pattern>`: Lint only files matching glob pattern (e.g., "inc/**/*.php")
 - `--changed-only`: Lint only files modified in the working tree (staged, unstaged, untracked)
+- `--changed-since <REF>`: Lint only files changed since a git ref
 - `--errors-only`: Show only errors, suppress warnings
 - `--summary`: Show compact summary instead of full output
+- `--sniffs <SNIFFS>`: Restrict to comma-separated linter sniffs or rules when supported
+- `--exclude-sniffs <SNIFFS>`: Exclude comma-separated linter sniffs or rules when supported
+- `--category <CATEGORY>`: Restrict to a named linter category when supported
 - `--fix`: Apply auto-fixable lint findings in place. Thin alias for `homeboy refactor <component> --from lint --write` — dispatches to the existing fixer pipeline so a single ergonomic flag resolves the auto-fix CTA.
 - `--setting <key=value>`: Override extension settings (can be used multiple times)
+- `--setting-json <key=json>`: Override extension settings with typed JSON values
 
 ## Examples
 
@@ -57,16 +63,16 @@ homeboy lint extrachill-api --setting some_option=value
 
 For a component to be lintable, it must have:
 
-- A extension configured (e.g., `wordpress`)
-- The extension must provide a lint-runner script (at scripts/lint-runner.sh within the extension)
+- A linked extension that declares a `lint` capability
+- A lint runner declared by the extension's `lint.extension_script`
 
 ## Environment Variables
 
 The following environment variables are set for lint runners:
 
-- `HOMEBOY_MODULE_PATH`: Absolute path to extension directory
+- `HOMEBOY_EXTENSION_ID`: Extension identifier
+- `HOMEBOY_EXTENSION_PATH`: Absolute path to extension directory
 - `HOMEBOY_COMPONENT_PATH`: Absolute path to component directory
-- `HOMEBOY_PLUGIN_PATH`: Same as component path
 - `HOMEBOY_FIX_ONLY`: Set to `1` when running in fix-only mode (refactor --from lint --write) — extension should apply fixes without re-running diagnostics
 - `HOMEBOY_SUMMARY_MODE`: Set to `1` when `--summary` flag is used
 - `HOMEBOY_LINT_FILE`: Single file path when `--file` is used
