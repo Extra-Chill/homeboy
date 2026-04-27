@@ -12,7 +12,10 @@
 //   HOMEBOY_BENCH_LIST_ONLY      — when 1, emit scenario inventory only
 //
 // Discovers `bench/**/*.bench.{ts,mjs,js}` under the project root.
-// Each workload file must export a default async function:
+// Each workload file must export a default async function. The function may
+// return `{ metrics: Record<string, number> }` to report workload-owned custom
+// metrics, which are averaged across measured iterations and merged beside the
+// dispatcher-owned timing metrics.
 //
 //     // bench/cold-boot.bench.ts
 //     export default async function () {
@@ -47,6 +50,15 @@ const LIST_ONLY = process.env.HOMEBOY_BENCH_LIST_ONLY === '1';
 const WARMUP = 1;
 const DEBUG = process.env.HOMEBOY_DEBUG === '1';
 
+const TIMING_METRIC_KEYS = new Set([
+    'mean_ms',
+    'p50_ms',
+    'p95_ms',
+    'p99_ms',
+    'min_ms',
+    'max_ms',
+]);
+
 if (!PROJECT_PATH || !COMPONENT_ID || !RESULTS_FILE) {
     console.error('FATAL: missing required env vars (PROJECT_PATH/COMPONENT_ID/RESULTS_FILE)');
     process.exit(2);
@@ -73,6 +85,54 @@ function scenarioId(file) {
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-+|-+$/g, '');
+}
+
+function validateWorkloadResult(value, iterationLabel) {
+    if (value === undefined) {
+        return {};
+    }
+
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error(`${iterationLabel} returned invalid result shape (expected undefined or an object)`);
+    }
+
+    const { metrics } = value;
+    if (metrics === undefined) {
+        return {};
+    }
+
+    if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) {
+        throw new Error(`${iterationLabel} returned invalid metrics shape (expected an object)`);
+    }
+
+    const validated = {};
+    for (const [key, metricValue] of Object.entries(metrics)) {
+        if (TIMING_METRIC_KEYS.has(key)) {
+            throw new Error(`${iterationLabel} returned metric "${key}", which is owned by the bench dispatcher`);
+        }
+        if (typeof metricValue !== 'number' || !Number.isFinite(metricValue)) {
+            throw new Error(`${iterationLabel} returned metric "${key}" with non-finite numeric value`);
+        }
+        validated[key] = metricValue;
+    }
+
+    return validated;
+}
+
+function aggregateCustomMetrics(iterationMetrics) {
+    const sums = new Map();
+    const counts = new Map();
+
+    for (const metrics of iterationMetrics) {
+        for (const [key, value] of Object.entries(metrics)) {
+            sums.set(key, (sums.get(key) || 0) + value);
+            counts.set(key, (counts.get(key) || 0) + 1);
+        }
+    }
+
+    return Object.fromEntries(
+        [...sums.entries()].map(([key, sum]) => [key, sum / counts.get(key)])
+    );
 }
 
 async function discoverWorkloads(dir) {
@@ -114,18 +174,19 @@ async function runWorkload(file) {
     // Warmup pass — discarded.
     for (let i = 0; i < WARMUP; i++) {
         try {
-            await fn();
+            validateWorkloadResult(await fn(), `warmup iteration ${i + 1}/${WARMUP}`);
         } catch (err) {
             return { error: `warmup iteration threw: ${err.message}` };
         }
     }
 
     const timings = [];
+    const customMetrics = [];
     let peakRss = 0;
     for (let i = 0; i < ITERATIONS; i++) {
         const start = performance.now();
         try {
-            await fn();
+            customMetrics.push(validateWorkloadResult(await fn(), `iteration ${i + 1}/${ITERATIONS}`));
         } catch (err) {
             return { error: `iteration ${i + 1}/${ITERATIONS} threw: ${err.message}` };
         }
@@ -135,7 +196,7 @@ async function runWorkload(file) {
     }
 
     timings.sort((a, b) => a - b);
-    return { timings, peakRss };
+    return { timings, peakRss, customMetrics: aggregateCustomMetrics(customMetrics) };
 }
 
 async function main() {
@@ -193,19 +254,21 @@ async function main() {
         }
 
         const t = result.timings;
+        const timingMetrics = {
+            mean_ms: t.reduce((a, b) => a + b, 0) / t.length,
+            p50_ms: percentile(t, 0.50),
+            p95_ms: percentile(t, 0.95),
+            p99_ms: percentile(t, 0.99),
+            min_ms: t[0],
+            max_ms: t[t.length - 1],
+        };
+
         scenarios.push({
             id,
             file: rel,
             source,
             iterations: t.length,
-            metrics: {
-                mean_ms: t.reduce((a, b) => a + b, 0) / t.length,
-                p50_ms: percentile(t, 0.50),
-                p95_ms: percentile(t, 0.95),
-                p99_ms: percentile(t, 0.99),
-                min_ms: t[0],
-                max_ms: t[t.length - 1],
-            },
+            metrics: { ...timingMetrics, ...result.customMetrics },
             memory: { peak_bytes: result.peakRss },
         });
 
