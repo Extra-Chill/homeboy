@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
+pub mod audit;
 pub mod inventory;
 pub mod mutations;
 pub mod portable;
@@ -9,6 +10,7 @@ pub mod resolution;
 pub mod scope;
 pub mod versioning;
 
+pub use audit::AuditConfig;
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,
     write_standalone_registration,
@@ -114,25 +116,6 @@ pub struct ScopeConfig {
     pub release: Option<CommandScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet: Option<CommandScopeConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AuditConfig {
-    /// Class/base names whose public methods are invoked by a runtime dispatcher.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runtime_entrypoint_extends: Vec<String>,
-    /// Source markers that indicate public methods are runtime-dispatched.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runtime_entrypoint_markers: Vec<String>,
-    /// Paths whose guards run outside normal production runtime assumptions.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lifecycle_path_globs: Vec<String>,
-    /// Type suffixes that mark convention outliers as intentional utilities.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub utility_suffixes: Vec<String>,
-    /// Files exempt from convention outlier checks.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub convention_exception_globs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

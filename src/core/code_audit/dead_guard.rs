@@ -45,10 +45,6 @@ struct Guard {
     line: usize,
 }
 
-pub(super) fn run(fingerprints: &[&FileFingerprint], root: &Path) -> Vec<Finding> {
-    run_with_config(fingerprints, root, &AuditConfig::default())
-}
-
 pub(super) fn run_with_config(
     fingerprints: &[&FileFingerprint],
     root: &Path,
@@ -154,7 +150,7 @@ fn camel_to_kebab(symbol: &str) -> String {
 /// Examples matched:
 /// - `function_exists('foo_bar')`
 /// - `! class_exists( "WP_Ability" )`
-/// - `defined('REST_REQUEST')`
+/// - `defined('RUNTIME_REQUEST')`
 ///
 /// Group 1: guard name. Group 2 or 3: quoted symbol (without quotes).
 fn guards_regex() -> &'static Regex {
@@ -232,21 +228,25 @@ mod tests {
         fs::write(root.join("plugin.php"), content).unwrap();
     }
 
+    fn run(fingerprints: &[&FileFingerprint], root: &Path) -> Vec<Finding> {
+        run_with_config(fingerprints, root, &AuditConfig::default())
+    }
+
     #[test]
     fn extract_guards_finds_all_three_kinds() {
         let content = r#"<?php
-if ( function_exists('wp_timezone') ) {}
-if ( ! class_exists( 'WP_Ability' ) ) {}
-if ( defined("REST_REQUEST") ) {}
+if ( function_exists('runtime_now') ) {}
+if ( ! class_exists( 'RuntimeCapability' ) ) {}
+if ( defined("RUNTIME_REQUEST") ) {}
 "#;
         let guards = extract_guards(content);
         assert_eq!(guards.len(), 3);
         assert_eq!(guards[0].kind, GuardKind::Function);
-        assert_eq!(guards[0].symbol, "wp_timezone");
+        assert_eq!(guards[0].symbol, "runtime_now");
         assert_eq!(guards[1].kind, GuardKind::Class);
-        assert_eq!(guards[1].symbol, "WP_Ability");
+        assert_eq!(guards[1].symbol, "RuntimeCapability");
         assert_eq!(guards[2].kind, GuardKind::Constant);
-        assert_eq!(guards[2].symbol, "REST_REQUEST");
+        assert_eq!(guards[2].symbol, "RUNTIME_REQUEST");
     }
 
     #[test]
@@ -349,14 +349,19 @@ if ( function_exists('as_schedule_single_action') ) {
         let tmp = tempfile::tempdir().unwrap();
         write_plugin_main(tmp.path(), Some("6.0"), "");
         let fp = make_fp(
-            "tests/queueable-trait-smoke.php",
+            "tests/compat-smoke.php",
             r#"<?php
-if ( ! function_exists('wp_json_encode') ) {
-    function wp_json_encode( $value ) { return json_encode( $value ); }
+if ( ! function_exists('runtime_json_encode') ) {
+    function runtime_json_encode( $value ) { return json_encode( $value ); }
 }
 "#,
         );
 
+        let guard = extract_guards(&fp.content).remove(0);
+        assert!(
+            guard_is_contextual(&fp, &guard, &AuditConfig::default()),
+            "stub definition guards are contextual even when the symbol is otherwise available"
+        );
         let findings = run(&[&fp], tmp.path());
         assert!(findings.is_empty(), "stub guards are test scaffolding");
     }
@@ -366,18 +371,23 @@ if ( ! function_exists('wp_json_encode') ) {
         let tmp = tempfile::tempdir().unwrap();
         write_plugin_main(tmp.path(), Some("6.0"), "");
         let fp = make_fp(
-            "uninstall.php",
+            "lifecycle/teardown.php",
             r#"<?php
-if ( function_exists('as_unschedule_all_actions') ) {
-    as_unschedule_all_actions('demo');
+if ( function_exists('runtime_unschedule_all') ) {
+    runtime_unschedule_all('demo');
 }
 "#,
         );
 
         let config = AuditConfig {
-            lifecycle_path_globs: vec!["uninstall.php".to_string()],
+            lifecycle_path_globs: vec!["lifecycle/*.php".to_string()],
             ..Default::default()
         };
+        let guard = extract_guards(&fp.content).remove(0);
+        assert!(
+            guard_is_contextual(&fp, &guard, &config),
+            "configured lifecycle globs mark guards as contextual"
+        );
         let findings = run_with_config(&[&fp], tmp.path(), &config);
         assert!(
             findings.is_empty(),

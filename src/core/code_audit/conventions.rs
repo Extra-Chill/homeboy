@@ -285,19 +285,6 @@ impl std::str::FromStr for AuditFinding {
 /// The algorithm:
 /// 1. Find methods that appear in ≥ 60% of files (the "convention")
 /// 2. Find files that are missing any of those methods (the "outliers")
-pub fn discover_conventions(
-    group_name: &str,
-    glob_pattern: &str,
-    fingerprints: &[FileFingerprint],
-) -> Option<Convention> {
-    discover_conventions_with_config(
-        group_name,
-        glob_pattern,
-        fingerprints,
-        &AuditConfig::default(),
-    )
-}
-
 pub fn discover_conventions_with_config(
     group_name: &str,
     glob_pattern: &str,
@@ -853,7 +840,20 @@ pub fn check_signature_consistency(conventions: &mut [Convention], root: &Path) 
 mod tests {
     use super::*;
 
-    fn wordpress_like_audit_config() -> AuditConfig {
+    fn discover_conventions(
+        group_name: &str,
+        glob_pattern: &str,
+        fingerprints: &[FileFingerprint],
+    ) -> Option<Convention> {
+        discover_conventions_with_config(
+            group_name,
+            glob_pattern,
+            fingerprints,
+            &AuditConfig::default(),
+        )
+    }
+
+    fn framework_like_audit_config() -> AuditConfig {
         AuditConfig {
             utility_suffixes: vec![
                 "Helper".to_string(),
@@ -958,7 +958,7 @@ mod tests {
             "Abilities",
             "abilities/*.php",
             &fingerprints,
-            &wordpress_like_audit_config(),
+            &framework_like_audit_config(),
         )
         .unwrap();
 
@@ -1038,7 +1038,7 @@ mod tests {
             "Chat",
             "chat/*.php",
             &fingerprints,
-            &wordpress_like_audit_config(),
+            &framework_like_audit_config(),
         )
         .unwrap();
         assert!(
@@ -1057,38 +1057,38 @@ mod tests {
     }
 
     #[test]
-    fn rest_utility_classes_do_not_need_route_registration() {
+    fn utility_classes_do_not_need_dispatch_registration() {
         let fingerprints = vec![
             FileFingerprint {
-                relative_path: "api/PostsController.php".to_string(),
+                relative_path: "endpoints/PostsEndpoint.php".to_string(),
                 language: Language::Php,
-                methods: vec!["register_routes".to_string()],
-                registrations: vec!["rest_api_init".to_string()],
-                type_name: Some("PostsController".to_string()),
+                methods: vec!["register".to_string()],
+                registrations: vec!["runtime_dispatch".to_string()],
+                type_name: Some("PostsEndpoint".to_string()),
                 ..Default::default()
             },
             FileFingerprint {
-                relative_path: "api/PagesController.php".to_string(),
+                relative_path: "endpoints/PagesEndpoint.php".to_string(),
                 language: Language::Php,
-                methods: vec!["register_routes".to_string()],
-                registrations: vec!["rest_api_init".to_string()],
-                type_name: Some("PagesController".to_string()),
+                methods: vec!["register".to_string()],
+                registrations: vec!["runtime_dispatch".to_string()],
+                type_name: Some("PagesEndpoint".to_string()),
                 ..Default::default()
             },
             FileFingerprint {
-                relative_path: "api/WebhookVerifier.php".to_string(),
+                relative_path: "endpoints/SignatureVerifier.php".to_string(),
                 language: Language::Php,
                 methods: vec!["verify".to_string()],
-                type_name: Some("WebhookVerifier".to_string()),
+                type_name: Some("SignatureVerifier".to_string()),
                 ..Default::default()
             },
         ];
 
         let convention = discover_conventions_with_config(
             "Api",
-            "api/*.php",
+            "endpoints/*.php",
             &fingerprints,
-            &wordpress_like_audit_config(),
+            &framework_like_audit_config(),
         )
         .unwrap();
         assert!(
@@ -1098,7 +1098,7 @@ mod tests {
                 .flat_map(|o| &o.deviations)
                 .all(|d| d.kind != AuditFinding::MissingRegistration
                     && d.kind != AuditFinding::MissingMethod),
-            "REST utility classes should not be treated as endpoint registrants"
+            "utility classes should not be treated as runtime endpoint registrants"
         );
     }
 
@@ -1132,7 +1132,7 @@ mod tests {
             "Chat",
             "chat/*.php",
             &fingerprints,
-            &wordpress_like_audit_config(),
+            &framework_like_audit_config(),
         )
         .unwrap();
         assert!(

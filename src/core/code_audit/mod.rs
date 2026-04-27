@@ -241,11 +241,27 @@ pub fn audit_path_scoped(
 }
 
 fn audit_config_for(component_id: &str, root: &Path) -> AuditConfig {
-    component::load(component_id)
-        .ok()
-        .and_then(|component| component.audit)
-        .or_else(|| component::discover_from_portable(root).and_then(|component| component.audit))
-        .unwrap_or_default()
+    let component =
+        component::discover_from_portable(root).or_else(|| component::load(component_id).ok());
+    let mut audit_config = AuditConfig::default();
+
+    if let Some(component) = &component {
+        if let Some(extensions) = &component.extensions {
+            for extension_id in extensions.keys() {
+                if let Ok(manifest) = crate::extension::load_extension(extension_id) {
+                    if let Some(rules) = manifest.audit_detector_rules() {
+                        audit_config.merge(rules);
+                    }
+                }
+            }
+        }
+
+        if let Some(component_rules) = &component.audit {
+            audit_config.merge(component_rules);
+        }
+    }
+
+    audit_config
 }
 
 /// Internal audit implementation supporting optional file scoping and impact tracing.

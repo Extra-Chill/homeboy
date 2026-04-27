@@ -53,14 +53,7 @@ fn build_caller_map(
 ///
 /// `reference` fingerprints contribute calls and imports to the cross-reference
 /// set but are NOT checked for dead code themselves. This prevents false positives
-/// when framework source (e.g. WordPress core) is included as a reference dependency.
-pub(crate) fn analyze_dead_code(
-    owned: &[&FileFingerprint],
-    reference: &[&FileFingerprint],
-) -> Vec<Finding> {
-    analyze_dead_code_with_config(owned, reference, &AuditConfig::default())
-}
-
+/// when framework source is included as a reference dependency.
 pub(crate) fn analyze_dead_code_with_config(
     owned: &[&FileFingerprint],
     reference: &[&FileFingerprint],
@@ -141,19 +134,17 @@ pub(crate) fn analyze_dead_code_with_config(
             for export in &fp.public_api {
                 // Skip if this function is registered as a hook/callback target
                 // from within this same file. Such functions ARE referenced —
-                // just by the framework runtime (WordPress hook system, REST
-                // route callbacks, activation hooks, block render callbacks,
-                // etc.) rather than by direct calls from other source files.
-                // (homeboy#1149 — WP plugin bootstrap files)
+                // just by the framework runtime rather than by direct calls
+                // from other source files.
+                // (homeboy#1149 — runtime bootstrap files)
                 if fp.hook_callbacks.contains(export) {
                     continue;
                 }
 
                 // For languages without finer visibility, same-file direct
-                // calls count as references. This catches WP plugin bootstrap
-                // patterns where a top-level helper is called from the main
-                // plugin file (e.g., the top-level WPINC guard that runs
-                // `datamachine_check_requirements()` before continuing).
+                // calls count as references. This catches bootstrap patterns
+                // where a top-level helper is called from the entry file before
+                // continuing.
                 if language_allows_self_reference && fp.internal_calls.contains(export) {
                     continue;
                 }
@@ -449,6 +440,13 @@ mod tests {
             public_api: public_api.into_iter().map(String::from).collect(),
             ..Default::default()
         }
+    }
+
+    fn analyze_dead_code(
+        owned: &[&FileFingerprint],
+        reference: &[&FileFingerprint],
+    ) -> Vec<Finding> {
+        analyze_dead_code_with_config(owned, reference, &AuditConfig::default())
     }
 
     #[test]
@@ -762,7 +760,7 @@ mod tests {
         // Framework has an export that nobody calls — should NOT be flagged
         // because framework fingerprints are reference-only.
         let framework_fp = make_fingerprint(
-            "wp-includes/internal.php",
+            "vendor/framework/internal.php",
             vec!["internal_helper"],
             vec!["internal_helper"],
             vec![],
@@ -779,18 +777,18 @@ mod tests {
 
     #[test]
     fn php_hook_callback_suppresses_unreferenced_export() {
-        // data-machine.php pattern: function is defined and registered as a
-        // WordPress hook callback in the same file. The hook system invokes
-        // it, but no other file has a direct call. This is NOT dead code.
+        // Runtime-callback pattern: function is defined and registered as a
+        // callback in the same file. The dispatcher invokes it, but no other
+        // file has a direct call. This is NOT dead code.
         let mut fp = make_fingerprint(
-            "data-machine.php",
-            vec!["datamachine_activate_plugin"],
-            vec!["datamachine_activate_plugin"],
+            "plugin.php",
+            vec!["activate_plugin"],
+            vec!["activate_plugin"],
             vec![], // no self-calls
             vec![],
         );
         fp.language = Language::Php;
-        fp.hook_callbacks = vec!["datamachine_activate_plugin".to_string()];
+        fp.hook_callbacks = vec!["activate_plugin".to_string()];
 
         let findings = analyze_dead_code(&[&fp], &[]);
         let unreferenced: Vec<&Finding> = findings
@@ -809,16 +807,16 @@ mod tests {
 
     #[test]
     fn php_same_file_internal_call_suppresses_unreferenced_export() {
-        // data-machine.php pattern: top-level bootstrap file calls its own
-        // helper functions directly. PHP has no finer visibility than
-        // "public" for top-level functions, so "make it private" is not
-        // actionable advice — the reference IS the justification for export.
+        // Top-level bootstrap pattern: the file calls its own helper functions
+        // directly. PHP has no finer visibility than "public" for top-level
+        // functions, so "make it private" is not actionable advice — the
+        // reference IS the justification for export.
         let mut fp = make_fingerprint(
-            "data-machine.php",
-            vec!["datamachine_check_requirements"],
-            vec!["datamachine_check_requirements"],
-            // Same-file call (e.g., line-20 WPINC guard)
-            vec!["datamachine_check_requirements"],
+            "plugin.php",
+            vec!["check_runtime_requirements"],
+            vec!["check_runtime_requirements"],
+            // Same-file call from bootstrap guard.
+            vec!["check_runtime_requirements"],
             vec![],
         );
         fp.language = Language::Php;
@@ -866,26 +864,22 @@ mod tests {
     }
 
     #[test]
-    fn configured_runtime_command_methods_are_entry_points() {
+    fn configured_runtime_dispatched_methods_are_entry_points() {
         let mut fp = make_fingerprint(
-            "inc/Cli/Commands/EmailCommand.php",
+            "src/Commands/EmailCommand.php",
             vec!["test_connection"],
             vec!["test_connection"],
             vec![],
             vec![],
         );
         fp.language = Language::Php;
-        fp.extends = Some("BaseCommand".to_string());
+        fp.extends = Some("RuntimeCommand".to_string());
         fp.content = r#"<?php
-class EmailCommand extends BaseCommand {
+class EmailCommand extends RuntimeCommand {
     /**
      * Test the IMAP connection.
      *
-     * ## EXAMPLES
-     *
-     *     wp datamachine email test-connection
-     *
-     * @subcommand test-connection
+     * @runtime-entrypoint test-connection
      */
     public function test_connection( array $args, array $assoc_args ): void {}
 }
@@ -893,8 +887,8 @@ class EmailCommand extends BaseCommand {
         .to_string();
 
         let config = AuditConfig {
-            runtime_entrypoint_extends: vec!["BaseCommand".to_string()],
-            runtime_entrypoint_markers: vec!["@subcommand".to_string(), "## EXAMPLES".to_string()],
+            runtime_entrypoint_extends: vec!["RuntimeCommand".to_string()],
+            runtime_entrypoint_markers: vec!["@runtime-entrypoint".to_string()],
             ..Default::default()
         };
 
@@ -905,7 +899,7 @@ class EmailCommand extends BaseCommand {
             .collect();
         assert!(
             unreferenced.is_empty(),
-            "WP-CLI public subcommands are invoked by runtime dispatch"
+            "configured runtime-dispatched methods are invoked by the runtime"
         );
     }
 }
