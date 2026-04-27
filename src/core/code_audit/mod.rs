@@ -36,6 +36,7 @@ mod layer_ownership;
 pub(crate) mod naming;
 mod repeated_literal_shape;
 pub mod report;
+mod requested_detectors;
 mod requirements;
 pub mod run;
 mod shadow_modules;
@@ -577,6 +578,17 @@ fn audit_internal(
             dead_guard_findings.len()
         );
         all_findings.extend(dead_guard_findings);
+    }
+
+    // Phase 4t: Requested drift detectors for common WordPress/PHP hazards.
+    let requested_findings = requested_detectors::run(&all_fingerprints);
+    if !requested_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Requested detectors: {} finding(s) (JSON LIKE, slug literal, option-scope drift)",
+            requested_findings.len()
+        );
+        all_findings.extend(requested_findings);
     }
 
     // Phase 4s: Shared scaffolding detection — groups of classes sharing the

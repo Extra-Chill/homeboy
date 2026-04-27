@@ -200,6 +200,15 @@ pub enum AuditFinding {
     /// method-shape (same method names + visibilities + order) and have high
     /// per-method body similarity — candidates for a shared base class.
     SharedScaffolding,
+    /// SQL uses LIKE to match exact JSON key/value semantics in a blob column
+    /// such as metadata, engine_data, config, or payload.
+    JsonLikeExactMatch,
+    /// String literal duplicates a slug value that is already centralized in a
+    /// class constant, making drift possible despite the constant existing.
+    ConstantBackedSlugLiteral,
+    /// Comments/docblocks promise network/site-option storage while nearby code
+    /// uses single-site get_option/update_option calls.
+    OptionScopeDrift,
 }
 
 impl AuditFinding {
@@ -247,6 +256,9 @@ impl AuditFinding {
             "dead_guard",
             "upstream_workaround",
             "shared_scaffolding",
+            "json_like_exact_match",
+            "constant_backed_slug_literal",
+            "option_scope_drift",
         ]
     }
 }
