@@ -43,8 +43,10 @@ assert_true("tests" in mapping.get("test_dirs", []), "missing lowercase tests di
 assert_true("Tests" in mapping.get("test_dirs", []), "missing uppercase Tests dir")
 assert_true(mapping.get("test_file_pattern") == "{dir}/{name}Tests.{ext}", "unexpected test file pattern")
 
-for key in ["lint", "scripts"]:
-    assert_true(key not in manifest, f"#{key} belongs to a later PR")
+capabilities = provides.get("capabilities", [])
+assert_true("validate" in capabilities, "missing validate capability")
+assert_true(manifest.get("scripts", {}).get("validate") == "scripts/validate.sh", "missing validate script")
+assert_true(manifest.get("lint", {}).get("extension_script") == "scripts/lint-runner.sh", "missing lint runner")
 
 print("swift manifest smoke passed")
 PY
