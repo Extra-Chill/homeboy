@@ -135,6 +135,17 @@ Each stage's `output` field carries the same structured payload that running
 PR-comment primitive, CI wrappers) can render per-stage detail without needing
 a separate invocation.
 
+For CI artifact consumers and PR review agents, prefer writing this envelope to a
+file with the global `--output` flag:
+
+```bash
+homeboy --output "$RUNNER_TEMP/homeboy-results/review.json" \
+  review my-plugin --path "$GITHUB_WORKSPACE" --changed-since=origin/main --summary
+```
+
+See [CI result JSON contract](../architecture/ci-results-contract.md) for the
+recommended `homeboy-ci-results` artifact layout and consumer rules.
+
 ## Output formats
 
 `review` supports two output shapes, selected via `--report`.

@@ -20,6 +20,7 @@ Homeboy is a config-driven automation engine for development and deployment auto
 - Performance benchmarks with baseline ratchet: [bench](commands/bench.md)
 - API authentication scoped per project: [auth](commands/auth.md)
 - JSON output envelope: [JSON output contract](architecture/output-system.md)
+- CI artifact payload for PR review agents: [CI result JSON contract](architecture/ci-results-contract.md)
 - Embedded docs behavior: [Embedded docs topic resolution](architecture/embedded-docs-topic-resolution.md)
 - Changelog content: [Changelog](changelog.md)
 - Template variables: [Template variables reference](templates.md)

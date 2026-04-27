@@ -165,5 +165,6 @@ Commands using this primitive:
 
 ## Related
 
+- [CI result JSON contract](ci-results-contract.md)
 - [Docs command JSON](../commands/docs.md)
 - [Changelog command JSON](../commands/changelog.md)
