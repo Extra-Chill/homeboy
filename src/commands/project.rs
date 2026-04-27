@@ -1,5 +1,4 @@
 use clap::{Args, Subcommand, ValueEnum};
-use homeboy::log_status;
 use std::path::Path;
 
 use super::CmdResult;
@@ -438,7 +437,7 @@ fn map_pin_type(pin_type: ProjectPinType) -> project::PinType {
 }
 
 fn status(project_id: &str, health_only: bool) -> CmdResult<ProjectOutput> {
-    log_status!("project", "Checking '{}'...", project_id);
+    homeboy::log_status!("project", "Checking '{}'...", project_id);
 
     Ok((
         project::build_status_output(project_id, project::status_report(project_id, health_only)?),

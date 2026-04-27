@@ -1,6 +1,7 @@
-use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
 
-use commands::GlobalArgs;
+use homeboy::commands::surface::{Cli, Commands};
+use homeboy::commands::GlobalArgs;
 
 #[derive(Debug, Clone, Copy)]
 enum ResponseMode {
@@ -15,121 +16,10 @@ enum RawOutputMode {
     PlainText,
 }
 
-mod commands;
-mod help_topics;
-
-use commands::utils::{args, entity_suggest, response as output, tty};
-use commands::{
-    api, audit, auth, bench, build, changelog, changes, cli, component, config, db, deploy,
-    extension, file, fleet, git, init, issues, lint, logs, project, refactor, release, review, rig,
-    server, ssh, stack, status, test, transfer, triage, undo, upgrade, validate, version,
-};
+use homeboy::commands;
+use homeboy::commands::utils::{args, entity_suggest, response as output, tty};
+use homeboy::commands::{changelog, cli, file, logs, review};
 use homeboy::extension::load_all_extensions;
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-#[derive(Parser)]
-#[command(name = "homeboy")]
-#[command(version = VERSION)]
-#[command(about = "CLI tool for development and deployment automation")]
-struct Cli {
-    /// Write structured JSON output to a file (in addition to stdout).
-    /// The file contains only the JSON envelope — no log text, no timestamps.
-    #[arg(long, global = true, value_name = "PATH")]
-    output: Option<String>,
-
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Manage project configuration
-    #[command(visible_alias = "projects")]
-    Project(project::ProjectArgs),
-    /// SSH into a project server or configured server
-    Ssh(ssh::SshArgs),
-    /// Manage SSH server configurations
-    #[command(visible_alias = "servers")]
-    Server(server::ServerArgs),
-    /// Run tests for a component
-    Test(test::TestArgs),
-    /// Run performance benchmarks for a component
-    Bench(bench::BenchArgs),
-    /// Lint a component
-    Lint(lint::LintArgs),
-    /// Database operations
-    Db(db::DbArgs),
-    /// Remote file operations
-    File(file::FileArgs),
-    /// Manage fleets (groups of projects)
-    #[command(visible_alias = "fleets")]
-    Fleet(fleet::FleetArgs),
-    /// Remote log viewing
-    Logs(logs::LogsArgs),
-    /// Transfer files between servers
-    Transfer(transfer::TransferArgs),
-    /// Read-only attention report for components, projects, fleets, and rigs
-    Triage(triage::TriageArgs),
-    /// Deploy components to remote server
-    Deploy(deploy::DeployArgs),
-    /// Manage standalone component configurations
-    #[command(visible_alias = "components")]
-    Component(component::ComponentArgs),
-    /// Manage global Homeboy configuration
-    Config(config::ConfigArgs),
-    /// Execute CLI-compatible extensions
-    #[command(visible_alias = "extensions")]
-    Extension(extension::ExtensionArgs),
-    /// Deprecated alias for `status --full`
-    #[command(hide = true)]
-    Init(init::InitArgs),
-    /// Actionable component status overview
-    Status(status::StatusArgs),
-    /// Display CLI documentation
-    Docs(crate::commands::docs::DocsArgs),
-    /// Changelog operations
-    Changelog(changelog::ChangelogArgs),
-    /// Git operations for components
-    Git(git::GitArgs),
-    /// Reconcile findings against an issue tracker
-    Issues(issues::IssuesArgs),
-    /// Version management for components
-    Version(version::VersionArgs),
-    /// Build a component
-    Build(build::BuildArgs),
-    /// Validate that code compiles/parses (runs extension scripts.validate)
-    Validate(validate::ValidateArgs),
-    /// Show changes since last version tag
-    Changes(changes::ChangesArgs),
-    /// Plan release workflows
-    Release(release::ReleaseArgs),
-    /// Run scoped audit + lint + test umbrella against PR-style changes
-    Review(review::ReviewArgs),
-    /// Audit code conventions and detect architectural drift
-    Audit(audit::AuditArgs),
-    /// Structural refactoring (rename terms across codebase)
-    Refactor(refactor::RefactorArgs),
-    /// Manage local dev rigs (reproducible multi-component environments)
-    #[command(visible_alias = "rigs")]
-    Rig(rig::RigArgs),
-    /// Manage stacks (combined-fixes branches built from base + cherry-picked PRs)
-    #[command(visible_alias = "stacks")]
-    Stack(stack::StackArgs),
-    /// Undo the last write operation (audit fix, refactor, etc.)
-    Undo(undo::UndoArgs),
-    /// Authenticate with a project's API
-    Auth(auth::AuthArgs),
-    /// Make API requests to a project
-    Api(api::ApiArgs),
-    /// Upgrade Homeboy to the latest version
-    Upgrade(upgrade::UpgradeArgs),
-    /// Alias for upgrade
-    #[command(hide = true)]
-    Update(upgrade::UpgradeArgs),
-    /// List available commands (alias for --help)
-    List,
-}
 
 fn response_mode(command: &Commands) -> ResponseMode {
     match command {
@@ -142,7 +32,7 @@ fn response_mode(command: &Commands) -> ResponseMode {
         Commands::File(args) if file::is_raw_read(args) => {
             ResponseMode::Raw(RawOutputMode::PlainText)
         }
-        Commands::Docs(args) if crate::commands::docs::is_json_mode(args) => ResponseMode::Json,
+        Commands::Docs(args) if homeboy::commands::docs::is_json_mode(args) => ResponseMode::Json,
         Commands::Docs(_) => ResponseMode::Raw(RawOutputMode::Markdown),
         Commands::Changelog(args) if changelog::is_show_markdown(args) => {
             ResponseMode::Raw(RawOutputMode::Markdown)
@@ -363,7 +253,7 @@ fn main() -> std::process::ExitCode {
     }
 
     if let ResponseMode::Raw(RawOutputMode::PlainText) = mode {
-        if let crate::Commands::File(args) = cli.command {
+        if let Commands::File(args) = cli.command {
             let result = file::run(args, &global);
             match result {
                 Ok((file::FileCommandOutput::Raw(content), exit_code)) => {
