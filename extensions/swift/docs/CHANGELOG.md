@@ -2,6 +2,14 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.2.0] - 2026-04-27
+
+### Added
+- add manifest discovery and audit grammar
+
+### Fixed
+- harden script test runner
+
 ## [2.1.0] - 2026-03-21
 
 ### Added
