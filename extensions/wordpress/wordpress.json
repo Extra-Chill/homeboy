@@ -120,14 +120,6 @@
       "DEPLOY_OWNER=$(stat -c '%U:%G' {{install_dir}} 2>/dev/null || stat -f '%Su:%Sg' {{install_dir}} 2>/dev/null) && case \"$DEPLOY_OWNER\" in root:root) echo 'WARNING: {{install_dir}} is owned by root:root. PHP-FPM (www-data) may not be able to read plugin files.' && echo '  Fix: homeboy component set {{component_id}} remote_owner www-data:www-data' ;; esac || true"
     ]
   },
-  "test": {
-    "drift": {
-      "source_dirs": ["src", "inc", "lib"],
-      "test_dirs": ["tests"],
-      "file_extensions": ["php"],
-      "inline_tests": false
-    }
-  },
   "deploy": {
     "remote_path_inference": [
       {
@@ -351,6 +343,12 @@
     "extension_script": "scripts/lint/lint-runner.sh"
   },
   "test": {
+    "drift": {
+      "source_dirs": ["src", "inc", "lib"],
+      "test_dirs": ["tests"],
+      "file_extensions": ["php"],
+      "inline_tests": false
+    },
     "extension_script": "scripts/test/test-runner.sh"
   },
   "bench": {
