@@ -346,6 +346,20 @@ build_run_command() {
   printf '%s\n' "${full_cmd}"
 }
 
+build_review_report_command() {
+  local component_id="$1"
+  local workspace="$2"
+  local full_cmd
+
+  full_cmd="homeboy review ${component_id} --path ${workspace} --report=pr-comment"
+
+  local scope
+  scope="$(scope_flags_for "review")"
+  [ -n "${scope}" ] && full_cmd="${full_cmd} ${scope}"
+
+  printf '%s\n' "${full_cmd}"
+}
+
 command_output_stem() {
   local cmd="$1"
   local stem
@@ -387,4 +401,3 @@ build_autofix_command() {
 
   printf '%s\n' "${full_cmd}"
 }
-

@@ -58,6 +58,11 @@ assert_equals \
   "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
   "audit keeps path with changed-since"
 
+assert_equals \
+  "homeboy review data-machine --path /tmp/workspace --report=pr-comment --changed-since origin/main" \
+  "$(build_review_report_command "${COMPONENT}" "${WORKSPACE}")" \
+  "review report keeps path with changed-since"
+
 EXTRA_ARGS="--format json"
 assert_equals \
   "homeboy audit data-machine --path /tmp/workspace --changed-since origin/main --format json" \
@@ -116,6 +121,11 @@ assert_equals \
   "homeboy refactor data-machine --all --path /tmp/workspace" \
   "$(build_run_command "refactor --all" "${COMPONENT}" "${WORKSPACE}")" \
   "refactor keeps workspace path"
+
+assert_equals \
+  "homeboy review data-machine --path /tmp/workspace --report=pr-comment" \
+  "$(build_review_report_command "${COMPONENT}" "${WORKSPACE}")" \
+  "review report keeps workspace path"
 
 PR_HEAD_REPO="some-contributor/homeboy-action"
 GITHUB_REPOSITORY="Extra-Chill/homeboy-action"

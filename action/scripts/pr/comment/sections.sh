@@ -59,6 +59,48 @@ append_test_scope_section() {
   fi
 }
 
+commands_use_review_report() {
+  local normalized
+  normalized="$(canonicalize_commands "${COMMANDS}")"
+
+  [ "${normalized}" = "audit,lint,test" ] && [ -z "${EXTRA_ARGS:-}" ]
+}
+
+append_review_report_section() {
+  if ! commands_use_review_report; then
+    return 1
+  fi
+
+  local review_cmd review_md review_exit
+  review_cmd="$(build_review_report_command "${COMP_ID}" "${WORKSPACE}")"
+
+  set +e
+  review_md="$(eval "${review_cmd}" 2>/dev/null)"
+  review_exit=$?
+  set -e
+
+  if [ -z "${review_md}" ]; then
+    echo "::warning::homeboy review did not render a PR-comment report; falling back to command summaries."
+    return 1
+  fi
+
+  if [[ "${review_md}" != *"finding(s) across"* ]]; then
+    echo "::warning::homeboy review output was not a PR-comment report; falling back to command summaries."
+    return 1
+  fi
+
+  SECTION_BODY+="${review_md}"$'\n\n'
+
+  # Exit code 1 means the review found issues, which is exactly when the PR
+  # comment is most useful. Exit code >=2 is an execution problem; keep the
+  # rendered diagnostics if core emitted any, but surface a workflow warning.
+  if [ "${review_exit}" -ge 2 ]; then
+    echo "::warning::homeboy review report command exited ${review_exit}; posted rendered diagnostics."
+  fi
+
+  return 0
+}
+
 append_command_sections() {
   IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
 
@@ -90,6 +132,9 @@ build_section_body() {
   SECTION_BODY="### ${SECTION_TITLE}"$'\n\n'
   append_autofix_section
   append_binary_source_section
+  if append_review_report_section; then
+    return 0
+  fi
   append_digest_section
   append_scope_section
   append_test_scope_section
