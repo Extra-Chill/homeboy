@@ -32,6 +32,24 @@ pub struct IssueGroup {
     /// them in. Empty falls back to a minimal "<count> findings" body.
     #[serde(default)]
     pub body: String,
+    /// Whether this category is eligible for tracker issue filing by default.
+    /// Heuristic audit categories are review-only unless callers explicitly
+    /// opt the group into actionable routing.
+    #[serde(default)]
+    pub routing: IssueGroupRouting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueGroupRouting {
+    Actionable,
+    ReviewOnly,
+}
+
+impl Default for IssueGroupRouting {
+    fn default() -> Self {
+        Self::Actionable
+    }
 }
 
 /// One issue from the tracker.
@@ -169,6 +187,9 @@ pub enum ReconcileSkipReason {
     ClosedNotPlannedNoRefresh,
     /// No findings AND no existing open issue → nothing to do.
     NoFindingsNoIssue,
+    /// Findings are still visible in reports, but this category defaults to
+    /// review-only routing and should not create or refresh tracker issues.
+    ReviewOnlyDefault,
 }
 
 /// The full reconciliation plan: every action, in execution order.

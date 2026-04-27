@@ -41,8 +41,8 @@ pub mod tracker;
 
 pub use apply::{apply_plan, ReconcileExecution, ReconcileResult};
 pub use plan::{
-    IssueGroup, ReconcileAction, ReconcileConfig, ReconcilePlan, ReconcileSkipReason, TrackedIssue,
-    TrackedIssueState,
+    IssueGroup, IssueGroupRouting, ReconcileAction, ReconcileConfig, ReconcilePlan,
+    ReconcileSkipReason, TrackedIssue, TrackedIssueState,
 };
 pub use reconcile::reconcile;
 pub use tracker::{GithubTracker, Tracker};

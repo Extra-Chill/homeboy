@@ -11,9 +11,10 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 
+use homeboy::code_audit::{AuditFinding, FindingConfidence};
 use homeboy::issues::{
-    apply_plan, reconcile, GithubTracker, IssueGroup, ReconcileConfig, ReconcilePlan,
-    ReconcileResult, Tracker,
+    apply_plan, reconcile, GithubTracker, IssueGroup, IssueGroupRouting, ReconcileConfig,
+    ReconcilePlan, ReconcileResult, Tracker,
 };
 
 use super::CmdResult;
@@ -53,7 +54,7 @@ enum IssuesCommand {
         ///   "command": "audit",
         ///   "groups": {
         ///     "unreferenced_export": { "count": 57, "label": "unreferenced export", "body": "..." },
-        ///     "god_file": { "count": 23, "label": "god file", "body": "..." }
+        ///     "god_file": { "count": 23, "label": "god file", "body": "...", "routing": "review_only" }
         ///   }
         /// }
         /// ```
@@ -222,6 +223,7 @@ struct GroupRow {
     count: usize,
     label: String,
     body: String,
+    routing: Option<IssueGroupRouting>,
 }
 
 impl FindingsInput {
@@ -231,6 +233,9 @@ impl FindingsInput {
             .map(|(category, row)| IssueGroup {
                 command: self.command.clone(),
                 component_id: component_id.to_string(),
+                routing: row
+                    .routing
+                    .unwrap_or_else(|| default_routing(&self.command, &category)),
                 category,
                 count: row.count,
                 label: row.label,
@@ -238,6 +243,21 @@ impl FindingsInput {
             })
             .collect()
     }
+}
+
+fn default_routing(command: &str, category: &str) -> IssueGroupRouting {
+    if command != "audit" {
+        return IssueGroupRouting::Actionable;
+    }
+
+    category
+        .parse::<AuditFinding>()
+        .ok()
+        .and_then(|finding| match finding.confidence() {
+            FindingConfidence::Heuristic => Some(IssueGroupRouting::ReviewOnly),
+            FindingConfidence::Structural | FindingConfidence::Graph => None,
+        })
+        .unwrap_or(IssueGroupRouting::Actionable)
 }
 
 fn read_findings(path: &str) -> homeboy::Result<FindingsInput> {
@@ -327,11 +347,41 @@ fn parse_findings_value(value: Value) -> homeboy::Result<FindingsInput> {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            groups.insert(category.clone(), GroupRow { count, label, body });
+            let routing = row_obj
+                .get("routing")
+                .or_else(|| row_obj.get("issue_routing"))
+                .and_then(|v| v.as_str())
+                .map(parse_issue_routing)
+                .transpose()?;
+            groups.insert(
+                category.clone(),
+                GroupRow {
+                    count,
+                    label,
+                    body,
+                    routing,
+                },
+            );
         }
     }
 
     Ok(FindingsInput { command, groups })
+}
+
+fn parse_issue_routing(value: &str) -> homeboy::Result<IssueGroupRouting> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "actionable" => Ok(IssueGroupRouting::Actionable),
+        "review_only" => Ok(IssueGroupRouting::ReviewOnly),
+        other => Err(homeboy::Error::validation_invalid_argument(
+            "findings.groups.*.routing",
+            &format!(
+                "unknown issue routing '{}'; expected 'actionable' or 'review_only'",
+                other
+            ),
+            None,
+            None,
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -486,5 +536,72 @@ fn summarize_plan(plan: &ReconcilePlan) -> PlanSummary {
         close: counts.close,
         close_duplicate: counts.close_duplicate,
         skip: counts.skip,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn audit_heuristic_categories_default_to_review_only_routing() {
+        let input = parse_findings_value(json!({
+            "command": "audit",
+            "groups": {
+                "god_file": { "count": 4 },
+                "repeated_field_pattern": { "count": 9 },
+                "compiler_warning": { "count": 1 },
+                "unreferenced_export": { "count": 2 }
+            }
+        }))
+        .expect("parse findings");
+
+        let groups = input.into_groups("homeboy");
+        let routing = groups
+            .iter()
+            .map(|g| (g.category.as_str(), g.routing))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(routing["god_file"], IssueGroupRouting::ReviewOnly);
+        assert_eq!(
+            routing["repeated_field_pattern"],
+            IssueGroupRouting::ReviewOnly
+        );
+        assert_eq!(routing["compiler_warning"], IssueGroupRouting::Actionable);
+        assert_eq!(
+            routing["unreferenced_export"],
+            IssueGroupRouting::Actionable
+        );
+    }
+
+    #[test]
+    fn explicit_routing_overrides_confidence_default() {
+        let input = parse_findings_value(json!({
+            "command": "audit",
+            "groups": {
+                "repeated_field_pattern": {
+                    "count": 9,
+                    "routing": "actionable"
+                },
+                "compiler_warning": {
+                    "count": 1,
+                    "routing": "review_only"
+                }
+            }
+        }))
+        .expect("parse findings");
+
+        let groups = input.into_groups("homeboy");
+        let routing = groups
+            .iter()
+            .map(|g| (g.category.as_str(), g.routing))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            routing["repeated_field_pattern"],
+            IssueGroupRouting::Actionable
+        );
+        assert_eq!(routing["compiler_warning"], IssueGroupRouting::ReviewOnly);
     }
 }

@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use super::plan::{
-    IssueGroup, ReconcileAction, ReconcileConfig, ReconcilePlan, ReconcileSkipReason, TrackedIssue,
-    TrackedIssueState,
+    IssueGroup, IssueGroupRouting, ReconcileAction, ReconcileConfig, ReconcilePlan,
+    ReconcileSkipReason, TrackedIssue, TrackedIssueState,
 };
 
 /// Run the 8-row behavior contract over every group.
@@ -105,6 +105,15 @@ pub fn reconcile(
         }
 
         // count > 0 from here.
+        if group.routing == IssueGroupRouting::ReviewOnly {
+            actions.push(ReconcileAction::Skip {
+                category: group.category.clone(),
+                component_id: group.component_id.clone(),
+                reason: ReconcileSkipReason::ReviewOnlyDefault,
+            });
+            continue;
+        }
+
         if !open_matches.is_empty() {
             // Update the lowest-numbered open match.
             let keep = open_matches[0].number;
@@ -285,6 +294,14 @@ mod tests {
             count,
             label: String::new(),
             body: format!("count={}", count),
+            routing: IssueGroupRouting::Actionable,
+        }
+    }
+
+    fn review_only_group(category: &str, count: usize) -> IssueGroup {
+        IssueGroup {
+            routing: IssueGroupRouting::ReviewOnly,
+            ..group(category, count)
         }
     }
 
@@ -500,6 +517,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn review_only_group_with_findings_skips_issue_actions() {
+        let groups = vec![review_only_group("repeated_field_pattern", 18)];
+        let existing = vec![issue(
+            1622,
+            "repeated field pattern",
+            TrackedIssueState::Open,
+            18,
+        )];
+
+        let plan = reconcile(&groups, &existing, &cfg());
+        assert_eq!(plan.actions.len(), 1);
+        match &plan.actions[0] {
+            ReconcileAction::Skip {
+                reason, category, ..
+            } => {
+                assert_eq!(*reason, ReconcileSkipReason::ReviewOnlyDefault);
+                assert_eq!(category, "repeated_field_pattern");
+            }
+            other => panic!("expected review-only Skip, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn review_only_group_with_zero_findings_still_closes_existing_open_issue() {
+        let groups = vec![review_only_group("repeated_field_pattern", 0)];
+        let existing = vec![issue(
+            1622,
+            "repeated field pattern",
+            TrackedIssueState::Open,
+            18,
+        )];
+
+        let plan = reconcile(&groups, &existing, &cfg());
+        assert_eq!(plan.actions.len(), 1);
+        assert!(matches!(
+            &plan.actions[0],
+            ReconcileAction::Close {
+                number: 1622,
+                category,
+                ..
+            } if category == "repeated_field_pattern"
+        ));
+    }
+
     // ----------------------------------------------- precedence ladder
 
     #[test]
@@ -624,6 +686,7 @@ mod tests {
             count: 1,
             label: String::new(),
             body: String::new(),
+            routing: IssueGroupRouting::Actionable,
         }];
         let plan = reconcile(&groups, &[], &cfg());
         match &plan.actions[0] {
@@ -643,6 +706,7 @@ mod tests {
             count: 3,
             label: "i18n / l10n".into(),
             body: String::new(),
+            routing: IssueGroupRouting::Actionable,
         }];
         let plan = reconcile(&groups, &[], &cfg());
         match &plan.actions[0] {
