@@ -28,6 +28,7 @@ pub mod source;
 pub mod spec;
 pub mod stack;
 pub mod state;
+pub mod toolchain;
 
 pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
 pub use install::{

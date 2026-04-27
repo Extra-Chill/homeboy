@@ -21,6 +21,7 @@ use super::spec::{
 };
 use super::stack as rig_stack;
 use super::state::{now_rfc3339, RigState, SharedPathState};
+use super::toolchain;
 use crate::error::{Error, Result};
 
 /// Result of one pipeline step.
@@ -423,13 +424,20 @@ fn run_command_step(
     env: &HashMap<String, String>,
 ) -> Result<()> {
     let expanded = expand_vars(rig, cmd);
-    let mut command = Command::new("sh");
+    let mut command = Command::new(command_step_shell());
     command.arg("-c").arg(&expanded);
 
     if let Some(cwd) = cwd {
         let resolved = expand_vars(rig, cwd);
         command.current_dir(PathBuf::from(resolved));
     }
+
+    if !env.contains_key("PATH") {
+        if let Some(path) = toolchain::command_step_path() {
+            command.env("PATH", path);
+        }
+    }
+
     for (k, v) in env {
         command.env(k, expand_vars(rig, v));
     }
@@ -443,13 +451,29 @@ fn run_command_step(
     })?;
 
     if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        let hint = if code == 127 {
+            ": command not found. Rig command steps bootstrap common toolchain PATHs automatically; if the tool lives elsewhere, set env.PATH for this step or prefer a typed build/git/check step"
+        } else {
+            ""
+        };
         return Err(Error::rig_pipeline_failed(
             &rig.id,
             "command",
-            format!("`{}` exited {}", expanded, status.code().unwrap_or(-1)),
+            format!("`{}` exited {}{}", expanded, code, hint),
         ));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn command_step_shell() -> &'static str {
+    "/bin/sh"
+}
+
+#[cfg(not(unix))]
+fn command_step_shell() -> &'static str {
+    "sh"
 }
 
 fn run_symlink_step(rig: &RigSpec, op: SymlinkOp) -> Result<()> {
@@ -517,6 +541,99 @@ fn create_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
         std::io::ErrorKind::Unsupported,
         "rig symlinks are not supported on this platform (Unix only)",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::fs;
+
+    use super::run_pipeline;
+    use crate::rig::spec::{PipelineStep, RigSpec};
+    use crate::rig::toolchain;
+
+    fn rig_with_command(cmd: String, env: HashMap<String, String>) -> RigSpec {
+        let mut pipeline = HashMap::new();
+        pipeline.insert(
+            "up".to_string(),
+            vec![PipelineStep::Command {
+                step_id: None,
+                depends_on: Vec::new(),
+                cmd,
+                cwd: None,
+                env,
+                label: Some("command".to_string()),
+            }],
+        );
+
+        RigSpec {
+            id: "command-env-test".to_string(),
+            description: String::new(),
+            components: Default::default(),
+            services: Default::default(),
+            symlinks: Vec::new(),
+            shared_paths: Vec::new(),
+            resources: Default::default(),
+            pipeline,
+            bench: None,
+            app_launcher: None,
+            bench_workloads: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_command_step_explicit_path_env_wins() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path_file = tmp.path().join("path.txt");
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), "/tmp/explicit-toolchain".to_string());
+
+        let rig = rig_with_command(
+            format!("printf '%s' \"$PATH\" > {}", path_file.to_string_lossy()),
+            env,
+        );
+        let outcome = run_pipeline(&rig, "up", true).expect("pipeline");
+
+        assert!(outcome.is_success(), "outcomes: {:?}", outcome.steps);
+        assert_eq!(
+            fs::read_to_string(path_file).expect("path file"),
+            "/tmp/explicit-toolchain"
+        );
+    }
+
+    #[test]
+    fn test_command_step_uses_bootstrapped_toolchain_path() {
+        let expected = toolchain::command_step_path().expect("toolchain path");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path_file = tmp.path().join("path.txt");
+
+        let rig = rig_with_command(
+            format!("printf '%s' \"$PATH\" > {}", path_file.to_string_lossy()),
+            HashMap::new(),
+        );
+        let outcome = run_pipeline(&rig, "up", true).expect("pipeline");
+
+        assert!(outcome.is_success(), "outcomes: {:?}", outcome.steps);
+        assert_eq!(
+            fs::read_to_string(path_file).expect("path file"),
+            expected.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn test_command_step_exit_127_mentions_path_contract() {
+        let rig = rig_with_command(
+            "definitely-not-a-homeboy-test-command-1758 2>/dev/null".to_string(),
+            HashMap::new(),
+        );
+        let outcome = run_pipeline(&rig, "up", true).expect("pipeline report");
+
+        assert!(!outcome.is_success());
+        let error = outcome.steps[0].error.as_deref().expect("error");
+        assert!(error.contains("exited 127"), "{error}");
+        assert!(error.contains("command not found"), "{error}");
+        assert!(error.contains("env.PATH"), "{error}");
+    }
 }
 
 fn verify_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<()> {
