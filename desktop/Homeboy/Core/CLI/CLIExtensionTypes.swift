@@ -1,6 +1,6 @@
 import Foundation
 
-/// Extension entry from `homeboy extension list --json`
+/// Extension entry from `homeboy extension list`
 /// Matches the CLI's ExtensionEntry struct output
 struct CLIExtensionEntry: Decodable, Identifiable {
     let id: String
@@ -10,10 +10,15 @@ struct CLIExtensionEntry: Decodable, Identifiable {
     let runtime: String  // "executable" or "platform"
     let compatible: Bool
     let ready: Bool
-    let configured: Bool
+    let configured: Bool?
     let linked: Bool
     let path: String  // Extension directory path for manifest reading
     let actions: [CLIExtensionAction]?  // Present when extension defines actions
+    let hasReadyCheck: Bool?
+    let hasSetup: Bool?
+    let cliDisplayName: String?
+    let cliTool: String?
+    let sourceRevision: String?
 }
 
 struct CLIExtensionAction: Decodable {
@@ -22,7 +27,7 @@ struct CLIExtensionAction: Decodable {
     let type: String
 }
 
-/// Response wrapper for `homeboy extension list --json`
+/// Response wrapper for `homeboy extension list`
 struct CLIExtensionListResponse: Decodable {
     let success: Bool
     let data: CLIExtensionListData?
@@ -30,6 +35,7 @@ struct CLIExtensionListResponse: Decodable {
 }
 
 struct CLIExtensionListData: Decodable {
+    let command: String?
     let projectId: String?
     let extensions: [CLIExtensionEntry]
 }

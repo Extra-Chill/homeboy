@@ -98,13 +98,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
         error = nil
 
         do {
-            let projectId = ConfigurationManager.shared.activeProject?.id
-            var args = ["extension", "list", "--json"]
-            if let project = projectId {
-                args += ["--project", project]
-            }
-
-            let response = try await CLIBridge.shared.execute(args)
+            let response = try await CLIBridge.shared.execute(["extension", "list"])
             let result = try response.decodeResponse(CLIExtensionListData.self)
 
             guard result.success, let data = result.data else {
@@ -208,7 +202,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
 
     /// Unlinks a linked extension (uses uninstall which handles symlinks)
     func unlinkExtension(extensionId: String) async throws {
-        let args = ["extension", "uninstall", extensionId, "--force"]
+        let args = ["extension", "uninstall", extensionId]
         let response = try await CLIBridge.shared.execute(args)
 
         guard response.success else {
@@ -220,7 +214,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
 
     /// Uninstalls a extension via CLI
     func uninstallExtension(extensionId: String) async throws {
-        let args = ["extension", "uninstall", extensionId, "--force"]
+        let args = ["extension", "uninstall", extensionId]
         let response = try await CLIBridge.shared.execute(args)
 
         guard response.success else {
@@ -248,15 +242,11 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
     func runExtension(
         extensionId: String,
         inputs: [String: String],
-        projectId: String?,
         onOutput: @escaping (String) -> Void
     ) async {
         var args = ["extension", "run", extensionId]
-        if let project = projectId {
-            args += ["--project", project]
-        }
-        for (key, value) in inputs {
-            args += ["--input", "\(key)=\(value)"]
+        for (key, value) in inputs.sorted(by: { $0.key < $1.key }) {
+            args.append("\(key)=\(value)")
         }
 
         let stream = await CLIBridge.shared.executeStreaming(args)

@@ -52,6 +52,39 @@ struct ComponentListItemCLI: Decodable {
     let buildArtifact: String?
 }
 
+// MARK: - Extension List Types (mirror CLIExtensionTypes.swift)
+
+struct ExtensionListOutput: Decodable {
+    let command: String?
+    let projectId: String?
+    let extensions: [ExtensionListItemCLI]
+}
+
+struct ExtensionListItemCLI: Decodable {
+    let id: String
+    let name: String
+    let version: String
+    let description: String
+    let runtime: String
+    let compatible: Bool
+    let ready: Bool
+    let configured: Bool?
+    let linked: Bool
+    let path: String
+    let actions: [ExtensionActionCLI]?
+    let hasReadyCheck: Bool?
+    let hasSetup: Bool?
+    let cliDisplayName: String?
+    let cliTool: String?
+    let sourceRevision: String?
+}
+
+struct ExtensionActionCLI: Decodable {
+    let id: String
+    let label: String
+    let type: String
+}
+
 // MARK: - Database Output Types (mirror HomeboyCLI.swift)
 
 struct DbOutput: Decodable {
@@ -140,6 +173,9 @@ func runTests(testDir: String) throws {
 
     // Test 9: HomeboyCLI helper command shapes
     try testHomeboyCLIHelperCommandShapes()
+
+    // Test 10: extension-list.json parsing
+    try testExtensionList(fixturesDir: fixturesDir, decoder: decoder)
 
     print("")
     print("All contract tests passed")
@@ -599,6 +635,71 @@ func testHomeboyCLIHelperCommandShapes() throws {
     try requireNotContains(#"\(context)"#,
         "helper commands do not pass literal context interpolation templates", code: 91)
 
+    print("")
+}
+
+func testExtensionList(fixturesDir: String, decoder: JSONDecoder) throws {
+    print("Test: extension-list.json")
+    print("-------------------------")
+
+    let fixture = URL(fileURLWithPath: "\(fixturesDir)/extension-list.json")
+
+    guard FileManager.default.fileExists(atPath: fixture.path) else {
+        throw NSError(domain: "ContractTest", code: 70,
+            userInfo: [NSLocalizedDescriptionKey: "Fixture not found: extension-list.json"])
+    }
+
+    let data = try Data(contentsOf: fixture)
+    let result = try decoder.decode(CLIResponse<ExtensionListOutput>.self, from: data)
+
+    guard result.success else {
+        throw NSError(domain: "ContractTest", code: 71,
+            userInfo: [NSLocalizedDescriptionKey: "extension-list.json: success=false"])
+    }
+    print("[PASS] Parsed CLIResponse wrapper")
+
+    guard let output = result.data else {
+        throw NSError(domain: "ContractTest", code: 72,
+            userInfo: [NSLocalizedDescriptionKey: "extension-list.json: data field is nil"])
+    }
+
+    guard output.command == "extension.list" else {
+        throw NSError(domain: "ContractTest", code: 73,
+            userInfo: [NSLocalizedDescriptionKey: "extension-list.json: command mismatch"])
+    }
+    print("[PASS] Parsed extension.list command")
+
+    guard output.projectId == nil else {
+        throw NSError(domain: "ContractTest", code: 74,
+            userInfo: [NSLocalizedDescriptionKey: "extension-list.json should not be project-scoped"])
+    }
+    print("[PASS] Extension list is not project-scoped")
+
+    guard output.extensions.count == 2 else {
+        throw NSError(domain: "ContractTest", code: 75,
+            userInfo: [NSLocalizedDescriptionKey: "Expected 2 extensions, got \(output.extensions.count)"])
+    }
+    print("[PASS] Parsed \(output.extensions.count) extensions")
+
+    let node = output.extensions[0]
+    guard node.configured == nil else {
+        throw NSError(domain: "ContractTest", code: 76,
+            userInfo: [NSLocalizedDescriptionKey: "Current extension list output should not require configured"])
+    }
+    print("[PASS] Optional configured field may be absent")
+
+    guard node.actions?.first?.id == "release.package" else {
+        throw NSError(domain: "ContractTest", code: 77,
+            userInfo: [NSLocalizedDescriptionKey: "Platform extension action did not decode"])
+    }
+    print("[PASS] Platform extension actions decoded")
+
+    let swift = output.extensions[1]
+    guard swift.hasSetup == true && swift.hasReadyCheck == true else {
+        throw NSError(domain: "ContractTest", code: 78,
+            userInfo: [NSLocalizedDescriptionKey: "Executable extension readiness flags did not decode"])
+    }
+    print("[PASS] Executable extension readiness flags decoded")
     print("")
 }
 

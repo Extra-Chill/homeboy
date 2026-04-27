@@ -99,12 +99,9 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
         isRunning = true
         
         Task {
-            let projectId = configManager.activeProject?.id
-
             await ExtensionManager.shared.runExtension(
                 extensionId: extension.id,
                 inputs: inputValues,
-                projectId: projectId,
                 onOutput: { [weak self] line in
                     Task { @MainActor in
                         self?.consoleOutput += line
