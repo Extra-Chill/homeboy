@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.24.0] - 2026-04-27
+
+### Added
+- support core-dev component shape
+
 ## [2.23.2] - 2026-04-27
 
 ### Fixed
