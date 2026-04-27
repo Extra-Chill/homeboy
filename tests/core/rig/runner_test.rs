@@ -286,6 +286,7 @@ fn test_run_status() {
             shared_paths: Vec::new(),
             pipeline: HashMap::new(),
             bench: None,
+            app_launcher: None,
             bench_workloads: HashMap::new(),
         };
 

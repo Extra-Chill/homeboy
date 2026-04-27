@@ -60,6 +60,7 @@ mod lifecycle {
             shared_paths: Vec::new(),
             pipeline: HashMap::new(),
             bench: None,
+            app_launcher: None,
             bench_workloads: HashMap::new(),
         }
     }
@@ -76,6 +77,7 @@ mod lifecycle {
             shared_paths: Vec::new(),
             pipeline: HashMap::new(),
             bench: None,
+            app_launcher: None,
             bench_workloads: HashMap::new(),
         }
     }

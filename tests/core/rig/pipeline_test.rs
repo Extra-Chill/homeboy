@@ -91,6 +91,7 @@ mod dag {
             shared_paths: Vec::new(),
             pipeline,
             bench: None,
+            app_launcher: None,
             bench_workloads: Default::default(),
         }
     }
