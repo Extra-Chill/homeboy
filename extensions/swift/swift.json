@@ -5,7 +5,11 @@
   "description": "Swift testing infrastructure for macOS, iOS, and Swift CLI projects",
   "author": "Extra Chill",
   "provides": {
-    "file_extensions": ["swift", "xcodeproj", "xcworkspace", "yml"]
+    "file_extensions": ["swift", "xcodeproj", "xcworkspace", "yml"],
+    "capabilities": ["validate"]
+  },
+  "scripts": {
+    "validate": "scripts/validate.sh"
   },
   "platform": {
     "discovery": {
