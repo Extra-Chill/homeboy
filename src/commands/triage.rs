@@ -36,6 +36,10 @@ pub struct TriageArgs {
     #[arg(long, global = true)]
     failing_checks: bool,
 
+    /// Include compact failing check names and URLs for failing PRs.
+    #[arg(long, global = true)]
+    drilldown: bool,
+
     /// Mark issues/PRs stale after this many days (`14` or `14d`).
     #[arg(long, global = true, value_name = "DAYS")]
     stale: Option<String>,
@@ -68,6 +72,7 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageOut
         labels: args.label,
         needs_review: args.needs_review,
         failing_checks: args.failing_checks,
+        drilldown: args.drilldown,
         stale_days: match args.stale {
             Some(value) => Some(triage::parse_stale_days(&value)?),
             None => None,

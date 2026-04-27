@@ -62,6 +62,7 @@ pub struct TriageOptions {
     pub labels: Vec<String>,
     pub needs_review: bool,
     pub failing_checks: bool,
+    pub drilldown: bool,
     pub stale_days: Option<i64>,
     pub limit: usize,
 }
@@ -161,6 +162,8 @@ pub struct TriagePrItem {
     pub review_decision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checks: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub check_failures: Vec<TriageCheckFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merge_state: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -173,6 +176,19 @@ pub struct TriagePrItem {
     pub updated_at: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TriageCheckFailure {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -485,7 +501,7 @@ fn fetch_prs(
     }
 
     let raw = run_gh(&args)?;
-    let mut items = parse_prs(&raw, stale_cutoff)?;
+    let mut items = parse_prs(&raw, stale_cutoff, options.drilldown)?;
     if options.needs_review {
         items.retain(|item| item.review_decision.as_deref() == Some("REVIEW_REQUIRED"));
     }
@@ -609,6 +625,7 @@ struct RawPr {
 fn parse_prs(
     raw: &str,
     stale_cutoff: Option<DateTime<Utc>>,
+    include_drilldown: bool,
 ) -> std::result::Result<Vec<TriagePrItem>, String> {
     let parsed: Vec<RawPr> = serde_json::from_str(raw.trim()).map_err(|e| e.to_string())?;
     Ok(parsed
@@ -623,6 +640,11 @@ fn parse_prs(
                 draft: item.is_draft,
                 review_decision: non_empty(item.review_decision),
                 checks: summarize_checks(&item.status_check_rollup),
+                check_failures: if include_drilldown {
+                    summarize_check_failures(&item.status_check_rollup)
+                } else {
+                    Vec::new()
+                },
                 merge_state: non_empty(item.merge_state_status),
                 labels: item.labels.into_iter().filter_map(|l| l.name).collect(),
                 assignees: item.assignees.into_iter().filter_map(|a| a.login).collect(),
@@ -664,6 +686,37 @@ fn summarize_checks(checks: &[Value]) -> Option<String> {
         }
     }
     Some(if saw_pending { "PENDING" } else { "SUCCESS" }.to_string())
+}
+
+fn summarize_check_failures(checks: &[Value]) -> Vec<TriageCheckFailure> {
+    checks
+        .iter()
+        .filter(|check| {
+            matches!(
+                check.get("conclusion").and_then(Value::as_str),
+                Some("FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED")
+            )
+        })
+        .map(|check| TriageCheckFailure {
+            workflow: string_field(check, &["workflowName", "workflow"]),
+            name: string_field(check, &["name", "context"])
+                .unwrap_or_else(|| "unknown check".to_string()),
+            status: string_field(check, &["status"]),
+            conclusion: string_field(check, &["conclusion"]),
+            url: string_field(check, &["detailsUrl", "targetUrl", "url"]),
+        })
+        .collect()
+}
+
+fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })
 }
 
 fn is_stale(updated_at: Option<&str>, stale_cutoff: Option<DateTime<Utc>>) -> bool {
@@ -902,11 +955,73 @@ mod tests {
               "updatedAt": "2026-04-26T00:00:00Z"
             }
         ]"#;
-        let items = parse_prs(raw, None).unwrap();
+        let items = parse_prs(raw, None, false).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].author.as_deref(), Some("chubes4"));
         assert!(items[0].review_decision.is_none());
         assert!(items[0].merge_state.is_none());
+        assert!(items[0].check_failures.is_empty());
+    }
+
+    #[test]
+    fn parse_prs_adds_compact_check_failure_drilldown_only_when_requested() {
+        let raw = r#"[
+            {
+              "number": 10,
+              "title": "Fix tests",
+              "url": "https://github.com/o/r/pull/10",
+              "state": "OPEN",
+              "isDraft": false,
+              "reviewDecision": null,
+              "mergeStateStatus": "DIRTY",
+              "statusCheckRollup": [
+                {
+                  "__typename": "CheckRun",
+                  "name": "test / unit",
+                  "workflowName": "CI",
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "detailsUrl": "https://github.com/o/r/actions/runs/1/job/2"
+                },
+                {
+                  "__typename": "StatusContext",
+                  "context": "lint",
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS",
+                  "targetUrl": "https://example.test/lint"
+                },
+                {
+                  "__typename": "CheckRun",
+                  "workflowName": "CI",
+                  "status": "COMPLETED",
+                  "conclusion": "TIMED_OUT",
+                  "detailsUrl": ""
+                }
+              ],
+              "labels": [],
+              "assignees": [],
+              "author": {"login":"chubes4"},
+              "updatedAt": "2026-04-26T00:00:00Z"
+            }
+        ]"#;
+
+        let without_drilldown = parse_prs(raw, None, false).unwrap();
+        assert_eq!(without_drilldown[0].checks.as_deref(), Some("FAILURE"));
+        assert!(without_drilldown[0].check_failures.is_empty());
+
+        let with_drilldown = parse_prs(raw, None, true).unwrap();
+        assert_eq!(with_drilldown[0].check_failures.len(), 2);
+        assert_eq!(
+            with_drilldown[0].check_failures[0].workflow.as_deref(),
+            Some("CI")
+        );
+        assert_eq!(with_drilldown[0].check_failures[0].name, "test / unit");
+        assert_eq!(
+            with_drilldown[0].check_failures[0].url.as_deref(),
+            Some("https://github.com/o/r/actions/runs/1/job/2")
+        );
+        assert_eq!(with_drilldown[0].check_failures[1].name, "unknown check");
+        assert!(with_drilldown[0].check_failures[1].url.is_none());
     }
 
     #[test]
@@ -957,6 +1072,7 @@ mod tests {
                     draft: false,
                     review_decision: Some("REVIEW_REQUIRED".to_string()),
                     checks: Some("FAILURE".to_string()),
+                    check_failures: Vec::new(),
                     merge_state: None,
                     labels: vec![],
                     assignees: vec![],
