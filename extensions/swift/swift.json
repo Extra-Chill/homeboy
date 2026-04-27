@@ -4,11 +4,38 @@
   "icon": "swift",
   "description": "Swift testing infrastructure for macOS, iOS, and Swift CLI projects",
   "author": "Extra Chill",
-  "executable": {
-    "runtime": {
-      "setup_command": "bash {{extension_path}}/scripts/setup.sh",
-      "ready_check": "which swift",
-      "run_command": "bash {{extension_path}}/scripts/test-runner.sh"
+  "provides": {
+    "file_extensions": ["swift", "xcodeproj", "xcworkspace", "yml"]
+  },
+  "platform": {
+    "discovery": {
+      "find_command": "find /Users /home /var/www /srv -maxdepth 6 \\( -name 'project.yml' -o -name '*.xcodeproj' -o -name '*.xcworkspace' -o -name '*.swift' \\) 2>/dev/null | sed -E 's#/(Sources|Tests|tests|[^/]+\\.xcodeproj|[^/]+\\.xcworkspace|[^/]+\\.swift).*##' | sort -u | head -20",
+      "base_path_transform": "identity",
+      "display_name_command": "basename {{basePath}}"
+    }
+  },
+  "audit": {
+    "feature_patterns": [
+      "class\\s+(\\w+)",
+      "struct\\s+(\\w+)",
+      "enum\\s+(\\w+)",
+      "protocol\\s+(\\w+)",
+      "func\\s+(\\w+)\\s*\\("
+    ],
+    "feature_labels": {
+      "class\\s+": "Classes",
+      "struct\\s+": "Structs",
+      "enum\\s+": "Enums",
+      "protocol\\s+": "Protocols",
+      "func\\s+": "Functions"
+    },
+    "test_mapping": {
+      "source_dirs": [".", "Sources"],
+      "test_dirs": ["tests", "Tests"],
+      "test_file_pattern": "{dir}/{name}Tests.{ext}",
+      "method_prefix": "test",
+      "inline_tests": false,
+      "critical_patterns": ["Sources/", "App/", "Homeboy/"]
     }
   },
   "settings": [
@@ -19,5 +46,12 @@
       "default": "script",
       "description": "Test type: 'script' (swift scripts) or 'xcodebuild' (XCTest)"
     }
-  ]
+  ],
+  "executable": {
+    "runtime": {
+      "setup_command": "bash {{extension_path}}/scripts/setup.sh",
+      "ready_check": "which swift",
+      "run_command": "bash {{extension_path}}/scripts/test-runner.sh"
+    }
+  }
 }
