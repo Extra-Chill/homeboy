@@ -208,8 +208,9 @@ fn extract_structs(content: &str, file: &str) -> Vec<StructDef> {
                         }
                     }
 
-                    // Parse field declarations from lines inside the struct body.
-                    if j > start && depth > 0 {
+                    // Parse only direct members of the type body. Nested executable bodies
+                    // can contain field-shaped syntax that is not extractable type structure.
+                    if j > start && depth == 1 {
                         if let Some(field) = parse_field_line(lines[j]) {
                             fields.push(field);
                         }
@@ -404,6 +405,106 @@ impl Foo {
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].fields.len(), 1);
         assert_eq!(structs[0].fields[0].name, "name");
+    }
+
+    #[test]
+    fn skips_call_arguments_inside_php_methods() {
+        let content = r#"
+class AIStep {
+    public static function register(): void {
+        self::registerStepType(
+            class_name: self::class,
+            label: 'AI',
+        );
+        add_filter('datamachine_handlers', [self::class, 'register']);
+    }
+}
+"#;
+
+        let structs = extract_structs(content, "test.php");
+        assert!(
+            structs.is_empty(),
+            "call-site named arguments inside methods should not create field-bearing structs"
+        );
+    }
+
+    #[test]
+    fn skips_field_shaped_syntax_inside_rust_methods() {
+        let content = r#"
+struct Foo {
+    name: String,
+}
+
+impl Foo {
+    fn new() -> Self {
+        Self {
+            name: String::new(),
+            label: "nested literal",
+        }
+    }
+}
+"#;
+
+        let structs = extract_structs(content, "test.rs");
+        assert_eq!(structs.len(), 1);
+        assert_eq!(structs[0].fields.len(), 1);
+        assert_eq!(structs[0].fields[0].name, "name");
+        assert_eq!(structs[0].fields[0].field_type, "String");
+    }
+
+    #[test]
+    fn skips_field_shaped_syntax_inside_typescript_methods() {
+        let content = r#"
+class Widget {
+    name: string;
+
+    build() {
+        return {
+            name: 'nested literal',
+            label: 'not a class field',
+        };
+    }
+}
+"#;
+
+        let structs = extract_structs(content, "test.ts");
+        assert_eq!(structs.len(), 1);
+        assert_eq!(structs[0].fields.len(), 1);
+        assert_eq!(structs[0].fields[0].name, "name");
+        assert_eq!(structs[0].fields[0].field_type, "string");
+    }
+
+    #[test]
+    fn does_not_report_repeated_php_self_registration_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        for name in &["ai.php", "fetch.php", "publish.php"] {
+            std::fs::write(
+                src.join(name),
+                format!(
+                    r#"
+class {} {{
+    public static function register(): void {{
+        self::registerStepType(
+            class_name: self::class,
+            label: 'Step',
+        );
+    }}
+}}
+"#,
+                    name.replace(".php", "").to_uppercase()
+                ),
+            )
+            .unwrap();
+        }
+
+        let findings = detect_repeated_field_patterns(dir.path());
+        assert!(
+            findings.is_empty(),
+            "PHP self::class registration arguments should not be reported as fields"
+        );
     }
 
     #[test]
