@@ -12,9 +12,7 @@
 use crate::extension::bench::aggregation::aggregate_runs;
 use crate::extension::bench::artifact::BenchArtifact;
 use crate::extension::bench::parsing::{BenchResults, BenchScenario};
-use crate::extension::bench::test_support::{
-    approx_eq, results_with_scenarios, scenario_with_iterations,
-};
+use crate::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
 
 fn scenario(id: &str, metrics: &[(&str, f64)]) -> BenchScenario {
     scenario_with_iterations(id, metrics, 1)
@@ -59,8 +57,8 @@ mod cases {
             .unwrap()
             .get("install_ms")
             .unwrap();
-        approx_eq(summary.stdev, (20000.0_f64 / 3.0).sqrt());
-        approx_eq(summary.cv_pct, summary.stdev / 200.0 * 100.0);
+        assert!((summary.stdev - (20000.0_f64 / 3.0).sqrt()).abs() < 1e-9);
+        assert!((summary.cv_pct - summary.stdev / 200.0 * 100.0).abs() < 1e-9);
         assert_eq!(summary.n, 3);
         assert_eq!(summary.min, 100.0);
         assert_eq!(summary.max, 300.0);
@@ -115,7 +113,7 @@ mod cases {
             .unwrap()
             .get("value")
             .unwrap();
-        approx_eq(summary.stdev, (2.0_f64 / 3.0).sqrt());
+        assert!((summary.stdev - (2.0_f64 / 3.0).sqrt()).abs() < 1e-9);
         assert_eq!(summary.n, 3);
     }
 

@@ -1,5 +1,4 @@
 use super::{distribution, percentile};
-use crate::extension::bench::test_support::approx_eq;
 
 #[test]
 fn distribution_reports_population_summary() {
@@ -9,8 +8,8 @@ fn distribution_reports_population_summary() {
     assert_eq!(summary.min, 1.0);
     assert_eq!(summary.max, 3.0);
     assert_eq!(summary.mean, 2.0);
-    approx_eq(summary.stdev, (2.0_f64 / 3.0).sqrt());
-    approx_eq(summary.cv_pct, summary.stdev / 2.0 * 100.0);
+    assert!((summary.stdev - (2.0_f64 / 3.0).sqrt()).abs() < 1e-9);
+    assert!((summary.cv_pct - summary.stdev / 2.0 * 100.0).abs() < 1e-9);
     assert_eq!(summary.p50, 2.0);
     assert_eq!(summary.p95, 2.9);
 }

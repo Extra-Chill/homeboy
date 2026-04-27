@@ -1,12 +1,4 @@
-use super::{approx_eq, results_with_scenarios, scenario_with_iterations};
-
-#[test]
-fn test_approx_eq() {
-    approx_eq(1.0 + 1e-12, 1.0);
-
-    let mismatch = std::panic::catch_unwind(|| approx_eq(1.1, 1.0));
-    assert!(mismatch.is_err());
-}
+use super::{results_with_scenarios, scenario_with_iterations};
 
 #[test]
 fn scenario_with_iterations_builds_minimal_bench_scenario() {
