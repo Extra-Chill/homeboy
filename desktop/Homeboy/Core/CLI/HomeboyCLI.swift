@@ -493,6 +493,48 @@ final class HomeboyCLI {
 
 private init() {}
 
+    private static var decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }()
+
+    private func executeCommandWithOutputFile<T: Decodable>(
+        _ args: [String],
+        dataType: T.Type,
+        source: String,
+        timeout: TimeInterval = 120
+    ) async throws -> T {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("homeboy-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+
+        var outputArgs = args
+        outputArgs.append(contentsOf: ["--output", outputURL.path])
+
+        let response = try await cli.execute(outputArgs, timeout: timeout)
+        guard FileManager.default.fileExists(atPath: outputURL.path) else {
+            if response.success {
+                throw CLIBridgeError.invalidResponse("Missing output file for \(source)")
+            }
+            throw CLIBridgeError.executionFailed(exitCode: response.exitCode, message: response.errorOutput)
+        }
+
+        let data = try Data(contentsOf: outputURL)
+        let result = try Self.decoder.decode(CLIBridgeResult<T>.self, from: data)
+        guard result.success else {
+            if let errorDetail = result.error {
+                throw CLIBridgeError.cliError(errorDetail.toCLIError(source: source))
+            }
+            throw CLIBridgeError.executionFailed(exitCode: response.exitCode, message: response.errorOutput)
+        }
+        guard let decoded = result.data else {
+            throw CLIBridgeError.invalidResponse("Success response missing data")
+        }
+
+        return decoded
+    }
+
     // MARK: - Init Command
 
     /// Run `homeboy init` to get full context including extensions and components
@@ -1246,7 +1288,7 @@ private init() {}
         return try await cli.executeCommand(args, dataType: LogsOutput.self, source: "Logs Search", timeout: 60)
     }
 
-    // MARK: - Audit Commands
+    // MARK: - Quality Commands
 
     private enum AuditSlice {
         static let code = [
@@ -1310,6 +1352,67 @@ private init() {}
     /// Run structural audit on a component
     func auditStructure(componentId: String) async throws -> AuditOutput {
         try await audit(componentId: componentId, only: AuditSlice.structure, source: "Audit Structure", timeout: 60)
+    }
+
+    func qualityReviewSummary(
+        componentId: String,
+        path: String? = nil,
+        scope: QualityScope = .full,
+        changedSince: String? = nil
+    ) async throws -> QualityReviewOutput {
+        var args = ["review", componentId, "--summary"]
+        appendQualityScope(&args, path: path, scope: scope, changedSince: changedSince)
+        return try await executeCommandWithOutputFile(args, dataType: QualityReviewOutput.self, source: "Quality Review", timeout: 180)
+    }
+
+    func qualityTriage(componentId: String) async throws -> QualityTriageOutput {
+        try await executeCommandWithOutputFile(
+            ["triage", "component", componentId],
+            dataType: QualityTriageOutput.self,
+            source: "Quality Triage",
+            timeout: 60
+        )
+    }
+
+    func qualityStage(
+        _ stage: QualityStage,
+        componentId: String,
+        path: String? = nil,
+        scope: QualityScope = .full,
+        changedSince: String? = nil
+    ) async throws -> CLIBridgeResponse {
+        var args = [stage.rawValue, componentId]
+        switch stage {
+        case .audit, .lint, .test:
+            appendQualityScope(&args, path: path, scope: scope, changedSince: changedSince)
+        case .validate:
+            if let path, !path.isEmpty {
+                args.append(contentsOf: ["--path", path])
+            }
+        }
+        return try await cli.execute(args, timeout: 180)
+    }
+
+    private func appendQualityScope(
+        _ args: inout [String],
+        path: String?,
+        scope: QualityScope,
+        changedSince: String?
+    ) {
+        if let path, !path.isEmpty {
+            args.append(contentsOf: ["--path", path])
+        }
+
+        switch scope {
+        case .full:
+            break
+        case .changedSince:
+            if let changedSince, !changedSince.isEmpty {
+                args.append(contentsOf: ["--changed-since", changedSince])
+            }
+        case .changedOnly:
+            args.append("--changed-only")
+        }
     }
 
     // MARK: - Refactor Commands

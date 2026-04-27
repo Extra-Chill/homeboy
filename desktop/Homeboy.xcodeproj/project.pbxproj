@@ -13,6 +13,9 @@
 		0597F5E10CC3D748D36710F9 /* ConfigurationObserving.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6676A7C26F7EE42CD5B9E7A /* ConfigurationObserving.swift */; };
 		0B1C053B8DCA686200739C43 /* ServerEditSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5D75CB92C4916A5B3A8DE34 /* ServerEditSheet.swift */; };
 		0BB5245A79F8709EBD8C5269 /* ModuleInstallSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA1C2F245C5FCEF82A5D2D3 /* ModuleInstallSheet.swift */; };
+		0D4D7E7A5AB24A1D85E8A001 /* QualityModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D4D7E7A5AB24A1D85E8A101 /* QualityModels.swift */; };
+		0D4D7E7A5AB24A1D85E8A002 /* QualityViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D4D7E7A5AB24A1D85E8A102 /* QualityViewModel.swift */; };
+		0D4D7E7A5AB24A1D85E8A003 /* QualityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D4D7E7A5AB24A1D85E8A103 /* QualityView.swift */; };
 		0FE6351E7C94950D6A459978 /* DeployerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F978C6E7F1C5288FF7303DF7 /* DeployerView.swift */; };
 		1162E40A1D0549D9B68608A8 /* BenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1162E4091D0549D9B68608A8 /* BenchView.swift */; };
 		102A2F3B4C5D6E7F8091A2B3 /* RigsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F3B4C5D6E7F8091A2B3102A /* RigsView.swift */; };
@@ -113,6 +116,9 @@
 		0354F3771ED337E0EDCAC7B5 /* ModuleResultsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleResultsView.swift; sourceTree = "<group>"; };
 		0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEntry.swift; sourceTree = "<group>"; };
 		0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
+		0D4D7E7A5AB24A1D85E8A101 /* QualityModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityModels.swift; sourceTree = "<group>"; };
+		0D4D7E7A5AB24A1D85E8A102 /* QualityViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityViewModel.swift; sourceTree = "<group>"; };
+		0D4D7E7A5AB24A1D85E8A103 /* QualityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityView.swift; sourceTree = "<group>"; };
 		0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineWarningView.swift; sourceTree = "<group>"; };
 		1162E4091D0549D9B68608A8 /* BenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchView.swift; sourceTree = "<group>"; };
 		13F8D60E3516F29F554438A0 /* VersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionParser.swift; sourceTree = "<group>"; };
@@ -271,6 +277,24 @@
 				29EDC4F278327A663263D4A7 /* DatabaseBrowserViewModel.swift */,
 			);
 			path = DatabaseBrowser;
+			sourceTree = "<group>";
+		};
+		47D4D7E7A5AB24A1D85E8A00 /* Quality */ = {
+			isa = PBXGroup;
+			children = (
+				48D4D7E7A5AB24A1D85E8A00 /* Views */,
+				0D4D7E7A5AB24A1D85E8A101 /* QualityModels.swift */,
+				0D4D7E7A5AB24A1D85E8A102 /* QualityViewModel.swift */,
+			);
+			path = Quality;
+			sourceTree = "<group>";
+		};
+		48D4D7E7A5AB24A1D85E8A00 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				0D4D7E7A5AB24A1D85E8A103 /* QualityView.swift */,
+			);
+			path = Views;
 			sourceTree = "<group>";
 		};
 		48A84FF4933780B2CA668D49 /* Resources */ = {
@@ -529,10 +553,11 @@
 			children = (
 				46F743648D562B5D67158FFF /* DatabaseBrowser */,
 				26C9D5C3477F3537E1BB713A /* Deployer */,
+				47D4D7E7A5AB24A1D85E8A00 /* Quality */,
 				2E61F67D3432F0D875C83574 /* RemoteFileEditor */,
 				426FE25E9CC2781D94562CE8 /* RemoteLogViewer */,
 			);
-			path = Modules;
+			path = Extensions;
 			sourceTree = "<group>";
 		};
 		E900FE3D44D913C0F5C320A7 /* Modules */ = {
@@ -732,6 +757,9 @@
 				76A91937D9017A5B0D9B0BA5 /* PinnableTabBar.swift in Sources */,
 				023E9AE450BF036FF40C0E76 /* ProjectConfiguration.swift in Sources */,
 				7EE844A0691D39F31A685114 /* ProjectSwitcherView.swift in Sources */,
+				0D4D7E7A5AB24A1D85E8A001 /* QualityModels.swift in Sources */,
+				0D4D7E7A5AB24A1D85E8A003 /* QualityView.swift in Sources */,
+				0D4D7E7A5AB24A1D85E8A002 /* QualityViewModel.swift in Sources */,
 				9ACBEB5DF2D256960184C815 /* QueryEditorView.swift in Sources */,
 				38D566E59E85DF4E4D14C48F /* RemoteFileBrowser.swift in Sources */,
 				22221233AC86561D48490886 /* RemoteFileBrowserView.swift in Sources */,
