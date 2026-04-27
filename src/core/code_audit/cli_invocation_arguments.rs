@@ -76,21 +76,78 @@ fn invocation_tokens(lines: &[&str], start: usize) -> Option<Vec<String>> {
     }
 
     let mut tokens = swift_string_array_items(line)?;
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let has_homeboy_binary = strip_homeboy_binary(&mut tokens);
+    if !has_homeboy_binary && !has_homeboy_wrapper_provenance(lines, start) {
+        return None;
+    }
+
     if tokens.is_empty() || !is_homeboy_command_candidate(&tokens) {
         return None;
     }
 
     let end = (start + 25).min(lines.len().saturating_sub(1));
-    for next in &lines[start + 1..=end] {
-        if !looks_like_argument_append(next) {
-            continue;
-        }
-        if let Some(extra) = swift_string_array_items(next) {
-            tokens.extend(extra);
+    if start < end {
+        for next in &lines[start + 1..=end] {
+            if !looks_like_argument_append(next) {
+                continue;
+            }
+            if let Some(extra) = swift_string_array_items(next) {
+                tokens.extend(extra);
+            }
         }
     }
 
     Some(tokens)
+}
+
+fn strip_homeboy_binary(tokens: &mut Vec<String>) -> bool {
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+
+    if is_homeboy_binary_token(first) {
+        tokens.remove(0);
+        return true;
+    }
+
+    false
+}
+
+fn is_homeboy_binary_token(token: &str) -> bool {
+    token
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|name| name == "homeboy")
+}
+
+fn has_homeboy_wrapper_provenance(lines: &[&str], start: usize) -> bool {
+    let Some(line) = lines.get(start) else {
+        return false;
+    };
+
+    if calls_homeboy_wrapper(line) {
+        return true;
+    }
+
+    if !line.contains("var args") && !line.contains("let args") {
+        return false;
+    }
+
+    let end = (start + 25).min(lines.len().saturating_sub(1));
+    start < end
+        && lines[start + 1..=end]
+            .iter()
+            .any(|next| calls_homeboy_wrapper(next) && next.contains("args"))
+}
+
+fn calls_homeboy_wrapper(line: &str) -> bool {
+    line.contains("executeCommand(")
+        || line.contains("executeWithStdin(")
+        || line.contains("cli.execute(")
 }
 
 fn validate_invocation(tokens: &[String]) -> Option<String> {
@@ -221,10 +278,12 @@ func fleetCreate(id: String, projectIds: [String]) {
     for pid in projectIds {
         args += ["--project", pid]
     }
+    try await cli.executeCommand(args)
 }
 
 func componentCreate(name: String, localPath: String, remotePath: String) {
     var args = ["component", "create", name, localPath, remotePath]
+    try await cli.executeCommand(args)
 }
 "#;
 
@@ -278,6 +337,48 @@ func staleInline(id: String) {
     }
 
     #[test]
+    fn validates_direct_homeboy_binary_argv() {
+        let source = r#"
+func directHomeboy(component: String) {
+    try await process.execute(["homeboy", "fleet", "create", component, "--project", "site-a"])
+}
+"#;
+
+        let findings = analyze_swift_file("HomeboyCLI.swift", source);
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("fleet create"));
+        assert!(findings[0].suggestion.contains("unexpected argument"));
+    }
+
+    #[test]
+    fn ignores_external_command_arrays_that_overlap_homeboy_commands() {
+        let source = r#"
+func remoteUrl(path: String) async throws {
+    try await process.execute(["git", "-C", path, "remote", "get-url", "origin"])
+}
+"#;
+
+        let findings = analyze_swift_file("GitOperationsViewModel.swift", source);
+
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn ignores_ambiguous_homeboy_shaped_arrays_without_provenance() {
+        let source = r#"
+func buildArgs(id: String) -> [String] {
+    let args = ["fleet", "create", id, "--project", "site-a"]
+    return args
+}
+"#;
+
+        let findings = analyze_swift_file("ArgumentFixtures.swift", source);
+
+        assert!(findings.is_empty());
+    }
+
+    #[test]
     fn audit_path_reports_swift_invocations_without_fingerprinting_extension() {
         let root = temp_dir("homeboy-cli-arg-shape");
         fs::create_dir_all(root.join("Homeboy/Core/CLI")).unwrap();
@@ -286,6 +387,7 @@ func staleInline(id: String) {
             r#"
 func componentCreate(name: String, localPath: String, remotePath: String) {
     var args = ["component", "create", name, localPath, remotePath]
+    try await cli.executeCommand(args)
 }
 "#,
         )
