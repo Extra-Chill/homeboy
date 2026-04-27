@@ -7,8 +7,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::stack::{
-    self, ApplyOutput, GitRef, InspectOptions, InspectOutput, PushOutput, StackPrEntry, StackSpec,
-    StatusOutput, SyncOutput,
+    self, ApplyOutput, GitRef, InspectOptions, InspectOutput, PushOutput, RebaseOutput,
+    StackPrEntry, StackSpec, StatusOutput, SyncOutput,
 };
 
 use super::CmdResult;
@@ -82,6 +82,14 @@ enum StackCommand {
         /// Stack ID.
         stack_id: String,
     },
+    /// Rebuild the target branch from fresh base + current spec PRs.
+    ///
+    /// Unlike `sync`, `rebase` never edits the stack spec: merged PRs stay
+    /// listed until an explicit `sync` or `remove-pr`.
+    Rebase {
+        /// Stack ID.
+        stack_id: String,
+    },
     /// Read-only status report — upstream PR state + local target state.
     Status {
         /// Stack ID.
@@ -139,6 +147,7 @@ pub enum StackCommandOutput {
     AddPr(StackMutationOutput),
     RemovePr(StackMutationOutput),
     Apply(StackApplyOutput),
+    Rebase(StackRebaseOutput),
     Status(StackStatusOutput),
     Sync(StackSyncOutput),
     Push(StackPushOutput),
@@ -179,6 +188,13 @@ pub struct StackApplyOutput {
     pub command: &'static str,
     #[serde(flatten)]
     pub report: ApplyOutput,
+}
+
+#[derive(Serialize)]
+pub struct StackRebaseOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub report: RebaseOutput,
 }
 
 #[derive(Serialize)]
@@ -240,6 +256,7 @@ pub fn run(args: StackArgs, _global: &super::GlobalArgs) -> CmdResult<StackComma
             repo,
         } => remove_pr(&stack_id, number, repo.as_deref()),
         StackCommand::Apply { stack_id } => apply(&stack_id),
+        StackCommand::Rebase { stack_id } => rebase(&stack_id),
         StackCommand::Status { stack_id } => status(&stack_id),
         StackCommand::Sync { stack_id, dry_run } => sync(&stack_id, dry_run),
         StackCommand::Push { stack_id } => push(&stack_id),
@@ -429,6 +446,19 @@ fn apply(stack_id: &str) -> CmdResult<StackCommandOutput> {
     Ok((
         StackCommandOutput::Apply(StackApplyOutput {
             command: "stack.apply",
+            report,
+        }),
+        exit_code,
+    ))
+}
+
+fn rebase(stack_id: &str) -> CmdResult<StackCommandOutput> {
+    let spec = stack::load(stack_id)?;
+    let report = stack::rebase(&spec)?;
+    let exit_code = if report.success { 0 } else { 1 };
+    Ok((
+        StackCommandOutput::Rebase(StackRebaseOutput {
+            command: "stack.rebase",
             report,
         }),
         exit_code,
