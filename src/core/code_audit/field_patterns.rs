@@ -437,76 +437,65 @@ fn is_test_path(path: &str) -> bool {
 }
 
 fn is_low_value_generic_group(fields: &[FieldSignature], locations: &[(String, String)]) -> bool {
-    if !is_generic_field_pair(fields) {
-        return false;
-    }
-
-    !locations_share_module(locations) && !locations_share_struct_suffix(locations)
-}
-
-fn is_generic_field_pair(fields: &[FieldSignature]) -> bool {
     if fields.len() != 2 {
         return false;
     }
 
     let mut names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
     names.sort_unstable();
-
-    matches!(
+    let is_generic_pair = matches!(
         names.as_slice(),
         ["from", "to"]
             | ["host", "port"]
             | ["local_version", "remote_version"]
             | ["new_version", "old_version"]
             | ["stderr", "stdout"]
-    )
-}
-
-fn locations_share_module(locations: &[(String, String)]) -> bool {
-    let Some(first_module) = locations.first().map(|(file, _)| module_path(file)) else {
+    );
+    if !is_generic_pair {
         return false;
-    };
-
-    locations
-        .iter()
-        .all(|(file, _)| module_path(file) == first_module)
-}
-
-fn module_path(file: &str) -> &str {
-    file.rsplit_once('/')
-        .map(|(module, _)| module)
-        .unwrap_or("")
-}
-
-fn locations_share_struct_suffix(locations: &[(String, String)]) -> bool {
-    let Some(first_suffix) = locations.first().and_then(|(_, name)| struct_suffix(name)) else {
-        return false;
-    };
-
-    locations
-        .iter()
-        .all(|(_, name)| struct_suffix(name) == Some(first_suffix))
-}
-
-fn struct_suffix(name: &str) -> Option<&str> {
-    let mut starts = name
-        .char_indices()
-        .filter_map(|(index, ch)| ch.is_uppercase().then_some(index));
-
-    let start = starts.next_back()?;
-    let suffix = &name[start..];
-    if suffix.len() <= 2 || is_generic_struct_suffix(suffix) {
-        None
-    } else {
-        Some(suffix)
     }
-}
 
-fn is_generic_struct_suffix(suffix: &str) -> bool {
-    matches!(
-        suffix,
-        "Client" | "Config" | "Output" | "Result" | "Row" | "Server" | "Summary"
-    )
+    let module = |file: &str| {
+        file.rsplit_once('/')
+            .map(|(module, _)| module)
+            .unwrap_or("")
+            .to_string()
+    };
+    let shared_module = locations
+        .first()
+        .map(|(file, _)| {
+            locations
+                .iter()
+                .all(|(other, _)| module(other) == module(file))
+        })
+        .unwrap_or(false);
+    if shared_module {
+        return false;
+    }
+
+    let suffix = |name: &str| {
+        let start = name
+            .char_indices()
+            .filter_map(|(index, ch)| ch.is_uppercase().then_some(index))
+            .next_back()?;
+        let suffix = &name[start..];
+        let generic_suffix = matches!(
+            suffix,
+            "Client" | "Config" | "Output" | "Result" | "Row" | "Server" | "Summary"
+        );
+        (suffix.len() > 2 && !generic_suffix).then_some(suffix.to_string())
+    };
+
+    let shared_suffix = locations
+        .first()
+        .and_then(|(_, name)| suffix(name))
+        .map(|first| {
+            locations
+                .iter()
+                .all(|(_, name)| suffix(name).as_ref() == Some(&first))
+        })
+        .unwrap_or(false);
+    !shared_suffix
 }
 
 fn strip_rust_cfg_test_modules(content: &str) -> String {
