@@ -12,6 +12,7 @@
 //! Contract with extension scripts:
 //! - `$HOMEBOY_BENCH_RESULTS_FILE` — path to write the JSON envelope to.
 //! - `$HOMEBOY_BENCH_ITERATIONS` — iterations per scenario.
+//! - `$HOMEBOY_BENCH_LIST_ONLY` — when `1`, emit scenario inventory only.
 //! - `$HOMEBOY_RUN_DIR` — the per-run directory (same as test/lint/build).
 //! - Passthrough args after `--` forwarded verbatim to the script.
 //!
@@ -40,7 +41,10 @@ pub use report::{
     aggregate_comparison, from_main_workflow, from_main_workflow_with_rig, BenchCommandOutput,
     BenchComparisonDiff, BenchComparisonOutput, MetricDelta as ReportMetricDelta, RigBenchEntry,
 };
-pub use run::{run_main_bench_workflow, BenchRunWorkflowArgs, BenchRunWorkflowResult};
+pub use run::{
+    run_bench_list_workflow, run_main_bench_workflow, BenchListWorkflowArgs,
+    BenchListWorkflowResult, BenchRunWorkflowArgs, BenchRunWorkflowResult,
+};
 
 pub fn resolve_bench_command(
     component: &Component,

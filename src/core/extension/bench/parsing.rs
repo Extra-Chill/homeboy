@@ -16,6 +16,8 @@
 //!     {
 //!       "id": "scenario_slug",
 //!       "file": "tests/bench/some-workload.ext",
+//!       "default_iterations": 10,
+//!       "tags": ["cold", "lifecycle"],
 //!       "iterations": 10,
 //!       "metrics": {
 //!         "p95_ms": 145.0,
@@ -63,6 +65,13 @@ pub struct BenchScenario {
     /// workloads and `rig` for out-of-tree workloads supplied by a rig spec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Declared default iteration count. List-only discovery uses this to
+    /// expose runner defaults without executing the workload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_iterations: Option<u64>,
+    /// Freeform scenario labels supplied by extension runners.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     pub iterations: u64,
     pub metrics: BenchMetrics,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,6 +284,8 @@ mod tests {
             {
                 "id": "scenario_one",
                 "file": "bench/one.ext",
+                "default_iterations": 10,
+                "tags": ["cold", "cli"],
                 "iterations": 10,
                 "metrics": {
                     "mean_ms": 120.5,
@@ -298,6 +309,8 @@ mod tests {
         let scenario = &parsed.scenarios[0];
         assert_eq!(scenario.id, "scenario_one");
         assert_eq!(scenario.file.as_deref(), Some("bench/one.ext"));
+        assert_eq!(scenario.default_iterations, Some(10));
+        assert_eq!(scenario.tags, vec!["cold", "cli"]);
         assert_eq!(scenario.metrics.get("p95_ms"), Some(145.0));
         assert_eq!(scenario.memory.as_ref().unwrap().peak_bytes, 41943040);
     }

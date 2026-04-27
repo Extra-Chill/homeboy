@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 
 use tempfile::TempDir;
 
-use super::{maybe_expand_default_baseline, BenchArgs};
+use super::{maybe_expand_default_baseline, BenchArgs, BenchRunArgs};
 use crate::commands::utils::args::{
     BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
 };
@@ -61,25 +61,26 @@ fn make_args(
     ignore_default_baseline: bool,
 ) -> BenchArgs {
     BenchArgs {
-        comp: PositionalComponentArgs {
-            component: None,
-            path: None,
+        command: None,
+        run: BenchRunArgs {
+            comp: PositionalComponentArgs {
+                component: None,
+                path: None,
+            },
+            iterations: 1,
+            baseline_args: BaselineArgs {
+                baseline,
+                ignore_baseline: false,
+                ratchet,
+            },
+            regression_threshold: 5.0,
+            setting_args: SettingArgs::default(),
+            args: Vec::new(),
+            _json: HiddenJsonArgs::default(),
+            json_summary: false,
+            rig,
+            ignore_default_baseline,
         },
-        iterations: 1,
-        shared_state: None,
-        concurrency: 1,
-        baseline_args: BaselineArgs {
-            baseline,
-            ignore_baseline: false,
-            ratchet,
-        },
-        regression_threshold: 5.0,
-        setting_args: SettingArgs::default(),
-        args: Vec::new(),
-        _json: HiddenJsonArgs::default(),
-        json_summary: false,
-        rig,
-        ignore_default_baseline,
     }
 }
 
@@ -111,7 +112,7 @@ fn test_expansion_rewrites_args_into_two_rig_comparison() {
     with_isolated_home(|home| {
         write_rig_fixture(home, "candidate", CANDIDATE_WITH_BASELINE);
         let args = make_args(vec!["candidate".to_string()], false, false, false);
-        let expanded = maybe_expand_default_baseline(&args)
+        let expanded = maybe_expand_default_baseline(&args.run)
             .expect("dispatch ok")
             .expect("expansion applied");
         assert_eq!(
@@ -127,7 +128,7 @@ fn test_no_expansion_when_default_baseline_unset() {
     with_isolated_home(|home| {
         write_rig_fixture(home, "candidate", CANDIDATE_WITHOUT_BASELINE);
         let args = make_args(vec!["candidate".to_string()], false, false, false);
-        let result = maybe_expand_default_baseline(&args).expect("dispatch ok");
+        let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
         assert!(
             result.is_none(),
             "rig without default_baseline_rig must not trigger expansion"
@@ -144,7 +145,7 @@ fn test_no_expansion_when_no_bench_block() {
         }"#;
         write_rig_fixture(home, "candidate", candidate_no_bench);
         let args = make_args(vec!["candidate".to_string()], false, false, false);
-        let result = maybe_expand_default_baseline(&args).expect("dispatch ok");
+        let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
         assert!(
             result.is_none(),
             "rig without bench block must not trigger expansion"
@@ -157,7 +158,7 @@ fn test_ignore_default_baseline_flag_suppresses_expansion() {
     with_isolated_home(|home| {
         write_rig_fixture(home, "candidate", CANDIDATE_WITH_BASELINE);
         let args = make_args(vec!["candidate".to_string()], false, false, true);
-        let result = maybe_expand_default_baseline(&args).expect("dispatch ok");
+        let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
         assert!(
             result.is_none(),
             "--ignore-default-baseline must short-circuit before rig::load"
@@ -174,7 +175,7 @@ fn test_baseline_flag_suppresses_expansion() {
     with_isolated_home(|home| {
         write_rig_fixture(home, "candidate", CANDIDATE_WITH_BASELINE);
         let args = make_args(vec!["candidate".to_string()], true, false, false);
-        let result = maybe_expand_default_baseline(&args).expect("dispatch ok");
+        let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
         assert!(result.is_none(), "--baseline must suppress expansion");
     });
 }
@@ -184,7 +185,7 @@ fn test_ratchet_flag_suppresses_expansion() {
     with_isolated_home(|home| {
         write_rig_fixture(home, "candidate", CANDIDATE_WITH_BASELINE);
         let args = make_args(vec!["candidate".to_string()], false, true, false);
-        let result = maybe_expand_default_baseline(&args).expect("dispatch ok");
+        let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
         assert!(result.is_none(), "--ratchet must suppress expansion");
     });
 }
@@ -196,7 +197,7 @@ fn test_multi_rig_user_input_wins_over_spec() {
     // beats implicit.
     let args = make_args(vec!["a".to_string(), "b".to_string()], false, false, false);
     // No fixture written — confirms `rig::load` is never called.
-    let result = maybe_expand_default_baseline(&args).expect("dispatch ok");
+    let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
     assert!(
         result.is_none(),
         "multi-rig user input must short-circuit before any rig::load"
@@ -210,7 +211,7 @@ fn test_empty_rig_list_returns_none() {
     // no-op for that case so a future caller that flips the order
     // doesn't surprise anyone.
     let args = make_args(Vec::new(), false, false, false);
-    let result = maybe_expand_default_baseline(&args).expect("dispatch ok");
+    let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
     assert!(result.is_none(), "empty rig list must not expand");
 }
 
@@ -220,7 +221,7 @@ fn test_self_reference_loop_is_rejected() {
         write_rig_fixture(home, "candidate", CANDIDATE_SELF_REFERENCE);
         let args = make_args(vec!["candidate".to_string()], false, false, false);
         let err =
-            maybe_expand_default_baseline(&args).expect_err("self-reference must be rejected");
+            maybe_expand_default_baseline(&args.run).expect_err("self-reference must be rejected");
         let msg = format!("{}", err);
         assert!(
             msg.contains("default_baseline_rig"),
@@ -249,7 +250,7 @@ fn test_self_reference_passes_through_with_opt_out() {
     with_isolated_home(|home| {
         write_rig_fixture(home, "candidate", CANDIDATE_SELF_REFERENCE);
         let args = make_args(vec!["candidate".to_string()], false, false, true);
-        let result = maybe_expand_default_baseline(&args)
+        let result = maybe_expand_default_baseline(&args.run)
             .expect("opt-out short-circuits before self-ref check");
         assert!(result.is_none(), "opt-out must yield single-rig dispatch");
     });
@@ -263,7 +264,7 @@ fn test_missing_candidate_rig_surfaces_load_error() {
     // pre-PR behavior.
     with_isolated_home(|_home| {
         let args = make_args(vec!["nonexistent-rig".to_string()], false, false, false);
-        let err = maybe_expand_default_baseline(&args).expect_err("missing rig must error");
+        let err = maybe_expand_default_baseline(&args.run).expect_err("missing rig must error");
         let msg = format!("{}", err);
         assert!(
             msg.to_lowercase().contains("nonexistent-rig")

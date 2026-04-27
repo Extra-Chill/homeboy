@@ -7,6 +7,7 @@ deltas against a stored baseline.
 
 ```bash
 homeboy bench <component> [options] [-- <runner-args>]
+homeboy bench list <component> [options] [-- <runner-args>]
 ```
 
 ## Description
@@ -58,11 +59,25 @@ the other capabilities.
 Arguments after `--` are passed verbatim to the extension's bench runner
 script (e.g., `--filter=scenario_id` for selective execution).
 
+## Scenario Discovery
+
+`homeboy bench list <component>` asks the extension runner for its scenario
+inventory without executing any workload code. The runner receives
+`$HOMEBOY_BENCH_LIST_ONLY=1` and writes the normal `BenchResults` envelope
+with `iterations: 0`, empty per-scenario `metrics`, and optional discovery
+metadata such as `file`, `source`, `default_iterations`, and `tags`.
+
+This is the safe first step for agent-driven or CI-driven perf work: inspect
+what can be measured before deciding which full bench run is worth paying for.
+
 ## Examples
 
 ```bash
 # Benchmark a component with defaults (10 iterations, 5% regression threshold)
 homeboy bench my-component
+
+# List declared scenarios without executing them
+homeboy bench list my-component
 
 # 50 iterations, stricter 2% regression threshold
 homeboy bench my-component --iterations 50 --regression-threshold 2.0

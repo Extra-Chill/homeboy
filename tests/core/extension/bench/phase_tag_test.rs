@@ -52,6 +52,8 @@ fn scenario(id: &str, metrics: &[(&str, f64)]) -> BenchScenario {
         id: id.to_string(),
         file: None,
         source: None,
+        default_iterations: None,
+        tags: Vec::new(),
         iterations: 10,
         metrics: BenchMetrics {
             values,

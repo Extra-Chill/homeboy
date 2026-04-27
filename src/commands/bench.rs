@@ -1,4 +1,4 @@
-use clap::Args;
+use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -6,8 +6,9 @@ use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::engine::run_dir::RunDir;
 use homeboy::extension::bench as extension_bench;
 use homeboy::extension::bench::{
-    aggregate_comparison, BenchCommandOutput, BenchComparisonOutput, BenchRunWorkflowArgs,
-    RigBenchEntry, DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+    aggregate_comparison, BenchCommandOutput, BenchComparisonOutput, BenchListWorkflowArgs,
+    BenchListWorkflowResult, BenchRunWorkflowArgs, RigBenchEntry,
+    DEFAULT_REGRESSION_THRESHOLD_PERCENT,
 };
 use homeboy::extension::ExtensionCapability;
 use homeboy::rig::{self, RigSpec};
@@ -17,6 +18,34 @@ use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
 pub struct BenchArgs {
+    #[command(subcommand)]
+    command: Option<BenchCommand>,
+
+    #[command(flatten)]
+    run: BenchRunArgs,
+}
+
+#[derive(Subcommand)]
+enum BenchCommand {
+    /// List declared benchmark scenarios without executing them
+    List(BenchListArgs),
+}
+
+#[derive(Args)]
+struct BenchListArgs {
+    #[command(flatten)]
+    comp: PositionalComponentArgs,
+
+    #[command(flatten)]
+    setting_args: SettingArgs,
+
+    /// Additional arguments to pass to the bench runner (must follow --)
+    #[arg(last = true)]
+    args: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct BenchRunArgs {
     #[command(flatten)]
     comp: PositionalComponentArgs,
 
@@ -162,15 +191,23 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 pub enum BenchOutput {
     Single(BenchCommandOutput),
     Comparison(BenchComparisonOutput),
+    List(BenchListWorkflowResult),
 }
 
 pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
-    let passthrough_args = filter_homeboy_flags(&args.args);
+    if let Some(command) = &args.command {
+        return match command {
+            BenchCommand::List(list_args) => run_list(list_args),
+        };
+    }
+
+    let run_args = &args.run;
+    let passthrough_args = filter_homeboy_flags(&run_args.args);
 
     // No --rig: legacy single bare run. No rig pinning, no rig
     // snapshot, baseline key untouched. Identical to before this PR.
-    if args.rig.is_empty() {
-        let (output, exit) = run_single(&args, &passthrough_args, None)?;
+    if run_args.rig.is_empty() {
+        let (output, exit) = run_single(run_args, &passthrough_args, None)?;
         return Ok((BenchOutput::Single(output), exit));
     }
 
@@ -182,25 +219,25 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
     //
     // The recursive call cannot loop: the second invocation has
     // args.rig.len() == 2 and skips this expansion entirely.
-    if let Some(expanded) = maybe_expand_default_baseline(&args)? {
+    if let Some(expanded) = maybe_expand_default_baseline(run_args)? {
         let mut expanded_args = args;
-        expanded_args.rig = expanded;
+        expanded_args.run.rig = expanded;
         return run(expanded_args, _global);
     }
 
     // --rig with one value: legacy single rig-pinned run. Same shape as
     // before this PR for `bench --rig <id>` callers (single output, rig
     // snapshot embedded). Baseline flags still honored.
-    if args.rig.len() == 1 {
-        let rig_id = args.rig[0].clone();
-        let (output, exit) = run_single(&args, &passthrough_args, Some(rig_id))?;
+    if run_args.rig.len() == 1 {
+        let rig_id = run_args.rig[0].clone();
+        let (output, exit) = run_single(run_args, &passthrough_args, Some(rig_id))?;
         return Ok((BenchOutput::Single(output), exit));
     }
 
     // --rig with two or more values: cross-rig comparison. Run each rig
     // in sequence, collect per-rig outputs, aggregate into a
     // BenchComparisonOutput.
-    if args.baseline_args.baseline {
+    if run_args.baseline_args.baseline {
         return Err(homeboy::Error::validation_invalid_argument(
             "--baseline",
             "Cannot --baseline a cross-rig run; baselines are per-rig. \
@@ -210,7 +247,7 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
             None,
         ));
     }
-    if args.baseline_args.ratchet {
+    if run_args.baseline_args.ratchet {
         return Err(homeboy::Error::validation_invalid_argument(
             "--ratchet",
             "Cannot --ratchet a cross-rig run; baselines are per-rig. \
@@ -220,11 +257,11 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
         ));
     }
 
-    let mut entries = Vec::with_capacity(args.rig.len());
+    let mut entries = Vec::with_capacity(run_args.rig.len());
     let mut effective_component_label: Option<String> = None;
 
-    for rig_id in &args.rig {
-        let (single_output, _exit) = run_single(&args, &passthrough_args, Some(rig_id.clone()))?;
+    for rig_id in &run_args.rig {
+        let (single_output, _exit) = run_single(run_args, &passthrough_args, Some(rig_id.clone()))?;
         if effective_component_label.is_none() {
             effective_component_label = Some(single_output.component.clone());
         }
@@ -239,11 +276,55 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
     }
 
     let component = effective_component_label
-        .or_else(|| args.comp.id().map(|s| s.to_string()))
+        .or_else(|| run_args.comp.id().map(|s| s.to_string()))
         .unwrap_or_else(|| "<unknown>".to_string());
 
-    let (output, exit) = aggregate_comparison(component, args.iterations, entries);
+    let (output, exit) = aggregate_comparison(component, run_args.iterations, entries);
     Ok((BenchOutput::Comparison(output), exit))
+}
+
+fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
+    let passthrough_args = filter_homeboy_flags(&args.args);
+    let effective_id = args.comp.resolve_id()?;
+
+    let ctx = execution_context::resolve(&ResolveOptions::with_capability_and_json(
+        &effective_id,
+        args.comp.path.clone(),
+        ExtensionCapability::Bench,
+        args.setting_args.setting.clone(),
+        args.setting_args.setting_json.clone(),
+    ))?;
+
+    let run_dir = RunDir::create()?;
+    let output = extension_bench::run_bench_list_workflow(
+        &ctx.component,
+        BenchListWorkflowArgs {
+            component_label: effective_id,
+            component_id: ctx.component_id.clone(),
+            path_override: args.comp.path.clone(),
+            settings: ctx
+                .settings
+                .iter()
+                .filter_map(|(k, v)| match v {
+                    serde_json::Value::String(s) => Some((k.clone(), s.clone())),
+                    _ => None,
+                })
+                .collect(),
+            settings_json: ctx
+                .settings
+                .iter()
+                .filter_map(|(k, v)| match v {
+                    serde_json::Value::String(_) => None,
+                    other => Some((k.clone(), other.clone())),
+                })
+                .collect(),
+            passthrough_args,
+            extra_workloads: Vec::new(),
+        },
+        &run_dir,
+    )?;
+
+    Ok((BenchOutput::List(output), 0))
 }
 
 /// Resolve the candidate rig's `bench.default_baseline_rig` and, when
@@ -260,7 +341,7 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
 /// A spec that names itself as its own default baseline is rejected
 /// with `validation_invalid_argument` — the auto-upgrade would loop
 /// and the user almost certainly meant a different rig.
-fn maybe_expand_default_baseline(args: &BenchArgs) -> homeboy::Result<Option<Vec<String>>> {
+fn maybe_expand_default_baseline(args: &BenchRunArgs) -> homeboy::Result<Option<Vec<String>>> {
     if args.rig.len() != 1 {
         return Ok(None);
     }
@@ -299,7 +380,7 @@ fn maybe_expand_default_baseline(args: &BenchArgs) -> homeboy::Result<Option<Vec
 /// the legacy single-run path and the new cross-rig comparison path
 /// share, so behavior stays identical for single-rig callers.
 fn run_single(
-    args: &BenchArgs,
+    args: &BenchRunArgs,
     passthrough_args: &[String],
     rig_id_override: Option<String>,
 ) -> CmdResult<BenchCommandOutput> {

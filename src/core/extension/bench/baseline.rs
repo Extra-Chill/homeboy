@@ -323,6 +323,8 @@ mod tests {
             id: id.to_string(),
             file: None,
             source: None,
+            default_iterations: None,
+            tags: Vec::new(),
             iterations: 10,
             metrics: BenchMetrics {
                 values: metrics,
@@ -342,6 +344,8 @@ mod tests {
             id: id.to_string(),
             file: None,
             source: None,
+            default_iterations: None,
+            tags: Vec::new(),
             iterations: 10,
             metrics: BenchMetrics {
                 values,
