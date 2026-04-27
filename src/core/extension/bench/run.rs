@@ -1,5 +1,6 @@
 //! Bench main workflow: invoke extension runner, load JSON, apply baseline.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -11,7 +12,9 @@ use crate::engine::baseline::BaselineFlags;
 use crate::engine::run_dir::{self, RunDir};
 use crate::error::{Error, Result};
 use crate::extension::bench::baseline::{self, BenchBaselineComparison};
-use crate::extension::bench::parsing::{self, BenchResults, BenchScenario};
+use crate::extension::bench::parsing::{
+    self, BenchMetrics, BenchResults, BenchRunDistribution, BenchRunSnapshot, BenchScenario,
+};
 use crate::extension::{
     resolve_execution_context, ExtensionCapability, ExtensionExecutionContext, ExtensionRunner,
 };
@@ -29,6 +32,7 @@ pub struct BenchRunWorkflowArgs {
     /// object, not a JSON-string-of-an-object.
     pub settings_json: Vec<(String, serde_json::Value)>,
     pub iterations: u64,
+    pub runs: u64,
     pub baseline_flags: BaselineFlags,
     pub regression_threshold_percent: f64,
     pub json_summary: bool,
@@ -103,6 +107,7 @@ pub fn run_bench_list_workflow(
             settings: args.settings,
             settings_json: args.settings_json,
             iterations: 0,
+            runs: 1,
             baseline_flags: BaselineFlags {
                 baseline: false,
                 ignore_baseline: true,
@@ -185,6 +190,14 @@ pub fn run_main_bench_workflow(
             None,
         ));
     }
+    if args.runs == 0 {
+        return Err(Error::validation_invalid_argument(
+            "runs",
+            "must be >= 1",
+            None,
+            None,
+        ));
+    }
     if args.concurrency > 1 && args.shared_state.is_none() {
         return Err(Error::validation_invalid_argument(
             "concurrency",
@@ -211,7 +224,9 @@ pub fn run_main_bench_workflow(
 
     let execution_context = resolve_execution_context(component, ExtensionCapability::Bench)?;
 
-    let (parsed, runner_success, runner_exit_code) = if args.concurrency <= 1 {
+    let (parsed, runner_success, runner_exit_code) = if args.runs > 1 {
+        run_sequential_runs(&execution_context, component, &args, run_dir)?
+    } else if args.concurrency <= 1 {
         let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
         let runner_output =
             build_runner(&execution_context, component, &args, run_dir, None)?.run()?;
@@ -295,6 +310,207 @@ pub fn run_main_bench_workflow(
         baseline_comparison,
         hints,
     })
+}
+
+fn run_sequential_runs(
+    execution_context: &ExtensionExecutionContext,
+    component: &Component,
+    args: &BenchRunWorkflowArgs,
+    run_dir: &RunDir,
+) -> Result<(Option<BenchResults>, bool, i32)> {
+    let mut parsed_runs = Vec::new();
+    let mut all_success = true;
+    let mut first_failure_exit: Option<i32> = None;
+
+    for _ in 0..args.runs {
+        let (parsed, success, exit_code) = if args.concurrency <= 1 {
+            run_single_dispatcher(execution_context, component, args, run_dir)?
+        } else {
+            run_concurrent_instances(execution_context, component, args, run_dir)?
+        };
+        if !success {
+            all_success = false;
+            if first_failure_exit.is_none() {
+                first_failure_exit = Some(exit_code);
+            }
+        }
+        if let Some(result) = parsed {
+            parsed_runs.push(result);
+        }
+    }
+
+    let merged = if parsed_runs.is_empty() {
+        None
+    } else {
+        Some(aggregate_runs(&parsed_runs)?)
+    };
+    let exit_code = if all_success {
+        0
+    } else {
+        first_failure_exit.unwrap_or(1)
+    };
+
+    Ok((merged, all_success, exit_code))
+}
+
+fn run_single_dispatcher(
+    execution_context: &ExtensionExecutionContext,
+    component: &Component,
+    args: &BenchRunWorkflowArgs,
+    run_dir: &RunDir,
+) -> Result<(Option<BenchResults>, bool, i32)> {
+    let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
+    if results_file.exists() {
+        std::fs::remove_file(&results_file).map_err(|e| {
+            Error::internal_io(
+                format!(
+                    "Failed to clear previous bench results file {}: {}",
+                    results_file.display(),
+                    e
+                ),
+                Some("bench.run.results_file".to_string()),
+            )
+        })?;
+    }
+
+    let runner_output = build_runner(execution_context, component, args, run_dir, None)?.run()?;
+    let parsed = if results_file.exists() {
+        Some(parsing::parse_bench_results_file(&results_file)?)
+    } else {
+        None
+    };
+    Ok((parsed, runner_output.success, runner_output.exit_code))
+}
+
+pub fn aggregate_runs(runs: &[BenchResults]) -> Result<BenchResults> {
+    let first = runs
+        .first()
+        .ok_or_else(|| Error::internal_unexpected("cannot aggregate zero bench runs"))?;
+    let mut metric_policies = BTreeMap::new();
+    let mut grouped: BTreeMap<String, (BenchScenario, Vec<BenchScenario>)> = BTreeMap::new();
+
+    for result in runs {
+        if result.component_id != first.component_id {
+            return Err(Error::validation_invalid_argument(
+                "bench_results.component_id",
+                format!(
+                    "bench run component_id mismatch: expected `{}`, got `{}`",
+                    first.component_id, result.component_id
+                ),
+                None,
+                None,
+            ));
+        }
+        if result.iterations != first.iterations {
+            return Err(Error::validation_invalid_argument(
+                "bench_results.iterations",
+                format!(
+                    "bench run iterations mismatch: expected `{}`, got `{}`",
+                    first.iterations, result.iterations
+                ),
+                None,
+                None,
+            ));
+        }
+        for (key, policy) in &result.metric_policies {
+            metric_policies
+                .entry(key.clone())
+                .or_insert_with(|| policy.clone());
+        }
+        for scenario in &result.scenarios {
+            grouped
+                .entry(scenario.id.clone())
+                .and_modify(|(_, scenarios)| scenarios.push(scenario.clone()))
+                .or_insert_with(|| (scenario.clone(), vec![scenario.clone()]));
+        }
+    }
+
+    let scenarios = grouped
+        .into_values()
+        .map(|(template, scenarios)| aggregate_scenario(template, scenarios))
+        .collect();
+
+    Ok(BenchResults {
+        component_id: first.component_id.clone(),
+        iterations: first.iterations,
+        scenarios,
+        metric_policies,
+    })
+}
+
+fn aggregate_scenario(mut template: BenchScenario, scenarios: Vec<BenchScenario>) -> BenchScenario {
+    let mut metric_values: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for scenario in &scenarios {
+        for (name, value) in &scenario.metrics.values {
+            metric_values.entry(name.clone()).or_default().push(*value);
+        }
+    }
+
+    let mut values = BTreeMap::new();
+    let mut summary = BTreeMap::new();
+    for (name, samples) in metric_values {
+        values.insert(name.clone(), percentile(&samples, 50.0));
+        summary.insert(name, distribution(&samples));
+    }
+
+    template.metrics = BenchMetrics {
+        values,
+        distributions: BTreeMap::new(),
+    };
+    template.memory = None;
+    template.runs = Some(
+        scenarios
+            .iter()
+            .map(|scenario| BenchRunSnapshot {
+                metrics: scenario.metrics.clone(),
+                memory: scenario.memory.clone(),
+            })
+            .collect(),
+    );
+    template.runs_summary = Some(summary);
+    template
+}
+
+fn distribution(samples: &[f64]) -> BenchRunDistribution {
+    let n = samples.len() as f64;
+    let mean = samples.iter().sum::<f64>() / n;
+    let variance = samples
+        .iter()
+        .map(|value| {
+            let delta = value - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / n;
+    let stdev = variance.sqrt();
+    let cv_pct = if mean == 0.0 {
+        0.0
+    } else {
+        stdev / mean * 100.0
+    };
+
+    BenchRunDistribution {
+        stdev,
+        cv_pct,
+        n: samples.len() as u64,
+    }
+}
+
+fn percentile(samples: &[f64], pct: f64) -> f64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let rank = pct / 100.0 * (sorted.len() as f64 - 1.0);
+    let lower = rank.floor() as usize;
+    let upper = rank.ceil() as usize;
+    if lower == upper {
+        sorted[lower]
+    } else {
+        let weight = rank - lower as f64;
+        sorted[lower] * (1.0 - weight) + sorted[upper] * weight
+    }
 }
 
 /// Per-instance results filename within the run dir.
@@ -517,6 +733,8 @@ mod tests {
                     distributions: BTreeMap::new(),
                 },
                 memory: None,
+                runs: None,
+                runs_summary: None,
             }],
         };
 
@@ -539,6 +757,7 @@ mod tests {
                 settings: Vec::new(),
                 settings_json: Vec::new(),
                 iterations: 1,
+                runs: 1,
                 baseline_flags: BaselineFlags {
                     baseline: false,
                     ignore_baseline: true,
@@ -559,3 +778,7 @@ mod tests {
         assert!(format!("{}", err).contains("concurrency"));
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/core/extension/bench/runs_flag_test.rs"]
+mod runs_flag_test;

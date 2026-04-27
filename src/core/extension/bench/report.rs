@@ -378,6 +378,8 @@ mod tests {
                 distributions: BTreeMap::new(),
             },
             memory: None,
+            runs: None,
+            runs_summary: None,
         }
     }
 

@@ -76,6 +76,29 @@ pub struct BenchScenario {
     pub metrics: BenchMetrics,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<BenchMemory>,
+    /// Per-run raw metric snapshots when `homeboy bench --runs N` is used.
+    /// Omitted for the default `--runs 1` path so existing envelopes keep
+    /// their exact shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runs: Option<Vec<BenchRunSnapshot>>,
+    /// Cross-run distribution stats keyed by metric name. Omitted for the
+    /// default `--runs 1` path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runs_summary: Option<BTreeMap<String, BenchRunDistribution>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BenchRunSnapshot {
+    pub metrics: BenchMetrics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<BenchMemory>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BenchRunDistribution {
+    pub stdev: f64,
+    pub cv_pct: f64,
+    pub n: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

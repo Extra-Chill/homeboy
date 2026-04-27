@@ -268,6 +268,7 @@ fn run_component_with_rig_context(
                 })
                 .collect(),
             iterations: args.iterations,
+            runs: args.runs,
             baseline_flags: homeboy::engine::baseline::BaselineFlags {
                 baseline: args.baseline_args.baseline,
                 ignore_baseline: args.baseline_args.ignore_baseline,
@@ -337,6 +338,7 @@ mod tests {
                 path: None,
             },
             iterations: 1,
+            runs: 1,
             shared_state: Some(PathBuf::from("/tmp/shared")),
             concurrency: 1,
             baseline_args: BaselineArgs::default(),
