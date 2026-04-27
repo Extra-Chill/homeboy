@@ -186,10 +186,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_self_status_command() {
+    fn test_current_command_surface() {
         let surface = current_command_surface();
 
         assert!(surface.contains_path(&["self"]));
         assert!(surface.contains_path(&["self", "status"]));
+    }
+
+    #[test]
+    fn test_command_surface_from() {
+        let surface = command_surface_from(Cli::command());
+
+        assert!(surface.contains_path(&["self"]));
+        assert!(surface.contains_path(&["self", "status"]));
+    }
+
+    #[test]
+    fn test_contains_path() {
+        let surface = current_command_surface();
+
+        assert!(surface.contains_path(&["self"]));
+        assert!(!surface.contains_path(&["self", "missing"]));
     }
 }
