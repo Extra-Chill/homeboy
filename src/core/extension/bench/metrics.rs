@@ -399,6 +399,51 @@ mod tests {
     }
 
     #[test]
+    fn test_compare_distribution() {
+        let resolved = ResolvedMetricPolicy::custom(
+            "latency_ms",
+            &BenchMetricPolicy {
+                direction: BenchMetricDirection::LowerIsBetter,
+                regression_threshold_percent: Some(5.0),
+                regression_threshold_absolute: Some(0.0),
+                variance_aware: true,
+                min_iterations_for_variance: Some(3),
+                regression_test: Some(RegressionTest::PointDelta),
+                phase: None,
+            },
+        );
+
+        let delta = resolved
+            .compare_distribution(&[100.0, 110.0, 120.0], &[120.0, 130.0, 140.0])
+            .expect("distribution delta");
+
+        assert_eq!(delta.baseline_value, 110.0);
+        assert_eq!(delta.current_value, 130.0);
+        assert_eq!(delta.regression_test, Some(RegressionTest::PointDelta));
+        assert_eq!(delta.baseline_samples, Some(3));
+        assert_eq!(delta.current_samples, Some(3));
+        assert!(delta.regression);
+    }
+
+    #[test]
+    fn test_variance_aware() {
+        let resolved = ResolvedMetricPolicy::custom(
+            "latency_ms",
+            &BenchMetricPolicy {
+                direction: BenchMetricDirection::LowerIsBetter,
+                regression_threshold_percent: None,
+                regression_threshold_absolute: None,
+                variance_aware: true,
+                min_iterations_for_variance: Some(3),
+                regression_test: Some(RegressionTest::MannWhitneyU),
+                phase: None,
+            },
+        );
+
+        assert!(resolved.variance_aware());
+    }
+
+    #[test]
     fn test_custom() {
         let resolved = ResolvedMetricPolicy::custom(
             "error_rate",
