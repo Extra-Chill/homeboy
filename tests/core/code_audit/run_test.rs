@@ -4,7 +4,7 @@
 
 use super::apply_finding_filters;
 use crate::code_audit::findings::{Finding, Severity};
-use crate::code_audit::{AuditFinding, AuditSummary, CodeAuditResult};
+use crate::code_audit::{AuditExecutionPlan, AuditFinding, AuditSummary, CodeAuditResult};
 
 fn make_finding(kind: AuditFinding, file: &str) -> Finding {
     Finding {
@@ -120,4 +120,32 @@ fn only_with_no_matches_leaves_zero_findings_and_clean_exit() {
 
     assert!(result.findings.is_empty());
     assert_eq!(result.summary.outliers_found, 0);
+}
+
+#[test]
+fn execution_plan_for_structural_only_skips_unrelated_detector_families() {
+    let plan = AuditExecutionPlan::from_filters(&[AuditFinding::GodFile], &[]);
+
+    assert!(plan.run_structural);
+    assert!(!plan.run_conventions);
+    assert!(!plan.run_duplication);
+    assert!(!plan.run_dead_code);
+    assert!(!plan.run_compiler_warnings);
+}
+
+#[test]
+fn execution_plan_for_duplicate_only_skips_structural_detector_family() {
+    let plan = AuditExecutionPlan::from_filters(&[AuditFinding::DuplicateFunction], &[]);
+
+    assert!(plan.run_duplication);
+    assert!(!plan.run_structural);
+    assert!(!plan.run_conventions);
+}
+
+#[test]
+fn execution_plan_is_full_without_filters() {
+    assert_eq!(
+        AuditExecutionPlan::from_filters(&[], &[]),
+        AuditExecutionPlan::full()
+    );
 }

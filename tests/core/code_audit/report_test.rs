@@ -3,7 +3,7 @@ use crate::code_audit::report::{
     AuditCommandOutput,
 };
 use crate::code_audit::test_helpers::{empty_result, make_finding};
-use crate::code_audit::{AuditFinding, FindingConfidence, Severity};
+use crate::code_audit::{AuditFinding, Finding, FindingConfidence, Severity};
 
 #[test]
 fn test_build_audit_summary_empty_result() {
@@ -103,6 +103,21 @@ fn test_compute_fixability_returns_none_for_nonexistent_path() {
     result.findings.push(make_finding(Severity::Warning));
     let fixability = compute_fixability(&result);
     assert!(fixability.is_none());
+}
+
+#[test]
+fn test_compute_fixability_skips_structural_only_results() {
+    let mut result = empty_result();
+    result.findings.push(Finding {
+        convention: "structural".to_string(),
+        severity: Severity::Warning,
+        file: "src/big.rs".to_string(),
+        description: "File has 1200 lines".to_string(),
+        suggestion: "Consider decomposing into focused modules".to_string(),
+        kind: AuditFinding::GodFile,
+    });
+
+    assert!(compute_fixability(&result).is_none());
 }
 
 #[test]

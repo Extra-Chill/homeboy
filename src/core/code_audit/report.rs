@@ -180,6 +180,20 @@ pub fn compute_fixability(result: &CodeAuditResult) -> Option<AuditFixability> {
         return None;
     }
 
+    if !result.findings.is_empty()
+        && result.findings.iter().all(|finding| {
+            matches!(
+                finding.kind,
+                AuditFinding::GodFile | AuditFinding::HighItemCount | AuditFinding::DirectorySprawl
+            )
+        })
+    {
+        // Structural decompose planning can be much more expensive than audit
+        // reporting. Keep filtered read-only audits fast; `homeboy refactor`
+        // remains the explicit path for planning those changes.
+        return None;
+    }
+
     // Generate fix plan (dry-run — never writes)
     let mut fix_result = crate::refactor::plan::generate::generate_audit_fixes(
         result,

@@ -111,6 +111,241 @@ pub struct CodeAuditResult {
     pub duplicate_groups: Vec<duplication::DuplicateGroup>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuditExecutionPlan {
+    pub(crate) run_conventions: bool,
+    pub(crate) run_stale_cli_invocations: bool,
+    pub(crate) run_cli_argument_shapes: bool,
+    pub(crate) run_structural: bool,
+    pub(crate) run_duplication: bool,
+    pub(crate) run_dead_code: bool,
+    pub(crate) run_comment_hygiene: bool,
+    pub(crate) run_test_coverage: bool,
+    pub(crate) run_layer_ownership: bool,
+    pub(crate) run_test_topology: bool,
+    pub(crate) run_docs: bool,
+    pub(crate) run_compiler_warnings: bool,
+    pub(crate) run_wrapper_inference: bool,
+    pub(crate) run_shadow_modules: bool,
+    pub(crate) run_field_patterns: bool,
+    pub(crate) run_facade_passthrough: bool,
+    pub(crate) run_literal_shapes: bool,
+    pub(crate) run_deprecation_age: bool,
+    pub(crate) run_dead_guard: bool,
+    pub(crate) run_requested_detectors: bool,
+    pub(crate) run_global_env_guard: bool,
+    pub(crate) run_shared_scaffolding: bool,
+}
+
+impl AuditExecutionPlan {
+    pub(crate) fn full() -> Self {
+        Self {
+            run_conventions: true,
+            run_stale_cli_invocations: true,
+            run_cli_argument_shapes: true,
+            run_structural: true,
+            run_duplication: true,
+            run_dead_code: true,
+            run_comment_hygiene: true,
+            run_test_coverage: true,
+            run_layer_ownership: true,
+            run_test_topology: true,
+            run_docs: true,
+            run_compiler_warnings: true,
+            run_wrapper_inference: true,
+            run_shadow_modules: true,
+            run_field_patterns: true,
+            run_facade_passthrough: true,
+            run_literal_shapes: true,
+            run_deprecation_age: true,
+            run_dead_guard: true,
+            run_requested_detectors: true,
+            run_global_env_guard: true,
+            run_shared_scaffolding: true,
+        }
+    }
+
+    pub(crate) fn from_filters(only: &[AuditFinding], exclude: &[AuditFinding]) -> Self {
+        if only.is_empty() && exclude.is_empty() {
+            return Self::full();
+        }
+
+        Self {
+            run_conventions: Self::family_enabled(
+                only,
+                exclude,
+                &[
+                    AuditFinding::MissingMethod,
+                    AuditFinding::ExtraMethod,
+                    AuditFinding::MissingRegistration,
+                    AuditFinding::DifferentRegistration,
+                    AuditFinding::MissingInterface,
+                    AuditFinding::NamingMismatch,
+                    AuditFinding::SignatureMismatch,
+                    AuditFinding::NamespaceMismatch,
+                    AuditFinding::MissingImport,
+                ],
+            ),
+            run_stale_cli_invocations: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::StaleCliInvocation],
+            ),
+            run_cli_argument_shapes: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::StaleCliArgumentShape],
+            ),
+            run_structural: Self::family_enabled(
+                only,
+                exclude,
+                &[
+                    AuditFinding::GodFile,
+                    AuditFinding::HighItemCount,
+                    AuditFinding::DirectorySprawl,
+                ],
+            ),
+            run_duplication: Self::family_enabled(
+                only,
+                exclude,
+                &[
+                    AuditFinding::DuplicateFunction,
+                    AuditFinding::IntraMethodDuplicate,
+                    AuditFinding::NearDuplicate,
+                    AuditFinding::ParallelImplementation,
+                ],
+            ),
+            run_dead_code: Self::family_enabled(
+                only,
+                exclude,
+                &[
+                    AuditFinding::UnusedParameter,
+                    AuditFinding::IgnoredParameter,
+                    AuditFinding::DeadCodeMarker,
+                    AuditFinding::UnreferencedExport,
+                    AuditFinding::OrphanedInternal,
+                ],
+            ),
+            run_comment_hygiene: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::TodoMarker, AuditFinding::LegacyComment],
+            ),
+            run_test_coverage: Self::family_enabled(
+                only,
+                exclude,
+                &[
+                    AuditFinding::MissingTestFile,
+                    AuditFinding::MissingTestMethod,
+                    AuditFinding::OrphanedTest,
+                    AuditFinding::VacuousTest,
+                ],
+            ),
+            run_layer_ownership: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::LayerOwnershipViolation],
+            ),
+            run_test_topology: Self::family_enabled(
+                only,
+                exclude,
+                &[
+                    AuditFinding::InlineTestModule,
+                    AuditFinding::ScatteredTestFile,
+                ],
+            ),
+            run_docs: Self::family_enabled(
+                only,
+                exclude,
+                &[
+                    AuditFinding::BrokenDocReference,
+                    AuditFinding::UndocumentedFeature,
+                    AuditFinding::StaleDocReference,
+                ],
+            ),
+            run_compiler_warnings: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::CompilerWarning],
+            ),
+            run_wrapper_inference: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::MissingWrapperDeclaration],
+            ),
+            run_shadow_modules: Self::family_enabled(only, exclude, &[AuditFinding::ShadowModule]),
+            run_field_patterns: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::RepeatedFieldPattern],
+            ),
+            run_facade_passthrough: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::FacadePassthrough],
+            ),
+            run_literal_shapes: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::RepeatedLiteralShape],
+            ),
+            run_deprecation_age: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::DeprecationAge],
+            ),
+            run_dead_guard: Self::family_enabled(only, exclude, &[AuditFinding::DeadGuard]),
+            run_requested_detectors: Self::family_enabled(
+                only,
+                exclude,
+                &[
+                    AuditFinding::JsonLikeExactMatch,
+                    AuditFinding::ConstantBackedSlugLiteral,
+                    AuditFinding::OptionScopeDrift,
+                ],
+            ),
+            run_global_env_guard: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::GlobalEnvMutationGuard],
+            ),
+            run_shared_scaffolding: Self::family_enabled(
+                only,
+                exclude,
+                &[AuditFinding::SharedScaffolding],
+            ),
+        }
+    }
+
+    fn family_enabled(
+        only: &[AuditFinding],
+        exclude: &[AuditFinding],
+        emitted: &[AuditFinding],
+    ) -> bool {
+        let requested = only.is_empty() || emitted.iter().any(|kind| only.contains(kind));
+        let fully_excluded = emitted.iter().all(|kind| exclude.contains(kind));
+
+        requested && !fully_excluded
+    }
+
+    fn requires_discovery(&self) -> bool {
+        self.run_conventions
+            || self.run_duplication
+            || self.run_dead_code
+            || self.run_comment_hygiene
+            || self.run_test_coverage
+            || self.run_wrapper_inference
+            || self.run_shadow_modules
+            || self.run_facade_passthrough
+            || self.run_literal_shapes
+            || self.run_deprecation_age
+            || self.run_dead_guard
+            || self.run_requested_detectors
+            || self.run_global_env_guard
+            || self.run_shared_scaffolding
+    }
+}
+
 /// A cross-directory convention: a pattern that sibling subdirectories share.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DirectoryConvention {
@@ -218,7 +453,23 @@ pub fn audit_path(path: &str) -> Result<CodeAuditResult> {
 /// Also available for callers that have a component ID and an overridden path.
 pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAuditResult> {
     let ref_paths = read_reference_paths_from_env();
-    audit_internal(component_id, source_path, None, None, &ref_paths)
+    audit_internal(
+        component_id,
+        source_path,
+        None,
+        None,
+        &ref_paths,
+        &AuditExecutionPlan::full(),
+    )
+}
+
+pub(crate) fn audit_path_with_id_with_plan(
+    component_id: &str,
+    source_path: &str,
+    plan: &AuditExecutionPlan,
+) -> Result<CodeAuditResult> {
+    let ref_paths = read_reference_paths_from_env();
+    audit_internal(component_id, source_path, None, None, &ref_paths, plan)
 }
 
 /// Audit only specific files within a component path.
@@ -244,6 +495,25 @@ pub fn audit_path_scoped(
         Some(file_filter),
         git_ref,
         &ref_paths,
+        &AuditExecutionPlan::full(),
+    )
+}
+
+pub(crate) fn audit_path_scoped_with_plan(
+    component_id: &str,
+    source_path: &str,
+    file_filter: &[String],
+    git_ref: Option<&str>,
+    plan: &AuditExecutionPlan,
+) -> Result<CodeAuditResult> {
+    let ref_paths = read_reference_paths_from_env();
+    audit_internal(
+        component_id,
+        source_path,
+        Some(file_filter),
+        git_ref,
+        &ref_paths,
+        plan,
     )
 }
 
@@ -282,6 +552,7 @@ fn audit_internal(
     file_filter: Option<&[String]>,
     git_ref: Option<&str>,
     reference_paths: &[String],
+    plan: &AuditExecutionPlan,
 ) -> Result<CodeAuditResult> {
     let root = Path::new(source_path);
     let audit_config = audit_config_for(component_id, root);
@@ -297,13 +568,25 @@ fn audit_internal(
         log_status!("audit", "Scanning {} for conventions...", source_path);
     }
 
+    if !plan.requires_discovery() {
+        return Ok(audit_root_only(component_id, source_path, root, plan));
+    }
+
     // Phase 1: Auto-discover file groups (always full codebase for convention detection)
     let discovery = discovery::auto_discover_groups(root);
     let files_skipped = discovery
         .files_walked
         .saturating_sub(discovery.files_fingerprinted);
-    let stale_cli_findings = stale_cli_invocation::run(root);
-    let cli_argument_findings = cli_invocation_arguments::run(root);
+    let stale_cli_findings = if plan.run_stale_cli_invocations {
+        stale_cli_invocation::run(root)
+    } else {
+        Vec::new()
+    };
+    let cli_argument_findings = if plan.run_cli_argument_shapes {
+        cli_invocation_arguments::run(root)
+    } else {
+        Vec::new()
+    };
 
     if discovery.groups.is_empty() {
         let mut warnings = Vec::new();
@@ -401,7 +684,11 @@ fn audit_internal(
     }
 
     // Phase 4b: Structural complexity analysis (god files, high item counts)
-    let structural_findings = structural::analyze_structure(root);
+    let structural_findings = if plan.run_structural {
+        structural::analyze_structure(root)
+    } else {
+        Vec::new()
+    };
     if !structural_findings.is_empty() {
         log_status!(
             "audit",
@@ -424,9 +711,16 @@ fn audit_internal(
     let convention_methods =
         build_convention_method_set(&discovered_conventions, &all_fingerprints);
 
-    let duplication_findings =
-        duplication::detect_duplicates(&all_fingerprints, &convention_methods);
-    let duplicate_groups = duplication::detect_duplicate_groups(&all_fingerprints);
+    let duplication_findings = if plan.run_duplication {
+        duplication::detect_duplicates(&all_fingerprints, &convention_methods)
+    } else {
+        Vec::new()
+    };
+    let duplicate_groups = if plan.run_duplication {
+        duplication::detect_duplicate_groups(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
     if !duplication_findings.is_empty() {
         log_status!(
             "audit",
@@ -438,7 +732,11 @@ fn audit_internal(
     }
 
     // Phase 4c2: Intra-method duplication (duplicated blocks within a single method)
-    let intra_dup_findings = duplication::detect_intra_method_duplicates(&all_fingerprints);
+    let intra_dup_findings = if plan.run_duplication {
+        duplication::detect_intra_method_duplicates(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
     if !intra_dup_findings.is_empty() {
         log_status!(
             "audit",
@@ -449,7 +747,11 @@ fn audit_internal(
     }
 
     // Phase 4d: Near-duplicate detection (structural similarity)
-    let near_dup_findings = duplication::detect_near_duplicates(&all_fingerprints);
+    let near_dup_findings = if plan.run_duplication {
+        duplication::detect_near_duplicates(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
     if !near_dup_findings.is_empty() {
         log_status!(
             "audit",
@@ -460,8 +762,11 @@ fn audit_internal(
     }
 
     // Phase 4d2: Parallel implementation detection (similar call patterns across files)
-    let parallel_findings =
-        duplication::detect_parallel_implementations(&all_fingerprints, &convention_methods);
+    let parallel_findings = if plan.run_duplication {
+        duplication::detect_parallel_implementations(&all_fingerprints, &convention_methods)
+    } else {
+        Vec::new()
+    };
     if !parallel_findings.is_empty() {
         log_status!(
             "audit",
@@ -476,10 +781,17 @@ fn audit_internal(
     // Reference dependencies (e.g. WordPress core, plugin dependencies) are fingerprinted
     // and included in the cross-reference set so that functions called via framework hooks,
     // callbacks, or inherited methods are recognized as referenced.
-    let ref_fingerprints = fingerprint_reference_paths(reference_paths);
+    let ref_fingerprints = if plan.run_dead_code {
+        fingerprint_reference_paths(reference_paths)
+    } else {
+        Vec::new()
+    };
     let ref_fp_refs: Vec<&fingerprint::FileFingerprint> = ref_fingerprints.iter().collect();
-    let dead_code_findings =
-        dead_code::analyze_dead_code_with_config(&all_fingerprints, &ref_fp_refs, &audit_config);
+    let dead_code_findings = if plan.run_dead_code {
+        dead_code::analyze_dead_code_with_config(&all_fingerprints, &ref_fp_refs, &audit_config)
+    } else {
+        Vec::new()
+    };
     if !dead_code_findings.is_empty() {
         log_status!(
             "audit",
@@ -490,7 +802,11 @@ fn audit_internal(
     }
 
     // Phase 4f: Comment hygiene detection (TODO/FIXME/HACK + stale phrasing)
-    let comment_findings = comment_hygiene::run(&all_fingerprints);
+    let comment_findings = if plan.run_comment_hygiene {
+        comment_hygiene::run(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
     if !comment_findings.is_empty() {
         log_status!(
             "audit",
@@ -502,25 +818,27 @@ fn audit_internal(
 
     // Phase 4g: Structural test coverage gap detection
     // Look up the extension's test mapping config for the component.
-    if let Ok(comp) = component::load(component_id) {
-        if let Some(extensions) = &comp.extensions {
-            for ext_id in extensions.keys() {
-                if let Ok(ext_manifest) = crate::extension::load_extension(ext_id) {
-                    if let Some(test_mapping) = ext_manifest.test_mapping() {
-                        let coverage_findings = test_coverage::analyze_test_coverage(
-                            root,
-                            &all_fingerprints,
-                            test_mapping,
-                        );
-                        if !coverage_findings.is_empty() {
-                            log_status!(
-                                "audit",
-                                "Test coverage: {} finding(s) (missing test files, uncovered methods, orphaned tests)",
-                                coverage_findings.len()
+    if plan.run_test_coverage {
+        if let Ok(comp) = component::load(component_id) {
+            if let Some(extensions) = &comp.extensions {
+                for ext_id in extensions.keys() {
+                    if let Ok(ext_manifest) = crate::extension::load_extension(ext_id) {
+                        if let Some(test_mapping) = ext_manifest.test_mapping() {
+                            let coverage_findings = test_coverage::analyze_test_coverage(
+                                root,
+                                &all_fingerprints,
+                                test_mapping,
                             );
-                            all_findings.extend(coverage_findings);
+                            if !coverage_findings.is_empty() {
+                                log_status!(
+                                    "audit",
+                                    "Test coverage: {} finding(s) (missing test files, uncovered methods, orphaned tests)",
+                                    coverage_findings.len()
+                                );
+                                all_findings.extend(coverage_findings);
+                            }
+                            break; // Only use the first extension that has test_mapping
                         }
-                        break; // Only use the first extension that has test_mapping
                     }
                 }
             }
@@ -528,7 +846,11 @@ fn audit_internal(
     }
 
     // Phase 4h: Architecture/layer ownership rule checks (optional config)
-    let layer_findings = run_layer_ownership(root);
+    let layer_findings = if plan.run_layer_ownership {
+        run_layer_ownership(root)
+    } else {
+        Vec::new()
+    };
     if !layer_findings.is_empty() {
         log_status!(
             "audit",
@@ -539,7 +861,11 @@ fn audit_internal(
     }
 
     // Phase 4i: Test topology checks (extension-driven classification + central policy)
-    let topology_findings = test_topology::run(root);
+    let topology_findings = if plan.run_test_topology {
+        test_topology::run(root)
+    } else {
+        Vec::new()
+    };
     if !topology_findings.is_empty() {
         log_status!(
             "audit",
@@ -563,7 +889,11 @@ fn audit_internal(
     }
 
     // Phase 4j: Documentation drift detection (broken/stale references in markdown)
-    let doc_findings = detect_doc_drift(root, component_id);
+    let doc_findings = if plan.run_docs {
+        detect_doc_drift(root, component_id)
+    } else {
+        Vec::new()
+    };
     if !doc_findings.is_empty() {
         log_status!(
             "audit",
@@ -575,7 +905,11 @@ fn audit_internal(
 
     // Phase 4l: Compiler warnings (dead code, unused imports, unused variables)
     // Runs cargo check / tsc / go vet and parses warnings into findings.
-    let compiler_findings = compiler_warnings::run(root);
+    let compiler_findings = if plan.run_compiler_warnings {
+        compiler_warnings::run(root)
+    } else {
+        Vec::new()
+    };
     if !compiler_findings.is_empty() {
         log_status!(
             "audit",
@@ -588,7 +922,11 @@ fn audit_internal(
     // Phase 4m: Wrapper-to-implementation inference
     // Detects wrapper files missing explicit declarations of what they wrap.
     // Uses configurable call pattern tracing to infer the implementation target.
-    let wrapper_findings = wrapper_inference::analyze_wrappers(&all_fingerprints, root);
+    let wrapper_findings = if plan.run_wrapper_inference {
+        wrapper_inference::analyze_wrappers(&all_fingerprints, root)
+    } else {
+        Vec::new()
+    };
     if !wrapper_findings.is_empty() {
         log_status!(
             "audit",
@@ -599,7 +937,11 @@ fn audit_internal(
     }
 
     // Phase 4n: Shadow module detection — directories that are near-copies.
-    let shadow_findings = shadow_modules::run(&all_fingerprints);
+    let shadow_findings = if plan.run_shadow_modules {
+        shadow_modules::run(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
     if !shadow_findings.is_empty() {
         log_status!(
             "audit",
@@ -610,7 +952,11 @@ fn audit_internal(
     }
 
     // Phase 4o: Repeated struct field pattern detection.
-    let field_pattern_findings = field_patterns::run(root);
+    let field_pattern_findings = if plan.run_field_patterns {
+        field_patterns::run(root)
+    } else {
+        Vec::new()
+    };
     if !field_pattern_findings.is_empty() {
         log_status!(
             "audit",
@@ -622,7 +968,11 @@ fn audit_internal(
 
     // Phase 4t: Facade-passthrough detection — classes whose public methods
     // mostly delegate to an inner member without adding behavior.
-    let facade_findings = facade_passthrough::run(&all_fingerprints);
+    let facade_findings = if plan.run_facade_passthrough {
+        facade_passthrough::run(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
     if !facade_findings.is_empty() {
         log_status!(
             "audit",
@@ -633,7 +983,11 @@ fn audit_internal(
     }
 
     // Phase 4u: Repeated inline array literal shape detection.
-    let literal_shape_findings = repeated_literal_shape::run(&all_fingerprints);
+    let literal_shape_findings = if plan.run_literal_shapes {
+        repeated_literal_shape::run(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
     if !literal_shape_findings.is_empty() {
         log_status!(
             "audit",
@@ -644,7 +998,11 @@ fn audit_internal(
     }
 
     // Phase 4r: Deprecation age detection
-    let deprecation_findings = deprecation_age::run(&all_fingerprints, root);
+    let deprecation_findings = if plan.run_deprecation_age {
+        deprecation_age::run(&all_fingerprints, root)
+    } else {
+        Vec::new()
+    };
     if !deprecation_findings.is_empty() {
         log_status!(
             "audit",
@@ -657,7 +1015,11 @@ fn audit_internal(
     // Phase 4q: Dead guard detection — flag function_exists/class_exists/defined
     // guards on symbols guaranteed to exist given plugin requirements, composer
     // dependencies, and bootstrap requires.
-    let dead_guard_findings = dead_guard::run_with_config(&all_fingerprints, root, &audit_config);
+    let dead_guard_findings = if plan.run_dead_guard {
+        dead_guard::run_with_config(&all_fingerprints, root, &audit_config)
+    } else {
+        Vec::new()
+    };
     if !dead_guard_findings.is_empty() {
         log_status!(
             "audit",
@@ -668,7 +1030,11 @@ fn audit_internal(
     }
 
     // Phase 4t: Requested drift detectors for common WordPress/PHP hazards.
-    let requested_findings = requested_detectors::run(&all_fingerprints);
+    let requested_findings = if plan.run_requested_detectors {
+        requested_detectors::run(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
     if !requested_findings.is_empty() {
         log_status!(
             "audit",
@@ -679,7 +1045,11 @@ fn audit_internal(
     }
 
     // Phase 4v: Process-global environment mutation guard consistency in tests.
-    let env_guard_findings = global_env_guard::run(&all_fingerprints);
+    let env_guard_findings = if plan.run_global_env_guard {
+        global_env_guard::run(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
     if !env_guard_findings.is_empty() {
         log_status!(
             "audit",
@@ -691,7 +1061,11 @@ fn audit_internal(
 
     // Phase 4s: Shared scaffolding detection — groups of classes sharing the
     // same method-shape AND high body similarity, candidates for a shared base.
-    let scaffolding_findings = shared_scaffolding::run(&all_fingerprints);
+    let scaffolding_findings = if plan.run_shared_scaffolding {
+        shared_scaffolding::run(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
     if !scaffolding_findings.is_empty() {
         log_status!(
             "audit",
@@ -840,6 +1214,135 @@ fn audit_internal(
         findings: all_findings,
         duplicate_groups,
     })
+}
+
+fn audit_root_only(
+    component_id: &str,
+    source_path: &str,
+    root: &Path,
+    plan: &AuditExecutionPlan,
+) -> CodeAuditResult {
+    let mut findings = Vec::new();
+
+    if plan.run_stale_cli_invocations {
+        let stale_cli_findings = stale_cli_invocation::run(root);
+        if !stale_cli_findings.is_empty() {
+            log_status!(
+                "audit",
+                "CLI invocations: {} finding(s) (stale Homeboy command arrays)",
+                stale_cli_findings.len()
+            );
+            findings.extend(stale_cli_findings);
+        }
+    }
+
+    if plan.run_cli_argument_shapes {
+        let cli_argument_findings = cli_invocation_arguments::run(root);
+        if !cli_argument_findings.is_empty() {
+            log_status!(
+                "audit",
+                "CLI argument shapes: {} finding(s) (stale Homeboy shell-out forms)",
+                cli_argument_findings.len()
+            );
+            findings.extend(cli_argument_findings);
+        }
+    }
+
+    if plan.run_structural {
+        let structural_findings = structural::analyze_structure(root);
+        if !structural_findings.is_empty() {
+            log_status!(
+                "audit",
+                "Structural: {} finding(s) (god files, high item counts)",
+                structural_findings.len()
+            );
+            findings.extend(structural_findings);
+        }
+    }
+
+    if plan.run_layer_ownership {
+        let layer_findings = run_layer_ownership(root);
+        if !layer_findings.is_empty() {
+            log_status!(
+                "audit",
+                "Layer ownership: {} finding(s) (architecture ownership violations)",
+                layer_findings.len()
+            );
+            findings.extend(layer_findings);
+        }
+    }
+
+    if plan.run_test_topology {
+        let topology_findings = test_topology::run(root);
+        if !topology_findings.is_empty() {
+            log_status!(
+                "audit",
+                "Test topology: {} finding(s) (inline/scattered test placement)",
+                topology_findings.len()
+            );
+            findings.extend(topology_findings);
+        }
+    }
+
+    if plan.run_docs {
+        let doc_findings = detect_doc_drift(root, component_id);
+        if !doc_findings.is_empty() {
+            log_status!(
+                "audit",
+                "Docs: {} finding(s) (broken references, stale paths)",
+                doc_findings.len()
+            );
+            findings.extend(doc_findings);
+        }
+    }
+
+    if plan.run_compiler_warnings {
+        let compiler_findings = compiler_warnings::run(root);
+        if !compiler_findings.is_empty() {
+            log_status!(
+                "audit",
+                "Compiler warnings: {} finding(s) (dead code, unused imports, unused variables)",
+                compiler_findings.len()
+            );
+            findings.extend(compiler_findings);
+        }
+    }
+
+    if plan.run_field_patterns {
+        let field_pattern_findings = field_patterns::run(root);
+        if !field_pattern_findings.is_empty() {
+            log_status!(
+                "audit",
+                "Field patterns: {} finding(s) (repeated struct fields)",
+                field_pattern_findings.len()
+            );
+            findings.extend(field_pattern_findings);
+        }
+    }
+
+    let outliers_found = findings.len();
+    log_status!(
+        "audit",
+        "Complete: root-only filtered run, {} finding(s)",
+        outliers_found
+    );
+
+    CodeAuditResult {
+        component_id: component_id.to_string(),
+        source_path: source_path.to_string(),
+        summary: AuditSummary {
+            files_scanned: 0,
+            conventions_detected: 0,
+            outliers_found,
+            alignment_score: None,
+            files_skipped: 0,
+            warnings: vec![],
+        },
+        conventions: vec![],
+        directory_conventions: vec![],
+        findings,
+        duplicate_groups: vec![],
+    }
 }
 
 // ============================================================================
