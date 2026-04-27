@@ -1,7 +1,7 @@
 //! Stale Homeboy CLI invocation detection.
 //!
-//! MVP scope is intentionally narrow: scan Swift array literals that look like
-//! Homeboy command arrays and flag high-confidence stale command shapes.
+//! Scope is intentionally narrow: scan high-confidence Homeboy command shapes
+//! and flag stale static prefixes.
 
 use std::path::Path;
 
@@ -15,7 +15,12 @@ const STALE_AUDIT_SUBCOMMANDS: &[&str] = &["code", "docs", "structure"];
 
 pub(crate) fn run(root: &Path) -> Vec<Finding> {
     let config = ScanConfig {
-        extensions: ExtensionFilter::Only(vec!["swift".to_string()]),
+        extensions: ExtensionFilter::Only(vec![
+            "swift".to_string(),
+            "sh".to_string(),
+            "bash".to_string(),
+            "zsh".to_string(),
+        ]),
         ..Default::default()
     };
     let mut findings = Vec::new();
@@ -30,7 +35,11 @@ pub(crate) fn run(root: &Path) -> Vec<Finding> {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-        findings.extend(scan_swift_file(&relative, &content));
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some("swift") => findings.extend(scan_swift_file(&relative, &content)),
+            Some("sh" | "bash" | "zsh") => findings.extend(scan_shell_file(&relative, &content)),
+            _ => {}
+        }
     }
 
     findings.sort_by(|a, b| {
@@ -39,6 +48,176 @@ pub(crate) fn run(root: &Path) -> Vec<Finding> {
             .then_with(|| a.description.cmp(&b.description))
     });
     findings
+}
+
+fn scan_shell_file(relative_path: &str, content: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut line_start = 0;
+
+    for line in content.split_inclusive('\n') {
+        let line_without_newline = line.trim_end_matches(['\r', '\n']);
+        if let Some(strings) = shell_invocation_tokens(line_without_newline) {
+            if let Some(finding) =
+                stale_invocation_finding(relative_path, content, line_start, &strings)
+            {
+                findings.push(finding);
+            }
+        }
+        line_start += line.len();
+    }
+
+    findings
+}
+
+fn shell_invocation_tokens(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') || starts_with_output_command(trimmed) {
+        return None;
+    }
+
+    if let Some(rest) = strip_homeboy_prefix(trimmed) {
+        return static_shell_words(rest, 2);
+    }
+
+    if let Some(rest) = command_substitution_homeboy_prefix(trimmed) {
+        return static_shell_words(rest, 2);
+    }
+
+    if let Some(rest) = quoted_assignment_homeboy_prefix(trimmed) {
+        return static_shell_words(rest, 2);
+    }
+
+    None
+}
+
+fn starts_with_output_command(line: &str) -> bool {
+    matches!(first_shell_word(line).as_deref(), Some("echo" | "printf"))
+}
+
+fn command_substitution_homeboy_prefix(line: &str) -> Option<&str> {
+    if let Some(start) = line.find("$(") {
+        let inner = line[start + 2..].trim_start();
+        if let Some(rest) = strip_homeboy_prefix(inner) {
+            return Some(rest);
+        }
+    }
+
+    if let Some(start) = line.find('`') {
+        let inner = line[start + 1..].trim_start();
+        if let Some(rest) = strip_homeboy_prefix(inner) {
+            return Some(rest);
+        }
+    }
+
+    None
+}
+
+fn quoted_assignment_homeboy_prefix(line: &str) -> Option<&str> {
+    let equals = line.find('=')?;
+    let lhs = line[..equals].trim();
+    if lhs.is_empty()
+        || lhs
+            .chars()
+            .any(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()))
+    {
+        return None;
+    }
+
+    let rhs = line[equals + 1..].trim_start();
+    let quote = rhs.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+
+    let inner = rhs[quote.len_utf8()..].trim_start();
+    strip_homeboy_prefix(inner)
+}
+
+fn strip_homeboy_prefix(input: &str) -> Option<&str> {
+    let rest = input.strip_prefix("homeboy")?;
+    match rest.chars().next() {
+        None => Some(rest),
+        Some(ch) if ch.is_whitespace() => Some(rest),
+        _ => None,
+    }
+}
+
+fn first_shell_word(line: &str) -> Option<String> {
+    static_shell_words(line, 1)?.into_iter().next()
+}
+
+fn static_shell_words(input: &str, limit: usize) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut rest = input.trim_start();
+
+    while !rest.is_empty() && words.len() < limit {
+        let first = rest.chars().next()?;
+        if matches!(first, '$' | '`' | ';' | '|' | '&' | ')' | '(') {
+            break;
+        }
+
+        let (word, consumed) = if first == '\'' || first == '"' {
+            quoted_shell_word(rest, first)?
+        } else {
+            unquoted_shell_word(rest)
+        };
+
+        if word.is_empty() {
+            break;
+        }
+
+        words.push(word);
+        rest = rest[consumed..].trim_start();
+    }
+
+    if words.is_empty() {
+        None
+    } else {
+        Some(words)
+    }
+}
+
+fn quoted_shell_word(input: &str, quote: char) -> Option<(String, usize)> {
+    let mut word = String::new();
+    let mut escaped = false;
+    let mut consumed = quote.len_utf8();
+
+    for ch in input[quote.len_utf8()..].chars() {
+        consumed += ch.len_utf8();
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote {
+            return Some((word, consumed));
+        }
+        if ch == '$' || ch == '`' {
+            return Some((word, consumed - ch.len_utf8()));
+        }
+        word.push(ch);
+    }
+
+    None
+}
+
+fn unquoted_shell_word(input: &str) -> (String, usize) {
+    let mut word = String::new();
+    let mut consumed = 0;
+
+    for ch in input.chars() {
+        if ch.is_whitespace() || matches!(ch, '$' | '`' | ';' | '|' | '&' | ')' | '(') {
+            break;
+        }
+        consumed += ch.len_utf8();
+        word.push(ch);
+    }
+
+    (word, consumed)
 }
 
 fn scan_swift_file(relative_path: &str, content: &str) -> Vec<Finding> {
@@ -300,5 +479,53 @@ final class HomeboyCLI {
         let findings = run(dir.path());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].file, "HomeboyCLI.swift");
+    }
+
+    #[test]
+    fn detects_stale_shell_homeboy_invocations() {
+        let content = r#"
+homeboy supports component
+RESULT="$(homeboy audit code my-component)"
+FULL_CMD="homeboy audit docs ${COMP_ID}"
+BACKTICK=`homeboy audit structure my-component`
+"#;
+
+        let findings = scan_shell_file("scripts/run.sh", content);
+        let descriptions: Vec<&str> = findings.iter().map(|f| f.description.as_str()).collect();
+
+        assert_eq!(findings.len(), 4);
+        assert!(descriptions.iter().any(|d| d.contains("`supports`")));
+        assert!(descriptions.iter().any(|d| d.contains("audit code")));
+        assert!(descriptions.iter().any(|d| d.contains("audit docs")));
+        assert!(descriptions.iter().any(|d| d.contains("audit structure")));
+        assert!(findings
+            .iter()
+            .all(|f| f.kind == AuditFinding::StaleCliInvocation));
+    }
+
+    #[test]
+    fn ignores_dynamic_and_prose_shell_homeboy_mentions() {
+        let content = r#"
+echo "Run: homeboy supports component"
+printf 'Run: homeboy audit docs component\n'
+# homeboy audit docs component
+FULL_CMD="homeboy ${CMD}"
+homeboy audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
+some_homeboy audit code
+"#;
+
+        let findings = scan_shell_file("scripts/run.sh", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn run_scans_shell_files_for_stale_invocations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("run.sh");
+        std::fs::write(file, "homeboy supports component\n").expect("write fixture");
+
+        let findings = run(dir.path());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file, "run.sh");
     }
 }
