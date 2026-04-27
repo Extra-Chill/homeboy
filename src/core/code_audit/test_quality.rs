@@ -58,9 +58,10 @@ struct TestFunction {
 }
 
 fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
+    let product_symbols = collect_product_imports(content);
     extract_test_functions(content)
         .into_iter()
-        .filter_map(|test| vacuous_reason(&test).map(|reason| (test, reason)))
+        .filter_map(|test| vacuous_reason(&test, &product_symbols).map(|reason| (test, reason)))
         .map(|(test, reason)| Finding {
             convention: "test_quality".to_string(),
             severity: Severity::Info,
@@ -69,12 +70,12 @@ fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
             suggestion:
                 "Delete the placeholder or replace it with a behavior test that calls product code"
                     .to_string(),
-            kind: AuditFinding::OrphanedTest,
+            kind: AuditFinding::VacuousTest,
         })
         .collect()
 }
 
-fn vacuous_reason(test: &TestFunction) -> Option<&'static str> {
+fn vacuous_reason(test: &TestFunction, product_symbols: &BTreeSet<String>) -> Option<&'static str> {
     if test.body.contains("compile contract") {
         return None;
     }
@@ -90,12 +91,12 @@ fn vacuous_reason(test: &TestFunction) -> Option<&'static str> {
         return Some("body only asserts true");
     }
 
-    if !contains_assertion(&body) && !contains_product_reference(&body) {
+    if !contains_assertion(&body) && !contains_product_reference(&body, product_symbols) {
         return Some("body has no assertion and no product-code reference");
     }
 
     if contains_assertion(&body)
-        && !contains_product_reference(&body)
+        && !contains_product_reference(&body, product_symbols)
         && only_std_fixture_behavior(&body)
     {
         return Some("assertions exercise only stdlib or fixture behavior");
@@ -111,11 +112,50 @@ fn contains_assertion(body: &str) -> bool {
         || body.contains("matches!")
 }
 
-fn contains_product_reference(body: &str) -> bool {
+fn contains_product_reference(body: &str, product_symbols: &BTreeSet<String>) -> bool {
     body.contains("homeboy::")
         || body.contains("crate::")
         || body.contains("super::")
         || body.contains("Command::cargo_bin")
+        || product_symbols
+            .iter()
+            .any(|symbol| contains_word_call(body, symbol))
+}
+
+fn collect_product_imports(content: &str) -> BTreeSet<String> {
+    let mut symbols = BTreeSet::new();
+    let simple = regex::Regex::new(
+        r"(?m)^\s*use\s+(?:homeboy|crate|super)::[^;]*::([A-Za-z_][A-Za-z0-9_]*)\s*;",
+    )
+    .unwrap();
+    for cap in simple.captures_iter(content) {
+        symbols.insert(cap[1].to_string());
+    }
+
+    let grouped =
+        regex::Regex::new(r"(?m)^\s*use\s+(?:homeboy|crate|super)::[^;]*\{([^}]+)\}\s*;").unwrap();
+    for cap in grouped.captures_iter(content) {
+        for raw in cap[1].split(',') {
+            let symbol = raw.trim().trim_start_matches("self::");
+            let symbol = symbol.split_whitespace().next().unwrap_or("");
+            if !symbol.is_empty()
+                && symbol
+                    .chars()
+                    .all(|c| c == '_' || c.is_ascii_alphanumeric())
+            {
+                symbols.insert(symbol.to_string());
+            }
+        }
+    }
+
+    symbols
+}
+
+fn contains_word_call(haystack: &str, needle: &str) -> bool {
+    let pattern = format!(r"\b{}\s*\(", regex::escape(needle));
+    regex::Regex::new(&pattern)
+        .ok()
+        .is_some_and(|re| re.is_match(haystack))
 }
 
 fn only_std_fixture_behavior(body: &str) -> bool {
@@ -347,7 +387,7 @@ fn test_run() {
         );
 
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, AuditFinding::OrphanedTest);
+        assert_eq!(findings[0].kind, AuditFinding::VacuousTest);
         assert!(findings[0].description.contains("asserts true"));
     }
 
@@ -386,6 +426,28 @@ fn public_api_compiles() {
     assert!(true);
 }
 "##,
+        );
+
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn keeps_tests_that_call_imported_product_symbols() {
+        let findings = detect_vacuous_tests(
+            "tests/core/rig/check_test.rs",
+            r#"
+use crate::rig::check::evaluate;
+use crate::rig::spec::{CheckSpec, RigSpec};
+
+fn minimal_rig() -> RigSpec { todo!() }
+
+#[test]
+fn test_evaluate_file_exists() {
+    let rig = minimal_rig();
+    let spec = CheckSpec::default();
+    evaluate(&rig, &spec).expect("existing file passes");
+}
+"#,
         );
 
         assert!(findings.is_empty());
