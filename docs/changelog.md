@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.104.0] - 2026-04-27
+
+### Added
+- add --runs N for cross-spawn distribution math
+
 ## [0.103.0] - 2026-04-27
 
 ### Added
