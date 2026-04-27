@@ -507,6 +507,7 @@ pub(crate) fn detect_intra_method_duplicates(fingerprints: &[&FileFingerprint]) 
             }
 
             let mut reported = false;
+            let mut suppressed_ranges: Vec<(usize, usize)> = Vec::new();
 
             for positions in hash_positions.values() {
                 if reported || positions.len() < 2 {
@@ -517,6 +518,12 @@ pub(crate) fn detect_intra_method_duplicates(fingerprints: &[&FileFingerprint]) 
                 for other in &positions[1..] {
                     // Non-overlapping: second block starts after first block ends
                     if other.0 <= first.1 {
+                        continue;
+                    }
+
+                    if is_inside_suppressed_range(first, &suppressed_ranges)
+                        || is_inside_suppressed_range(*other, &suppressed_ranges)
+                    {
                         continue;
                     }
 
@@ -552,6 +559,20 @@ pub(crate) fn detect_intra_method_duplicates(fingerprints: &[&FileFingerprint]) 
                     // A block is worth flagging only if it contains at least
                     // one logic-bearing line.
                     if is_structural_syntax_only(&normalized, first_norm_idx, match_len) {
+                        continue;
+                    }
+
+                    if is_branch_shape_repetition(&body_lines, first, *other, match_len)
+                        || is_low_information_literal_or_error_block(
+                            &normalized,
+                            first_norm_idx,
+                            match_len,
+                        )
+                    {
+                        suppressed_ranges
+                            .push((first.0, normalized[first_norm_idx + match_len - 1].0));
+                        suppressed_ranges
+                            .push((other.0, normalized[other_norm_idx + match_len - 1].0));
                         continue;
                     }
 
@@ -766,6 +787,105 @@ fn is_scaffolding_line(normalized: &str) -> bool {
     }
 
     false
+}
+
+/// Repeated blocks in sibling `if` / `else if` / `else` arms are usually local
+/// branch shape, not high-confidence copy/paste. Keep this deliberately narrow:
+/// long blocks can still indicate real duplication, and adjacent repeated logic
+/// outside branch arms is still reported.
+fn is_branch_shape_repetition(
+    body_lines: &[&str],
+    first: (usize, usize),
+    other: (usize, usize),
+    match_len: usize,
+) -> bool {
+    if match_len > 12 || first.1 >= other.0 || other.0 > body_lines.len() {
+        return false;
+    }
+
+    body_lines[first.1 + 1..other.0]
+        .iter()
+        .any(|line| is_branch_separator(line.trim()))
+}
+
+fn is_inside_suppressed_range(candidate: (usize, usize), ranges: &[(usize, usize)]) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| candidate.0 >= *start && candidate.1 <= *end)
+}
+
+fn is_branch_separator(trimmed: &str) -> bool {
+    trimmed.starts_with("} else")
+        || trimmed.starts_with("else ")
+        || trimmed.starts_with("elseif ")
+        || trimmed.starts_with("} elseif")
+}
+
+/// Suppress low-information literal/envelope repeats: DTO tails full of
+/// `None`/`Default::default()` and repeated error constructors. These are common
+/// review-noise patterns where extraction usually hides branch intent.
+fn is_low_information_literal_or_error_block(
+    normalized: &[(usize, String)],
+    start: usize,
+    len: usize,
+) -> bool {
+    let end = (start + len).min(normalized.len());
+    if start >= end {
+        return false;
+    }
+
+    let window = &normalized[start..end];
+    let low_info_lines = window
+        .iter()
+        .filter(|(_, line)| is_low_information_literal_or_error_line(line))
+        .count();
+
+    low_info_lines >= MIN_INTRA_BLOCK_LINES && low_info_lines * 100 / window.len() >= 80
+}
+
+fn is_low_information_literal_or_error_line(normalized: &str) -> bool {
+    let t = normalized.trim().trim_end_matches(',');
+
+    if t.is_empty() || is_scaffolding_line(t) {
+        return true;
+    }
+
+    if t == "0" || t == "..default::default()" {
+        return true;
+    }
+
+    if is_neutral_struct_field(t) {
+        return true;
+    }
+
+    if is_error_envelope_line(t) {
+        return true;
+    }
+
+    false
+}
+
+fn is_neutral_struct_field(line: &str) -> bool {
+    let Some((_field, value)) = line.split_once(':') else {
+        return false;
+    };
+    let value = value.trim();
+
+    value == "none"
+        || value == "default::default()"
+        || value == "false"
+        || value == "0"
+        || value.ends_with(".clone()")
+        || value.ends_with(".to_string()")
+        || value.starts_with("some(")
+}
+
+fn is_error_envelope_line(line: &str) -> bool {
+    line.contains("error::")
+        || line.contains("::error")
+        || line.contains("internal_io(")
+        || line.starts_with("format!(")
+        || line.starts_with("some(")
 }
 
 // ============================================================================
@@ -1885,6 +2005,186 @@ fn process_twice() -> Result {
         assert!(
             !findings.is_empty(),
             "Real duplication with logic lines should still be detected"
+        );
+    }
+
+    #[test]
+    fn intra_method_ignores_complementary_output_dto_tails() {
+        let content = r#"
+fn show(builtin: bool) -> CmdResult<ConfigOutput> {
+    if builtin {
+        Ok((
+            ConfigOutput {
+                command: "config.show".to_string(),
+                defaults: Some(defaults::builtin_defaults()),
+                config: None,
+                path: None,
+                exists: None,
+                pointer: None,
+                value: None,
+                deleted: None,
+            },
+            0,
+        ))
+    } else {
+        let config = defaults::load_config();
+        Ok((
+            ConfigOutput {
+                command: "config.show".to_string(),
+                config: Some(config),
+                defaults: None,
+                path: None,
+                exists: None,
+                pointer: None,
+                value: None,
+                deleted: None,
+            },
+            0,
+        ))
+    }
+}
+"#;
+        let mut fp = make_fingerprint("src/commands/config.rs", &["show"], &[]);
+        fp.content = content.to_string();
+
+        let findings = detect_intra_method_duplicates(&[&fp]);
+        assert!(
+            findings.is_empty(),
+            "Complementary DTO literal tails should not be flagged: {:?}",
+            findings
+                .iter()
+                .map(|f| f.description.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn intra_method_ignores_repeated_error_envelopes() {
+        let content = r#"
+fn write_file_atomic(path: &Path, content: &str, operation: &str) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        Error::internal_io(
+            format!("Invalid path: {}", path.display()),
+            Some(operation.to_string()),
+        )
+    })?;
+
+    let filename = path.file_name().ok_or_else(|| {
+        Error::internal_io(
+            format!("Invalid path: {}", path.display()),
+            Some(operation.to_string()),
+        )
+    })?;
+
+    let tmp_path = parent.join(format!("{}.tmp", filename.to_string_lossy()));
+    write_tmp(tmp_path, content)
+}
+"#;
+        let mut fp = make_fingerprint(
+            "src/core/engine/local_files.rs",
+            &["write_file_atomic"],
+            &[],
+        );
+        fp.content = content.to_string();
+
+        let findings = detect_intra_method_duplicates(&[&fp]);
+        assert!(
+            findings.is_empty(),
+            "Repeated error envelopes should not be flagged: {:?}",
+            findings
+                .iter()
+                .map(|f| f.description.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn intra_method_ignores_short_sibling_branch_repetition() {
+        let content = r#"
+fn resolve_effective_glob(args: &Args, component: &Component) -> Result<Option<String>> {
+    if args.changed_only {
+        let changed_files = git::working_tree_changes(&component.local_path)?;
+        if changed_files.is_empty() {
+            println!("No files in working tree changes");
+            return Ok(Some(String::new()));
+        }
+
+        let abs_files: Vec<String> = changed_files
+            .iter()
+            .map(|f| format!("{}/{}", component.local_path, f))
+            .collect();
+
+        if abs_files.len() == 1 {
+            Ok(Some(abs_files[0].clone()))
+        } else {
+            Ok(Some(format!("{{{}}}", abs_files.join(","))))
+        }
+    } else if let Some(ref git_ref) = args.changed_since {
+        let changed_files = git::get_files_changed_since(&component.local_path, git_ref)?;
+        if changed_files.is_empty() {
+            println!("No files changed since {}", git_ref);
+            return Ok(Some(String::new()));
+        }
+
+        let abs_files: Vec<String> = changed_files
+            .iter()
+            .map(|f| format!("{}/{}", component.local_path, f))
+            .collect();
+
+        if abs_files.len() == 1 {
+            Ok(Some(abs_files[0].clone()))
+        } else {
+            Ok(Some(format!("{{{}}}", abs_files.join(","))))
+        }
+    } else {
+        Ok(args.glob.clone())
+    }
+}
+"#;
+        let mut fp = make_fingerprint(
+            "src/core/extension/lint/run.rs",
+            &["resolve_effective_glob"],
+            &[],
+        );
+        fp.content = content.to_string();
+
+        let findings = detect_intra_method_duplicates(&[&fp]);
+        assert!(
+            findings.is_empty(),
+            "Short sibling-branch repetition should not be flagged: {:?}",
+            findings
+                .iter()
+                .map(|f| f.description.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn intra_method_still_flags_adjacent_logic_copy_paste() {
+        let content = r#"
+fn rebuild_twice(items: &[Item]) -> Result<()> {
+    let config = load_config()?;
+    let validator = Validator::new(&config);
+    let processor = Processor::new(&config);
+    let output = processor.run(&items[0]);
+    save_output(&output)?;
+
+    let config = load_config()?;
+    let validator = Validator::new(&config);
+    let processor = Processor::new(&config);
+    let output = processor.run(&items[0]);
+    save_output(&output)?;
+
+    Ok(())
+}
+"#;
+        let mut fp = make_fingerprint("src/core/pipeline.rs", &["rebuild_twice"], &[]);
+        fp.content = content.to_string();
+
+        let findings = detect_intra_method_duplicates(&[&fp]);
+        assert!(
+            !findings.is_empty(),
+            "Adjacent repeated logic should still be reported"
         );
     }
 
