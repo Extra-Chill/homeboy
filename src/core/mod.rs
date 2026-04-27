@@ -1,6 +1,7 @@
 // Public extensions (config first — exports entity_crud! macro used by entity extensions)
 #[macro_use]
 pub mod config;
+pub mod api_jobs;
 pub mod code_audit;
 pub mod component;
 pub mod context;
