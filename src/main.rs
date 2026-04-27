@@ -1,6 +1,6 @@
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
 
-use homeboy::commands::surface::{Cli, Commands};
+use homeboy::cli_surface::{Cli, Commands};
 use homeboy::commands::GlobalArgs;
 
 #[derive(Debug, Clone, Copy)]
