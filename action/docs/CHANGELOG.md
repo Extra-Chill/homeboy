@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.11] - 2026-04-27
+
+### Changed
+- use homeboy review report for comments
+
 ## [1.16.10] - 2026-04-27
 
 ### Changed
