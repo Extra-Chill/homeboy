@@ -27,9 +27,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::extension::bench::parsing::{
     parse_bench_results_str, BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy,
-    BenchMetrics, BenchResults, BenchScenario,
+    BenchResults, BenchScenario,
 };
 use crate::extension::bench::report::{BenchComparisonDiff, BenchPhaseGroups};
+use crate::extension::bench::test_support::scenario_with_iterations;
 
 fn policy(direction: BenchMetricDirection, phase: Option<BenchMetricPhase>) -> BenchMetricPolicy {
     BenchMetricPolicy {
@@ -44,25 +45,7 @@ fn policy(direction: BenchMetricDirection, phase: Option<BenchMetricPhase>) -> B
 }
 
 fn scenario(id: &str, metrics: &[(&str, f64)]) -> BenchScenario {
-    let mut values = BTreeMap::new();
-    for (k, v) in metrics {
-        values.insert((*k).to_string(), *v);
-    }
-    BenchScenario {
-        id: id.to_string(),
-        file: None,
-        source: None,
-        default_iterations: None,
-        tags: Vec::new(),
-        iterations: 10,
-        metrics: BenchMetrics {
-            values,
-            distributions: BTreeMap::new(),
-        },
-        memory: None,
-        runs: None,
-        runs_summary: None,
-    }
+    scenario_with_iterations(id, metrics, 10)
 }
 
 fn results_with(

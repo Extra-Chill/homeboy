@@ -9,48 +9,17 @@
 //! 4. Scenarios missing from some runs aggregate from the runs that emitted
 //!    them instead of failing the whole bench.
 
-use std::collections::BTreeMap;
-
-use crate::extension::bench::parsing::{BenchMetrics, BenchResults, BenchScenario};
-use crate::extension::bench::run::aggregate_runs;
+use crate::extension::bench::aggregation::aggregate_runs;
+use crate::extension::bench::artifact::BenchArtifact;
+use crate::extension::bench::parsing::{BenchResults, BenchScenario};
+use crate::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
 
 fn scenario(id: &str, metrics: &[(&str, f64)]) -> BenchScenario {
-    let mut values = BTreeMap::new();
-    for (name, value) in metrics {
-        values.insert((*name).to_string(), *value);
-    }
-
-    BenchScenario {
-        id: id.to_string(),
-        file: None,
-        source: None,
-        default_iterations: None,
-        tags: Vec::new(),
-        iterations: 1,
-        metrics: BenchMetrics {
-            values,
-            distributions: BTreeMap::new(),
-        },
-        memory: None,
-        runs: None,
-        runs_summary: None,
-    }
+    scenario_with_iterations(id, metrics, 1)
 }
 
 fn results(scenarios: Vec<BenchScenario>) -> BenchResults {
-    BenchResults {
-        component_id: "bench-noop".to_string(),
-        iterations: 5,
-        scenarios,
-        metric_policies: BTreeMap::new(),
-    }
-}
-
-fn approx_eq(actual: f64, expected: f64) {
-    assert!(
-        (actual - expected).abs() < 1e-9,
-        "expected {expected}, got {actual}"
-    );
+    results_with_scenarios("bench-noop", 5, scenarios)
 }
 
 mod cases {
@@ -70,7 +39,7 @@ mod cases {
     }
 
     #[test]
-    fn runs_three_aggregates_correctly() {
+    fn test_aggregate_runs() {
         let aggregated = aggregate_runs(&[
             results(vec![scenario("__bootstrap", &[("install_ms", 100.0)])]),
             results(vec![scenario("__bootstrap", &[("install_ms", 200.0)])]),
@@ -88,9 +57,18 @@ mod cases {
             .unwrap()
             .get("install_ms")
             .unwrap();
-        approx_eq(summary.stdev, (20000.0_f64 / 3.0).sqrt());
-        approx_eq(summary.cv_pct, summary.stdev / 200.0 * 100.0);
+        assert!((summary.stdev - (20000.0_f64 / 3.0).sqrt()).abs() < 1e-9);
+        assert!((summary.cv_pct - summary.stdev / 200.0 * 100.0).abs() < 1e-9);
         assert_eq!(summary.n, 3);
+        assert_eq!(summary.min, 100.0);
+        assert_eq!(summary.max, 300.0);
+        assert_eq!(summary.mean, 200.0);
+        assert_eq!(summary.p50, 200.0);
+        assert_eq!(summary.p95, 290.0);
+        assert_eq!(
+            scenario.metrics.distribution("install_ms"),
+            Some(&[100.0, 200.0, 300.0][..])
+        );
     }
 
     #[test]
@@ -135,7 +113,7 @@ mod cases {
             .unwrap()
             .get("value")
             .unwrap();
-        approx_eq(summary.stdev, (2.0_f64 / 3.0).sqrt());
+        assert!((summary.stdev - (2.0_f64 / 3.0).sqrt()).abs() < 1e-9);
         assert_eq!(summary.n, 3);
     }
 
@@ -164,6 +142,41 @@ mod cases {
                 .unwrap()
                 .n,
             2
+        );
+    }
+
+    #[test]
+    fn runs_preserve_per_run_artifacts() {
+        let mut first = scenario("agent", &[("success_rate", 1.0)]);
+        first.artifacts.insert(
+            "transcript".to_string(),
+            BenchArtifact {
+                path: "artifacts/run-1/transcript.json".to_string(),
+                kind: Some("json".to_string()),
+                label: Some("Run 1 transcript".to_string()),
+            },
+        );
+        let mut second = scenario("agent", &[("success_rate", 1.0)]);
+        second.artifacts.insert(
+            "transcript".to_string(),
+            BenchArtifact {
+                path: "artifacts/run-2/transcript.json".to_string(),
+                kind: Some("json".to_string()),
+                label: Some("Run 2 transcript".to_string()),
+            },
+        );
+
+        let aggregated = aggregate_runs(&[results(vec![first]), results(vec![second])]).unwrap();
+        let runs = aggregated.scenarios[0].runs.as_ref().unwrap();
+
+        assert_eq!(runs.len(), 2);
+        assert_eq!(
+            runs[0].artifacts["transcript"].path,
+            "artifacts/run-1/transcript.json"
+        );
+        assert_eq!(
+            runs[1].artifacts["transcript"].path,
+            "artifacts/run-2/transcript.json"
         );
     }
 }

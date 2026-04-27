@@ -378,6 +378,7 @@ mod tests {
                 distributions: BTreeMap::new(),
             },
             memory: None,
+            artifacts: BTreeMap::new(),
             runs: None,
             runs_summary: None,
         }

@@ -27,7 +27,14 @@
 //!           "agent_loop_ms": [1000.0, 1200.0, 1400.0]
 //!         }
 //!       },
-//!       "memory": { "peak_bytes": 41943040 }
+//!       "memory": { "peak_bytes": 41943040 },
+//!       "artifacts": {
+//!         "transcript": {
+//!           "path": "bench-artifacts/scenario/transcript.json",
+//!           "kind": "json",
+//!           "label": "Agent transcript"
+//!         }
+//!       }
 //!     }
 //!   ]
 //! }
@@ -39,6 +46,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+
+use super::artifact::BenchArtifact;
+use super::distribution::BenchRunDistribution;
 
 /// Full bench run output from an extension script.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -76,6 +86,13 @@ pub struct BenchScenario {
     pub metrics: BenchMetrics,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<BenchMemory>,
+    /// Optional local artifact pointers produced by the scenario.
+    ///
+    /// Homeboy preserves paths and metadata but does not upload, retain, or
+    /// diff artifact contents. Consumers can correlate artifacts by scenario,
+    /// rig, and run without scraping logs or side-channel files.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifacts: BTreeMap<String, BenchArtifact>,
     /// Per-run raw metric snapshots when `homeboy bench --runs N` is used.
     /// Omitted for the default `--runs 1` path so existing envelopes keep
     /// their exact shape.
@@ -92,13 +109,8 @@ pub struct BenchRunSnapshot {
     pub metrics: BenchMetrics,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<BenchMemory>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct BenchRunDistribution {
-    pub stdev: f64,
-    pub cv_pct: f64,
-    pub n: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifacts: BTreeMap<String, BenchArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -359,6 +371,63 @@ mod tests {
         assert_eq!(scenario.tags, vec!["cold", "cli"]);
         assert_eq!(scenario.metrics.get("p95_ms"), Some(145.0));
         assert_eq!(scenario.memory.as_ref().unwrap().peak_bytes, 41943040);
+        assert!(scenario.artifacts.is_empty());
+    }
+
+    #[test]
+    fn parses_scenario_artifacts() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 1,
+            "scenarios": [
+                {
+                    "id": "agent_loop",
+                    "iterations": 1,
+                    "metrics": { "success_rate": 1.0 },
+                    "artifacts": {
+                        "transcript": {
+                            "path": "artifacts/agent-loop/transcript.json",
+                            "kind": "json",
+                            "label": "Agent transcript"
+                        },
+                        "final_output": {
+                            "path": "artifacts/agent-loop/final.md"
+                        }
+                    }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+        let artifacts = &parsed.scenarios[0].artifacts;
+
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(
+            artifacts["transcript"].path,
+            "artifacts/agent-loop/transcript.json"
+        );
+        assert_eq!(artifacts["transcript"].kind.as_deref(), Some("json"));
+        assert_eq!(
+            artifacts["transcript"].label.as_deref(),
+            Some("Agent transcript")
+        );
+        assert_eq!(
+            artifacts["final_output"].path,
+            "artifacts/agent-loop/final.md"
+        );
+        assert_eq!(artifacts["final_output"].kind, None);
+
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(serialized.contains("\"artifacts\""));
+        assert!(serialized.contains("artifacts/agent-loop/transcript.json"));
+    }
+
+    #[test]
+    fn omits_empty_scenario_artifacts() {
+        let parsed = parse_bench_results_str(VALID_RESULTS).unwrap();
+        let raw = serde_json::to_string(&parsed.scenarios[0]).unwrap();
+
+        assert!(!raw.contains("artifacts"));
     }
 
     #[test]

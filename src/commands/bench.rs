@@ -59,7 +59,7 @@ pub struct BenchRunArgs {
     /// exact behaviour. When > 1, the bench dispatcher is invoked N times in
     /// sequence and per-scenario metrics carry both the cross-run p50
     /// (top-level, unchanged shape) and a runs array with each run's raw
-    /// metrics, plus a runs_summary object with stdev/cv_pct/n.
+    /// metrics, plus a runs_summary object with n/min/max/mean/stdev/cv_pct/p50/p95.
     #[arg(long, default_value_t = 1)]
     runs: u64,
 
