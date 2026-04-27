@@ -160,5 +160,5 @@ build_tooling_section() {
   printf '%s\n' "- Action: \`${action_repository}@${action_ref}\`"
   printf '\n</details>\n\n'
   printf '%s\n' '---'
-  printf '%s\n' "*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1*"
+  printf '%s\n' "*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v2*"
 }

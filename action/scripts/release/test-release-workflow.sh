@@ -5,6 +5,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="${ROOT_DIR}/.github/workflows/release.yml"
 RUN_RELEASE="${ROOT_DIR}/scripts/release/run-release.sh"
+README="${ROOT_DIR}/README.md"
+COMMENT_SECTIONS="${ROOT_DIR}/scripts/pr/comment/sections.sh"
+VERSION_FILE="${ROOT_DIR}/VERSION"
 
 assert_not_contains() {
   local needle="$1"
@@ -41,5 +44,10 @@ assert_not_contains '--no-github-release' "${RUN_RELEASE}" "run-release lets Hom
 assert_contains 'homeboy_verify_github_release_exists "${ACTUAL_TAG}" "${GITHUB_REPOSITORY:-}"' "${RUN_RELEASE}" "run-release verifies the GitHub Release after successful release"
 assert_contains 'release-verify-github-release:' "${ROOT_DIR}/action.yml" "action exposes GitHub Release verification toggle"
 assert_contains 'HOMEBOY_VERIFY_GITHUB_RELEASE: ${{ inputs.release-verify-github-release }}' "${ROOT_DIR}/action.yml" "action passes verification toggle to release script"
+assert_contains '^2\.' "${VERSION_FILE}" "VERSION is aligned with the v2 action channel"
+assert_not_contains 'Extra-Chill/homeboy-action@v1' "${README}" "README examples use the v2 action channel"
+assert_contains 'Extra-Chill/homeboy-action@v2' "${README}" "README documents the v2 action channel"
+assert_not_contains 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1' "${COMMENT_SECTIONS}" "PR comment footer does not advertise v1"
+assert_contains 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v2' "${COMMENT_SECTIONS}" "PR comment footer advertises v2"
 
 printf 'All release workflow checks passed.\n'

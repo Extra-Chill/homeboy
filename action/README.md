@@ -4,6 +4,16 @@ GitHub Action for running [Homeboy](https://github.com/Extra-Chill/homeboy) lint
 
 Works with **any Homeboy extension** — WordPress, Rust, Node, or your own custom extension.
 
+## Action Channel
+
+Use the floating `v2` channel for normal GitHub Actions workflows:
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v2
+```
+
+The action release stream is aligned with that channel. Release commits and tags use `v2.x.y`, and the floating `v2` tag moves to the latest compatible `v2.x.y` release.
+
 ## Quick Start
 
 ### PR Quality Checks
@@ -22,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: wordpress
           commands: lint,test
@@ -53,7 +63,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         id: release
         with:
           extension: rust
@@ -151,7 +161,7 @@ Use these outputs to gate downstream jobs:
 ### Lint Only (Fast PR Check)
 
 ```yaml
-- uses: Extra-Chill/homeboy-action@v1
+- uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
     commands: lint
@@ -162,7 +172,7 @@ Use these outputs to gate downstream jobs:
 ### Full Suite with Audit
 
 ```yaml
-- uses: Extra-Chill/homeboy-action@v1
+- uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
     commands: lint,test,audit
@@ -173,7 +183,7 @@ Use these outputs to gate downstream jobs:
 ### PR Scoped Checks (Changed Files)
 
 ```yaml
-- uses: Extra-Chill/homeboy-action@v1
+- uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
     commands: lint,test,audit
@@ -189,7 +199,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: rust
           component: homeboy
@@ -199,7 +209,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: rust
           component: homeboy
@@ -209,7 +219,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: rust
           component: homeboy
@@ -221,7 +231,7 @@ All three jobs write to the **same PR comment** automatically.
 ### Auto-apply Fixable CI Issues (PRs)
 
 ```yaml
-- uses: Extra-Chill/homeboy-action@v1
+- uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
     commands: lint,test
@@ -244,7 +254,7 @@ For fork PRs, Homeboy Action now attempts the same direct-to-PR autofix flow fir
 ### Auto-open Fix PRs on non-PR runs
 
 ```yaml
-- uses: Extra-Chill/homeboy-action@v1
+- uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
     commands: lint,test,audit
@@ -297,7 +307,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo fmt --check && cargo clippy && cargo test
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           source: '.'
           extension: rust
@@ -315,7 +325,7 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         id: release
         with:
           extension: rust
@@ -362,7 +372,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: wordpress
           commands: lint,test,audit
@@ -396,7 +406,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: wordpress
           commands: lint,test,audit
@@ -434,7 +444,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: wordpress
           commands: lint,test,audit
@@ -460,7 +470,7 @@ The action does **not** probe for or emulate missing CLI features. If the instal
 Set `differential-gating: 'true'` to make PR `audit` and `test` checks compare against the pull request base SHA instead of failing solely because the current branch has existing debt:
 
 ```yaml
-- uses: Extra-Chill/homeboy-action@v1
+- uses: Extra-Chill/homeboy-action@v2
   with:
     extension: rust
     commands: audit,test,lint
