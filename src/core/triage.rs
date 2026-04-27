@@ -22,6 +22,7 @@ pub enum TriageTarget {
     Project(String),
     Fleet(String),
     Rig(String),
+    Workspace,
 }
 
 impl TriageTarget {
@@ -31,6 +32,7 @@ impl TriageTarget {
             TriageTarget::Project(_) => "project",
             TriageTarget::Fleet(_) => "fleet",
             TriageTarget::Rig(_) => "rig",
+            TriageTarget::Workspace => "workspace",
         }
     }
 
@@ -40,6 +42,7 @@ impl TriageTarget {
             | TriageTarget::Project(id)
             | TriageTarget::Fleet(id)
             | TriageTarget::Rig(id) => id,
+            TriageTarget::Workspace => "workspace",
         }
     }
 
@@ -49,6 +52,7 @@ impl TriageTarget {
             TriageTarget::Project(_) => "triage.project",
             TriageTarget::Fleet(_) => "triage.fleet",
             TriageTarget::Rig(_) => "triage.rig",
+            TriageTarget::Workspace => "triage.workspace",
         }
     }
 }
@@ -301,7 +305,97 @@ fn resolve_target_components(target: &TriageTarget) -> Result<Vec<ComponentRef>>
             refs.sort_by(|a, b| a.component_id.cmp(&b.component_id));
             Ok(refs)
         }
+        TriageTarget::Workspace => resolve_workspace_components(),
     }
+}
+
+fn resolve_workspace_components() -> Result<Vec<ComponentRef>> {
+    let mut refs = BTreeMap::new();
+
+    for proj in project::list()? {
+        for attachment in proj.components {
+            let comp = component::load(&attachment.id).ok();
+            let mut component_ref = ComponentRef::new(
+                attachment.id.clone(),
+                if attachment.local_path.is_empty() {
+                    comp.as_ref()
+                        .map(|c| c.local_path.clone())
+                        .unwrap_or_default()
+                } else {
+                    attachment.local_path
+                },
+                comp.and_then(|c| c.remote_url),
+                format!("project:{}", proj.id),
+            );
+            component_ref.usage.insert(proj.id.clone());
+            merge_component_ref(&mut refs, component_ref);
+        }
+    }
+
+    for spec in rig::list()? {
+        for (component_id, component_spec) in spec.components.iter() {
+            let mut component_ref = ComponentRef::new(
+                component_id.clone(),
+                rig::expand::expand_vars(&spec, &component_spec.path),
+                component_spec.remote_url.clone(),
+                format!("rig:{}", spec.id),
+            );
+            component_ref.usage.insert(spec.id.clone());
+            merge_component_ref(&mut refs, component_ref);
+        }
+    }
+
+    for comp in component::list()? {
+        let source = format!("component:{}", comp.id);
+        merge_component_ref(
+            &mut refs,
+            ComponentRef::new(comp.id, comp.local_path, comp.remote_url, source),
+        );
+    }
+
+    Ok(dedupe_refs_by_repo(refs.into_values().collect()))
+}
+
+fn merge_component_ref(refs: &mut BTreeMap<String, ComponentRef>, component_ref: ComponentRef) {
+    let entry = refs
+        .entry(component_ref.component_id.clone())
+        .or_insert_with(|| component_ref.clone());
+    entry.sources.extend(component_ref.sources);
+    entry.usage.extend(component_ref.usage);
+    if entry.local_path.is_empty() && !component_ref.local_path.is_empty() {
+        entry.local_path = component_ref.local_path;
+    }
+    if entry.remote_url.is_none() {
+        entry.remote_url = component_ref.remote_url;
+    }
+}
+
+fn dedupe_refs_by_repo(component_refs: Vec<ComponentRef>) -> Vec<ComponentRef> {
+    let mut resolved = BTreeMap::new();
+    let mut unresolved = Vec::new();
+
+    for component_ref in component_refs {
+        match resolve_repo(&component_ref) {
+            Ok(repo) => {
+                let key = format!("{}/{}", repo.owner.to_lowercase(), repo.repo.to_lowercase());
+                let entry = resolved.entry(key).or_insert_with(|| component_ref.clone());
+                entry.sources.extend(component_ref.sources);
+                entry.usage.extend(component_ref.usage);
+                if entry.local_path.is_empty() && !component_ref.local_path.is_empty() {
+                    entry.local_path = component_ref.local_path;
+                }
+                if entry.remote_url.is_none() {
+                    entry.remote_url = component_ref.remote_url;
+                }
+            }
+            Err(_) => unresolved.push(component_ref),
+        }
+    }
+
+    let mut refs: Vec<ComponentRef> = resolved.into_values().collect();
+    refs.extend(unresolved);
+    refs.sort_by(|a, b| a.component_id.cmp(&b.component_id));
+    refs
 }
 
 fn resolve_fleet_components(fleet_id: &str) -> Result<Vec<ComponentRef>> {
@@ -834,6 +928,73 @@ mod tests {
         assert_eq!(parse_stale_days("14d").unwrap(), 14);
         assert!(parse_stale_days("0d").is_err());
         assert!(parse_stale_days("two-weeks").is_err());
+    }
+
+    #[test]
+    fn dedupe_refs_by_repo_merges_sources_and_usage() {
+        let mut project_ref = ComponentRef::new(
+            "intelligence".to_string(),
+            "/tmp/intelligence".to_string(),
+            Some("https://github.com/Automattic/intelligence.git".to_string()),
+            "project:intelligence-chubes4".to_string(),
+        );
+        project_ref.usage.insert("intelligence-chubes4".to_string());
+
+        let mut rig_ref = ComponentRef::new(
+            "intelligence-dev".to_string(),
+            "/tmp/intelligence-dev".to_string(),
+            Some("git@github.com:Automattic/intelligence.git".to_string()),
+            "rig:intelligence-chubes4".to_string(),
+        );
+        rig_ref.usage.insert("intelligence-chubes4".to_string());
+
+        let component_ref = ComponentRef::new(
+            "standalone".to_string(),
+            "/tmp/standalone".to_string(),
+            Some("https://github.com/Extra-Chill/standalone.git".to_string()),
+            "component:standalone".to_string(),
+        );
+
+        let refs = dedupe_refs_by_repo(vec![project_ref, rig_ref, component_ref]);
+
+        assert_eq!(refs.len(), 2);
+        let intelligence = refs
+            .iter()
+            .find(|component_ref| component_ref.component_id == "intelligence")
+            .expect("first ref for the repo should be retained");
+        assert_eq!(
+            intelligence.sources.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                "project:intelligence-chubes4".to_string(),
+                "rig:intelligence-chubes4".to_string(),
+            ]
+        );
+        assert_eq!(
+            intelligence.usage.iter().cloned().collect::<Vec<_>>(),
+            vec!["intelligence-chubes4".to_string()]
+        );
+    }
+
+    #[test]
+    fn dedupe_refs_by_repo_keeps_unresolved_entries_separate() {
+        let resolved = ComponentRef::new(
+            "data-machine".to_string(),
+            "/tmp/data-machine".to_string(),
+            Some("https://github.com/Extra-Chill/data-machine.git".to_string()),
+            "component:data-machine".to_string(),
+        );
+        let unresolved = ComponentRef::new(
+            "local-only".to_string(),
+            "".to_string(),
+            None,
+            "component:local-only".to_string(),
+        );
+
+        let refs = dedupe_refs_by_repo(vec![unresolved, resolved]);
+
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.component_id == "data-machine"));
+        assert!(refs.iter().any(|r| r.component_id == "local-only"));
     }
 
     #[test]

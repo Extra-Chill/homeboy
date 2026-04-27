@@ -55,6 +55,8 @@ enum TriageCommand {
     Fleet { fleet_id: String },
     /// Triage components declared in a local rig spec.
     Rig { rig_id: String },
+    /// Triage every configured project, rig, and registered component once per repo.
+    Workspace,
 }
 
 pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageOutput> {
@@ -80,6 +82,7 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageOut
         TriageCommand::Project { project_id } => TriageTarget::Project(project_id),
         TriageCommand::Fleet { fleet_id } => TriageTarget::Fleet(fleet_id),
         TriageCommand::Rig { rig_id } => TriageTarget::Rig(rig_id),
+        TriageCommand::Workspace => TriageTarget::Workspace,
     };
 
     Ok((triage::run(target, options)?, 0))
