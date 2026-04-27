@@ -306,7 +306,7 @@ fn parse_findings_value(value: Value) -> homeboy::Result<FindingsInput> {
         for (category, row_value) in groups_obj {
             let row_obj = row_value.as_object().ok_or_else(|| {
                 homeboy::Error::validation_invalid_argument(
-                    &format!("findings.groups.{}", category),
+                    format!("findings.groups.{}", category),
                     "Each group must be a JSON object with `count`, optional `label`, optional `body`",
                     None,
                     None,
