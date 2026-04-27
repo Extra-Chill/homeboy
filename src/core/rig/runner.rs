@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::expand::expand_vars;
+use super::lease::acquire_active_run_lease;
 use super::pipeline::{cleanup_shared_paths, run_pipeline, PipelineOutcome};
 use super::service::{self, ServiceStatus};
 use super::spec::{RigSpec, ServiceKind};
@@ -68,6 +69,7 @@ pub struct ServiceStatusReport {
 
 /// Materialize a rig: run the `up` pipeline, stash timestamp in state.
 pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
+    let _lease = acquire_active_run_lease(rig, "up")?;
     let outcome = run_pipeline(rig, "up", true)?;
 
     if outcome.is_success() {
@@ -104,6 +106,7 @@ pub fn run_check(rig: &RigSpec) -> Result<CheckReport> {
 /// service the rig knows about (belt + suspenders — spec authors sometimes
 /// forget to add `service stop` steps to `down`).
 pub fn run_down(rig: &RigSpec) -> Result<DownReport> {
+    let _lease = acquire_active_run_lease(rig, "down")?;
     let pipeline = if rig.pipeline.contains_key("down") {
         Some(run_pipeline(rig, "down", false)?)
     } else {

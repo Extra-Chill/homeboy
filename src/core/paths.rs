@@ -116,6 +116,11 @@ pub fn rig_logs_dir(id: &str) -> Result<PathBuf> {
     Ok(rig_state_dir(id)?.join("logs"))
 }
 
+/// Active rig run leases (~/.config/homeboy/rig-leases/).
+pub fn rig_leases_dir() -> Result<PathBuf> {
+    Ok(homeboy()?.join("rig-leases"))
+}
+
 /// Stacks directory (~/.config/homeboy/stacks/)
 pub fn stacks() -> Result<PathBuf> {
     Ok(homeboy()?.join("stacks"))

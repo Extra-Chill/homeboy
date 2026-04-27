@@ -136,6 +136,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
 
         ErrorCode::RigPipelineFailed
         | ErrorCode::RigServiceFailed
+        | ErrorCode::RigResourceConflict
         | ErrorCode::StackApplyConflict => 20,
 
         ErrorCode::SshServerInvalid

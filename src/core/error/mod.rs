@@ -32,6 +32,7 @@ pub enum ErrorCode {
     RigNotFound,
     RigPipelineFailed,
     RigServiceFailed,
+    RigResourceConflict,
     StackNotFound,
     StackApplyConflict,
 
@@ -78,6 +79,7 @@ impl ErrorCode {
             ErrorCode::RigNotFound => "rig.not_found",
             ErrorCode::RigPipelineFailed => "rig.pipeline_failed",
             ErrorCode::RigServiceFailed => "rig.service_failed",
+            ErrorCode::RigResourceConflict => "rig.resource_conflict",
             ErrorCode::StackNotFound => "stack.not_found",
             ErrorCode::StackApplyConflict => "stack.apply_conflict",
 
@@ -187,6 +189,18 @@ pub struct InvalidArgumentDetails {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tried: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RigResourceConflictInfo {
+    pub rig_id: String,
+    pub command: String,
+    pub resource_kind: String,
+    pub resource_value: String,
+    pub held_by_rig: String,
+    pub held_by_command: String,
+    pub held_by_pid: u32,
+    pub held_since: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -478,6 +492,35 @@ impl Error {
                 "rig_id": rig_id,
                 "service_id": service_id,
                 "reason": reason,
+            }),
+        )
+    }
+
+    pub fn rig_resource_conflict(info: RigResourceConflictInfo) -> Self {
+        Self::new(
+            ErrorCode::RigResourceConflict,
+            format!(
+                "Rig '{}' cannot run '{}': {} resource '{}' is already held by rig '{}' running '{}' (pid {}, since {})",
+                info.rig_id,
+                info.command,
+                info.resource_kind,
+                info.resource_value,
+                info.held_by_rig,
+                info.held_by_command,
+                info.held_by_pid,
+                info.held_since
+            ),
+            serde_json::json!({
+                "rig_id": info.rig_id,
+                "command": info.command,
+                "resource_kind": info.resource_kind,
+                "resource_value": info.resource_value,
+                "held_by": {
+                    "rig_id": info.held_by_rig,
+                    "command": info.held_by_command,
+                    "pid": info.held_by_pid,
+                    "since": info.held_since,
+                }
             }),
         )
     }

@@ -21,6 +21,7 @@ pub mod app;
 pub mod check;
 pub mod expand;
 pub mod install;
+pub mod lease;
 pub mod pipeline;
 pub mod runner;
 pub mod service;
@@ -35,6 +36,7 @@ pub use install::{
     discover_rigs, install, read_source_metadata, DiscoveredRig, RigInstallResult,
     RigSourceMetadata,
 };
+pub use lease::{acquire_active_run_lease, ActiveRigRunLease, RigRunLease};
 pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
 pub use runner::{
     run_check, run_down, run_status, run_up, snapshot_state, CheckReport, ComponentSnapshot,
