@@ -14,6 +14,9 @@
     "crossref": "scripts/test/crossref.php",
     "validate": "scripts/validation/validate-syntax.sh"
   },
+  "component_env": {
+    "detect_script": "scripts/env/detect.sh"
+  },
   "platform": {
     "config_schema": "wordpress",
     "discovery": {
