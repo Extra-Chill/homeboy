@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,6 +27,7 @@ function assert(condition, message) {
 assert(manifest.build.extension_script === 'scripts/build/build-runner.sh', 'build runner path is stable');
 assert(manifest.build.command_template === 'bash {{script}}', 'build runner executes through bash');
 assert(runner.startsWith('#!/usr/bin/env bash'), 'build runner declares bash shebang');
+assert(runner.includes('exec bash "$0" "$@"'), 'build runner re-execs bash when invoked by sh');
 assert(runner.includes('set -euo pipefail'), 'build runner uses bash pipefail mode');
 assert(runner.includes('BASH_SOURCE[0]'), 'build runner uses bash BASH_SOURCE');
 assert(runner.includes('PIPESTATUS[0]'), 'build runner uses bash PIPESTATUS');

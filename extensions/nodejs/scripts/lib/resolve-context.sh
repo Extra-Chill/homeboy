@@ -73,11 +73,11 @@ homeboy_require_package_json() {
 # Sets PKG_MANAGER and PKG_RUN ("pnpm run", "yarn", "npm run", "npx").
 homeboy_detect_package_manager() {
     local _dir="${1:-$PROJECT_PATH}"
-    if [ -f "$_dir/pnpm-lock.yaml" ]; then
+    if [ -f "$_dir/pnpm-lock.yaml" ] && command -v pnpm >/dev/null 2>&1; then
         PKG_MANAGER="pnpm"
         PKG_RUN="pnpm run"
         PKG_EXEC="pnpm exec"
-    elif [ -f "$_dir/yarn.lock" ]; then
+    elif [ -f "$_dir/yarn.lock" ] && command -v yarn >/dev/null 2>&1; then
         PKG_MANAGER="yarn"
         PKG_RUN="yarn"
         PKG_EXEC="yarn"
