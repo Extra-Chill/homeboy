@@ -13,6 +13,7 @@ pub(crate) mod expand;
 pub mod extension;
 pub mod fleet;
 pub mod git;
+pub mod http_api;
 pub mod issues;
 pub mod output;
 pub mod project;
