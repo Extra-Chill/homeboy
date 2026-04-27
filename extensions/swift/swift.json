@@ -54,6 +54,9 @@
   "lint": {
     "extension_script": "scripts/lint-runner.sh"
   },
+  "test": {
+    "extension_script": "scripts/test-runner.sh"
+  },
   "executable": {
     "runtime": {
       "setup_command": "bash {{extension_path}}/scripts/setup.sh",
