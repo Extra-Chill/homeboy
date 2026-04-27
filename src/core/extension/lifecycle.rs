@@ -887,6 +887,28 @@ mod tests {
     }
 
     #[test]
+    fn test_install_for_component_uses_path_based_portable_component_config() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source");
+            write_extension_fixture(&source, "alpha");
+            write_extension_fixture(&source, "beta");
+
+            let component_dir = home.join("component");
+            fs::create_dir_all(&component_dir).expect("component dir");
+            write_component_fixture(&component_dir, &["alpha", "beta"]);
+
+            let component = component::discover_from_portable(&component_dir)
+                .expect("component should resolve from portable path");
+            let result = install_for_component(&component, &source.to_string_lossy())
+                .expect("install should succeed");
+
+            assert_eq!(result.component_id, "multi-extension-component");
+            assert_eq!(result.installed.len(), 2);
+        });
+    }
+
+    #[test]
     fn is_workdir_clean_non_git_dir_returns_true() {
         // Regression test for Extra-Chill/homeboy#1181: tarball / plain-directory
         // installs (no `.git`) must be treated as clean, since there is no
