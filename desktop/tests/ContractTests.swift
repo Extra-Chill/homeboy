@@ -138,6 +138,9 @@ func runTests(testDir: String) throws {
     // Test 8: Remote Log Viewer pin command shape
     try testRemoteLogViewerPinCommandShape(testDir: testDir)
 
+    // Test 9: HomeboyCLI helper command shapes
+    try testHomeboyCLIHelperCommandShapes()
+
     print("")
     print("All contract tests passed")
 }
@@ -540,6 +543,62 @@ func testRemoteLogViewerPinCommandShape(testDir: String) throws {
             userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewer still contains old positional-first project pin add syntax"])
     }
     print("[PASS] Old positional-first log pin syntax is absent")
+
+    print("")
+}
+
+func testHomeboyCLIHelperCommandShapes() throws {
+    print("Test: HomeboyCLI helper command shapes")
+    print("--------------------------------------")
+
+    let sourceURL = URL(fileURLWithPath: "Homeboy/Core/CLI/HomeboyCLI.swift")
+    guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+        throw NSError(domain: "ContractTest", code: 80,
+            userInfo: [NSLocalizedDescriptionKey: "Source file not found: \(sourceURL.path)"])
+    }
+
+    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+    func requireContains(_ needle: String, _ message: String, code: Int) throws {
+        guard source.contains(needle) else {
+            throw NSError(domain: "ContractTest", code: code,
+                userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        print("[PASS] \(message)")
+    }
+
+    func requireNotContains(_ needle: String, _ message: String, code: Int) throws {
+        guard !source.contains(needle) else {
+            throw NSError(domain: "ContractTest", code: code,
+                userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        print("[PASS] \(message)")
+    }
+
+    try requireContains("[\"refactor\", \"rename\", \"--from\", from, \"--to\", to, \"--component\", componentId]",
+        "refactor rename uses current component flag shape", code: 81)
+    try requireContains("[\"--file-type\", type]",
+        "file find uses --file-type", code: 82)
+    try requireContains("[\"--limit\", String(limit)]",
+        "db search limit is converted before parser validation", code: 83)
+    try requireContains("[\"--max-depth\", String(depth)]",
+        "file search depth is converted before parser validation", code: 84)
+    try requireContains("[\"-n\", String(lines)]",
+        "log line counts are converted before parser validation", code: 85)
+    try requireContains("[\"-C\", String(context)]",
+        "log context counts are converted before parser validation", code: 86)
+
+    try requireNotContains("[\"--type\", type]",
+        "file find no longer uses stale --type flag", code: 87)
+    try requireNotContains(#"\(lines)"#,
+        "helper commands do not pass literal line interpolation templates", code: 88)
+    try requireNotContains(#"\(depth)"#,
+        "helper commands do not pass literal depth interpolation templates", code: 89)
+    try requireNotContains(#"\(limit)"#,
+        "helper commands do not pass literal limit interpolation templates", code: 90)
+    try requireNotContains(#"\(context)"#,
+        "helper commands do not pass literal context interpolation templates", code: 91)
+
     print("")
 }
 

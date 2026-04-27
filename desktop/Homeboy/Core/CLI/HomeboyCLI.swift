@@ -831,7 +831,7 @@ private init() {}
     func logsShow(projectId: String, path: String, lines: Int?) async throws -> LogsOutput {
         var args = ["logs", "show", projectId, path]
         if let lines {
-            args.append(contentsOf: ["-n", "\(lines)"])
+            args.append(contentsOf: ["-n", String(lines)])
         }
         return try await cli.executeCommand(args, dataType: LogsOutput.self, source: "Logs Show")
     }
@@ -923,7 +923,7 @@ private init() {}
             args.append("--exact")
         }
         if let limit {
-            args.append(contentsOf: ["--limit", "\(limit)"])
+            args.append(contentsOf: ["--limit", String(limit)])
         }
         if let subtarget {
             args.append(contentsOf: ["--subtarget", subtarget])
@@ -945,10 +945,10 @@ private init() {}
             args.append(contentsOf: ["--name", name])
         }
         if let type = fileType {
-            args.append(contentsOf: ["--type", type])
+            args.append(contentsOf: ["--file-type", type])
         }
         if let depth = maxDepth {
-            args.append(contentsOf: ["--max-depth", "\(depth)"])
+            args.append(contentsOf: ["--max-depth", String(depth)])
         }
         return try await cli.executeCommand(args, dataType: FileFindOutput.self, source: "File Find", timeout: 60)
     }
@@ -966,7 +966,7 @@ private init() {}
             args.append(contentsOf: ["--name", name])
         }
         if let depth = maxDepth {
-            args.append(contentsOf: ["--max-depth", "\(depth)"])
+            args.append(contentsOf: ["--max-depth", String(depth)])
         }
         if caseInsensitive {
             args.append("-i")
@@ -989,10 +989,10 @@ private init() {}
             args.append("-i")
         }
         if let lines {
-            args.append(contentsOf: ["-n", "\(lines)"])
+            args.append(contentsOf: ["-n", String(lines)])
         }
         if let context {
-            args.append(contentsOf: ["-C", "\(context)"])
+            args.append(contentsOf: ["-C", String(context)])
         }
         return try await cli.executeCommand(args, dataType: LogsOutput.self, source: "Logs Search", timeout: 60)
     }
@@ -1063,7 +1063,7 @@ private init() {}
 
     /// Rename a term across the codebase
     func refactorRename(componentId: String, from: String, to: String, write: Bool = false) async throws -> RefactorResult {
-        var args = ["refactor", "rename", componentId, "--from", from, "--to", to]
+        var args = ["refactor", "rename", "--from", from, "--to", to, "--component", componentId]
         if write {
             args.append("--write")
         }
