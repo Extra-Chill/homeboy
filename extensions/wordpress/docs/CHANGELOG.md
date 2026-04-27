@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.26.0] - 2026-04-27
+
+### Added
+- support persisted bench site scenarios
+
 ## [2.25.0] - 2026-04-27
 
 ### Added
