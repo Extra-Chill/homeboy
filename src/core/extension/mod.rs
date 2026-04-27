@@ -144,7 +144,7 @@ impl ExtensionCapability {
         }
     }
 
-    pub(crate) fn script_path<'a>(self, manifest: &'a ExtensionManifest) -> Option<&'a str> {
+    pub(crate) fn script_path(self, manifest: &ExtensionManifest) -> Option<&str> {
         match self {
             ExtensionCapability::Lint => manifest.lint_script(),
             ExtensionCapability::Test => manifest.test_script(),
