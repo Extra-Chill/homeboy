@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.2] - 2026-04-27
+
+### Fixed
+- remove duplicate test config
+
 ## [2.30.1] - 2026-04-27
 
 ### Fixed
