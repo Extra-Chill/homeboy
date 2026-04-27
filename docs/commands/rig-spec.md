@@ -141,7 +141,7 @@ Applies or verifies an idempotent local-only file patch. `marker` must appear in
 
 Runs via `sh -c`. `cwd`, `command`, and `env` values all support variable expansion. `label` is optional; without it, the command string itself is used in status output.
 
-Command steps bootstrap a portable developer-tool PATH unless the step explicitly sets `env.PATH`. Homeboy prepends existing common bin directories (`$HOME/.local/bin`, `$HOME/.cargo/bin`, `$HOME/.kimaki/bin`, `/opt/homebrew/bin`, `/usr/local/bin`) before the inherited `PATH`. Missing directories are ignored. If a tool lives somewhere else, set `env.PATH` on the step or prefer a typed primitive such as `build`, `git`, or `check` when one fits.
+Command steps bootstrap a portable developer-tool PATH unless the step explicitly sets `env.PATH`. Homeboy prepends existing common bin directories (`$HOME/.local/bin`, `$HOME/.cargo/bin`, `$HOME/.kimaki/bin`, `$HOME/.nvm/versions/node/*/bin`, `/opt/homebrew/bin`, `/usr/local/bin`) before the inherited `PATH`. Missing directories are ignored. If a tool lives somewhere else, set `env.PATH` on the step or prefer a typed primitive such as `build`, `git`, or `check` when one fits.
 
 **Escape hatch — use sparingly.** If a step maps to `build`, `git`, or `check`, use those instead. Generic commands lose homeboy's error formatting, extension integration, and structured output.
 

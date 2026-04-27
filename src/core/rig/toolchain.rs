@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 const HOME_BIN_DIRS: &[&str] = &[".local/bin", ".cargo/bin", ".kimaki/bin"];
@@ -36,6 +37,7 @@ fn build_command_step_path_with_absolute_dirs(
         for rel in HOME_BIN_DIRS {
             push_existing_path(&mut paths, &mut seen, home.join(rel));
         }
+        push_nvm_node_bins(&mut paths, &mut seen, home);
     }
 
     for path in absolute_dirs {
@@ -58,6 +60,24 @@ fn build_command_step_path_with_absolute_dirs(
 fn push_existing_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
     if path.exists() {
         push_path(paths, seen, path);
+    }
+}
+
+fn push_nvm_node_bins(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, home: &Path) {
+    let versions_dir = home.join(".nvm/versions/node");
+    let Ok(entries) = fs::read_dir(versions_dir) else {
+        return;
+    };
+
+    let mut bins = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path().join("bin")))
+        .filter(|path| path.exists())
+        .collect::<Vec<_>>();
+    bins.sort();
+    bins.reverse();
+
+    for bin in bins {
+        push_path(paths, seen, bin);
     }
 }
 
@@ -94,6 +114,25 @@ mod tests {
         assert!(parts.contains(&PathBuf::from("/usr/bin")));
         assert!(parts.contains(&PathBuf::from("/bin")));
         assert!(!parts.contains(&home.join(".kimaki/bin")));
+    }
+
+    #[test]
+    fn test_command_step_path_prepends_nvm_node_bins() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let home = tmp.path().join("home");
+        let node_20 = home.join(".nvm/versions/node/v20.0.0/bin");
+        let node_24 = home.join(".nvm/versions/node/v24.13.1/bin");
+        fs::create_dir_all(&node_20).expect("node 20 bin");
+        fs::create_dir_all(&node_24).expect("node 24 bin");
+
+        let inherited = OsString::from("/usr/bin:/bin");
+        let path = build_command_step_path_with_absolute_dirs(Some(&home), Some(&inherited), &[])
+            .expect("path");
+        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
+
+        assert_eq!(parts[0], node_24);
+        assert_eq!(parts[1], node_20);
+        assert!(parts.contains(&PathBuf::from("/usr/bin")));
     }
 
     #[test]
