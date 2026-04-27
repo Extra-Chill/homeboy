@@ -135,6 +135,64 @@ struct ComponentConfigurationTest: Decodable {
     }
 }
 
+// MARK: - Bench Output Types (mirror HomeboyCLI.swift)
+
+struct BenchCommandOutputTest: Decodable {
+    let passed: Bool
+    let status: String
+    let component: String
+    let exitCode: Int32
+    let iterations: Int
+    let results: BenchResultsTest?
+    let baselineComparison: BenchBaselineComparisonTest?
+    let hints: [String]?
+}
+
+struct BenchResultsTest: Decodable {
+    let componentId: String
+    let iterations: Int
+    let scenarios: [BenchScenarioTest]
+    let metricPolicies: [String: BenchMetricPolicyTest]?
+}
+
+struct BenchScenarioTest: Decodable {
+    let id: String
+    let file: String?
+    let iterations: Int
+    let metrics: [String: Double]
+    let memory: BenchMemoryTest?
+}
+
+struct BenchMemoryTest: Decodable {
+    let peakBytes: UInt64
+}
+
+struct BenchMetricPolicyTest: Decodable {
+    let direction: String
+    let regressionThresholdPercent: Double?
+    let regressionThresholdAbsolute: Double?
+}
+
+struct BenchBaselineComparisonTest: Decodable {
+    let thresholdPercent: Double
+    let scenarios: [BenchScenarioDeltaTest]
+    let newScenarioIds: [String]
+    let removedScenarioIds: [String]
+    let regression: Bool
+    let hasImprovements: Bool
+    let reasons: [String]?
+}
+
+struct BenchScenarioDeltaTest: Decodable {
+    let id: String
+    let baselineP95Ms: Double?
+    let currentP95Ms: Double?
+    let p95DeltaMs: Double?
+    let p95DeltaPct: Double?
+    let regression: Bool
+    let improvement: Bool
+}
+
 // MARK: - Test Runner
 
 func runTests(testDir: String) throws {
@@ -182,6 +240,9 @@ func runTests(testDir: String) throws {
 
     // Test 12: CLI command construction uses current Homeboy surface
     try testCurrentCLICommandSurface(testDir: testDir)
+
+    // Test 13: bench result parsing
+    try testBenchResult(fixturesDir: fixturesDir, decoder: decoder)
 
     print("")
     print("All contract tests passed")
@@ -812,6 +873,67 @@ func testCurrentCLICommandSurface(testDir: String) throws {
         }
     }
     print("[PASS] Audit filters and help-surface probe are present")
+    print("")
+}
+
+func testBenchResult(fixturesDir: String, decoder: JSONDecoder) throws {
+    print("Test: bench-result.json")
+    print("-----------------------")
+
+    let fixture = URL(fileURLWithPath: "\(fixturesDir)/bench-result.json")
+
+    guard FileManager.default.fileExists(atPath: fixture.path) else {
+        throw NSError(domain: "ContractTest", code: 80,
+            userInfo: [NSLocalizedDescriptionKey: "Fixture not found: bench-result.json"])
+    }
+
+    let data = try Data(contentsOf: fixture)
+    let result = try decoder.decode(CLIResponse<BenchCommandOutputTest>.self, from: data)
+
+    guard result.success else {
+        throw NSError(domain: "ContractTest", code: 81,
+            userInfo: [NSLocalizedDescriptionKey: "bench-result.json: success=false"])
+    }
+
+    guard let output = result.data else {
+        throw NSError(domain: "ContractTest", code: 82,
+            userInfo: [NSLocalizedDescriptionKey: "bench-result.json: data field is nil"])
+    }
+
+    guard output.component == "homeboy" else {
+        throw NSError(domain: "ContractTest", code: 83,
+            userInfo: [NSLocalizedDescriptionKey: "Unexpected bench component: \(output.component)"])
+    }
+    print("[PASS] Parsed bench command output")
+
+    guard let results = output.results else {
+        throw NSError(domain: "ContractTest", code: 84,
+            userInfo: [NSLocalizedDescriptionKey: "bench-result.json: results is nil"])
+    }
+
+    guard results.scenarios.count == 2 else {
+        throw NSError(domain: "ContractTest", code: 85,
+            userInfo: [NSLocalizedDescriptionKey: "Expected 2 scenarios, got \(results.scenarios.count)"])
+    }
+    print("[PASS] Parsed \(results.scenarios.count) bench scenarios")
+
+    guard let p95 = results.scenarios.first?.metrics["p95_ms"], p95 > 0 else {
+        throw NSError(domain: "ContractTest", code: 86,
+            userInfo: [NSLocalizedDescriptionKey: "First scenario missing positive p95_ms"])
+    }
+    print("[PASS] Scenario metrics decode as numeric values")
+
+    guard results.scenarios.first?.memory?.peakBytes == 41943040 else {
+        throw NSError(domain: "ContractTest", code: 87,
+            userInfo: [NSLocalizedDescriptionKey: "First scenario memory peak did not decode"])
+    }
+    print("[PASS] Scenario memory decodes from peak_bytes")
+
+    guard output.baselineComparison?.regression == false else {
+        throw NSError(domain: "ContractTest", code: 88,
+            userInfo: [NSLocalizedDescriptionKey: "Baseline comparison regression flag mismatch"])
+    }
+    print("[PASS] Baseline comparison decodes")
     print("")
 }
 

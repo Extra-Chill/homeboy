@@ -1,0 +1,64 @@
+{
+  "success": true,
+  "data": {
+    "passed": true,
+    "status": "passed",
+    "component": "homeboy",
+    "exit_code": 0,
+    "iterations": 10,
+    "results": {
+      "component_id": "homeboy",
+      "iterations": 10,
+      "metric_policies": {
+        "p95_ms": {
+          "direction": "lower_is_better",
+          "regression_threshold_percent": 5
+        }
+      },
+      "scenarios": [
+        {
+          "id": "audit_self",
+          "file": "src/bin/bench-audit-self.rs",
+          "iterations": 10,
+          "metrics": {
+            "p50_ms": 59700,
+            "p95_ms": 62900,
+            "min_ms": 59500,
+            "max_ms": 63300
+          },
+          "memory": {
+            "peak_bytes": 41943040
+          }
+        },
+        {
+          "id": "noop",
+          "iterations": 10,
+          "metrics": {
+            "p50_ms": 1.2,
+            "p95_ms": 1.8,
+            "requests_per_second": 180.5
+          }
+        }
+      ]
+    },
+    "baseline_comparison": {
+      "threshold_percent": 5,
+      "scenarios": [
+        {
+          "id": "audit_self",
+          "baseline_p95_ms": 64000,
+          "current_p95_ms": 62900,
+          "p95_delta_ms": -1100,
+          "p95_delta_pct": -1.71875,
+          "metric_deltas": [],
+          "regression": false,
+          "improvement": true
+        }
+      ],
+      "new_scenario_ids": ["noop"],
+      "removed_scenario_ids": [],
+      "regression": false,
+      "has_improvements": true
+    }
+  }
+}

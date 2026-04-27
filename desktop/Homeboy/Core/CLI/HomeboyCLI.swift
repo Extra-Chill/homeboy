@@ -275,6 +275,64 @@ struct ComponentRecordCLI: Decodable, Identifiable {
     }
 }
 
+// MARK: - Bench CLI Output Models
+
+struct BenchCommandOutput: Decodable {
+    let passed: Bool
+    let status: String
+    let component: String
+    let exitCode: Int32
+    let iterations: Int
+    let results: BenchResults?
+    let baselineComparison: BenchBaselineComparison?
+    let hints: [String]?
+}
+
+struct BenchResults: Decodable {
+    let componentId: String
+    let iterations: Int
+    let scenarios: [BenchScenario]
+    let metricPolicies: [String: BenchMetricPolicy]?
+}
+
+struct BenchScenario: Decodable, Identifiable {
+    let id: String
+    let file: String?
+    let iterations: Int
+    let metrics: [String: Double]
+    let memory: BenchMemory?
+}
+
+struct BenchMemory: Decodable {
+    let peakBytes: UInt64
+}
+
+struct BenchMetricPolicy: Decodable {
+    let direction: String
+    let regressionThresholdPercent: Double?
+    let regressionThresholdAbsolute: Double?
+}
+
+struct BenchBaselineComparison: Decodable {
+    let thresholdPercent: Double
+    let scenarios: [BenchScenarioDelta]
+    let newScenarioIds: [String]
+    let removedScenarioIds: [String]
+    let regression: Bool
+    let hasImprovements: Bool
+    let reasons: [String]?
+}
+
+struct BenchScenarioDelta: Decodable, Identifiable {
+    let id: String
+    let baselineP95Ms: Double?
+    let currentP95Ms: Double?
+    let p95DeltaMs: Double?
+    let p95DeltaPct: Double?
+    let regression: Bool
+    let improvement: Bool
+}
+
 /// Extension configuration scoped to a component (for CLI output parsing)
 /// Settings use [String: String] for simplicity - CLI returns settings as strings
 struct ScopedExtensionConfig: Decodable {
@@ -772,6 +830,24 @@ private init() {}
             dataType: ComponentOutput.self,
             source: "Component Delete"
         )
+    }
+
+    // MARK: - Bench Commands
+
+    func benchList(componentId: String, path: String? = nil) async throws -> BenchCommandOutput {
+        var args = ["bench", "list", componentId]
+        if let path, !path.isEmpty {
+            args.append(contentsOf: ["--path", path])
+        }
+        return try await cli.executeCommand(args, dataType: BenchCommandOutput.self, source: "Bench List", timeout: 60)
+    }
+
+    func benchRun(componentId: String, path: String? = nil, iterations: Int = 10) async throws -> BenchCommandOutput {
+        var args = ["bench", componentId, "--iterations", String(iterations)]
+        if let path, !path.isEmpty {
+            args.append(contentsOf: ["--path", path])
+        }
+        return try await cli.executeCommand(args, dataType: BenchCommandOutput.self, source: "Bench", timeout: 300)
     }
 
     // MARK: - File Commands

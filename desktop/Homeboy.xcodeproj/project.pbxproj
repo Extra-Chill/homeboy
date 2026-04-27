@@ -13,6 +13,7 @@
 		0B1C053B8DCA686200739C43 /* ServerEditSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5D75CB92C4916A5B3A8DE34 /* ServerEditSheet.swift */; };
 		0BB5245A79F8709EBD8C5269 /* ModuleInstallSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA1C2F245C5FCEF82A5D2D3 /* ModuleInstallSheet.swift */; };
 		0FE6351E7C94950D6A459978 /* DeployerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F978C6E7F1C5288FF7303DF7 /* DeployerView.swift */; };
+		1162E40A1D0549D9B68608A8 /* BenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1162E4091D0549D9B68608A8 /* BenchView.swift */; };
 		1A164D8DD4607926F6964B95 /* CopyableContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */; };
 		1D8C5CFC6CC66D4D2059241A /* CLIError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0B9A725382C46F30D83C02 /* CLIError.swift */; };
 		1E0233CF5AC026C74233786E /* TableDataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EC7ED01925DBCB9195A8A4D /* TableDataView.swift */; };
@@ -107,6 +108,7 @@
 		0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEntry.swift; sourceTree = "<group>"; };
 		0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
 		0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineWarningView.swift; sourceTree = "<group>"; };
+		1162E4091D0549D9B68608A8 /* BenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchView.swift; sourceTree = "<group>"; };
 		13F8D60E3516F29F554438A0 /* VersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionParser.swift; sourceTree = "<group>"; };
 		14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseTypes.swift; sourceTree = "<group>"; };
 		1682E9BF7F10ED915C606359 /* RemoteFileEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorViewModel.swift; sourceTree = "<group>"; };
@@ -378,6 +380,7 @@
 				8007D7D3CCEF3F80C36AA686 /* Components */,
 				E900FE3D44D913C0F5C320A7 /* Modules */,
 				F08C0BC0AC87CDDCAA5955CF /* Settings */,
+				1162E4091D0549D9B68608A8 /* BenchView.swift */,
 				3A80F92FC849ACD9591EDEFE /* LoginView.swift */,
 				EA62EB2C6FD0532AE4CCD204 /* ProjectSwitcherView.swift */,
 				E7C2AF5C1F794564BF7DC0F4 /* RemoteFileBrowserView.swift */,
@@ -627,6 +630,7 @@
 				27D41F217F00E3A8171BEC63 /* AppWarning.swift in Sources */,
 				86C712A03FB9FC626DC46371 /* ArtifactVersionParser.swift in Sources */,
 				FE865BA85263630F8BF6A608 /* AuthManager.swift in Sources */,
+				1162E40A1D0549D9B68608A8 /* BenchView.swift in Sources */,
 				1EBFEF675F781A40A250D009 /* BackupService.swift in Sources */,
 				D067D1266FD0989BC9E07C43 /* CLIBridge.swift in Sources */,
 				1D8C5CFC6CC66D4D2059241A /* CLIError.swift in Sources */,

@@ -12,6 +12,7 @@ enum NavigationItem: Hashable {
 /// Settings is shown in a separate section.
 enum CoreTool: String, CaseIterable, Identifiable {
     case deployer = "Deployer"
+    case bench = "Bench"
     case remoteFileEditor = "File Editor"
     case remoteLogViewer = "Log Viewer"
     case databaseBrowser = "Database"
@@ -22,6 +23,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .deployer: return "arrow.up.to.line"
+        case .bench: return "speedometer"
         case .remoteFileEditor: return "doc.badge.gearshape"
         case .remoteLogViewer: return "doc.text.magnifyingglass"
         case .databaseBrowser: return "cylinder.split.1x2"
@@ -62,6 +64,8 @@ struct ContentView: View {
             // Core tools - kept mounted to preserve state
             DeployerView()
                 .opacity(selectedItem == .coreTool(.deployer) ? 1 : 0)
+            BenchView()
+                .opacity(selectedItem == .coreTool(.bench) ? 1 : 0)
             DatabaseBrowserView()
                 .opacity(selectedItem == .coreTool(.databaseBrowser) ? 1 : 0)
             RemoteLogViewerView()
