@@ -8,11 +8,17 @@ const RUNNER_STEPS_SH: &str = include_str!("runtime/runner-steps.sh");
 const FAILURE_TRAP_SH: &str = include_str!("runtime/failure-trap.sh");
 const WRITE_TEST_RESULTS_SH: &str = include_str!("runtime/write-test-results.sh");
 const RESOLVE_CONTEXT_SH: &str = include_str!("runtime/resolve-context.sh");
+const BENCH_HELPER_SH: &str = include_str!("runtime/bench-helper.sh");
+const BENCH_HELPER_JS: &str = include_str!("runtime/bench-helper.mjs");
+const BENCH_HELPER_PHP: &str = include_str!("runtime/bench-helper.php");
 
 pub const RUNNER_STEPS_ENV: &str = "HOMEBOY_RUNTIME_RUNNER_STEPS";
 pub const FAILURE_TRAP_ENV: &str = "HOMEBOY_RUNTIME_FAILURE_TRAP";
 pub const WRITE_TEST_RESULTS_ENV: &str = "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS";
 pub const RESOLVE_CONTEXT_ENV: &str = "HOMEBOY_RUNTIME_RESOLVE_CONTEXT";
+pub const BENCH_HELPER_SH_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_SH";
+pub const BENCH_HELPER_JS_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_JS";
+pub const BENCH_HELPER_PHP_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_PHP";
 
 struct RuntimeHelper {
     filename: &'static str,
@@ -40,6 +46,21 @@ const HELPERS: &[RuntimeHelper] = &[
         filename: "resolve-context.sh",
         content: RESOLVE_CONTEXT_SH,
         env_var: RESOLVE_CONTEXT_ENV,
+    },
+    RuntimeHelper {
+        filename: "bench-helper.sh",
+        content: BENCH_HELPER_SH,
+        env_var: BENCH_HELPER_SH_ENV,
+    },
+    RuntimeHelper {
+        filename: "bench-helper.mjs",
+        content: BENCH_HELPER_JS,
+        env_var: BENCH_HELPER_JS_ENV,
+    },
+    RuntimeHelper {
+        filename: "bench-helper.php",
+        content: BENCH_HELPER_PHP,
+        env_var: BENCH_HELPER_PHP_ENV,
     },
 ];
 
@@ -109,6 +130,14 @@ mod tests {
             pairs.iter().any(|(k, _)| k == RESOLVE_CONTEXT_ENV),
             "resolve context helper should be in pairs"
         );
+        assert!(
+            pairs.iter().any(|(k, _)| k == BENCH_HELPER_JS_ENV),
+            "bench JS helper should be in pairs"
+        );
+        assert!(
+            pairs.iter().any(|(k, _)| k == BENCH_HELPER_PHP_ENV),
+            "bench PHP helper should be in pairs"
+        );
     }
 
     #[test]
@@ -176,5 +205,56 @@ mod tests {
                 component_dir.display()
             )
         );
+    }
+
+    #[test]
+    fn bench_shell_helper_writes_empty_envelope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let helper_path = dir.path().join("bench-helper.sh");
+        let results_path = dir.path().join("bench-results.json");
+        std::fs::write(&helper_path, BENCH_HELPER_SH).expect("write helper");
+
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "source {}; HOMEBOY_BENCH_RESULTS_FILE={}; homeboy_write_empty_bench_results demo 7; cat {}",
+                helper_path.display(),
+                results_path.display(),
+                results_path.display()
+            ))
+            .output()
+            .expect("run bash");
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "{\"component_id\":\"demo\",\"iterations\":7,\"scenarios\":[]}\n"
+        );
+    }
+
+    #[test]
+    fn bench_runtime_helpers_document_shared_contract() {
+        for content in [BENCH_HELPER_JS, BENCH_HELPER_PHP] {
+            assert!(
+                content.contains("R-7 percentile"),
+                "helper should document percentile method"
+            );
+            assert!(
+                content.contains("p * (n - 1)") || content.contains("$p * ($n - 1)"),
+                "helper should use R-7 rank formula"
+            );
+            assert!(
+                content.contains("scenario") && content.contains("slug"),
+                "helper should own scenario slugging"
+            );
+            assert!(
+                content.contains("component_id") && content.contains("scenarios"),
+                "helper should own BenchResults envelope shape"
+            );
+        }
     }
 }
