@@ -26,6 +26,7 @@ mod deprecation_age;
 mod discovery;
 pub mod docs_audit;
 mod duplication;
+mod facade_passthrough;
 mod field_patterns;
 mod findings;
 pub mod fingerprint;
@@ -543,6 +544,18 @@ fn audit_internal(
             field_pattern_findings.len()
         );
         all_findings.extend(field_pattern_findings);
+    }
+
+    // Phase 4t: Facade-passthrough detection — classes whose public methods
+    // mostly delegate to an inner member without adding behavior.
+    let facade_findings = facade_passthrough::run(&all_fingerprints);
+    if !facade_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Facade passthrough: {} finding(s) (thin wrapper classes)",
+            facade_findings.len()
+        );
+        all_findings.extend(facade_findings);
     }
 
     // Phase 4u: Repeated inline array literal shape detection.

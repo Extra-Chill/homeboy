@@ -200,6 +200,9 @@ pub enum AuditFinding {
     /// method-shape (same method names + visibilities + order) and have high
     /// per-method body similarity — candidates for a shared base class.
     SharedScaffolding,
+    /// Class whose public methods are mostly single-expression delegates to an
+    /// internal member — usually a split-then-rejoin facade or legacy wrapper.
+    FacadePassthrough,
     /// SQL uses LIKE to match exact JSON key/value semantics in a blob column
     /// such as metadata, engine_data, config, or payload.
     JsonLikeExactMatch,
@@ -256,6 +259,7 @@ impl AuditFinding {
             "dead_guard",
             "upstream_workaround",
             "shared_scaffolding",
+            "facade_passthrough",
             "json_like_exact_match",
             "constant_backed_slug_literal",
             "option_scope_drift",
