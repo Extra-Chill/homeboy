@@ -216,6 +216,8 @@ pub enum AuditFinding {
     /// Tests mutate process-global environment variables without using the
     /// shared guard for that variable.
     GlobalEnvMutationGuard,
+    /// Source code shells out to a Homeboy CLI command shape that no longer exists.
+    StaleCliInvocation,
 }
 
 impl AuditFinding {
@@ -268,6 +270,7 @@ impl AuditFinding {
             "constant_backed_slug_literal",
             "option_scope_drift",
             "global_env_mutation_guard",
+            "stale_cli_invocation",
         ]
     }
 }

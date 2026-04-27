@@ -44,6 +44,7 @@ pub mod run;
 mod shadow_modules;
 mod shared_scaffolding;
 mod signatures;
+mod stale_cli_invocation;
 mod structural;
 mod test_coverage;
 pub(crate) mod test_mapping;
@@ -298,6 +299,7 @@ fn audit_internal(
     let files_skipped = discovery
         .files_walked
         .saturating_sub(discovery.files_fingerprinted);
+    let stale_cli_findings = stale_cli_invocation::run(root);
 
     if discovery.groups.is_empty() {
         let mut warnings = Vec::new();
@@ -328,20 +330,28 @@ fn audit_internal(
         } else {
             log_status!("audit", "No source files found");
         }
+        if !stale_cli_findings.is_empty() {
+            log_status!(
+                "audit",
+                "CLI invocations: {} finding(s) (stale Homeboy command arrays)",
+                stale_cli_findings.len()
+            );
+        }
+
         return Ok(CodeAuditResult {
             component_id: component_id.to_string(),
             source_path: source_path.to_string(),
             summary: AuditSummary {
                 files_scanned: 0,
                 conventions_detected: 0,
-                outliers_found: 0,
+                outliers_found: stale_cli_findings.len(),
                 alignment_score: None,
                 files_skipped: total_skipped,
                 warnings,
             },
             conventions: vec![],
             directory_conventions: vec![],
-            findings: vec![],
+            findings: stale_cli_findings,
             duplicate_groups: vec![],
         });
     }
@@ -367,6 +377,15 @@ fn audit_internal(
 
     // Phase 4: Build findings
     let mut all_findings = findings::build_findings(&check_results);
+
+    if !stale_cli_findings.is_empty() {
+        log_status!(
+            "audit",
+            "CLI invocations: {} finding(s) (stale Homeboy command arrays)",
+            stale_cli_findings.len()
+        );
+        all_findings.extend(stale_cli_findings);
+    }
 
     // Phase 4b: Structural complexity analysis (god files, high item counts)
     let structural_findings = structural::analyze_structure(root);
