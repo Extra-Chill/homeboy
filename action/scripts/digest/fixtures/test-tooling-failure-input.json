@@ -1,0 +1,17 @@
+{
+  "success": true,
+  "data": {
+    "passed": false,
+    "status": "failed",
+    "component": "block-format-bridge",
+    "exit_code": 1,
+    "failure": "test runner exited before reporting failed test cases",
+    "test_counts": {
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0
+    },
+    "failed_tests": []
+  }
+}

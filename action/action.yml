@@ -520,7 +520,7 @@ runs:
       if: always() && github.event_name == 'pull_request' && steps.check-pr-state.outputs.active != 'false'
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.app-token || github.token }}
+        GH_TOKEN: ${{ inputs.app-token }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         RESULTS: ${{ steps.select-results.outputs.results }}

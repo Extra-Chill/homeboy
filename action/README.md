@@ -492,9 +492,14 @@ Recommended policy:
 The main lane is the right place to maintain issue state because it runs against the full repository and can update, close, or suppress stale findings consistently. PR lanes should focus on author feedback and should not maintain long-lived audit issues from partial data.
 
 When a rule is useful as a health metric but not safe as an actionable task list, configure it as dashboard-only or suppress it from issue reconciliation in Homeboy's audit config. Homeboy Action passes `--suppress-from-config` to `homeboy issues reconcile`, so repository-level audit policy is honored during auto-issue maintenance.
+
+### PR Comment Identity
+
+PR comments are posted only with `app-token`. This keeps Homeboy comments under the `homeboy-ci[bot]` identity and avoids silently falling back to `github-actions[bot]`. Configure `app-token` with `actions/create-github-app-token`; when it is unavailable, checks still run but the comment step is skipped with a warning.
+
 ### Fork PR Note
 
-On fork-based pull requests, GitHub may provide a restricted `GITHUB_TOKEN` that cannot write PR comments. Homeboy Action treats the PR comment step as best-effort — lint/test/audit execution still runs and determines job pass/fail.
+On fork-based pull requests, GitHub App secrets may be unavailable. Homeboy Action treats the PR comment step as best-effort — lint/test/audit execution still runs and determines job pass/fail.
 
 ## Failure Digest
 

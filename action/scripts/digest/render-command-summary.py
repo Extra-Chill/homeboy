@@ -212,7 +212,21 @@ def markdown_test(data: dict[str, Any], lines: list[str]) -> None:
     if not failed_count:
         failed_count = len(failed_tests)
 
-    lines.append(f"- Failed tests: **{failed_count}**")
+    if failed_count > 0:
+        lines.append(f"- Failed tests: **{failed_count}**")
+    else:
+        lines.append("- Test command failed, but structured output reported **0 failed test cases**.")
+        status = str(data.get("status") or "").strip()
+        exit_code = data.get("exit_code")
+        if status or exit_code is not None:
+            status_label = status or "unknown"
+            exit_label = "unknown" if exit_code is None else str(exit_code)
+            lines.append(f"- Runner status: `{status_label}` (exit code `{exit_label}`)")
+        failure = str(data.get("failure") or "").strip()
+        if failure:
+            lines.append(f"- Failure: {failure}")
+        lines.append("- Interpret this as a runner/tooling failure, not failed test assertions.")
+
     details = []
     for idx, item in enumerate(failed_tests[:10], start=1):
         if isinstance(item, dict):

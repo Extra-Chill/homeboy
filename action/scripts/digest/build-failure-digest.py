@@ -125,7 +125,20 @@ def build_lint_digest_from_json(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_test_digest_from_json(payload: dict[str, Any]) -> dict[str, Any]:
+def read_log_excerpt(output_dir: str, stem: str, max_lines: int = 25) -> list[str]:
+    """Return a compact tail excerpt from a command log."""
+    path = os.path.join(output_dir, f"{stem}.log")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = [line.rstrip() for line in f]
+    except OSError:
+        return []
+
+    compact = [line for line in lines if line.strip()]
+    return compact[-max_lines:]
+
+
+def build_test_digest_from_json(payload: dict[str, Any], raw_excerpt: list[str] | None = None) -> dict[str, Any]:
     """Build test digest from structured JSON output."""
     data = payload.get("data", {})
     test_counts = data.get("test_counts", {})
@@ -149,7 +162,10 @@ def build_test_digest_from_json(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "failed_tests_count": failed_count,
         "top_failed_tests": top_failed,
-        "raw_excerpt": [],
+        "raw_excerpt": raw_excerpt or [],
+        "status": str(data.get("status", "")),
+        "exit_code": data.get("exit_code"),
+        "failure_message": str(data.get("failure") or ""),
     }
 
 
@@ -351,12 +367,15 @@ def main() -> int:
 
     if results.get("test") == "fail":
         if test_json and test_json.get("data"):
-            test_digest = build_test_digest_from_json(test_json)
+            test_digest = build_test_digest_from_json(test_json, read_log_excerpt(output_dir, "test"))
         else:
             test_digest = {
                 "failed_tests_count": 0,
                 "top_failed_tests": [],
-                "raw_excerpt": [],
+                "raw_excerpt": read_log_excerpt(output_dir, "test"),
+                "status": "",
+                "exit_code": None,
+                "failure_message": "",
             }
     else:
         test_digest = {

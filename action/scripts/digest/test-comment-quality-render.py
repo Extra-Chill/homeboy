@@ -51,6 +51,16 @@ def main() -> int:
     assert_not_contains(refactor, "Warnings", "no-op warnings detail")
     assert_not_contains(refactor, "Stages", "no-op stage listing")
 
+    tooling_failure = render("test", "test-tooling-failure-input.json")
+    assert_contains(
+        tooling_failure,
+        "Test command failed, but structured output reported **0 failed test cases**.",
+        "zero-failed test command explanation",
+    )
+    assert_contains(tooling_failure, "Runner status: `failed` (exit code `1`)", "test runner status")
+    assert_contains(tooling_failure, "runner/tooling failure", "test failure classification")
+    assert_not_contains(tooling_failure, "Failed tests: **0**", "misleading zero failed tests line")
+
     full_digest = render_markdown(
         lint_digest={},
         test_digest={},
@@ -80,6 +90,28 @@ def main() -> int:
     assert_contains(full_digest, "<details><summary>Audit findings (6)</summary>", "deduped details block")
     assert_not_contains(full_digest, "Top actionable findings", "failure digest duplicated top list")
     assert_not_contains(full_digest, "unknown:", "failure digest unknown severity")
+
+    test_digest = render_markdown(
+        lint_digest={},
+        test_digest={
+            "failed_tests_count": 0,
+            "top_failed_tests": [],
+            "raw_excerpt": ["composer install failed", "exit status 2"],
+            "status": "failed",
+            "exit_code": 1,
+            "failure_message": "runner setup failed",
+        },
+        audit_digest={},
+        autofixability={"overall": "human_needed", "autofix_enabled": False, "autofix_attempted": False},
+        run_url="https://github.com/Extra-Chill/homeboy/actions/runs/1",
+        tooling={},
+        job_links={},
+        results={"test": "fail"},
+    )
+    assert_contains(test_digest, "Test command failed, but structured output reported **0 failed test cases**.", "digest zero-failed test command explanation")
+    assert_contains(test_digest, "runner/tooling failure", "digest test failure classification")
+    assert_contains(test_digest, "<details><summary>Raw test failure excerpt</summary>", "digest raw log excerpt")
+    assert_not_contains(test_digest, "Failed tests: **0**", "digest misleading zero failed tests line")
 
     print("comment quality rendering checks passed")
     return 0

@@ -142,7 +142,21 @@ def render_markdown(
 
     if "test" in results:
         lines.append("### Test Failure Digest")
-        lines.append(f"- Failed tests: **{test_digest.get('failed_tests_count', 0)}**")
+        failed_count = int(test_digest.get("failed_tests_count", 0) or 0)
+        if failed_count > 0:
+            lines.append(f"- Failed tests: **{failed_count}**")
+        else:
+            lines.append("- Test command failed, but structured output reported **0 failed test cases**.")
+            status = str(test_digest.get("status") or "").strip()
+            exit_code = test_digest.get("exit_code")
+            if status or exit_code is not None:
+                status_label = status or "unknown"
+                exit_label = "unknown" if exit_code is None else str(exit_code)
+                lines.append(f"- Runner status: `{status_label}` (exit code `{exit_label}`)")
+            failure_message = str(test_digest.get("failure_message") or "").strip()
+            if failure_message:
+                lines.append(f"- Failure: {failure_message}")
+            lines.append("- Interpret this as a runner/tooling failure, not failed test assertions.")
         top_tests = test_digest.get("top_failed_tests", []) or []
         if top_tests:
             _append_details_block(
@@ -150,7 +164,7 @@ def render_markdown(
                 f"Failed test details ({min(len(top_tests), 10)} shown)",
                 [_summarize_test_failure(test, idx) for idx, test in enumerate(top_tests[:10], start=1)],
             )
-        else:
+        elif failed_count > 0:
             lines.append("- No structured test failure details available.")
 
         raw_excerpt = [str(line) for line in (test_digest.get("raw_excerpt", []) or [])]

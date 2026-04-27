@@ -36,6 +36,11 @@ if [ -z "${OUTPUT_DIR}" ] || [ -z "${PR_NUMBER:-}" ]; then
   exit 0
 fi
 
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "::warning::Skipping PR comment — app-token was not provided. Refusing to post as github-actions[bot]; configure the homeboy-ci GitHub App token."
+  exit 0
+fi
+
 if ! pr_is_active; then
   echo "Skipping PR comment — PR #${PR_NUMBER} is no longer open (merged or closed)"
   exit 0
