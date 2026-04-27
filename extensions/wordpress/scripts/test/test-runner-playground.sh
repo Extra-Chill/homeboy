@@ -44,6 +44,7 @@ RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
+PLAYGROUND_PATHS_HELPER="${SCRIPT_DIR}/../lib/playground-paths.sh"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context --component-alias PLUGIN_PATH
@@ -59,6 +60,8 @@ fi
 if [ -f "$PHP_PREFLIGHT_HELPER" ]; then
     source "$PHP_PREFLIGHT_HELPER"
 fi
+# shellcheck source=../lib/playground-paths.sh
+source "$PLAYGROUND_PATHS_HELPER"
 # shellcheck source=/dev/null
 if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
     source "$FAILURE_TRAP_HELPER"
@@ -201,7 +204,8 @@ if [ -f "$PLUGIN_DB_PHP" ]; then
     fi
 fi
 
-MOUNT_ARGS+=("--mount" "${EXTENSION_PATH}:/homeboy-extension")
+EXTENSION_MOUNT_PATH="$(homeboy_playground_resolve_mount_path "$EXTENSION_PATH")"
+MOUNT_ARGS+=("--mount" "${EXTENSION_MOUNT_PATH}:/homeboy-extension")
 
 PLAYGROUND_DEP_MOUNTS=""
 if [ -n "$DEPENDENCY_PATHS" ]; then

@@ -40,6 +40,7 @@ BENCH_HELPER_PHP_HOST="${HOMEBOY_RUNTIME_BENCH_HELPER_PHP:-${HOME}/.homeboy/runt
 BENCH_HELPER_PHP_GUEST="/homeboy-runtime/bench-helper.php"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
+PLAYGROUND_PATHS_HELPER="${SCRIPT_DIR}/../lib/playground-paths.sh"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context --component-alias PLUGIN_PATH
@@ -51,6 +52,8 @@ fi
 if [ -f "$DEPENDENCY_HELPER" ]; then
     source "$DEPENDENCY_HELPER"
 fi
+# shellcheck source=../lib/playground-paths.sh
+source "$PLAYGROUND_PATHS_HELPER"
 # shellcheck source=/dev/null
 if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
     source "$FAILURE_TRAP_HELPER"
@@ -268,7 +271,8 @@ if [ -f "$PLUGIN_DB_PHP" ]; then
     MOUNT_ARGS+=("--mount" "${PLUGIN_DB_PHP}:/wordpress/wp-content/db.php")
 fi
 
-MOUNT_ARGS+=("--mount" "${EXTENSION_PATH}:/homeboy-extension")
+EXTENSION_MOUNT_PATH="$(homeboy_playground_resolve_mount_path "$EXTENSION_PATH")"
+MOUNT_ARGS+=("--mount" "${EXTENSION_MOUNT_PATH}:/homeboy-extension")
 MOUNT_ARGS+=("--mount" "${BENCH_HELPER_PHP_HOST}:${BENCH_HELPER_PHP_GUEST}")
 
 # Rig-private workloads are host paths supplied by homeboy core through a
