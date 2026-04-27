@@ -58,7 +58,31 @@ struct TestFunction {
 }
 
 fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
-    let product_symbols = collect_product_imports(content);
+    let mut product_symbols = BTreeSet::new();
+    let simple = regex::Regex::new(
+        r"(?m)^\s*use\s+(?:homeboy|crate|super)::[^;]*::([A-Za-z_][A-Za-z0-9_]*)\s*;",
+    )
+    .unwrap();
+    for cap in simple.captures_iter(content) {
+        product_symbols.insert(cap[1].to_string());
+    }
+
+    let grouped =
+        regex::Regex::new(r"(?m)^\s*use\s+(?:homeboy|crate|super)::[^;]*\{([^}]+)\}\s*;").unwrap();
+    for cap in grouped.captures_iter(content) {
+        for raw in cap[1].split(',') {
+            let symbol = raw.trim().trim_start_matches("self::");
+            let symbol = symbol.split_whitespace().next().unwrap_or("");
+            if !symbol.is_empty()
+                && symbol
+                    .chars()
+                    .all(|c| c == '_' || c.is_ascii_alphanumeric())
+            {
+                product_symbols.insert(symbol.to_string());
+            }
+        }
+    }
+
     extract_test_functions(content)
         .into_iter()
         .filter_map(|test| vacuous_reason(&test, &product_symbols).map(|reason| (test, reason)))
@@ -117,45 +141,12 @@ fn contains_product_reference(body: &str, product_symbols: &BTreeSet<String>) ->
         || body.contains("crate::")
         || body.contains("super::")
         || body.contains("Command::cargo_bin")
-        || product_symbols
-            .iter()
-            .any(|symbol| contains_word_call(body, symbol))
-}
-
-fn collect_product_imports(content: &str) -> BTreeSet<String> {
-    let mut symbols = BTreeSet::new();
-    let simple = regex::Regex::new(
-        r"(?m)^\s*use\s+(?:homeboy|crate|super)::[^;]*::([A-Za-z_][A-Za-z0-9_]*)\s*;",
-    )
-    .unwrap();
-    for cap in simple.captures_iter(content) {
-        symbols.insert(cap[1].to_string());
-    }
-
-    let grouped =
-        regex::Regex::new(r"(?m)^\s*use\s+(?:homeboy|crate|super)::[^;]*\{([^}]+)\}\s*;").unwrap();
-    for cap in grouped.captures_iter(content) {
-        for raw in cap[1].split(',') {
-            let symbol = raw.trim().trim_start_matches("self::");
-            let symbol = symbol.split_whitespace().next().unwrap_or("");
-            if !symbol.is_empty()
-                && symbol
-                    .chars()
-                    .all(|c| c == '_' || c.is_ascii_alphanumeric())
-            {
-                symbols.insert(symbol.to_string());
-            }
-        }
-    }
-
-    symbols
-}
-
-fn contains_word_call(haystack: &str, needle: &str) -> bool {
-    let pattern = format!(r"\b{}\s*\(", regex::escape(needle));
-    regex::Regex::new(&pattern)
-        .ok()
-        .is_some_and(|re| re.is_match(haystack))
+        || product_symbols.iter().any(|symbol| {
+            let pattern = format!(r"\b{}\s*\(", regex::escape(symbol));
+            regex::Regex::new(&pattern)
+                .ok()
+                .is_some_and(|re| re.is_match(body))
+        })
 }
 
 fn only_std_fixture_behavior(body: &str) -> bool {
