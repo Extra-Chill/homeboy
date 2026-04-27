@@ -51,19 +51,15 @@ pub enum Severity {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum FindingConfidence {
     /// Derived from parser output, compiler output, or explicit file-system facts.
     Structural,
     /// Derived from whole-codebase reference or ownership graph analysis.
     Graph,
     /// Derived from naming, shape, similarity, or convention heuristics.
+    #[default]
     Heuristic,
-}
-
-impl Default for FindingConfidence {
-    fn default() -> Self {
-        Self::Heuristic
-    }
 }
 
 impl FindingConfidence {

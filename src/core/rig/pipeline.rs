@@ -215,7 +215,8 @@ fn order_pipeline_steps(
         let cycle_members = steps
             .iter()
             .enumerate()
-            .filter_map(|(idx, step)| (indegree[idx] > 0).then(|| step_node_label(step, idx)))
+            .filter(|&(idx, _step)| indegree[idx] > 0)
+            .map(|(idx, step)| step_node_label(step, idx))
             .collect::<Vec<_>>()
             .join(", ");
         return Err(Error::rig_pipeline_failed(

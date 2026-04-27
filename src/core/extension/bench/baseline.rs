@@ -83,7 +83,7 @@ impl BenchScenarioSnapshot {
     }
 
     fn metric_value(&self, name: &str) -> Option<f64> {
-        self.metrics.get(name).copied().or_else(|| match name {
+        self.metrics.get(name).copied().or(match name {
             "p95_ms" => self.p95_ms,
             "p50_ms" => self.p50_ms,
             "mean_ms" => self.mean_ms,
