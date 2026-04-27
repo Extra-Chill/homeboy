@@ -2,14 +2,14 @@
 
 # Shared component detection for WordPress extension scripts.
 #
-# Detects whether a component is a plugin or theme and extracts
+# Detects whether a component is WordPress core-dev, a plugin, or a theme and extracts
 # metadata from the header (Plugin Name, Text Domain, Version, etc.)
 #
 # Usage: source this file, then call:
 #   homeboy_detect_component <path>
 #
 # After calling, these variables are set:
-#   HOMEBOY_COMPONENT_TYPE             — "plugin" or "theme" or ""
+#   HOMEBOY_COMPONENT_TYPE             — "core-dev" or "plugin" or "theme" or ""
 #   HOMEBOY_COMPONENT_MAIN_FILE        — path to the main plugin/theme file
 #   HOMEBOY_COMPONENT_NAME             — Plugin Name / Theme Name value
 #   HOMEBOY_COMPONENT_TEXT_DOMAIN      — Text Domain value (may be empty)
@@ -27,6 +27,17 @@ homeboy_detect_component() {
     HOMEBOY_COMPONENT_VERSION=""
     HOMEBOY_COMPONENT_REQUIRES_PHP=""
     HOMEBOY_COMPONENT_REQUIRES_PLUGINS=""
+
+    # wordpress-develop is the WordPress source tree itself. It should use
+    # core's native test/lint/build tooling, not the plugin/theme Playground path.
+    if [ -f "${component_path}/wp-config-sample.php" ] \
+        && [ -f "${component_path}/src/wp-includes/version.php" ] \
+        && [ -d "${component_path}/tests/phpunit" ]; then
+        HOMEBOY_COMPONENT_TYPE="core-dev"
+        HOMEBOY_COMPONENT_MAIN_FILE="${component_path}/src/wp-includes/version.php"
+        HOMEBOY_COMPONENT_NAME="WordPress Core Development"
+        return 0
+    fi
 
     # Check for theme first (style.css with "Theme Name:")
     if [ -f "${component_path}/style.css" ]; then

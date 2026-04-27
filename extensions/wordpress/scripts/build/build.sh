@@ -51,7 +51,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 # Extension path from Homeboy environment (required)
-EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
+EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 # Output functions
 print_status() {
@@ -68,6 +68,30 @@ print_error() {
 
 print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+is_core_dev_project() {
+    [ "${HOMEBOY_COMPONENT_SHAPE:-}" = "core-dev" ] && return 0
+    [ -f "wp-config-sample.php" ] && [ -f "src/wp-includes/version.php" ] && [ -d "tests/phpunit" ]
+}
+
+build_core_dev_project() {
+    print_status "WordPress core-dev build"
+
+    if [ "${HOMEBOY_CORE_DEV_DRY_RUN:-}" = "1" ]; then
+        print_status "core-dev build runner selected: $(pwd)"
+        return 0
+    fi
+
+    if [ ! -d node_modules ]; then
+        command -v npm >/dev/null 2>&1 || { print_error "npm is required to build wordpress-develop"; exit 1; }
+        print_status "Installing npm dependencies..."
+        npm install
+    fi
+
+    print_status "Running WordPress core build..."
+    npm run build
+    print_success "WordPress core build completed"
 }
 
 # Check for required tools
@@ -664,6 +688,11 @@ main() {
     echo ""
 
     FRONTEND_BUILD_FAILED=0
+
+    if is_core_dev_project; then
+        build_core_dev_project
+        return 0
+    fi
 
     check_dependencies
     detect_project

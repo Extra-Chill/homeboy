@@ -72,6 +72,20 @@ RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context
 
+COMPONENT_SHAPE="${HOMEBOY_COMPONENT_SHAPE:-}"
+if [ -z "$COMPONENT_SHAPE" ]; then
+    DETECT_COMPONENT_HELPER="${HOMEBOY_RUNTIME_DETECT_COMPONENT:-${SCRIPT_DIR}/../lib/detect-component.sh}"
+    # shellcheck source=../lib/detect-component.sh
+    source "${DETECT_COMPONENT_HELPER}"
+    if homeboy_detect_component "$PLUGIN_PATH"; then
+        COMPONENT_SHAPE="$HOMEBOY_COMPONENT_TYPE"
+    fi
+fi
+
+if [ "$COMPONENT_SHAPE" = "core-dev" ]; then
+    exec bash "${SCRIPT_DIR}/lint-runner-core-dev.sh" "$@"
+fi
+
 homeboy_mktemp() {
     local template="$1"
     local tmpdir="${HOMEBOY_CACHE_DIR:-${TMPDIR:-/tmp}}"

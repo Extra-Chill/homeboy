@@ -3,11 +3,8 @@ set -euo pipefail
 
 # Test runner router for WordPress Homeboy extension.
 #
-# All test execution runs inside WordPress Playground (PHP-WASM + embedded SQLite).
-# The legacy host-PHP backend (wp-phpunit, FakeMySQL, SQLite_DB, MySQL/SQLite
-# auto-detection) was retired in Phase 3 of the Playground migration (#214).
-#
-# This script resolves execution context and dispatches to the Playground runner.
+# Plugin/theme tests run inside WordPress Playground. Core-dev checkouts
+# (wordpress-develop) dispatch to WordPress core's native PHPUnit runner.
 
 # Bash 4.0+ required — lint-runner.sh (called during test runs) uses
 # associative arrays which are bash 4+ only. Fail early with a clear
@@ -54,5 +51,21 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Component path: ${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
 fi
 
-# Dispatch to Playground runner — single code path.
-exec bash "${SCRIPT_DIR}/test-runner-playground.sh" "$@"
+COMPONENT_SHAPE="${HOMEBOY_COMPONENT_SHAPE:-}"
+if [ -z "$COMPONENT_SHAPE" ]; then
+    DETECT_COMPONENT_HELPER="${HOMEBOY_RUNTIME_DETECT_COMPONENT:-${SCRIPT_DIR}/../lib/detect-component.sh}"
+    # shellcheck source=../lib/detect-component.sh
+    source "${DETECT_COMPONENT_HELPER}"
+    if homeboy_detect_component "${HOMEBOY_COMPONENT_PATH:-$(pwd)}"; then
+        COMPONENT_SHAPE="$HOMEBOY_COMPONENT_TYPE"
+    fi
+fi
+
+case "$COMPONENT_SHAPE" in
+    core-dev)
+        exec bash "${SCRIPT_DIR}/test-runner-core-dev.sh" "$@"
+        ;;
+    *)
+        exec bash "${SCRIPT_DIR}/test-runner-playground.sh" "$@"
+        ;;
+esac
