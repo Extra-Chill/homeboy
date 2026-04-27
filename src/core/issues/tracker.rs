@@ -102,7 +102,7 @@ impl Tracker for GithubTracker {
         let issues = out
             .items
             .into_iter()
-            .filter_map(|item| github_to_tracked(item))
+            .filter_map(github_to_tracked)
             .collect();
         Ok(issues)
     }

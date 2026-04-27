@@ -724,15 +724,11 @@ pub fn extract(content: &str, grammar: &Grammar) -> Vec<Symbol> {
 
             // Skip based on context constraint
             match pattern.context.as_str() {
-                "top_level" => {
-                    if ctx_line.depth != 0 {
-                        continue;
-                    }
+                "top_level" if ctx_line.depth != 0 => {
+                    continue;
                 }
-                "in_block" => {
-                    if ctx_line.depth == 0 {
-                        continue;
-                    }
+                "in_block" if ctx_line.depth == 0 => {
+                    continue;
                 }
                 _ => {} // "any" or "line" — no constraint
             }
