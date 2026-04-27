@@ -222,7 +222,8 @@ pub(super) fn calculate_component_status(
         }
     };
 
-    if matches!(version_status, ComponentStatus::UpToDate) && component_is_behind_upstream(component)
+    if matches!(version_status, ComponentStatus::UpToDate)
+        && component_is_behind_upstream(component)
     {
         ComponentStatus::BehindUpstream
     } else {
