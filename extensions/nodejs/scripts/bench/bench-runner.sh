@@ -24,29 +24,21 @@ if ((BASH_VERSINFO[0] < 4)); then
     exit 1
 fi
 
-FAILED_STEP=""
-FAILURE_OUTPUT=""
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/resolve-context.sh
 source "${SCRIPT_DIR}/../lib/resolve-context.sh"
 homeboy_resolve_context
 homeboy_require_package_json
 
-print_failure_summary() {
-    if [ -n "$FAILED_STEP" ]; then
-        echo ""
-        echo "============================================"
-        echo "BENCH FAILED: $FAILED_STEP"
-        echo "============================================"
-        if [ -n "$FAILURE_OUTPUT" ]; then
-            echo ""
-            echo "Error details:"
-            echo "$FAILURE_OUTPUT"
-        fi
-    fi
-}
-trap print_failure_summary EXIT
+FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+# shellcheck source=/dev/null
+if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
+    source "$FAILURE_TRAP_HELPER"
+    homeboy_init_failure_trap
+else
+    FAILED_STEP=""
+    FAILURE_OUTPUT=""
+fi
 
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
 RESULTS_FILE="${HOMEBOY_BENCH_RESULTS_FILE:-${PROJECT_PATH}/.node-bench-results.json}"

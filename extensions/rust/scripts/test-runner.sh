@@ -16,32 +16,20 @@ set -euo pipefail
 #
 # Passthrough args after -- are forwarded to cargo test.
 
-FAILED_STEP=""
-FAILURE_OUTPUT=""
-FAILURE_REPLAY_MODE="full"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/lib/runner-steps.sh}"
+FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 # shellcheck source=./lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
-
-print_failure_summary() {
-    if [ -n "$FAILED_STEP" ]; then
-        echo ""
-        echo "============================================"
-        echo "BUILD FAILED: $FAILED_STEP"
-        echo "============================================"
-        if [ "$FAILURE_REPLAY_MODE" = "none" ]; then
-            echo ""
-            echo "See test output above (not replayed)."
-        elif [ -n "$FAILURE_OUTPUT" ]; then
-            echo ""
-            echo "Error details:"
-            echo "$FAILURE_OUTPUT"
-        fi
-    fi
-}
-trap print_failure_summary EXIT
+# shellcheck source=/dev/null
+if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
+    source "$FAILURE_TRAP_HELPER"
+    homeboy_init_failure_trap
+else
+    FAILED_STEP=""
+    FAILURE_OUTPUT=""
+    FAILURE_REPLAY_MODE="full"
+fi
 
 # Determine project path
 if [ -n "${HOMEBOY_COMPONENT_PATH:-}" ]; then
@@ -295,7 +283,7 @@ fi
 # Detect zero-test runs — only warn if NO test result line shows passed tests.
 # Cargo runs multiple test binaries (unit, integration, doc-tests); some may
 # legitimately have 0 tests while others have hundreds.
-TOTAL_PASSED=$(echo "$TEST_OUTPUT" | grep -oP '\d+ passed' | awk '{s+=$1} END {print s+0}')
+TOTAL_PASSED=$( { echo "$TEST_OUTPUT" | grep -Eo '[0-9]+ passed' || true; } | awk '{s+=$1} END {print s+0}' )
 if [ "$TOTAL_PASSED" -eq 0 ]; then
     TEST_FILE_COUNT=$(find "$PROJECT_PATH" -name "*test*" -name "*.rs" -not -path "*/target/*" 2>/dev/null | wc -l | tr -d ' ')
     if [ "$TEST_FILE_COUNT" -gt 0 ]; then

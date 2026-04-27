@@ -32,11 +32,9 @@ set -euo pipefail
 # 4. Reads the host-visible .pg-bench-results.json (written through the
 #    mount) and copies it to $HOMEBOY_BENCH_RESULTS_FILE for homeboy core.
 
-FAILED_STEP=""
-FAILURE_OUTPUT=""
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 # shellcheck source=../lib/php-preflight.sh
@@ -47,21 +45,14 @@ fi
 if [ -f "$DEPENDENCY_HELPER" ]; then
     source "$DEPENDENCY_HELPER"
 fi
-
-print_failure_summary() {
-    if [ -n "$FAILED_STEP" ]; then
-        echo ""
-        echo "============================================"
-        echo "BENCH FAILED: $FAILED_STEP"
-        echo "============================================"
-        if [ -n "$FAILURE_OUTPUT" ]; then
-            echo ""
-            echo "Error details:"
-            echo "$FAILURE_OUTPUT"
-        fi
-    fi
-}
-trap print_failure_summary EXIT
+# shellcheck source=/dev/null
+if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
+    source "$FAILURE_TRAP_HELPER"
+    homeboy_init_failure_trap
+else
+    FAILED_STEP=""
+    FAILURE_OUTPUT=""
+fi
 
 # Component resolution — same priority order as test-runner-playground.sh
 # so bench gets the same component-discovery semantics for free.

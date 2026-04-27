@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Parse PHPUnit output and write test results JSON to HOMEBOY_TEST_RESULTS_FILE.
+# Parse PHPUnit output and ask Homeboy's runtime helper to write test results.
 #
 # PHPUnit output patterns:
 #   OK (481 tests, 1234 assertions)
@@ -12,7 +12,7 @@
 #
 # Usage: parse-test-results.sh <phpunit-output-file>
 #
-# Writes JSON to HOMEBOY_TEST_RESULTS_FILE if set. Always prints summary to stderr.
+# Writes JSON to HOMEBOY_TEST_RESULTS_FILE when the runtime helper is provided.
 
 set -euo pipefail
 
@@ -22,6 +22,12 @@ if [ -z "$OUTPUT_FILE" ] || [ ! -f "$OUTPUT_FILE" ]; then
 fi
 
 OUTPUT=$(cat "$OUTPUT_FILE")
+
+WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
+if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; then
+    # shellcheck source=/dev/null
+    source "$WRITE_TEST_RESULTS_HELPER"
+fi
 
 TOTAL=0
 PASSED=0
@@ -88,33 +94,7 @@ else
     exit 0
 fi
 
-# Write JSON to file if requested
-if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ]; then
-    if [ -n "${PARTIAL:-}" ]; then
-        cat > "$HOMEBOY_TEST_RESULTS_FILE" << JSONEOF
-{
-  "total": ${TOTAL},
-  "passed": ${PASSED},
-  "failed": ${FAILED},
-  "skipped": ${SKIPPED},
-  "partial": "${PARTIAL}"
-}
-JSONEOF
-    else
-        cat > "$HOMEBOY_TEST_RESULTS_FILE" << JSONEOF
-{
-  "total": ${TOTAL},
-  "passed": ${PASSED},
-  "failed": ${FAILED},
-  "skipped": ${SKIPPED}
-}
-JSONEOF
-    fi
-fi
-
-# Print summary to stderr for visibility
-if [ -n "${PARTIAL:-}" ]; then
-    echo "[test-results] Total: ${TOTAL}, Passed: ${PASSED}, Failed: ${FAILED}, Skipped: ${SKIPPED} (${PARTIAL}: PHPUnit crashed before printing summary)" >&2
-else
-    echo "[test-results] Total: ${TOTAL}, Passed: ${PASSED}, Failed: ${FAILED}, Skipped: ${SKIPPED}" >&2
+# Write JSON to file if requested by core.
+if type homeboy_write_test_results >/dev/null 2>&1; then
+    homeboy_write_test_results "$TOTAL" "$PASSED" "$FAILED" "$SKIPPED" "$PARTIAL"
 fi

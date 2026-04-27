@@ -27,9 +27,6 @@ if ((BASH_VERSINFO[0] < 4)); then
     exit 1
 fi
 
-FAILED_STEP=""
-FAILURE_OUTPUT=""
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/resolve-context.sh
 source "${SCRIPT_DIR}/../lib/resolve-context.sh"
@@ -37,20 +34,15 @@ homeboy_resolve_context
 homeboy_require_package_json
 homeboy_detect_package_manager
 
-print_failure_summary() {
-    if [ -n "$FAILED_STEP" ]; then
-        echo ""
-        echo "============================================"
-        echo "BUILD FAILED: $FAILED_STEP"
-        echo "============================================"
-        if [ -n "$FAILURE_OUTPUT" ]; then
-            echo ""
-            echo "Error details:"
-            echo "$FAILURE_OUTPUT"
-        fi
-    fi
-}
-trap print_failure_summary EXIT
+FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+# shellcheck source=/dev/null
+if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
+    source "$FAILURE_TRAP_HELPER"
+    homeboy_init_failure_trap
+else
+    FAILED_STEP=""
+    FAILURE_OUTPUT=""
+fi
 
 # Resolve the build command.
 BUILD_CMD=""

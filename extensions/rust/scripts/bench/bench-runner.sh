@@ -53,25 +53,16 @@ if ((BASH_VERSINFO[0] < 4)); then
     exit 1
 fi
 
-FAILED_STEP=""
-FAILURE_OUTPUT=""
-
-print_failure_summary() {
-    if [ -n "$FAILED_STEP" ]; then
-        echo "" >&2
-        echo "============================================" >&2
-        echo "BENCH FAILED: $FAILED_STEP" >&2
-        echo "============================================" >&2
-        if [ -n "$FAILURE_OUTPUT" ]; then
-            echo "" >&2
-            echo "Error details:" >&2
-            echo "$FAILURE_OUTPUT" >&2
-        fi
-    fi
-}
-trap print_failure_summary EXIT
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+# shellcheck source=/dev/null
+if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
+    source "$FAILURE_TRAP_HELPER"
+    homeboy_init_failure_trap
+else
+    FAILED_STEP=""
+    FAILURE_OUTPUT=""
+fi
 
 # Resolve context (matches test-runner.sh shape).
 if [ -n "${HOMEBOY_COMPONENT_PATH:-}" ]; then
@@ -243,7 +234,13 @@ else
 fi
 
 SCENARIOS_JSON_TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$SCENARIOS_JSON_TMPDIR"; print_failure_summary' EXIT
+cleanup_scenarios() {
+    rm -rf "$SCENARIOS_JSON_TMPDIR"
+    if type homeboy_print_failure_summary >/dev/null 2>&1; then
+        homeboy_print_failure_summary
+    fi
+}
+trap cleanup_scenarios EXIT
 
 OVERALL_OK=1
 SCENARIOS_PATHS=()

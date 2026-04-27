@@ -20,28 +20,19 @@ set -euo pipefail
 #   HOMEBOY_SKIP            — comma-separated steps to skip
 #   HOMEBOY_DEBUG           — if "1", show debug output
 
-FAILED_STEP=""
-FAILURE_OUTPUT=""
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/lib/runner-steps.sh}"
+FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 # shellcheck source=./lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
-
-print_failure_summary() {
-    if [ -n "$FAILED_STEP" ]; then
-        echo ""
-        echo "============================================"
-        echo "BUILD FAILED: $FAILED_STEP"
-        echo "============================================"
-        if [ -n "$FAILURE_OUTPUT" ]; then
-            echo ""
-            echo "Error details:"
-            echo "$FAILURE_OUTPUT"
-        fi
-    fi
-}
-trap print_failure_summary EXIT
+# shellcheck source=/dev/null
+if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
+    source "$FAILURE_TRAP_HELPER"
+    homeboy_init_failure_trap
+else
+    FAILED_STEP=""
+    FAILURE_OUTPUT=""
+fi
 
 # Determine project path
 if [ -n "${HOMEBOY_COMPONENT_PATH:-}" ]; then

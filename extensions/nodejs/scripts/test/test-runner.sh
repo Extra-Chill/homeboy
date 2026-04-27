@@ -29,9 +29,6 @@ if ((BASH_VERSINFO[0] < 4)); then
     exit 1
 fi
 
-FAILED_STEP=""
-FAILURE_OUTPUT=""
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/resolve-context.sh
 source "${SCRIPT_DIR}/../lib/resolve-context.sh"
@@ -39,47 +36,21 @@ homeboy_resolve_context
 homeboy_require_package_json
 homeboy_detect_package_manager
 
-# Source the homeboy runtime helper if available — provides the canonical
-# homeboy_write_test_results function. Path provided by core via
-# HOMEBOY_RUNTIME_WRITE_TEST_RESULTS; fall back to inline writer if not set
-# (direct invocation outside homeboy).
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
 if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; then
     # shellcheck source=/dev/null
     source "$WRITE_TEST_RESULTS_HELPER"
-else
-    # Inline fallback that matches the canonical writer's contract.
-    homeboy_write_test_results() {
-        local total="${1:-0}" passed="${2:-0}" failed="${3:-0}" skipped="${4:-0}" partial="${5:-}"
-        if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ]; then
-            if [ -n "$partial" ]; then
-                cat > "$HOMEBOY_TEST_RESULTS_FILE" <<JSONEOF
-{"total":${total},"passed":${passed},"failed":${failed},"skipped":${skipped},"partial":"${partial}"}
-JSONEOF
-            else
-                cat > "$HOMEBOY_TEST_RESULTS_FILE" <<JSONEOF
-{"total":${total},"passed":${passed},"failed":${failed},"skipped":${skipped}}
-JSONEOF
-            fi
-        fi
-        echo "[test-results] Total: ${total}, Passed: ${passed}, Failed: ${failed}, Skipped: ${skipped}${partial:+ ($partial)}" >&2
-    }
 fi
 
-print_failure_summary() {
-    if [ -n "$FAILED_STEP" ]; then
-        echo ""
-        echo "============================================"
-        echo "TEST FAILED: $FAILED_STEP"
-        echo "============================================"
-        if [ -n "$FAILURE_OUTPUT" ]; then
-            echo ""
-            echo "Error details:"
-            echo "$FAILURE_OUTPUT"
-        fi
-    fi
-}
-trap print_failure_summary EXIT
+FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+# shellcheck source=/dev/null
+if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
+    source "$FAILURE_TRAP_HELPER"
+    homeboy_init_failure_trap
+else
+    FAILED_STEP=""
+    FAILURE_OUTPUT=""
+fi
 
 # Resolve the test command.
 if [ -n "${HOMEBOY_NODE_TEST_COMMAND:-}" ]; then
@@ -183,7 +154,9 @@ if [ $PARSED -eq 0 ]; then
     PARTIAL_LABEL="unknown-runner"
 fi
 
-homeboy_write_test_results "$TOTAL" "$PASSED" "$FAILED" "$SKIPPED" "$PARTIAL_LABEL"
+if type homeboy_write_test_results >/dev/null 2>&1; then
+    homeboy_write_test_results "$TOTAL" "$PASSED" "$FAILED" "$SKIPPED" "$PARTIAL_LABEL"
+fi
 
 if [ $TEST_EXIT -ne 0 ]; then
     FAILED_STEP="Tests failed (exit $TEST_EXIT)"

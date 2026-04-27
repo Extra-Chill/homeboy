@@ -38,13 +38,10 @@ set -euo pipefail
 # The host bootstrap (tests/bootstrap.php) is NOT used by this backend.
 # install.php is included in-process which avoids the system() subprocess.
 
-FAILED_STEP=""
-FAILURE_OUTPUT=""
-FAILURE_REPLAY_MODE="full"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
+FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 # shellcheck source=../lib/runner-steps.sh
@@ -59,24 +56,15 @@ fi
 if [ -f "$PHP_PREFLIGHT_HELPER" ]; then
     source "$PHP_PREFLIGHT_HELPER"
 fi
-
-print_failure_summary() {
-    if [ -n "$FAILED_STEP" ]; then
-        echo ""
-        echo "============================================"
-        echo "BUILD FAILED: $FAILED_STEP"
-        echo "============================================"
-        if [ "$FAILURE_REPLAY_MODE" = "none" ]; then
-            echo ""
-            echo "See PHPUnit output above (not replayed)."
-        elif [ -n "$FAILURE_OUTPUT" ]; then
-            echo ""
-            echo "Error details:"
-            echo "$FAILURE_OUTPUT"
-        fi
-    fi
-}
-trap print_failure_summary EXIT
+# shellcheck source=/dev/null
+if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
+    source "$FAILURE_TRAP_HELPER"
+    homeboy_init_failure_trap
+else
+    FAILED_STEP=""
+    FAILURE_OUTPUT=""
+    FAILURE_REPLAY_MODE="full"
+fi
 
 SETTINGS_JSON="${HOMEBOY_SETTINGS_JSON:-}"
 
