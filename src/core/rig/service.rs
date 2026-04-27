@@ -53,6 +53,11 @@ pub fn status(rig_id: &str, service_id: &str) -> Result<ServiceStatus> {
     platform::status(rig_id, service_id)
 }
 
+/// Log file path for a supervised service.
+pub fn log_path(rig_id: &str, service_id: &str) -> Result<std::path::PathBuf> {
+    platform::log_file_path(rig_id, service_id)
+}
+
 /// Find the newest process whose command line contains `pattern`.
 ///
 /// Used by `external` services (`stop` discovery) and the `newer_than`
@@ -223,23 +228,20 @@ mod platform {
             return Ok(());
         }
 
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        }
+        let managed_process_group = spec.kind != ServiceKind::External;
+        signal(pid, managed_process_group, libc::SIGTERM);
 
         // Grace period up to 5s.
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if !pid_alive(pid) {
+            if !target_alive(pid, managed_process_group) {
                 break;
             }
             thread::sleep(Duration::from_millis(100));
         }
 
-        if pid_alive(pid) {
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
+        if target_alive(pid, managed_process_group) {
+            signal(pid, managed_process_group, libc::SIGKILL);
             thread::sleep(Duration::from_millis(200));
         }
 
@@ -318,6 +320,10 @@ mod platform {
         }
     }
 
+    pub(super) fn log_file_path(rig_id: &str, service_id: &str) -> Result<PathBuf> {
+        Ok(paths::rig_logs_dir(rig_id)?.join(format!("{}.log", service_id)))
+    }
+
     fn log_file_for(rig_id: &str, service_id: &str) -> Result<PathBuf> {
         let dir = paths::rig_logs_dir(rig_id)?;
         std::fs::create_dir_all(&dir).map_err(|e| {
@@ -327,7 +333,7 @@ mod platform {
                 e
             ))
         })?;
-        Ok(dir.join(format!("{}.log", service_id)))
+        log_file_path(rig_id, service_id)
     }
 
     fn open_log(path: &PathBuf) -> Result<File> {
@@ -347,6 +353,32 @@ mod platform {
             return false;
         }
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    fn process_group_alive(pgid: u32) -> bool {
+        if pgid == 0 {
+            return false;
+        }
+        unsafe { libc::kill(-(pgid as libc::pid_t), 0) == 0 }
+    }
+
+    fn target_alive(pid: u32, process_group: bool) -> bool {
+        if process_group {
+            process_group_alive(pid)
+        } else {
+            pid_alive(pid)
+        }
+    }
+
+    fn signal(pid: u32, process_group: bool, sig: libc::c_int) {
+        let target = if process_group {
+            -(pid as libc::pid_t)
+        } else {
+            pid as libc::pid_t
+        };
+        unsafe {
+            libc::kill(target, sig);
+        }
     }
 
     /// Find processes whose argv contains `pattern`, return the newest by
@@ -471,6 +503,10 @@ mod platform {
     }
 
     pub fn status(rig_id: &str, service_id: &str) -> Result<ServiceStatus> {
+        Err(Error::rig_service_failed(rig_id, service_id, UNSUPPORTED))
+    }
+
+    pub fn log_file_path(rig_id: &str, service_id: &str) -> Result<std::path::PathBuf> {
         Err(Error::rig_service_failed(rig_id, service_id, UNSUPPORTED))
     }
 

@@ -23,7 +23,9 @@ use crate::rig::runner::{
     run_check, run_down, run_status, run_up, snapshot_state, CheckReport, RigStatusReport,
     ServiceStatusReport, UpReport,
 };
-use crate::rig::spec::{ComponentSpec, PipelineStep, RigSpec, SharedPathOp, SharedPathSpec};
+use crate::rig::spec::{
+    ComponentSpec, PipelineStep, RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec,
+};
 
 fn empty_pipeline(name: &str) -> PipelineOutcome {
     PipelineOutcome {
@@ -121,8 +123,11 @@ fn test_status_report_empty_services_serializes() {
 fn test_service_status_report_omits_optional_fields_when_stopped() {
     let report = ServiceStatusReport {
         id: "svc".to_string(),
+        kind: "command".to_string(),
         status: "stopped".to_string(),
         pid: None,
+        port: None,
+        log_path: "/tmp/svc.log".to_string(),
         started_at: None,
     };
     let json = serde_json::to_string(&report).expect("serialize");
@@ -134,12 +139,18 @@ fn test_service_status_report_omits_optional_fields_when_stopped() {
 fn test_service_status_report_emits_pid_when_running() {
     let report = ServiceStatusReport {
         id: "svc".to_string(),
+        kind: "http-static".to_string(),
         status: "running".to_string(),
         pid: Some(4321),
+        port: Some(9724),
+        log_path: "/tmp/svc.log".to_string(),
         started_at: Some("2026-04-24T13:00:00Z".to_string()),
     };
     let json = serde_json::to_string(&report).expect("serialize");
     assert!(json.contains("\"pid\":4321"));
+    assert!(json.contains("\"kind\":\"http-static\""));
+    assert!(json.contains("\"port\":9724"));
+    assert!(json.contains("\"log_path\":\"/tmp/svc.log\""));
     assert!(json.contains("\"started_at\":\"2026-04-24T13:00:00Z\""));
 }
 
@@ -250,6 +261,46 @@ fn test_run_status() {
         );
         assert!(status.last_check.is_none());
         assert!(status.last_check_result.is_none());
+
+        let mut services = HashMap::new();
+        services.insert(
+            "assets".to_string(),
+            ServiceSpec {
+                kind: ServiceKind::HttpStatic,
+                cwd: Some("/tmp".to_string()),
+                port: Some(9724),
+                command: None,
+                env: HashMap::new(),
+                health: None,
+                discover: None,
+            },
+        );
+        let rig = RigSpec {
+            id: "run-status-service-fixture".to_string(),
+            description: "service status".to_string(),
+            components: HashMap::new(),
+            services,
+            symlinks: Vec::new(),
+            shared_paths: Vec::new(),
+            pipeline: HashMap::new(),
+            bench: None,
+            bench_workloads: HashMap::new(),
+        };
+
+        let status = run_status(&rig).expect("run_status with service");
+        assert_eq!(status.services.len(), 1);
+        let service = &status.services[0];
+        assert_eq!(service.id, "assets");
+        assert_eq!(service.kind, "http-static");
+        assert_eq!(service.status, "stopped");
+        assert_eq!(service.port, Some(9724));
+        assert!(
+            service
+                .log_path
+                .ends_with("run-status-service-fixture.state/logs/assets.log"),
+            "unexpected log path: {}",
+            service.log_path
+        );
     });
 }
 

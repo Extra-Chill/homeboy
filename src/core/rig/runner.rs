@@ -11,7 +11,7 @@ use serde::Serialize;
 use super::expand::expand_vars;
 use super::pipeline::{cleanup_shared_paths, run_pipeline, PipelineOutcome};
 use super::service::{self, ServiceStatus};
-use super::spec::RigSpec;
+use super::spec::{RigSpec, ServiceKind};
 use super::state::{now_rfc3339, RigState};
 use crate::engine::command::run_in_optional;
 use crate::error::Result;
@@ -55,9 +55,13 @@ pub struct RigStatusReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceStatusReport {
     pub id: String,
+    pub kind: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    pub log_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
 }
@@ -129,7 +133,7 @@ pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
     let state = RigState::load(&rig.id)?;
     let mut services = Vec::with_capacity(rig.services.len());
 
-    for id in rig.services.keys() {
+    for (id, spec) in &rig.services {
         let live = service::status(&rig.id, id)?;
         let (status_str, pid) = match live {
             ServiceStatus::Running(pid) => ("running", Some(pid)),
@@ -137,10 +141,16 @@ pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
             ServiceStatus::Stale(pid) => ("stale", Some(pid)),
         };
         let started_at = state.services.get(id).and_then(|s| s.started_at.clone());
+        let log_path = service::log_path(&rig.id, id)?
+            .to_string_lossy()
+            .into_owned();
         services.push(ServiceStatusReport {
             id: id.clone(),
+            kind: service_kind_label(spec.kind).to_string(),
             status: status_str.to_string(),
             pid,
+            port: spec.port,
+            log_path,
             started_at,
         });
     }
@@ -154,6 +164,14 @@ pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
         last_check: state.last_check,
         last_check_result: state.last_check_result,
     })
+}
+
+fn service_kind_label(kind: ServiceKind) -> &'static str {
+    match kind {
+        ServiceKind::HttpStatic => "http-static",
+        ServiceKind::Command => "command",
+        ServiceKind::External => "external",
+    }
 }
 
 /// Captured component state for one entry in a rig's components map.
