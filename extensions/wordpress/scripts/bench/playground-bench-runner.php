@@ -34,7 +34,10 @@
  *
  * The runner times wall-clock around the callable, captures peak memory
  * after, and aggregates per-iteration measurements into p50/p95/p99/mean/
- * min/max for the BenchResults envelope.
+ * min/max for the BenchResults envelope. Workloads may also return
+ * `['metrics' => ['rows' => 10], 'metadata' => ['phase' => 'warm']]`;
+ * numeric custom metrics are aggregated with the same percentile machinery
+ * and the latest metadata payload is attached to the scenario.
  *
  * OUTPUT CONTRACT
  *
@@ -284,6 +287,57 @@ function pg_bench_percentile(array $sorted_ms, float $p): float {
     return $sorted_ms[$lo] * (1 - $frac) + $sorted_ms[$hi] * $frac;
 }
 
+/**
+ * Aggregate a numeric sample set into the flat BenchMetrics key shape.
+ *
+ * `$suffix` should include any unit (for example `_ms` for duration metrics)
+ * and may be empty for unitless workload-provided counters.
+ */
+function pg_bench_aggregate_metric(array $samples, string $prefix, string $suffix = ''): array {
+    sort($samples);
+    $count = count($samples);
+    $sum = array_sum($samples);
+    $mean = $count > 0 ? $sum / $count : 0.0;
+    $key_prefix = $prefix === '' ? '' : $prefix . '_';
+
+    return [
+        "{$key_prefix}mean{$suffix}" => $mean,
+        "{$key_prefix}p50{$suffix}" => pg_bench_percentile($samples, 0.50),
+        "{$key_prefix}p95{$suffix}" => pg_bench_percentile($samples, 0.95),
+        "{$key_prefix}p99{$suffix}" => pg_bench_percentile($samples, 0.99),
+        "{$key_prefix}min{$suffix}" => $count > 0 ? $samples[0] : 0.0,
+        "{$key_prefix}max{$suffix}" => $count > 0 ? $samples[$count - 1] : 0.0,
+    ];
+}
+
+/** Record custom metrics/metadata from a workload return payload. */
+function pg_bench_record_workload_result($result, array &$custom_metric_samples, &$latest_metadata): void {
+    if (!is_array($result)) {
+        return;
+    }
+
+    if (array_key_exists('metadata', $result)) {
+        $latest_metadata = $result['metadata'];
+    }
+
+    if (!isset($result['metrics']) || !is_array($result['metrics'])) {
+        return;
+    }
+
+    foreach ($result['metrics'] as $metric => $value) {
+        if (!is_string($metric) || $metric === '' || !is_numeric($value)) {
+            continue;
+        }
+
+        $sample = (float) $value;
+        if (!is_finite($sample)) {
+            continue;
+        }
+
+        $custom_metric_samples[$metric][] = $sample;
+    }
+}
+
 pg_stage_begin('run_workloads');
 $scenarios = [];
 $iterations_per_workload = (int) '{{ITERATIONS}}';
@@ -347,6 +401,9 @@ try {
         }
 
         $timings_ms = [];
+        $custom_metric_samples = [];
+        $latest_metadata = null;
+        $has_metadata = false;
         $peak_memory = 0;
 
         // Reset PHP's peak-memory counter so the workload's footprint is
@@ -362,35 +419,40 @@ try {
         for ($i = 0; $i < $total_iterations; $i++) {
             $is_warmup = $i < $warmup_iterations;
             $start_ns = hrtime(true);
-            $callable();
+            $workload_result = $callable();
             $elapsed_ns = hrtime(true) - $start_ns;
             if (!$is_warmup) {
                 $timings_ms[] = $elapsed_ns / 1_000_000;
+                if (is_array($workload_result) && array_key_exists('metadata', $workload_result)) {
+                    $has_metadata = true;
+                }
+                pg_bench_record_workload_result($workload_result, $custom_metric_samples, $latest_metadata);
             }
         }
 
         $peak_memory = memory_get_peak_usage(true);
 
-        sort($timings_ms);
-        $count = count($timings_ms);
-        $sum = array_sum($timings_ms);
-        $mean = $count > 0 ? $sum / $count : 0.0;
+        $metrics = pg_bench_aggregate_metric($timings_ms, '', '_ms');
 
-        $scenarios[] = [
+        ksort($custom_metric_samples);
+        foreach ($custom_metric_samples as $metric => $samples) {
+            $metrics += pg_bench_aggregate_metric($samples, $metric);
+        }
+
+        $scenario = [
             'id' => $scenario_id,
             'file' => $relative_file,
             'source' => $source,
             'iterations' => $iterations_per_workload,
-            'metrics' => [
-                'mean_ms' => $mean,
-                'p50_ms' => pg_bench_percentile($timings_ms, 0.50),
-                'p95_ms' => pg_bench_percentile($timings_ms, 0.95),
-                'p99_ms' => pg_bench_percentile($timings_ms, 0.99),
-                'min_ms' => $count > 0 ? $timings_ms[0] : 0.0,
-                'max_ms' => $count > 0 ? $timings_ms[$count - 1] : 0.0,
-            ],
+            'metrics' => $metrics,
             'memory' => ['peak_bytes' => $peak_memory],
         ];
+
+        if ($has_metadata) {
+            $scenario['metadata'] = $latest_metadata;
+        }
+
+        $scenarios[] = $scenario;
 
         pg_log(sprintf(
             "WORKLOAD_OK: %s p50=%.2fms p95=%.2fms p99=%.2fms",
