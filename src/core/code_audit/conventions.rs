@@ -351,9 +351,15 @@ pub fn discover_conventions(
         }
     }
 
+    let declared_traits: Vec<String> = fingerprints
+        .iter()
+        .filter_map(declared_trait_name)
+        .collect();
+
     let expected_interfaces: Vec<String> = interface_counts
         .iter()
         .filter(|(_, count)| **count >= threshold)
+        .filter(|(name, _)| !declared_traits.contains(name))
         .map(|(name, _)| name.clone())
         .collect();
 
@@ -412,10 +418,11 @@ pub fn discover_conventions(
                     .iter()
                     .all(|name| !suffix_matches(name, suffix))
         });
+        let utility_like = helper_like && is_utility_like_file(fp);
 
         let mut deviations = Vec::new();
 
-        if helper_like {
+        if helper_like && !utility_like {
             let suffix = naming_suffix.as_deref().unwrap_or("member");
             deviations.push(Deviation {
                 kind: AuditFinding::NamingMismatch,
@@ -569,6 +576,41 @@ pub fn discover_conventions(
         total_files: total,
         confidence,
     })
+}
+
+fn declared_trait_name(fp: &FileFingerprint) -> Option<String> {
+    let re = regex::Regex::new(r"(?m)^\s*trait\s+([A-Za-z_][A-Za-z0-9_]*)\b").ok()?;
+    re.captures(&fp.content)
+        .and_then(|cap| cap.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+fn is_utility_like_file(fp: &FileFingerprint) -> bool {
+    let suffixes = [
+        "Helper",
+        "Helpers",
+        "Constants",
+        "Categories",
+        "Sanitizer",
+        "Renderer",
+        "Validator",
+        "Verifier",
+        "Resolver",
+        "Factory",
+        "Builder",
+        "Result",
+        "Scheduling",
+    ];
+    let names_to_check: Vec<&str> = if !fp.type_names.is_empty() {
+        fp.type_names.iter().map(|s| s.as_str()).collect()
+    } else {
+        fp.type_name.as_deref().into_iter().collect()
+    };
+
+    declared_trait_name(fp).is_some()
+        || names_to_check
+            .iter()
+            .any(|name| suffixes.iter().any(|suffix| name.ends_with(suffix)))
 }
 
 // ============================================================================
@@ -854,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn helper_like_outlier_collapses_to_naming_mismatch() {
+    fn utility_like_outlier_is_not_promoted_to_naming_mismatch() {
         let fingerprints = vec![
             FileFingerprint {
                 relative_path: "abilities/CreateAbility.php".to_string(),
@@ -882,13 +924,92 @@ mod tests {
         let convention =
             discover_conventions("Abilities", "abilities/*.php", &fingerprints).unwrap();
 
+        assert!(
+            convention.outliers.is_empty(),
+            "recognized helper files are intentional utilities, got: {:?}",
+            convention.outliers
+        );
+    }
+
+    #[test]
+    fn non_utility_helper_like_outlier_still_reports_naming_mismatch() {
+        let fingerprints = vec![
+            FileFingerprint {
+                relative_path: "abilities/CreateAbility.php".to_string(),
+                language: Language::Php,
+                methods: vec!["execute".to_string(), "register".to_string()],
+                type_name: Some("CreateAbility".to_string()),
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "abilities/UpdateAbility.php".to_string(),
+                language: Language::Php,
+                methods: vec!["execute".to_string(), "register".to_string()],
+                type_name: Some("UpdateAbility".to_string()),
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "abilities/FlowThing.php".to_string(),
+                language: Language::Php,
+                methods: vec!["formatFlow".to_string()],
+                type_name: Some("FlowThing".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let convention =
+            discover_conventions("Abilities", "abilities/*.php", &fingerprints).unwrap();
+
         assert_eq!(convention.outliers.len(), 1);
-        assert!(convention.outliers[0].noisy);
-        assert_eq!(convention.outliers[0].deviations.len(), 1);
         assert!(matches!(
             convention.outliers[0].deviations[0].kind,
             AuditFinding::NamingMismatch
         ));
+    }
+
+    #[test]
+    fn declared_traits_do_not_become_missing_interfaces() {
+        let fingerprints = vec![
+            FileFingerprint {
+                relative_path: "chat/ListChatSessionsAbility.php".to_string(),
+                language: Language::Php,
+                methods: vec!["execute".to_string()],
+                type_name: Some("ListChatSessionsAbility".to_string()),
+                implements: vec!["ChatSessionHelpers".to_string()],
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "chat/DeleteChatSessionAbility.php".to_string(),
+                language: Language::Php,
+                methods: vec!["execute".to_string()],
+                type_name: Some("DeleteChatSessionAbility".to_string()),
+                implements: vec!["ChatSessionHelpers".to_string()],
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "chat/ChatSessionHelpers.php".to_string(),
+                language: Language::Php,
+                methods: vec!["verifySessionOwnership".to_string()],
+                type_name: Some("ChatSessionHelpers".to_string()),
+                content: "<?php\ntrait ChatSessionHelpers {}".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let convention = discover_conventions("Chat", "chat/*.php", &fingerprints).unwrap();
+        assert!(
+            convention.expected_interfaces.is_empty(),
+            "traits should not be treated as interfaces: {:?}",
+            convention.expected_interfaces
+        );
+        assert!(
+            convention
+                .outliers
+                .iter()
+                .flat_map(|o| &o.deviations)
+                .all(|d| d.kind != AuditFinding::MissingInterface),
+            "declared trait should not produce MissingInterface deviations"
+        );
     }
 
     #[test]

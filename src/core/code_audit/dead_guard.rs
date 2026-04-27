@@ -56,6 +56,9 @@ pub(super) fn run(fingerprints: &[&FileFingerprint], root: &Path) -> Vec<Finding
             continue;
         }
         for guard in extract_guards(&fp.content) {
+            if guard_is_contextual(fp, &guard) {
+                continue;
+            }
             if symbol_is_known(&known, &guard) {
                 findings.push(Finding {
                     convention: "dead_guard".to_string(),
@@ -88,6 +91,57 @@ fn symbol_is_known(known: &KnownSymbols, guard: &Guard) -> bool {
         GuardKind::Class => known.has_class(&guard.symbol),
         GuardKind::Constant => known.has_constant(&guard.symbol),
     }
+}
+
+fn guard_is_contextual(fp: &FileFingerprint, guard: &Guard) -> bool {
+    is_lifecycle_or_test_path(&fp.relative_path)
+        || guard_defines_stub(&fp.content, guard)
+        || guard_loads_symbol_provider(&fp.content, guard)
+}
+
+fn is_lifecycle_or_test_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.starts_with("tests/")
+        || normalized.contains("/tests/")
+        || normalized == "uninstall.php"
+        || normalized.ends_with("/uninstall.php")
+        || normalized == "activate.php"
+        || normalized.ends_with("/activate.php")
+        || normalized.starts_with("inc/migrations/")
+        || normalized.contains("/inc/migrations/")
+}
+
+fn guard_defines_stub(content: &str, guard: &Guard) -> bool {
+    if guard.kind != GuardKind::Function {
+        return false;
+    }
+    let pattern = format!(r"(?m)\bfunction\s+{}\s*\(", regex::escape(&guard.symbol));
+    Regex::new(&pattern)
+        .map(|re| re.is_match(content))
+        .unwrap_or(false)
+}
+
+fn guard_loads_symbol_provider(content: &str, guard: &Guard) -> bool {
+    if guard.kind != GuardKind::Class {
+        return false;
+    }
+    let symbol = guard.symbol.to_ascii_lowercase();
+    let content = content.to_ascii_lowercase();
+    content.contains("require")
+        && (content.contains(&symbol)
+            || content.contains(&symbol.replace('_', "-"))
+            || content.contains(&camel_to_kebab(&guard.symbol)))
+}
+
+fn camel_to_kebab(symbol: &str) -> String {
+    let mut out = String::new();
+    for (idx, ch) in symbol.chars().enumerate() {
+        if ch.is_ascii_uppercase() && idx > 0 {
+            out.push('-');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
 }
 
 /// Regex matching any of the three guard calls plus a quoted symbol argument.
@@ -283,6 +337,43 @@ if ( function_exists('as_schedule_single_action') ) {
 
         let findings = run(&[&fp], tmp.path());
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_stub_definition_guard_is_not_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin_main(tmp.path(), Some("6.0"), "");
+        let fp = make_fp(
+            "tests/queueable-trait-smoke.php",
+            r#"<?php
+if ( ! function_exists('wp_json_encode') ) {
+    function wp_json_encode( $value ) { return json_encode( $value ); }
+}
+"#,
+        );
+
+        let findings = run(&[&fp], tmp.path());
+        assert!(findings.is_empty(), "stub guards are test scaffolding");
+    }
+
+    #[test]
+    fn lifecycle_paths_are_not_production_dead_guards() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin_main(tmp.path(), Some("6.0"), "");
+        let fp = make_fp(
+            "uninstall.php",
+            r#"<?php
+if ( function_exists('as_unschedule_all_actions') ) {
+    as_unschedule_all_actions('demo');
+}
+"#,
+        );
+
+        let findings = run(&[&fp], tmp.path());
+        assert!(
+            findings.is_empty(),
+            "uninstall context is not normal runtime"
+        );
     }
 
     #[test]

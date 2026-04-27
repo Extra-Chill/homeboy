@@ -294,6 +294,10 @@ fn is_framework_entry_point(name: &str, fp: &FileFingerprint) -> bool {
 
     // PHP/WordPress-specific: hook callbacks, lifecycle methods
     if matches!(fp.language, super::conventions::Language::Php) {
+        if is_wp_cli_command_file(fp) {
+            return true;
+        }
+
         let php_entry_points = [
             "__construct",
             "__destruct",
@@ -322,6 +326,15 @@ fn is_framework_entry_point(name: &str, fp: &FileFingerprint) -> bool {
     }
 
     false
+}
+
+fn is_wp_cli_command_file(fp: &FileFingerprint) -> bool {
+    let extends = fp.extends.as_deref().unwrap_or("");
+    extends.ends_with("WP_CLI_Command")
+        || extends.ends_with("BaseCommand")
+        || fp.content.contains("@subcommand")
+        || fp.content.contains("## OPTIONS")
+        || fp.content.contains("## EXAMPLES")
 }
 
 // ============================================================================
@@ -837,6 +850,44 @@ mod tests {
             unreferenced.len(),
             1,
             "Rust public functions called only from their own file should still be flagged for visibility narrowing"
+        );
+    }
+
+    #[test]
+    fn wp_cli_command_methods_are_runtime_entry_points() {
+        let mut fp = make_fingerprint(
+            "inc/Cli/Commands/EmailCommand.php",
+            vec!["test_connection"],
+            vec!["test_connection"],
+            vec![],
+            vec![],
+        );
+        fp.language = Language::Php;
+        fp.extends = Some("BaseCommand".to_string());
+        fp.content = r#"<?php
+class EmailCommand extends BaseCommand {
+    /**
+     * Test the IMAP connection.
+     *
+     * ## EXAMPLES
+     *
+     *     wp datamachine email test-connection
+     *
+     * @subcommand test-connection
+     */
+    public function test_connection( array $args, array $assoc_args ): void {}
+}
+"#
+        .to_string();
+
+        let findings = analyze_dead_code(&[&fp], &[]);
+        let unreferenced: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::UnreferencedExport)
+            .collect();
+        assert!(
+            unreferenced.is_empty(),
+            "WP-CLI public subcommands are invoked by runtime dispatch"
         );
     }
 }

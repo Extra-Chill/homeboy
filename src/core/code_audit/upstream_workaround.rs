@@ -291,6 +291,21 @@ mod tests {
     }
 
     #[test]
+    fn test_bare_see_design_reference_does_not_trigger() {
+        let fp = make_fp(
+            "src/Api/WebhookAuthResolver.php",
+            Language::Php,
+            "<?php\n/**\n * Webhook auth config resolver.\n *\n * Produces a canonical verifier config for an HMAC flow.\n *\n * @see https://github.com/Extra-Chill/data-machine/issues/1179\n */\nclass WebhookAuthResolver {}\n",
+        );
+
+        let findings = run(&[&fp]);
+        assert!(
+            findings.is_empty(),
+            "bare @see references are design provenance, not workarounds"
+        );
+    }
+
+    #[test]
     fn test_hack_comment_with_trac_ticket() {
         let fp = make_fp(
             "vendor-src/HtmlConverter.php",
