@@ -1084,7 +1084,16 @@ mod tests {
 
     #[test]
     fn build_exec_env_includes_toolchain_path() {
-        let env = build_exec_env("nodejs", None, None, "{}", Some("/tmp/ext"), None, None, None);
+        let env = build_exec_env(
+            "nodejs",
+            None,
+            None,
+            "{}",
+            Some("/tmp/ext"),
+            None,
+            None,
+            None,
+        );
 
         let path = env
             .iter()

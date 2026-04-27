@@ -29,10 +29,10 @@ pub use manifest::{
     ActionConfig, ActionType, AuditCapability, AutofixVerifyConfig, BenchConfig, BuildConfig,
     CliConfig, DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride,
     DeployVerification, DiscoveryConfig, DocTarget, ExecutableCapability, ExtensionManifest,
-    FeatureContextRule, HttpMethod, InputConfig, LintConfig, OutputConfig, OutputSchema,
-    PlatformCapability, ProvidesConfig, RequirementsConfig, RuntimeConfig,
-    RuntimeRequirementsConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig,
-    TestConfig, TestMappingConfig, VersionPatternConfig,
+    FeatureContextRule, FileContainsCondition, HttpMethod, InputConfig, LintConfig, OutputConfig,
+    OutputSchema, PlatformCapability, ProvidesConfig, RemotePathInferenceRule, RequirementsConfig,
+    RuntimeConfig, RuntimeRequirementsConfig, ScriptsConfig, SelectOption, SettingConfig,
+    SinceTagConfig, TestConfig, TestMappingConfig, VersionPatternConfig,
 };
 
 // Re-export version types

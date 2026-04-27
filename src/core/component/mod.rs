@@ -1,5 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub mod audit;
 pub mod inventory;
@@ -368,17 +368,15 @@ impl Component {
         }
     }
 
-    /// Auto-resolve `remote_path` for WordPress components when not explicitly set.
+    /// Auto-resolve `remote_path` from linked extension deploy rules when not explicitly set.
     ///
-    /// If the component has the `wordpress` extension and `remote_path` is empty,
-    /// detect whether it's a plugin or theme from source files and return the
-    /// canonical WordPress path.
+    /// Extensions can declare generic file-content checks and target-path templates.
+    /// Core does not know framework-specific deploy paths; it only evaluates the
+    /// extension-provided contract.
     ///
-    /// Uses the **local directory name** (basename of `local_path`) as the remote
-    /// directory name — not the component ID. The component ID may differ from the
-    /// directory name (e.g., component `extrachill-theme` lives in directory
-    /// `extrachill/`), and WordPress expects the directory name to match the slug
-    /// from `style.css` or the main plugin file.
+    /// Extension templates can use the **local directory name** (basename of
+    /// `local_path`) separately from the component ID. This keeps deploy paths
+    /// correct when a component ID differs from the on-disk package directory.
     ///
     /// Returns `Some(path)` if auto-resolved, `None` if not applicable or not detectable.
     pub fn auto_resolve_remote_path(&self) -> Option<String> {
@@ -387,45 +385,58 @@ impl Component {
             return None;
         }
 
-        // Only applies to components with the wordpress extension.
-        let extensions = self.extensions.as_ref()?;
-        if !extensions.contains_key("wordpress") {
-            return None;
-        }
-
         let local = std::path::Path::new(&self.local_path);
 
         // Use the directory basename as the remote directory name.
-        // This matches WordPress convention: the theme/plugin slug is the directory name.
         let dir_name = local.file_name()?.to_str()?;
 
-        // Check for plugin: look for a .php file with "Plugin Name:" header.
-        // Try {dir_name}.php first (standard convention), then {id}.php as fallback.
-        let plugin_candidates = [
-            local.join(format!("{}.php", dir_name)),
-            local.join(format!("{}.php", self.id)),
-        ];
-        for plugin_file in &plugin_candidates {
-            if plugin_file.exists() {
-                if let Ok(content) = std::fs::read_to_string(plugin_file) {
-                    if content.contains("Plugin Name:") {
-                        return Some(format!("wp-content/plugins/{}", dir_name));
-                    }
+        let mut matches = HashSet::new();
+        for extension_id in self.extensions.as_ref()?.keys() {
+            let Ok(extension) = crate::extension::load_extension(extension_id) else {
+                continue;
+            };
+
+            for rule in extension.remote_path_inference_rules() {
+                if self.remote_path_inference_rule_matches(rule, local, dir_name) {
+                    matches.insert(render_remote_path_template(
+                        &rule.remote_path,
+                        &self.id,
+                        dir_name,
+                    ));
                 }
             }
         }
 
-        // Check for theme: style.css with "Theme Name:" header
-        let style_file = local.join("style.css");
-        if style_file.exists() {
-            if let Ok(content) = std::fs::read_to_string(&style_file) {
-                if content.contains("Theme Name:") {
-                    return Some(format!("wp-content/themes/{}", dir_name));
-                }
-            }
+        if matches.len() == 1 {
+            matches.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    fn remote_path_inference_rule_matches(
+        &self,
+        rule: &crate::extension::RemotePathInferenceRule,
+        local: &std::path::Path,
+        dir_name: &str,
+    ) -> bool {
+        let relative_file =
+            render_remote_path_template(&rule.when_file_contains.file, &self.id, dir_name);
+        let relative_path = std::path::Path::new(&relative_file);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return false;
         }
 
-        None
+        let file = local.join(relative_path);
+        let Ok(content) = std::fs::read_to_string(file) else {
+            return false;
+        };
+
+        content.contains(&rule.when_file_contains.text)
     }
 
     /// Check if this component's local_path points to a file (not a directory).
@@ -450,6 +461,13 @@ impl Component {
     }
 }
 
+fn render_remote_path_template(template: &str, component_id: &str, dir_name: &str) -> String {
+    template
+        .replace("{{component_id}}", component_id)
+        .replace("{{id}}", component_id)
+        .replace("{{dir_name}}", dir_name)
+}
+
 /// Normalize empty strings to None. Treats "", null, and field omission identically for consistent validation.
 fn deserialize_empty_as_none<'de, D>(
     deserializer: D,
@@ -472,6 +490,44 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_isolated_home<T>(f: impl FnOnce(&Path) -> T) -> T {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let home = tempfile::tempdir().expect("home tempdir");
+
+        std::env::set_var("HOME", home.path());
+        let result = f(home.path());
+
+        if let Some(value) = old_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        result
+    }
+
+    fn write_extension_fixture(home: &Path, id: &str, deploy_json: &str) {
+        let dir = home.join(".config/homeboy/extensions").join(id);
+        std::fs::create_dir_all(&dir).expect("extension dir");
+        std::fs::write(
+            dir.join(format!("{}.json", id)),
+            format!(
+                r#"{{
+  "name": "{} extension",
+  "version": "1.0.0",
+  "deploy": {}
+}}"#,
+                id, deploy_json
+            ),
+        )
+        .expect("extension manifest");
+    }
 
     #[test]
     fn validate_version_target_conflict_different_pattern_errors() {
@@ -594,88 +650,81 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn auto_resolve_remote_path_detects_wordpress_plugin() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Use a named subdirectory — auto_resolve uses the dir basename, not the component ID
-        let dir = tmp.path().join("my-plugin");
-        std::fs::create_dir_all(&dir).unwrap();
+    fn auto_resolve_remote_path_uses_extension_rule() {
+        with_isolated_home(|home| {
+            write_extension_fixture(
+                home,
+                "example",
+                r#"{
+    "remote_path_inference": [
+      {
+        "when_file_contains": { "file": "{{dir_name}}.txt", "text": "Deployable" },
+        "remote_path": "remote/{{dir_name}}"
+      }
+    ]
+  }"#,
+            );
 
-        // Create a WordPress plugin file matching the directory name
-        std::fs::write(
-            dir.join("my-plugin.php"),
-            "<?php\n/**\n * Plugin Name: My Plugin\n */\n",
-        )
-        .unwrap();
+            let dir = home.join("my-component");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("my-component.txt"), "Deployable component").unwrap();
 
-        let component = Component {
-            id: "my-plugin".to_string(),
-            local_path: dir.to_string_lossy().to_string(),
-            extensions: Some(HashMap::from([(
-                "wordpress".to_string(),
-                ScopedExtensionConfig::default(),
-            )])),
-            ..Component::default()
-        };
+            let component = Component {
+                id: "my-component".to_string(),
+                local_path: dir.to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([(
+                    "example".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Component::default()
+            };
 
-        assert_eq!(
-            component.auto_resolve_remote_path(),
-            Some("wp-content/plugins/my-plugin".to_string()),
-        );
+            assert_eq!(
+                component.auto_resolve_remote_path(),
+                Some("remote/my-component".to_string()),
+            );
+        });
     }
 
     #[test]
     fn auto_resolve_remote_path_uses_dirname_not_component_id() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Directory name differs from component ID — this is the bug scenario
-        let dir = tmp.path().join("extrachill");
-        std::fs::create_dir_all(&dir).unwrap();
+        with_isolated_home(|home| {
+            write_extension_fixture(
+                home,
+                "example",
+                r#"{
+    "remote_path_inference": [
+      {
+        "when_file_contains": { "file": "marker.txt", "text": "Deployable" },
+        "remote_path": "remote/{{dir_name}}"
+      }
+    ]
+  }"#,
+            );
 
-        std::fs::write(dir.join("style.css"), "/*\nTheme Name: Extra Chill\n*/\n").unwrap();
+            let dir = home.join("source-dir");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("marker.txt"), "Deployable component").unwrap();
 
-        let component = Component {
-            id: "extrachill-theme".to_string(), // ID differs from dir name
-            local_path: dir.to_string_lossy().to_string(),
-            extensions: Some(HashMap::from([(
-                "wordpress".to_string(),
-                ScopedExtensionConfig::default(),
-            )])),
-            ..Component::default()
-        };
+            let component = Component {
+                id: "component-id".to_string(),
+                local_path: dir.to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([(
+                    "example".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Component::default()
+            };
 
-        // Should use directory name "extrachill", NOT component ID "extrachill-theme"
-        assert_eq!(
-            component.auto_resolve_remote_path(),
-            Some("wp-content/themes/extrachill".to_string()),
-        );
+            assert_eq!(
+                component.auto_resolve_remote_path(),
+                Some("remote/source-dir".to_string()),
+            );
+        });
     }
 
     #[test]
-    fn auto_resolve_remote_path_detects_wordpress_theme() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let dir = tmp.path().join("my-theme");
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // Create a WordPress theme style.css
-        std::fs::write(dir.join("style.css"), "/*\nTheme Name: My Theme\n*/\n").unwrap();
-
-        let component = Component {
-            id: "my-theme".to_string(),
-            local_path: dir.to_string_lossy().to_string(),
-            extensions: Some(HashMap::from([(
-                "wordpress".to_string(),
-                ScopedExtensionConfig::default(),
-            )])),
-            ..Component::default()
-        };
-
-        assert_eq!(
-            component.auto_resolve_remote_path(),
-            Some("wp-content/themes/my-theme".to_string()),
-        );
-    }
-
-    #[test]
-    fn auto_resolve_remote_path_returns_none_without_wordpress_extension() {
+    fn auto_resolve_remote_path_returns_none_without_matching_extension_rule() {
         let component = Component {
             id: "my-crate".to_string(),
             local_path: "/tmp".to_string(),
@@ -690,30 +739,76 @@ mod tests {
     }
 
     #[test]
+    fn auto_resolve_remote_path_returns_none_on_conflicting_extension_rules() {
+        with_isolated_home(|home| {
+            let rule = |path: &str| {
+                format!(
+                    r#"{{
+    "remote_path_inference": [
+      {{
+        "when_file_contains": {{ "file": "marker.txt", "text": "Deployable" }},
+        "remote_path": "{}"
+      }}
+    ]
+  }}"#,
+                    path
+                )
+            };
+            write_extension_fixture(home, "alpha", &rule("remote/alpha/{{dir_name}}"));
+            write_extension_fixture(home, "beta", &rule("remote/beta/{{dir_name}}"));
+
+            let dir = home.join("my-component");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("marker.txt"), "Deployable component").unwrap();
+
+            let component = Component {
+                id: "my-component".to_string(),
+                local_path: dir.to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([
+                    ("alpha".to_string(), ScopedExtensionConfig::default()),
+                    ("beta".to_string(), ScopedExtensionConfig::default()),
+                ])),
+                ..Component::default()
+            };
+
+            assert_eq!(component.auto_resolve_remote_path(), None);
+        });
+    }
+
+    #[test]
     fn resolve_remote_path_fills_empty() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let dir = tmp.path().join("my-plugin");
-        std::fs::create_dir_all(&dir).unwrap();
+        with_isolated_home(|home| {
+            write_extension_fixture(
+                home,
+                "example",
+                r#"{
+    "remote_path_inference": [
+      {
+        "when_file_contains": { "file": "marker.txt", "text": "Deployable" },
+        "remote_path": "remote/{{dir_name}}"
+      }
+    ]
+  }"#,
+            );
 
-        std::fs::write(
-            dir.join("my-plugin.php"),
-            "<?php\n/**\n * Plugin Name: My Plugin\n */\n",
-        )
-        .unwrap();
+            let dir = home.join("my-component");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("marker.txt"), "Deployable component").unwrap();
 
-        let mut component = Component {
-            id: "my-plugin".to_string(),
-            local_path: dir.to_string_lossy().to_string(),
-            remote_path: String::new(),
-            extensions: Some(HashMap::from([(
-                "wordpress".to_string(),
-                ScopedExtensionConfig::default(),
-            )])),
-            ..Component::default()
-        };
+            let mut component = Component {
+                id: "my-component".to_string(),
+                local_path: dir.to_string_lossy().to_string(),
+                remote_path: String::new(),
+                extensions: Some(HashMap::from([(
+                    "example".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Component::default()
+            };
 
-        component.resolve_remote_path();
-        assert_eq!(component.remote_path, "wp-content/plugins/my-plugin");
+            component.resolve_remote_path();
+            assert_eq!(component.remote_path, "remote/my-component");
+        });
     }
 
     #[test]
