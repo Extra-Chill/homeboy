@@ -200,6 +200,9 @@ pub enum AuditFinding {
     /// method-shape (same method names + visibilities + order) and have high
     /// per-method body similarity — candidates for a shared base class.
     SharedScaffolding,
+    /// Class whose public methods are mostly single-expression delegates to an
+    /// internal member — usually a split-then-rejoin facade or legacy wrapper.
+    FacadePassthrough,
 }
 
 impl AuditFinding {
@@ -247,6 +250,7 @@ impl AuditFinding {
             "dead_guard",
             "upstream_workaround",
             "shared_scaffolding",
+            "facade_passthrough",
         ]
     }
 }
