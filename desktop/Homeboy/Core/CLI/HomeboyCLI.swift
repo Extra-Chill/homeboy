@@ -30,7 +30,12 @@ struct ProjectConfigCLI: Decodable {
     let serverId: String?
     let basePath: String?
     let tablePrefix: String?
+    let changelogNextSectionLabel: String?
+    let changelogNextSectionAliases: [String]?
     let componentIds: [String]
+    let components: [ProjectComponentAttachmentCLI]
+    let componentOverrides: [String: ProjectComponentOverrides]
+    let services: [String]
     let remoteFiles: RemoteFileConfigCLI
     let remoteLogs: RemoteLogConfigCLI
     let database: DatabaseConfigCLI
@@ -38,10 +43,59 @@ struct ProjectConfigCLI: Decodable {
     let api: ApiConfigCLI
     let subTargets: [SubTargetCLI]
     let sharedTables: [String]
+
+    private enum CodingKeys: String, CodingKey {
+        case domain, serverId, basePath, tablePrefix
+        case changelogNextSectionLabel, changelogNextSectionAliases
+        case componentIds, components, componentOverrides, services
+        case remoteFiles, remoteLogs, database, tools, api, subTargets, sharedTables
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        domain = try container.decodeIfPresent(String.self, forKey: .domain)
+        serverId = try container.decodeIfPresent(String.self, forKey: .serverId)
+        basePath = try container.decodeIfPresent(String.self, forKey: .basePath)
+        tablePrefix = try container.decodeIfPresent(String.self, forKey: .tablePrefix)
+        changelogNextSectionLabel = try container.decodeIfPresent(String.self, forKey: .changelogNextSectionLabel)
+        changelogNextSectionAliases = try container.decodeIfPresent([String].self, forKey: .changelogNextSectionAliases)
+        components = try container.decodeIfPresent([ProjectComponentAttachmentCLI].self, forKey: .components) ?? []
+        componentIds = try container.decodeIfPresent([String].self, forKey: .componentIds)
+            ?? components.map { $0.id }
+        componentOverrides = try container.decodeIfPresent([String: ProjectComponentOverrides].self, forKey: .componentOverrides) ?? [:]
+        services = try container.decodeIfPresent([String].self, forKey: .services) ?? []
+        remoteFiles = try container.decodeIfPresent(RemoteFileConfigCLI.self, forKey: .remoteFiles) ?? RemoteFileConfigCLI()
+        remoteLogs = try container.decodeIfPresent(RemoteLogConfigCLI.self, forKey: .remoteLogs) ?? RemoteLogConfigCLI()
+        database = try container.decodeIfPresent(DatabaseConfigCLI.self, forKey: .database) ?? DatabaseConfigCLI()
+        tools = try container.decodeIfPresent(ToolsConfigCLI.self, forKey: .tools) ?? ToolsConfigCLI()
+        api = try container.decodeIfPresent(ApiConfigCLI.self, forKey: .api) ?? ApiConfigCLI()
+        subTargets = try container.decodeIfPresent([SubTargetCLI].self, forKey: .subTargets) ?? []
+        sharedTables = try container.decodeIfPresent([String].self, forKey: .sharedTables) ?? []
+    }
+}
+
+struct ProjectComponentAttachmentCLI: Decodable {
+    let id: String
+    let localPath: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id, localPath
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        localPath = try container.decodeIfPresent(String.self, forKey: .localPath) ?? ""
+    }
 }
 
 struct RemoteFileConfigCLI: Decodable {
     let pinnedFiles: [PinnedRemoteFileCLI]
+
+    init(pinnedFiles: [PinnedRemoteFileCLI] = []) {
+        self.pinnedFiles = pinnedFiles
+    }
 }
 
 struct PinnedRemoteFileCLI: Decodable, Identifiable {
@@ -52,6 +106,10 @@ struct PinnedRemoteFileCLI: Decodable, Identifiable {
 
 struct RemoteLogConfigCLI: Decodable {
     let pinnedLogs: [PinnedRemoteLogCLI]
+
+    init(pinnedLogs: [PinnedRemoteLogCLI] = []) {
+        self.pinnedLogs = pinnedLogs
+    }
 }
 
 struct PinnedRemoteLogCLI: Decodable, Identifiable {
@@ -67,11 +125,24 @@ struct DatabaseConfigCLI: Decodable {
     let name: String
     let user: String
     let useSshTunnel: Bool
+
+    init(host: String = "localhost", port: Int = 3306, name: String = "", user: String = "", useSshTunnel: Bool = true) {
+        self.host = host
+        self.port = port
+        self.name = name
+        self.user = user
+        self.useSshTunnel = useSshTunnel
+    }
 }
 
 struct ToolsConfigCLI: Decodable {
     let bandcampScraper: BandcampScraperConfig?
     let newsletter: NewsletterToolConfig?
+
+    init(bandcampScraper: BandcampScraperConfig? = nil, newsletter: NewsletterToolConfig? = nil) {
+        self.bandcampScraper = bandcampScraper
+        self.newsletter = newsletter
+    }
 
     struct BandcampScraperConfig: Decodable {
         let defaultTag: String?
@@ -85,6 +156,11 @@ struct ToolsConfigCLI: Decodable {
 struct ApiConfigCLI: Decodable {
     let baseUrl: String
     let enabled: Bool
+
+    init(baseUrl: String = "", enabled: Bool = false) {
+        self.baseUrl = baseUrl
+        self.enabled = enabled
+    }
 }
 
 // MARK: - API/Auth CLI Output Models
@@ -280,14 +356,57 @@ struct ComponentRecordCLI: Decodable, Identifiable {
     let remotePath: String
     let buildArtifact: String?
     let buildCommand: String?
-    let extensions: [String: ScopedExtensionConfig]?  // NEW: Extension configs by ID
+    let extensions: [String: ScopedExtensionConfigCLI]?  // NEW: Extension configs by ID
     let versionTargets: [VersionTargetCLI]?
     let changelogTarget: String?       // NEW: Dedicated changelog file path
+    let changelogNextSectionLabel: String?
+    let changelogNextSectionAliases: [String]?
     let hooks: [String: [String]]?     // NEW: Lifecycle hooks
+    let extractCommand: String?
+    let remoteOwner: String?
+    let deployStrategy: String?
+    let gitDeploy: GitDeployConfig?
+    let remoteUrl: String?
+    let autoCleanup: Bool
+    let docsDir: String?
+    let docsDirs: [String]
+    let scopes: ScopeConfig?
 
     struct VersionTargetCLI: Decodable {
         let file: String
         let pattern: String?
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, aliases, localPath, remotePath, buildArtifact, buildCommand, extensions, versionTargets
+        case changelogTarget, changelogNextSectionLabel, changelogNextSectionAliases, hooks
+        case extractCommand, remoteOwner, deployStrategy, gitDeploy, remoteUrl, autoCleanup
+        case docsDir, docsDirs, scopes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
+        localPath = try container.decode(String.self, forKey: .localPath)
+        remotePath = try container.decode(String.self, forKey: .remotePath)
+        buildArtifact = try container.decodeIfPresent(String.self, forKey: .buildArtifact)
+        buildCommand = try container.decodeIfPresent(String.self, forKey: .buildCommand)
+        extensions = try container.decodeIfPresent([String: ScopedExtensionConfigCLI].self, forKey: .extensions)
+        versionTargets = try container.decodeIfPresent([VersionTargetCLI].self, forKey: .versionTargets)
+        changelogTarget = try container.decodeIfPresent(String.self, forKey: .changelogTarget)
+        changelogNextSectionLabel = try container.decodeIfPresent(String.self, forKey: .changelogNextSectionLabel)
+        changelogNextSectionAliases = try container.decodeIfPresent([String].self, forKey: .changelogNextSectionAliases)
+        hooks = try container.decodeIfPresent([String: [String]].self, forKey: .hooks)
+        extractCommand = try container.decodeIfPresent(String.self, forKey: .extractCommand)
+        remoteOwner = try container.decodeIfPresent(String.self, forKey: .remoteOwner)
+        deployStrategy = try container.decodeIfPresent(String.self, forKey: .deployStrategy)
+        gitDeploy = try container.decodeIfPresent(GitDeployConfig.self, forKey: .gitDeploy)
+        remoteUrl = try container.decodeIfPresent(String.self, forKey: .remoteUrl)
+        autoCleanup = try container.decodeIfPresent(Bool.self, forKey: .autoCleanup) ?? false
+        docsDir = try container.decodeIfPresent(String.self, forKey: .docsDir)
+        docsDirs = try container.decodeIfPresent([String].self, forKey: .docsDirs) ?? []
+        scopes = try container.decodeIfPresent(ScopeConfig.self, forKey: .scopes)
     }
 }
 
@@ -351,7 +470,7 @@ struct BenchScenarioDelta: Decodable, Identifiable {
 
 /// Extension configuration scoped to a component (for CLI output parsing)
 /// Settings use [String: String] for simplicity - CLI returns settings as strings
-struct ScopedExtensionConfig: Decodable {
+struct ScopedExtensionConfigCLI: Decodable {
     let version: String?
     let settings: [String: String]?
 }

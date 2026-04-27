@@ -4,6 +4,31 @@
   "remote_path": "wp-content/themes/extrachill",
   "build_artifact": "build/extrachill.zip",
   "build_command": "./build.sh",
+  "changelog_next_section_label": "Unreleased",
+  "changelog_next_section_aliases": ["Next", "Upcoming"],
+  "extract_command": "unzip -o build/extrachill.zip -d /tmp/extrachill",
+  "remote_owner": "www-data:www-data",
+  "deploy_strategy": "git",
+  "git_deploy": {
+    "remote": "origin",
+    "branch": "main",
+    "post_pull": ["composer install --no-dev"],
+    "tag_pattern": "v{{version}}"
+  },
+  "remote_url": "https://github.com/Extra-Chill/extrachill.git",
+  "auto_cleanup": true,
+  "docs_dir": "docs",
+  "docs_dirs": ["docs", "guides"],
+  "scopes": {
+    "defaults": {
+      "include": ["src/**"],
+      "exclude": ["vendor/**"]
+    },
+    "audit": {
+      "include": ["Homeboy/**"],
+      "exclude": []
+    }
+  },
   "version_targets": [
     {
       "file": "style.css",

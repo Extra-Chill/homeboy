@@ -58,6 +58,70 @@ struct PinnedRemoteLog: Codable, Identifiable, Equatable {
     }
 }
 
+/// Component attachment stored on a Homeboy project.
+struct ProjectComponentAttachment: Codable, Equatable {
+    var id: String
+    var localPath: String
+
+    init(id: String, localPath: String = "") {
+        self.id = id
+        self.localPath = localPath
+    }
+}
+
+/// Project-scoped overrides for a linked component.
+struct ProjectComponentOverrides: Codable, Equatable {
+    var remotePath: String?
+    var buildArtifact: String?
+    var extractCommand: String?
+    var remoteOwner: String?
+    var deployStrategy: String?
+    var gitDeploy: GitDeployConfig?
+    var hooks: [String: [String]]
+    var scopes: ScopeConfig?
+    var cliPath: String?
+
+    init(
+        remotePath: String? = nil,
+        buildArtifact: String? = nil,
+        extractCommand: String? = nil,
+        remoteOwner: String? = nil,
+        deployStrategy: String? = nil,
+        gitDeploy: GitDeployConfig? = nil,
+        hooks: [String: [String]] = [:],
+        scopes: ScopeConfig? = nil,
+        cliPath: String? = nil
+    ) {
+        self.remotePath = remotePath
+        self.buildArtifact = buildArtifact
+        self.extractCommand = extractCommand
+        self.remoteOwner = remoteOwner
+        self.deployStrategy = deployStrategy
+        self.gitDeploy = gitDeploy
+        self.hooks = hooks
+        self.scopes = scopes
+        self.cliPath = cliPath
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case remotePath, buildArtifact, extractCommand, remoteOwner, deployStrategy
+        case gitDeploy, hooks, scopes, cliPath
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        remotePath = try container.decodeIfPresent(String.self, forKey: .remotePath)
+        buildArtifact = try container.decodeIfPresent(String.self, forKey: .buildArtifact)
+        extractCommand = try container.decodeIfPresent(String.self, forKey: .extractCommand)
+        remoteOwner = try container.decodeIfPresent(String.self, forKey: .remoteOwner)
+        deployStrategy = try container.decodeIfPresent(String.self, forKey: .deployStrategy)
+        gitDeploy = try container.decodeIfPresent(GitDeployConfig.self, forKey: .gitDeploy)
+        hooks = try container.decodeIfPresent([String: [String]].self, forKey: .hooks) ?? [:]
+        scopes = try container.decodeIfPresent(ScopeConfig.self, forKey: .scopes)
+        cliPath = try container.decodeIfPresent(String.self, forKey: .cliPath)
+    }
+}
+
 // MARK: - Project Configuration
 
 /// Configuration for a single project (WordPress site, Node.js app, etc.)
@@ -79,13 +143,19 @@ struct ProjectConfiguration: Codable, Identifiable {
     var api: APIConfig
     var subTargets: [SubTarget]
     var sharedTables: [String]
+    var components: [ProjectComponentAttachment]
     var componentIds: [String]
+    var componentOverrides: [String: ProjectComponentOverrides]
+    var services: [String]
+    var changelogNextSectionLabel: String?
+    var changelogNextSectionAliases: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case id, name, domain
         case serverId, basePath, tablePrefix
         case extensions, remoteFiles, remoteLogs, database, tools, api
-        case subTargets, sharedTables, componentIds
+        case subTargets, sharedTables, components, componentIds, componentOverrides, services
+        case changelogNextSectionLabel, changelogNextSectionAliases
     }
 
     /// Whether this is a WordPress project (inferred from extensions or table prefix)
@@ -120,7 +190,12 @@ struct ProjectConfiguration: Codable, Identifiable {
         api: APIConfig,
         subTargets: [SubTarget] = [],
         sharedTables: [String] = [],
-        componentIds: [String] = []
+        components: [ProjectComponentAttachment] = [],
+        componentIds: [String] = [],
+        componentOverrides: [String: ProjectComponentOverrides] = [:],
+        services: [String] = [],
+        changelogNextSectionLabel: String? = nil,
+        changelogNextSectionAliases: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -136,7 +211,12 @@ struct ProjectConfiguration: Codable, Identifiable {
         self.api = api
         self.subTargets = subTargets
         self.sharedTables = sharedTables
+        self.components = components
         self.componentIds = componentIds
+        self.componentOverrides = componentOverrides
+        self.services = services
+        self.changelogNextSectionLabel = changelogNextSectionLabel
+        self.changelogNextSectionAliases = changelogNextSectionAliases
     }
 
     /// Creates a ProjectConfiguration from CLI's project show output
@@ -200,7 +280,14 @@ struct ProjectConfiguration: Codable, Identifiable {
         }
 
         self.sharedTables = config.sharedTables
+        self.components = config.components.map { component in
+            ProjectComponentAttachment(id: component.id, localPath: component.localPath)
+        }
         self.componentIds = config.componentIds
+        self.componentOverrides = config.componentOverrides
+        self.services = config.services
+        self.changelogNextSectionLabel = config.changelogNextSectionLabel
+        self.changelogNextSectionAliases = config.changelogNextSectionAliases
     }
 
     /// Creates a ProjectConfiguration from CLI's ProjectListItem (minimal data for picker)
@@ -227,6 +314,7 @@ struct ProjectConfiguration: Codable, Identifiable {
             api: APIConfig(),
             subTargets: [],
             sharedTables: [],
+            components: [],
             componentIds: []
         )
     }
@@ -246,6 +334,7 @@ struct ProjectConfiguration: Codable, Identifiable {
         extensions = try container.decodeIfPresent([String].self, forKey: .extensions) ?? []
         subTargets = try container.decodeIfPresent([SubTarget].self, forKey: .subTargets) ?? []
         sharedTables = try container.decodeIfPresent([String].self, forKey: .sharedTables) ?? []
+        components = try container.decodeIfPresent([ProjectComponentAttachment].self, forKey: .components) ?? []
 
         remoteFiles = try container.decodeIfPresent(RemoteFileConfig.self, forKey: .remoteFiles)
             ?? RemoteFileConfig()
@@ -259,7 +348,12 @@ struct ProjectConfiguration: Codable, Identifiable {
         api = try container.decodeIfPresent(APIConfig.self, forKey: .api)
             ?? APIConfig()
 
-        componentIds = try container.decodeIfPresent([String].self, forKey: .componentIds) ?? []
+        componentIds = try container.decodeIfPresent([String].self, forKey: .componentIds)
+            ?? components.map { $0.id }
+        componentOverrides = try container.decodeIfPresent([String: ProjectComponentOverrides].self, forKey: .componentOverrides) ?? [:]
+        services = try container.decodeIfPresent([String].self, forKey: .services) ?? []
+        changelogNextSectionLabel = try container.decodeIfPresent(String.self, forKey: .changelogNextSectionLabel)
+        changelogNextSectionAliases = try container.decodeIfPresent([String].self, forKey: .changelogNextSectionAliases)
     }
 
     /// Custom encoder
@@ -283,7 +377,12 @@ struct ProjectConfiguration: Codable, Identifiable {
 
         try container.encode(subTargets, forKey: .subTargets)
         try container.encode(sharedTables, forKey: .sharedTables)
+        try container.encode(components, forKey: .components)
         try container.encode(componentIds, forKey: .componentIds)
+        try container.encode(componentOverrides, forKey: .componentOverrides)
+        try container.encode(services, forKey: .services)
+        try container.encodeIfPresent(changelogNextSectionLabel, forKey: .changelogNextSectionLabel)
+        try container.encodeIfPresent(changelogNextSectionAliases, forKey: .changelogNextSectionAliases)
     }
 }
 

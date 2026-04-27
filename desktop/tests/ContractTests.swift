@@ -259,13 +259,88 @@ struct VersionTargetTest: Decodable {
     let pattern: String?
 }
 
+struct CommandScopeConfigTest: Decodable {
+    let include: [String]
+    let exclude: [String]
+}
+
+struct ScopeConfigTest: Decodable {
+    let defaults: CommandScopeConfigTest?
+    let audit: CommandScopeConfigTest?
+    let lint: CommandScopeConfigTest?
+    let test: CommandScopeConfigTest?
+    let refactor: CommandScopeConfigTest?
+    let deploy: CommandScopeConfigTest?
+    let release: CommandScopeConfigTest?
+    let fleet: CommandScopeConfigTest?
+}
+
+struct GitDeployConfigTest: Decodable {
+    let remote: String
+    let branch: String
+    let postPull: [String]
+    let tagPattern: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case remote, branch, postPull, tagPattern
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        remote = try container.decodeIfPresent(String.self, forKey: .remote) ?? "origin"
+        branch = try container.decodeIfPresent(String.self, forKey: .branch) ?? "main"
+        postPull = try container.decodeIfPresent([String].self, forKey: .postPull) ?? []
+        tagPattern = try container.decodeIfPresent(String.self, forKey: .tagPattern)
+    }
+}
+
 struct ComponentConfigurationTest: Decodable {
     let id: String
+    let aliases: [String]
     let localPath: String
     let remotePath: String
     let buildArtifact: String?
     let versionTargets: [VersionTargetTest]?
     let buildCommand: String?
+    let changelogNextSectionLabel: String?
+    let changelogNextSectionAliases: [String]?
+    let extractCommand: String?
+    let remoteOwner: String?
+    let deployStrategy: String?
+    let gitDeploy: GitDeployConfigTest?
+    let remoteUrl: String?
+    let autoCleanup: Bool
+    let docsDir: String?
+    let docsDirs: [String]
+    let scopes: ScopeConfigTest?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, aliases, localPath, remotePath, buildArtifact, versionTargets, buildCommand
+        case changelogNextSectionLabel, changelogNextSectionAliases, extractCommand, remoteOwner
+        case deployStrategy, gitDeploy, remoteUrl, autoCleanup, docsDir, docsDirs, scopes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
+        localPath = try container.decode(String.self, forKey: .localPath)
+        remotePath = try container.decode(String.self, forKey: .remotePath)
+        buildArtifact = try container.decodeIfPresent(String.self, forKey: .buildArtifact)
+        versionTargets = try container.decodeIfPresent([VersionTargetTest].self, forKey: .versionTargets)
+        buildCommand = try container.decodeIfPresent(String.self, forKey: .buildCommand)
+        changelogNextSectionLabel = try container.decodeIfPresent(String.self, forKey: .changelogNextSectionLabel)
+        changelogNextSectionAliases = try container.decodeIfPresent([String].self, forKey: .changelogNextSectionAliases)
+        extractCommand = try container.decodeIfPresent(String.self, forKey: .extractCommand)
+        remoteOwner = try container.decodeIfPresent(String.self, forKey: .remoteOwner)
+        deployStrategy = try container.decodeIfPresent(String.self, forKey: .deployStrategy)
+        gitDeploy = try container.decodeIfPresent(GitDeployConfigTest.self, forKey: .gitDeploy)
+        remoteUrl = try container.decodeIfPresent(String.self, forKey: .remoteUrl)
+        autoCleanup = try container.decodeIfPresent(Bool.self, forKey: .autoCleanup) ?? false
+        docsDir = try container.decodeIfPresent(String.self, forKey: .docsDir)
+        docsDirs = try container.decodeIfPresent([String].self, forKey: .docsDirs) ?? []
+        scopes = try container.decodeIfPresent(ScopeConfigTest.self, forKey: .scopes)
+    }
 
     var displayName: String {
         id.split(separator: "-")
@@ -279,6 +354,77 @@ struct ComponentConfigurationTest: Decodable {
 
     var versionPattern: String? {
         versionTargets?.first?.pattern
+    }
+}
+
+struct ProjectComponentAttachmentTest: Decodable {
+    let id: String
+    let localPath: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id, localPath
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        localPath = try container.decodeIfPresent(String.self, forKey: .localPath) ?? ""
+    }
+}
+
+struct ProjectComponentOverridesTest: Decodable {
+    let remotePath: String?
+    let buildArtifact: String?
+    let extractCommand: String?
+    let remoteOwner: String?
+    let deployStrategy: String?
+    let gitDeploy: GitDeployConfigTest?
+    let hooks: [String: [String]]
+    let scopes: ScopeConfigTest?
+    let cliPath: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case remotePath, buildArtifact, extractCommand, remoteOwner, deployStrategy
+        case gitDeploy, hooks, scopes, cliPath
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        remotePath = try container.decodeIfPresent(String.self, forKey: .remotePath)
+        buildArtifact = try container.decodeIfPresent(String.self, forKey: .buildArtifact)
+        extractCommand = try container.decodeIfPresent(String.self, forKey: .extractCommand)
+        remoteOwner = try container.decodeIfPresent(String.self, forKey: .remoteOwner)
+        deployStrategy = try container.decodeIfPresent(String.self, forKey: .deployStrategy)
+        gitDeploy = try container.decodeIfPresent(GitDeployConfigTest.self, forKey: .gitDeploy)
+        hooks = try container.decodeIfPresent([String: [String]].self, forKey: .hooks) ?? [:]
+        scopes = try container.decodeIfPresent(ScopeConfigTest.self, forKey: .scopes)
+        cliPath = try container.decodeIfPresent(String.self, forKey: .cliPath)
+    }
+}
+
+struct ProjectConfigCLITest: Decodable {
+    let domain: String?
+    let changelogNextSectionLabel: String?
+    let changelogNextSectionAliases: [String]?
+    let components: [ProjectComponentAttachmentTest]
+    let componentIds: [String]
+    let componentOverrides: [String: ProjectComponentOverridesTest]
+    let services: [String]
+
+    private enum CodingKeys: String, CodingKey {
+        case domain, changelogNextSectionLabel, changelogNextSectionAliases
+        case components, componentIds, componentOverrides, services
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        domain = try container.decodeIfPresent(String.self, forKey: .domain)
+        changelogNextSectionLabel = try container.decodeIfPresent(String.self, forKey: .changelogNextSectionLabel)
+        changelogNextSectionAliases = try container.decodeIfPresent([String].self, forKey: .changelogNextSectionAliases)
+        components = try container.decodeIfPresent([ProjectComponentAttachmentTest].self, forKey: .components) ?? []
+        componentIds = try container.decodeIfPresent([String].self, forKey: .componentIds) ?? components.map { $0.id }
+        componentOverrides = try container.decodeIfPresent([String: ProjectComponentOverridesTest].self, forKey: .componentOverrides) ?? [:]
+        services = try container.decodeIfPresent([String].self, forKey: .services) ?? []
     }
 }
 
@@ -480,6 +626,12 @@ func runTests(testDir: String) throws {
 
     // Test 21: Quality workspace command shapes
     try testQualityWorkspaceCommandShapes(testDir: testDir)
+
+    // Test 22: Current component configuration fields
+    try testCurrentComponentConfigurationFields(fixturesDir: fixturesDir, decoder: decoder)
+
+    // Test 23: Current project configuration fields
+    try testCurrentProjectConfigurationFields(decoder: decoder)
 
     print("")
     print("All contract tests passed")
@@ -1075,6 +1227,138 @@ func testVersionTargetsParsing(fixturesDir: String, decoder: JSONDecoder) throws
             userInfo: [NSLocalizedDescriptionKey: "versionPattern computed property should not be nil"])
     }
     print("[PASS] versionPattern computed property: present")
+    print("")
+}
+
+func testCurrentComponentConfigurationFields(fixturesDir: String, decoder: JSONDecoder) throws {
+    print("Test: current component configuration fields")
+    print("--------------------------------------------")
+
+    let fixture = URL(fileURLWithPath: "\(fixturesDir)/component.json")
+    let data = try Data(contentsOf: fixture)
+    let component = try decoder.decode(ComponentConfigurationTest.self, from: data)
+
+    guard component.changelogNextSectionLabel == "Unreleased" else {
+        throw NSError(domain: "ContractTest", code: 230,
+            userInfo: [NSLocalizedDescriptionKey: "changelog_next_section_label did not decode"])
+    }
+    print("[PASS] changelog next section label decodes")
+
+    guard component.changelogNextSectionAliases == ["Next", "Upcoming"] else {
+        throw NSError(domain: "ContractTest", code: 231,
+            userInfo: [NSLocalizedDescriptionKey: "changelog_next_section_aliases did not decode"])
+    }
+    print("[PASS] changelog next section aliases decode")
+
+    guard component.extractCommand?.contains("unzip") == true,
+          component.remoteOwner == "www-data:www-data",
+          component.deployStrategy == "git" else {
+        throw NSError(domain: "ContractTest", code: 232,
+            userInfo: [NSLocalizedDescriptionKey: "deploy metadata fields did not decode"])
+    }
+    print("[PASS] deploy metadata fields decode")
+
+    guard component.gitDeploy?.remote == "origin",
+          component.gitDeploy?.branch == "main",
+          component.gitDeploy?.postPull == ["composer install --no-dev"],
+          component.gitDeploy?.tagPattern == "v{{version}}" else {
+        throw NSError(domain: "ContractTest", code: 233,
+            userInfo: [NSLocalizedDescriptionKey: "git_deploy did not decode"])
+    }
+    print("[PASS] git_deploy decodes")
+
+    guard component.remoteUrl == "https://github.com/Extra-Chill/extrachill.git",
+          component.autoCleanup == true,
+          component.docsDir == "docs",
+          component.docsDirs == ["docs", "guides"] else {
+        throw NSError(domain: "ContractTest", code: 234,
+            userInfo: [NSLocalizedDescriptionKey: "remote/docs cleanup fields did not decode"])
+    }
+    print("[PASS] remote/docs cleanup fields decode")
+
+    guard component.scopes?.defaults?.include == ["src/**"],
+          component.scopes?.defaults?.exclude == ["vendor/**"],
+          component.scopes?.audit?.include == ["Homeboy/**"] else {
+        throw NSError(domain: "ContractTest", code: 235,
+            userInfo: [NSLocalizedDescriptionKey: "scopes did not decode"])
+    }
+    print("[PASS] scopes decode")
+
+    let minimalGitDeploy = #"{"git_deploy":{}}"#.data(using: .utf8)!
+    struct MinimalGitDeployWrapper: Decodable { let gitDeploy: GitDeployConfigTest }
+    let wrapper = try decoder.decode(MinimalGitDeployWrapper.self, from: minimalGitDeploy)
+    guard wrapper.gitDeploy.remote == "origin", wrapper.gitDeploy.branch == "main", wrapper.gitDeploy.postPull.isEmpty else {
+        throw NSError(domain: "ContractTest", code: 236,
+            userInfo: [NSLocalizedDescriptionKey: "git_deploy defaults did not decode"])
+    }
+    print("[PASS] git_deploy defaults decode")
+    print("")
+}
+
+func testCurrentProjectConfigurationFields(decoder: JSONDecoder) throws {
+    print("Test: current project configuration fields")
+    print("------------------------------------------")
+
+    let json = #"""
+    {
+        "domain": "example.test",
+        "changelog_next_section_label": "Unreleased",
+        "changelog_next_section_aliases": ["Next"],
+        "components": [
+            {"id": "data-machine", "local_path": "/Users/chubes/Developer/data-machine"}
+        ],
+        "component_overrides": {
+            "data-machine": {
+                "remote_path": "wp-content/plugins/data-machine",
+                "extract_command": "unzip artifact.zip",
+                "remote_owner": "www-data:www-data",
+                "deploy_strategy": "git",
+                "git_deploy": {"post_pull": ["composer install --no-dev"]},
+                "hooks": {"post:deploy": ["wp cache flush"]},
+                "scopes": {"lint": {"include": ["inc/**"], "exclude": []}},
+                "cli_path": "studio wp"
+            }
+        },
+        "services": ["nginx", "php8.4-fpm"]
+    }
+    """#.data(using: .utf8)!
+
+    let project = try decoder.decode(ProjectConfigCLITest.self, from: json)
+    guard project.changelogNextSectionLabel == "Unreleased",
+          project.changelogNextSectionAliases == ["Next"] else {
+        throw NSError(domain: "ContractTest", code: 240,
+            userInfo: [NSLocalizedDescriptionKey: "project changelog fields did not decode"])
+    }
+    print("[PASS] Project changelog fields decode")
+
+    guard project.components.first?.id == "data-machine",
+          project.componentIds == ["data-machine"] else {
+        throw NSError(domain: "ContractTest", code: 241,
+            userInfo: [NSLocalizedDescriptionKey: "project components did not decode or derive componentIds"])
+    }
+    print("[PASS] Project components decode and derive componentIds")
+
+    guard project.services == ["nginx", "php8.4-fpm"] else {
+        throw NSError(domain: "ContractTest", code: 242,
+            userInfo: [NSLocalizedDescriptionKey: "project services did not decode"])
+    }
+    print("[PASS] Project services decode")
+
+    guard let override = project.componentOverrides["data-machine"],
+          override.remotePath == "wp-content/plugins/data-machine",
+          override.extractCommand == "unzip artifact.zip",
+          override.remoteOwner == "www-data:www-data",
+          override.deployStrategy == "git",
+          override.gitDeploy?.remote == "origin",
+          override.gitDeploy?.branch == "main",
+          override.gitDeploy?.postPull == ["composer install --no-dev"],
+          override.hooks["post:deploy"] == ["wp cache flush"],
+          override.scopes?.lint?.include == ["inc/**"],
+          override.cliPath == "studio wp" else {
+        throw NSError(domain: "ContractTest", code: 243,
+            userInfo: [NSLocalizedDescriptionKey: "project component_overrides did not decode"])
+    }
+    print("[PASS] Project component overrides decode")
     print("")
 }
 
