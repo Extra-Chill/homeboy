@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.25.0] - 2026-04-27
+
+### Added
+- detect mock-over-fixture test smells
+
 ## [2.24.0] - 2026-04-27
 
 ### Added
