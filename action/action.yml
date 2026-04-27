@@ -484,7 +484,7 @@ runs:
 
     - name: Run release
       id: release
-      if: contains(steps.resolve-commands.outputs.resolved-commands, 'release') && github.event_name != 'pull_request'
+      if: steps.resolve-commands.outputs.release-commands != '' && github.event_name != 'pull_request'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token || github.token }}

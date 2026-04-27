@@ -207,4 +207,14 @@ assert_equals \
   "$(canonicalize_commands "fleet exec my-fleet -- homeboy upgrade,deploy my-project --all")" \
   "canonicalize returns empty when only operations commands"
 
+assert_equals \
+  "audit,lint,test" \
+  "$(canonicalize_commands "release,audit,lint,test")" \
+  "canonicalize strips release commands"
+
+assert_equals \
+  "" \
+  "$(canonicalize_commands "release")" \
+  "canonicalize returns empty when only release commands"
+
 printf 'All command builder checks passed.\n'

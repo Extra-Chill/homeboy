@@ -15,16 +15,15 @@ if [ -z "${RESULTS:-}" ] || [ "${RESULTS}" = "{}" ]; then
     exit 0
   fi
 
-  # If the only commands are release/operations, empty quality results are expected
+  # If there are no quality commands, empty quality results are expected.
   COMMANDS="${COMMANDS:-}"
-  NON_RELEASE="$(echo "${COMMANDS}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^release$' | grep -v '^$' || true)"
-  if [ -z "${NON_RELEASE}" ] && [ -z "${OPERATIONS_RESULTS}" ]; then
-    echo "Release-only mode — no quality gate commands to enforce"
+  if [ -z "${COMMANDS}" ] && [ -z "${OPERATIONS_RESULTS}" ]; then
+    echo "No quality gate commands to enforce"
     exit 0
   fi
 
   # If we have operations results but no quality results, that's fine
-  if [ -z "${NON_RELEASE}" ] && [ -n "${OPERATIONS_RESULTS}" ]; then
+  if [ -z "${COMMANDS}" ] && [ -n "${OPERATIONS_RESULTS}" ]; then
     HAS_QUALITY_COMMANDS=false
   elif [ -z "${OPERATIONS_RESULTS}" ]; then
     echo "::error::No command results were produced"

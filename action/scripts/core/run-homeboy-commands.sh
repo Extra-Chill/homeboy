@@ -4,7 +4,7 @@ set -euo pipefail
 
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
-# v2: prefer RESOLVED_COMMANDS (from resolve-commands.sh), fall back to COMMANDS for compat
+# v2: prefer RESOLVED_COMMANDS (quality-only from resolve-commands.sh), fall back to COMMANDS for compat
 EFFECTIVE_COMMANDS="${RESOLVED_COMMANDS:-${COMMANDS:-audit,lint,test}}"
 
 # If no quality commands to run (e.g. operations-only mode), exit cleanly
@@ -34,11 +34,6 @@ HAS_LINT_COMMAND="$(has_lint_command "${EFFECTIVE_COMMANDS}")"
 
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD=$(echo "${CMD}" | xargs)
-
-  # Release is handled by the dedicated release step, not the command loop
-  if [ "${CMD}" = "release" ]; then
-    continue
-  fi
 
   if [ "${CMD}" = "test" ] && [ "${HAS_LINT_COMMAND}" = "true" ]; then
     export HOMEBOY_SKIP_LINT=1
