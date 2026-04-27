@@ -85,6 +85,7 @@ if (!defined('HOMEBOY_BENCH_LIST_ONLY')) {
 }
 
 require_once '/homeboy-extension/scripts/lib/playground-bootstrap.php';
+require_once '{{BENCH_HELPER_PHP}}';
 
 pg_install_diagnostics_handlers();
 
@@ -143,15 +144,6 @@ if ($installed_site_mode) {
 pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
 pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 
-/** Slugify a workload basename into a scenario id ("BulkImport.php" → "bulk-import"). */
-function pg_bench_scenario_id(string $basename): string {
-    $name = preg_replace('/\.php$/i', '', $basename);
-    $name = preg_replace('/([a-z0-9])([A-Z])/', '$1-$2', $name);
-    $name = strtolower($name);
-    $name = preg_replace('/[^a-z0-9]+/', '-', $name);
-    return trim($name, '-');
-}
-
 /**
  * Normalize the optional bench_workloads setting into scenario IDs.
  *
@@ -179,7 +171,7 @@ function pg_bench_normalize_workload_filter(string $raw): array {
         if (!is_scalar($value)) {
             throw new RuntimeException('bench_workloads entries must be strings');
         }
-        $id = pg_bench_scenario_id((string) $value);
+        $id = homeboy_bench_scenario_id((string) $value);
         if ($id !== '' && !in_array($id, $normalized, true)) {
             $normalized[] = $id;
         }
@@ -239,7 +231,7 @@ try {
         $filtered_workload_files = [];
 
         foreach ($workload_files as $workload_file) {
-            $scenario_id = pg_bench_scenario_id(basename($workload_file));
+            $scenario_id = homeboy_bench_scenario_id(basename($workload_file));
             $available_workloads[] = $scenario_id;
             if (isset($requested_lookup[$scenario_id])) {
                 $filtered_workload_files[] = $workload_file;
@@ -273,31 +265,6 @@ try {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute percentile (linear interpolation) over a sorted ascending array.
- *
- * Uses the same definition homeboy core's parser expects (R-7 / Excel-style):
- * given p in [0, 1], the position is p * (N - 1) and the value is the
- * linear interpolation between the floor and ceil indices.
- */
-function pg_bench_percentile(array $sorted_ms, float $p): float {
-    $n = count($sorted_ms);
-    if ($n === 0) {
-        return 0.0;
-    }
-    if ($n === 1) {
-        return $sorted_ms[0];
-    }
-    $rank = $p * ($n - 1);
-    $lo = (int) floor($rank);
-    $hi = (int) ceil($rank);
-    if ($lo === $hi) {
-        return $sorted_ms[$lo];
-    }
-    $frac = $rank - $lo;
-    return $sorted_ms[$lo] * (1 - $frac) + $sorted_ms[$hi] * $frac;
-}
-
-/**
  * Aggregate a numeric sample set into the flat BenchMetrics key shape.
  *
  * `$suffix` should include any unit (for example `_ms` for duration metrics)
@@ -312,9 +279,9 @@ function pg_bench_aggregate_metric(array $samples, string $prefix, string $suffi
 
     return [
         "{$key_prefix}mean{$suffix}" => $mean,
-        "{$key_prefix}p50{$suffix}" => pg_bench_percentile($samples, 0.50),
-        "{$key_prefix}p95{$suffix}" => pg_bench_percentile($samples, 0.95),
-        "{$key_prefix}p99{$suffix}" => pg_bench_percentile($samples, 0.99),
+        "{$key_prefix}p50{$suffix}" => homeboy_bench_percentile($samples, 0.50),
+        "{$key_prefix}p95{$suffix}" => homeboy_bench_percentile($samples, 0.95),
+        "{$key_prefix}p99{$suffix}" => homeboy_bench_percentile($samples, 0.99),
         "{$key_prefix}min{$suffix}" => $count > 0 ? $samples[0] : 0.0,
         "{$key_prefix}max{$suffix}" => $count > 0 ? $samples[$count - 1] : 0.0,
     ];
@@ -360,7 +327,7 @@ if ($iterations_per_workload < 1) {
 if (HOMEBOY_BENCH_LIST_ONLY) {
     foreach ($workload_files as $workload_file) {
         $basename = basename($workload_file);
-        $scenario_id = pg_bench_scenario_id($basename);
+        $scenario_id = homeboy_bench_scenario_id($basename);
         $source = $workload_sources[$workload_file] ?? 'in_tree';
         $relative_file = $source === 'in_tree'
             ? substr($workload_file, strlen($plugin_path) + 1)
@@ -377,11 +344,7 @@ if (HOMEBOY_BENCH_LIST_ONLY) {
         ];
     }
 
-    file_put_contents("$plugin_path/.pg-bench-results{{RESULT_SUFFIX}}.json", json_encode([
-        'component_id' => '{{COMPONENT_ID}}',
-        'iterations' => 0,
-        'scenarios' => $scenarios,
-    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    homeboy_write_bench_results("$plugin_path/.pg-bench-results{{RESULT_SUFFIX}}.json", '{{COMPONENT_ID}}', 0, $scenarios);
     pg_log('LIST_ONLY: scenarios=' . count($scenarios));
     exit(0);
 }
@@ -389,7 +352,7 @@ if (HOMEBOY_BENCH_LIST_ONLY) {
 try {
     foreach ($workload_files as $workload_file) {
         $basename = basename($workload_file);
-        $scenario_id = pg_bench_scenario_id($basename);
+        $scenario_id = homeboy_bench_scenario_id($basename);
         // Path relative to the plugin root for the BenchResults envelope.
         $source = $workload_sources[$workload_file] ?? 'in_tree';
         $relative_file = $source === 'in_tree'
@@ -467,9 +430,9 @@ try {
         pg_log(sprintf(
             "WORKLOAD_OK: %s p50=%.2fms p95=%.2fms p99=%.2fms",
             $scenario_id,
-            pg_bench_percentile($timings_ms, 0.50),
-            pg_bench_percentile($timings_ms, 0.95),
-            pg_bench_percentile($timings_ms, 0.99)
+            homeboy_bench_percentile($timings_ms, 0.50),
+            homeboy_bench_percentile($timings_ms, 0.95),
+            homeboy_bench_percentile($timings_ms, 0.99)
         ));
     }
     pg_stage_ok('run_workloads');
@@ -511,18 +474,7 @@ try {
     }
 
     $results_path = "$plugin_path/.pg-bench-results{{RESULT_SUFFIX}}.json";
-    $envelope = [
-        'component_id' => '{{COMPONENT_ID}}',
-        'iterations' => $iterations_per_workload,
-        'scenarios' => $scenarios,
-    ];
-    $json = json_encode($envelope, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-    if ($json === false) {
-        throw new RuntimeException("json_encode failed: " . json_last_error_msg());
-    }
-    if (file_put_contents($results_path, $json) === false) {
-        throw new RuntimeException("failed to write $results_path");
-    }
+    homeboy_write_bench_results($results_path, '{{COMPONENT_ID}}', $iterations_per_workload, $scenarios);
     pg_log("RESULTS_EMITTED: $results_path (" . count($scenarios) . " scenarios)");
     pg_stage_ok('emit_results');
 } catch (Throwable $e) {

@@ -35,6 +35,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+BENCH_HELPER_SH="${HOMEBOY_RUNTIME_BENCH_HELPER_SH:-${HOME}/.homeboy/runtime/bench-helper.sh}"
+BENCH_HELPER_PHP_HOST="${HOMEBOY_RUNTIME_BENCH_HELPER_PHP:-${HOME}/.homeboy/runtime/bench-helper.php}"
+BENCH_HELPER_PHP_GUEST="/homeboy-runtime/bench-helper.php"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 # shellcheck source=/dev/null
@@ -55,6 +58,17 @@ if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
 else
     FAILED_STEP=""
     FAILURE_OUTPUT=""
+fi
+# shellcheck source=/dev/null
+if [ -f "$BENCH_HELPER_SH" ]; then
+    source "$BENCH_HELPER_SH"
+else
+    echo "ERROR: Homeboy bench helper not found at ${BENCH_HELPER_SH}" >&2
+    exit 2
+fi
+if [ ! -f "$BENCH_HELPER_PHP_HOST" ]; then
+    echo "ERROR: Homeboy PHP bench helper not found at ${BENCH_HELPER_PHP_HOST}" >&2
+    exit 2
 fi
 
 # PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
@@ -109,9 +123,7 @@ if [ ! -d "$BENCH_DIR" ] && [ -z "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ] && [ "$B
     # Emit an empty-but-valid BenchResults so homeboy core's parser
     # doesn't see a missing file and treat the run as a crash.
     if [ -n "${HOMEBOY_BENCH_RESULTS_FILE:-}" ]; then
-        cat > "${HOMEBOY_BENCH_RESULTS_FILE}" <<EMPTY
-{"component_id":"${COMPONENT_ID}","iterations":0,"scenarios":[]}
-EMPTY
+        homeboy_write_empty_bench_results "$COMPONENT_ID" 0 "${HOMEBOY_BENCH_RESULTS_FILE}"
     fi
     exit 0
 fi
@@ -257,6 +269,7 @@ if [ -f "$PLUGIN_DB_PHP" ]; then
 fi
 
 MOUNT_ARGS+=("--mount" "${EXTENSION_PATH}:/homeboy-extension")
+MOUNT_ARGS+=("--mount" "${BENCH_HELPER_PHP_HOST}:${BENCH_HELPER_PHP_GUEST}")
 
 # Rig-private workloads are host paths supplied by homeboy core through a
 # PATH-style list. Mount each file into Playground and let the PHP runner tag
@@ -397,6 +410,7 @@ sed \
     -e "s|{{CONCURRENCY}}|${CONCURRENCY}|g" \
     -e "s|{{LIST_ONLY}}|${LIST_ONLY_PHP}|g" \
     -e "s|{{RESULT_SUFFIX}}|${RESULT_SUFFIX}|g" \
+    -e "s|{{BENCH_HELPER_PHP}}|${BENCH_HELPER_PHP_GUEST}|g" \
     -e "s|{{BENCH_SITE_MODE}}|${BENCH_SITE_MODE}|g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \

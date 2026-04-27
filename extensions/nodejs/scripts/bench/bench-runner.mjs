@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Node.js bench harness — workload discovery, iteration loop, percentile
-// math, and BenchResults envelope serialization.
+// Node.js bench harness — workload discovery and iteration loop. Shared
+// percentile math and BenchResults envelope helpers come from Homeboy core.
 //
 // CONTRACT
 //
@@ -37,10 +37,22 @@
 // Writes the BenchResults JSON envelope (homeboy/src/core/extension/
 // bench/parsing.rs::BenchResults shape) to HOMEBOY_BENCH_RESULTS_FILE.
 
-import { readdir, writeFile, mkdir } from 'node:fs/promises';
-import { resolve, relative, basename, dirname, delimiter } from 'node:path';
+import { readdir } from 'node:fs/promises';
+import { resolve, relative, basename, delimiter } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
+
+const helperPath = process.env.HOMEBOY_RUNTIME_BENCH_HELPER_JS;
+if (!helperPath) {
+    console.error('FATAL: HOMEBOY_RUNTIME_BENCH_HELPER_JS is required');
+    process.exit(2);
+}
+
+const {
+    homeboyBenchPercentile,
+    homeboyBenchScenarioId,
+    homeboyWriteBenchResults,
+} = await import(pathToFileURL(helperPath).href);
 
 const PROJECT_PATH = process.env.HOMEBOY_COMPONENT_PATH;
 const COMPONENT_ID = process.env.HOMEBOY_COMPONENT_ID;
@@ -62,29 +74,6 @@ const TIMING_METRIC_KEYS = new Set([
 if (!PROJECT_PATH || !COMPONENT_ID || !RESULTS_FILE) {
     console.error('FATAL: missing required env vars (PROJECT_PATH/COMPONENT_ID/RESULTS_FILE)');
     process.exit(2);
-}
-
-// R-7 percentile — matches pg_bench_percentile() in the WP runner.
-function percentile(sortedMs, p) {
-    const n = sortedMs.length;
-    if (n === 0) return 0;
-    if (n === 1) return sortedMs[0];
-    const rank = p * (n - 1);
-    const lo = Math.floor(rank);
-    const hi = Math.ceil(rank);
-    if (lo === hi) return sortedMs[lo];
-    const frac = rank - lo;
-    return sortedMs[lo] * (1 - frac) + sortedMs[hi] * frac;
-}
-
-// "ColdBoot.bench.ts" → "cold-boot". Matches WP runner's slug rule.
-function scenarioId(file) {
-    return basename(file)
-        .replace(/\.bench\.(ts|mjs|cjs|js)$/, '')
-        .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '');
 }
 
 function validateWorkloadResult(value, iterationLabel) {
@@ -212,7 +201,7 @@ async function main() {
 
     if (LIST_ONLY) {
         const scenarios = files.map(({ file, source }) => ({
-            id: scenarioId(file),
+            id: homeboyBenchScenarioId(file, /\.bench\.(ts|mjs|cjs|js)$/),
             file: source === 'in_tree' ? relative(PROJECT_PATH, file) : file,
             source,
             iterations: 0,
@@ -237,7 +226,7 @@ async function main() {
 
     for (const workload of files) {
         const { file, source } = workload;
-        const id = scenarioId(file);
+        const id = homeboyBenchScenarioId(file, /\.bench\.(ts|mjs|cjs|js)$/);
         const rel = source === 'in_tree' ? relative(PROJECT_PATH, file) : file;
         process.stdout.write(`WORKLOAD_BEGIN: ${id} (${basename(file)})\n`);
 
@@ -256,9 +245,9 @@ async function main() {
         const t = result.timings;
         const timingMetrics = {
             mean_ms: t.reduce((a, b) => a + b, 0) / t.length,
-            p50_ms: percentile(t, 0.50),
-            p95_ms: percentile(t, 0.95),
-            p99_ms: percentile(t, 0.99),
+            p50_ms: homeboyBenchPercentile(t, 0.50),
+            p95_ms: homeboyBenchPercentile(t, 0.95),
+            p99_ms: homeboyBenchPercentile(t, 0.99),
             min_ms: t[0],
             max_ms: t[t.length - 1],
         };
@@ -273,18 +262,11 @@ async function main() {
         });
 
         process.stdout.write(
-            `WORKLOAD_DONE:  ${id}  p50=${percentile(t, 0.50).toFixed(2)}ms  p95=${percentile(t, 0.95).toFixed(2)}ms\n`
+            `WORKLOAD_DONE:  ${id}  p50=${homeboyBenchPercentile(t, 0.50).toFixed(2)}ms  p95=${homeboyBenchPercentile(t, 0.95).toFixed(2)}ms\n`
         );
     }
 
-    const envelope = {
-        component_id: COMPONENT_ID,
-        iterations: ITERATIONS,
-        scenarios,
-    };
-
-    await mkdir(dirname(RESULTS_FILE), { recursive: true });
-    await writeFile(RESULTS_FILE, JSON.stringify(envelope, null, 2));
+    await homeboyWriteBenchResults(RESULTS_FILE, COMPONENT_ID, ITERATIONS, scenarios);
 
     if (DEBUG) console.error(`DEBUG: results written to ${RESULTS_FILE}`);
 
