@@ -6,7 +6,9 @@
 
 use std::path::Path;
 
-use clap::Parser;
+use std::any::TypeId;
+
+use clap::{Arg, ArgAction, Command, CommandFactory, Parser};
 
 use crate::cli_surface::{current_command_surface, Cli};
 use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
@@ -112,8 +114,8 @@ fn invocation_tokens(lines: &[&str], start: usize) -> Option<InvocationTokens> {
 
     let variable = invocation_variable_name(line);
     let mut tokens = token_sources_from_line(line, start + 1)?;
-    let has_homeboy_binary = strip_homeboy_binary(&mut tokens);
-    if !has_homeboy_binary && !has_homeboy_wrapper_provenance(lines, start) {
+    let has_homeboy_binary = InvocationClassifier::strip_homeboy_binary(&mut tokens);
+    if !has_homeboy_binary && !InvocationClassifier::has_homeboy_wrapper_provenance(lines, start) {
         return None;
     }
 
@@ -121,7 +123,7 @@ fn invocation_tokens(lines: &[&str], start: usize) -> Option<InvocationTokens> {
         .iter()
         .map(|token| token.value.clone())
         .collect::<Vec<_>>();
-    if values.is_empty() || !is_homeboy_command_candidate(&values) {
+    if values.is_empty() || !InvocationClassifier::is_homeboy_command_candidate(&values) {
         return None;
     }
 
@@ -150,60 +152,12 @@ fn invocation_tokens(lines: &[&str], start: usize) -> Option<InvocationTokens> {
     Some(InvocationTokens { tokens })
 }
 
-fn strip_homeboy_binary(tokens: &mut Vec<TokenSource>) -> bool {
-    let Some(first) = tokens.first() else {
-        return false;
-    };
-
-    if is_homeboy_binary_token(&first.value) {
-        tokens.remove(0);
-        return true;
-    }
-
-    false
-}
-
-fn is_homeboy_binary_token(token: &str) -> bool {
-    token
-        .rsplit(['/', '\\'])
-        .next()
-        .is_some_and(|name| name == "homeboy")
-}
-
-fn has_homeboy_wrapper_provenance(lines: &[&str], start: usize) -> bool {
-    let Some(line) = lines.get(start) else {
-        return false;
-    };
-
-    if calls_homeboy_wrapper(line) {
-        return true;
-    }
-
-    if !line.contains("var args") && !line.contains("let args") {
-        return false;
-    }
-
-    let end = (start + 25).min(lines.len().saturating_sub(1));
-    start < end
-        && lines[start + 1..=end]
-            .iter()
-            .any(|next| calls_homeboy_wrapper(next) && next.contains("args"))
-}
-
-fn calls_homeboy_wrapper(line: &str) -> bool {
-    line.contains("executeCommand(")
-        || line.contains("executeWithStdin(")
-        || line.contains("cli.execute(")
-}
-
 fn validate_invocation(tokens: &[String]) -> Option<String> {
     if should_skip_for_stale_command_detector(tokens) {
         return None;
     }
 
-    let argv = std::iter::once("homeboy".to_string())
-        .chain(tokens.iter().cloned())
-        .collect::<Vec<_>>();
+    let argv = PlaceholderSynthesizer::argv(tokens);
 
     Cli::try_parse_from(argv)
         .err()
@@ -228,13 +182,6 @@ fn should_skip_for_stale_command_detector(tokens: &[String]) -> bool {
     }
 
     false
-}
-
-fn is_homeboy_command_candidate(tokens: &[String]) -> bool {
-    let Some(command) = tokens.first() else {
-        return false;
-    };
-    current_command_surface().contains_path(&[command.as_str()])
 }
 
 fn looks_like_invocation_array(line: &str) -> bool {
@@ -266,7 +213,7 @@ fn swift_string_array_items(line: &str) -> Option<Vec<String>> {
         if let Some(stripped) = item.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
             items.push(stripped.to_string());
         } else {
-            items.push("value".to_string());
+            items.push(PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER.to_string());
         }
     }
 
@@ -363,7 +310,230 @@ fn split_swift_array_items(inner: &str) -> Vec<String> {
 }
 
 fn display_shape(tokens: &[String]) -> String {
-    tokens.join(" ")
+    tokens
+        .iter()
+        .map(|token| {
+            if token == PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER {
+                "value"
+            } else {
+                token.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+struct InvocationClassifier;
+
+impl InvocationClassifier {
+    fn strip_homeboy_binary(tokens: &mut Vec<TokenSource>) -> bool {
+        let Some(first) = tokens.first() else {
+            return false;
+        };
+
+        if Self::is_homeboy_binary_token(&first.value) {
+            tokens.remove(0);
+            return true;
+        }
+
+        false
+    }
+
+    fn has_homeboy_wrapper_provenance(lines: &[&str], start: usize) -> bool {
+        let Some(line) = lines.get(start) else {
+            return false;
+        };
+
+        if Self::calls_homeboy_wrapper(line) {
+            return true;
+        }
+
+        if !line.contains("var args") && !line.contains("let args") {
+            return false;
+        }
+
+        let end = (start + 25).min(lines.len().saturating_sub(1));
+        start < end
+            && lines[start + 1..=end]
+                .iter()
+                .any(|next| Self::calls_homeboy_wrapper(next) && next.contains("args"))
+    }
+
+    fn is_homeboy_command_candidate(tokens: &[String]) -> bool {
+        let Some(command) = tokens.first() else {
+            return false;
+        };
+        current_command_surface().contains_path(&[command.as_str()])
+    }
+
+    fn is_homeboy_binary_token(token: &str) -> bool {
+        token
+            .rsplit(['/', '\\'])
+            .next()
+            .is_some_and(|name| name == "homeboy")
+    }
+
+    fn calls_homeboy_wrapper(line: &str) -> bool {
+        line.contains("executeCommand(")
+            || line.contains("executeWithStdin(")
+            || line.contains("cli.execute(")
+    }
+}
+
+struct PlaceholderSynthesizer;
+
+impl PlaceholderSynthesizer {
+    const DYNAMIC_PLACEHOLDER: &'static str = "\0homeboy-dynamic-placeholder\0";
+
+    fn argv(tokens: &[String]) -> Vec<String> {
+        let command = Self::command_for_tokens(tokens);
+        let mut argv = vec!["homeboy".to_string()];
+        let mut positional_index = 0;
+
+        for (index, token) in tokens.iter().enumerate() {
+            if token != Self::DYNAMIC_PLACEHOLDER {
+                argv.push(token.clone());
+                continue;
+            }
+
+            let arg = Self::preceding_value_arg(tokens, index, &command).or_else(|| {
+                let positional = Self::positional_arg(&command, positional_index);
+                positional_index += 1;
+                positional
+            });
+            argv.push(
+                arg.map(Self::placeholder_for_arg)
+                    .unwrap_or_else(|| "value".to_string()),
+            );
+        }
+
+        argv
+    }
+
+    fn command_for_tokens(tokens: &[String]) -> Command {
+        let mut command = Cli::command();
+
+        for token in tokens {
+            if token == Self::DYNAMIC_PLACEHOLDER || token.starts_with('-') {
+                break;
+            }
+
+            let Some(subcommand) = command
+                .get_subcommands()
+                .find(|subcommand| Self::subcommand_name_matches(subcommand, token))
+            else {
+                break;
+            };
+            command = subcommand.clone();
+        }
+
+        command
+    }
+
+    fn subcommand_name_matches(command: &Command, token: &str) -> bool {
+        command.get_name() == token || command.get_visible_aliases().any(|alias| alias == token)
+    }
+
+    fn preceding_value_arg<'a>(
+        tokens: &[String],
+        index: usize,
+        command: &'a Command,
+    ) -> Option<&'a Arg> {
+        let previous = tokens.get(index.checked_sub(1)?)?;
+        let arg = if let Some(long) = previous.strip_prefix("--") {
+            command
+                .get_arguments()
+                .find(|arg| arg.get_long() == Some(long))
+        } else if previous.starts_with('-') && previous.len() == 2 {
+            let short = previous.chars().nth(1)?;
+            command
+                .get_arguments()
+                .find(|arg| arg.get_short() == Some(short))
+        } else {
+            None
+        }?;
+
+        if Self::arg_takes_value(arg) {
+            Some(arg)
+        } else {
+            None
+        }
+    }
+
+    fn positional_arg(command: &Command, index: usize) -> Option<&Arg> {
+        command
+            .get_arguments()
+            .filter(|arg| arg.is_positional())
+            .nth(index)
+    }
+
+    fn arg_takes_value(arg: &Arg) -> bool {
+        !matches!(
+            arg.get_action(),
+            ArgAction::SetTrue | ArgAction::SetFalse | ArgAction::Count | ArgAction::Help
+        )
+    }
+
+    fn placeholder_for_arg(arg: &Arg) -> String {
+        if let Some(value) = arg
+            .get_possible_values()
+            .into_iter()
+            .find(|value| !value.is_hide_set())
+        {
+            return value.get_name().to_string();
+        }
+
+        if Self::is_numeric_arg(arg) {
+            "1".to_string()
+        } else {
+            "value".to_string()
+        }
+    }
+
+    fn is_numeric_arg(arg: &Arg) -> bool {
+        let type_id = arg.get_value_parser().type_id();
+        type_id == TypeId::of::<u8>()
+            || type_id == TypeId::of::<u16>()
+            || type_id == TypeId::of::<u32>()
+            || type_id == TypeId::of::<u64>()
+            || type_id == TypeId::of::<u128>()
+            || type_id == TypeId::of::<usize>()
+            || type_id == TypeId::of::<i8>()
+            || type_id == TypeId::of::<i16>()
+            || type_id == TypeId::of::<i32>()
+            || type_id == TypeId::of::<i64>()
+            || type_id == TypeId::of::<i128>()
+            || type_id == TypeId::of::<isize>()
+            || Self::arg_value_names(arg)
+                .iter()
+                .any(|name| Self::is_numeric_name(name))
+    }
+
+    fn arg_value_names(arg: &Arg) -> Vec<String> {
+        arg.get_value_names()
+            .map(|names| names.iter().map(|name| name.to_string()).collect())
+            .unwrap_or_else(|| vec![arg.get_id().to_string()])
+    }
+
+    fn is_numeric_name(name: &str) -> bool {
+        let normalized = name.to_ascii_lowercase().replace(['-', '_'], "");
+        matches!(
+            normalized.as_str(),
+            "n" | "num"
+                | "number"
+                | "count"
+                | "limit"
+                | "maxdepth"
+                | "depth"
+                | "lines"
+                | "line"
+                | "context"
+                | "port"
+                | "pid"
+                | "id"
+                | "index"
+        )
+    }
 }
 
 #[cfg(test)]
@@ -565,6 +735,122 @@ func buildArgs(id: String) -> [String] {
         let findings = analyze_swift_file("ArgumentFixtures.swift", source);
 
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn dynamic_placeholders_match_typed_clap_options() {
+        let source = r#"
+func dbSearch(projectId: String, table: String, column: String, pattern: String, limit: String, subtarget: String) {
+    let args = ["db", "search", projectId, table, "--column", column, "--pattern", pattern, "--limit", limit, "--subtarget", subtarget]
+    try await cli.executeCommand(args)
+}
+
+func fileFind(projectId: String, path: String, name: String, maxDepth: String) {
+    let args = ["file", "find", projectId, path, "--name", name, "--max-depth", maxDepth]
+    try await cli.executeCommand(args)
+}
+
+func logsShow(projectId: String, path: String, lines: String) {
+    let args = ["logs", "show", projectId, path, "-n", lines]
+    try await cli.executeCommand(args)
+}
+
+func logsSearchShortContext(projectId: String, path: String, pattern: String, lines: String, context: String) {
+    let args = ["logs", "search", projectId, path, pattern, "-n", lines, "-C", context]
+    try await cli.executeCommand(args)
+}
+
+func logsSearchLongContext(projectId: String, path: String, pattern: String, context: String) {
+    let args = ["logs", "search", projectId, path, pattern, "--context", context]
+    try await cli.executeCommand(args)
+}
+"#;
+
+        let findings = analyze_swift_file("HomeboyCLI.swift", source);
+
+        assert!(findings.is_empty(), "unexpected findings: {findings:#?}");
+    }
+
+    #[test]
+    fn synthesized_argv_uses_numeric_values_for_numeric_flags() {
+        let cases = [
+            (
+                vec![
+                    "db",
+                    "search",
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    "--column",
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    "--pattern",
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    "--limit",
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                ],
+                "--limit",
+            ),
+            (
+                vec![
+                    "file",
+                    "find",
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    "--max-depth",
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                ],
+                "--max-depth",
+            ),
+            (
+                vec![
+                    "logs",
+                    "show",
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    "--lines",
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                ],
+                "--lines",
+            ),
+            (
+                vec![
+                    "logs",
+                    "search",
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                    "-C",
+                    PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER,
+                ],
+                "-C",
+            ),
+        ];
+
+        for (tokens, flag) in cases {
+            let tokens = tokens.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let argv = PlaceholderSynthesizer::argv(&tokens);
+            let flag_index = argv.iter().position(|token| token == flag).unwrap();
+
+            assert_eq!(argv.get(flag_index + 1).map(String::as_str), Some("1"));
+        }
+    }
+
+    #[test]
+    fn synthesized_argv_uses_possible_value_for_enum_flags() {
+        let tokens = vec![
+            "review".to_string(),
+            PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER.to_string(),
+            "--report".to_string(),
+            PlaceholderSynthesizer::DYNAMIC_PLACEHOLDER.to_string(),
+        ];
+
+        let argv = PlaceholderSynthesizer::argv(&tokens);
+
+        assert_eq!(
+            argv.get(argv.iter().position(|token| token == "--report").unwrap() + 1)
+                .map(String::as_str),
+            Some("pr-comment")
+        );
+        Cli::try_parse_from(argv).expect("synthesized enum value should parse");
     }
 
     #[test]
