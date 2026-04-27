@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.12.1] - 2026-04-27
+
+### Fixed
+- adopt shared resolve context
+
 ## [1.12.0] - 2026-04-27
 
 ### Added
