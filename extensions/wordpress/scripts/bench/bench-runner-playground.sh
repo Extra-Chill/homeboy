@@ -200,11 +200,56 @@ if [ "$BENCH_WORKLOADS_JSON" = "null" ] && [ -n "${HOMEBOY_BENCH_WORKLOADS:-}" ]
     BENCH_WORKLOADS_JSON=$(jq -Rn --arg value "$HOMEBOY_BENCH_WORKLOADS" '$value')
 fi
 
+# Extract `bench_site_mode` from the merged settings JSON. Default `fresh`
+# preserves the historical wp-phpunit install path. `installed` mounts a
+# persisted /wordpress tree from HOMEBOY_BENCH_SHARED_STATE, lets Playground
+# prepare that tree on the first run, and has the PHP runner boot wp-load.php
+# instead of re-running wp-phpunit install.php on warm runs.
+BENCH_SITE_MODE="${HOMEBOY_BENCH_SITE_MODE:-fresh}"
+if [ -z "${HOMEBOY_BENCH_SITE_MODE:-}" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.bench_site_mode // "fresh"' 2>/dev/null || echo "fresh")
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        BENCH_SITE_MODE="$extracted"
+    fi
+fi
+case "$BENCH_SITE_MODE" in
+    fresh|installed)
+        ;;
+    *)
+        echo "Error: bench_site_mode must be 'fresh' or 'installed' (got '$BENCH_SITE_MODE')" >&2
+        FAILED_STEP="Bench site mode setup"
+        exit 1
+        ;;
+esac
+
+# Optional Playground blueprint JSON. Non-empty objects are written to a host
+# tempfile and passed to wp-playground-cli --blueprint so cold-boot scenarios
+# can measure plugin/theme installation as part of Playground bootstrap.
+PLAYGROUND_BLUEPRINT_JSON="{}"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.playground_blueprint // {}' 2>/dev/null || echo "{}")
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        PLAYGROUND_BLUEPRINT_JSON="$extracted"
+    fi
+fi
+
+# Optional direct pass-through for Playground's own install-mode flag. Most
+# components should use bench_site_mode; this is a narrow escape hatch for
+# runner-level experiments without teaching homeboy core about Playground.
+PLAYGROUND_WORDPRESS_INSTALL_MODE=""
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground_wordpress_install_mode // empty' 2>/dev/null || true)
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        PLAYGROUND_WORDPRESS_INSTALL_MODE="$extracted"
+    fi
+fi
+
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
 
 # ---------------------------------------------------------------------------
 # Build VFS mount args (mirrors test-runner-playground.sh shape)
 # ---------------------------------------------------------------------------
+MOUNT_BEFORE_INSTALL_ARGS=()
 MOUNT_ARGS=()
 MOUNT_ARGS+=("--mount" "${PLUGIN_PATH}:/wordpress/wp-content/plugins/${PLUGIN_SLUG}")
 
@@ -265,6 +310,36 @@ if [ -n "$SHARED_STATE_HOST" ]; then
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
         echo "DEBUG: [bench:playground] Shared state: ${SHARED_STATE_HOST} → ${SHARED_STATE_GUEST}"
     fi
+fi
+
+if [ "$BENCH_SITE_MODE" = "installed" ]; then
+    if [ -z "$SHARED_STATE_HOST" ]; then
+        echo "Error: bench_site_mode=installed requires HOMEBOY_BENCH_SHARED_STATE so /wordpress can persist across runs." >&2
+        FAILED_STEP="Installed-site bench setup"
+        exit 1
+    fi
+    SITE_STATE_HOST="${SHARED_STATE_HOST}/wordpress"
+    mkdir -p "$SITE_STATE_HOST"
+    MOUNT_BEFORE_INSTALL_ARGS+=("--mount-before-install" "${SITE_STATE_HOST}:/wordpress")
+    if [ -z "$PLAYGROUND_WORDPRESS_INSTALL_MODE" ]; then
+        if [ -f "${SITE_STATE_HOST}/wp-load.php" ]; then
+            PLAYGROUND_WORDPRESS_INSTALL_MODE="install-from-existing-files-if-needed"
+        else
+            PLAYGROUND_WORDPRESS_INSTALL_MODE="download-and-install"
+        fi
+    fi
+else
+    if [ -z "$PLAYGROUND_WORDPRESS_INSTALL_MODE" ]; then
+        PLAYGROUND_WORDPRESS_INSTALL_MODE="download-and-install"
+    fi
+fi
+
+BLUEPRINT_TMPFILE=""
+BLUEPRINT_ARGS=()
+if printf '%s' "$PLAYGROUND_BLUEPRINT_JSON" | jq -e 'type == "object" and length > 0' >/dev/null 2>&1; then
+    BLUEPRINT_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/pg-blueprint.XXXXXX.json")
+    printf '%s' "$PLAYGROUND_BLUEPRINT_JSON" > "$BLUEPRINT_TMPFILE"
+    BLUEPRINT_ARGS+=("--blueprint" "$BLUEPRINT_TMPFILE")
 fi
 
 INSTANCE_ID="${HOMEBOY_BENCH_INSTANCE_ID:-0}"
@@ -332,6 +407,7 @@ sed \
     -e "s|{{CONCURRENCY}}|${CONCURRENCY}|g" \
     -e "s|{{LIST_ONLY}}|${LIST_ONLY_PHP}|g" \
     -e "s|{{RESULT_SUFFIX}}|${RESULT_SUFFIX}|g" \
+    -e "s|{{BENCH_SITE_MODE}}|${BENCH_SITE_MODE}|g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_WORKLOADS_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
@@ -342,24 +418,33 @@ echo "Running performance benchmarks via WordPress Playground..."
 echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
 echo "  Iterations: ${ITERATIONS}"
 echo "  Backend: playground (PHP-WASM + SQLite)"
+echo "  Site mode: ${BENCH_SITE_MODE}"
 if [ "$LIST_ONLY" = "1" ]; then
     echo "  Mode: list only"
 fi
 if [ -n "$SHARED_STATE_GUEST" ]; then
     echo "  Shared state: ${SHARED_STATE_HOST} (instance ${INSTANCE_ID}/${CONCURRENCY})"
 fi
+if [ -n "$BLUEPRINT_TMPFILE" ]; then
+    echo "  Playground blueprint: enabled"
+fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "  Wrapper: $WRAPPER_TMPFILE"
+    echo "  Mount-before-install args: ${MOUNT_BEFORE_INSTALL_ARGS[*]}"
     echo "  Mount args: ${MOUNT_ARGS[*]}"
+    echo "  WordPress install mode: ${PLAYGROUND_WORDPRESS_INSTALL_MODE}"
 fi
 
 BENCH_TMPFILE=$(mktemp)
 
 set +e
 "$PLAYGROUND_CLI" php \
+    "${MOUNT_BEFORE_INSTALL_ARGS[@]}" \
     "${MOUNT_ARGS[@]}" \
     "--mount" "${WRAPPER_TMPFILE}:/runner.php" \
+    "${BLUEPRINT_ARGS[@]}" \
+    "--wordpress-install-mode=${PLAYGROUND_WORDPRESS_INSTALL_MODE}" \
     --wp=6.9 \
     --verbosity=normal \
     -- /runner.php \
@@ -367,7 +452,7 @@ set +e
 playground_exit=${PIPESTATUS[0]}
 set -e
 
-rm -f "$WRAPPER_TMPFILE"
+rm -f "$WRAPPER_TMPFILE" "$BLUEPRINT_TMPFILE"
 
 BENCH_LOG=""
 if [ -f "$RESULT_LOG" ]; then

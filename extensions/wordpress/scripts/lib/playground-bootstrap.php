@@ -12,6 +12,7 @@
  * Stages provided:
  *   - boot           — render wp-tests-config.php, load composer autoloader
  *   - install        — wp-phpunit install.php (creates WP + tables in-process)
+ *   - load_wordpress — wp-load.php for already-installed persisted sites
  *   - load_deps      — load Plugin-Name-headed entry files for declared deps
  *   - load_component — load the plugin/theme under test
  *
@@ -214,11 +215,37 @@ function pg_install_diagnostics_handlers() {
  * /tmp/wp-tests-config.php (the canonical location wp-phpunit's install.php
  * expects). The path is also returned so callers don't have to hard-code it.
  *
- * @return string Path to the generated wp-tests-config.php.
+ *   - skip_test_config: when true, do not write the wp-phpunit config or
+ *     define the canonical test DB constants. Extra defines are applied to
+ *     the current process directly so installed-site runs can boot the
+ *     persisted site's own wp-config.php without test-config pollution.
+ *
+ * @return string|null Path to the generated wp-tests-config.php, or null when skipped.
  */
-function pg_run_boot_stage(array $cfg = []): string {
+function pg_run_boot_stage(array $cfg = []): ?string {
     pg_stage_begin('boot');
     try {
+        $extra_defines = $cfg['extra_defines'] ?? [];
+        $skip_test_config = !empty($cfg['skip_test_config']);
+
+        if ($skip_test_config) {
+            if (!empty($extra_defines) && is_array($extra_defines)) {
+                foreach ($extra_defines as $name => $value) {
+                    if (!is_string($name) || !preg_match('/^[A-Z_][A-Z0-9_]*$/i', $name)) {
+                        pg_log("NOTICE: skipping invalid wp_config_defines key: " . var_export($name, true));
+                        continue;
+                    }
+                    if (!defined($name)) {
+                        define($name, $value);
+                    }
+                }
+            }
+
+            require_once '/homeboy-extension/vendor/autoload.php';
+            pg_stage_ok('boot');
+            return null;
+        }
+
         $config_path = '/tmp/wp-tests-config.php';
         $config = <<<'CONFIG'
 <?php
@@ -238,7 +265,6 @@ define('FS_CHMOD_DIR', 0755);
 define('FS_METHOD', 'direct');
 CONFIG;
 
-        $extra_defines = $cfg['extra_defines'] ?? [];
         if (!empty($extra_defines) && is_array($extra_defines)) {
             $config .= "\n\n// Component-declared wp_config_defines.\n";
             foreach ($extra_defines as $name => $value) {
@@ -297,6 +323,32 @@ function pg_run_install_stage(array $cfg) {
         pg_stage_ok('install');
     } catch (Throwable $e) {
         pg_stage_fail('install', $e);
+        exit(1);
+    }
+}
+
+/**
+ * Run the `load_wordpress` stage: boot an already-installed WordPress site.
+ *
+ * Installed-site bench mode lets Playground prepare `/wordpress` before the
+ * runner starts (usually from a shared-state mount), then this stage loads the
+ * persisted site's own wp-config.php/wp-settings.php instead of running the
+ * wp-phpunit installer again.
+ */
+function pg_run_load_wordpress_stage(array $cfg = []) {
+    pg_stage_begin('load_wordpress');
+    try {
+        $wp_load_path = $cfg['wp_load_path'] ?? '/wordpress/wp-load.php';
+        if (!file_exists($wp_load_path)) {
+            throw new RuntimeException("wp-load.php not found at $wp_load_path");
+        }
+        require_once $wp_load_path;
+        while (ob_get_level() > 0) {
+            @ob_end_clean();
+        }
+        pg_stage_ok('load_wordpress');
+    } catch (Throwable $e) {
+        pg_stage_fail('load_wordpress', $e);
         exit(1);
     }
 }

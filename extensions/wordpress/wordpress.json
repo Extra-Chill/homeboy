@@ -355,6 +355,27 @@
       "type": "object",
       "default": {},
       "description": "Map of NAME => value forwarded into Playground PHP-WASM as environment variables. Workloads (bench) and test fixtures (test runner) read them via getenv() / $_ENV. Required because host shell env doesn't cross the wp-playground-cli sandbox boundary; without this seam, getenv('MY_KNOB') returns false regardless of what the parent shell set. Values are coerced to strings (via json_encode for non-scalars) per PHP env-var convention. Component declares static defaults; matrix drivers can synthesize HOMEBOY_SETTINGS_JSON inline to override per-cell."
+    },
+    {
+      "id": "playground_blueprint",
+      "label": "Playground blueprint",
+      "type": "object",
+      "default": {},
+      "description": "Blueprint JSON passed to wp-playground-cli --blueprint before bench workloads run. Use this for cold-boot scenarios that need plugins, themes, site options, or seeded content installed during Playground bootstrap. Empty object means stock WordPress."
+    },
+    {
+      "id": "bench_site_mode",
+      "label": "Bench site mode",
+      "type": "string",
+      "default": "fresh",
+      "description": "WordPress bench boot shape. 'fresh' preserves the historical wp-phpunit install stage. 'installed' requires HOMEBOY_BENCH_SHARED_STATE, mounts its wordpress/ subdirectory at /wordpress before Playground install, prepares that persisted site on the first run, skips wp-phpunit install.php, and boots the site with wp-load.php for warm installed-site runs."
+    },
+    {
+      "id": "playground_wordpress_install_mode",
+      "label": "Playground WordPress install mode",
+      "type": "string",
+      "default": "",
+      "description": "Optional pass-through for wp-playground-cli --wordpress-install-mode. Leave empty unless a bench needs a non-default Playground install policy; bench_site_mode chooses the normal default for fresh versus installed runs."
     }
   ]
 }

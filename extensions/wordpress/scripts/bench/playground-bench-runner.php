@@ -9,7 +9,7 @@
  *
  * BOOT PATH
  *
- * Reuses the four shared bootstrap stages from
+ * Reuses the shared bootstrap stages from
  * /homeboy-extension/scripts/lib/playground-bootstrap.php so bench measures
  * the *same* WordPress that tests run against. A regression in `boot` or
  * `install` is therefore visible to both runners simultaneously — the only
@@ -100,7 +100,13 @@ $wp_config_defines = json_decode($wp_config_defines_raw, true);
 if (!is_array($wp_config_defines)) {
     $wp_config_defines = [];
 }
-$config_path = pg_run_boot_stage(['extra_defines' => $wp_config_defines]);
+$bench_site_mode = '{{BENCH_SITE_MODE}}';
+$installed_site_mode = $bench_site_mode === 'installed';
+
+$config_path = pg_run_boot_stage([
+    'extra_defines' => $wp_config_defines,
+    'skip_test_config' => $installed_site_mode,
+]);
 
 // Component-declared bench env vars. Host shell env doesn't propagate
 // across the wp-playground-cli sandbox boundary, so workloads' getenv()
@@ -129,7 +135,11 @@ if (is_array($bench_env)) {
     }
 }
 
-pg_run_install_stage(['config_path' => $config_path]);
+if ($installed_site_mode) {
+    pg_run_load_wordpress_stage();
+} else {
+    pg_run_install_stage(['config_path' => $config_path]);
+}
 pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
 pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 
@@ -487,7 +497,7 @@ try {
     // id makes the synthetic nature obvious in reports.
     $bootstrap_durations = pg_stage_durations_ms();
     $bootstrap_metrics = [];
-    foreach (['boot', 'install', 'load_deps', 'load_component'] as $stage) {
+    foreach (['boot', 'install', 'load_wordpress', 'load_deps', 'load_component'] as $stage) {
         if (isset($bootstrap_durations[$stage])) {
             $bootstrap_metrics["{$stage}_ms"] = $bootstrap_durations[$stage];
         }
