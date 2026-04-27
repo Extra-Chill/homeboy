@@ -14,6 +14,7 @@ use std::process::Command;
 use crate::component;
 use crate::deploy::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
 use crate::error::{Error, Result};
+use crate::git::gh_probe_succeeds;
 use crate::{fleet, project, rig};
 
 #[derive(Debug, Clone)]
@@ -705,16 +706,6 @@ fn ensure_gh_ready() -> std::result::Result<(), String> {
         return Err("gh is not authenticated for github.com".to_string());
     }
     Ok(())
-}
-
-fn gh_probe_succeeds(args: &[&str]) -> bool {
-    Command::new("gh")
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 fn run_gh(args: &[String]) -> std::result::Result<String, String> {

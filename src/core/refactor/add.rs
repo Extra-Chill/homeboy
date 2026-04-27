@@ -6,12 +6,12 @@
 //! - **Explicit**: Add imports/stubs to files matching a glob pattern.
 //!   Example: `refactor add --import "use serde::Serialize" --to "src/commands/*.rs"`
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::code_audit::CodeAuditResult;
 use crate::refactor::auto::{self, ChunkStatus, Fix, FixResult, Insertion, InsertionKind, NewFile};
 use crate::refactor::plan;
-use crate::{component, Result};
+use crate::Result;
 
 /// Result of an explicit import addition (not from audit).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -78,7 +78,7 @@ pub fn add_import(
     path: Option<&str>,
     write: bool,
 ) -> Result<AddResult> {
-    let root = resolve_root(component_id, path)?;
+    let root = super::resolve_root(component_id, path)?;
     let matched_files = resolve_target_files(&root, target)?;
 
     if matched_files.is_empty() {
@@ -147,26 +147,6 @@ pub fn add_import(
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Resolve the root directory from component ID or explicit path.
-fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> Result<PathBuf> {
-    if let Some(p) = path {
-        let pb = PathBuf::from(p);
-        if !pb.is_dir() {
-            return Err(crate::Error::validation_invalid_argument(
-                "path",
-                format!("Not a directory: {}", p),
-                None,
-                None,
-            ));
-        }
-        Ok(pb)
-    } else {
-        let comp = component::resolve(component_id)?;
-        let validated = component::validate_local_path(&comp)?;
-        Ok(validated)
-    }
-}
 
 /// Resolve target files from a glob pattern or direct file path.
 ///
