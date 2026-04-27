@@ -650,8 +650,23 @@ pub struct CliConfig {
     pub working_dir_template: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub settings_flags: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_flags: Vec<CliAutoFlag>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub help: Option<CliHelpConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliAutoFlag {
+    #[serde(default)]
+    pub when: CliAutoFlagCondition,
+    pub flag: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CliAutoFlagCondition {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_user: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

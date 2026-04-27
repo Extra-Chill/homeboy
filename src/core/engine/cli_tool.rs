@@ -8,7 +8,7 @@ use crate::engine::shell;
 use crate::engine::template::{render_map, TemplateVars};
 use crate::engine::text;
 use crate::error::ErrorCode;
-use crate::extension::{find_extension_by_tool, CliConfig};
+use crate::extension::{find_extension_by_tool, CliAutoFlag, CliConfig};
 use crate::project::{self, Project};
 use crate::server;
 use crate::server::{execute_local_command, CommandOutput};
@@ -258,20 +258,54 @@ fn build_project_command(
         }
     }
 
-    // Auto-inject --allow-root when SSH user is root (WP-CLI only)
-    if extension_id == "wordpress" {
-        if let Some(ref server_id) = project.server_id {
-            if !server_id.is_empty() {
-                if let Ok(svr) = server::load(server_id) {
-                    if svr.user == "root" {
-                        rendered.push_str(" --allow-root");
-                    }
-                }
-            }
-        }
+    for flag in matching_auto_flags(
+        extension_id,
+        cli_config,
+        project_server_user(project).as_deref(),
+    ) {
+        rendered.push(' ');
+        rendered.push_str(flag);
     }
 
     Ok((target_domain, rendered))
+}
+
+fn project_server_user(project: &Project) -> Option<String> {
+    let server_id = project.server_id.as_ref().filter(|s| !s.is_empty())?;
+    server::load(server_id).ok().map(|svr| svr.user)
+}
+
+fn matching_auto_flags<'a>(
+    extension_id: &str,
+    cli_config: &'a CliConfig,
+    server_user: Option<&str>,
+) -> Vec<&'a str> {
+    if cli_config.auto_flags.is_empty() {
+        return legacy_default_auto_flags(extension_id, server_user);
+    }
+
+    cli_config
+        .auto_flags
+        .iter()
+        .filter(|auto_flag| auto_flag_matches(auto_flag, server_user))
+        .map(|auto_flag| auto_flag.flag.as_str())
+        .collect()
+}
+
+fn legacy_default_auto_flags(extension_id: &str, server_user: Option<&str>) -> Vec<&'static str> {
+    if extension_id == "wordpress" && server_user == Some("root") {
+        vec!["--allow-root"]
+    } else {
+        Vec::new()
+    }
+}
+
+fn auto_flag_matches(auto_flag: &CliAutoFlag, server_user: Option<&str>) -> bool {
+    if let Some(expected_user) = auto_flag.when.server_user.as_deref() {
+        return server_user == Some(expected_user);
+    }
+
+    true
 }
 
 fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<String>)> {
@@ -346,4 +380,103 @@ fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<
         Some(project.id.clone()),
         None,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extension::{CliAutoFlagCondition, CliHelpConfig};
+
+    fn cli_config(auto_flags: Vec<CliAutoFlag>) -> CliConfig {
+        CliConfig {
+            tool: "wp".to_string(),
+            display_name: "WP-CLI".to_string(),
+            command_template: "{{cliPath}} {{args}}".to_string(),
+            default_cli_path: Some("wp".to_string()),
+            working_dir_template: None,
+            settings_flags: HashMap::new(),
+            auto_flags,
+            help: None::<CliHelpConfig>,
+        }
+    }
+
+    #[test]
+    fn auto_flags_match_server_user_conditions() {
+        let config = cli_config(vec![
+            CliAutoFlag {
+                when: CliAutoFlagCondition {
+                    server_user: Some("root".to_string()),
+                },
+                flag: "--allow-root".to_string(),
+            },
+            CliAutoFlag {
+                when: CliAutoFlagCondition {
+                    server_user: Some("deploy".to_string()),
+                },
+                flag: "--as-deploy".to_string(),
+            },
+        ]);
+
+        assert_eq!(
+            matching_auto_flags("wordpress", &config, Some("root")),
+            vec!["--allow-root"]
+        );
+        assert_eq!(
+            matching_auto_flags("wordpress", &config, Some("deploy")),
+            vec!["--as-deploy"]
+        );
+        assert!(matching_auto_flags("wordpress", &config, Some("www-data")).is_empty());
+        assert!(matching_auto_flags("wordpress", &config, None).is_empty());
+    }
+
+    #[test]
+    fn auto_flags_with_empty_conditions_always_apply() {
+        let config = cli_config(vec![CliAutoFlag {
+            when: CliAutoFlagCondition::default(),
+            flag: "--global-flag".to_string(),
+        }]);
+
+        assert_eq!(
+            matching_auto_flags("wordpress", &config, Some("root")),
+            vec!["--global-flag"]
+        );
+        assert_eq!(
+            matching_auto_flags("wordpress", &config, None),
+            vec!["--global-flag"]
+        );
+    }
+
+    #[test]
+    fn legacy_wordpress_auto_flag_still_applies_without_manifest_flags() {
+        let config = cli_config(Vec::new());
+
+        assert_eq!(
+            matching_auto_flags("wordpress", &config, Some("root")),
+            vec!["--allow-root"]
+        );
+        assert!(matching_auto_flags("wordpress", &config, Some("deploy")).is_empty());
+        assert!(matching_auto_flags("custom", &config, Some("root")).is_empty());
+    }
+
+    #[test]
+    fn cli_config_deserializes_manifest_auto_flags() {
+        let config: CliConfig = serde_json::from_str(
+            r#"{
+                "tool": "wp",
+                "display_name": "WP-CLI",
+                "command_template": "{{cliPath}} {{args}}",
+                "auto_flags": [
+                    { "when": { "server_user": "root" }, "flag": "--allow-root" }
+                ]
+            }"#,
+        )
+        .expect("parse cli config");
+
+        assert_eq!(config.auto_flags.len(), 1);
+        assert_eq!(
+            config.auto_flags[0].when.server_user.as_deref(),
+            Some("root")
+        );
+        assert_eq!(config.auto_flags[0].flag, "--allow-root");
+    }
 }
