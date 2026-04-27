@@ -8,6 +8,7 @@
 //   HOMEBOY_COMPONENT_PATH       — project root
 //   HOMEBOY_COMPONENT_ID         — component id (goes into envelope)
 //   HOMEBOY_BENCH_ITERATIONS     — iterations per workload
+//   HOMEBOY_BENCH_WARMUP_ITERATIONS — discarded warmups per workload (default 1)
 //   HOMEBOY_BENCH_RESULTS_FILE   — where to write the envelope
 //   HOMEBOY_BENCH_LIST_ONLY      — when 1, emit scenario inventory only
 //
@@ -24,8 +25,9 @@
 //
 // One file = one scenario. Wall-clock measured with performance.now()
 // around the function call. peak_bytes captured via process.memoryUsage().rss
-// max across iterations. One warmup iteration per workload is discarded
-// (matches WP runner — JIT/module-cache settle time).
+// max across iterations. One warmup iteration per workload is discarded by
+// default (matches WP runner — JIT/module-cache settle time), but expensive
+// workloads may set HOMEBOY_BENCH_WARMUP_ITERATIONS=0 to disable it.
 //
 // PERCENTILE METHOD
 //
@@ -59,7 +61,7 @@ const COMPONENT_ID = process.env.HOMEBOY_COMPONENT_ID;
 const RESULTS_FILE = process.env.HOMEBOY_BENCH_RESULTS_FILE;
 const ITERATIONS = Math.max(1, Number(process.env.HOMEBOY_BENCH_ITERATIONS) || 10);
 const LIST_ONLY = process.env.HOMEBOY_BENCH_LIST_ONLY === '1';
-const WARMUP = 1;
+const WARMUP = LIST_ONLY ? 0 : parseWarmupIterations(process.env.HOMEBOY_BENCH_WARMUP_ITERATIONS);
 const DEBUG = process.env.HOMEBOY_DEBUG === '1';
 
 const TIMING_METRIC_KEYS = new Set([
@@ -74,6 +76,19 @@ const TIMING_METRIC_KEYS = new Set([
 if (!PROJECT_PATH || !COMPONENT_ID || !RESULTS_FILE) {
     console.error('FATAL: missing required env vars (PROJECT_PATH/COMPONENT_ID/RESULTS_FILE)');
     process.exit(2);
+}
+
+function parseWarmupIterations(value) {
+    if (value === undefined) {
+        return 1;
+    }
+
+    if (!/^-?\d+$/.test(value)) {
+        console.error(`FATAL: HOMEBOY_BENCH_WARMUP_ITERATIONS must be an integer, got "${value}"`);
+        process.exit(2);
+    }
+
+    return Math.max(0, Number(value));
 }
 
 function validateWorkloadResult(value, iterationLabel) {
