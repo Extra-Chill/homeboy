@@ -304,6 +304,14 @@
     "settings_flags": {
       "user": "--user={{value}}"
     },
+    "auto_flags": [
+      {
+        "when": {
+          "server_user": "root"
+        },
+        "flag": "--allow-root"
+      }
+    ],
     "help": {
       "project_id_help": "Project ID (use 'homeboy project list'). For multisite: project:subtarget",
       "args_help": "WP-CLI command and arguments (space-separated, not quoted)",
