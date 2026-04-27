@@ -51,6 +51,9 @@
       "description": "Test type: 'script' (swift scripts) or 'xcodebuild' (XCTest)"
     }
   ],
+  "lint": {
+    "extension_script": "scripts/lint-runner.sh"
+  },
   "executable": {
     "runtime": {
       "setup_command": "bash {{extension_path}}/scripts/setup.sh",
