@@ -54,6 +54,7 @@ fn make_args(
             _json: HiddenJsonArgs::default(),
             json_summary: false,
             rig,
+            scenario_ids: Vec::new(),
             ignore_default_baseline,
         },
     }

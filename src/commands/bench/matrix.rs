@@ -308,6 +308,7 @@ fn run_component_with_rig_context(
             regression_threshold_percent: args.regression_threshold,
             json_summary: args.json_summary,
             passthrough_args: passthrough_args.to_vec(),
+            scenario_ids: args.scenario_ids.clone(),
             rig_id: rig_id.clone(),
             shared_state: shared_state_override.or_else(|| args.shared_state.clone()),
             concurrency: args.concurrency,
@@ -400,6 +401,7 @@ mod tests {
             _json: HiddenJsonArgs::default(),
             json_summary: false,
             rig: vec!["rig".to_string()],
+            scenario_ids: Vec::new(),
             ignore_default_baseline: false,
         };
 

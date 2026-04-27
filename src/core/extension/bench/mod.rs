@@ -13,6 +13,7 @@
 //! - `$HOMEBOY_BENCH_RESULTS_FILE` — path to write the JSON envelope to.
 //! - `$HOMEBOY_BENCH_ITERATIONS` — iterations per scenario.
 //! - `$HOMEBOY_BENCH_LIST_ONLY` — when `1`, emit scenario inventory only.
+//! - `$HOMEBOY_BENCH_SCENARIOS` — comma-separated exact scenario ids selected by `--scenario`.
 //! - `$HOMEBOY_RUN_DIR` — the per-run directory (same as test/lint/build).
 //! - Passthrough args after `--` forwarded verbatim to the script.
 //!

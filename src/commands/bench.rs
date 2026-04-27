@@ -42,6 +42,10 @@ struct BenchListArgs {
     #[arg(long, value_name = "RIG_ID", value_delimiter = ',')]
     rig: Vec<String>,
 
+    /// Only list matching benchmark scenario ids. Repeat to select multiple.
+    #[arg(long = "scenario", value_name = "SCENARIO_ID")]
+    scenario_ids: Vec<String>,
+
     #[command(flatten)]
     setting_args: SettingArgs,
 
@@ -123,6 +127,10 @@ pub struct BenchRunArgs {
     #[arg(long, value_name = "RIG_ID[,RIG_ID...]", value_delimiter = ',')]
     rig: Vec<String>,
 
+    /// Only run matching benchmark scenario ids. Repeat to select multiple.
+    #[arg(long = "scenario", value_name = "SCENARIO_ID")]
+    scenario_ids: Vec<String>,
+
     /// Skip auto-upgrading single-rig runs into a comparison even when
     /// the rig spec declares `bench.default_baseline_rig`. Use with
     /// `--baseline` / `--ratchet` against a rig that normally
@@ -154,6 +162,7 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
         "--shared-state",
         "--concurrency",
         "--regression-threshold",
+        "--scenario",
         "--rig",
         "--setting",
         "--path",
@@ -366,6 +375,7 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
                 })
                 .collect(),
             passthrough_args,
+            scenario_ids: args.scenario_ids.clone(),
             extra_workloads,
         },
         &run_dir,
@@ -552,16 +562,34 @@ mod tests {
             &script_path,
             r#"#!/bin/sh
 if [ -n "$HOMEBOY_BENCH_EXTRA_WORKLOADS" ]; then
-  scenario="rig-extra"
+  all_scenarios="rig-extra rig-slow"
 else
-  scenario="in-tree"
+  all_scenarios="in-tree slow"
 fi
+
+if [ "$HOMEBOY_BENCH_LIST_ONLY" = "1" ] || [ -z "$HOMEBOY_BENCH_SCENARIOS" ]; then
+  selected="$all_scenarios"
+else
+  selected=$(printf '%s' "$HOMEBOY_BENCH_SCENARIOS" | tr ',' ' ')
+fi
+
 cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
 {
   "component_id": "$HOMEBOY_COMPONENT_ID",
-  "iterations": 0,
+  "iterations": ${HOMEBOY_BENCH_ITERATIONS:-0},
   "scenarios": [
-    { "id": "$scenario", "iterations": 0, "metrics": { "p95_ms": 1.0 } }
+JSON
+
+comma=""
+for scenario in $selected; do
+  cat >> "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
+    $comma{ "id": "$scenario", "iterations": ${HOMEBOY_BENCH_ITERATIONS:-0}, "metrics": { "p95_ms": 1.0 } }
+JSON
+  comma=",
+"
+done
+
+cat >> "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
   ],
   "metric_policies": { "p95_ms": { "direction": "lower_is_better" } }
 }
@@ -628,8 +656,38 @@ JSON
                 path: None,
             },
             rig,
+            scenario_ids: Vec::new(),
             setting_args: SettingArgs::default(),
             args: Vec::new(),
+        }
+    }
+
+    fn run_args(component: Option<&str>, rig: Vec<String>, scenario_ids: Vec<String>) -> BenchArgs {
+        BenchArgs {
+            command: None,
+            run: BenchRunArgs {
+                comp: PositionalComponentArgs {
+                    component: component.map(str::to_string),
+                    path: None,
+                },
+                iterations: 1,
+                runs: 1,
+                shared_state: None,
+                concurrency: 1,
+                baseline_args: BaselineArgs {
+                    baseline: false,
+                    ignore_baseline: true,
+                    ratchet: false,
+                },
+                regression_threshold: 5.0,
+                setting_args: SettingArgs::default(),
+                args: Vec::new(),
+                _json: HiddenJsonArgs::default(),
+                json_summary: false,
+                rig,
+                scenario_ids,
+                ignore_default_baseline: false,
+            },
         }
     }
 
@@ -651,6 +709,27 @@ JSON
     }
 
     #[test]
+    fn parses_repeated_scenario_flags() {
+        let cli = TestCli::try_parse_from([
+            "bench",
+            "homeboy",
+            "--scenario",
+            "studio-agent-runtime",
+            "--scenario",
+            "wp-admin-load",
+        ])
+        .expect("bench --scenario should parse");
+
+        assert_eq!(
+            cli.bench.run.scenario_ids,
+            vec![
+                "studio-agent-runtime".to_string(),
+                "wp-admin-load".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn run_list_uses_rig_default_component_and_workloads() {
         with_isolated_home(|home| {
             write_bench_extension(home);
@@ -665,7 +744,7 @@ JSON
                 BenchOutput::List(result) => {
                     assert_eq!(result.component, "studio");
                     assert_eq!(result.component_id, "studio");
-                    assert_eq!(result.count, 1);
+                    assert_eq!(result.count, 2);
                     assert_eq!(result.scenarios[0].id, "rig-extra");
                 }
                 _ => panic!("expected list output"),
@@ -688,10 +767,150 @@ JSON
                 BenchOutput::List(result) => {
                     assert_eq!(result.component, "studio");
                     assert_eq!(result.component_id, "studio");
-                    assert_eq!(result.count, 1);
+                    assert_eq!(result.count, 2);
                     assert_eq!(result.scenarios[0].id, "in-tree");
                 }
                 _ => panic!("expected list output"),
+            }
+        });
+    }
+
+    #[test]
+    fn run_list_filters_selected_scenario() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let mut args = list_args(Some("studio"), Vec::new());
+            args.scenario_ids = vec!["slow".to_string()];
+            let (output, exit_code) = run_list(&args).expect("plain bench list should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::List(result) => {
+                    assert_eq!(result.count, 1);
+                    assert_eq!(result.scenarios[0].id, "slow");
+                }
+                _ => panic!("expected list output"),
+            }
+        });
+    }
+
+    #[test]
+    fn run_selects_single_scenario() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let (output, exit_code) = run(
+                run_args(Some("studio"), Vec::new(), vec!["slow".to_string()]),
+                &GlobalArgs {},
+            )
+            .expect("selected bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    let scenarios = result.results.expect("results").scenarios;
+                    assert_eq!(scenarios.len(), 1);
+                    assert_eq!(scenarios[0].id, "slow");
+                }
+                _ => panic!("expected single output"),
+            }
+        });
+    }
+
+    #[test]
+    fn run_selects_multiple_scenarios() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let (output, exit_code) = run(
+                run_args(
+                    Some("studio"),
+                    Vec::new(),
+                    vec!["in-tree".to_string(), "slow".to_string()],
+                ),
+                &GlobalArgs {},
+            )
+            .expect("selected bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    let scenario_ids: Vec<String> = result
+                        .results
+                        .expect("results")
+                        .scenarios
+                        .into_iter()
+                        .map(|scenario| scenario.id)
+                        .collect();
+                    assert_eq!(
+                        scenario_ids,
+                        vec!["in-tree".to_string(), "slow".to_string()]
+                    );
+                }
+                _ => panic!("expected single output"),
+            }
+        });
+    }
+
+    #[test]
+    fn unknown_scenario_reports_discovered_ids() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let err = match run(
+                run_args(Some("studio"), Vec::new(), vec!["missing".to_string()]),
+                &GlobalArgs {},
+            ) {
+                Ok(_) => panic!("unknown scenario should fail"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+
+            assert!(message.contains("missing"), "got: {}", message);
+            assert!(message.contains("in-tree"), "got: {}", message);
+            assert!(message.contains("slow"), "got: {}", message);
+        });
+    }
+
+    #[test]
+    fn cross_rig_run_passes_selector_to_each_rig() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig(home, "rig-a", "studio", component_a.path());
+            write_rig(home, "rig-b", "studio", component_b.path());
+
+            let (output, exit_code) = run(
+                run_args(
+                    None,
+                    vec!["rig-a".to_string(), "rig-b".to_string()],
+                    vec!["rig-slow".to_string()],
+                ),
+                &GlobalArgs {},
+            )
+            .expect("cross-rig selected bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Comparison(result) => {
+                    assert_eq!(result.rigs.len(), 2);
+                    for rig in result.rigs {
+                        let scenarios = rig.results.expect("rig results").scenarios;
+                        assert_eq!(scenarios.len(), 1);
+                        assert_eq!(scenarios[0].id, "rig-slow");
+                    }
+                }
+                _ => panic!("expected comparison output"),
             }
         });
     }

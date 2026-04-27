@@ -60,11 +60,15 @@ the other capabilities.
   run the same component + workload + iteration count against each rig in
   sequence and emit a cross-rig comparison envelope. See "Cross-rig
   comparison" below.
+- `--scenario <SCENARIO_ID>`: Run or list only the exact scenario id. May
+  be repeated. Homeboy validates selected ids against discovery before
+  execution and forwards the comma-separated selector to runners via
+  `$HOMEBOY_BENCH_SCENARIOS`.
 - `--ignore-default-baseline`: Skip automatic single-rig expansion when
   the rig declares `bench.default_baseline_rig`.
 
 Arguments after `--` are passed verbatim to the extension's bench runner
-script (e.g., `--filter=scenario_id` for selective execution).
+script.
 
 ## Scenario Discovery
 
@@ -95,8 +99,13 @@ homeboy bench my-component --baseline
 # Run with auto-ratchet on improvement
 homeboy bench my-component --ratchet
 
-# Select a single scenario via passthrough args
-homeboy bench my-component -- --filter=hot_path
+# Select a single scenario
+homeboy bench my-component --scenario hot_path
+
+# Select two scenarios in a cross-rig comparison
+homeboy bench studio --rig studio-trunk,studio-branch \
+    --scenario studio-agent-runtime \
+    --scenario wp-admin-load
 
 # Share warm state across invocations and run four instances in parallel
 homeboy bench my-component --shared-state /tmp/homeboy-bench --concurrency 4

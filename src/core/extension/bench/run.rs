@@ -35,6 +35,9 @@ pub struct BenchRunWorkflowArgs {
     pub regression_threshold_percent: f64,
     pub json_summary: bool,
     pub passthrough_args: Vec<String>,
+    /// Exact scenario ids selected by the CLI. Empty means run every
+    /// discovered scenario.
+    pub scenario_ids: Vec<String>,
     /// Optional rig identifier when bench was invoked via `--rig <id>`.
     /// Threads through to the baseline storage key so rig-pinned and
     /// unpinned baselines stay in separate slots inside `homeboy.json`.
@@ -88,6 +91,7 @@ pub struct BenchListWorkflowArgs {
     pub settings: Vec<(String, String)>,
     pub settings_json: Vec<(String, serde_json::Value)>,
     pub passthrough_args: Vec<String>,
+    pub scenario_ids: Vec<String>,
     pub extra_workloads: Vec<PathBuf>,
 }
 
@@ -127,6 +131,7 @@ pub fn run_bench_list_workflow(
             regression_threshold_percent: 0.0,
             json_summary: false,
             passthrough_args: args.passthrough_args,
+            scenario_ids: Vec::new(),
             rig_id: None,
             shared_state: None,
             concurrency: 1,
@@ -153,7 +158,10 @@ pub fn run_bench_list_workflow(
         ));
     }
 
-    let parsed = parsing::parse_bench_results_file(&results_file)?;
+    let parsed = apply_scenario_filter(
+        parsing::parse_bench_results_file(&results_file)?,
+        &args.scenario_ids,
+    )?;
     let count = parsed.scenarios.len();
 
     Ok(BenchListWorkflowResult {
@@ -162,6 +170,89 @@ pub fn run_bench_list_workflow(
         scenarios: parsed.scenarios,
         count,
     })
+}
+
+fn apply_scenario_filter(
+    mut results: BenchResults,
+    scenario_ids: &[String],
+) -> Result<BenchResults> {
+    if scenario_ids.is_empty() {
+        return Ok(results);
+    }
+
+    let discovered: Vec<String> = results.scenarios.iter().map(|s| s.id.clone()).collect();
+    let missing: Vec<String> = scenario_ids
+        .iter()
+        .filter(|id| !discovered.contains(id))
+        .cloned()
+        .collect();
+
+    if !missing.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "scenario",
+            format!(
+                "unknown bench scenario id(s): {}; discovered ids: {}",
+                missing.join(", "),
+                if discovered.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    discovered.join(", ")
+                }
+            ),
+            Some(missing.join(", ")),
+            Some(discovered),
+        ));
+    }
+
+    results
+        .scenarios
+        .retain(|scenario| scenario_ids.contains(&scenario.id));
+    Ok(results)
+}
+
+fn discover_bench_scenarios(
+    execution_context: &ExtensionExecutionContext,
+    component: &Component,
+    args: &BenchRunWorkflowArgs,
+    run_dir: &RunDir,
+) -> Result<BenchResults> {
+    let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
+    if results_file.exists() {
+        std::fs::remove_file(&results_file).map_err(|e| {
+            Error::internal_io(
+                format!(
+                    "Failed to clear previous bench discovery results file {}: {}",
+                    results_file.display(),
+                    e
+                ),
+                Some("bench.discovery.results_file".to_string()),
+            )
+        })?;
+    }
+
+    let mut discovery_args = args.clone();
+    discovery_args.scenario_ids.clear();
+
+    let runner_output = build_runner(execution_context, component, &discovery_args, run_dir, None)?
+        .env("HOMEBOY_BENCH_LIST_ONLY", "1")
+        .run()?;
+
+    if !runner_output.success {
+        return Err(Error::validation_invalid_argument(
+            "scenario",
+            format!(
+                "bench scenario discovery failed with exit code {}",
+                runner_output.exit_code
+            ),
+            Some(format!(
+                "stdout:\n{}\n\nstderr:\n{}",
+                runner_output.stdout, runner_output.stderr
+            )),
+            None,
+        ));
+    }
+
+    parsing::parse_bench_results_file(&results_file)
 }
 
 fn validate_bench_run_args(args: &BenchRunWorkflowArgs) -> Result<()> {
@@ -240,6 +331,11 @@ pub fn run_main_bench_workflow(
 
     let execution_context = resolve_execution_context(component, ExtensionCapability::Bench)?;
 
+    if !args.scenario_ids.is_empty() {
+        let discovered = discover_bench_scenarios(&execution_context, component, &args, run_dir)?;
+        apply_scenario_filter(discovered, &args.scenario_ids)?;
+    }
+
     let (parsed, runner_success, runner_exit_code, failure_stderr_tail) = if args.runs > 1 {
         run_sequential_runs(&execution_context, component, &args, run_dir)?
     } else if args.concurrency <= 1 {
@@ -247,7 +343,10 @@ pub fn run_main_bench_workflow(
         let runner_output =
             build_runner(&execution_context, component, &args, run_dir, None)?.run()?;
         let parsed = if results_file.exists() {
-            parsing::parse_bench_results_file(&results_file).ok()
+            parsing::parse_bench_results_file(&results_file)
+                .ok()
+                .map(|results| apply_scenario_filter(results, &args.scenario_ids))
+                .transpose()?
         } else {
             None
         };
@@ -427,7 +526,10 @@ fn run_single_dispatcher(
 
     let runner_output = build_runner(execution_context, component, args, run_dir, None)?.run()?;
     let parsed = if results_file.exists() {
-        Some(parsing::parse_bench_results_file(&results_file)?)
+        Some(apply_scenario_filter(
+            parsing::parse_bench_results_file(&results_file)?,
+            &args.scenario_ids,
+        )?)
     } else {
         None
     };
@@ -480,6 +582,10 @@ fn build_runner(
             "HOMEBOY_BENCH_EXTRA_WORKLOADS",
             &extra_workloads_env_value(&args.extra_workloads)?,
         );
+    }
+
+    if !args.scenario_ids.is_empty() {
+        runner = runner.env("HOMEBOY_BENCH_SCENARIOS", &args.scenario_ids.join(","));
     }
 
     if let Some(ref shared) = args.shared_state {
@@ -592,7 +698,9 @@ fn run_concurrent_instances(
         if !path.exists() {
             continue;
         }
-        let parsed = match parsing::parse_bench_results_file(&path) {
+        let parsed = match parsing::parse_bench_results_file(&path)
+            .and_then(|results| apply_scenario_filter(results, &args.scenario_ids))
+        {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -702,6 +810,7 @@ mod tests {
                 regression_threshold_percent: 5.0,
                 json_summary: false,
                 passthrough_args: Vec::new(),
+                scenario_ids: Vec::new(),
                 rig_id: None,
                 shared_state: None,
                 concurrency: 0,
