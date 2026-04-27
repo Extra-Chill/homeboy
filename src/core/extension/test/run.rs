@@ -6,7 +6,7 @@ use crate::extension::test::baseline::{self, TestBaselineComparison, TestCounts}
 use crate::extension::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope, parse_coverage_file,
     parse_failures_file, parse_test_results_file, parse_test_results_text, CoverageOutput,
-    TestScopeOutput, TestSummaryOutput,
+    FailedTest, TestScopeOutput, TestSummaryOutput,
 };
 use crate::refactor::AppliedRefactor;
 use serde::Serialize;
@@ -34,6 +34,7 @@ pub struct TestRunWorkflowResult {
     pub component: String,
     pub exit_code: i32,
     pub test_counts: Option<TestCounts>,
+    pub failed_tests: Option<Vec<FailedTest>>,
     pub coverage: Option<CoverageOutput>,
     pub baseline_comparison: Option<TestBaselineComparison>,
     pub analysis: Option<TestAnalysis>,
@@ -66,6 +67,44 @@ pub struct RawTestOutput {
 
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
 
+fn failed_tests_from_analysis_input(input: &TestAnalysisInput) -> Option<Vec<FailedTest>> {
+    if input.failures.is_empty() {
+        return None;
+    }
+
+    Some(
+        input
+            .failures
+            .iter()
+            .map(|failure| {
+                let detail = if failure.error_type.is_empty() {
+                    failure.message.clone()
+                } else if failure.message.is_empty() {
+                    failure.error_type.clone()
+                } else {
+                    format!("{}: {}", failure.error_type, failure.message)
+                };
+
+                let location = if !failure.source_file.is_empty() {
+                    if failure.source_line > 0 {
+                        format!("{}:{}", failure.source_file, failure.source_line)
+                    } else {
+                        failure.source_file.clone()
+                    }
+                } else {
+                    failure.test_file.clone()
+                };
+
+                FailedTest {
+                    name: failure.test_name.clone(),
+                    detail: (!detail.is_empty()).then_some(detail),
+                    location: (!location.is_empty()).then_some(location),
+                }
+            })
+            .collect(),
+    )
+}
+
 fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
     let lines: Vec<&str> = s.lines().collect();
     if lines.len() <= max_lines {
@@ -95,11 +134,7 @@ pub fn run_main_test_workflow(
     } else {
         None
     };
-    let failures_file = if args.analyze {
-        Some(run_dir.step_file(run_dir::files::TEST_FAILURES))
-    } else {
-        None
-    };
+    let failures_file = run_dir.step_file(run_dir::files::TEST_FAILURES);
 
     let changed_test_files = changed_scope
         .as_ref()
@@ -123,6 +158,7 @@ pub fn run_main_test_workflow(
                 component: args.component_label,
                 exit_code: 0,
                 test_counts: None,
+                failed_tests: None,
                 coverage: None,
                 baseline_comparison: None,
                 analysis: None,
@@ -174,18 +210,20 @@ pub fn run_main_test_workflow(
         .as_ref()
         .and_then(|file| parse_coverage_file(file).ok());
 
+    let failure_analysis_input = parse_failures_file(&failures_file);
+    let failed_tests = failure_analysis_input
+        .as_ref()
+        .and_then(failed_tests_from_analysis_input);
+
     let analysis = if args.analyze {
-        let analysis_input = failures_file
-            .as_ref()
-            .and_then(|file| parse_failures_file(file))
-            .unwrap_or_else(|| TestAnalysisInput {
-                failures: Vec::new(),
-                total: test_counts.as_ref().map(|counts| counts.total).unwrap_or(0),
-                passed: test_counts
-                    .as_ref()
-                    .map(|counts| counts.passed)
-                    .unwrap_or(0),
-            });
+        let analysis_input = failure_analysis_input.unwrap_or_else(|| TestAnalysisInput {
+            failures: Vec::new(),
+            total: test_counts.as_ref().map(|counts| counts.total).unwrap_or(0),
+            passed: test_counts
+                .as_ref()
+                .map(|counts| counts.passed)
+                .unwrap_or(0),
+        });
 
         Some(analyze(&args.component_id, &analysis_input))
     } else {
@@ -337,6 +375,7 @@ pub fn run_main_test_workflow(
         component: args.component_label,
         exit_code,
         test_counts,
+        failed_tests,
         coverage,
         baseline_comparison,
         analysis,
@@ -351,6 +390,7 @@ pub fn run_main_test_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension::test::TestFailure;
 
     #[test]
     fn tail_lines_returns_full_text_when_under_limit() {
@@ -388,5 +428,30 @@ mod tests {
         let (tail, truncated) = tail_lines(input, 3);
         assert_eq!(tail, input);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn failed_tests_from_analysis_input_preserves_name_detail_and_location() {
+        let input = TestAnalysisInput {
+            failures: vec![TestFailure {
+                test_name: "tests::fails".to_string(),
+                test_file: "tests/fails.rs".to_string(),
+                error_type: "AssertionFailed".to_string(),
+                message: "expected true".to_string(),
+                source_file: "src/lib.rs".to_string(),
+                source_line: 42,
+            }],
+            total: 2,
+            passed: 1,
+        };
+
+        let failed_tests = failed_tests_from_analysis_input(&input).expect("failed tests");
+        assert_eq!(failed_tests.len(), 1);
+        assert_eq!(failed_tests[0].name, "tests::fails");
+        assert_eq!(
+            failed_tests[0].detail.as_deref(),
+            Some("AssertionFailed: expected true")
+        );
+        assert_eq!(failed_tests[0].location.as_deref(), Some("src/lib.rs:42"));
     }
 }

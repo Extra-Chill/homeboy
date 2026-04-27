@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 
 use homeboy::code_audit::AuditCommandOutput;
 use homeboy::extension::lint::LintCommandOutput;
-use homeboy::extension::test::TestCommandOutput;
+use homeboy::extension::test::{FailedTest, TestCommandOutput};
 use homeboy::top_n::top_n_by;
 
 use super::{ReviewCommandOutput, ReviewStage};
@@ -206,9 +206,8 @@ fn render_lint_body(out: &mut String, output: &LintCommandOutput) {
     let _ = writeln!(out, "- _Total: {} finding(s)_", buckets.total);
 }
 
-/// Render the test stage body — failure count + pass-summary line. Per-test
-/// failure names are not surfaced in `TestCommandOutput` (no `failed_tests`
-/// field), so we summarize from `test_counts`.
+/// Render the test stage body — structured failure names when present, with
+/// the aggregate-only fallback preserved for runners that only report counts.
 fn render_test_body(out: &mut String, output: &TestCommandOutput) {
     let counts = match output.test_counts.as_ref() {
         Some(c) => c,
@@ -221,6 +220,9 @@ fn render_test_body(out: &mut String, output: &TestCommandOutput) {
             "- **{} failed** out of {} total",
             counts.failed, counts.total
         );
+        if let Some(failed_tests) = output.failed_tests.as_ref() {
+            render_failed_tests(out, failed_tests);
+        }
         if counts.passed > 0 {
             let _ = writeln!(out, "- {} passed", counts.passed);
         }
@@ -235,6 +237,27 @@ fn render_test_body(out: &mut String, output: &TestCommandOutput) {
     }
 }
 
+fn render_failed_tests(out: &mut String, failed_tests: &[FailedTest]) {
+    for failed_test in failed_tests.iter().take(TOP_N) {
+        let _ = write!(out, "- `{}`", failed_test.name);
+        if let Some(detail) = failed_test.detail.as_deref() {
+            let _ = write!(out, " — {}", detail);
+        }
+        if let Some(location) = failed_test.location.as_deref() {
+            let _ = write!(out, " (`{}`)", location);
+        }
+        out.push('\n');
+    }
+
+    if failed_tests.len() > TOP_N {
+        let _ = writeln!(
+            out,
+            "- _… {} more failed test(s)_",
+            failed_tests.len() - TOP_N
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,7 +266,7 @@ mod tests {
         AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity,
     };
     use homeboy::extension::lint::{LintCommandOutput, LintFinding};
-    use homeboy::extension::test::{TestCommandOutput, TestCounts};
+    use homeboy::extension::test::{FailedTest, TestCommandOutput, TestCounts};
     use homeboy::extension::{PhaseReport, PhaseStatus, VerificationPhase};
 
     // ── Builders for fixture envelopes ──────────────────────────────────
@@ -408,6 +431,7 @@ mod tests {
                 failed,
                 skipped,
             }),
+            failed_tests: None,
             coverage: None,
             baseline_comparison: None,
             analysis: None,
@@ -419,6 +443,20 @@ mod tests {
             summary: None,
             raw_output: None,
         }
+    }
+
+    fn failed_test(idx: usize) -> FailedTest {
+        FailedTest {
+            name: format!("tests::suite::case_{:02}", idx),
+            detail: Some(format!("assertion {} failed", idx)),
+            location: Some(format!("tests/suite.rs:{}", idx + 10)),
+        }
+    }
+
+    fn test_with_failed_tests(total: usize) -> TestCommandOutput {
+        let mut output = test_with_counts(20, total as u64, 1);
+        output.failed_tests = Some((0..total).map(failed_test).collect());
+        output
     }
 
     // ── Tests ───────────────────────────────────────────────────────────
@@ -598,6 +636,59 @@ mod tests {
             md
         );
         assert!(md.contains("- 10 passed"), "missing passed line:\n{}", md);
+    }
+
+    #[test]
+    fn renders_top_failed_tests_when_present() {
+        let mut env = passing_envelope();
+        env.test.passed = false;
+        env.test.exit_code = 1;
+        env.test.finding_count = 3;
+        env.test.output = Some(test_with_failed_tests(3));
+
+        let md = render_pr_comment(&env);
+        assert!(
+            md.contains("- **3 failed** out of 24 total"),
+            "missing aggregate line:\n{}",
+            md
+        );
+        assert!(
+            md.contains("- `tests::suite::case_00` — assertion 0 failed (`tests/suite.rs:10`)"),
+            "missing failed-test detail line:\n{}",
+            md
+        );
+        assert!(
+            md.contains("- `tests::suite::case_02` — assertion 2 failed (`tests/suite.rs:12`)"),
+            "missing final failed-test detail line:\n{}",
+            md
+        );
+    }
+
+    #[test]
+    fn caps_failed_tests_at_top_10() {
+        let mut env = passing_envelope();
+        env.test.passed = false;
+        env.test.exit_code = 1;
+        env.test.finding_count = 12;
+        env.test.output = Some(test_with_failed_tests(12));
+
+        let md = render_pr_comment(&env);
+        let bullet_count = md.matches("- `tests::suite::case_").count();
+        assert_eq!(
+            bullet_count, TOP_N,
+            "should render exactly 10 failed-test bullets:\n{}",
+            md
+        );
+        assert!(
+            md.contains("_… 2 more failed test(s)_"),
+            "missing failed-test overflow hint:\n{}",
+            md
+        );
+        assert!(
+            !md.contains("tests::suite::case_10"),
+            "should not render failed tests beyond top cap:\n{}",
+            md
+        );
     }
 
     #[test]

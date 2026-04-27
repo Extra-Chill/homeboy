@@ -3,8 +3,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-04-27T01:17:47Z",
-      "item_count": 758,
+      "created_at": "2026-04-27T01:48:54Z",
+      "item_count": 761,
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "Stack (Tests)::tests/core/stack/inspect_test.rs::MissingMethod",
@@ -244,6 +244,7 @@
         "structural::src/commands/project.rs::HighItemCount",
         "structural::src/commands/refactor.rs::GodFile",
         "structural::src/commands/refactor.rs::HighItemCount",
+        "structural::src/commands/review/render.rs::HighItemCount",
         "structural::src/commands/server.rs::HighItemCount",
         "structural::src/commands/stack.rs::HighItemCount",
         "structural::src/commands/status.rs::HighItemCount",
@@ -524,7 +525,9 @@
         "test_coverage::src/core/extension/test/drift.rs::MissingTestMethod",
         "test_coverage::src/core/extension/test/drift.rs::MissingTestMethod",
         "test_coverage::src/core/extension/test/parsing.rs::MissingTestFile",
-        "test_coverage::src/core/extension/test/report.rs::MissingTestFile",
+        "test_coverage::src/core/extension/test/report.rs::MissingTestMethod",
+        "test_coverage::src/core/extension/test/report.rs::MissingTestMethod",
+        "test_coverage::src/core/extension/test/report.rs::MissingTestMethod",
         "test_coverage::src/core/extension/test/run.rs::MissingTestMethod",
         "test_coverage::src/core/extension/test/workflow.rs::MissingTestFile",
         "test_coverage::src/core/extension/update_check.rs::MissingTestMethod",
