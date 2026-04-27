@@ -96,7 +96,7 @@ mod tests {
     use super::build_command_step_path_with_absolute_dirs;
 
     #[test]
-    fn test_command_step_path_prepends_existing_toolchain_dirs() {
+    fn test_build_command_step_path_prepends_existing_toolchain_dirs() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let home = tmp.path().join("home");
         let local = home.join(".local/bin");
