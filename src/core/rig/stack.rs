@@ -186,17 +186,17 @@ where
 }
 
 fn entry_from_output(component_id: &str, output: SyncOutput) -> RigStackSyncEntry {
-    let changed = output.picked_count > 0 || output.dropped_count > 0;
+    let changed = output.picked_count > 0 || output.preview.dropped_count > 0;
     RigStackSyncEntry {
         component_id: component_id.to_string(),
-        stack_id: output.stack_id,
+        stack_id: output.preview.stack_id,
         status: if changed { "changed" } else { "no-op" }.to_string(),
-        branch: Some(output.branch),
-        base: Some(output.base),
-        target: Some(output.target),
+        branch: Some(output.preview.branch),
+        base: Some(output.preview.base),
+        target: Some(output.preview.target),
         picked_count: output.picked_count,
         skipped_count: output.skipped_count,
-        dropped_count: output.dropped_count,
+        dropped_count: output.preview.dropped_count,
         error: None,
     }
 }

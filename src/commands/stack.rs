@@ -7,8 +7,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::stack::{
-    self, ApplyOutput, GitRef, InspectOptions, InspectOutput, PushOutput, RebaseOutput,
-    StackPrEntry, StackSpec, StatusOutput, SyncOutput,
+    self, ApplyOutput, DiffOutput, GitRef, InspectOptions, InspectOutput, PushOutput,
+    RebaseOutput, StackPrEntry, StackSpec, StatusOutput, SyncOutput,
 };
 
 use super::CmdResult;
@@ -116,6 +116,11 @@ enum StackCommand {
         /// Stack ID.
         stack_id: String,
     },
+    /// Preview what `stack sync` would change without mutating target or spec.
+    Diff {
+        /// Stack ID.
+        stack_id: String,
+    },
     /// Spec-less inspection of the current branch as a stack of commits.
     /// Replaces the previous `homeboy git stack` command (re-homed into
     /// the stack domain).
@@ -151,6 +156,7 @@ pub enum StackCommandOutput {
     Status(StackStatusOutput),
     Sync(StackSyncOutput),
     Push(StackPushOutput),
+    Diff(StackDiffOutput),
     Inspect(StackInspectOutput),
 }
 
@@ -219,6 +225,13 @@ pub struct StackPushOutput {
 }
 
 #[derive(Serialize)]
+pub struct StackDiffOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub report: DiffOutput,
+}
+
+#[derive(Serialize)]
 pub struct StackInspectOutput {
     pub command: &'static str,
     #[serde(flatten)]
@@ -260,6 +273,7 @@ pub fn run(args: StackArgs, _global: &super::GlobalArgs) -> CmdResult<StackComma
         StackCommand::Status { stack_id } => status(&stack_id),
         StackCommand::Sync { stack_id, dry_run } => sync(&stack_id, dry_run),
         StackCommand::Push { stack_id } => push(&stack_id),
+        StackCommand::Diff { stack_id } => diff(&stack_id),
         StackCommand::Inspect {
             component_id,
             base,
@@ -496,6 +510,18 @@ fn push(stack_id: &str) -> CmdResult<StackCommandOutput> {
     Ok((
         StackCommandOutput::Push(StackPushOutput {
             command: "stack.push",
+            report,
+        }),
+        0,
+    ))
+}
+
+fn diff(stack_id: &str) -> CmdResult<StackCommandOutput> {
+    let spec = stack::load(stack_id)?;
+    let report = stack::diff(&spec)?;
+    Ok((
+        StackCommandOutput::Diff(StackDiffOutput {
+            command: "stack.diff",
             report,
         }),
         0,

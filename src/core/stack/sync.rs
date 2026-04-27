@@ -41,11 +41,27 @@ use super::git::run_git;
 use super::pr_meta::fetch_pr_meta;
 pub(crate) use super::pr_meta::StackPrMeta as PrMeta;
 use super::spec::{resolve_existing_component_path, save, StackPrEntry, StackSpec};
-use super::status::{commit_reachable, patch_in_base};
+use super::status::{commit_reachable, count_revs, git_ref_exists, patch_in_base};
 
 /// Output envelope for `homeboy stack sync`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncOutput {
+    #[serde(flatten)]
+    pub preview: SyncPreview,
+    /// PRs cherry-picked onto the rebuilt target branch.
+    pub applied: Vec<AppliedPr>,
+    /// `true` when called with `--dry-run`: the spec on disk was NOT
+    /// mutated and no cherry-picks ran.
+    pub dry_run: bool,
+    pub picked_count: usize,
+    pub skipped_count: usize,
+    pub success: bool,
+}
+
+/// Shared read-only sync preview. Used directly by `stack diff` and flattened
+/// into `stack sync` output.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncPreview {
     pub stack_id: String,
     pub component_path: String,
     pub branch: String,
@@ -54,16 +70,28 @@ pub struct SyncOutput {
     /// PRs auto-removed from the spec because they were upstream-merged
     /// AND their content was already in base.
     pub dropped: Vec<DroppedPr>,
-    /// PRs cherry-picked onto the rebuilt target branch.
-    pub applied: Vec<AppliedPr>,
-    /// `true` when called with `--dry-run`: the spec on disk was NOT
-    /// mutated and no cherry-picks ran.
-    pub dry_run: bool,
-    pub picked_count: usize,
-    pub skipped_count: usize,
+    /// PRs that `sync` would replay (or did replay) after rebuilding target.
+    pub replayed: Vec<ReplayedPr>,
+    /// PRs that could not be classified because metadata or head-fetching
+    /// failed. `sync` refuses to mutate while this list is non-empty.
+    pub uncertain: Vec<UncertainPr>,
+    /// Whether the local target branch currently exists.
+    pub target_exists: bool,
+    /// `git rev-list --count <base>..<target>` before sync mutates anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_ahead: Option<usize>,
+    /// `git rev-list --count <target>..<base>` before sync mutates anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_behind: Option<usize>,
     pub dropped_count: usize,
+    pub replayed_count: usize,
+    pub uncertain_count: usize,
+    pub would_mutate: bool,
+    pub blocked: bool,
     pub success: bool,
 }
+
+pub type DiffOutput = SyncPreview;
 
 /// One PR auto-removed from the spec.
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +104,42 @@ pub struct DroppedPr {
     pub merged_at: Option<String>,
     /// Human-readable reason — e.g. "merged upstream and content in base".
     pub reason: String,
+}
+
+/// One PR that would be replayed during `sync`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplayedPr {
+    pub repo: String,
+    pub number: u64,
+    pub sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub reason: String,
+}
+
+/// One PR whose sync outcome could not be decided safely.
+#[derive(Debug, Clone, Serialize)]
+pub struct UncertainPr {
+    pub repo: String,
+    pub number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SyncPlan {
+    pub preview: SyncPreview,
+    #[serde(skip)]
+    kept_entries: Vec<StackPrEntry>,
+    #[serde(skip)]
+    kept_metas: Vec<PrMeta>,
 }
 
 /// Decide whether a PR should be dropped from the spec.
@@ -97,46 +161,67 @@ pub(crate) fn is_droppable(meta: &PrMeta, path: &str, base_ref: &str) -> bool {
     patch_in_base(path, &meta.head_sha, base_ref).unwrap_or(false)
 }
 
-/// Sync a stack: rebuild target from base, auto-drop merged PRs, replay
-/// the rest.
-pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
+/// Build the shared read-only plan consumed by `stack diff`, `sync --dry-run`,
+/// and the mutating `sync` path.
+pub(crate) fn plan_sync(spec: &StackSpec) -> Result<SyncPlan> {
     let path = resolve_existing_component_path(spec)?;
 
-    // 1. Fetch base — must succeed so droppability checks are honest.
+    // Fetch base so ahead/behind and droppability checks are honest. This
+    // updates remote-tracking refs only; it does not touch target or the spec.
     fetch_remote_branch(&path, &spec.base.remote, &spec.base.branch)?;
-    // Best-effort fetch target; failure is fine on a fresh stack.
+    // Best-effort fetch target; a fresh stack may not have pushed it yet.
     let _ = fetch_remote_branch(&path, &spec.target.remote, &spec.target.branch);
 
     let base_ref = format!("{}/{}", spec.base.remote, spec.base.branch);
+    let target_branch = &spec.target.branch;
+    let target_exists = git_ref_exists(&path, target_branch);
+    let (target_ahead, target_behind) = if target_exists {
+        (
+            count_revs(&path, &base_ref, target_branch),
+            count_revs(&path, target_branch, &base_ref),
+        )
+    } else {
+        (None, None)
+    };
 
-    // 2. Resolve metadata for every PR up front. We need head SHAs locally
-    //    BEFORE deciding droppability — `commit_reachable` and
-    //    `patch_in_base` both require the SHA to be in the object store.
-    //    Use a temp remote per fork (same machinery as `apply`).
     let mut ensured_remotes: HashSet<String> = HashSet::new();
-    let mut metas: Vec<PrMeta> = Vec::with_capacity(spec.prs.len());
+    let mut dropped = Vec::new();
+    let mut replayed = Vec::new();
+    let mut uncertain = Vec::new();
+    let mut kept_entries = Vec::new();
+    let mut kept_metas = Vec::new();
 
     for pr in &spec.prs {
-        let meta = fetch_pr_meta(pr)?;
-        let head = meta.require_head(pr)?;
-        // Fetch the head SHA into the local object store before asking
-        // git about reachability/patch-id.
-        let head_remote = ensure_head_remote(&path, pr, &head, &mut ensured_remotes)?;
-        if !meta.head_sha.is_empty() {
-            // Best-effort fetch — a 404 here means the SHA is gone from
-            // the head repo (force-pushed away). is_droppable() will then
-            // return false and the cherry-pick path will surface the real
-            // error.
-            let _ = fetch_sha(&path, &head_remote, &meta.head_sha);
-        }
-        metas.push(meta);
-    }
+        let meta = match fetch_pr_meta(pr) {
+            Ok(meta) => meta,
+            Err(e) => {
+                uncertain.push(uncertain_pr(pr, e.to_string()));
+                continue;
+            }
+        };
 
-    // 3. Partition into drop list + pick list, preserving spec order.
-    let mut dropped: Vec<DroppedPr> = Vec::new();
-    let mut keep_indices: Vec<usize> = Vec::new();
-    for (idx, (pr, meta)) in spec.prs.iter().zip(metas.iter()).enumerate() {
-        if is_droppable(meta, &path, &base_ref) {
+        let head = match meta.require_head(pr) {
+            Ok(head) => head,
+            Err(e) => {
+                uncertain.push(uncertain_pr(pr, e.to_string()));
+                continue;
+            }
+        };
+
+        let head_remote = match ensure_head_remote(&path, pr, &head, &mut ensured_remotes) {
+            Ok(remote) => remote,
+            Err(e) => {
+                uncertain.push(uncertain_pr(pr, e.to_string()));
+                continue;
+            }
+        };
+
+        if let Err(e) = fetch_sha(&path, &head_remote, &meta.head_sha) {
+            uncertain.push(uncertain_pr(pr, e.to_string()));
+            continue;
+        }
+
+        if is_droppable(&meta, &path, &base_ref) {
             dropped.push(DroppedPr {
                 repo: pr.repo.clone(),
                 number: pr.number,
@@ -145,50 +230,111 @@ pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
                 reason: "merged upstream and content in base".to_string(),
             });
         } else {
-            keep_indices.push(idx);
+            replayed.push(ReplayedPr {
+                repo: pr.repo.clone(),
+                number: pr.number,
+                sha: meta.head_sha.clone(),
+                title: meta.title.clone(),
+                url: meta.url.clone(),
+                upstream_state: Some(meta.state.clone()),
+                note: pr.note.clone(),
+                reason: replay_reason(&meta).to_string(),
+            });
+            kept_entries.push(pr.clone());
+            kept_metas.push(meta);
         }
     }
 
     let dropped_count = dropped.len();
+    let replayed_count = replayed.len();
+    let uncertain_count = uncertain.len();
+    let blocked = uncertain_count > 0;
+    let would_mutate = sync_would_mutate(
+        target_exists,
+        target_ahead,
+        target_behind,
+        dropped_count,
+        replayed_count,
+    );
+
+    Ok(SyncPlan {
+        preview: SyncPreview {
+            stack_id: spec.id.clone(),
+            component_path: path,
+            branch: spec.target.branch.clone(),
+            base: spec.base.display(),
+            target: spec.target.display(),
+            target_exists,
+            target_ahead,
+            target_behind,
+            dropped,
+            replayed,
+            uncertain,
+            dropped_count,
+            replayed_count,
+            uncertain_count,
+            would_mutate,
+            blocked,
+            success: true,
+        },
+        kept_entries,
+        kept_metas,
+    })
+}
+
+/// Read-only preview for `homeboy stack diff`.
+pub fn diff(spec: &StackSpec) -> Result<DiffOutput> {
+    let plan = plan_sync(spec)?;
+    Ok(plan.preview)
+}
+
+/// Sync a stack: rebuild target from base, auto-drop merged PRs, replay
+/// the rest.
+pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
+    let plan = plan_sync(spec)?;
 
     if dry_run {
         // Report what WOULD happen; mutate nothing.
-        return Ok(sync_output(
-            spec,
-            path,
-            dropped,
-            Vec::new(),
-            true,
-            0,
-            0,
-            dropped_count,
-        ));
+        return Ok(sync_output(plan, Vec::new(), true, 0, 0));
+    }
+
+    if plan.preview.blocked {
+        let summary = plan
+            .preview
+            .uncertain
+            .iter()
+            .map(|p| format!("{}#{}: {}", p.repo, p.number, p.error))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Error::git_command_failed(format!(
+            "stack sync {} is blocked by uncertain PR metadata: {}",
+            spec.id, summary
+        )));
     }
 
     // 4. Persist the pruned spec BEFORE any cherry-picks. A partial pick
     //    failure leaves a half-applied target but a correct spec — re-run
     //    cleanly rebuilds.
-    let kept: Vec<StackPrEntry> = keep_indices.iter().map(|i| spec.prs[*i].clone()).collect();
-    let kept_metas: Vec<PrMeta> = keep_indices.iter().map(|i| metas[*i].clone()).collect();
-    if dropped_count > 0 {
-        spec.prs = kept.clone();
+    if plan.preview.dropped_count > 0 {
+        spec.prs = plan.kept_entries.clone();
         save(spec)?;
     } else {
-        // No spec mutation needed — but keep `kept`/`kept_metas` so the
-        // pick loop has consistent indexing.
-        spec.prs = kept.clone();
+        // No spec mutation needed — but keep `spec.prs` aligned with the
+        // plan so the pick loop has consistent indexing.
+        spec.prs = plan.kept_entries.clone();
     }
 
     // 5. Force-recreate target locally from base.
-    checkout_force(&path, &spec.target.branch, &base_ref)?;
+    let base_ref = format!("{}/{}", spec.base.remote, spec.base.branch);
+    checkout_force(&plan.preview.component_path, &spec.target.branch, &base_ref)?;
 
     // 6. Cherry-pick the kept PRs.
-    let mut applied: Vec<AppliedPr> = Vec::with_capacity(kept.len());
+    let mut applied: Vec<AppliedPr> = Vec::with_capacity(plan.kept_entries.len());
     let mut picked = 0usize;
     let mut skipped = 0usize;
 
-    for (pr, meta) in kept.iter().zip(kept_metas.iter()) {
-        match cherry_pick(&path, &meta.head_sha)? {
+    for (pr, meta) in plan.kept_entries.iter().zip(plan.kept_metas.iter()) {
+        match cherry_pick(&plan.preview.component_path, &meta.head_sha)? {
             CherryPickResult::Picked => {
                 picked += 1;
                 applied.push(AppliedPr {
@@ -210,7 +356,7 @@ pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
                 });
             }
             CherryPickResult::Conflict(message) => {
-                let _ = run_git(&path, &["cherry-pick", "--abort"]);
+                let _ = run_git(&plan.preview.component_path, &["cherry-pick", "--abort"]);
 
                 applied.push(AppliedPr {
                     repo: pr.repo.clone(),
@@ -234,42 +380,55 @@ pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
         }
     }
 
-    Ok(sync_output(
-        spec,
-        path,
-        dropped,
-        applied,
-        false,
-        picked,
-        skipped,
-        dropped_count,
-    ))
+    Ok(sync_output(plan, applied, false, picked, skipped))
 }
 
 fn sync_output(
-    spec: &StackSpec,
-    path: String,
-    dropped: Vec<DroppedPr>,
+    plan: SyncPlan,
     applied: Vec<AppliedPr>,
     dry_run: bool,
     picked_count: usize,
     skipped_count: usize,
-    dropped_count: usize,
 ) -> SyncOutput {
     SyncOutput {
-        stack_id: spec.id.clone(),
-        component_path: path,
-        branch: spec.target.branch.clone(),
-        base: spec.base.display(),
-        target: spec.target.display(),
-        dropped,
+        preview: plan.preview,
         applied,
         dry_run,
         picked_count,
         skipped_count,
-        dropped_count,
         success: true,
     }
+}
+
+fn uncertain_pr(pr: &StackPrEntry, error: String) -> UncertainPr {
+    UncertainPr {
+        repo: pr.repo.clone(),
+        number: pr.number,
+        note: pr.note.clone(),
+        error,
+    }
+}
+
+fn replay_reason(meta: &PrMeta) -> &'static str {
+    if meta.state == "MERGED" {
+        "merged upstream but content is not in base"
+    } else {
+        "not merged upstream"
+    }
+}
+
+pub(crate) fn sync_would_mutate(
+    target_exists: bool,
+    target_ahead: Option<usize>,
+    target_behind: Option<usize>,
+    dropped_count: usize,
+    replayed_count: usize,
+) -> bool {
+    !target_exists
+        || target_ahead.unwrap_or(0) > 0
+        || target_behind.unwrap_or(0) > 0
+        || dropped_count > 0
+        || replayed_count > 0
 }
 
 #[cfg(test)]

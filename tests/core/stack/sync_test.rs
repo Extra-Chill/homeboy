@@ -11,7 +11,7 @@
 //! from the spec. The cherry-pick orchestration after that decision is
 //! the same machinery `apply` uses (already tested in `apply_test.rs`).
 
-use crate::stack::sync::{is_droppable, PrMeta};
+use crate::stack::sync::{is_droppable, sync_would_mutate, PrMeta};
 use std::fs;
 
 mod support;
@@ -163,5 +163,49 @@ fn is_droppable_state_check_is_case_sensitive() {
     assert!(
         !is_droppable(&lower_case, &path, "main"),
         "is_droppable must match gh's canonical 'MERGED' exactly"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// sync_would_mutate — diff/sync preview state summary
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_would_mutate_false_for_clean_materialized_target() {
+    assert!(
+        !sync_would_mutate(true, Some(0), Some(0), 0, 0),
+        "existing target at base with no drops or replays is a no-op"
+    );
+}
+
+#[test]
+fn sync_would_mutate_true_when_target_missing() {
+    assert!(
+        sync_would_mutate(false, None, None, 0, 0),
+        "sync would create the target branch"
+    );
+}
+
+#[test]
+fn sync_would_mutate_true_when_target_diverged_from_base() {
+    assert!(
+        sync_would_mutate(true, Some(1), Some(0), 0, 0),
+        "sync would drop target-only commits by recreating target from base"
+    );
+    assert!(
+        sync_would_mutate(true, Some(0), Some(1), 0, 0),
+        "sync would move target forward to the newer base"
+    );
+}
+
+#[test]
+fn sync_would_mutate_true_for_drop_or_replay_plan() {
+    assert!(
+        sync_would_mutate(true, Some(0), Some(0), 1, 0),
+        "sync would mutate the stack spec by dropping merged PRs"
+    );
+    assert!(
+        sync_would_mutate(true, Some(0), Some(0), 0, 1),
+        "sync would replay PRs onto the rebuilt target"
     );
 }
