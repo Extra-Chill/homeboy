@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::extension;
 use crate::project;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Derive a runtime component inventory from project attachments, standalone
 /// registrations, and portable components.
@@ -79,6 +79,7 @@ fn load_standalone_components() -> Result<Vec<Component>> {
     }
 
     let mut components = Vec::new();
+    let mut stale_parent_dirs = HashSet::new();
 
     let entries = std::fs::read_dir(&dir)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", dir.display()))))?;
@@ -141,6 +142,9 @@ fn load_standalone_components() -> Result<Vec<Component>> {
                 components.push(discovered);
                 continue;
             }
+        } else if let Some(parent) = local_dir.parent() {
+            stale_parent_dirs.insert(parent.to_path_buf());
+            continue;
         }
 
         // No portable config available — build component from the standalone JSON.
@@ -155,7 +159,45 @@ fn load_standalone_components() -> Result<Vec<Component>> {
         }
     }
 
+    let mut seen_ids: HashSet<String> = components.iter().map(|c| c.id.clone()).collect();
+    for parent in stale_parent_dirs {
+        discover_sibling_portable_components(&parent, &mut seen_ids, &mut components);
+    }
+
     Ok(components)
+}
+
+/// Discover sibling repos when a standalone registration points at a path that
+/// no longer exists. This catches common workspace renames (`mv old-id new-id`)
+/// where the new directory already has an updated repo-owned `homeboy.json`.
+fn discover_sibling_portable_components(
+    parent: &Path,
+    seen_ids: &mut HashSet<String>,
+    components: &mut Vec<Component>,
+) {
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    let mut discovered = Vec::new();
+    for entry in entries.flatten() {
+        let path: PathBuf = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(component) = discover_from_portable(&path) else {
+            continue;
+        };
+
+        if seen_ids.insert(component.id.clone()) {
+            discovered.push(component);
+        }
+    }
+
+    discovered.sort_by(|a, b| a.id.cmp(&b.id));
+    components.extend(discovered);
 }
 
 /// Check if any linked extension provides an artifact pattern.
@@ -553,6 +595,59 @@ mod tests {
     }
 
     #[test]
+    fn stale_standalone_path_discovers_renamed_sibling_portable_component() {
+        let dir = TempDir::new().unwrap();
+        let config_components = dir
+            .path()
+            .join(".config")
+            .join("homeboy")
+            .join("components");
+        fs::create_dir_all(&config_components).unwrap();
+
+        let workspace = dir.path().join("workspace");
+        let stale_path = workspace.join("old-plugin");
+        let renamed_path = workspace.join("new-plugin");
+        fs::create_dir_all(&renamed_path).unwrap();
+
+        let standalone = serde_json::json!({
+            "local_path": stale_path.to_string_lossy(),
+            "remote_path": "wp-content/plugins/old-plugin"
+        });
+        fs::write(
+            config_components.join("old-plugin.json"),
+            serde_json::to_string_pretty(&standalone).unwrap(),
+        )
+        .unwrap();
+
+        let portable = serde_json::json!({
+            "id": "new-plugin",
+            "local_path": renamed_path.to_string_lossy(),
+            "remote_path": "wp-content/plugins/new-plugin",
+            "changelog_target": "CHANGELOG.md"
+        });
+        fs::write(
+            renamed_path.join("homeboy.json"),
+            serde_json::to_string_pretty(&portable).unwrap(),
+        )
+        .unwrap();
+
+        let _home = with_home_override(dir.path());
+        let components = load_standalone_components().unwrap();
+
+        let renamed = components
+            .iter()
+            .find(|component| component.id == "new-plugin")
+            .expect("renamed sibling component should be discovered from homeboy.json");
+        assert_eq!(renamed.local_path, renamed_path.to_string_lossy());
+        assert!(
+            !components
+                .iter()
+                .any(|component| component.id == "old-plugin"),
+            "stale standalone path should not re-register the old component id"
+        );
+    }
+
+    #[test]
     fn write_standalone_creates_and_reads_back() {
         let dir = TempDir::new().unwrap();
         let config_dir = dir.path().join(".config").join("homeboy");
@@ -560,9 +655,12 @@ mod tests {
 
         let _home = with_home_override(dir.path());
 
+        let repo_dir = dir.path().join("test-plugin");
+        fs::create_dir_all(&repo_dir).unwrap();
+
         let component = Component::new(
             "test-plugin".to_string(),
-            "/tmp/test-plugin".to_string(),
+            repo_dir.to_string_lossy().to_string(),
             "wp-content/plugins/test-plugin".to_string(),
             None,
         );
