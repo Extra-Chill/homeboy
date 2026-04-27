@@ -19,6 +19,8 @@ pub struct BenchCommandOutput {
     pub iterations: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub results: Option<BenchResults>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gate_failures: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_comparison: Option<BenchBaselineComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -54,6 +56,7 @@ pub fn from_main_workflow_with_rig(
             exit_code,
             iterations: result.iterations,
             results: result.results,
+            gate_failures: result.gate_failures,
             baseline_comparison: result.baseline_comparison,
             hints: result.hints,
             rig_state,
@@ -620,6 +623,9 @@ mod tests {
                 values,
                 distributions: BTreeMap::new(),
             },
+            gates: Vec::new(),
+            gate_results: Vec::new(),
+            passed: true,
             memory: None,
             artifacts: BTreeMap::new(),
             runs: None,
@@ -706,6 +712,7 @@ mod tests {
             exit_code: 0,
             iterations: 3,
             results: None,
+            gate_failures: Vec::new(),
             baseline_comparison: None,
             hints: None,
             failure: None,
@@ -726,6 +733,7 @@ mod tests {
                 exit_code: 1,
                 iterations: 1,
                 results: None,
+                gate_failures: Vec::new(),
                 baseline_comparison: None,
                 hints: Some(vec!["check output".to_string()]),
                 failure: None,

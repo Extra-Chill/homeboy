@@ -50,6 +50,14 @@ use crate::error::{Error, Result};
 use super::artifact::BenchArtifact;
 use super::distribution::BenchRunDistribution;
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// Full bench run output from an extension script.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -84,6 +92,18 @@ pub struct BenchScenario {
     pub tags: Vec<String>,
     pub iterations: u64,
     pub metrics: BenchMetrics,
+    /// Scenario-level semantic gates. Unlike metric policies, gates are
+    /// correctness checks: any failure invalidates the scenario even if
+    /// timing metrics improved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<BenchGate>,
+    /// Computed gate outcomes, populated by Homeboy after metrics are
+    /// parsed and aggregated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_results: Vec<BenchGateResult>,
+    /// Scenario pass/fail status after semantic gates are evaluated.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub passed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<BenchMemory>,
     /// Optional local artifact pointers produced by the scenario.
@@ -102,6 +122,105 @@ pub struct BenchScenario {
     /// default `--runs 1` path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runs_summary: Option<BTreeMap<String, BenchRunDistribution>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BenchGate {
+    pub metric: String,
+    pub op: BenchGateOp,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BenchGateOp {
+    Eq,
+    Gte,
+    Lte,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BenchGateResult {
+    pub metric: String,
+    pub op: BenchGateOp,
+    pub expected: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<f64>,
+    pub passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl BenchGate {
+    fn evaluate(&self, scenario_id: &str, metrics: &BenchMetrics) -> BenchGateResult {
+        let actual = metrics.get(&self.metric);
+        let passed = actual
+            .map(|value| match self.op {
+                BenchGateOp::Eq => value == self.value,
+                BenchGateOp::Gte => value >= self.value,
+                BenchGateOp::Lte => value <= self.value,
+            })
+            .unwrap_or(false);
+        let reason = if passed {
+            None
+        } else {
+            Some(match actual {
+                Some(value) => format!(
+                    "scenario `{}` gate failed: {} {} {} (actual {})",
+                    scenario_id,
+                    self.metric,
+                    self.op.as_str(),
+                    self.value,
+                    value
+                ),
+                None => format!(
+                    "scenario `{}` gate failed: metric `{}` is missing",
+                    scenario_id, self.metric
+                ),
+            })
+        };
+
+        BenchGateResult {
+            metric: self.metric.clone(),
+            op: self.op,
+            expected: self.value,
+            actual,
+            passed,
+            reason,
+        }
+    }
+}
+
+impl BenchGateOp {
+    fn as_str(self) -> &'static str {
+        match self {
+            BenchGateOp::Eq => "eq",
+            BenchGateOp::Gte => "gte",
+            BenchGateOp::Lte => "lte",
+        }
+    }
+}
+
+/// Evaluate semantic gates in place and return every failure reason.
+pub fn evaluate_gates(results: &mut BenchResults) -> Vec<String> {
+    let mut failures = Vec::new();
+    for scenario in &mut results.scenarios {
+        scenario.gate_results = scenario
+            .gates
+            .iter()
+            .map(|gate| gate.evaluate(&scenario.id, &scenario.metrics))
+            .collect();
+        scenario.passed = scenario.gate_results.iter().all(|result| result.passed);
+        failures.extend(
+            scenario
+                .gate_results
+                .iter()
+                .filter_map(|result| result.reason.clone()),
+        );
+    }
+    failures
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -499,6 +618,141 @@ mod tests {
             parsed.metric_policies["requests_per_second"].direction,
             BenchMetricDirection::HigherIsBetter
         );
+    }
+
+    #[test]
+    fn semantic_gate_pass_leaves_scenario_passed() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "scenarios": [
+                {
+                    "id": "agent_loop",
+                    "iterations": 10,
+                    "metrics": {
+                        "assistant_message_count": 2,
+                        "identifies_studio_rate": 1.0
+                    },
+                    "gates": [
+                        { "metric": "assistant_message_count", "op": "gte", "value": 1 },
+                        { "metric": "identifies_studio_rate", "op": "eq", "value": 1.0 }
+                    ]
+                }
+            ]
+        }"#;
+
+        let mut parsed = parse_bench_results_str(raw).unwrap();
+        let failures = evaluate_gates(&mut parsed);
+        let scenario = &parsed.scenarios[0];
+
+        assert!(failures.is_empty());
+        assert!(scenario.passed);
+        assert_eq!(scenario.gate_results.len(), 2);
+        assert!(scenario.gate_results.iter().all(|result| result.passed));
+    }
+
+    #[test]
+    fn semantic_gate_failure_marks_scenario_failed() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "scenarios": [
+                {
+                    "id": "agent_loop",
+                    "iterations": 10,
+                    "metrics": {
+                        "assistant_message_count": 0,
+                        "p95_ms": 80.0
+                    },
+                    "gates": [
+                        { "metric": "assistant_message_count", "op": "gte", "value": 1 }
+                    ]
+                }
+            ]
+        }"#;
+
+        let mut parsed = parse_bench_results_str(raw).unwrap();
+        let failures = evaluate_gates(&mut parsed);
+        let scenario = &parsed.scenarios[0];
+
+        assert!(!scenario.passed);
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("assistant_message_count gte 1"));
+        assert_eq!(scenario.gate_results[0].actual, Some(0.0));
+    }
+
+    #[test]
+    fn timing_improvement_does_not_override_semantic_gate_failure() {
+        let baseline = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "scenarios": [
+                { "id": "agent_loop", "iterations": 10, "metrics": { "p95_ms": 100.0 } }
+            ]
+        }"#;
+        let current = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "scenarios": [
+                {
+                    "id": "agent_loop",
+                    "iterations": 10,
+                    "metrics": { "p95_ms": 50.0, "assistant_message_count": 0 },
+                    "gates": [
+                        { "metric": "assistant_message_count", "op": "gte", "value": 1 }
+                    ]
+                }
+            ]
+        }"#;
+
+        let baseline = parse_bench_results_str(baseline).unwrap();
+        let mut current = parse_bench_results_str(current).unwrap();
+        let failures = evaluate_gates(&mut current);
+
+        assert!(
+            current.scenarios[0].metrics.get("p95_ms").unwrap()
+                < baseline.scenarios[0].metrics.get("p95_ms").unwrap()
+        );
+        assert_eq!(failures.len(), 1);
+        assert!(!current.scenarios[0].passed);
+    }
+
+    #[test]
+    fn semantic_gate_failure_serializes_details() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "scenarios": [
+                {
+                    "id": "agent_loop",
+                    "iterations": 10,
+                    "metrics": { "identifies_studio_rate": 0.0 },
+                    "gates": [
+                        { "metric": "identifies_studio_rate", "op": "gte", "value": 1.0 }
+                    ]
+                }
+            ]
+        }"#;
+
+        let mut parsed = parse_bench_results_str(raw).unwrap();
+        let failures = evaluate_gates(&mut parsed);
+        let value = serde_json::to_value(&parsed).unwrap();
+        let scenario = &value["scenarios"][0];
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(scenario["passed"], serde_json::Value::Bool(false));
+        assert_eq!(
+            scenario["gate_results"][0]["metric"],
+            "identifies_studio_rate"
+        );
+        assert_eq!(scenario["gate_results"][0]["op"], "gte");
+        assert_eq!(scenario["gate_results"][0]["expected"], 1.0);
+        assert_eq!(scenario["gate_results"][0]["actual"], 0.0);
+        assert_eq!(scenario["gate_results"][0]["passed"], false);
+        assert!(scenario["gate_results"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("identifies_studio_rate gte 1"));
     }
 
     #[test]

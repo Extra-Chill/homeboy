@@ -195,6 +195,10 @@ pub(super) fn run_single_rig(
             exit_code,
             iterations: args.iterations,
             results: merge_matrix_results(&matrix_components, &outputs),
+            gate_failures: outputs
+                .iter()
+                .flat_map(|output| output.gate_failures.clone())
+                .collect(),
             baseline_comparison: None,
             hints: if hints.is_empty() { None } else { Some(hints) },
             rig_state: Some(context.snapshot),
@@ -573,6 +577,7 @@ mod tests {
             exit_code: 0,
             iterations: 10,
             results,
+            gate_failures: Vec::new(),
             baseline_comparison: None,
             hints: None,
             rig_state: None,
