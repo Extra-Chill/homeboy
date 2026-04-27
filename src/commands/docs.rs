@@ -70,7 +70,7 @@ pub enum DocsOutput {
 // ============================================================================
 
 /// Check if this invocation should return JSON (map subcommand)
-pub(crate) fn is_json_mode(args: &DocsArgs) -> bool {
+pub fn is_json_mode(args: &DocsArgs) -> bool {
     matches!(args.command, Some(DocsCommand::Map { .. }))
 }
 

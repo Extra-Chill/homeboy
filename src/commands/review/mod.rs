@@ -65,7 +65,7 @@ pub struct ReviewArgs {
 /// True when the caller asked for a markdown PR-comment section instead of
 /// the structured JSON envelope. Used by the top-level dispatcher to route
 /// the response through `RawOutputMode::Markdown`.
-pub(crate) fn is_markdown_mode(args: &ReviewArgs) -> bool {
+pub fn is_markdown_mode(args: &ReviewArgs) -> bool {
     args.report.as_deref() == Some("pr-comment")
 }
 

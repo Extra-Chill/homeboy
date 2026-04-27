@@ -249,7 +249,7 @@ pub enum FileCommandOutput {
     Raw(String),
 }
 
-pub(crate) fn is_raw_read(args: &FileArgs) -> bool {
+pub fn is_raw_read(args: &FileArgs) -> bool {
     matches!(&args.command, FileCommand::Read { raw: true, .. })
 }
 

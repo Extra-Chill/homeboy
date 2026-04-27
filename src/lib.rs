@@ -14,7 +14,19 @@ macro_rules! log_status {
     };
 }
 
+extern crate self as homeboy;
+
+#[doc(hidden)]
+pub mod commands;
 pub mod core;
+pub mod help_topics;
+
+/// Read-only Homeboy CLI command surface derived from the Clap command tree.
+pub mod cli_surface {
+    pub use crate::commands::surface::{
+        command_surface_from, current_command_surface, CommandSurface, CommandSurfaceEntry,
+    };
+}
 
 #[cfg(test)]
 pub(crate) mod test_support;
