@@ -13,6 +13,34 @@ def _format_audit_finding(finding: dict[str, Any]) -> str:
     return " — ".join(parts)
 
 
+def _format_new_audit_finding(finding: dict[str, Any]) -> str:
+    context = str(finding.get("context", "unknown"))
+    message = str(finding.get("message", ""))
+    fingerprint = str(finding.get("fingerprint", ""))
+    line = f"**{context}**"
+    if message:
+        line += f" — {message}"
+    if fingerprint:
+        line += f" (`{fingerprint}`)"
+    return line
+
+
+def _status_summary(results: dict[str, Any], audit_digest: dict[str, Any]) -> str:
+    parts: list[str] = []
+    ordered_commands = [cmd for cmd in ["lint", "test", "audit", "refactor"] if cmd in results]
+    ordered_commands.extend(cmd for cmd in results if cmd not in ordered_commands)
+    for command in ordered_commands:
+        status = str(results.get(command, "unknown"))
+        icon = ":white_check_mark:" if status == "pass" else ":x:"
+        label = command
+        if command == "audit":
+            new_count = audit_digest.get("new_findings_count", 0)
+            if isinstance(new_count, int) and new_count > 0:
+                label += f" ({new_count} new)"
+        parts.append(f"{icon} {label}")
+    return " · ".join(parts)
+
+
 def _append_details_block(lines: list[str], summary: str, block_lines: list[str]) -> None:
     content = [str(line) for line in block_lines if str(line) != ""]
     if not content:
@@ -58,6 +86,10 @@ def render_markdown(
 ) -> str:
     lines: list[str] = []
     lines.append("## Failure Digest")
+    summary = _status_summary(results, audit_digest)
+    if summary:
+        lines.append("")
+        lines.append(f"**TL;DR:** {summary}")
     lines.append("")
 
     if "lint" in results:
@@ -137,13 +169,27 @@ def render_markdown(
 
     if "audit" in results:
         lines.append("### Audit Failure Digest")
+        new_findings = audit_digest.get("new_findings", []) or []
+        new_findings_count = audit_digest.get("new_findings_count", 0)
+        if isinstance(new_findings_count, int) and new_findings_count > 0:
+            lines.append(f":x: **{new_findings_count} new finding(s) on this PR:**")
+            lines.append("")
+            for idx, finding in enumerate(new_findings[:5], start=1):
+                lines.append(f"{idx}. {_format_new_audit_finding(finding)}")
+            if new_findings_count > 5:
+                lines.append(f"... and {new_findings_count - 5} more")
+            lines.append("")
+            lines.append("_Full audit state below._")
+
         alignment_score = audit_digest.get("alignment_score")
         if isinstance(alignment_score, (int, float)):
             lines.append(f"- Alignment score: **{alignment_score:.3f}**")
         severity_counts = audit_digest.get("severity_counts", {}) or {}
         if severity_counts:
-            sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(severity_counts.items()))
-            lines.append(f"- Severity counts: **{sev_text}**")
+            known_counts = {k: v for k, v in severity_counts.items() if str(k).lower() != "unknown"}
+            if known_counts:
+                sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(known_counts.items()))
+                lines.append(f"- Severity counts: **{sev_text}**")
         outliers = audit_digest.get("outliers_found")
         if isinstance(outliers, int):
             lines.append(f"- Outliers in current run: **{outliers}**")
@@ -152,27 +198,8 @@ def render_markdown(
             lines.append(f"- Parsed outlier entries: **{parsed_outliers}**")
         lines.append(f"- Drift increased: **{'yes' if audit_digest.get('drift_increased') else 'no'}**")
 
-        new_findings = audit_digest.get("new_findings", []) or []
-        new_findings_count = audit_digest.get("new_findings_count", 0)
-        if isinstance(new_findings_count, int) and new_findings_count > 0:
-            lines.append(f"- New findings since baseline: **{new_findings_count}**")
-            for idx, finding in enumerate(new_findings[:5], start=1):
-                context = str(finding.get("context", "unknown"))
-                message = str(finding.get("message", ""))
-                fingerprint = str(finding.get("fingerprint", ""))
-                line = f"  {idx}. **{context}**"
-                if message:
-                    line += f" — {message}"
-                if fingerprint:
-                    line += f" (`{fingerprint}`)"
-                lines.append(line)
-
         top_findings = audit_digest.get("top_findings", []) or []
         if top_findings:
-            lines.append("- Top actionable findings:")
-            for idx, finding in enumerate(top_findings[:5], start=1):
-                lines.append(f"  {idx}. {_format_audit_finding(finding)}")
-
             max_full_findings = 300
             full_findings = top_findings[:max_full_findings]
             detail_lines = [
@@ -184,7 +211,12 @@ def render_markdown(
                 detail_lines.append(
                     f"_Truncated to {max_full_findings} findings to avoid oversized PR comments ({len(top_findings)} total parsed)._"
                 )
-            _append_details_block(lines, f"All parsed audit findings ({len(top_findings)})", detail_lines)
+            if len(top_findings) <= 5:
+                lines.append("- Actionable findings:")
+                for line in detail_lines:
+                    lines.append(f"  {line}")
+            else:
+                _append_details_block(lines, f"Audit findings ({len(top_findings)})", detail_lines)
         else:
             lines.append("- No structured audit findings available.")
 

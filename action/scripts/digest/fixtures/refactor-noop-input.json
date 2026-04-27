@@ -1,0 +1,26 @@
+{
+  "success": true,
+  "data": {
+    "files_modified": 0,
+    "plan_totals": {
+      "total_fixes_proposed": 0
+    },
+    "stages": [
+      {
+        "stage": "audit",
+        "fixes_proposed": 0,
+        "files_modified": 0,
+        "detected_findings": 3
+      },
+      {
+        "stage": "lint",
+        "fixes_proposed": 0,
+        "files_modified": 0,
+        "detected_findings": 0
+      }
+    ],
+    "warnings": [
+      "No automated fixes accumulated across audit/lint/test"
+    ]
+  }
+}

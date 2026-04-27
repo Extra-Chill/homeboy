@@ -17,7 +17,7 @@ derive_comment_key() {
 }
 
 derive_section_key() {
-  local command_count
+  local command_count raw_key
   command_count=$(python3 - <<'PY'
 import os
 commands = [part.strip() for part in os.environ.get("COMMANDS", "").split(",") if part.strip()]
@@ -26,16 +26,27 @@ PY
 )
 
   if [ -n "${COMMENT_SECTION_KEY_INPUT:-}" ]; then
-    printf '%s\n' "${COMMENT_SECTION_KEY_INPUT}"
+    raw_key="${COMMENT_SECTION_KEY_INPUT}"
   elif [ "${command_count}" = "1" ]; then
-    python3 - <<'PY'
+    raw_key="$(python3 - <<'PY'
 import os
 commands = [part.strip() for part in os.environ.get("COMMANDS", "").split(",") if part.strip()]
 print(commands[0] if commands else os.environ.get("GITHUB_JOB", "homeboy"))
 PY
+    )"
   else
-    printf '%s\n' "${GITHUB_JOB:-homeboy}"
+    raw_key="${GITHUB_JOB:-homeboy}"
   fi
+
+  SECTION_KEY_RAW="${raw_key}" python3 - <<'PY'
+import os
+import re
+
+raw = os.environ.get("SECTION_KEY_RAW", "homeboy")
+slug = re.sub(r"[^A-Za-z0-9._-]+", "-", raw.strip().lower())
+slug = re.sub(r"-+", "-", slug).strip("-._")
+print(slug or "homeboy")
+PY
 }
 
 derive_section_title() {

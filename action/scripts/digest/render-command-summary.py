@@ -44,6 +44,18 @@ def append_details(lines: list[str], summary: str, body_lines: list[str]) -> Non
     lines.append("</details>")
 
 
+def format_new_audit_item(item: dict[str, Any]) -> str:
+    context = str(item.get("context_label") or item.get("file") or "unknown")
+    message = str(item.get("description") or item.get("message") or "(new finding)")
+    fingerprint = str(item.get("fingerprint") or "")
+    entry = f"**{context}**"
+    if message:
+        entry += f" — {message}"
+    if fingerprint:
+        entry += f" (`{fingerprint}`)"
+    return entry
+
+
 # ── Compact summaries (one-line for issue filing) ─────────────────────
 
 def compact_summary(command: str, raw: dict[str, Any]) -> str:
@@ -222,6 +234,18 @@ def markdown_audit(data: dict[str, Any], lines: list[str]) -> None:
     findings = data.get("findings", []) if isinstance(data, dict) else []
     conventions = data.get("conventions", []) if isinstance(data, dict) else []
 
+    new_items = baseline.get("new_items", []) if isinstance(baseline, dict) else []
+    if isinstance(new_items, list) and new_items:
+        lines.append(f":x: **{len(new_items)} new finding(s) on this PR:**")
+        lines.append("")
+        for idx, item in enumerate(new_items[:5], start=1):
+            if isinstance(item, dict):
+                lines.append(f"{idx}. {format_new_audit_item(item)}")
+        if len(new_items) > 5:
+            lines.append(f"... and {len(new_items) - 5} more")
+        lines.append("")
+        lines.append("_Full audit state below._")
+
     alignment = summary.get("alignment_score") if isinstance(summary, dict) else None
     if isinstance(alignment, (int, float)):
         lines.append(f"- Alignment score: **{alignment:.3f}**")
@@ -232,23 +256,6 @@ def markdown_audit(data: dict[str, Any], lines: list[str]) -> None:
 
     drift = baseline.get("drift_increased", False) if isinstance(baseline, dict) else False
     lines.append(f"- Drift increased: **{'yes' if drift else 'no'}**")
-
-    # New findings from baseline comparison
-    new_items = baseline.get("new_items", []) if isinstance(baseline, dict) else []
-    if isinstance(new_items, list) and new_items:
-        lines.append(f"- New findings since baseline: **{len(new_items)}**")
-        for idx, item in enumerate(new_items[:5], start=1):
-            if not isinstance(item, dict):
-                continue
-            context = str(item.get("context_label") or item.get("file") or "unknown")
-            message = str(item.get("description") or item.get("message") or "(new finding)")
-            fingerprint = str(item.get("fingerprint") or "")
-            entry = f"  {idx}. **{context}**"
-            if message:
-                entry += f" — {message}"
-            if fingerprint:
-                entry += f" (`{fingerprint}`)"
-            lines.append(entry)
 
     # Collect outlier items from conventions
     outlier_items: list[dict[str, Any]] = []
@@ -279,30 +286,39 @@ def markdown_audit(data: dict[str, Any], lines: list[str]) -> None:
         })
 
     if severity_counts:
-        sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(severity_counts.items()))
-        lines.append(f"- Severity counts: **{sev_text}**")
+        known_counts = {k: v for k, v in severity_counts.items() if k != "unknown"}
+        if known_counts:
+            sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(known_counts.items()))
+            lines.append(f"- Severity counts: **{sev_text}**")
 
     if top_findings:
-        lines.append("- Top actionable findings:")
         detail_lines: list[str] = []
         for idx, finding in enumerate(top_findings[:10], start=1):
             file_value = finding["file"]
             rule_value = finding["rule"]
             message = finding["message"]
-            line = f"  {idx}. **{file_value}** — {rule_value}"
             detail = f"{idx}. **{file_value}** — {rule_value}"
             if message:
-                line += f" — {message}"
                 detail += f" — {message}"
-            lines.append(line)
             detail_lines.append(detail)
-        append_details(lines, f"Audit findings ({min(len(top_findings), 10)} shown)", detail_lines)
+        if len(top_findings) <= 5:
+            lines.append("- Actionable findings:")
+            for line in detail_lines:
+                lines.append(f"  {line}")
+        else:
+            append_details(lines, f"Audit findings ({min(len(top_findings), 10)} shown)", detail_lines)
 
 
 def markdown_refactor(data: dict[str, Any], lines: list[str]) -> None:
     files_modified = int(data.get("files_modified", 0) or 0)
     totals = data.get("plan_totals", {})
     total_fixes = int(totals.get("total_fixes_proposed", 0) or 0) if isinstance(totals, dict) else 0
+    warnings = data.get("warnings", [])
+
+    if total_fixes == 0 and files_modified == 0:
+        lines.append("- No fixable changes")
+        return
+
     lines.append(f"- Total fixes proposed: **{total_fixes}**")
     lines.append(f"- Files modified: **{files_modified}**")
 
@@ -326,7 +342,6 @@ def markdown_refactor(data: dict[str, Any], lines: list[str]) -> None:
             detail_lines.append(f"... and {len(changed_files) - 15} more")
         append_details(lines, f"Changed files ({len(changed_files)})", detail_lines)
 
-    warnings = data.get("warnings", [])
     if isinstance(warnings, list):
         notable = [str(w) for w in warnings if isinstance(w, str) and "merge order" not in w.lower()]
         if notable:

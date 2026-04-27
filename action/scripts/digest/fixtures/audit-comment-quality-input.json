@@ -1,0 +1,67 @@
+{
+  "success": false,
+  "data": {
+    "summary": {
+      "alignment_score": 0.9,
+      "outliers_found": 4
+    },
+    "baseline_comparison": {
+      "drift_increased": true,
+      "new_items": [
+        {
+          "context_label": "docs",
+          "description": "Broken file reference `scripts/build/build.sh` (line 19) — target does not exist",
+          "fingerprint": "docs::runner::build"
+        },
+        {
+          "context_label": "docs",
+          "description": "Broken file reference `scripts/lint/lint-runner.sh` (line 17) — target does not exist",
+          "fingerprint": "docs::runner::lint"
+        },
+        {
+          "context_label": "docs",
+          "description": "Broken file reference `scripts/test/test-runner.sh` (line 18) — target does not exist",
+          "fingerprint": "docs::runner::test"
+        }
+      ]
+    },
+    "findings": [
+      {
+        "file": "docs/architecture/runner-contract.md",
+        "rule": "broken_doc_reference",
+        "description": "Broken file reference `scripts/build/build.sh` (line 19) — target does not exist",
+        "severity": "warning"
+      },
+      {
+        "file": "docs/architecture/runner-contract.md",
+        "rule": "broken_doc_reference",
+        "description": "Broken file reference `scripts/lint/lint-runner.sh` (line 17) — target does not exist",
+        "severity": "warning"
+      },
+      {
+        "file": "docs/architecture/runner-contract.md",
+        "rule": "broken_doc_reference",
+        "description": "Broken file reference `scripts/test/test-runner.sh` (line 18) — target does not exist",
+        "severity": "warning"
+      },
+      {
+        "file": "src/commands/docs.rs",
+        "rule": "outlier",
+        "description": "(outlier)",
+        "severity": "unknown"
+      },
+      {
+        "file": "src/core/engine/undo/entry.rs",
+        "rule": "outlier",
+        "description": "(outlier)",
+        "severity": "unknown"
+      },
+      {
+        "file": "src/core/engine/undo/snapshot.rs",
+        "rule": "outlier",
+        "description": "(outlier)",
+        "severity": "unknown"
+      }
+    ]
+  }
+}
