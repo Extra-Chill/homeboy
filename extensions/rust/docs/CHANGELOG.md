@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.12.0] - 2026-04-27
+
+### Added
+- support list-only scenario discovery
+
 ## [1.11.0] - 2026-04-26
 
 ### Added
