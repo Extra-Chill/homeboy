@@ -213,6 +213,9 @@ pub enum AuditFinding {
     /// Comments/docblocks promise network/site-option storage while nearby code
     /// uses single-site get_option/update_option calls.
     OptionScopeDrift,
+    /// Tests mutate process-global environment variables without using the
+    /// shared guard for that variable.
+    GlobalEnvMutationGuard,
 }
 
 impl AuditFinding {
@@ -264,6 +267,7 @@ impl AuditFinding {
             "json_like_exact_match",
             "constant_backed_slug_literal",
             "option_scope_drift",
+            "global_env_mutation_guard",
         ]
     }
 }
