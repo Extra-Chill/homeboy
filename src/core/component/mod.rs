@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
+pub mod audit;
 pub mod inventory;
 pub mod mutations;
 pub mod portable;
@@ -9,6 +10,7 @@ pub mod resolution;
 pub mod scope;
 pub mod versioning;
 
+pub use audit::AuditConfig;
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,
     write_standalone_registration,
@@ -143,6 +145,8 @@ pub struct Component {
     pub docs_dir: Option<String>,
     pub docs_dirs: Vec<String>,
     pub scopes: Option<ScopeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditConfig>,
     /// Override the CLI path used by extension deploy install steps.
     /// For example, Studio sites need "studio wp" instead of the default "wp".
     pub cli_path: Option<String>,
@@ -203,6 +207,8 @@ struct RawComponent {
     docs_dirs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scopes: Option<ScopeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audit: Option<AuditConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cli_path: Option<String>,
 }
@@ -250,6 +256,7 @@ impl From<RawComponent> for Component {
             docs_dir: raw.docs_dir,
             docs_dirs: raw.docs_dirs,
             scopes: raw.scopes,
+            audit: raw.audit,
             cli_path: raw.cli_path,
         }
     }
@@ -281,6 +288,7 @@ impl From<Component> for RawComponent {
             docs_dir: c.docs_dir,
             docs_dirs: c.docs_dirs,
             scopes: c.scopes,
+            audit: c.audit,
             cli_path: c.cli_path,
         }
     }
@@ -349,6 +357,7 @@ impl Component {
             docs_dir: None,
             docs_dirs: Vec::new(),
             scopes: None,
+            audit: None,
             cli_path: None,
         }
     }

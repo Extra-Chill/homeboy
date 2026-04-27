@@ -19,6 +19,7 @@ use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::requirements::{known_available_symbols, KnownSymbols};
+use crate::component::AuditConfig;
 
 /// Kinds of guards we detect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +45,11 @@ struct Guard {
     line: usize,
 }
 
-pub(super) fn run(fingerprints: &[&FileFingerprint], root: &Path) -> Vec<Finding> {
+pub(super) fn run_with_config(
+    fingerprints: &[&FileFingerprint],
+    root: &Path,
+    audit_config: &AuditConfig,
+) -> Vec<Finding> {
     let known = known_available_symbols(root);
     if known.functions.is_empty() && known.classes.is_empty() && known.constants.is_empty() {
         return Vec::new();
@@ -56,6 +61,9 @@ pub(super) fn run(fingerprints: &[&FileFingerprint], root: &Path) -> Vec<Finding
             continue;
         }
         for guard in extract_guards(&fp.content) {
+            if guard_is_contextual(fp, &guard, audit_config) {
+                continue;
+            }
             if symbol_is_known(&known, &guard) {
                 findings.push(Finding {
                     convention: "dead_guard".to_string(),
@@ -90,12 +98,59 @@ fn symbol_is_known(known: &KnownSymbols, guard: &Guard) -> bool {
     }
 }
 
+fn guard_is_contextual(fp: &FileFingerprint, guard: &Guard, audit_config: &AuditConfig) -> bool {
+    is_lifecycle_or_test_path(&fp.relative_path, audit_config)
+        || guard_defines_stub(&fp.content, guard)
+        || guard_loads_symbol_provider(&fp.content, guard)
+}
+
+fn is_lifecycle_or_test_path(path: &str, audit_config: &AuditConfig) -> bool {
+    let normalized = path.replace('\\', "/");
+    audit_config
+        .lifecycle_path_globs
+        .iter()
+        .any(|pattern| glob_match::glob_match(pattern, &normalized))
+}
+
+fn guard_defines_stub(content: &str, guard: &Guard) -> bool {
+    if guard.kind != GuardKind::Function {
+        return false;
+    }
+    let pattern = format!(r"(?m)\bfunction\s+{}\s*\(", regex::escape(&guard.symbol));
+    Regex::new(&pattern)
+        .map(|re| re.is_match(content))
+        .unwrap_or(false)
+}
+
+fn guard_loads_symbol_provider(content: &str, guard: &Guard) -> bool {
+    if guard.kind != GuardKind::Class {
+        return false;
+    }
+    let symbol = guard.symbol.to_ascii_lowercase();
+    let content = content.to_ascii_lowercase();
+    content.contains("require")
+        && (content.contains(&symbol)
+            || content.contains(&symbol.replace('_', "-"))
+            || content.contains(&camel_to_kebab(&guard.symbol)))
+}
+
+fn camel_to_kebab(symbol: &str) -> String {
+    let mut out = String::new();
+    for (idx, ch) in symbol.chars().enumerate() {
+        if ch.is_ascii_uppercase() && idx > 0 {
+            out.push('-');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
+}
+
 /// Regex matching any of the three guard calls plus a quoted symbol argument.
 ///
 /// Examples matched:
 /// - `function_exists('foo_bar')`
 /// - `! class_exists( "WP_Ability" )`
-/// - `defined('REST_REQUEST')`
+/// - `defined('RUNTIME_REQUEST')`
 ///
 /// Group 1: guard name. Group 2 or 3: quoted symbol (without quotes).
 fn guards_regex() -> &'static Regex {
@@ -173,21 +228,25 @@ mod tests {
         fs::write(root.join("plugin.php"), content).unwrap();
     }
 
+    fn run(fingerprints: &[&FileFingerprint], root: &Path) -> Vec<Finding> {
+        run_with_config(fingerprints, root, &AuditConfig::default())
+    }
+
     #[test]
     fn extract_guards_finds_all_three_kinds() {
         let content = r#"<?php
-if ( function_exists('wp_timezone') ) {}
-if ( ! class_exists( 'WP_Ability' ) ) {}
-if ( defined("REST_REQUEST") ) {}
+if ( function_exists('runtime_now') ) {}
+if ( ! class_exists( 'RuntimeCapability' ) ) {}
+if ( defined("RUNTIME_REQUEST") ) {}
 "#;
         let guards = extract_guards(content);
         assert_eq!(guards.len(), 3);
         assert_eq!(guards[0].kind, GuardKind::Function);
-        assert_eq!(guards[0].symbol, "wp_timezone");
+        assert_eq!(guards[0].symbol, "runtime_now");
         assert_eq!(guards[1].kind, GuardKind::Class);
-        assert_eq!(guards[1].symbol, "WP_Ability");
+        assert_eq!(guards[1].symbol, "RuntimeCapability");
         assert_eq!(guards[2].kind, GuardKind::Constant);
-        assert_eq!(guards[2].symbol, "REST_REQUEST");
+        assert_eq!(guards[2].symbol, "RUNTIME_REQUEST");
     }
 
     #[test]
@@ -283,6 +342,57 @@ if ( function_exists('as_schedule_single_action') ) {
 
         let findings = run(&[&fp], tmp.path());
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_stub_definition_guard_is_not_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin_main(tmp.path(), Some("6.0"), "");
+        let fp = make_fp(
+            "tests/compat-smoke.php",
+            r#"<?php
+if ( ! function_exists('runtime_json_encode') ) {
+    function runtime_json_encode( $value ) { return json_encode( $value ); }
+}
+"#,
+        );
+
+        let guard = extract_guards(&fp.content).remove(0);
+        assert!(
+            guard_is_contextual(&fp, &guard, &AuditConfig::default()),
+            "stub definition guards are contextual even when the symbol is otherwise available"
+        );
+        let findings = run(&[&fp], tmp.path());
+        assert!(findings.is_empty(), "stub guards are test scaffolding");
+    }
+
+    #[test]
+    fn configured_lifecycle_paths_are_not_production_dead_guards() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin_main(tmp.path(), Some("6.0"), "");
+        let fp = make_fp(
+            "lifecycle/teardown.php",
+            r#"<?php
+if ( function_exists('runtime_unschedule_all') ) {
+    runtime_unschedule_all('demo');
+}
+"#,
+        );
+
+        let config = AuditConfig {
+            lifecycle_path_globs: vec!["lifecycle/*.php".to_string()],
+            ..Default::default()
+        };
+        let guard = extract_guards(&fp.content).remove(0);
+        assert!(
+            guard_is_contextual(&fp, &guard, &config),
+            "configured lifecycle globs mark guards as contextual"
+        );
+        let findings = run_with_config(&[&fp], tmp.path(), &config);
+        assert!(
+            findings.is_empty(),
+            "uninstall context is not normal runtime"
+        );
     }
 
     #[test]

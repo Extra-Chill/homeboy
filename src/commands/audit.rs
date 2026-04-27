@@ -225,12 +225,12 @@ mod tests {
 
         fs::write(
             root.join("commands/good_one.rs"),
-            "pub fn run() {}\npub fn helper() {}\n",
+            "pub fn run() {}\npub fn execute() {}\n",
         )
         .unwrap();
         fs::write(
             root.join("commands/good_two.rs"),
-            "pub fn run() {}\npub fn helper() {}\n",
+            "pub fn run() {}\npub fn execute() {}\n",
         )
         .unwrap();
         fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();

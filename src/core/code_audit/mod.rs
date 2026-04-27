@@ -70,7 +70,7 @@ pub use report::AuditCommandOutput;
 pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs, AuditRunWorkflowResult};
 pub use walker::is_test_path;
 
-use crate::{component, is_zero, Result};
+use crate::{component, component::AuditConfig, is_zero, Result};
 
 /// Summary counts for the audit report.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -242,6 +242,30 @@ pub fn audit_path_scoped(
     )
 }
 
+fn audit_config_for(component_id: &str, root: &Path) -> AuditConfig {
+    let component =
+        component::discover_from_portable(root).or_else(|| component::load(component_id).ok());
+    let mut audit_config = AuditConfig::default();
+
+    if let Some(component) = &component {
+        if let Some(extensions) = &component.extensions {
+            for extension_id in extensions.keys() {
+                if let Ok(manifest) = crate::extension::load_extension(extension_id) {
+                    if let Some(rules) = manifest.audit_detector_rules() {
+                        audit_config.merge(rules);
+                    }
+                }
+            }
+        }
+
+        if let Some(component_rules) = &component.audit {
+            audit_config.merge(component_rules);
+        }
+    }
+
+    audit_config
+}
+
 /// Internal audit implementation supporting optional file scoping and impact tracing.
 ///
 /// `reference_paths` are external codebases whose fingerprints are included in
@@ -255,6 +279,7 @@ fn audit_internal(
     reference_paths: &[String],
 ) -> Result<CodeAuditResult> {
     let root = Path::new(source_path);
+    let audit_config = audit_config_for(component_id, root);
 
     if let Some(filter) = file_filter {
         log_status!(
@@ -326,7 +351,9 @@ fn audit_internal(
 
     for (name, glob, fingerprints) in &discovery.groups {
         total_files += fingerprints.len();
-        if let Some(convention) = conventions::discover_conventions(name, glob, fingerprints) {
+        if let Some(convention) =
+            conventions::discover_conventions_with_config(name, glob, fingerprints, &audit_config)
+        {
             discovered_conventions.push(convention);
         }
     }
@@ -418,7 +445,8 @@ fn audit_internal(
     // callbacks, or inherited methods are recognized as referenced.
     let ref_fingerprints = fingerprint_reference_paths(reference_paths);
     let ref_fp_refs: Vec<&fingerprint::FileFingerprint> = ref_fingerprints.iter().collect();
-    let dead_code_findings = dead_code::analyze_dead_code(&all_fingerprints, &ref_fp_refs);
+    let dead_code_findings =
+        dead_code::analyze_dead_code_with_config(&all_fingerprints, &ref_fp_refs, &audit_config);
     if !dead_code_findings.is_empty() {
         log_status!(
             "audit",
@@ -583,7 +611,7 @@ fn audit_internal(
     // Phase 4q: Dead guard detection — flag function_exists/class_exists/defined
     // guards on symbols guaranteed to exist given plugin requirements, composer
     // dependencies, and bootstrap requires.
-    let dead_guard_findings = dead_guard::run(&all_fingerprints, root);
+    let dead_guard_findings = dead_guard::run_with_config(&all_fingerprints, root, &audit_config);
     if !dead_guard_findings.is_empty() {
         log_status!(
             "audit",

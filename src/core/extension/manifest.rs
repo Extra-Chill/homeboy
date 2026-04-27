@@ -1,3 +1,4 @@
+use crate::component::AuditConfig;
 use crate::config::ConfigEntity;
 use crate::error::{Error, Result};
 use crate::paths;
@@ -100,6 +101,9 @@ pub struct AuditCapability {
     /// Example: WordPress core + plugin dependencies.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_references: Option<String>,
+    /// Detector rules supplied by this extension for its language/framework.
+    #[serde(default, skip_serializing_if = "AuditConfig::is_empty")]
+    pub detector_rules: AuditConfig,
     /// Glob patterns for paths to ignore during docs audit.
     /// Uses `*` for single segment and `**` for multiple segments (e.g., `/wp-json/**`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -381,6 +385,11 @@ impl ExtensionManifest {
     /// declared under the audit capability.
     pub fn test_mapping(&self) -> Option<&TestMappingConfig> {
         self.audit.as_ref().and_then(|a| a.test_mapping.as_ref())
+    }
+
+    /// Convenience accessor for extension-supplied generic audit detector rules.
+    pub fn audit_detector_rules(&self) -> Option<&AuditConfig> {
+        self.audit.as_ref().map(|a| &a.detector_rules)
     }
 
     /// Convenience: autofix verify config, if this extension declares one.
