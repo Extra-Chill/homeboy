@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::component::{self, Component};
-use crate::error::{Error, Result};
-use crate::extension::{self, ExtensionCapability, ExtensionExecutionContext};
+use crate::error::Result;
+use crate::extension::{self, ExtensionCapability};
 
 /// Unified execution context for extension-backed commands.
 ///
@@ -201,78 +201,6 @@ pub fn resolve(options: &ResolveOptions) -> Result<ExecutionContext> {
 }
 
 impl ExecutionContext {
-    /// Convert to the extension-specific `ExtensionExecutionContext` for use with `ExtensionRunner`.
-    ///
-    /// This bridges between the unified context and the existing runner infrastructure.
-    /// Only valid when a capability was resolved (panics otherwise).
-    pub fn to_extension_context(
-        &self,
-        capability: ExtensionCapability,
-    ) -> Result<ExtensionExecutionContext> {
-        let extension_id = self.extension_id.as_ref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "capability",
-                "No extension was resolved for this execution context",
-                None,
-                Some(vec![
-                    "Use ResolveOptions::with_capability() to resolve an extension".to_string(),
-                ]),
-            )
-        })?;
-
-        let extension_path = self.extension_path.as_ref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "extension_path",
-                "Extension path not resolved",
-                None,
-                None,
-            )
-        })?;
-
-        // Resolve the script path for this capability
-        let manifest = extension::load_extension(extension_id)?;
-        let script_path = match capability {
-            ExtensionCapability::Lint => manifest.lint_script(),
-            ExtensionCapability::Test => manifest.test_script(),
-            ExtensionCapability::Build => manifest.build_script(),
-            ExtensionCapability::Bench => manifest.bench_script(),
-        }
-        .map(|s| s.to_string())
-        .or_else(|| {
-            if capability == ExtensionCapability::Build {
-                Some(String::new())
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "extension",
-                format!(
-                    "Extension '{}' does not have {} infrastructure configured",
-                    extension_id,
-                    match capability {
-                        ExtensionCapability::Lint => "lint",
-                        ExtensionCapability::Test => "test",
-                        ExtensionCapability::Build => "build",
-                        ExtensionCapability::Bench => "bench",
-                    }
-                ),
-                None,
-                None,
-            )
-        })?;
-
-        Ok(ExtensionExecutionContext {
-            component: self.component.clone(),
-            capability,
-            extension_id: extension_id.clone(),
-            extension_path: extension_path.clone(),
-            script_path,
-            settings: self.settings.clone(),
-        })
-    }
-
     /// Get the effective working directory for command execution.
     ///
     /// Returns the source path as a string reference.
