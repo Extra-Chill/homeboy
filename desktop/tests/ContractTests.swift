@@ -193,6 +193,60 @@ struct BenchScenarioDeltaTest: Decodable {
     let improvement: Bool
 }
 
+// MARK: - Release / Build Output Types (mirror HomeboyCLI.swift)
+
+struct ChangesOutputTest: Decodable {
+    let componentId: String?
+    let baselineRef: String?
+    let baselineSource: String?
+    let latestTag: String?
+    let path: String?
+    let commits: [ChangeCommitTest]
+    let uncommitted: UncommittedChangesTest?
+    let changelog: ChangeChangelogTest?
+}
+
+struct ChangeCommitTest: Decodable {
+    let hash: String
+    let subject: String
+    let category: String?
+}
+
+struct UncommittedChangesTest: Decodable {
+    let hasChanges: Bool
+    let staged: [String]?
+    let unstaged: [String]?
+    let untracked: [String]?
+}
+
+struct ChangeChangelogTest: Decodable {
+    let path: String?
+    let unreleasedEntries: Int?
+}
+
+struct VersionShowOutputTest: Decodable {
+    let command: String?
+    let componentId: String?
+    let version: String?
+    let path: String?
+    let targets: [VersionTargetTest]?
+}
+
+struct ReleaseOutputTest: Decodable {
+    let command: String?
+    let result: ReleaseResultTest?
+}
+
+struct ReleaseResultTest: Decodable {
+    let componentId: String?
+    let dryRun: Bool?
+    let bumpType: String?
+    let currentVersion: String?
+    let nextVersion: String?
+    let releasableCommits: Int?
+    let skippedReason: String?
+}
+
 // MARK: - Test Runner
 
 func runTests(testDir: String) throws {
@@ -244,8 +298,92 @@ func runTests(testDir: String) throws {
     // Test 13: bench result parsing
     try testBenchResult(fixturesDir: fixturesDir, decoder: decoder)
 
+    // Test 14: release/build planning model parsing
+    try testReleaseBuildPlanningFixtures(fixturesDir: fixturesDir, decoder: decoder)
+
+    // Test 15: release/build planning command shapes
+    try testReleaseBuildPlanningCommandShapes()
+
     print("")
     print("All contract tests passed")
+}
+
+func testReleaseBuildPlanningFixtures(fixturesDir: String, decoder: JSONDecoder) throws {
+    print("Test: release/build planning fixtures")
+    print("-------------------------------------")
+
+    let changesData = try Data(contentsOf: URL(fileURLWithPath: "\(fixturesDir)/changes.json"))
+    let changes = try decoder.decode(CLIResponse<ChangesOutputTest>.self, from: changesData)
+    guard changes.success, let changesOutput = changes.data else {
+        throw NSError(domain: "ContractTest", code: 92,
+            userInfo: [NSLocalizedDescriptionKey: "changes.json did not decode as a successful response"])
+    }
+    guard changesOutput.componentId == "homeboy-desktop" else {
+        throw NSError(domain: "ContractTest", code: 93,
+            userInfo: [NSLocalizedDescriptionKey: "changes.json component_id mismatch"])
+    }
+    guard changesOutput.commits.count == 2 else {
+        throw NSError(domain: "ContractTest", code: 94,
+            userInfo: [NSLocalizedDescriptionKey: "changes.json expected 2 commits"])
+    }
+    print("[PASS] changes output decodes with commits and baseline")
+
+    let versionData = try Data(contentsOf: URL(fileURLWithPath: "\(fixturesDir)/version-show.json"))
+    let version = try decoder.decode(CLIResponse<VersionShowOutputTest>.self, from: versionData)
+    guard version.success, version.data?.version == "0.11.3" else {
+        throw NSError(domain: "ContractTest", code: 95,
+            userInfo: [NSLocalizedDescriptionKey: "version-show.json did not decode expected version"])
+    }
+    print("[PASS] version show output decodes")
+
+    let releaseData = try Data(contentsOf: URL(fileURLWithPath: "\(fixturesDir)/release-dry-run.json"))
+    let release = try decoder.decode(CLIResponse<ReleaseOutputTest>.self, from: releaseData)
+    guard release.success, release.data?.result?.dryRun == true else {
+        throw NSError(domain: "ContractTest", code: 96,
+            userInfo: [NSLocalizedDescriptionKey: "release-dry-run.json did not decode dry_run=true"])
+    }
+    guard release.data?.result?.skippedReason == "major-requires-flag" else {
+        throw NSError(domain: "ContractTest", code: 97,
+            userInfo: [NSLocalizedDescriptionKey: "release-dry-run.json skipped_reason mismatch"])
+    }
+    print("[PASS] release dry-run output decodes")
+
+    print("")
+}
+
+func testReleaseBuildPlanningCommandShapes() throws {
+    print("Test: release/build planning command shapes")
+    print("-------------------------------------------")
+
+    let source = try String(contentsOf: URL(fileURLWithPath: "Homeboy/Core/CLI/HomeboyCLI.swift"), encoding: .utf8)
+    let contentView = try String(contentsOf: URL(fileURLWithPath: "Homeboy/App/ContentView.swift"), encoding: .utf8)
+
+    func requireContains(_ haystack: String, _ needle: String, _ message: String, code: Int) throws {
+        guard haystack.contains(needle) else {
+            throw NSError(domain: "ContractTest", code: code,
+                userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        print("[PASS] \(message)")
+    }
+
+    func requireNotContains(_ haystack: String, _ needle: String, _ message: String, code: Int) throws {
+        guard !haystack.contains(needle) else {
+            throw NSError(domain: "ContractTest", code: code,
+                userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        print("[PASS] \(message)")
+    }
+
+    try requireContains(source, "[\"changes\", componentId]", "changes helper uses current command shape", code: 98)
+    try requireContains(source, "[\"version\", \"show\", componentId]", "version show helper uses current command shape", code: 99)
+    try requireContains(source, "[\"build\", componentId]", "build helper uses current command shape", code: 100)
+    try requireContains(source, "[\"release\", componentId, \"--dry-run\"]", "release helper is dry-run only", code: 101)
+    try requireContains(contentView, "case release = \"Release\"", "release is a separate core tool", code: 102)
+    try requireContains(contentView, "ReleaseWorkflowView()", "release view is mounted separately from deployer", code: 103)
+    try requireContains(contentView, "Release Disabled", "mutating release action remains disabled", code: 104)
+    try requireNotContains(contentView, "cli.release(", "release view does not call a mutating release helper", code: 105)
+
+    print("")
 }
 
 func testDeployDryRun(fixturesDir: String, decoder: JSONDecoder) throws {

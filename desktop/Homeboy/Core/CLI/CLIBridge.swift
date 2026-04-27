@@ -233,6 +233,7 @@ private struct CLIBridgeComponentEntity: Decodable {
     let localPath: String
     let remotePath: String
     let buildArtifact: String?
+    let buildCommand: String?
     let versionTargets: [VersionTarget]?
     let changelogTarget: String?
     let hooks: [String: [String]]?
@@ -244,6 +245,7 @@ private struct CLIBridgeComponentEntity: Decodable {
             localPath: localPath,
             remotePath: remotePath,
             buildArtifact: buildArtifact,
+            buildCommand: buildCommand,
             extensions: nil,
             versionTargets: versionTargets,
             changelogTarget: changelogTarget,

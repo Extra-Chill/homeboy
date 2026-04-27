@@ -1,0 +1,32 @@
+{
+  "success": true,
+  "data": {
+    "baseline_ref": "v0.11.3",
+    "baseline_source": "tag",
+    "changelog": {
+      "path": "/Users/chubes/Developer/homeboy-desktop/docs/CHANGELOG.md",
+      "unreleased_entries": 0
+    },
+    "commits": [
+      {
+        "category": "Fix",
+        "hash": "488c310",
+        "subject": "fix: modernize CLI helper command shapes (#40)"
+      },
+      {
+        "category": "Feature",
+        "hash": "00b472e",
+        "subject": "feat: add fleet management support (Closes #12)"
+      }
+    ],
+    "component_id": "homeboy-desktop",
+    "latest_tag": "v0.11.3",
+    "path": "/Users/chubes/Developer/homeboy-desktop",
+    "uncommitted": {
+      "has_changes": false,
+      "staged": [],
+      "unstaged": [],
+      "untracked": []
+    }
+  }
+}

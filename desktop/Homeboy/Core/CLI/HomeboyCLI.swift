@@ -264,6 +264,7 @@ struct ComponentRecordCLI: Decodable, Identifiable {
     let localPath: String
     let remotePath: String
     let buildArtifact: String?
+    let buildCommand: String?
     let extensions: [String: ScopedExtensionConfig]?  // NEW: Extension configs by ID
     let versionTargets: [VersionTargetCLI]?
     let changelogTarget: String?       // NEW: Dedicated changelog file path
@@ -1202,6 +1203,45 @@ private init() {}
         return response.output.contains(option) || response.errorOutput.contains(option)
     }
 
+    // MARK: - Release / Build Planning Commands
+
+    /// Inspect changes since the release baseline for a component.
+    func changes(componentId: String) async throws -> ChangesOutput {
+        try await cli.executeCommand(
+            ["changes", componentId],
+            dataType: ChangesOutput.self,
+            source: "Release Changes",
+            timeout: 60
+        )
+    }
+
+    /// Show the current version for a component. Path is optional and only used for local override workflows.
+    func versionShow(componentId: String, path: String? = nil) async throws -> VersionShowOutput {
+        var args = ["version", "show", componentId]
+        if let path {
+            args.append(contentsOf: ["--path", path])
+        }
+        return try await cli.executeCommand(args, dataType: VersionShowOutput.self, source: "Version Show", timeout: 30)
+    }
+
+    /// Execute a component build through the CLI. This is intentionally separate from release execution.
+    func build(componentId: String, path: String? = nil) async throws -> BuildOutput {
+        var args = ["build", componentId]
+        if let path {
+            args.append(contentsOf: ["--path", path])
+        }
+        return try await cli.executeCommand(args, dataType: BuildOutput.self, source: "Build", timeout: 300)
+    }
+
+    /// Preview a release plan without mutating the repository.
+    func releaseDryRun(componentId: String, path: String? = nil) async throws -> ReleaseOutput {
+        var args = ["release", componentId, "--dry-run"]
+        if let path {
+            args.append(contentsOf: ["--path", path])
+        }
+        return try await cli.executeCommand(args, dataType: ReleaseOutput.self, source: "Release Dry Run", timeout: 120)
+    }
+
     // MARK: - Undo Command
 
     /// Undo the last write operation
@@ -1293,6 +1333,91 @@ struct RefactorResult: Decodable {
     let changesApplied: Int?
     let filesModified: [String]?
     let errors: [String]?
+}
+
+/// Output from `homeboy changes <component>`.
+struct ChangesOutput: Decodable {
+    let componentId: String?
+    let baselineRef: String?
+    let baselineSource: String?
+    let latestTag: String?
+    let path: String?
+    let commits: [ChangeCommit]
+    let uncommitted: UncommittedChanges?
+    let changelog: ChangeChangelog?
+}
+
+struct ChangeCommit: Decodable, Identifiable {
+    let hash: String
+    let subject: String
+    let category: String?
+
+    var id: String { hash }
+}
+
+struct UncommittedChanges: Decodable {
+    let hasChanges: Bool
+    let staged: [String]?
+    let unstaged: [String]?
+    let untracked: [String]?
+}
+
+struct ChangeChangelog: Decodable {
+    let path: String?
+    let unreleasedEntries: Int?
+}
+
+/// Output from `homeboy version show <component>`.
+struct VersionShowOutput: Decodable {
+    let command: String?
+    let componentId: String?
+    let version: String?
+    let path: String?
+    let targets: [ComponentRecordCLI.VersionTargetCLI]?
+}
+
+/// Output from `homeboy build <component>`.
+struct BuildOutput: Decodable {
+    let command: String?
+    let componentId: String?
+    let success: Bool?
+    let results: [BuildResult]?
+    let summary: BuildSummary?
+    let artifactPath: String?
+    let message: String?
+}
+
+struct BuildResult: Decodable, Identifiable {
+    let componentId: String?
+    let id: String?
+    let success: Bool?
+    let artifactPath: String?
+    let message: String?
+
+    var stableId: String { componentId ?? id ?? artifactPath ?? message ?? UUID().uuidString }
+}
+
+struct BuildSummary: Decodable {
+    let succeeded: Int?
+    let failed: Int?
+    let skipped: Int?
+    let total: Int?
+}
+
+/// Output from `homeboy release <component> --dry-run`.
+struct ReleaseOutput: Decodable {
+    let command: String?
+    let result: ReleaseResult?
+}
+
+struct ReleaseResult: Decodable {
+    let componentId: String?
+    let dryRun: Bool?
+    let bumpType: String?
+    let currentVersion: String?
+    let nextVersion: String?
+    let releasableCommits: Int?
+    let skippedReason: String?
 }
 
 /// Output from undo command

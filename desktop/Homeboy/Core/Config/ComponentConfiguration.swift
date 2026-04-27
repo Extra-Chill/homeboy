@@ -23,10 +23,35 @@ struct ComponentConfiguration: Codable, Identifiable {
     var localPath: String
     var remotePath: String
     var buildArtifact: String?
+    var buildCommand: String?
     var extensions: [String: ScopedExtensionConfig]?  // NEW: Extension configs by ID
     var versionTargets: [VersionTarget]?
     var changelogTarget: String?       // NEW: Dedicated changelog file path
     var hooks: [String: [String]]?     // NEW: Lifecycle hooks
+
+    init(
+        id: String,
+        aliases: [String] = [],
+        localPath: String,
+        remotePath: String,
+        buildArtifact: String? = nil,
+        buildCommand: String? = nil,
+        extensions: [String: ScopedExtensionConfig]? = nil,
+        versionTargets: [VersionTarget]? = nil,
+        changelogTarget: String? = nil,
+        hooks: [String: [String]]? = nil
+    ) {
+        self.id = id
+        self.aliases = aliases
+        self.localPath = localPath
+        self.remotePath = remotePath
+        self.buildArtifact = buildArtifact
+        self.buildCommand = buildCommand
+        self.extensions = extensions
+        self.versionTargets = versionTargets
+        self.changelogTarget = changelogTarget
+        self.hooks = hooks
+    }
 
     /// Display name computed from id (e.g., "chubes-theme" -> "Chubes Theme")
     var displayName: String {
