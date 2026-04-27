@@ -31,7 +31,7 @@ jobs:
 
 ### Continuous Release
 
-Fully automated releases — no human input needed. Triggers on every push to main, checks for releasable conventional commits since the last tag, computes the version, generates changelog, bumps version targets, tags, and publishes.
+Fully automated releases — no human input needed. Triggers on every push to main, checks for releasable conventional commits since the last tag, computes the version, generates changelog, bumps version targets, tags, creates a GitHub Release, and publishes.
 
 ```yaml
 name: Release
@@ -69,7 +69,7 @@ The release command:
 4. Generates changelog entries via `homeboy changelog add`
 5. Bumps version targets (Cargo.toml, package.json, VERSION, etc.)
 6. Finalizes changelog (`[Next]` → `[VERSION] - DATE`)
-7. Commits, creates an annotated tag, and pushes
+7. Commits, creates an annotated tag, pushes, and creates a GitHub Release
 
 After the tag push, downstream build/publish jobs can pick it up (e.g. cargo-dist, npm publish).
 
@@ -324,7 +324,7 @@ jobs:
   build:
     needs: prepare
     if: needs.prepare.outputs.released == 'true'
-    # ... cargo-dist, crates.io, Homebrew, GitHub Release
+    # ... cargo-dist, crates.io, Homebrew
 ```
 
 ### Recommended Org-wide CI Profile
@@ -371,7 +371,7 @@ When multiple jobs invoke Homeboy Action on the same PR, they **merge into one s
 2. **Installs Extension** — Clones and sets up the specified extension
 3. **Validates Portable Config** — Requires `homeboy.json` at repo root
 4. **Runs Commands** — Executes each command with `--path` pointing at your workspace
-5. **Release** — If `commands` includes `release`, checks for releasable commits, bumps version, generates changelog, tags, and pushes
+5. **Release** — If `commands` includes `release`, checks for releasable commits, bumps version, generates changelog, tags, pushes, and creates a GitHub Release
 
 ## Requirements
 

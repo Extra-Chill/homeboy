@@ -3,7 +3,7 @@
 # Triggers on push to main (immediate release) and manual dispatch.
 # Checks for releasable conventional commits since the last tag. If found:
 #   1. Version bump + changelog generation
-#   2. Tag + push
+#   2. Tag + push + GitHub Release creation
 #   3. Post-release hook moves the floating v2 tag
 #
 # No binary builds, no extensions needed — homeboy reads homeboy.json
@@ -109,80 +109,6 @@ jobs:
           commands: release
           release-dry-run: ${{ inputs.dry-run || 'false' }}
           app-token: ${{ steps.app-token.outputs.token || '' }}
-
-  # ── Step 3: Create GitHub Release ──
-  # After a successful release, create a GitHub Release from the tag
-  # with changelog notes extracted from docs/CHANGELOG.md.
-  create-release:
-    name: Create GitHub Release
-    needs: release
-    if: ${{ needs.release.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: main
-
-      - name: Get release metadata
-        id: meta
-        run: |
-          # Get the latest semver tag (skip floating tags like v1, v2)
-          TAG="$(git tag --sort=-creatordate --list 'v[0-9]*.[0-9]*.[0-9]*' | head -1)"
-          if [ -z "${TAG}" ]; then
-            echo "::error::No semver tag found on HEAD"
-            exit 1
-          fi
-          VERSION="${TAG#v}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Release tag: ${TAG} (version: ${VERSION})"
-
-      - name: Extract changelog section
-        id: notes
-        run: |
-          VERSION="${{ steps.meta.outputs.version }}"
-          CHANGELOG="docs/CHANGELOG.md"
-
-          if [ ! -f "${CHANGELOG}" ]; then
-            echo "body=Release ${VERSION}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Extract the section for this version: from "## [VERSION]" to the next "## ["
-          BODY=$(awk -v ver="${VERSION}" '
-            /^## \[/ {
-              if (found) exit
-              if (index($0, "[" ver "]")) found=1
-              next
-            }
-            found { print }
-          ' "${CHANGELOG}" | sed '/^$/N;/^\n$/d')
-
-          if [ -z "${BODY}" ]; then
-            BODY="Release v${VERSION}"
-          fi
-
-          # Write to file to avoid quoting issues
-          echo "${BODY}" > /tmp/release-notes.md
-          echo "notes-file=/tmp/release-notes.md" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.meta.outputs.tag }}"
-
-          # Skip if release already exists
-          if gh release view "${TAG}" > /dev/null 2>&1; then
-            echo "Release ${TAG} already exists — skipping"
-            exit 0
-          fi
-
-          gh release create "${TAG}" \
-            --title "${TAG}" \
-            --notes-file "${{ steps.notes.outputs.notes-file }}" \
-            --verify-tag
 
   # ── Record failed SHA to prevent retry loops ──
   record-failure:
