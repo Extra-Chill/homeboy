@@ -218,6 +218,7 @@ mod dag {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                extensions: None,
             },
         );
         components.insert(
@@ -228,6 +229,7 @@ mod dag {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                extensions: None,
             },
         );
 
@@ -286,6 +288,7 @@ mod patch {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                extensions: None,
             },
         );
         let mut pipeline = HashMap::new();

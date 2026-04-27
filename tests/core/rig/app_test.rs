@@ -18,6 +18,7 @@ fn rig_with_launcher(install_dir: &str) -> RigSpec {
             triage_remote_url: None,
             stack: None,
             branch: None,
+            extensions: None,
         },
     );
 

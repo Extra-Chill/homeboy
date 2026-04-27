@@ -296,6 +296,7 @@ fn test_snapshot_state() {
             triage_remote_url: None,
             stack: None,
             branch: None,
+            extensions: None,
         },
     );
     components.insert(
@@ -306,6 +307,7 @@ fn test_snapshot_state() {
             triage_remote_url: None,
             stack: None,
             branch: None,
+            extensions: None,
         },
     );
     let rig = RigSpec {

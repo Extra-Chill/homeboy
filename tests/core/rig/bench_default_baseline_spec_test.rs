@@ -85,6 +85,68 @@ fn test_rig_spec_deserializes_bench_workloads_by_extension() {
 }
 
 #[test]
+fn test_rig_component_deserializes_extension_config() {
+    let spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "studio",
+            "components": {
+                "studio": {
+                    "path": "~/Developer/studio",
+                    "extensions": {
+                        "nodejs": {
+                            "settings": { "package_manager": "pnpm" },
+                            "workspace": "apps/studio"
+                        }
+                    }
+                }
+            },
+            "bench": { "default_component": "studio" }
+        }"#,
+    )
+    .expect("parse RigSpec");
+
+    let component = spec.components.get("studio").expect("studio component");
+    let extensions = component.extensions.as_ref().expect("extensions present");
+    let nodejs = extensions.get("nodejs").expect("nodejs extension config");
+
+    assert_eq!(component.path, "~/Developer/studio");
+    assert_eq!(
+        nodejs.settings.get("package_manager"),
+        Some(&serde_json::json!("pnpm"))
+    );
+    assert_eq!(
+        nodejs.settings.get("workspace"),
+        Some(&serde_json::json!("apps/studio"))
+    );
+}
+
+#[test]
+fn test_rig_component_extension_config_round_trips() {
+    let original_json = r#"{
+        "id": "studio",
+        "components": {
+            "studio": {
+                "path": "/tmp/studio",
+                "extensions": {
+                    "nodejs": { "settings": { "package_manager": "pnpm" } }
+                }
+            }
+        }
+    }"#;
+    let spec: RigSpec = serde_json::from_str(original_json).expect("parse");
+    let re_serialized = serde_json::to_string(&spec).expect("serialize");
+    let reparsed: RigSpec = serde_json::from_str(&re_serialized).expect("reparse");
+
+    let extensions = reparsed
+        .components
+        .get("studio")
+        .and_then(|component| component.extensions.as_ref())
+        .expect("extensions preserved");
+    assert!(extensions.contains_key("nodejs"));
+    assert!(re_serialized.contains("extensions"));
+}
+
+#[test]
 fn test_bench_spec_default_component_only_back_compat() {
     // Pre-PR specs declare only `default_component`; the new field
     // must default to None so existing rigs keep parsing.

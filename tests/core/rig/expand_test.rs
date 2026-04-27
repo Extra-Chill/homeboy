@@ -40,6 +40,7 @@ fn test_expand_vars_component_path() {
             triage_remote_url: None,
             stack: None,
             branch: None,
+            extensions: None,
         },
     );
     let rig = rig_with("t", components);

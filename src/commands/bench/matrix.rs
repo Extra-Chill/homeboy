@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use homeboy::component::Component;
 use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::engine::run_dir::RunDir;
 use homeboy::extension::bench as extension_bench;
@@ -51,6 +52,20 @@ fn rig_component_path(spec: &RigSpec, component_id: &str) -> Option<String> {
     spec.components
         .get(component_id)
         .map(|component| rig::expand::expand_vars(spec, &component.path))
+}
+
+fn rig_component_for_bench(spec: &RigSpec, component_id: &str) -> Option<Component> {
+    let rig_component = spec.components.get(component_id)?;
+    let extensions = rig_component.extensions.clone()?;
+    let mut component = Component {
+        id: component_id.to_string(),
+        local_path: rig::expand::expand_vars(spec, &rig_component.path),
+        remote_url: rig_component.remote_url.clone(),
+        extensions: Some(extensions),
+        ..Component::default()
+    };
+    component.resolve_remote_path();
+    Some(component)
 }
 
 fn component_shared_state(
@@ -225,13 +240,20 @@ fn run_component_with_rig_context(
         .clone()
         .or_else(|| rig_spec.and_then(|spec| rig_component_path(spec, &effective_id)));
 
-    let ctx = execution_context::resolve(&ResolveOptions::with_capability_and_json(
-        &effective_id,
-        path_override.clone(),
-        ExtensionCapability::Bench,
-        args.setting_args.setting.clone(),
-        args.setting_args.setting_json.clone(),
-    ))?;
+    let component_override = rig_spec
+        .as_ref()
+        .and_then(|spec| rig_component_for_bench(spec, &effective_id));
+
+    let ctx = execution_context::resolve_with_component(
+        &ResolveOptions::with_capability_and_json(
+            &effective_id,
+            path_override.clone(),
+            ExtensionCapability::Bench,
+            args.setting_args.setting.clone(),
+            args.setting_args.setting_json.clone(),
+        ),
+        component_override,
+    )?;
 
     let run_dir = RunDir::create()?;
 
@@ -297,6 +319,27 @@ mod tests {
     use crate::commands::utils::args::{
         BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
     };
+    use crate::test_support::with_isolated_home;
+    use std::fs;
+
+    fn write_bench_extension(home: &tempfile::TempDir, extension_id: &str) {
+        let extension_dir = home
+            .path()
+            .join(".config")
+            .join("homeboy")
+            .join("extensions")
+            .join(extension_id);
+        fs::create_dir_all(&extension_dir).expect("mkdir extension");
+        fs::write(
+            extension_dir.join(format!("{}.json", extension_id)),
+            r#"{
+                "name": "Node.js",
+                "version": "0.0.0",
+                "bench": { "extension_script": "bench-runner.sh" }
+            }"#,
+        )
+        .expect("write extension manifest");
+    }
 
     #[test]
     fn rig_bench_components_prefers_matrix_over_default_component() {
@@ -362,6 +405,135 @@ mod tests {
 
         args.shared_state = None;
         assert_eq!(component_shared_state(&args, "mdi-primary", 3), None);
+    }
+
+    #[test]
+    fn rig_component_for_bench_synthesizes_extension_config() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let rig_spec: RigSpec = serde_json::from_str(&format!(
+            r#"{{
+                "id": "studio",
+                "components": {{
+                    "studio": {{
+                        "path": "{}",
+                        "extensions": {{
+                            "nodejs": {{
+                                "settings": {{ "package_manager": "pnpm" }},
+                                "workspace": "apps/studio"
+                            }}
+                        }}
+                    }}
+                }},
+                "bench": {{ "default_component": "studio" }}
+            }}"#,
+            temp.path().display()
+        ))
+        .expect("parse rig spec");
+
+        let component = rig_component_for_bench(&rig_spec, "studio")
+            .expect("rig component with extensions should synthesize component");
+
+        assert_eq!(component.id, "studio");
+        assert_eq!(component.local_path, temp.path().to_string_lossy());
+        let nodejs = component
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("nodejs"))
+            .expect("nodejs config preserved");
+        assert_eq!(
+            nodejs.settings.get("package_manager"),
+            Some(&serde_json::json!("pnpm"))
+        );
+        assert_eq!(
+            nodejs.settings.get("workspace"),
+            Some(&serde_json::json!("apps/studio"))
+        );
+    }
+
+    #[test]
+    fn rig_component_for_bench_absent_extension_config_falls_back() {
+        let rig_spec: RigSpec = serde_json::from_str(
+            r#"{
+                "id": "legacy",
+                "components": { "studio": { "path": "/tmp/studio" } },
+                "bench": { "default_component": "studio" }
+            }"#,
+        )
+        .expect("parse rig spec");
+
+        assert!(rig_component_for_bench(&rig_spec, "studio").is_none());
+        assert!(rig_component_for_bench(&rig_spec, "missing").is_none());
+    }
+
+    #[test]
+    fn rig_component_extension_config_resolves_bench_context() {
+        with_isolated_home(|home| {
+            write_bench_extension(home, "nodejs");
+            let temp = tempfile::TempDir::new().expect("component dir");
+            let rig_spec: RigSpec = serde_json::from_str(&format!(
+                r#"{{
+                    "id": "studio",
+                    "components": {{
+                        "studio": {{
+                            "path": "{}",
+                            "extensions": {{
+                                "nodejs": {{ "package_manager": "pnpm" }}
+                            }}
+                        }}
+                    }},
+                    "bench": {{ "default_component": "studio" }}
+                }}"#,
+                temp.path().display()
+            ))
+            .expect("parse rig spec");
+            let component_override = rig_component_for_bench(&rig_spec, "studio");
+
+            let ctx = execution_context::resolve_with_component(
+                &ResolveOptions::with_capability_and_json(
+                    "studio",
+                    Some(temp.path().to_string_lossy().to_string()),
+                    ExtensionCapability::Bench,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                component_override,
+            )
+            .expect("rig-owned extension config resolves bench context");
+
+            assert_eq!(ctx.component_id, "studio");
+            assert_eq!(ctx.extension_id.as_deref(), Some("nodejs"));
+            assert!(ctx
+                .settings
+                .iter()
+                .any(|(key, value)| key == "package_manager" && value == "pnpm"));
+        });
+    }
+
+    #[test]
+    fn missing_rig_extension_config_keeps_clear_error() {
+        let temp = tempfile::TempDir::new().expect("component dir");
+        let err = execution_context::resolve_with_component(
+            &ResolveOptions::with_capability_and_json(
+                "studio",
+                Some(temp.path().to_string_lossy().to_string()),
+                ExtensionCapability::Bench,
+                Vec::new(),
+                Vec::new(),
+            ),
+            Some(Component {
+                id: "studio".to_string(),
+                local_path: temp.path().to_string_lossy().to_string(),
+                ..Component::default()
+            }),
+        )
+        .expect_err("component without extensions should fail clearly");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("has no extensions configured"),
+            "expected missing-extension error, got: {}",
+            message
+        );
     }
 
     fn bench_results(component_id: &str, scenario_id: &str, p95: f64) -> BenchResults {

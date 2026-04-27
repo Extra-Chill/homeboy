@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::component::ScopedExtensionConfig;
+
 /// A rig: components + services + pipelines.
 ///
 /// Lives at `~/.config/homeboy/rigs/{id}.json`.
@@ -184,6 +186,15 @@ pub struct ComponentSpec {
     /// this field documents expected branch for humans reading specs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+
+    /// Optional extension config for rig-owned bench dispatch.
+    ///
+    /// This is intentionally narrower than the global component registry: rigs
+    /// may provide the extension settings needed by `homeboy bench --rig`, but
+    /// release/deploy/component-management semantics still belong to registered
+    /// components or repo-owned `homeboy.json` files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<HashMap<String, ScopedExtensionConfig>>,
 }
 
 /// A background service the rig manages.
