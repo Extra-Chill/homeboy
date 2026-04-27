@@ -17,7 +17,13 @@
     "extension_script": "scripts/lint-runner.sh"
   },
   "test": {
-    "extension_script": "scripts/test-runner.sh"
+    "extension_script": "scripts/test-runner.sh",
+    "drift": {
+      "source_dirs": ["src"],
+      "test_dirs": ["tests"],
+      "file_extensions": ["rs"],
+      "inline_tests": true
+    }
   },
   "bench": {
     "extension_script": "scripts/bench/bench-runner.sh"

@@ -27,7 +27,13 @@
     "extension_script": "scripts/lint-runner.sh"
   },
   "test": {
-    "extension_script": "scripts/test-runner.sh"
+    "extension_script": "scripts/test-runner.sh",
+    "drift": {
+      "source_dirs": ["."],
+      "test_dirs": ["."],
+      "file_extensions": ["go"],
+      "inline_tests": false
+    }
   },
   "cli": {
     "tool": "go",
