@@ -180,6 +180,9 @@ func runTests(testDir: String) throws {
     // Test 11: mutation command construction stays aligned with current homeboy parser
     try testMutationCommandShapes(testDir: testDir)
 
+    // Test 12: CLI command construction uses current Homeboy surface
+    try testCurrentCLICommandSurface(testDir: testDir)
+
     print("")
     print("All contract tests passed")
 }
@@ -768,6 +771,48 @@ func assertDoesNotContain(_ haystack: String, _ needle: String, message: String)
         throw NSError(domain: "ContractTest", code: 104,
             userInfo: [NSLocalizedDescriptionKey: message])
     }
+}
+
+func testCurrentCLICommandSurface(testDir: String) throws {
+    print("Test: current CLI command surface")
+    print("---------------------------------")
+
+    let source = URL(fileURLWithPath: testDir)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Homeboy/Core/CLI/HomeboyCLI.swift")
+    let content = try String(contentsOf: source, encoding: .utf8)
+
+    let removedShapes = [
+        "\"audit\", \"code\"",
+        "\"audit\", \"docs\"",
+        "\"audit\", \"structure\"",
+        "\"supports\"",
+        "SupportsOutput",
+    ]
+
+    for shape in removedShapes {
+        guard !content.contains(shape) else {
+            throw NSError(domain: "ContractTest", code: 70,
+                userInfo: [NSLocalizedDescriptionKey: "Removed CLI shape still appears in HomeboyCLI.swift: \(shape)"])
+        }
+    }
+    print("[PASS] Removed audit/supports command shapes are absent")
+
+    let requiredShapes = [
+        "var args = [\"audit\", componentId]",
+        "args.append(contentsOf: [\"--only\", kind])",
+        "args.append(\"--help\")",
+        "commandSurfaceSupports",
+    ]
+
+    for shape in requiredShapes {
+        guard content.contains(shape) else {
+            throw NSError(domain: "ContractTest", code: 71,
+                userInfo: [NSLocalizedDescriptionKey: "Expected CLI construction shape is missing: \(shape)"])
+        }
+    }
+    print("[PASS] Audit filters and help-surface probe are present")
+    print("")
 }
 
 // MARK: - Entry Point

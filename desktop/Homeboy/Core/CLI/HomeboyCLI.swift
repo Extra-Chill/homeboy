@@ -1003,35 +1003,68 @@ private init() {}
 
     // MARK: - Audit Commands
 
+    private enum AuditSlice {
+        static let code = [
+            "dead_guard",
+            "stale_cli_argument_shape",
+            "stale_cli_invocation",
+            "unreferenced_export",
+            "unused_parameter",
+        ]
+
+        static let docs = [
+            "broken_doc_reference",
+            "stale_doc_reference",
+        ]
+
+        static let structure = [
+            "directory_sprawl",
+            "duplicate_function",
+            "god_file",
+            "high_item_count",
+            "missing_interface",
+            "missing_method",
+            "missing_registration",
+            "naming_mismatch",
+            "parallel_implementation",
+            "repeated_field_pattern",
+            "repeated_literal_shape",
+            "shared_scaffolding",
+        ]
+    }
+
+    private func audit(componentId: String, only kinds: [String], source: String, timeout: TimeInterval) async throws -> AuditOutput {
+        var args = ["audit", componentId]
+        for kind in kinds {
+            args.append(contentsOf: ["--only", kind])
+        }
+
+        let response = try await cli.execute(args, timeout: timeout)
+        let result = try response.decodeResponse(AuditOutput.self)
+
+        if let data = result.data {
+            return data
+        }
+
+        if let errorDetail = result.error {
+            throw CLIBridgeError.cliError(errorDetail.toCLIError(source: source))
+        }
+        throw CLIBridgeError.executionFailed(exitCode: response.exitCode, message: response.errorOutput)
+    }
+
     /// Run code audit on a component
     func auditCode(componentId: String, fix: Bool = false, write: Bool = false) async throws -> AuditOutput {
-        var args = ["audit", "code", componentId]
-        if fix {
-            args.append("--fix")
-        }
-        if write {
-            args.append("--write")
-        }
-        return try await cli.executeCommand(args, dataType: AuditOutput.self, source: "Audit Code", timeout: 120)
+        try await audit(componentId: componentId, only: AuditSlice.code, source: "Audit Code", timeout: 120)
     }
 
     /// Run documentation audit on a component
     func auditDocs(componentId: String, fix: Bool = false) async throws -> AuditOutput {
-        var args = ["audit", "docs", componentId]
-        if fix {
-            args.append("--fix")
-        }
-        return try await cli.executeCommand(args, dataType: AuditOutput.self, source: "Audit Docs", timeout: 60)
+        try await audit(componentId: componentId, only: AuditSlice.docs, source: "Audit Docs", timeout: 60)
     }
 
     /// Run structural audit on a component
     func auditStructure(componentId: String) async throws -> AuditOutput {
-        try await cli.executeCommand(
-            ["audit", "structure", componentId],
-            dataType: AuditOutput.self,
-            source: "Audit Structure",
-            timeout: 60
-        )
+        try await audit(componentId: componentId, only: AuditSlice.structure, source: "Audit Structure", timeout: 60)
     }
 
     // MARK: - Refactor Commands
@@ -1074,16 +1107,23 @@ private init() {}
         return try await cli.executeCommand(args, dataType: RefactorResult.self, source: "Refactor Rename", timeout: 120)
     }
 
-    // MARK: - Supports Command
+    // MARK: - Command Surface
 
-    /// Check if CLI supports a specific capability
-    func supports(command: String, option: String? = nil) async throws -> Bool {
-        var args = ["supports", command]
-        if let opt = option {
-            args.append(opt)
+    /// Check whether the installed CLI exposes a command or option.
+    func commandSurfaceSupports(command: String, option: String? = nil) async throws -> Bool {
+        var args = command.split(separator: " ").map(String.init)
+        args.append("--help")
+
+        let response = try await cli.execute(args, timeout: 10)
+        guard response.success else {
+            return false
         }
-        let output: SupportsOutput = try await cli.executeCommand(args, dataType: SupportsOutput.self, source: "Supports Check", timeout: 10)
-        return output.supported ?? false
+
+        guard let option else {
+            return true
+        }
+
+        return response.output.contains(option) || response.errorOutput.contains(option)
     }
 
     // MARK: - Undo Command
@@ -1111,31 +1151,41 @@ private init() {}
 
 // MARK: - New Command Output Types
 
-/// Output from audit commands (code, docs, structure)
+/// Output from audit commands
 struct AuditOutput: Decodable {
     let command: String
     let componentId: String?
+    let sourcePath: String?
+    let passed: Bool?
     let findings: [AuditFinding]?
     let summary: AuditSummary?
-    let fixed: Int?
-    let unchanged: Int?
+    let conventions: [AuditConvention]?
 }
 
 struct AuditFinding: Decodable, Identifiable {
-    let id: String
-    let severity: String  // "error", "warning", "info"
-    let category: String
-    let message: String
+    var id: String { "\(file ?? ""):\(kind):\(description)" }
+
+    let severity: String
+    let kind: String
+    let convention: String?
+    let confidence: String?
+    let description: String
     let file: String?
-    let line: Int?
     let suggestion: String?
 }
 
 struct AuditSummary: Decodable {
-    let total: Int
-    let errors: Int
-    let warnings: Int
-    let info: Int
+    let conventionsDetected: Int?
+    let filesScanned: Int?
+    let filesSkipped: Int?
+    let outliersFound: Int?
+    let warnings: [String]?
+}
+
+struct AuditConvention: Decodable {
+    let name: String?
+    let description: String?
+    let confidence: String?
 }
 
 /// Output from refactor plan command
@@ -1167,13 +1217,6 @@ struct RefactorResult: Decodable {
     let changesApplied: Int?
     let filesModified: [String]?
     let errors: [String]?
-}
-
-/// Output from supports command
-struct SupportsOutput: Decodable {
-    let command: String
-    let supported: Bool?
-    let message: String?
 }
 
 /// Output from undo command
