@@ -620,6 +620,14 @@ fn check_unreleased_commits(components: &[Component], config: &DeployConfig) -> 
         return Ok(());
     }
 
+    if config.tagged {
+        log_status!(
+            "deploy",
+            "Deploying from tagged releases (--tagged). Use `deploy --head` to include unreleased commits, or `homeboy release` to tag them."
+        );
+        return Ok(());
+    }
+
     if config.force {
         log_status!(
             "deploy",
@@ -708,6 +716,45 @@ mod tests {
         Component::new(id.to_string(), local_path.to_string(), String::new(), None)
     }
 
+    fn base_deploy_config() -> DeployConfig {
+        DeployConfig {
+            component_ids: vec![],
+            all: false,
+            outdated: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: false,
+            tagged: false,
+        }
+    }
+
+    fn init_repo_with_tag_gap(path: &Path) {
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command")
+        };
+        assert!(run(&["init", "-q"]).status.success());
+        assert!(run(&["config", "user.email", "test@example.com"])
+            .status
+            .success());
+        assert!(run(&["config", "user.name", "Test"]).status.success());
+        assert!(run(&["commit", "--allow-empty", "-q", "-m", "release"])
+            .status
+            .success());
+        assert!(run(&["tag", "v1.0.0"]).status.success());
+        assert!(run(&["commit", "--allow-empty", "-q", "-m", "fix: next"])
+            .status
+            .success());
+    }
+
     #[test]
     fn check_uncommitted_changes_reports_non_git_local_path() {
         // A directory exists but is not a git repo — the error must say so clearly
@@ -752,5 +799,35 @@ mod tests {
 
         let component = make_component("test", &path.to_string_lossy());
         check_uncommitted_changes(&[component]).expect("clean git repo should pass");
+    }
+
+    #[test]
+    fn tagged_deploy_allows_head_ahead_of_latest_tag() {
+        let dir = TempDir::new().expect("temp dir");
+        init_repo_with_tag_gap(dir.path());
+
+        let component = make_component("test", &dir.path().to_string_lossy());
+        let mut config = base_deploy_config();
+        config.tagged = true;
+
+        check_unreleased_commits(&[component], &config)
+            .expect("--tagged deploys the latest tag and should not require --force");
+    }
+
+    #[test]
+    fn default_tagged_release_guard_still_blocks_unreleased_head() {
+        let dir = TempDir::new().expect("temp dir");
+        init_repo_with_tag_gap(dir.path());
+
+        let component = make_component("test", &dir.path().to_string_lossy());
+        let config = base_deploy_config();
+
+        let err = check_unreleased_commits(&[component], &config)
+            .expect_err("default tag deploy should still require an explicit override");
+        assert!(
+            err.message.contains("HEAD has unreleased commits"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 }
