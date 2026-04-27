@@ -36,7 +36,7 @@ Homeboy extensions can:
 
 The manifest is a single unified `homeboy.json` file; extensions include only fields they need.
 
-For the authoritative runtime behavior, see [`homeboy/docs/commands/extension.md`](../../homeboy/docs/commands/extension.md).
+For the authoritative runtime behavior, run `homeboy docs extension`.
 
 ## Manifest Schema
 
@@ -68,7 +68,7 @@ For the authoritative runtime behavior, see [`homeboy/docs/commands/extension.md
 
 ### Runtime Object
 
-Executable extensions use the CLI runtime contract described in [`homeboy/docs/commands/extension.md`](../../homeboy/docs/commands/extension.md).
+Executable extensions use the CLI runtime contract described by `homeboy docs extension`.
 
 The manifest's `runtime` object configures shell commands that the CLI runs (for example `runCommand`, `setupCommand`, and optional `readyCheck`). The CLI injects execution context and merged settings via environment variables.
 

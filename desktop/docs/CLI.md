@@ -39,7 +39,7 @@ This document avoids duplicating CLI command docs.
 Use the CLI as the source of truth:
 - `homeboy docs`
 - `homeboy docs <topic>`
-- Markdown sources embedded into the CLI: [`homeboy/docs/`](../../homeboy/docs/index.md)
+- Markdown sources embedded into the CLI: `docs/` in the Homeboy CLI source tree
 
 ### Desktop ↔ CLI responsibilities
 
@@ -70,11 +70,11 @@ For canonical flags, output schemas, safety rules, and subtarget behavior, use `
 The desktop app relies on the CLI's mapped exit codes.
 
 Canonical mapping and error-code groups live in:
-- [`homeboy/docs/json-output/json-output-contract.md`](../../homeboy/docs/json-output/json-output-contract.md#exit-codes)
+- `homeboy docs json-output`
 
 ## Error reporting
 
 The desktop app surfaces CLI failures as `AppError` instances (see [ERROR-HANDLING](ERROR-HANDLING.md)).
 
 Canonical error codes/messages and exit code mapping live in the CLI docs:
-- [`homeboy/docs/json-output/json-output-contract.md#exit-codes`](../../homeboy/docs/json-output/json-output-contract.md#exit-codes)
+- `homeboy docs json-output`

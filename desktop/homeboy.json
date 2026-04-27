@@ -1,0 +1,9 @@
+{
+  "auto_cleanup": false,
+  "changelog_target": "docs/CHANGELOG.md",
+  "extensions": {
+    "swift": {}
+  },
+  "id": "homeboy-desktop",
+  "remote_path": ""
+}
