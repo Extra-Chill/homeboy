@@ -1,0 +1,58 @@
+{
+  "success": true,
+  "data": {
+    "command": "rig.show",
+    "rig": {
+      "components": {
+        "studio": {
+          "branch": "dev/combined-fixes",
+          "path": "~/Developer/studio"
+        },
+        "wordpress-playground": {
+          "branch": "dev/combined-fixes",
+          "path": "~/Developer/wordpress-playground"
+        }
+      },
+      "description": "Studio dev rig",
+      "id": "studio",
+      "pipeline": {
+        "check": [
+          {
+            "command": "docker info >/dev/null 2>&1",
+            "expect_exit": 0,
+            "kind": "check",
+            "label": "Docker daemon running"
+          },
+          {
+            "id": "tarball-server",
+            "kind": "service",
+            "op": "health"
+          }
+        ],
+        "up": [
+          {
+            "id": "tarball-server",
+            "kind": "service",
+            "op": "start"
+          }
+        ]
+      },
+      "services": {
+        "tarball-server": {
+          "health": {
+            "expect_status": 200,
+            "http": "http://127.0.0.1:9724/"
+          },
+          "kind": "http-static",
+          "port": 9724
+        }
+      },
+      "symlinks": [
+        {
+          "link": "~/.local/bin/studio",
+          "target": "~/.local/bin/studio-dev"
+        }
+      ]
+    }
+  }
+}

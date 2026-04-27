@@ -15,6 +15,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
     case deployer = "Deployer"
     case bench = "Bench"
     case release = "Release"
+    case rigs = "Rigs"
     case remoteFileEditor = "File Editor"
     case remoteLogViewer = "Log Viewer"
     case databaseBrowser = "Database"
@@ -27,6 +28,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
         case .deployer: return "arrow.up.to.line"
         case .bench: return "speedometer"
         case .release: return "tag"
+        case .rigs: return "shippingbox.and.arrow.backward"
         case .remoteFileEditor: return "doc.badge.gearshape"
         case .remoteLogViewer: return "doc.text.magnifyingglass"
         case .databaseBrowser: return "cylinder.split.1x2"
@@ -71,6 +73,8 @@ struct ContentView: View {
                 .opacity(selectedItem == .coreTool(.bench) ? 1 : 0)
             ReleaseWorkflowView()
                 .opacity(selectedItem == .coreTool(.release) ? 1 : 0)
+            RigsView()
+                .opacity(selectedItem == .coreTool(.rigs) ? 1 : 0)
             DatabaseBrowserView()
                 .opacity(selectedItem == .coreTool(.databaseBrowser) ? 1 : 0)
             RemoteLogViewerView()

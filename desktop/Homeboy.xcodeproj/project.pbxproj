@@ -14,6 +14,8 @@
 		0BB5245A79F8709EBD8C5269 /* ModuleInstallSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA1C2F245C5FCEF82A5D2D3 /* ModuleInstallSheet.swift */; };
 		0FE6351E7C94950D6A459978 /* DeployerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F978C6E7F1C5288FF7303DF7 /* DeployerView.swift */; };
 		1162E40A1D0549D9B68608A8 /* BenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1162E4091D0549D9B68608A8 /* BenchView.swift */; };
+		102A2F3B4C5D6E7F8091A2B3 /* RigsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F3B4C5D6E7F8091A2B3102A /* RigsView.swift */; };
+		1A2B3102F3B4C5D6E7F8091A /* RigsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B4C5D6E7F8091A2B3102A2F /* RigsViewModel.swift */; };
 		1A164D8DD4607926F6964B95 /* CopyableContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */; };
 		1D8C5CFC6CC66D4D2059241A /* CLIError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0B9A725382C46F30D83C02 /* CLIError.swift */; };
 		1E0233CF5AC026C74233786E /* TableDataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EC7ED01925DBCB9195A8A4D /* TableDataView.swift */; };
@@ -118,9 +120,11 @@
 		21BD4D2024772E1CFC5F01C2 /* ModuleViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleViewModel.swift; sourceTree = "<group>"; };
 		267B4789567169ABFC9AAD53 /* ModuleManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleManifest.swift; sourceTree = "<group>"; };
 		29EDC4F278327A663263D4A7 /* DatabaseBrowserViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseBrowserViewModel.swift; sourceTree = "<group>"; };
+		2F3B4C5D6E7F8091A2B3102A /* RigsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RigsView.swift; sourceTree = "<group>"; };
 		2DA1C2F245C5FCEF82A5D2D3 /* ModuleInstallSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleInstallSheet.swift; sourceTree = "<group>"; };
 		2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileBrowser.swift; sourceTree = "<group>"; };
 		2EC7ED01925DBCB9195A8A4D /* TableDataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableDataView.swift; sourceTree = "<group>"; };
+		3B4C5D6E7F8091A2B3102A2F /* RigsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RigsViewModel.swift; sourceTree = "<group>"; };
 		385944CD36C9E1B61CE23EDE /* FindableTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindableTextView.swift; sourceTree = "<group>"; };
 		3A6FE3DEAD139D529B6724D8 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
 		3A80F92FC849ACD9591EDEFE /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
@@ -379,6 +383,7 @@
 			children = (
 				8007D7D3CCEF3F80C36AA686 /* Components */,
 				E900FE3D44D913C0F5C320A7 /* Modules */,
+				4C5D6E7F8091A2B3102A2F3B /* Rigs */,
 				F08C0BC0AC87CDDCAA5955CF /* Settings */,
 				1162E4091D0549D9B68608A8 /* BenchView.swift */,
 				3A80F92FC849ACD9591EDEFE /* LoginView.swift */,
@@ -396,6 +401,15 @@
 				21BD4D2024772E1CFC5F01C2 /* ModuleViewModel.swift */,
 			);
 			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		4C5D6E7F8091A2B3102A2F3B /* Rigs */ = {
+			isa = PBXGroup;
+			children = (
+				2F3B4C5D6E7F8091A2B3102A /* RigsView.swift */,
+				3B4C5D6E7F8091A2B3102A2F /* RigsViewModel.swift */,
+			);
+			path = Rigs;
 			sourceTree = "<group>";
 		};
 		8007D7D3CCEF3F80C36AA686 /* Components */ = {
@@ -700,6 +714,8 @@
 				80D12DD221BE19316CB0BDCA /* RemoteLogViewerViewModel.swift in Sources */,
 				C24FBE4BE4FE4BA046D565C3 /* RemotePathResolver+WordPress.swift in Sources */,
 				465D0E037B7E2705A578EAF2 /* RemotePathResolver.swift in Sources */,
+				102A2F3B4C5D6E7F8091A2B3 /* RigsView.swift in Sources */,
+				1A2B3102F3B4C5D6E7F8091A /* RigsViewModel.swift in Sources */,
 				58C9903BC07607162259D792 /* SSHKeyManager.swift in Sources */,
 				71419F89166E98CC7C4A3A98 /* SSHService.swift in Sources */,
 				E8A0E0A1E7364CFEB6EB48AF /* SchemaResolver.swift in Sources */,

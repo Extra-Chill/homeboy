@@ -765,6 +765,94 @@ private init() {}
         )
     }
 
+    // MARK: - Rig Commands
+
+    func rigList() async throws -> [RigListItem] {
+        let output: RigListOutput = try await cli.executeCommand(
+            ["rig", "list"],
+            dataType: RigListOutput.self,
+            source: "Rig List"
+        )
+        return output.rigs ?? []
+    }
+
+    func rigShow(id: String) async throws -> RigSpec {
+        let output: RigShowOutput = try await cli.executeCommand(
+            ["rig", "show", id],
+            dataType: RigShowOutput.self,
+            source: "Rig Show"
+        )
+        guard let rig = output.rig else {
+            throw CLIBridgeError.invalidResponse("Rig not found: \(id)")
+        }
+        return rig
+    }
+
+    func rigStatus(id: String) async throws -> RigStatusOutput {
+        try await cli.executeCommand(
+            ["rig", "status", id],
+            dataType: RigStatusOutput.self,
+            source: "Rig Status",
+            timeout: 60
+        )
+    }
+
+    func rigCheck(id: String) async throws -> RigCommandResult<RigCheckOutput> {
+        try await runRigCommand(["rig", "check", id], dataType: RigCheckOutput.self, source: "Rig Check", timeout: 180)
+    }
+
+    func rigUp(id: String) async throws -> RigCommandResult<RigLifecycleOutput> {
+        try await runRigCommand(["rig", "up", id], dataType: RigLifecycleOutput.self, source: "Rig Up", timeout: 900)
+    }
+
+    func rigDown(id: String) async throws -> RigCommandResult<RigLifecycleOutput> {
+        try await runRigCommand(["rig", "down", id], dataType: RigLifecycleOutput.self, source: "Rig Down", timeout: 300)
+    }
+
+    private func runRigCommand<T: Decodable>(
+        _ args: [String],
+        dataType: T.Type,
+        source: String,
+        timeout: TimeInterval
+    ) async throws -> RigCommandResult<T> {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("homeboy-rig-\(UUID().uuidString).json")
+        var commandArgs = args
+        if commandArgs.first == "rig" {
+            commandArgs.insert(contentsOf: ["--output", outputURL.path], at: 1)
+        }
+
+        let response = try await cli.execute(commandArgs, timeout: timeout)
+        let structuredOutput = (try? String(contentsOf: outputURL, encoding: .utf8)).flatMap { value in
+            value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        } ?? response.output
+        try? FileManager.default.removeItem(at: outputURL)
+
+        guard let data = structuredOutput.data(using: .utf8) else {
+            throw CLIBridgeError.invalidResponse("\(source) output is not valid UTF-8")
+        }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let result = try decoder.decode(CLIBridgeResult<T>.self, from: data)
+
+        if let data = result.data {
+            return RigCommandResult(
+                success: result.success,
+                data: data,
+                rawOutput: response.output.isEmpty ? structuredOutput : response.output,
+                errorOutput: response.errorOutput,
+                exitCode: response.exitCode
+            )
+        }
+
+        if let errorDetail = result.error {
+            throw CLIBridgeError.cliError(errorDetail.toCLIError(source: source))
+        }
+
+        throw CLIBridgeError.invalidResponse("\(source) response missing data")
+    }
+
 // MARK: - Component Commands
 
     func componentList() async throws -> [ComponentListItemCLI] {
@@ -1528,4 +1616,128 @@ struct FleetExecResult: Decodable, Identifiable {
     let error: String?
 
     var id: String { projectId }
+}
+
+// MARK: - Rig Output Types
+
+struct RigCommandResult<T: Decodable> {
+    let success: Bool
+    let data: T
+    let rawOutput: String
+    let errorOutput: String
+    let exitCode: Int32
+}
+
+struct RigListOutput: Decodable {
+    let command: String
+    let rigs: [RigListItem]?
+}
+
+struct RigListItem: Decodable, Identifiable {
+    let id: String
+    let declaredId: String?
+    let description: String?
+    let pipelines: [String]
+    let componentCount: Int
+    let serviceCount: Int
+    let source: RigSource?
+}
+
+struct RigSource: Decodable {
+    let source: String?
+    let packagePath: String?
+    let rigPath: String?
+    let linked: Bool?
+}
+
+struct RigShowOutput: Decodable {
+    let command: String
+    let rig: RigSpec?
+}
+
+struct RigSpec: Decodable, Identifiable {
+    let id: String
+    let description: String?
+    let components: [String: RigComponent]
+    let services: [String: JSONValue]?
+    let symlinks: [JSONValue]?
+    let pipeline: [String: [RigStep]]?
+}
+
+struct RigComponent: Decodable, Identifiable {
+    let path: String
+    let branch: String?
+    let stack: String?
+
+    var id: String { path }
+}
+
+struct RigStep: Decodable, Identifiable {
+    let kind: String
+    let label: String?
+    let idValue: String?
+    let op: String?
+    let component: String?
+    let command: String?
+
+    var id: String { [kind, label, idValue, op, component, command].compactMap { $0 }.joined(separator: ":") }
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case label
+        case idValue = "id"
+        case op
+        case component
+        case command
+    }
+}
+
+struct RigStatusOutput: Decodable {
+    let command: String
+    let rigId: String
+    let description: String?
+    let lastUp: String?
+    let lastCheck: String?
+    let lastCheckResult: String?
+    let services: [RigServiceStatus]
+}
+
+struct RigServiceStatus: Decodable, Identifiable {
+    let id: String
+    let kind: String
+    let status: String
+    let port: Int?
+    let pid: Int?
+    let startedAt: String?
+    let logPath: String?
+}
+
+struct RigCheckOutput: Decodable {
+    let command: String
+    let rigId: String
+    let success: Bool
+    let pipeline: RigPipelineResult
+}
+
+struct RigLifecycleOutput: Decodable {
+    let command: String
+    let rigId: String?
+    let success: Bool?
+    let pipeline: RigPipelineResult?
+}
+
+struct RigPipelineResult: Decodable {
+    let name: String
+    let passed: Int?
+    let failed: Int?
+    let steps: [RigPipelineStep]
+}
+
+struct RigPipelineStep: Decodable, Identifiable {
+    let kind: String
+    let label: String
+    let status: String
+    let error: String?
+
+    var id: String { "\(kind):\(label)" }
 }

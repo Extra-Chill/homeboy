@@ -99,6 +99,97 @@ struct DbOutput: Decodable {
     let sql: String?
 }
 
+// MARK: - Rig Output Types (mirror HomeboyCLI.swift)
+
+enum JSONValueTest: Decodable {
+    case string(String)
+    case int(Int)
+    case double(Double)
+    case bool(Bool)
+    case null
+    case array([JSONValueTest])
+    case object([String: JSONValueTest])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode(Int.self) {
+            self = .int(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .double(value)
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode([JSONValueTest].self) {
+            self = .array(value)
+        } else if let value = try? container.decode([String: JSONValueTest].self) {
+            self = .object(value)
+        } else {
+            throw DecodingError.typeMismatch(JSONValueTest.self, DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Unable to decode JSON value"))
+        }
+    }
+}
+
+struct RigListOutputTest: Decodable {
+    let command: String
+    let rigs: [RigListItemTest]?
+}
+
+struct RigListItemTest: Decodable {
+    let id: String
+    let description: String?
+    let pipelines: [String]
+    let componentCount: Int
+    let serviceCount: Int
+}
+
+struct RigShowOutputTest: Decodable {
+    let command: String
+    let rig: RigSpecTest?
+}
+
+struct RigSpecTest: Decodable {
+    let id: String
+    let description: String?
+    let components: [String: RigComponentTest]
+    let services: [String: JSONValueTest]?
+    let symlinks: [JSONValueTest]?
+    let pipeline: [String: [RigStepTest]]?
+}
+
+struct RigComponentTest: Decodable {
+    let path: String
+    let branch: String?
+}
+
+struct RigStepTest: Decodable {
+    let kind: String
+    let label: String?
+}
+
+struct RigCheckOutputTest: Decodable {
+    let command: String
+    let rigId: String
+    let success: Bool
+    let pipeline: RigPipelineResultTest
+}
+
+struct RigPipelineResultTest: Decodable {
+    let name: String
+    let passed: Int?
+    let failed: Int?
+    let steps: [RigPipelineStepTest]
+}
+
+struct RigPipelineStepTest: Decodable {
+    let kind: String
+    let label: String
+    let status: String
+    let error: String?
+}
+
 struct WPTable: Decodable {
     let Name: String
     let Rows: String?
@@ -303,6 +394,9 @@ func runTests(testDir: String) throws {
 
     // Test 15: release/build planning command shapes
     try testReleaseBuildPlanningCommandShapes()
+
+    // Test 16: Rig command JSON contracts
+    try testRigContracts(fixturesDir: fixturesDir, decoder: decoder)
 
     print("")
     print("All contract tests passed")
@@ -1072,6 +1166,61 @@ func testBenchResult(fixturesDir: String, decoder: JSONDecoder) throws {
             userInfo: [NSLocalizedDescriptionKey: "Baseline comparison regression flag mismatch"])
     }
     print("[PASS] Baseline comparison decodes")
+    print("")
+}
+
+func testRigContracts(fixturesDir: String, decoder: JSONDecoder) throws {
+    print("Test: rig command contracts")
+    print("---------------------------")
+
+    let listFixture = URL(fileURLWithPath: "\(fixturesDir)/rig-list.json")
+    let showFixture = URL(fileURLWithPath: "\(fixturesDir)/rig-show.json")
+    let checkFixture = URL(fileURLWithPath: "\(fixturesDir)/rig-check-failed.json")
+
+    let listData = try Data(contentsOf: listFixture)
+    let listResult = try decoder.decode(CLIResponse<RigListOutputTest>.self, from: listData)
+    guard listResult.success, let list = listResult.data, let rigs = list.rigs, !rigs.isEmpty else {
+        throw NSError(domain: "ContractTest", code: 80,
+            userInfo: [NSLocalizedDescriptionKey: "rig-list.json did not decode rigs"])
+    }
+    print("[PASS] Decoded rig list with \(rigs.count) rig(s)")
+
+    let firstRig = rigs[0]
+    guard firstRig.componentCount == 2, firstRig.serviceCount == 1 else {
+        throw NSError(domain: "ContractTest", code: 81,
+            userInfo: [NSLocalizedDescriptionKey: "rig-list.json counts did not decode"])
+    }
+    print("[PASS] Rig list counts decode")
+
+    let showData = try Data(contentsOf: showFixture)
+    let showResult = try decoder.decode(CLIResponse<RigShowOutputTest>.self, from: showData)
+    guard showResult.success, let spec = showResult.data?.rig else {
+        throw NSError(domain: "ContractTest", code: 82,
+            userInfo: [NSLocalizedDescriptionKey: "rig-show.json did not decode rig spec"])
+    }
+    guard spec.components.keys.sorted() == ["studio", "wordpress-playground"] else {
+        throw NSError(domain: "ContractTest", code: 83,
+            userInfo: [NSLocalizedDescriptionKey: "rig-show.json component map did not decode"])
+    }
+    print("[PASS] Rig spec component map decodes")
+
+    guard spec.pipeline?["check"]?.count == 2 else {
+        throw NSError(domain: "ContractTest", code: 84,
+            userInfo: [NSLocalizedDescriptionKey: "rig-show.json check pipeline did not decode"])
+    }
+    print("[PASS] Rig spec pipeline steps decode")
+
+    let checkData = try Data(contentsOf: checkFixture)
+    let checkResult = try decoder.decode(CLIResponse<RigCheckOutputTest>.self, from: checkData)
+    guard checkResult.success == false, let check = checkResult.data else {
+        throw NSError(domain: "ContractTest", code: 85,
+            userInfo: [NSLocalizedDescriptionKey: "rig-check-failed.json should decode failed envelope with data"])
+    }
+    guard check.success == false, check.pipeline.failed == 1 else {
+        throw NSError(domain: "ContractTest", code: 86,
+            userInfo: [NSLocalizedDescriptionKey: "rig-check-failed.json failed check details did not decode"])
+    }
+    print("[PASS] Failed rig check data decodes without requiring success=true")
     print("")
 }
 
