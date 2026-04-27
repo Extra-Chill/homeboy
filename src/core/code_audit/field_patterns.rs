@@ -79,7 +79,13 @@ fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
             continue;
         };
 
-        let structs = extract_structs(&content, &relative);
+        let scan_content = if relative.ends_with(".rs") {
+            strip_rust_cfg_test_modules(&content)
+        } else {
+            content
+        };
+
+        let structs = extract_structs(&scan_content, &relative);
         all_structs.extend(structs);
     }
 
@@ -251,14 +257,28 @@ fn extract_structs(content: &str, file: &str) -> Vec<StructDef> {
 /// Try to extract a type name from a line that starts a struct/class/interface.
 fn extract_type_name(line: &str) -> Option<String> {
     // Skip comments and attributes.
-    let trimmed = line.trim();
+    let mut trimmed = line.trim();
     if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("/*") {
         return None;
     }
 
-    // Rust: pub struct Foo, struct Foo, pub(crate) struct Foo
-    if let Some(pos) = trimmed.find("struct ") {
-        let after = &trimmed[pos + 7..];
+    loop {
+        let Some(stripped) = trimmed
+            .strip_prefix("pub(crate) ")
+            .or_else(|| trimmed.strip_prefix("pub(super) "))
+            .or_else(|| trimmed.strip_prefix("pub "))
+            .or_else(|| trimmed.strip_prefix("export "))
+            .or_else(|| trimmed.strip_prefix("default "))
+            .or_else(|| trimmed.strip_prefix("abstract "))
+            .or_else(|| trimmed.strip_prefix("final "))
+        else {
+            break;
+        };
+        trimmed = stripped.trim_start();
+    }
+
+    // Rust: pub struct Foo, struct Foo, pub(crate) struct Foo.
+    if let Some(after) = trimmed.strip_prefix("struct ") {
         let name = after
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .next()?;
@@ -269,8 +289,7 @@ fn extract_type_name(line: &str) -> Option<String> {
 
     // PHP/TS: class Foo, interface Foo
     for keyword in &["class ", "interface "] {
-        if let Some(pos) = trimmed.find(keyword) {
-            let after = &trimmed[pos + keyword.len()..];
+        if let Some(after) = trimmed.strip_prefix(keyword) {
             let name = after
                 .split(|c: char| !c.is_alphanumeric() && c != '_')
                 .next()?;
@@ -350,6 +369,113 @@ fn is_test_path(path: &str) -> bool {
         || lower.ends_with("_test.php")
         || lower.ends_with(".test.ts")
         || lower.ends_with(".test.js")
+}
+
+fn strip_rust_cfg_test_modules(content: &str) -> String {
+    let mut out = Vec::new();
+    let mut pending_cfg_test: Option<&str> = None;
+    let mut skipping = false;
+    let mut depth = 0i32;
+    let mut raw_string_hashes: Option<usize> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if skipping {
+            depth += brace_delta_outside_rust_raw_strings(line, &mut raw_string_hashes);
+            if depth <= 0 {
+                skipping = false;
+                raw_string_hashes = None;
+            }
+            continue;
+        }
+
+        if let Some(cfg_line) = pending_cfg_test.take() {
+            if trimmed.starts_with("mod tests") {
+                skipping = true;
+                raw_string_hashes = None;
+                depth = brace_delta_outside_rust_raw_strings(line, &mut raw_string_hashes);
+                if depth <= 0 {
+                    skipping = false;
+                    raw_string_hashes = None;
+                }
+                continue;
+            }
+
+            out.push(cfg_line.to_string());
+        }
+
+        if trimmed == "#[cfg(test)]" {
+            pending_cfg_test = Some(line);
+            continue;
+        }
+
+        out.push(line.to_string());
+    }
+
+    if let Some(cfg_line) = pending_cfg_test {
+        out.push(cfg_line.to_string());
+    }
+
+    out.join("\n")
+}
+
+fn brace_delta_outside_rust_raw_strings(line: &str, raw_hashes: &mut Option<usize>) -> i32 {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut depth = 0;
+
+    while i < bytes.len() {
+        if let Some(hashes) = *raw_hashes {
+            if raw_string_closes_at(bytes, i, hashes) {
+                *raw_hashes = None;
+                i += 1 + hashes;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if let Some(hashes) = raw_string_opens_at(bytes, i) {
+            *raw_hashes = Some(hashes);
+            i += 2 + hashes;
+            continue;
+        }
+
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    depth
+}
+
+fn raw_string_opens_at(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'r') {
+        return None;
+    }
+
+    let mut i = start + 1;
+    while bytes.get(i) == Some(&b'#') {
+        i += 1;
+    }
+
+    if bytes.get(i) == Some(&b'"') {
+        Some(i - start - 1)
+    } else {
+        None
+    }
+}
+
+fn raw_string_closes_at(bytes: &[u8], start: usize, hashes: usize) -> bool {
+    if bytes.get(start) != Some(&b'"') {
+        return false;
+    }
+
+    (0..hashes).all(|offset| bytes.get(start + 1 + offset) == Some(&b'#'))
 }
 
 #[cfg(test)]
@@ -515,6 +641,54 @@ class {} {{
     }
 
     #[test]
+    fn skips_rust_cfg_test_modules_when_scanning_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("detector.rs"),
+            r##"
+pub struct RealConfig {
+    enabled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fixture_strings_do_not_count_as_real_structs() {
+        let _ = r#"
+struct Foo {
+    std: fs::PathBuf,
+    std: io::Result<()>,
+}
+"#;
+        let _ = r#"
+struct Foo {
+    std: fs::PathBuf,
+    std: io::Result<()>,
+}
+"#;
+        let _ = r#"
+struct Foo {
+    std: fs::PathBuf,
+    std: io::Result<()>,
+}
+"#;
+    }
+}
+"##,
+        )
+        .unwrap();
+
+        let findings = detect_repeated_field_patterns(dir.path());
+        assert!(
+            findings.is_empty(),
+            "inline Rust test fixtures should not be scanned as production structs: {:?}",
+            findings
+        );
+    }
+
+    #[test]
     fn parse_field_line_rust() {
         let field = parse_field_line("    pub verbose: bool,");
         assert!(field.is_some());
@@ -559,6 +733,12 @@ class {} {{
     }
 
     #[test]
+    fn extract_type_name_skips_keywords_inside_string_literals() {
+        assert_eq!(extract_type_name("let content = \"struct Foo {\";"), None);
+        assert_eq!(extract_type_name("format!(\"class Widget {\")"), None);
+    }
+
+    #[test]
     fn extract_type_name_other_langs() {
         assert_eq!(
             extract_type_name("class MyClass {"),
@@ -567,6 +747,14 @@ class {} {{
         assert_eq!(
             extract_type_name("interface IFoo {"),
             Some("IFoo".to_string())
+        );
+        assert_eq!(
+            extract_type_name("export interface Props {"),
+            Some("Props".to_string())
+        );
+        assert_eq!(
+            extract_type_name("export default class Widget {"),
+            Some("Widget".to_string())
         );
     }
 
