@@ -20,8 +20,9 @@ else
     # Called directly
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     EXTENSION_PATH="$(dirname "$SCRIPT_DIR")"
-    COMPONENT_PATH="$(pwd)"
+    COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
     COMPONENT_ID="$(basename "$COMPONENT_PATH")"
+    SETTINGS_JSON="${HOMEBOY_SETTINGS_JSON:-}"
 fi
 
 echo "Running Swift tests for: $COMPONENT_ID"
@@ -32,7 +33,11 @@ fi
 # Parse test type from settings
 TEST_TYPE="script"
 if [ -n "${SETTINGS_JSON:-}" ] && [ "$SETTINGS_JSON" != "{}" ]; then
-    TEST_TYPE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.test_type // "script"')
+    if command -v jq >/dev/null 2>&1; then
+        TEST_TYPE=$(printf '%s' "$SETTINGS_JSON" | jq -r '.test_type // "script"')
+    elif printf '%s' "$SETTINGS_JSON" | grep -q '"test_type"[[:space:]]*:[[:space:]]*"xcodebuild"'; then
+        TEST_TYPE="xcodebuild"
+    fi
 fi
 
 # Look for tests directory in component
