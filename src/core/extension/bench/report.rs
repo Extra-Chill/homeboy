@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::baseline::BenchBaselineComparison;
+use super::distribution::BenchRunDistribution;
 use super::parsing::{BenchMetricPhase, BenchResults, BenchScenario};
 use super::run::BenchRunWorkflowResult;
 use crate::rig::RigStateSnapshot;
@@ -94,6 +95,11 @@ pub struct BenchComparisonOutput {
     /// reference rig. Empty when only one rig produced parseable
     /// results.
     pub diff: BenchComparisonDiff,
+    /// Per-scenario run summary table. Promotes the variance-aware data
+    /// already present under each scenario's `runs_summary` into a direct
+    /// cross-rig comparison shape.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub summary: Vec<BenchScenarioComparisonSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hints: Option<Vec<String>>,
 }
@@ -155,6 +161,37 @@ pub struct BenchPhaseGroups {
     pub amortized: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub untagged: Vec<String>,
+}
+
+/// Table-shaped cross-rig summary for one shared scenario.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct BenchScenarioComparisonSummary {
+    pub scenario: String,
+    /// Metric used for p50/p95/mean/CV. Timing metrics are preferred so
+    /// users see latency variance first, while semantic metrics stay as
+    /// row columns.
+    pub metric: String,
+    pub rows: Vec<BenchScenarioComparisonRow>,
+}
+
+/// One row in a scenario's cross-rig summary table.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct BenchScenarioComparisonRow {
+    pub rig_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p50_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cv_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_p50_pct: Option<f64>,
+    #[serde(flatten)]
+    pub semantic_metrics: BTreeMap<String, f64>,
 }
 
 impl BenchPhaseGroups {
@@ -293,6 +330,152 @@ impl BenchComparisonDiff {
     }
 }
 
+impl BenchScenarioComparisonSummary {
+    fn build(entries: &[RigBenchEntry]) -> Vec<BenchScenarioComparisonSummary> {
+        let Some(reference_results) = entries.first().and_then(|e| e.results.as_ref()) else {
+            return Vec::new();
+        };
+
+        let parseable_entries: Vec<&RigBenchEntry> = entries
+            .iter()
+            .filter(|entry| entry.results.is_some())
+            .collect();
+        if parseable_entries.len() < 2 {
+            return Vec::new();
+        }
+
+        let mut summaries = Vec::new();
+        for ref_scenario in &reference_results.scenarios {
+            let scenario_rows: Vec<(&RigBenchEntry, &BenchScenario)> = parseable_entries
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .results
+                        .as_ref()
+                        .and_then(|results| find_scenario(results, &ref_scenario.id))
+                        .map(|scenario| (*entry, scenario))
+                })
+                .collect();
+
+            if scenario_rows.len() != parseable_entries.len() {
+                continue;
+            }
+
+            let Some(metric) = select_summary_metric(
+                scenario_rows
+                    .iter()
+                    .map(|(_, scenario)| *scenario)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            ) else {
+                continue;
+            };
+
+            let reference_p50 = scenario_rows
+                .first()
+                .and_then(|(_, scenario)| summary_distribution(scenario, &metric))
+                .map(|distribution| distribution.p50);
+
+            let rows = scenario_rows
+                .into_iter()
+                .map(|(entry, scenario)| {
+                    let distribution = summary_distribution(scenario, &metric);
+                    let p50 = distribution.map(|d| d.p50);
+                    let delta_p50_pct = match (reference_p50, p50) {
+                        (Some(reference), Some(current)) => Some(percent_delta(reference, current)),
+                        _ => None,
+                    };
+
+                    BenchScenarioComparisonRow {
+                        rig_id: entry.rig_id.clone(),
+                        n: distribution.map(|d| d.n),
+                        p50_ms: p50,
+                        p95_ms: distribution.map(|d| d.p95),
+                        mean_ms: distribution.map(|d| d.mean),
+                        cv_pct: distribution.map(|d| d.cv_pct),
+                        delta_p50_pct,
+                        semantic_metrics: semantic_metrics(scenario, &metric),
+                    }
+                })
+                .collect();
+
+            summaries.push(BenchScenarioComparisonSummary {
+                scenario: ref_scenario.id.clone(),
+                metric,
+                rows,
+            });
+        }
+
+        summaries
+    }
+}
+
+fn select_summary_metric(scenarios: &[&BenchScenario]) -> Option<String> {
+    let reference = scenarios.first()?;
+    let summary = reference.runs_summary.as_ref()?;
+    let candidates = ["elapsed_ms", "duration_ms", "p50_ms", "p95_ms", "mean_ms"];
+
+    for candidate in candidates {
+        if summary.contains_key(candidate)
+            && scenarios
+                .iter()
+                .all(|scenario| summary_distribution(scenario, candidate).is_some())
+        {
+            return Some(candidate.to_string());
+        }
+    }
+
+    summary.keys().find_map(|metric| {
+        if metric.ends_with("_ms")
+            && scenarios
+                .iter()
+                .all(|scenario| summary_distribution(scenario, metric).is_some())
+        {
+            Some(metric.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn summary_distribution<'a>(
+    scenario: &'a BenchScenario,
+    metric: &str,
+) -> Option<&'a BenchRunDistribution> {
+    scenario
+        .runs_summary
+        .as_ref()
+        .and_then(|summary| summary.get(metric))
+}
+
+fn percent_delta(reference: f64, current: f64) -> f64 {
+    if reference == 0.0 {
+        if current == 0.0 {
+            0.0
+        } else if current > 0.0 {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        }
+    } else {
+        (current - reference) / reference * 100.0
+    }
+}
+
+fn semantic_metrics(scenario: &BenchScenario, primary_metric: &str) -> BTreeMap<String, f64> {
+    scenario
+        .metrics
+        .values
+        .iter()
+        .filter_map(|(name, value)| {
+            if name == primary_metric || name.ends_with("_ms") || name.ends_with("_pct") {
+                return None;
+            }
+            Some((name.clone(), *value))
+        })
+        .collect()
+}
+
 fn find_scenario<'a>(results: &'a BenchResults, id: &str) -> Option<&'a BenchScenario> {
     results.scenarios.iter().find(|s| s.id == id)
 }
@@ -326,6 +509,7 @@ pub fn aggregate_comparison(
             BenchComparisonDiff::build((reference_id, ref_results), &others)
         }
     };
+    let summary = BenchScenarioComparisonSummary::build(&entries);
 
     let mut hints = Vec::new();
     if entries.iter().any(|e| e.results.is_none()) {
@@ -348,6 +532,7 @@ pub fn aggregate_comparison(
             iterations,
             rigs: entries,
             diff,
+            summary,
             hints: Some(hints),
         },
         exit_code,
@@ -381,6 +566,38 @@ mod tests {
             artifacts: BTreeMap::new(),
             runs: None,
             runs_summary: None,
+        }
+    }
+
+    fn scenario_with_runs_summary(
+        id: &str,
+        metrics: &[(&str, f64)],
+        summary_metric: &str,
+        distribution: BenchRunDistribution,
+    ) -> BenchScenario {
+        let mut scenario = scenario(id, metrics);
+        let mut runs_summary = BTreeMap::new();
+        runs_summary.insert(summary_metric.to_string(), distribution);
+        scenario.runs_summary = Some(runs_summary);
+        scenario
+    }
+
+    fn run_distribution(
+        n: u64,
+        p50: f64,
+        p95: f64,
+        mean: f64,
+        cv_pct: f64,
+    ) -> BenchRunDistribution {
+        BenchRunDistribution {
+            n,
+            min: p50,
+            max: p95,
+            mean,
+            stdev: mean * cv_pct / 100.0,
+            cv_pct,
+            p50,
+            p95,
         }
     }
 
@@ -624,6 +841,99 @@ mod tests {
         let (out, _) = aggregate_comparison("studio".into(), 10, entries);
         let hints = out.hints.as_ref().unwrap();
         assert!(hints.iter().any(|h| h.contains("no parseable results")));
+    }
+
+    #[test]
+    fn aggregate_promotes_cross_rig_run_summary() {
+        let reference = results(vec![scenario_with_runs_summary(
+            "studio-agent-runtime",
+            &[("elapsed_ms", 7552.0), ("success_rate", 1.0)],
+            "elapsed_ms",
+            run_distribution(3, 7552.0, 8324.0, 7827.0, 5.27),
+        )]);
+        let candidate = results(vec![scenario_with_runs_summary(
+            "studio-agent-runtime",
+            &[("elapsed_ms", 3311.0), ("success_rate", 1.0)],
+            "elapsed_ms",
+            run_distribution(3, 3311.0, 3377.0, 3232.0, 5.15),
+        )]);
+
+        let entries = vec![
+            entry("studio-agent-sdk", true, Some(reference)),
+            entry("studio-agent-pi", true, Some(candidate)),
+        ];
+        let (out, _) = aggregate_comparison("studio".into(), 10, entries);
+
+        assert_eq!(out.summary.len(), 1);
+        let summary = &out.summary[0];
+        assert_eq!(summary.scenario, "studio-agent-runtime");
+        assert_eq!(summary.metric, "elapsed_ms");
+        assert_eq!(summary.rows.len(), 2);
+
+        let reference_row = &summary.rows[0];
+        assert_eq!(reference_row.rig_id, "studio-agent-sdk");
+        assert_eq!(reference_row.n, Some(3));
+        assert_eq!(reference_row.p50_ms, Some(7552.0));
+        assert_eq!(reference_row.p95_ms, Some(8324.0));
+        assert_eq!(reference_row.mean_ms, Some(7827.0));
+        assert_eq!(reference_row.cv_pct, Some(5.27));
+        assert_eq!(reference_row.delta_p50_pct, Some(0.0));
+        assert_eq!(
+            reference_row.semantic_metrics.get("success_rate"),
+            Some(&1.0)
+        );
+
+        let candidate_row = &summary.rows[1];
+        assert_eq!(candidate_row.rig_id, "studio-agent-pi");
+        assert_eq!(candidate_row.n, Some(3));
+        assert_eq!(candidate_row.p50_ms, Some(3311.0));
+        assert_eq!(candidate_row.p95_ms, Some(3377.0));
+        assert_eq!(candidate_row.mean_ms, Some(3232.0));
+        assert_eq!(candidate_row.cv_pct, Some(5.15));
+        assert!(
+            (candidate_row.delta_p50_pct.unwrap() - -56.157309322033896).abs() < 1e-9,
+            "expected p50 delta against reference, got {:?}",
+            candidate_row.delta_p50_pct
+        );
+        assert_eq!(
+            candidate_row.semantic_metrics.get("success_rate"),
+            Some(&1.0)
+        );
+    }
+
+    #[test]
+    fn comparison_summary_serializes_as_direct_table_shape() {
+        let reference = results(vec![scenario_with_runs_summary(
+            "chat",
+            &[("elapsed_ms", 100.0), ("assistant_message_count", 2.0)],
+            "elapsed_ms",
+            run_distribution(2, 100.0, 110.0, 105.0, 4.76),
+        )]);
+        let candidate = results(vec![scenario_with_runs_summary(
+            "chat",
+            &[("elapsed_ms", 80.0), ("assistant_message_count", 2.0)],
+            "elapsed_ms",
+            run_distribution(2, 80.0, 90.0, 85.0, 5.88),
+        )]);
+
+        let entries = vec![
+            entry("ref", true, Some(reference)),
+            entry("next", true, Some(candidate)),
+        ];
+        let (out, _) = aggregate_comparison("agent".into(), 10, entries);
+        let value = serde_json::to_value(out).unwrap();
+        let rows = value["summary"][0]["rows"].as_array().unwrap();
+
+        assert_eq!(value["summary"][0]["scenario"], "chat");
+        assert_eq!(rows[0]["rig_id"], "ref");
+        assert_eq!(rows[0]["n"], 2);
+        assert_eq!(rows[0]["p50_ms"], 100.0);
+        assert_eq!(rows[0]["p95_ms"], 110.0);
+        assert_eq!(rows[0]["mean_ms"], 105.0);
+        assert_eq!(rows[0]["cv_pct"], 4.76);
+        assert_eq!(rows[0]["assistant_message_count"], 2.0);
+        assert_eq!(rows[1]["rig_id"], "next");
+        assert_eq!(rows[1]["delta_p50_pct"], -20.0);
     }
 }
 
