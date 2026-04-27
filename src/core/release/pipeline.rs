@@ -838,11 +838,11 @@ fn validate_code_quality(component: &Component) -> Result<()> {
                 if lint_passed {
                     log_status!("release", "Lint passed");
                 } else {
-                    failures.push(format!("Lint failed (exit code {})", output.exit_code));
+                    failures.push(code_quality_failure_message("Lint", &output));
                 }
             }
             Err(e) => {
-                failures.push(format!("Lint error: {}", e));
+                failures.push(format!("Lint runner error: {}", e));
             }
         }
     }
@@ -872,10 +872,10 @@ fn validate_code_quality(component: &Component) -> Result<()> {
             }
             Ok(output) => {
                 checks_run += 1;
-                failures.push(format!("Tests failed (exit code {})", output.exit_code));
+                failures.push(code_quality_failure_message("Tests", &output));
             }
             Err(e) => {
-                failures.push(format!("Test error: {}", e));
+                failures.push(format!("Test runner error: {}", e));
             }
         }
     }
@@ -892,6 +892,11 @@ fn validate_code_quality(component: &Component) -> Result<()> {
         return Ok(());
     }
 
+    log_status!("release", "Code quality check summary:");
+    for failure in &failures {
+        log_status!("release", "  - {}", failure);
+    }
+
     Err(Error::validation_invalid_argument(
         "code_quality",
         failures.join("; "),
@@ -901,6 +906,35 @@ fn validate_code_quality(component: &Component) -> Result<()> {
             "To bypass: homeboy release <component> --skip-checks".to_string(),
         ]),
     ))
+}
+
+fn code_quality_failure_message(check: &str, output: &extension::RunnerOutput) -> String {
+    if is_runner_infrastructure_failure(output) {
+        format!(
+            "{} runner infrastructure failure (exit code {})",
+            check, output.exit_code
+        )
+    } else {
+        format!("{} failed (exit code {})", check, output.exit_code)
+    }
+}
+
+fn is_runner_infrastructure_failure(output: &extension::RunnerOutput) -> bool {
+    if output.exit_code >= 2 || output.exit_code < 0 {
+        return true;
+    }
+
+    let combined = format!("{}\n{}", output.stdout, output.stderr).to_lowercase();
+    [
+        "playground bootstrap helper not found",
+        "playground php crash",
+        "bootstrap failure:",
+        "test harness infrastructure failure",
+        "lint runner infrastructure failure",
+        "failed opening required '/homeboy-extension/scripts/lib/playground-bootstrap.php'",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle))
 }
 
 /// Generate changelog entries from the commits since the last tag.
@@ -1539,10 +1573,12 @@ fn get_unexpected_uncommitted_files(
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_changelog_initialized, filter_homeboy_managed, get_unexpected_uncommitted_files,
-        is_homeboy_managed_path, read_changelog_for_release, strip_pr_reference,
+        code_quality_failure_message, ensure_changelog_initialized, filter_homeboy_managed,
+        get_unexpected_uncommitted_files, is_homeboy_managed_path,
+        is_runner_infrastructure_failure, read_changelog_for_release, strip_pr_reference,
     };
     use crate::component::Component;
+    use crate::extension::RunnerOutput;
     use crate::git::{CommitCategory, CommitInfo, UncommittedChanges};
 
     fn commit(subject: &str, category: CommitCategory) -> CommitInfo {
@@ -1594,6 +1630,51 @@ mod tests {
             "delete AgentType class — replace with string literals"
         );
         assert_eq!(fixed[0], "queue-add uses unified check-duplicate");
+    }
+
+    fn runner_output(exit_code: i32, stdout: &str, stderr: &str) -> RunnerOutput {
+        RunnerOutput {
+            exit_code,
+            success: exit_code == 0,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    #[test]
+    fn code_quality_failure_message_separates_test_findings_from_runner_infra() {
+        let findings = runner_output(1, "FAILURES!\nTests: 3, Assertions: 4, Failures: 1", "");
+        let infra = runner_output(
+            2,
+            "Error: Playground bootstrap helper not found at /tmp/missing",
+            "",
+        );
+
+        assert!(!is_runner_infrastructure_failure(&findings));
+        assert!(is_runner_infrastructure_failure(&infra));
+        assert_eq!(
+            code_quality_failure_message("Tests", &findings),
+            "Tests failed (exit code 1)"
+        );
+        assert_eq!(
+            code_quality_failure_message("Tests", &infra),
+            "Tests runner infrastructure failure (exit code 2)"
+        );
+    }
+
+    #[test]
+    fn code_quality_failure_message_detects_pre_runner_playground_fatal_output() {
+        let output = runner_output(
+            1,
+            "Fatal error: Uncaught Error: Failed opening required '/homeboy-extension/scripts/lib/playground-bootstrap.php'",
+            "",
+        );
+
+        assert!(is_runner_infrastructure_failure(&output));
+        assert_eq!(
+            code_quality_failure_message("Tests", &output),
+            "Tests runner infrastructure failure (exit code 1)"
+        );
     }
 
     // ---- homeboy-managed scratch path filtering (issue #1162) ----
