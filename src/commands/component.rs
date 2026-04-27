@@ -426,7 +426,11 @@ struct ComponentEnvOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     php: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    php_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_source: Option<String>,
 }
 
 fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
@@ -469,6 +473,8 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
 
     let mut php_version: Option<String> = None;
     let mut node_version: Option<String> = None;
+    let mut php_source: Option<String> = None;
+    let mut node_source: Option<String> = None;
 
     // Read node version from raw homeboy.json (the Rust struct drops unknown
     // fields like "php" and "node" from the extension config during deserialization).
@@ -479,10 +485,12 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
                 if let Some(ext_obj) = json.get("extensions").and_then(|e| e.get(ext_id.as_str())) {
                     if let Some(v) = ext_obj.get("node").and_then(|v| v.as_str()) {
                         node_version = Some(v.to_string());
+                        node_source = Some("component".to_string());
                     }
                     // Read php from homeboy.json as fallback (overridden below by header detection)
                     if let Some(v) = ext_obj.get("php").and_then(|v| v.as_str()) {
                         php_version = Some(v.to_string());
+                        php_source = Some("component".to_string());
                     }
                 }
             }
@@ -494,6 +502,22 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
     if extension_id.as_deref() == Some("wordpress") {
         if let Some(detected_php) = detect_wordpress_requires_php(local_path) {
             php_version = Some(detected_php);
+            php_source = Some("component".to_string());
+        }
+    }
+
+    if let Some(ref ext_id) = extension_id {
+        if let Ok(extension) = homeboy::extension::load_extension(ext_id) {
+            if let Some(runtime) = extension.runtime.as_ref() {
+                apply_extension_runtime_requirements(
+                    ext_id,
+                    runtime,
+                    &mut node_version,
+                    &mut node_source,
+                    &mut php_version,
+                    &mut php_source,
+                );
+            }
         }
     }
 
@@ -502,7 +526,9 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
         id: comp_id.clone(),
         extension: extension_id,
         php: php_version,
+        php_source,
         node: node_version,
+        node_source,
     };
 
     let entity = serde_json::to_value(&env_output).map_err(|error| {
@@ -523,6 +549,28 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
         },
         0,
     ))
+}
+
+fn apply_extension_runtime_requirements(
+    extension_id: &str,
+    runtime: &homeboy::extension::RuntimeRequirementsConfig,
+    node_version: &mut Option<String>,
+    node_source: &mut Option<String>,
+    php_version: &mut Option<String>,
+    php_source: &mut Option<String>,
+) {
+    if node_version.is_none() {
+        if let Some(node) = runtime.node.as_ref() {
+            *node_version = Some(node.clone());
+            *node_source = Some(format!("extension:{}", extension_id));
+        }
+    }
+    if php_version.is_none() {
+        if let Some(php) = runtime.php.as_ref() {
+            *php_version = Some(php.clone());
+            *php_source = Some(format!("extension:{}", extension_id));
+        }
+    }
 }
 
 /// Parse "Requires PHP: X.Y" from a WordPress plugin or theme header.
@@ -965,5 +1013,57 @@ mod tests {
 
         assert_eq!(obj["local_path"], serde_json::json!("/override"));
         assert_eq!(obj["remote_path"], serde_json::json!("/keep-this"));
+    }
+
+    #[test]
+    fn extension_runtime_requirements_fill_missing_component_versions() {
+        let runtime = homeboy::extension::RuntimeRequirementsConfig {
+            node: Some("24".to_string()),
+            php: Some("8.3".to_string()),
+        };
+        let mut node = None;
+        let mut node_source = None;
+        let mut php = None;
+        let mut php_source = None;
+
+        apply_extension_runtime_requirements(
+            "nodejs",
+            &runtime,
+            &mut node,
+            &mut node_source,
+            &mut php,
+            &mut php_source,
+        );
+
+        assert_eq!(node.as_deref(), Some("24"));
+        assert_eq!(node_source.as_deref(), Some("extension:nodejs"));
+        assert_eq!(php.as_deref(), Some("8.3"));
+        assert_eq!(php_source.as_deref(), Some("extension:nodejs"));
+    }
+
+    #[test]
+    fn component_versions_win_over_extension_runtime_requirements() {
+        let runtime = homeboy::extension::RuntimeRequirementsConfig {
+            node: Some("24".to_string()),
+            php: Some("8.3".to_string()),
+        };
+        let mut node = Some("22".to_string());
+        let mut node_source = Some("component".to_string());
+        let mut php = Some("8.2".to_string());
+        let mut php_source = Some("component".to_string());
+
+        apply_extension_runtime_requirements(
+            "nodejs",
+            &runtime,
+            &mut node,
+            &mut node_source,
+            &mut php,
+            &mut php_source,
+        );
+
+        assert_eq!(node.as_deref(), Some("22"));
+        assert_eq!(node_source.as_deref(), Some("component"));
+        assert_eq!(php.as_deref(), Some("8.2"));
+        assert_eq!(php_source.as_deref(), Some("component"));
     }
 }

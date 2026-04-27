@@ -7,10 +7,12 @@ use std::path::PathBuf;
 const RUNNER_STEPS_SH: &str = include_str!("runtime/runner-steps.sh");
 const FAILURE_TRAP_SH: &str = include_str!("runtime/failure-trap.sh");
 const WRITE_TEST_RESULTS_SH: &str = include_str!("runtime/write-test-results.sh");
+const RESOLVE_CONTEXT_SH: &str = include_str!("runtime/resolve-context.sh");
 
 pub const RUNNER_STEPS_ENV: &str = "HOMEBOY_RUNTIME_RUNNER_STEPS";
 pub const FAILURE_TRAP_ENV: &str = "HOMEBOY_RUNTIME_FAILURE_TRAP";
 pub const WRITE_TEST_RESULTS_ENV: &str = "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS";
+pub const RESOLVE_CONTEXT_ENV: &str = "HOMEBOY_RUNTIME_RESOLVE_CONTEXT";
 
 struct RuntimeHelper {
     filename: &'static str,
@@ -33,6 +35,11 @@ const HELPERS: &[RuntimeHelper] = &[
         filename: "write-test-results.sh",
         content: WRITE_TEST_RESULTS_SH,
         env_var: WRITE_TEST_RESULTS_ENV,
+    },
+    RuntimeHelper {
+        filename: "resolve-context.sh",
+        content: RESOLVE_CONTEXT_SH,
+        env_var: RESOLVE_CONTEXT_ENV,
     },
 ];
 
@@ -97,6 +104,77 @@ mod tests {
         assert!(
             pairs.iter().any(|(k, _)| k == WRITE_TEST_RESULTS_ENV),
             "write test results helper should be in pairs"
+        );
+        assert!(
+            pairs.iter().any(|(k, _)| k == RESOLVE_CONTEXT_ENV),
+            "resolve context helper should be in pairs"
+        );
+    }
+
+    #[test]
+    fn resolve_context_helper_exports_homeboy_env_and_aliases() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let helper_path = dir.path().join("resolve-context.sh");
+        std::fs::write(&helper_path, RESOLVE_CONTEXT_SH).expect("write helper");
+
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "source {}; homeboy_resolve_context --component-alias PLUGIN_PATH; printf '%s|%s|%s|%s' \"$EXTENSION_PATH\" \"$COMPONENT_PATH\" \"$COMPONENT_ID\" \"$PLUGIN_PATH\"",
+                helper_path.display()
+            ))
+            .env("HOMEBOY_EXTENSION_PATH", "/tmp/ext")
+            .env("HOMEBOY_COMPONENT_PATH", "/tmp/project")
+            .env("HOMEBOY_COMPONENT_ID", "demo")
+            .output()
+            .expect("run bash");
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "/tmp/ext|/tmp/project|demo|/tmp/project"
+        );
+    }
+
+    #[test]
+    fn resolve_context_helper_supports_direct_invocation_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let extension_dir = dir.path().join("extension");
+        let script_dir = extension_dir.join("scripts/test");
+        let component_dir = dir.path().join("component");
+        std::fs::create_dir_all(&script_dir).expect("script dir");
+        std::fs::create_dir_all(&component_dir).expect("component dir");
+        std::fs::write(extension_dir.join("extension.json"), "{}").expect("manifest marker");
+        let helper_path = dir.path().join("resolve-context.sh");
+        std::fs::write(&helper_path, RESOLVE_CONTEXT_SH).expect("write helper");
+
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "cd {}; source {}; SCRIPT_DIR={}; homeboy_resolve_context; printf '%s|%s|%s' \"$EXTENSION_PATH\" \"$COMPONENT_PATH\" \"$COMPONENT_ID\"",
+                component_dir.display(),
+                helper_path.display(),
+                script_dir.display()
+            ))
+            .output()
+            .expect("run bash");
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!(
+                "{}|{}|component",
+                extension_dir.display(),
+                component_dir.display()
+            )
         );
     }
 }

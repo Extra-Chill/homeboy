@@ -269,6 +269,8 @@ pub struct ExtensionDetail {
     pub source_url: Option<String>,
     pub runtime: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_requirements: Option<homeboy::extension::RuntimeRequirementsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub has_setup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_ready_check: Option<bool>,
@@ -391,6 +393,7 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
         } else {
             "platform".to_string()
         },
+        runtime_requirements: extension.runtime.clone(),
         has_setup,
         has_ready_check,
         ready: ready_status.ready,

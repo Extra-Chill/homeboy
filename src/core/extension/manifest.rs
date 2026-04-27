@@ -1,5 +1,6 @@
 use crate::component::AuditConfig;
 use crate::config::ConfigEntity;
+use crate::engine::output_parse::ParseSpec;
 use crate::error::{Error, Result};
 use crate::paths;
 use serde::{Deserialize, Serialize};
@@ -285,6 +286,12 @@ pub struct ExtensionManifest {
     pub executable: Option<ExecutableCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformCapability>,
+
+    /// Runtime requirements needed to execute this extension's runner scripts.
+    /// Component-declared requirements still win; these are fallbacks for the
+    /// runner substrate itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeRequirementsConfig>,
 
     // Standalone capabilities (already self-contained structs)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -708,6 +715,16 @@ pub struct LintConfig {
 pub struct TestConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension_script: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_parse: Option<ParseSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RuntimeRequirementsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub php: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

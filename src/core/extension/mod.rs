@@ -30,9 +30,9 @@ pub use manifest::{
     CliConfig, DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride,
     DeployVerification, DiscoveryConfig, DocTarget, ExecutableCapability, ExtensionManifest,
     FeatureContextRule, HttpMethod, InputConfig, LintConfig, OutputConfig, OutputSchema,
-    PlatformCapability, ProvidesConfig, RequirementsConfig, RuntimeConfig, ScriptsConfig,
-    SelectOption, SettingConfig, SinceTagConfig, TestConfig, TestMappingConfig,
-    VersionPatternConfig,
+    PlatformCapability, ProvidesConfig, RequirementsConfig, RuntimeConfig,
+    RuntimeRequirementsConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig,
+    TestConfig, TestMappingConfig, VersionPatternConfig,
 };
 
 // Re-export version types
@@ -1105,12 +1105,34 @@ mod tests {
         let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
             "name": "Example",
             "version": "0.0.0",
+            "runtime": { "node": "24" },
             "lint": { "extension_script": "lint.sh" },
-            "test": { "extension_script": "test.sh" },
+            "test": {
+                "extension_script": "test.sh",
+                "result_parse": {
+                    "rules": [{ "pattern": "Tests: (\\d+)", "field": "total" }]
+                }
+            },
             "build": { "extension_script": "build.sh" },
             "bench": { "extension_script": "bench.sh" }
         }))
         .unwrap();
+
+        assert_eq!(
+            manifest
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.node.as_deref()),
+            Some("24")
+        );
+        assert_eq!(
+            manifest
+                .test
+                .as_ref()
+                .and_then(|test| test.result_parse.as_ref())
+                .map(|spec| spec.rules.len()),
+            Some(1)
+        );
 
         for (capability, label, script, requires_script) in [
             (ExtensionCapability::Lint, "lint", "lint.sh", true),

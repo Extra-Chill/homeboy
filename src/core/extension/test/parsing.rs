@@ -130,7 +130,23 @@ pub fn parse_test_results_file(path: &std::path::Path) -> Option<TestCounts> {
 }
 
 pub fn parse_test_results_text(text: &str) -> Option<TestCounts> {
-    let spec = ParseSpec {
+    parse_test_results_text_with_spec(text, &default_test_result_parse_spec())
+}
+
+pub fn parse_test_results_text_with_spec(text: &str, spec: &ParseSpec) -> Option<TestCounts> {
+    let parsed = spec.parse(text);
+    let total = parsed.get("total").copied().unwrap_or(0.0).max(0.0) as u64;
+    if total == 0 {
+        return None;
+    }
+    let passed = parsed.get("passed").copied().unwrap_or(0.0).max(0.0) as u64;
+    let failed = parsed.get("failed").copied().unwrap_or(0.0).max(0.0) as u64;
+    let skipped = parsed.get("skipped").copied().unwrap_or(0.0).max(0.0) as u64;
+    Some(TestCounts::new(total, passed, failed, skipped))
+}
+
+fn default_test_result_parse_spec() -> ParseSpec {
+    ParseSpec {
         rules: vec![
             ParseRule {
                 pattern: r"Tests:\s*(\d+)".to_string(),
@@ -172,17 +188,7 @@ pub fn parse_test_results_text(text: &str) -> Option<TestCounts> {
             field: "passed".to_string(),
             expr: "total - failed - errors - skipped".to_string(),
         }],
-    };
-
-    let parsed = spec.parse(text);
-    let total = parsed.get("total").copied().unwrap_or(0.0).max(0.0) as u64;
-    if total == 0 {
-        return None;
     }
-    let passed = parsed.get("passed").copied().unwrap_or(0.0).max(0.0) as u64;
-    let failed = parsed.get("failed").copied().unwrap_or(0.0).max(0.0) as u64;
-    let skipped = parsed.get("skipped").copied().unwrap_or(0.0).max(0.0) as u64;
-    Some(TestCounts::new(total, passed, failed, skipped))
 }
 
 pub fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<CoverageOutput, ()> {
@@ -242,4 +248,48 @@ pub fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<Covera
         methods_pct,
         uncovered_files,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_parse_spec_can_sum_cargo_result_lines() {
+        let spec: ParseSpec = serde_json::from_value(serde_json::json!({
+            "rules": [
+                { "pattern": "test result:.*?(\\d+) passed", "field": "passed", "aggregate": "sum" },
+                { "pattern": "test result:.*?(\\d+) failed", "field": "failed", "aggregate": "sum" },
+                { "pattern": "test result:.*?(\\d+) ignored", "field": "skipped", "aggregate": "sum" }
+            ],
+            "defaults": { "passed": 0, "failed": 0, "skipped": 0 },
+            "derive": [
+                { "field": "total", "expr": "passed + failed + skipped" }
+            ]
+        }))
+        .expect("parse spec should deserialize from manifest-shaped JSON");
+
+        let counts = parse_test_results_text_with_spec(
+            "test result: ok. 2 passed; 0 failed; 1 ignored\n\
+             test result: FAILED. 3 passed; 1 failed; 0 ignored",
+            &spec,
+        )
+        .expect("cargo-style output should parse");
+
+        assert_eq!(counts.total, 7);
+        assert_eq!(counts.passed, 5);
+        assert_eq!(counts.failed, 1);
+        assert_eq!(counts.skipped, 1);
+    }
+
+    #[test]
+    fn default_parse_spec_preserves_phpunit_summary_fallback() {
+        let counts = parse_test_results_text("Tests: 12, Assertions: 20, Failures: 2, Skipped: 3")
+            .expect("default PHPUnit-ish fallback should still parse");
+
+        assert_eq!(counts.total, 12);
+        assert_eq!(counts.passed, 7);
+        assert_eq!(counts.failed, 2);
+        assert_eq!(counts.skipped, 3);
+    }
 }

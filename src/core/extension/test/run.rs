@@ -5,8 +5,9 @@ use crate::extension::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
 use crate::extension::test::baseline::{self, TestBaselineComparison, TestCounts};
 use crate::extension::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope, parse_coverage_file,
-    parse_failures_file, parse_test_results_file, parse_test_results_text, CoverageOutput,
-    FailedTest, TestScopeOutput, TestSummaryOutput,
+    parse_failures_file, parse_test_results_file, parse_test_results_text,
+    parse_test_results_text_with_spec, CoverageOutput, FailedTest, TestScopeOutput,
+    TestSummaryOutput,
 };
 use crate::refactor::AppliedRefactor;
 use serde::Serialize;
@@ -175,6 +176,11 @@ pub fn run_main_test_workflow(
         }
     }
 
+    let result_parse = crate::extension::test::resolve_test_command(component)
+        .ok()
+        .and_then(|context| crate::extension::load_extension(&context.extension_id).ok())
+        .and_then(|extension| extension.test.and_then(|test| test.result_parse));
+
     let output = build_test_runner(
         component,
         args.path_override.clone(),
@@ -188,8 +194,12 @@ pub fn run_main_test_workflow(
     .script_args(&args.passthrough_args)
     .run()?;
 
-    let test_counts =
-        parse_test_results_file(&results_file).or_else(|| parse_test_results_text(&output.stdout));
+    let test_counts = parse_test_results_file(&results_file).or_else(|| {
+        result_parse
+            .as_ref()
+            .and_then(|spec| parse_test_results_text_with_spec(&output.stdout, spec))
+            .or_else(|| parse_test_results_text(&output.stdout))
+    });
 
     // Autofix is owned by `refactor --from test --write`; the test command is read-only.
     let test_autofix: Option<AppliedRefactor> = None;

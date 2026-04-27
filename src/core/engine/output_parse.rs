@@ -1,32 +1,44 @@
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Aggregate {
     First,
+    #[default]
     Last,
     Sum,
     Max,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParseRule {
     pub pattern: String,
     pub field: String,
+    #[serde(default = "default_group")]
     pub group: usize,
+    #[serde(default)]
     pub aggregate: Aggregate,
 }
 
-#[derive(Debug, Clone)]
+fn default_group() -> usize {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeriveRule {
     pub field: String,
     pub expr: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParseSpec {
+    #[serde(default)]
     pub rules: Vec<ParseRule>,
+    #[serde(default)]
     pub defaults: HashMap<String, f64>,
+    #[serde(default)]
     pub derive: Vec<DeriveRule>,
 }
 

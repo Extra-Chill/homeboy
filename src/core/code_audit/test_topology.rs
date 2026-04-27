@@ -375,6 +375,7 @@ JSON
             audit: None,
             executable: None,
             platform: None,
+            runtime: None,
             cli: None,
             build: None,
             lint: None,
