@@ -663,7 +663,7 @@ func testAPIAuthContracts(decoder: JSONDecoder) throws {
     }
     print("[PASS] API GET output decodes arbitrary response JSON")
 
-    let source = try String(contentsOf: URL(fileURLWithPath: "Homeboy/Core/CLI/HomeboyCLI.swift"), encoding: .utf8)
+    let source = try cliSourceContent()
 
     func requireContains(_ needle: String, _ message: String, code: Int) throws {
         guard source.contains(needle) else {
@@ -732,7 +732,7 @@ func testReleaseBuildPlanningCommandShapes() throws {
     print("Test: release/build planning command shapes")
     print("-------------------------------------------")
 
-    let source = try String(contentsOf: URL(fileURLWithPath: "Homeboy/Core/CLI/HomeboyCLI.swift"), encoding: .utf8)
+    let source = try cliSourceContent()
     let contentView = try String(contentsOf: URL(fileURLWithPath: "Homeboy/App/ContentView.swift"), encoding: .utf8)
 
     func requireContains(_ haystack: String, _ needle: String, _ message: String, code: Int) throws {
@@ -811,12 +811,12 @@ func testQualityWorkspaceCommandShapes(testDir: String) throws {
     print("Test: Quality workspace command shapes")
     print("--------------------------------------")
 
-    let sourceURL = URL(fileURLWithPath: "Homeboy/Core/CLI/HomeboyCLI.swift")
+    let sourceURL = URL(fileURLWithPath: "Homeboy/Core/CLI")
     let contentViewURL = URL(fileURLWithPath: "Homeboy/App/ContentView.swift")
     let qualityViewURL = URL(fileURLWithPath: "Homeboy/Extensions/Quality/Views/QualityView.swift")
     let qualityViewModelURL = URL(fileURLWithPath: "Homeboy/Extensions/Quality/QualityViewModel.swift")
 
-    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    let source = try cliSourceContent(at: sourceURL)
     let contentView = try String(contentsOf: contentViewURL, encoding: .utf8)
     let qualityView = try String(contentsOf: qualityViewURL, encoding: .utf8)
     let qualityViewModel = try String(contentsOf: qualityViewModelURL, encoding: .utf8)
@@ -1400,13 +1400,13 @@ func testHomeboyCLIHelperCommandShapes() throws {
     print("Test: HomeboyCLI helper command shapes")
     print("--------------------------------------")
 
-    let sourceURL = URL(fileURLWithPath: "Homeboy/Core/CLI/HomeboyCLI.swift")
+    let sourceURL = URL(fileURLWithPath: "Homeboy/Core/CLI")
     guard FileManager.default.fileExists(atPath: sourceURL.path) else {
         throw NSError(domain: "ContractTest", code: 80,
             userInfo: [NSLocalizedDescriptionKey: "Source file not found: \(sourceURL.path)"])
     }
 
-    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    let source = try cliSourceContent(at: sourceURL)
 
     func requireContains(_ needle: String, _ message: String, code: Int) throws {
         guard source.contains(needle) else {
@@ -1526,14 +1526,14 @@ func testMutationCommandShapes(testDir: String) throws {
 
     let testURL = URL(fileURLWithPath: testDir)
     let repoRoot = testURL.lastPathComponent == "tests" ? testURL.deletingLastPathComponent() : testURL
-    let cliURL = repoRoot.appendingPathComponent("Homeboy/Core/CLI/HomeboyCLI.swift")
+    let cliURL = repoRoot.appendingPathComponent("Homeboy/Core/CLI")
 
     guard FileManager.default.fileExists(atPath: cliURL.path) else {
         throw NSError(domain: "ContractTest", code: 100,
-            userInfo: [NSLocalizedDescriptionKey: "HomeboyCLI.swift not found at \(cliURL.path)"])
+            userInfo: [NSLocalizedDescriptionKey: "Homeboy CLI source directory not found at \(cliURL.path)"])
     }
 
-    let source = try String(contentsOf: cliURL, encoding: .utf8)
+    let source = try cliSourceContent(at: cliURL)
     let fleetCreate = try sourceSlice(
         source,
         from: "func fleetCreate(",
@@ -1570,6 +1570,17 @@ func sourceSlice(_ source: String, from startMarker: String, to endMarker: Strin
     return String(source[start..<end])
 }
 
+func cliSourceContent(at sourceURL: URL = URL(fileURLWithPath: "Homeboy/Core/CLI")) throws -> String {
+    try FileManager.default.contentsOfDirectory(
+        at: sourceURL,
+        includingPropertiesForKeys: nil
+    )
+    .filter { $0.pathExtension == "swift" }
+    .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    .map { try String(contentsOf: $0, encoding: .utf8) }
+    .joined(separator: "\n")
+}
+
 func assertContains(_ haystack: String, _ needle: String, message: String) throws {
     guard haystack.contains(needle) else {
         throw NSError(domain: "ContractTest", code: 103,
@@ -1590,8 +1601,8 @@ func testCurrentCLICommandSurface(testDir: String) throws {
 
     let source = URL(fileURLWithPath: testDir)
         .deletingLastPathComponent()
-        .appendingPathComponent("Homeboy/Core/CLI/HomeboyCLI.swift")
-    let content = try String(contentsOf: source, encoding: .utf8)
+        .appendingPathComponent("Homeboy/Core/CLI")
+    let content = try cliSourceContent(at: source)
 
     let removedShapes = [
         "\"audit\", \"code\"",
@@ -1604,7 +1615,7 @@ func testCurrentCLICommandSurface(testDir: String) throws {
     for shape in removedShapes {
         guard !content.contains(shape) else {
             throw NSError(domain: "ContractTest", code: 70,
-                userInfo: [NSLocalizedDescriptionKey: "Removed CLI shape still appears in HomeboyCLI.swift: \(shape)"])
+                userInfo: [NSLocalizedDescriptionKey: "Removed CLI shape still appears in Homeboy CLI sources: \(shape)"])
         }
     }
     print("[PASS] Removed audit/supports command shapes are absent")
@@ -1631,7 +1642,7 @@ func testGitWorkspaceCommandShapes(testDir: String) throws {
     print("Test: Git workspace command shapes")
     print("----------------------------------")
 
-    let cliSource = try String(contentsOf: URL(fileURLWithPath: "Homeboy/Core/CLI/HomeboyCLI.swift"), encoding: .utf8)
+    let cliSource = try cliSourceContent()
     let viewModelSource = try String(
         contentsOf: URL(fileURLWithPath: "Homeboy/Extensions/GitOperations/GitOperationsViewModel.swift"),
         encoding: .utf8
