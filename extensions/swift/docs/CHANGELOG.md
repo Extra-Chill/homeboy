@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.4.2] - 2026-04-27
+
+### Fixed
+- advertise script test runner
+
 ## [2.4.1] - 2026-04-27
 
 ### Fixed
