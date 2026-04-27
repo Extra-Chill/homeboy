@@ -118,6 +118,20 @@
     ]
   },
   "deploy": {
+    "remote_path_inference": [
+      {
+        "when_file_contains": { "file": "{{dir_name}}.php", "text": "Plugin Name:" },
+        "remote_path": "wp-content/plugins/{{dir_name}}"
+      },
+      {
+        "when_file_contains": { "file": "{{id}}.php", "text": "Plugin Name:" },
+        "remote_path": "wp-content/plugins/{{dir_name}}"
+      },
+      {
+        "when_file_contains": { "file": "style.css", "text": "Theme Name:" },
+        "remote_path": "wp-content/themes/{{dir_name}}"
+      }
+    ],
     "verifications": [
       {
         "path_pattern": "/wp-content/plugins/",
