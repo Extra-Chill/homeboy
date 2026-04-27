@@ -197,6 +197,25 @@ for teams that want full enforcement.
 [wp-perf-1803]: https://github.com/WordPress/performance/pull/1803
 [strict-rules]: https://github.com/phpstan/phpstan-strict-rules
 
+### Test-smell preflight
+
+Before Playground boots PHPUnit, the runner scans `tests/**/*.php` for the
+high-confidence `wp.test.mock_over_fixture` smell: a test method that creates
+`$query = new WP_Query()` and then manually assigns result-state fields such
+as `->posts`, `->post_count`, or `->found_posts`.
+
+That pattern mocks WordPress query internals even though the WordPress test
+fixture layer can build the state directly. Prefer real fixtures:
+
+```php
+$post_id = self::factory()->post->create( array( 'post_date' => $date ) );
+query_posts( array( 'posts__in' => array( $post_id ), 'fields' => 'ids' ) );
+```
+
+Use `WP_Query` with real query args when a local query object is required.
+If a test intentionally exercises impossible query state, suppress the single
+case with `// homeboy-ignore wp.test.mock_over_fixture` near the setup.
+
 ## Debug output
 
 The Playground runner writes a structured log to

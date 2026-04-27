@@ -108,6 +108,11 @@ if type homeboy_php_preflight &>/dev/null; then
     homeboy_php_preflight "$PLUGIN_PATH"
 fi
 
+WP_TEST_SMELLS="${EXTENSION_PATH}/scripts/audit/wp-test-smells.py"
+if [ -f "$WP_TEST_SMELLS" ]; then
+    python3 "$WP_TEST_SMELLS" "$PLUGIN_PATH"
+fi
+
 if [ -n "${COMPONENT_ID:-}" ]; then
     export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
     export HOMEBOY_COMPONENT_PATH="$PLUGIN_PATH"
