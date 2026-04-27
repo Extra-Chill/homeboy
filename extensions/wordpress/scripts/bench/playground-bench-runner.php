@@ -77,6 +77,9 @@ if (!defined('HOMEBOY_BENCH_INSTANCE_ID')) {
 if (!defined('HOMEBOY_BENCH_CONCURRENCY')) {
     define('HOMEBOY_BENCH_CONCURRENCY', (int) '{{CONCURRENCY}}');
 }
+if (!defined('HOMEBOY_BENCH_LIST_ONLY')) {
+    define('HOMEBOY_BENCH_LIST_ONLY', '{{LIST_ONLY}}' === 'true');
+}
 
 require_once '/homeboy-extension/scripts/lib/playground-bootstrap.php';
 
@@ -288,6 +291,35 @@ $warmup_iterations = 1; // Discard first iteration (autoload + OPcache warmup).
 
 if ($iterations_per_workload < 1) {
     $iterations_per_workload = 1;
+}
+
+if (HOMEBOY_BENCH_LIST_ONLY) {
+    foreach ($workload_files as $workload_file) {
+        $basename = basename($workload_file);
+        $scenario_id = pg_bench_scenario_id($basename);
+        $source = $workload_sources[$workload_file] ?? 'in_tree';
+        $relative_file = $source === 'in_tree'
+            ? substr($workload_file, strlen($plugin_path) + 1)
+            : $workload_file;
+
+        $scenarios[] = [
+            'id' => $scenario_id,
+            'file' => $relative_file,
+            'source' => $source,
+            'iterations' => 0,
+            'default_iterations' => $iterations_per_workload,
+            'tags' => [],
+            'metrics' => new stdClass(),
+        ];
+    }
+
+    file_put_contents("$plugin_path/.pg-bench-results{{RESULT_SUFFIX}}.json", json_encode([
+        'component_id' => '{{COMPONENT_ID}}',
+        'iterations' => 0,
+        'scenarios' => $scenarios,
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    pg_log('LIST_ONLY: scenarios=' . count($scenarios));
+    exit(0);
 }
 
 try {

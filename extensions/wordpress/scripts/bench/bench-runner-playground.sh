@@ -278,6 +278,12 @@ fi
 
 INSTANCE_ID="${HOMEBOY_BENCH_INSTANCE_ID:-0}"
 CONCURRENCY="${HOMEBOY_BENCH_CONCURRENCY:-1}"
+LIST_ONLY="${HOMEBOY_BENCH_LIST_ONLY:-0}"
+if [ "$LIST_ONLY" = "1" ]; then
+    LIST_ONLY_PHP="true"
+else
+    LIST_ONLY_PHP="false"
+fi
 
 PLAYGROUND_DEP_MOUNTS=""
 if [ -n "$DEPENDENCY_PATHS" ]; then
@@ -333,6 +339,7 @@ sed \
     -e "s|{{SHARED_STATE_PATH}}|${SHARED_STATE_GUEST}|g" \
     -e "s|{{INSTANCE_ID}}|${INSTANCE_ID}|g" \
     -e "s|{{CONCURRENCY}}|${CONCURRENCY}|g" \
+    -e "s|{{LIST_ONLY}}|${LIST_ONLY_PHP}|g" \
     -e "s|{{RESULT_SUFFIX}}|${RESULT_SUFFIX}|g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
@@ -344,6 +351,9 @@ echo "Running performance benchmarks via WordPress Playground..."
 echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
 echo "  Iterations: ${ITERATIONS}"
 echo "  Backend: playground (PHP-WASM + SQLite)"
+if [ "$LIST_ONLY" = "1" ]; then
+    echo "  Mode: list only"
+fi
 if [ -n "$SHARED_STATE_GUEST" ]; then
     echo "  Shared state: ${SHARED_STATE_HOST} (instance ${INSTANCE_ID}/${CONCURRENCY})"
 fi

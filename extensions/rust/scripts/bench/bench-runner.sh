@@ -42,6 +42,7 @@ set -euo pipefail
 #   HOMEBOY_COMPONENT_ID         — component identifier
 #   HOMEBOY_BENCH_ITERATIONS     — iterations per workload (default 10)
 #   HOMEBOY_BENCH_RESULTS_FILE   — where core wants the envelope written
+#   HOMEBOY_BENCH_LIST_ONLY      — when 1, emit scenario inventory only
 #   HOMEBOY_DEBUG                — verbose output
 
 if ((BASH_VERSINFO[0] < 4)); then
@@ -84,6 +85,7 @@ fi
 EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
 RESULTS_FILE="${HOMEBOY_BENCH_RESULTS_FILE:-${PROJECT_PATH}/.rust-bench-results.json}"
+LIST_ONLY="${HOMEBOY_BENCH_LIST_ONLY:-0}"
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: [bench:rust] extension=$EXTENSION_PATH" >&2
@@ -91,6 +93,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: [bench:rust] component_id=$COMPONENT_ID" >&2
     echo "DEBUG: [bench:rust] iterations=$ITERATIONS" >&2
     echo "DEBUG: [bench:rust] results=$RESULTS_FILE" >&2
+    echo "DEBUG: [bench:rust] list_only=$LIST_ONLY" >&2
 fi
 
 if [ ! -f "${PROJECT_PATH}/Cargo.toml" ]; then
@@ -146,7 +149,62 @@ discover_bench_bins() {
     printf '%s\n' "${_bins[@]:-}"
 }
 
+bench_bin_file() {
+    local _bin="$1"
+    local _auto="${PROJECT_PATH}/src/bin/${_bin}.rs"
+    if [ -f "$_auto" ]; then
+        printf 'src/bin/%s.rs\n' "$_bin"
+        return 0
+    fi
+    printf 'null\n'
+}
+
 mapfile -t BENCH_BINS < <(discover_bench_bins)
+
+if [ "$LIST_ONLY" = "1" ]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+        FAILED_STEP="python3 not on PATH"
+        FAILURE_OUTPUT="bench list requires python3 to write the discovery envelope"
+        exit 1
+    fi
+
+    SCENARIO_ARGS=()
+    for _bin in "${BENCH_BINS[@]:-}"; do
+        _scenario_id="${_bin#bench-}"
+        _scenario_file="$(bench_bin_file "$_bin")"
+        SCENARIO_ARGS+=("${_scenario_id}=${_scenario_file}")
+    done
+
+    python3 - <<PYTHON_LIST "$RESULTS_FILE" "$COMPONENT_ID" "$ITERATIONS" "${SCENARIO_ARGS[@]:-}"
+import json, os, sys
+
+results_file = sys.argv[1]
+component_id = sys.argv[2]
+iterations = int(sys.argv[3])
+scenario_kvs = sys.argv[4:]
+scenarios = []
+for kv in scenario_kvs:
+    scenario_id, rel_file = kv.split('=', 1)
+    scenario = {
+        'id': scenario_id,
+        'iterations': 0,
+        'default_iterations': iterations,
+        'tags': [],
+        'metrics': {},
+    }
+    if rel_file != 'null':
+        scenario['file'] = rel_file
+        scenario['source'] = 'in_tree'
+    scenarios.append(scenario)
+
+os.makedirs(os.path.dirname(results_file) or '.', exist_ok=True)
+with open(results_file, 'w', encoding='utf-8') as fh:
+    json.dump({'component_id': component_id, 'iterations': 0, 'scenarios': scenarios}, fh, indent=2)
+PYTHON_LIST
+
+    echo "Discovered ${#BENCH_BINS[@]} Rust bench scenarios."
+    exit 0
+fi
 
 if [ "${#BENCH_BINS[@]}" -eq 0 ]; then
     echo "" >&2

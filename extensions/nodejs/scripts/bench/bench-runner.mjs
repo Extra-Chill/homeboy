@@ -9,6 +9,7 @@
 //   HOMEBOY_COMPONENT_ID         — component id (goes into envelope)
 //   HOMEBOY_BENCH_ITERATIONS     — iterations per workload
 //   HOMEBOY_BENCH_RESULTS_FILE   — where to write the envelope
+//   HOMEBOY_BENCH_LIST_ONLY      — when 1, emit scenario inventory only
 //
 // Discovers `bench/**/*.bench.{ts,mjs,js}` under the project root.
 // Each workload file must export a default async function:
@@ -42,6 +43,7 @@ const PROJECT_PATH = process.env.HOMEBOY_COMPONENT_PATH;
 const COMPONENT_ID = process.env.HOMEBOY_COMPONENT_ID;
 const RESULTS_FILE = process.env.HOMEBOY_BENCH_RESULTS_FILE;
 const ITERATIONS = Math.max(1, Number(process.env.HOMEBOY_BENCH_ITERATIONS) || 10);
+const LIST_ONLY = process.env.HOMEBOY_BENCH_LIST_ONLY === '1';
 const WARMUP = 1;
 const DEBUG = process.env.HOMEBOY_DEBUG === '1';
 
@@ -146,6 +148,28 @@ async function main() {
     const files = [...inTreeFiles, ...extraFiles].sort((a, b) => a.file.localeCompare(b.file));
 
     if (DEBUG) console.error(`DEBUG: discovered ${files.length} workloads under ${benchDir}`);
+
+    if (LIST_ONLY) {
+        const scenarios = files.map(({ file, source }) => ({
+            id: scenarioId(file),
+            file: source === 'in_tree' ? relative(PROJECT_PATH, file) : file,
+            source,
+            iterations: 0,
+            default_iterations: ITERATIONS,
+            tags: [],
+            metrics: {},
+        }));
+
+        await mkdir(dirname(RESULTS_FILE), { recursive: true });
+        await writeFile(RESULTS_FILE, JSON.stringify({
+            component_id: COMPONENT_ID,
+            iterations: 0,
+            scenarios,
+        }, null, 2));
+
+        process.stdout.write(`Discovered ${scenarios.length} Node.js bench scenarios.\n`);
+        return;
+    }
 
     const scenarios = [];
     let hadError = false;

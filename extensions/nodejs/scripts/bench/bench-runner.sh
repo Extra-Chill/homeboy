@@ -13,6 +13,7 @@ set -euo pipefail
 #   HOMEBOY_COMPONENT_ID         — component identifier
 #   HOMEBOY_BENCH_ITERATIONS     — iterations per workload (default 10)
 #   HOMEBOY_BENCH_RESULTS_FILE   — where core wants the envelope written
+#   HOMEBOY_BENCH_LIST_ONLY      — when 1, emit scenario inventory only
 #   HOMEBOY_DEBUG                — verbose output
 
 if ((BASH_VERSINFO[0] < 4)); then
@@ -87,6 +88,7 @@ export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
 export HOMEBOY_COMPONENT_PATH="$PROJECT_PATH"
 export HOMEBOY_BENCH_ITERATIONS="$ITERATIONS"
 export HOMEBOY_BENCH_EXTRA_WORKLOADS="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
+export HOMEBOY_BENCH_LIST_ONLY="${HOMEBOY_BENCH_LIST_ONLY:-0}"
 
 echo "Running Node.js benchmarks..."
 echo "  Component: ${COMPONENT_ID} (${PROJECT_PATH})"
