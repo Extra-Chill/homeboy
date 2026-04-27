@@ -13,6 +13,7 @@ use super::{bench_workloads_for_extension, BenchRunArgs, CmdResult};
 struct RigBenchContext {
     id: String,
     spec: RigSpec,
+    package_root: Option<PathBuf>,
     snapshot: RigStateSnapshot,
 }
 
@@ -27,9 +28,12 @@ fn prepare_rig_bench_context(rig_id: &str) -> homeboy::Result<RigBenchContext> {
         ));
     }
     let snapshot = rig::snapshot_state(&spec);
+    let package_root =
+        rig::read_source_metadata(&spec.id).map(|metadata| PathBuf::from(metadata.package_path));
     Ok(RigBenchContext {
         id: spec.id.clone(),
         spec,
+        package_root,
         snapshot,
     })
 }
@@ -260,9 +264,13 @@ fn run_component_with_rig_context(
     let extra_workloads = rig_spec
         .as_ref()
         .and_then(|spec| {
-            ctx.extension_id
-                .as_deref()
-                .map(|id| bench_workloads_for_extension(spec, id))
+            ctx.extension_id.as_deref().map(|id| {
+                bench_workloads_for_extension(
+                    spec,
+                    rig_context.and_then(|context| context.package_root.as_deref()),
+                    id,
+                )
+            })
         })
         .unwrap_or_default();
 

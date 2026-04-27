@@ -62,7 +62,8 @@ pub struct RigSpec {
     /// These are private, rig-owned workloads that should run alongside the
     /// component's in-tree bench discovery when `homeboy bench --rig <id>` is
     /// invoked. Values support the same `~`, `${env.NAME}`, and
-    /// `${components.<id>.path}` expansion as other rig path fields.
+    /// `${components.<id>.path}` expansion as other rig path fields, plus
+    /// `${package.root}` for rigs installed from a package source.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub bench_workloads: HashMap<String, Vec<String>>,
 

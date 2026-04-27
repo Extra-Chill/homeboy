@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::engine::run_dir::RunDir;
@@ -396,13 +396,30 @@ fn maybe_expand_default_baseline(args: &BenchRunArgs) -> homeboy::Result<Option<
     Ok(Some(vec![baseline_rig_id, candidate.clone()]))
 }
 
-fn bench_workloads_for_extension(rig_spec: &RigSpec, extension_id: &str) -> Vec<PathBuf> {
+fn expand_bench_workload_path(
+    rig_spec: &RigSpec,
+    package_root: Option<&Path>,
+    path: &str,
+) -> PathBuf {
+    let expanded = rig::expand::expand_vars(rig_spec, path);
+    let expanded = match package_root {
+        Some(root) => expanded.replace("${package.root}", &root.to_string_lossy()),
+        None => expanded,
+    };
+    PathBuf::from(expanded)
+}
+
+fn bench_workloads_for_extension(
+    rig_spec: &RigSpec,
+    package_root: Option<&Path>,
+    extension_id: &str,
+) -> Vec<PathBuf> {
     rig_spec
         .bench_workloads
         .get(extension_id)
         .into_iter()
         .flat_map(|paths| paths.iter())
-        .map(|path| PathBuf::from(rig::expand::expand_vars(rig_spec, path)))
+        .map(|path| expand_bench_workload_path(rig_spec, package_root, path))
         .collect()
 }
 
@@ -445,7 +462,7 @@ mod tests {
         )
         .expect("parse rig spec");
 
-        let workloads = bench_workloads_for_extension(&rig_spec, "wordpress");
+        let workloads = bench_workloads_for_extension(&rig_spec, None, "wordpress");
 
         assert_eq!(
             workloads,
@@ -454,7 +471,56 @@ mod tests {
                 PathBuf::from("/tmp/playground/fixtures/wc-loaded.php"),
             ]
         );
-        assert!(bench_workloads_for_extension(&rig_spec, "rust").is_empty());
+        assert!(bench_workloads_for_extension(&rig_spec, None, "rust").is_empty());
+    }
+
+    #[test]
+    fn bench_workloads_for_extension_expands_package_root_when_available() {
+        let rig_spec: RigSpec = serde_json::from_str(
+            r#"{
+                "id": "studio-agent-sdk",
+                "bench_workloads": {
+                    "nodejs": [
+                        "${package.root}/bench/studio-agent-runtime.bench.mjs",
+                        "/tmp/absolute.bench.mjs"
+                    ]
+                }
+            }"#,
+        )
+        .expect("parse rig spec");
+        let package = PathBuf::from("/tmp/homeboy-rigs/Automattic/studio");
+
+        let workloads = bench_workloads_for_extension(&rig_spec, Some(&package), "nodejs");
+
+        assert_eq!(
+            workloads,
+            vec![
+                PathBuf::from(
+                    "/tmp/homeboy-rigs/Automattic/studio/bench/studio-agent-runtime.bench.mjs"
+                ),
+                PathBuf::from("/tmp/absolute.bench.mjs"),
+            ]
+        );
+    }
+
+    #[test]
+    fn bench_workloads_for_extension_leaves_package_root_unexpanded_without_metadata() {
+        let rig_spec: RigSpec = serde_json::from_str(
+            r#"{
+                "id": "manual",
+                "bench_workloads": {
+                    "nodejs": ["${package.root}/bench/manual.bench.mjs"]
+                }
+            }"#,
+        )
+        .expect("parse rig spec");
+
+        let workloads = bench_workloads_for_extension(&rig_spec, None, "nodejs");
+
+        assert_eq!(
+            workloads,
+            vec![PathBuf::from("${package.root}/bench/manual.bench.mjs")]
+        );
     }
 
     #[test]
