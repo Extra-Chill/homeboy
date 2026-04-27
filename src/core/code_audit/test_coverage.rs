@@ -300,6 +300,7 @@ pub(crate) fn analyze_test_coverage(
         .collect();
 
     let source_name_index = build_source_name_index(&source_fps);
+    let source_symbol_names = collect_source_symbol_names(&source_fps);
 
     for test_fp in &test_fps {
         let expected_source_path = test_to_source_path(&test_fp.relative_path, config);
@@ -336,7 +337,7 @@ pub(crate) fn analyze_test_coverage(
                         ),
                         kind: AuditFinding::OrphanedTest,
                     });
-                } else {
+                } else if !references_multiple_source_symbols(test_fp, &source_symbol_names) {
                     // Truly orphaned — no source found anywhere
                     findings.push(Finding {
                         convention: "test_coverage".to_string(),
@@ -358,6 +359,73 @@ pub(crate) fn analyze_test_coverage(
     // Sort by file path for deterministic output
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
+}
+
+fn collect_source_symbol_names(source_fps: &[&FileFingerprint]) -> HashSet<String> {
+    let mut names = HashSet::new();
+
+    for fp in source_fps {
+        if let Some(type_name) = &fp.type_name {
+            if is_meaningful_symbol_name(type_name) {
+                names.insert(type_name.clone());
+            }
+        }
+        for type_name in &fp.type_names {
+            if is_meaningful_symbol_name(type_name) {
+                names.insert(type_name.clone());
+            }
+        }
+        if let Some(stem) = Path::new(&fp.relative_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
+            if is_meaningful_symbol_name(stem) {
+                names.insert(stem.to_string());
+            }
+        }
+    }
+
+    names
+}
+
+fn references_multiple_source_symbols(
+    test_fp: &FileFingerprint,
+    source_symbol_names: &HashSet<String>,
+) -> bool {
+    let mut referenced = HashSet::new();
+    let mut haystacks = Vec::new();
+    haystacks.push(test_fp.content.as_str());
+    haystacks.extend(test_fp.imports.iter().map(|s| s.as_str()));
+
+    for symbol in source_symbol_names {
+        if haystacks
+            .iter()
+            .any(|haystack| contains_symbol(haystack, symbol))
+        {
+            referenced.insert(symbol.as_str());
+            if referenced.len() >= 2 {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn is_meaningful_symbol_name(name: &str) -> bool {
+    name.len() >= 3 && name.chars().any(|c| c.is_alphabetic())
+}
+
+fn contains_symbol(haystack: &str, symbol: &str) -> bool {
+    haystack.match_indices(symbol).any(|(start, _)| {
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[start + symbol.len()..].chars().next();
+        !before.is_some_and(is_identifier_char) && !after.is_some_and(is_identifier_char)
+    })
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 /// Load test methods from disk for a known test file path.
@@ -732,6 +800,48 @@ mod tests {
             .collect();
         assert_eq!(orphaned.len(), 1);
         assert!(orphaned[0].description.contains("old_module"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn behavior_named_test_referencing_multiple_source_symbols_is_not_orphaned() {
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_behavior_file");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+        std::fs::create_dir_all(dir.join("tests/core")).unwrap();
+
+        let mut resolver = make_fp("src/core/tool_policy_resolver.rs", vec!["resolve"]);
+        resolver.type_name = Some("ToolPolicyResolver".to_string());
+        let mut registry = make_fp("src/core/tool_registry.rs", vec!["register"]);
+        registry.type_name = Some("ToolRegistry".to_string());
+        let mut test = make_fp(
+            "tests/core/chat_tools_availability_test.rs",
+            vec!["test_chat_tools"],
+        );
+        test.content = r#"
+use crate::core::tool_policy_resolver::ToolPolicyResolver;
+use crate::core::tool_registry::ToolRegistry;
+
+#[test]
+fn test_chat_tools() {
+    let _ = ToolPolicyResolver::new(ToolRegistry::default());
+}
+"#
+        .to_string();
+
+        let findings = analyze_test_coverage(&dir, &[&resolver, &registry, &test], &config);
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::OrphanedTest)
+            .collect();
+
+        assert!(
+            orphaned.is_empty(),
+            "behavior/integration test files that reference multiple source symbols should not be marked orphaned: {:?}",
+            orphaned
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

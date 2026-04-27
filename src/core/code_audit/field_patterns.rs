@@ -49,6 +49,12 @@ struct StructDef {
     fields: Vec<FieldSignature>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldSyntax {
+    RustLike,
+    Php,
+}
+
 fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
     let config = ScanConfig {
         extensions: ExtensionFilter::Only(vec![
@@ -85,7 +91,8 @@ fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
             content
         };
 
-        let structs = extract_structs(&scan_content, &relative);
+        let syntax = field_syntax_for_path(&relative);
+        let structs = extract_structs(&scan_content, &relative, syntax);
         all_structs.extend(structs);
     }
 
@@ -186,7 +193,7 @@ fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
 /// - Rust: `struct Name {` ... `field: Type,` ... `}`
 /// - PHP: `class Name {` ... `type $field;` or `public type $field;`
 /// - TS/JS: `interface Name {` or `type Name = {`
-fn extract_structs(content: &str, file: &str) -> Vec<StructDef> {
+fn extract_structs(content: &str, file: &str, syntax: FieldSyntax) -> Vec<StructDef> {
     let mut result = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
@@ -224,7 +231,7 @@ fn extract_structs(content: &str, file: &str) -> Vec<StructDef> {
                     // Parse only direct members of the type body. Nested executable bodies
                     // can contain field-shaped syntax that is not extractable type structure.
                     if j > start && depth == 1 {
-                        if let Some(field) = parse_field_line(lines[j]) {
+                        if let Some(field) = parse_field_line(lines[j], syntax) {
                             fields.push(field);
                         }
                     }
@@ -252,6 +259,14 @@ fn extract_structs(content: &str, file: &str) -> Vec<StructDef> {
     }
 
     result
+}
+
+fn field_syntax_for_path(path: &str) -> FieldSyntax {
+    if path.ends_with(".php") {
+        FieldSyntax::Php
+    } else {
+        FieldSyntax::RustLike
+    }
 }
 
 /// Try to extract a type name from a line that starts a struct/class/interface.
@@ -309,7 +324,7 @@ fn extract_type_name(line: &str) -> Option<String> {
 /// - Rust: `field_name: Type,` or `pub field_name: Type,`
 /// - PHP: `public Type $field_name;` or `$field_name;`
 /// - TS: `field_name: type;` or `readonly field_name: type;`
-fn parse_field_line(line: &str) -> Option<FieldSignature> {
+fn parse_field_line(line: &str, syntax: FieldSyntax) -> Option<FieldSignature> {
     let trimmed = line.trim();
 
     // Skip comments, attributes, blank lines, braces.
@@ -328,6 +343,10 @@ fn parse_field_line(line: &str) -> Option<FieldSignature> {
     // Skip function/method declarations.
     if trimmed.contains("fn ") || trimmed.contains("function ") || trimmed.contains("=>") {
         return None;
+    }
+
+    if syntax == FieldSyntax::Php {
+        return parse_php_property_line(trimmed);
     }
 
     // Rust-style: `[pub] name: Type[,]`
@@ -357,6 +376,49 @@ fn parse_field_line(line: &str) -> Option<FieldSignature> {
     }
 
     None
+}
+
+fn parse_php_property_line(line: &str) -> Option<FieldSignature> {
+    let mut content = line.trim().trim_end_matches(';').trim();
+
+    loop {
+        let Some(stripped) = content
+            .strip_prefix("public ")
+            .or_else(|| content.strip_prefix("protected "))
+            .or_else(|| content.strip_prefix("private "))
+            .or_else(|| content.strip_prefix("static "))
+            .or_else(|| content.strip_prefix("readonly "))
+        else {
+            break;
+        };
+        content = stripped.trim_start();
+    }
+
+    let Some(dollar_pos) = content.find('$') else {
+        return None;
+    };
+
+    let field_type = content[..dollar_pos].trim();
+    let after_dollar = &content[dollar_pos + 1..];
+    let name: String = after_dollar
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    if name.is_empty() {
+        return None;
+    }
+
+    let field_type = if field_type.is_empty() {
+        "mixed"
+    } else {
+        field_type
+    };
+
+    Some(FieldSignature {
+        name,
+        field_type: field_type.to_string(),
+    })
 }
 
 fn is_test_path(path: &str) -> bool {
@@ -497,7 +559,7 @@ pub struct Config {
     pub output: Option<String>,
 }
 "#;
-        let structs = extract_structs(content, "test.rs");
+        let structs = extract_structs(content, "test.rs", FieldSyntax::RustLike);
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "Config");
         assert_eq!(structs[0].fields.len(), 3);
@@ -521,7 +583,7 @@ struct Beta {
     z: i32,
 }
 "#;
-        let structs = extract_structs(content, "test.rs");
+        let structs = extract_structs(content, "test.rs", FieldSyntax::RustLike);
         assert_eq!(structs.len(), 2);
         assert_eq!(structs[0].name, "Alpha");
         assert_eq!(structs[1].name, "Beta");
@@ -540,7 +602,7 @@ impl Foo {
     }
 }
 "#;
-        let structs = extract_structs(content, "test.rs");
+        let structs = extract_structs(content, "test.rs", FieldSyntax::RustLike);
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].fields.len(), 1);
         assert_eq!(structs[0].fields[0].name, "name");
@@ -560,10 +622,70 @@ class AIStep {
 }
 "#;
 
-        let structs = extract_structs(content, "test.php");
+        let structs = extract_structs(content, "test.php", FieldSyntax::Php);
         assert!(
             structs.is_empty(),
             "call-site named arguments inside methods should not create field-bearing structs"
+        );
+    }
+
+    #[test]
+    fn extracts_php_class_properties_without_named_arguments() {
+        let content = r#"
+class Config {
+    public string $label;
+    protected ?array $settings;
+
+    public static function register(): void {
+        self::registerStepType(
+            label: 'Config',
+            stepSettings: array(),
+        );
+    }
+}
+"#;
+
+        let structs = extract_structs(content, "test.php", FieldSyntax::Php);
+        assert_eq!(structs.len(), 1);
+        assert_eq!(structs[0].fields.len(), 2);
+        assert_eq!(structs[0].fields[0].name, "label");
+        assert_eq!(structs[0].fields[0].field_type, "string");
+        assert_eq!(structs[0].fields[1].name, "settings");
+        assert_eq!(structs[0].fields[1].field_type, "?array");
+    }
+
+    #[test]
+    fn does_not_report_repeated_php_presentation_or_command_call_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        for name in &["callback.php", "authorize.php", "webhook.php"] {
+            std::fs::write(
+                src.join(name),
+                format!(
+                    r#"
+class {} {{
+    public function render(): void {{
+        $styles = array(
+            'display' => 'flex',
+            'background' => '#fff',
+        );
+        WP_CLI::log( 'Rendered' );
+    }}
+}}
+"#,
+                    name.replace(".php", "").to_uppercase()
+                ),
+            )
+            .unwrap();
+        }
+
+        let findings = detect_repeated_field_patterns(dir.path());
+        assert!(
+            findings.is_empty(),
+            "presentation arrays and WP_CLI call sites are not extractable field groups: {:?}",
+            findings
         );
     }
 
@@ -584,7 +706,7 @@ impl Foo {
 }
 "#;
 
-        let structs = extract_structs(content, "test.rs");
+        let structs = extract_structs(content, "test.rs", FieldSyntax::RustLike);
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].fields.len(), 1);
         assert_eq!(structs[0].fields[0].name, "name");
@@ -606,7 +728,7 @@ class Widget {
 }
 "#;
 
-        let structs = extract_structs(content, "test.ts");
+        let structs = extract_structs(content, "test.ts", FieldSyntax::RustLike);
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].fields.len(), 1);
         assert_eq!(structs[0].fields[0].name, "name");
@@ -704,7 +826,7 @@ struct Foo {
 
     #[test]
     fn parse_field_line_rust() {
-        let field = parse_field_line("    pub verbose: bool,");
+        let field = parse_field_line("    pub verbose: bool,", FieldSyntax::RustLike);
         assert!(field.is_some());
         let f = field.unwrap();
         assert_eq!(f.name, "verbose");
@@ -713,7 +835,7 @@ struct Foo {
 
     #[test]
     fn parse_field_line_with_option() {
-        let field = parse_field_line("    output: Option<PathBuf>,");
+        let field = parse_field_line("    output: Option<PathBuf>,", FieldSyntax::RustLike);
         assert!(field.is_some());
         let f = field.unwrap();
         assert_eq!(f.name, "output");
@@ -722,15 +844,15 @@ struct Foo {
 
     #[test]
     fn parse_field_line_skips_comments() {
-        assert!(parse_field_line("    // a comment").is_none());
-        assert!(parse_field_line("    #[derive(Debug)]").is_none());
-        assert!(parse_field_line("").is_none());
+        assert!(parse_field_line("    // a comment", FieldSyntax::RustLike).is_none());
+        assert!(parse_field_line("    #[derive(Debug)]", FieldSyntax::RustLike).is_none());
+        assert!(parse_field_line("", FieldSyntax::RustLike).is_none());
     }
 
     #[test]
     fn parse_field_line_skips_functions() {
-        assert!(parse_field_line("    fn new() -> Self {").is_none());
-        assert!(parse_field_line("    pub function run() {").is_none());
+        assert!(parse_field_line("    fn new() -> Self {", FieldSyntax::RustLike).is_none());
+        assert!(parse_field_line("    pub function run() {", FieldSyntax::RustLike).is_none());
     }
 
     #[test]

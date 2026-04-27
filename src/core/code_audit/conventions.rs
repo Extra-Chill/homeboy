@@ -333,25 +333,18 @@ pub fn discover_conventions_with_config(
     }
 
     // Methods appearing in ≥ threshold files are "expected".
-    // Test lifecycle methods are excluded — they're optional overrides inherited
-    // from test base classes (PHPUnit, WP_UnitTestCase), not convention-specific.
-    let test_lifecycle: &[&str] = &[
-        "set_up",
-        "tear_down",
-        "set_up_before_class",
-        "tear_down_after_class",
-        "setUp",
-        "tearDown",
-        "setUpBeforeClass",
-        "tearDownAfterClass",
-    ];
     let is_test_group = super::walker::is_test_path(glob_pattern);
-    let expected_methods: Vec<String> = method_counts
-        .iter()
-        .filter(|(_, count)| **count >= threshold)
-        .filter(|(name, _)| !is_test_group || !test_lifecycle.contains(&name.as_str()))
-        .map(|(name, _)| name.clone())
-        .collect();
+    let expected_methods: Vec<String> = if is_test_group {
+        // Test-file helpers (`run`, `init_repo`, fixture builders, etc.) are local
+        // scaffolding, not production API conventions every sibling test must carry.
+        Vec::new()
+    } else {
+        method_counts
+            .iter()
+            .filter(|(_, count)| **count >= threshold)
+            .map(|(name, _)| name.clone())
+            .collect()
+    };
 
     if expected_methods.is_empty() {
         return None; // No convention found
@@ -1168,6 +1161,53 @@ mod tests {
                 .flat_map(|o| &o.deviations)
                 .all(|d| d.kind != AuditFinding::MissingMethod),
             "factories produce stores; they should not implement store methods"
+        );
+    }
+
+    #[test]
+    fn test_file_helper_functions_do_not_create_missing_method_conventions() {
+        let fingerprints = vec![
+            FileFingerprint {
+                relative_path: "tests/core/stack/apply_test.rs".to_string(),
+                language: Language::Rust,
+                methods: vec![
+                    "run".to_string(),
+                    "init_repo".to_string(),
+                    "write_and_commit".to_string(),
+                ],
+                type_name: None,
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "tests/core/stack/status_test.rs".to_string(),
+                language: Language::Rust,
+                methods: vec![
+                    "run".to_string(),
+                    "init_repo".to_string(),
+                    "write_and_commit".to_string(),
+                ],
+                type_name: None,
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "tests/core/stack/spec_test.rs".to_string(),
+                language: Language::Rust,
+                methods: vec!["spec_round_trips".to_string()],
+                type_name: None,
+                ..Default::default()
+            },
+        ];
+
+        let convention = discover_conventions_with_config(
+            "Stack (Tests)",
+            "tests/core/stack/*_test.rs",
+            &fingerprints,
+            &AuditConfig::default(),
+        );
+
+        assert!(
+            convention.is_none(),
+            "test helper functions are local scaffolding, not methods every sibling test file must define"
         );
     }
 
