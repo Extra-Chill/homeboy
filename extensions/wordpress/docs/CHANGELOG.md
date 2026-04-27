@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.28.0] - 2026-04-27
+
+### Added
+- add component env detector
+
 ## [2.27.2] - 2026-04-27
 
 ### Changed
