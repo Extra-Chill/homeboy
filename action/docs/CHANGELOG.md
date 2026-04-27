@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.16.10] - 2026-04-27
+
+### Changed
+- bridge to homeboy issues reconcile (homeboy v0.99+)
+
+### Fixed
+- install extension node deps for playground tests
+
 ## [1.16.9] - 2026-04-25
 
 ### Changed
