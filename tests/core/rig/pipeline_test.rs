@@ -63,7 +63,7 @@ mod dag {
     use std::fs;
 
     use crate::rig::pipeline::run_pipeline;
-    use crate::rig::spec::{ComponentSpec, PipelineStep, RigSpec};
+    use crate::rig::spec::{ComponentSpec, PipelineStep, RigSpec, StackOp};
 
     fn command(id: &str, depends_on: &[&str], cmd: String, cwd: Option<String>) -> PipelineStep {
         PipelineStep::Command {
@@ -74,6 +74,20 @@ mod dag {
             env: HashMap::new(),
             label: Some(id.to_string()),
         }
+    }
+
+    fn stack(id: &str, component: &str, stack_id: &str) -> (String, PipelineStep) {
+        (
+            stack_id.to_string(),
+            PipelineStep::Stack {
+                step_id: Some(id.to_string()),
+                depends_on: Vec::new(),
+                component: component.to_string(),
+                op: StackOp::Sync,
+                dry_run: true,
+                label: Some(id.to_string()),
+            },
+        )
     }
 
     fn rig_with_steps(
@@ -199,6 +213,46 @@ mod dag {
             fs::read_to_string(&log).expect("read log"),
             "one\ntwo\nthree\n"
         );
+    }
+
+    #[test]
+    fn test_stack_failure_skips_later_steps_when_fail_fast() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let marker = tmp.path().join("marker.txt");
+        let marker_arg = marker.to_string_lossy();
+        let (stack_id, stack_step) = stack("sync-stack", "studio", "missing-stack-for-test");
+        let mut components = HashMap::new();
+        components.insert(
+            "studio".to_string(),
+            ComponentSpec {
+                path: tmp.path().to_string_lossy().into_owned(),
+                remote_url: None,
+                triage_remote_url: None,
+                stack: Some(stack_id),
+                branch: None,
+                extensions: None,
+            },
+        );
+        let rig = rig_with_steps(
+            vec![
+                stack_step,
+                command(
+                    "build-after-stack",
+                    &[],
+                    format!("printf 'should-not-run' > {}", marker_arg),
+                    None,
+                ),
+            ],
+            components,
+        );
+
+        let out = run_pipeline(&rig, "up", true).expect("pipeline report");
+        assert!(!out.is_success());
+        assert_eq!(out.failed, 1);
+        assert_eq!(out.steps[0].kind, "stack");
+        assert_eq!(out.steps[0].status, "fail");
+        assert_eq!(out.steps[1].status, "skip");
+        assert!(!marker.exists());
     }
 
     #[test]

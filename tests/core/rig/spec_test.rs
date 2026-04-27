@@ -278,6 +278,55 @@ fn test_spec_git_op_current_branch_kebab_serializes() {
 }
 
 #[test]
+fn test_spec_stack_step_parses_sync_shape() {
+    use crate::rig::spec::StackOp;
+    let json = r#"{
+        "id": "r",
+        "components": {
+            "studio": {
+                "path": "/tmp/studio",
+                "branch": "dev/combined-fixes",
+                "stack": "studio-combined"
+            }
+        },
+        "pipeline": {
+            "sync": [
+                {
+                    "kind": "stack",
+                    "id": "sync-studio-stack",
+                    "component": "studio",
+                    "op": "sync",
+                    "dry_run": true,
+                    "label": "sync Studio combined fixes"
+                }
+            ]
+        }
+    }"#;
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    assert_eq!(
+        spec.components.get("studio").unwrap().stack.as_deref(),
+        Some("studio-combined")
+    );
+    match &spec.pipeline.get("sync").unwrap()[0] {
+        PipelineStep::Stack {
+            step_id,
+            component,
+            op,
+            dry_run,
+            label,
+            ..
+        } => {
+            assert_eq!(step_id.as_deref(), Some("sync-studio-stack"));
+            assert_eq!(component, "studio");
+            assert_eq!(*op, StackOp::Sync);
+            assert!(*dry_run);
+            assert_eq!(label.as_deref(), Some("sync Studio combined fixes"));
+        }
+        other => panic!("expected Stack, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_spec_round_trip_preserves_shape() {
     let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
     let re_serialized = serde_json::to_string(&spec).expect("serialize");

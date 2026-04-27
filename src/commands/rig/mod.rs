@@ -11,8 +11,8 @@ use homeboy::rig;
 
 use self::output::{
     RigAppOutput, RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledSummary,
-    RigListOutput, RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary, RigUpOutput,
-    RigUpdateOutput,
+    RigListOutput, RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary, RigSyncOutput,
+    RigUpOutput, RigUpdateOutput,
 };
 use super::CmdResult;
 
@@ -45,6 +45,14 @@ enum RigCommand {
     Down {
         /// Rig ID
         rig_id: String,
+    },
+    /// Sync every stack declared by this rig's components
+    Sync {
+        /// Rig ID
+        rig_id: String,
+        /// Print what WOULD happen without mutating stack specs or target branches.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Show current state of a rig: running services, last up/check
     Status {
@@ -117,6 +125,7 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Up { rig_id } => up(&rig_id),
         RigCommand::Check { rig_id } => check(&rig_id),
         RigCommand::Down { rig_id } => down(&rig_id),
+        RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
         RigCommand::Status { rig_id } => status(&rig_id),
         RigCommand::Install { source, id, all } => install(&source, id.as_deref(), all),
         RigCommand::Update { rig_id, all } => update(rig_id.as_deref(), all),
@@ -259,6 +268,19 @@ fn down(rig_id: &str) -> CmdResult<RigCommandOutput> {
     Ok((
         RigCommandOutput::Down(RigDownOutput {
             command: "rig.down",
+            report,
+        }),
+        exit_code,
+    ))
+}
+
+fn sync(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(rig_id)?;
+    let report = rig::run_sync(&rig, dry_run)?;
+    let exit_code = if report.success { 0 } else { 1 };
+    Ok((
+        RigCommandOutput::Sync(RigSyncOutput {
+            command: "rig.sync",
             report,
         }),
         exit_code,

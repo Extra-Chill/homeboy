@@ -7,16 +7,15 @@
 //! Phase 1 scope:
 //! - Spec schema with components, services, symlinks, shared paths, and linear pipelines
 //! - Service kinds: `http-static`, `command`, `external` (adopted)
-//! - Pipeline step kinds: `service`, `build`, `git`, `command`, `symlink`,
-//!   `shared-path`, `patch`, `check`
+//! - Pipeline step kinds: `service`, `build`, `git`, `stack`, `command`,
+//!   `symlink`, `shared-path`, `patch`, `check`
 //! - Check probes: `http`, `file` (+ `contains`), `command`, `newer_than`
 //!   (mtime / process-start staleness)
 //! - State file at `~/.config/homeboy/rigs/{id}.state/state.json`
 //! - CLI verbs: `list`, `show`, `up`, `check`, `down`, `status`
 //!
-//! Deferred to later phases (see Automattic/homeboy#1462+): stack integration,
-//! DAG pipelines, extension-registered service kinds, `.app` wrappers,
-//! bench composition, spec sharing.
+//! Deferred to later phases (see Automattic/homeboy#1462+): deeper stack
+//! lifecycle automation, extension-registered service kinds, spec sharing.
 
 pub mod app;
 pub mod check;
@@ -27,6 +26,7 @@ pub mod runner;
 pub mod service;
 pub mod source;
 pub mod spec;
+pub mod stack;
 pub mod state;
 
 pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
@@ -49,7 +49,11 @@ pub use source::{
 pub use spec::{
     AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, BenchSpec, CheckSpec,
     ComponentSpec, DiscoverSpec, NewerThanSpec, PatchOp, PipelineStep, RigSpec, ServiceKind,
-    ServiceSpec, SharedPathOp, SharedPathSpec, SymlinkSpec, TimeSource,
+    ServiceSpec, SharedPathOp, SharedPathSpec, StackOp, SymlinkSpec, TimeSource,
+};
+pub use stack::{
+    plan_stack_sync, run_component_sync, run_sync, RigStackPlanEntry, RigStackSyncEntry,
+    RigStackSyncReport,
 };
 pub use state::{RigState, ServiceState};
 

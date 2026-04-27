@@ -17,8 +17,9 @@ use super::expand::expand_vars;
 use super::service;
 use super::spec::{
     ComponentSpec, GitOp, PatchOp, PipelineStep, RigSpec, ServiceOp, SharedPathOp, SharedPathSpec,
-    SymlinkOp, SymlinkSpec,
+    StackOp, SymlinkOp, SymlinkSpec,
 };
+use super::stack as rig_stack;
 use super::state::{now_rfc3339, RigState, SharedPathState};
 use crate::error::{Error, Result};
 
@@ -121,6 +122,12 @@ fn run_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
             args,
             ..
         } => run_git_step(rig, component, *op, args),
+        PipelineStep::Stack {
+            component,
+            op,
+            dry_run,
+            ..
+        } => run_stack_step(rig, component, *op, *dry_run),
         PipelineStep::Command {
             cmd,
             cwd,
@@ -237,6 +244,7 @@ fn step_id(step: &PipelineStep) -> Option<&str> {
         PipelineStep::Service { step_id, .. }
         | PipelineStep::Build { step_id, .. }
         | PipelineStep::Git { step_id, .. }
+        | PipelineStep::Stack { step_id, .. }
         | PipelineStep::Command { step_id, .. }
         | PipelineStep::Symlink { step_id, .. }
         | PipelineStep::SharedPath { step_id, .. }
@@ -250,6 +258,7 @@ fn step_dependencies(step: &PipelineStep) -> &[String] {
         PipelineStep::Service { depends_on, .. }
         | PipelineStep::Build { depends_on, .. }
         | PipelineStep::Git { depends_on, .. }
+        | PipelineStep::Stack { depends_on, .. }
         | PipelineStep::Command { depends_on, .. }
         | PipelineStep::Symlink { depends_on, .. }
         | PipelineStep::SharedPath { depends_on, .. }
@@ -365,6 +374,15 @@ fn run_git_step(rig: &RigSpec, component_id: &str, op: GitOp, extra_args: &[Stri
         ));
     }
     Ok(())
+}
+
+fn run_stack_step(rig: &RigSpec, component_id: &str, op: StackOp, dry_run: bool) -> Result<()> {
+    match op {
+        StackOp::Sync => {
+            rig_stack::run_component_sync(rig, component_id, dry_run)?;
+            Ok(())
+        }
+    }
 }
 
 fn run_service_step(rig: &RigSpec, service_id: &str, op: ServiceOp) -> Result<()> {
@@ -885,6 +903,7 @@ fn step_kind(step: &PipelineStep) -> &'static str {
         PipelineStep::Service { .. } => "service",
         PipelineStep::Build { .. } => "build",
         PipelineStep::Git { .. } => "git",
+        PipelineStep::Stack { .. } => "stack",
         PipelineStep::Command { .. } => "command",
         PipelineStep::Symlink { .. } => "symlink",
         PipelineStep::SharedPath { .. } => "shared-path",
@@ -914,6 +933,20 @@ fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> String {
                 format!(" {}", args.join(" "))
             };
             format!("git {} {}{}", serialize_git_op(*op), component, joined)
+        }),
+        PipelineStep::Stack {
+            component,
+            op,
+            dry_run,
+            label,
+            ..
+        } => label.clone().unwrap_or_else(|| {
+            format!(
+                "stack {} {}{}",
+                serialize_stack_op(*op),
+                component,
+                if *dry_run { " --dry-run" } else { "" }
+            )
         }),
         PipelineStep::Command { cmd, label, .. } => label
             .clone()
@@ -952,6 +985,12 @@ fn serialize_git_op(op: GitOp) -> &'static str {
         GitOp::CurrentBranch => "current-branch",
         GitOp::Rebase => "rebase",
         GitOp::CherryPick => "cherry-pick",
+    }
+}
+
+fn serialize_stack_op(op: StackOp) -> &'static str {
+    match op {
+        StackOp::Sync => "sync",
     }
 }
 

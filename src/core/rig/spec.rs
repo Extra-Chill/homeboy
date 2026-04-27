@@ -352,6 +352,32 @@ pub enum PipelineStep {
         label: Option<String>,
     },
 
+    /// Delegate to a declared component's stack spec.
+    ///
+    /// This is intentionally explicit: rigs only rewrite combined-fixes
+    /// branches when a pipeline author opts into a `stack` step (or the user
+    /// runs `homeboy rig sync`). `rig up` never syncs stacks implicitly.
+    Stack {
+        /// Optional stable node ID for dependency-aware pipeline ordering.
+        #[serde(default, rename = "id", skip_serializing_if = "Option::is_none")]
+        step_id: Option<String>,
+        /// Step IDs that must run before this step.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        depends_on: Vec<String>,
+        /// Component ID — must exist in the rig's `components` map and declare
+        /// a `stack` field.
+        component: String,
+        /// Stack operation.
+        op: StackOp,
+        /// Print what WOULD happen without mutating the stack spec or target
+        /// branch. Only meaningful for `op = "sync"` today.
+        #[serde(default)]
+        dry_run: bool,
+        /// Human-readable label shown during execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Run an arbitrary shell command — escape hatch for operations that
     /// don't map to a homeboy primitive (waits, custom tooling, probes).
     ///
@@ -502,6 +528,14 @@ pub enum GitOp {
     /// CLI-only convenience and not modelled at the rig step level —
     /// resolve PR numbers to SHAs in the rig spec.
     CherryPick,
+}
+
+/// Stack operation supported by a rig `stack` step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StackOp {
+    /// Delegate to `homeboy stack sync <stack-id>`.
+    Sync,
 }
 
 /// Service operation in a pipeline step.
