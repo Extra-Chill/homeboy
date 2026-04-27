@@ -1257,16 +1257,15 @@ struct Param {
 /// Supports both Rust (`name: Type`) and PHP (`Type $name`) signatures.
 fn parse_params(params: &str) -> Vec<Param> {
     let mut out = Vec::new();
-    for chunk in params.split(',') {
+    for chunk in split_top_level_commas(params) {
         let chunk = chunk.trim();
         if chunk.is_empty() {
             continue;
         }
-        if chunk.contains(':') {
+        if let Some(colon_pos) = top_level_param_colon(chunk) {
             // Rust-style: "name: Type" or "mut name: Type" or "&self"
-            let mut parts = chunk.splitn(2, ':');
-            let before_colon = parts.next().unwrap_or("").trim();
-            let after_colon = parts.next().unwrap_or("").trim();
+            let before_colon = chunk[..colon_pos].trim();
+            let after_colon = chunk[colon_pos + 1..].trim();
             let name = before_colon.trim_start_matches("mut").trim();
             if name.is_empty() || name == "&self" || name == "self" {
                 continue;
@@ -1300,6 +1299,51 @@ fn parse_params(params: &str) -> Vec<Param> {
         }
     }
     out
+}
+
+/// Split a parameter list on commas that are not inside nested types.
+fn split_top_level_commas(params: &str) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut depth = 0i32;
+
+    for (idx, ch) in params.char_indices() {
+        match ch {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' | ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                chunks.push(&params[start..idx]);
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    chunks.push(&params[start..]);
+    chunks
+}
+
+/// Find the Rust parameter-name colon, ignoring `::` in type paths.
+fn top_level_param_colon(param: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let bytes = param.as_bytes();
+
+    for (idx, ch) in param.char_indices() {
+        match ch {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' | ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ':' if depth == 0 => {
+                let prev_is_colon = idx > 0 && bytes[idx - 1] == b':';
+                let next_is_colon = bytes.get(idx + 1).is_some_and(|b| *b == b':');
+                if !prev_is_colon && !next_is_colon {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// Parse parameter names from a params string.
@@ -1622,6 +1666,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_param_names_rust_nested_type_paths() {
+        let names = parse_param_names("overrides: &[(String, serde_json::Value)]");
+        assert_eq!(names, vec!["overrides"]);
+    }
+
+    #[test]
+    fn test_parse_param_names_ignores_bare_type_paths() {
+        let names = parse_param_names("serde_json::Value");
+        assert!(names.is_empty());
+    }
+
+    #[test]
     fn test_trait_impl_excluded_from_hashes() {
         let grammar = rust_grammar();
         let content = r#"
@@ -1760,6 +1816,51 @@ pub(crate) fn ignores_second(a: i32, b: i32) -> i32 {
                 .iter()
                 .any(|p| p.function == "uses_both"),
             "uses_both should have no unused params"
+        );
+    }
+
+    #[test]
+    fn rust_unused_param_detection_handles_typed_nested_params() {
+        let grammar = rust_grammar();
+        let content = r#"
+pub fn settings_json(overrides: &[(String, serde_json::Value)]) -> Self {
+    self.settings_json_overrides.extend(overrides.iter().cloned());
+    self
+}
+"#;
+
+        let fp = fingerprint_from_grammar(content, &grammar, "src/lib.rs").unwrap();
+
+        assert!(
+            fp.unused_parameters.is_empty(),
+            "Nested type paths should not be parsed as parameters. Got: {:?}",
+            fp.unused_parameters
+        );
+    }
+
+    #[test]
+    fn rust_unused_param_detection_sees_comparison_usage() {
+        let grammar = rust_grammar();
+        let content = r#"
+fn parse_field_line(line: &str, syntax: FieldSyntax) -> Option<FieldSignature> {
+    let trimmed = line.trim();
+
+    if syntax == FieldSyntax::Php {
+        return parse_php_property_line(trimmed);
+    }
+
+    None
+}
+"#;
+
+        let fp = fingerprint_from_grammar(content, &grammar, "src/lib.rs").unwrap();
+
+        assert!(
+            !fp.unused_parameters
+                .iter()
+                .any(|p| p.function == "parse_field_line" && p.param == "syntax"),
+            "Parameter usage in comparisons should be detected. Got: {:?}",
+            fp.unused_parameters
         );
     }
 
