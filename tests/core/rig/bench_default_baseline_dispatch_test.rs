@@ -40,6 +40,7 @@ fn make_args(
                 path: None,
             },
             iterations: 1,
+            runs: 1,
             shared_state: None,
             concurrency: 1,
             baseline_args: BaselineArgs {

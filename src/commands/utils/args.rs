@@ -143,6 +143,7 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
             "",
             &[
                 "--iterations",
+                "--runs",
                 "--baseline",
                 "--ignore-baseline",
                 "--ignore-default-baseline",
@@ -454,6 +455,23 @@ mod normalize_tests {
             "--shared-state",
             "/tmp/homeboy-bench",
             "--concurrency=4",
+        ]);
+        let expected = input.clone();
+        assert_eq!(normalize_trailing_flags(input), expected);
+    }
+
+    /// `bench` owns run-level repetition. It must remain a named CLI flag
+    /// even when placed after the positional component.
+    #[test]
+    fn bench_runs_flag_after_component_is_not_separated() {
+        let input = argv(&[
+            "homeboy",
+            "bench",
+            "my-comp",
+            "--runs",
+            "5",
+            "--iterations",
+            "1",
         ]);
         let expected = input.clone();
         assert_eq!(normalize_trailing_flags(input), expected);
