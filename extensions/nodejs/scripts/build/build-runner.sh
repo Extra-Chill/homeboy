@@ -28,9 +28,12 @@ if ((BASH_VERSINFO[0] < 4)); then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../lib/resolve-context.sh
-source "${SCRIPT_DIR}/../lib/resolve-context.sh"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+# shellcheck source=/dev/null
+source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
+# shellcheck source=../lib/node-helpers.sh
+source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
 homeboy_detect_package_manager
 

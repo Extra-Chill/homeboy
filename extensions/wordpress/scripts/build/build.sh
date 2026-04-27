@@ -50,8 +50,12 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# Extension path from Homeboy environment (required)
-EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# Resolve execution context.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+# shellcheck source=/dev/null
+source "$RESOLVE_CONTEXT_HELPER"
+homeboy_resolve_context --component-alias PLUGIN_PATH
 
 # Output functions
 print_status() {

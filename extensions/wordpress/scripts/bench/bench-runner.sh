@@ -36,25 +36,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # vars are pre-set; when invoked directly (e.g. via composer or
 # `bash scripts/bench/bench-runner.sh`) we synthesize them from CWD so the
 # Playground runner can mount the right paths.
-if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
-    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
-else
-    EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
-    export HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH"
-
-    COMPONENT_PATH="$(pwd)"
-    export HOMEBOY_COMPONENT_ID="$(basename "$COMPONENT_PATH")"
-    export HOMEBOY_COMPONENT_PATH="$COMPONENT_PATH"
-
-    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: [bench] Direct execution context (component: $(basename "$COMPONENT_PATH"))"
-    fi
-fi
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+# shellcheck source=/dev/null
+source "$RESOLVE_CONTEXT_HELPER"
+homeboy_resolve_context --component-alias PLUGIN_PATH
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: [bench] Extension path: $EXTENSION_PATH"
     echo "DEBUG: [bench] Component: ${HOMEBOY_COMPONENT_ID:-none}"
-    echo "DEBUG: [bench] Component path: ${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
+    echo "DEBUG: [bench] Component path: ${COMPONENT_PATH:-$(pwd)}"
 fi
 
 exec bash "${SCRIPT_DIR}/bench-runner-playground.sh" "$@"

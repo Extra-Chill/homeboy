@@ -51,7 +51,7 @@ fi
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 # shellcheck source=../lib/resolve-context.sh
 source "${RESOLVE_CONTEXT_HELPER}"
-homeboy_resolve_context
+homeboy_resolve_context --component-alias PLUGIN_PATH
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Extension path: $EXTENSION_PATH"

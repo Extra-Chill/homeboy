@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 # shellcheck source=../lib/resolve-context.sh
 source "${RESOLVE_CONTEXT_HELPER}"
-homeboy_resolve_context
+homeboy_resolve_context --component-alias PLUGIN_PATH
 
 CORE_PATH="$PLUGIN_PATH"
 

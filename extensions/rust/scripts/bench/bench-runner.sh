@@ -54,7 +54,11 @@ if ((BASH_VERSINFO[0] < 4)); then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+# shellcheck source=/dev/null
+source "$RESOLVE_CONTEXT_HELPER"
+homeboy_resolve_context
 # shellcheck source=/dev/null
 if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
     source "$FAILURE_TRAP_HELPER"
@@ -64,16 +68,6 @@ else
     FAILURE_OUTPUT=""
 fi
 
-# Resolve context (matches test-runner.sh shape).
-if [ -n "${HOMEBOY_COMPONENT_PATH:-}" ]; then
-    PROJECT_PATH="${HOMEBOY_COMPONENT_PATH}"
-    COMPONENT_ID="${HOMEBOY_COMPONENT_ID:-$(basename "$PROJECT_PATH")}"
-else
-    PROJECT_PATH="$(pwd)"
-    COMPONENT_ID="$(basename "$PROJECT_PATH")"
-fi
-
-EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
 RESULTS_FILE="${HOMEBOY_BENCH_RESULTS_FILE:-${PROJECT_PATH}/.rust-bench-results.json}"
 LIST_ONLY="${HOMEBOY_BENCH_LIST_ONLY:-0}"

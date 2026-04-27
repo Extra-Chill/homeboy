@@ -28,27 +28,15 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Resolve execution context and export env vars that the Playground runner expects.
-if [ -n "${HOMEBOY_EXTENSION_PATH:-}" ]; then
-    # Called through Homeboy extension system — env vars already set by core.
-    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
-else
-    # Called directly (e.g., from composer test in component directory).
-    EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
-    export HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH"
-
-    COMPONENT_PATH="$(pwd)"
-    export HOMEBOY_COMPONENT_ID="$(basename "$COMPONENT_PATH")"
-    export HOMEBOY_COMPONENT_PATH="$COMPONENT_PATH"
-
-    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: Direct execution context (component: $(basename "$COMPONENT_PATH"))"
-    fi
-fi
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+# shellcheck source=/dev/null
+source "$RESOLVE_CONTEXT_HELPER"
+homeboy_resolve_context --component-alias PLUGIN_PATH
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Extension path: $EXTENSION_PATH"
     echo "DEBUG: Component: ${HOMEBOY_COMPONENT_ID:-none}"
-    echo "DEBUG: Component path: ${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
+    echo "DEBUG: Component path: ${COMPONENT_PATH:-$(pwd)}"
 fi
 
 COMPONENT_SHAPE="${HOMEBOY_COMPONENT_SHAPE:-}"
@@ -56,7 +44,7 @@ if [ -z "$COMPONENT_SHAPE" ]; then
     DETECT_COMPONENT_HELPER="${HOMEBOY_RUNTIME_DETECT_COMPONENT:-${SCRIPT_DIR}/../lib/detect-component.sh}"
     # shellcheck source=../lib/detect-component.sh
     source "${DETECT_COMPONENT_HELPER}"
-    if homeboy_detect_component "${HOMEBOY_COMPONENT_PATH:-$(pwd)}"; then
+    if homeboy_detect_component "${COMPONENT_PATH:-$(pwd)}"; then
         COMPONENT_SHAPE="$HOMEBOY_COMPONENT_TYPE"
     fi
 fi

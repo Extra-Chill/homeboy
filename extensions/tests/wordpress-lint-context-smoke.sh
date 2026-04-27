@@ -32,23 +32,15 @@ PHP
 
 touch "$FAKE_EXTENSION/vendor/bin/phpcs" "$FAKE_EXTENSION/vendor/bin/phpcbf" "$FAKE_EXTENSION/phpcs.xml.dist"
 
-NOOP_RESOLVER="$TMP_DIR/noop-resolve-context.sh"
-cat > "$NOOP_RESOLVER" <<'SH'
-homeboy_resolve_context() {
-    return 0
-}
-SH
-
 HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
-HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$NOOP_RESOLVER" \
 HOMEBOY_STEP="none" \
     bash "$RUNNER" > "$TMP_DIR/lint.out" 2>&1
 
 assert_contains "$TMP_DIR/lint.out" "Linting passed"
 
-assert_contains "$RUNNER" 'PLUGIN_PATH="${HOMEBOY_PLUGIN_PATH:-$COMPONENT_PATH}"'
+assert_contains "$RUNNER" 'homeboy_resolve_context --component-alias PLUGIN_PATH'
 assert_contains "$RUNNER" "*/vendor_prefixed/*"
 assert_contains "$PHPSTAN_RUNNER" "*/vendor_prefixed/*"
 assert_contains "$PHPSTAN_CONFIG" "*/vendor_prefixed/*"

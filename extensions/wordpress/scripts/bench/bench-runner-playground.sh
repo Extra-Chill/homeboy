@@ -33,10 +33,13 @@ set -euo pipefail
 #    mount) and copies it to $HOMEBOY_BENCH_RESULTS_FILE for homeboy core.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
+# shellcheck source=/dev/null
+source "$RESOLVE_CONTEXT_HELPER"
+homeboy_resolve_context --component-alias PLUGIN_PATH
 # shellcheck source=../lib/php-preflight.sh
 if [ -f "$PHP_PREFLIGHT_HELPER" ]; then
     source "$PHP_PREFLIGHT_HELPER"
@@ -52,19 +55,6 @@ if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
 else
     FAILED_STEP=""
     FAILURE_OUTPUT=""
-fi
-
-# Component resolution — same priority order as test-runner-playground.sh
-# so bench gets the same component-discovery semantics for free.
-if [ -n "${HOMEBOY_COMPONENT_PATH:-}" ]; then
-    PLUGIN_PATH="${HOMEBOY_COMPONENT_PATH}"
-    COMPONENT_ID="${HOMEBOY_COMPONENT_ID:-}"
-elif [ -n "${HOMEBOY_PROJECT_PATH:-}" ]; then
-    PLUGIN_PATH="${HOMEBOY_PROJECT_PATH}"
-    COMPONENT_ID=""
-else
-    PLUGIN_PATH="$(pwd)"
-    COMPONENT_ID="$(basename "$PLUGIN_PATH")"
 fi
 
 # PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to

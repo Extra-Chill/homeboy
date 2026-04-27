@@ -39,11 +39,14 @@ set -euo pipefail
 # install.php is included in-process which avoids the system() subprocess.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
+# shellcheck source=/dev/null
+source "$RESOLVE_CONTEXT_HELPER"
+homeboy_resolve_context --component-alias PLUGIN_PATH
 # shellcheck source=../lib/runner-steps.sh
 if [ -f "$RUNNER_STEPS_HELPER" ]; then
     source "$RUNNER_STEPS_HELPER"
@@ -67,17 +70,6 @@ else
 fi
 
 SETTINGS_JSON="${HOMEBOY_SETTINGS_JSON:-}"
-
-if [ -n "${HOMEBOY_COMPONENT_PATH:-}" ]; then
-    PLUGIN_PATH="${HOMEBOY_COMPONENT_PATH}"
-    COMPONENT_ID="${HOMEBOY_COMPONENT_ID:-}"
-elif [ -n "${HOMEBOY_PROJECT_PATH:-}" ]; then
-    PLUGIN_PATH="${HOMEBOY_PROJECT_PATH}"
-    COMPONENT_ID=""
-else
-    PLUGIN_PATH="$(pwd)"
-    COMPONENT_ID="$(basename "$PLUGIN_PATH")"
-fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: [playground] Extension path: $EXTENSION_PATH"

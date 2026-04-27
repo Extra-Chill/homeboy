@@ -17,8 +17,12 @@ set -euo pipefail
 # Passthrough args after -- are forwarded to cargo test.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/lib/resolve-context.sh}"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/lib/runner-steps.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+# shellcheck source=/dev/null
+source "$RESOLVE_CONTEXT_HELPER"
+homeboy_resolve_context
 # shellcheck source=./lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
 # shellcheck source=/dev/null
@@ -30,15 +34,6 @@ else
     FAILURE_OUTPUT=""
     FAILURE_REPLAY_MODE="full"
 fi
-
-# Determine project path
-if [ -n "${HOMEBOY_COMPONENT_PATH:-}" ]; then
-    PROJECT_PATH="${HOMEBOY_COMPONENT_PATH}"
-else
-    PROJECT_PATH="$(pwd)"
-fi
-
-EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Rust Test Environment:"
