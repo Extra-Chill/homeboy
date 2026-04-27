@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.5.0] - 2026-04-27
+
+### Added
+- fingerprint source symbols
+
 ## [2.4.2] - 2026-04-27
 
 ### Fixed
