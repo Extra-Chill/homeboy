@@ -14,9 +14,6 @@
 //! file doesn't bleed across tests or the developer's real `~/.config`.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-
-use tempfile::TempDir;
 
 use crate::rig::pipeline::PipelineOutcome;
 use crate::rig::runner::{
@@ -26,6 +23,7 @@ use crate::rig::runner::{
 use crate::rig::spec::{
     ComponentSpec, PipelineStep, RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec,
 };
+use crate::test_support::with_isolated_home;
 
 fn empty_pipeline(name: &str) -> PipelineOutcome {
     PipelineOutcome {
@@ -49,32 +47,6 @@ fn minimal_spec(id: &str) -> RigSpec {
         bench_workloads: HashMap::new(),
         app_launcher: None,
     }
-}
-
-/// Serializes `HOME` env-var mutation across rig runner tests so concurrent
-/// test threads can't clobber each other's state-file target. `paths::homeboy()`
-/// reads `HOME` at call time, so the guard must stay alive for the full
-/// duration of anything that reads/writes rig state.
-fn home_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-/// Run `body` with `HOME` pointed at a fresh tempdir, restoring the prior
-/// value when `body` returns. Held under a process-wide mutex so parallel
-/// tests don't race on the shared env var.
-fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
-    let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let prior = std::env::var("HOME").ok();
-    let dir = TempDir::new().expect("create tempdir");
-    std::env::set_var("HOME", dir.path());
-    let result = body(&dir);
-    match prior {
-        Some(v) => std::env::set_var("HOME", v),
-        None => std::env::remove_var("HOME"),
-    }
-    drop(guard);
-    result
 }
 
 // ------------------------------------------------------------------

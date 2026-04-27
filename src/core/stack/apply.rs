@@ -24,11 +24,12 @@
 
 use serde::Serialize;
 use std::collections::HashSet;
-use std::process::Command;
 
 use crate::error::{Error, Result};
 
-use super::spec::{expand_path, StackPrEntry, StackSpec};
+use super::git::run_git;
+use super::pr_meta::{fetch_pr_meta, PrHead};
+use super::spec::{resolve_existing_component_path, StackPrEntry, StackSpec};
 
 /// Per-PR outcome from a single `apply` run.
 #[derive(Debug, Clone, Serialize)]
@@ -74,23 +75,7 @@ pub struct ApplyOutput {
 
 /// Apply a stack spec: build `target` from `base + prs`.
 pub fn apply(spec: &StackSpec) -> Result<ApplyOutput> {
-    let path = expand_path(&spec.component_path);
-
-    // 1. Verify the checkout exists.
-    if !std::path::Path::new(&path).exists() {
-        return Err(Error::validation_invalid_argument(
-            "component_path",
-            format!(
-                "Component path '{}' does not exist (stack '{}')",
-                path, spec.id
-            ),
-            None,
-            Some(vec![format!(
-                "Edit ~/.config/homeboy/stacks/{}.json or clone the checkout",
-                spec.id
-            )]),
-        ));
-    }
+    let path = resolve_existing_component_path(spec)?;
 
     // 2. Fetch base — must succeed.
     fetch_remote_branch(&path, &spec.base.remote, &spec.base.branch)?;
@@ -111,7 +96,7 @@ pub fn apply(spec: &StackSpec) -> Result<ApplyOutput> {
     let mut skipped = 0usize;
 
     for pr in &spec.prs {
-        let head = resolve_pr_head(pr)?;
+        let head = fetch_pr_meta(pr)?.require_head(pr)?;
 
         // Ensure we can fetch the head SHA. If it lives in a different
         // repo than the base remote, add a temp remote keyed by the head
@@ -186,18 +171,6 @@ pub fn apply(spec: &StackSpec) -> Result<ApplyOutput> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// PR head info extracted from `gh pr view`.
-#[derive(Debug, Clone)]
-pub(super) struct PrHead {
-    pub(super) sha: String,
-    /// `<owner>/<name>` of the head repo (may differ from the PR's base repo
-    /// if the PR was opened from a fork).
-    pub(super) head_repo: String,
-    /// `https://github.com/<owner>/<name>.git` — used as fetch URL for any
-    /// temp remote we add.
-    pub(super) clone_url: String,
-}
-
 /// One of three outcomes from a single `git cherry-pick` invocation.
 #[derive(Debug)]
 pub(crate) enum CherryPickResult {
@@ -232,88 +205,6 @@ pub(crate) fn checkout_force(path: &str, branch: &str, start_point: &str) -> Res
         )));
     }
     Ok(())
-}
-
-/// Resolve the head SHA + head-repo coordinates for a PR via `gh pr view`.
-fn resolve_pr_head(pr: &StackPrEntry) -> Result<PrHead> {
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            &pr.number.to_string(),
-            "--repo",
-            &pr.repo,
-            "--json",
-            "headRefOid,headRepository,headRepositoryOwner",
-        ])
-        .output()
-        .map_err(|e| {
-            Error::git_command_failed(format!(
-                "gh pr view {}#{}: {} (is `gh` installed and authenticated?)",
-                pr.repo, pr.number, e
-            ))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::git_command_failed(format!(
-            "gh pr view {}#{} failed: {}",
-            pr.repo,
-            pr.number,
-            stderr.trim()
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
-        Error::validation_invalid_json(
-            e,
-            Some(format!("parse `gh pr view {}#{}`", pr.repo, pr.number)),
-            Some(stdout.chars().take(200).collect()),
-        )
-    })?;
-
-    let sha = parsed
-        .get("headRefOid")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            Error::git_command_failed(format!(
-                "gh pr view {}#{} returned no headRefOid",
-                pr.repo, pr.number
-            ))
-        })?
-        .to_string();
-    let head_owner = parsed
-        .get("headRepositoryOwner")
-        .and_then(|v| v.get("login"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            Error::git_command_failed(format!(
-                "gh pr view {}#{} returned no headRepositoryOwner.login",
-                pr.repo, pr.number
-            ))
-        })?
-        .to_string();
-    let head_name = parsed
-        .get("headRepository")
-        .and_then(|v| v.get("name"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            Error::git_command_failed(format!(
-                "gh pr view {}#{} returned no headRepository.name",
-                pr.repo, pr.number
-            ))
-        })?
-        .to_string();
-
-    let head_repo = format!("{}/{}", head_owner, head_name);
-    let clone_url = format!("https://github.com/{}.git", head_repo);
-
-    Ok(PrHead {
-        sha,
-        head_repo,
-        clone_url,
-    })
 }
 
 /// Make sure a git remote exists pointing at the PR's head repo, and return
@@ -436,14 +327,6 @@ pub(crate) fn cherry_pick(path: &str, sha: &str) -> Result<CherryPickResult> {
     }
 
     Ok(CherryPickResult::Conflict(combined.trim().to_string()))
-}
-
-pub(super) fn run_git(path: &str, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::git_command_failed(format!("git {}: {}", args.join(" "), e)))
 }
 
 #[cfg(test)]

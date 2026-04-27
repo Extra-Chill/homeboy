@@ -69,7 +69,7 @@ pub fn validate_local_path(component: &Component) -> Result<PathBuf> {
 }
 
 /// Detect component ID from current working directory.
-pub fn detect_from_cwd() -> Option<String> {
+fn detect_from_cwd() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let components = inventory().ok()?;
 
@@ -248,6 +248,100 @@ pub fn resolve_effective(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::ScopedExtensionConfig;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        CWD_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = cwd_lock().lock().expect("cwd lock");
+        let previous = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(dir).expect("set cwd");
+        let result = f();
+        std::env::set_current_dir(previous).expect("restore cwd");
+        result
+    }
+
+    #[test]
+    fn test_resolve_artifact() {
+        let explicit = Component {
+            id: "explicit".to_string(),
+            local_path: "/tmp/explicit".to_string(),
+            build_artifact: Some("dist/plugin.zip".to_string()),
+            ..Component::default()
+        };
+
+        assert_eq!(
+            resolve_artifact(&explicit),
+            Some("dist/plugin.zip".to_string())
+        );
+
+        let mut extensions = HashMap::new();
+        extensions.insert(
+            "unknown-extension".to_string(),
+            ScopedExtensionConfig::default(),
+        );
+        let missing_extension = Component {
+            id: "missing-extension".to_string(),
+            local_path: "/tmp/missing-extension".to_string(),
+            extensions: Some(extensions),
+            ..Component::default()
+        };
+
+        assert_eq!(resolve_artifact(&missing_extension), None);
+    }
+
+    #[test]
+    fn test_validate_local_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let component = Component {
+            id: "valid".to_string(),
+            local_path: dir.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+
+        assert_eq!(
+            validate_local_path(&component).expect("valid path"),
+            dir.path()
+        );
+
+        let relative = Component {
+            id: "relative".to_string(),
+            local_path: "relative/path".to_string(),
+            ..Component::default()
+        };
+        assert!(validate_local_path(&relative).is_err());
+    }
+
+    #[test]
+    fn test_detect_from_cwd() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        with_cwd(dir.path(), || {
+            assert_eq!(detect_from_cwd(), None);
+        });
+    }
+
+    #[test]
+    fn test_detect_git_root() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+
+        assert_eq!(detect_git_root(&repo), Some(repo.canonicalize().unwrap()));
+    }
 
     #[test]
     fn resolve_effective_accepts_raw_directory_as_positional_component() {

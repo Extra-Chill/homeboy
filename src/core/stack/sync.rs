@@ -30,15 +30,17 @@
 
 use serde::Serialize;
 use std::collections::HashSet;
-use std::process::Command;
 
 use crate::error::{Error, Result};
 
 use super::apply::{
-    checkout_force, cherry_pick, ensure_head_remote, fetch_remote_branch, fetch_sha, run_git,
-    AppliedPr, CherryPickResult, PickOutcome, PrHead,
+    checkout_force, cherry_pick, ensure_head_remote, fetch_remote_branch, fetch_sha, AppliedPr,
+    CherryPickResult, PickOutcome,
 };
-use super::spec::{expand_path, save, StackPrEntry, StackSpec};
+use super::git::run_git;
+use super::pr_meta::fetch_pr_meta;
+pub(crate) use super::pr_meta::StackPrMeta as PrMeta;
+use super::spec::{resolve_existing_component_path, save, StackPrEntry, StackSpec};
 use super::status::{commit_reachable, patch_in_base};
 
 /// Output envelope for `homeboy stack sync`.
@@ -76,40 +78,6 @@ pub struct DroppedPr {
     pub reason: String,
 }
 
-/// Pre-fetched PR metadata used by [`is_droppable`] and the cherry-pick
-/// path. Public-in-module so tests can build fixtures without invoking
-/// `gh`.
-#[derive(Debug, Clone)]
-pub(crate) struct PrMeta {
-    pub head_sha: String,
-    pub head_owner: String,
-    pub head_name: String,
-    pub state: String,
-    pub title: Option<String>,
-    pub merged_at: Option<String>,
-}
-
-impl PrMeta {
-    fn head_repo(&self) -> String {
-        format!("{}/{}", self.head_owner, self.head_name)
-    }
-
-    fn clone_url(&self) -> String {
-        format!(
-            "https://github.com/{}/{}.git",
-            self.head_owner, self.head_name
-        )
-    }
-
-    fn to_pr_head(&self) -> PrHead {
-        PrHead {
-            sha: self.head_sha.clone(),
-            head_repo: self.head_repo(),
-            clone_url: self.clone_url(),
-        }
-    }
-}
-
 /// Decide whether a PR should be dropped from the spec.
 ///
 /// Pure with respect to the (already-fetched) `PrMeta` — only touches the
@@ -132,22 +100,7 @@ pub(crate) fn is_droppable(meta: &PrMeta, path: &str, base_ref: &str) -> bool {
 /// Sync a stack: rebuild target from base, auto-drop merged PRs, replay
 /// the rest.
 pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
-    let path = expand_path(&spec.component_path);
-
-    if !std::path::Path::new(&path).exists() {
-        return Err(Error::validation_invalid_argument(
-            "component_path",
-            format!(
-                "Component path '{}' does not exist (stack '{}')",
-                path, spec.id
-            ),
-            None,
-            Some(vec![format!(
-                "Edit ~/.config/homeboy/stacks/{}.json or clone the checkout",
-                spec.id
-            )]),
-        ));
-    }
+    let path = resolve_existing_component_path(spec)?;
 
     // 1. Fetch base — must succeed so droppability checks are honest.
     fetch_remote_branch(&path, &spec.base.remote, &spec.base.branch)?;
@@ -165,9 +118,10 @@ pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
 
     for pr in &spec.prs {
         let meta = fetch_pr_meta(pr)?;
+        let head = meta.require_head(pr)?;
         // Fetch the head SHA into the local object store before asking
         // git about reachability/patch-id.
-        let head_remote = ensure_head_remote(&path, pr, &meta.to_pr_head(), &mut ensured_remotes)?;
+        let head_remote = ensure_head_remote(&path, pr, &head, &mut ensured_remotes)?;
         if !meta.head_sha.is_empty() {
             // Best-effort fetch — a 404 here means the SHA is gone from
             // the head repo (force-pushed away). is_droppable() will then
@@ -199,20 +153,16 @@ pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
 
     if dry_run {
         // Report what WOULD happen; mutate nothing.
-        return Ok(SyncOutput {
-            stack_id: spec.id.clone(),
-            component_path: path,
-            branch: spec.target.branch.clone(),
-            base: spec.base.display(),
-            target: spec.target.display(),
+        return Ok(sync_output(
+            spec,
+            path,
             dropped,
-            applied: Vec::new(),
-            dry_run: true,
-            picked_count: 0,
-            skipped_count: 0,
+            Vec::new(),
+            true,
+            0,
+            0,
             dropped_count,
-            success: true,
-        });
+        ));
     }
 
     // 4. Persist the pruned spec BEFORE any cherry-picks. A partial pick
@@ -284,7 +234,29 @@ pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
         }
     }
 
-    Ok(SyncOutput {
+    Ok(sync_output(
+        spec,
+        path,
+        dropped,
+        applied,
+        false,
+        picked,
+        skipped,
+        dropped_count,
+    ))
+}
+
+fn sync_output(
+    spec: &StackSpec,
+    path: String,
+    dropped: Vec<DroppedPr>,
+    applied: Vec<AppliedPr>,
+    dry_run: bool,
+    picked_count: usize,
+    skipped_count: usize,
+    dropped_count: usize,
+) -> SyncOutput {
+    SyncOutput {
         stack_id: spec.id.clone(),
         component_path: path,
         branch: spec.target.branch.clone(),
@@ -292,99 +264,12 @@ pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
         target: spec.target.display(),
         dropped,
         applied,
-        dry_run: false,
-        picked_count: picked,
-        skipped_count: skipped,
+        dry_run,
+        picked_count,
+        skipped_count,
         dropped_count,
         success: true,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// gh pr view glue
-// ---------------------------------------------------------------------------
-
-/// Resolve PR metadata via `gh pr view`. Fetches every field both
-/// `is_droppable` and the cherry-pick path need, in one call.
-fn fetch_pr_meta(pr: &StackPrEntry) -> Result<PrMeta> {
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            &pr.number.to_string(),
-            "--repo",
-            &pr.repo,
-            "--json",
-            "headRefOid,headRepository,headRepositoryOwner,state,title,mergedAt",
-        ])
-        .output()
-        .map_err(|e| {
-            Error::git_command_failed(format!(
-                "gh pr view {}#{}: {} (is `gh` installed and authenticated?)",
-                pr.repo, pr.number, e
-            ))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::git_command_failed(format!(
-            "gh pr view {}#{} failed: {}",
-            pr.repo,
-            pr.number,
-            stderr.trim()
-        )));
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
-        Error::validation_invalid_json(
-            e,
-            Some(format!("parse `gh pr view {}#{}`", pr.repo, pr.number)),
-            Some(stdout.chars().take(200).collect()),
-        )
-    })?;
-
-    let head_sha = parsed
-        .get("headRefOid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let head_owner = parsed
-        .get("headRepositoryOwner")
-        .and_then(|v| v.get("login"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let head_name = parsed
-        .get("headRepository")
-        .and_then(|v| v.get("name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let state = parsed
-        .get("state")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let title = parsed
-        .get("title")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let merged_at = parsed
-        .get("mergedAt")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-
-    Ok(PrMeta {
-        head_sha,
-        head_owner,
-        head_name,
-        state,
-        title,
-        merged_at,
-    })
 }
 
 #[cfg(test)]

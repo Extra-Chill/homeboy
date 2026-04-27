@@ -6,15 +6,15 @@
 //!
 //! Mirrors the rig spec layout (one JSON file per stack, ID derived from
 //! filename if absent in JSON). Supports `~` and `${env.VAR}` expansion in
-//! the `component_path` field via `shellexpand::tilde` + a small env-var
-//! substitution pass — same shape the rig `expand` module uses, kept
-//! intentionally narrow here so the two modules don't need a hard
-//! dependency.
+//! the `component_path` field via the same token-expansion helper used by
+//! rig specs, with a narrower token vocabulary.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::Path;
 
 use crate::error::{Error, Result};
+use crate::expand;
 use crate::paths;
 
 /// A stack: the spec for one combined-fixes branch.
@@ -83,43 +83,32 @@ pub struct StackPrEntry {
 /// Expand `~` and `${env.VAR}` in a stack spec field. Kept tiny on purpose:
 /// stack specs only have one field that needs expansion (`component_path`).
 pub fn expand_path(input: &str) -> String {
-    let substituted = substitute_env(input);
-    shellexpand::tilde(&substituted).into_owned()
+    expand::expand_with_tilde(input, |token| {
+        token
+            .strip_prefix("env.")
+            .map(|name| std::env::var(name).unwrap_or_default())
+    })
 }
 
-fn substitute_env(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '$' && chars.peek() == Some(&'{') {
-            chars.next(); // consume '{'
-            let mut token = String::new();
-            let mut closed = false;
-            for inner in chars.by_ref() {
-                if inner == '}' {
-                    closed = true;
-                    break;
-                }
-                token.push(inner);
-            }
-            if !closed {
-                out.push_str("${");
-                out.push_str(&token);
-                continue;
-            }
-            if let Some(name) = token.strip_prefix("env.") {
-                out.push_str(&std::env::var(name).unwrap_or_default());
-            } else {
-                // Unknown token: leave literal so users get a clear failure.
-                out.push_str("${");
-                out.push_str(&token);
-                out.push('}');
-            }
-        } else {
-            out.push(c);
-        }
+/// Resolve a stack's component checkout path and ensure it exists.
+pub(crate) fn resolve_existing_component_path(spec: &StackSpec) -> Result<String> {
+    let path = expand_path(&spec.component_path);
+    if Path::new(&path).exists() {
+        return Ok(path);
     }
-    out
+
+    Err(Error::validation_invalid_argument(
+        "component_path",
+        format!(
+            "Component path '{}' does not exist (stack '{}')",
+            path, spec.id
+        ),
+        None,
+        Some(vec![format!(
+            "Edit ~/.config/homeboy/stacks/{}.json or clone the checkout",
+            spec.id
+        )]),
+    ))
 }
 
 /// Load a stack spec by ID from `~/.config/homeboy/stacks/{id}.json`.
@@ -250,6 +239,69 @@ pub fn parse_git_ref(value: &str, field: &'static str) -> Result<GitRef> {
                 field
             )]),
         )),
+    }
+}
+
+#[cfg(test)]
+mod inline_tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_existing_component_path() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_string_lossy().to_string();
+        let spec = StackSpec {
+            id: "test-stack".to_string(),
+            description: String::new(),
+            component: "homeboy".to_string(),
+            component_path: path.clone(),
+            base: GitRef {
+                remote: "origin".to_string(),
+                branch: "main".to_string(),
+            },
+            target: GitRef {
+                remote: "origin".to_string(),
+                branch: "stack".to_string(),
+            },
+            prs: Vec::new(),
+        };
+
+        assert_eq!(resolve_existing_component_path(&spec).unwrap(), path);
+    }
+
+    #[test]
+    fn resolve_existing_component_path_preserves_error_contract() {
+        let spec = StackSpec {
+            id: "missing-stack".to_string(),
+            description: String::new(),
+            component: "homeboy".to_string(),
+            component_path: "/definitely/missing/homeboy-stack-checkout".to_string(),
+            base: GitRef {
+                remote: "origin".to_string(),
+                branch: "main".to_string(),
+            },
+            target: GitRef {
+                remote: "origin".to_string(),
+                branch: "stack".to_string(),
+            },
+            prs: Vec::new(),
+        };
+
+        let err = resolve_existing_component_path(&spec).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("component_path"));
+        assert!(msg.contains(
+            "Component path '/definitely/missing/homeboy-stack-checkout' does not exist"
+        ));
+        assert_eq!(
+            err.details
+                .get("tried")
+                .and_then(|v| v.as_array())
+                .map(|v| v[0].as_str()),
+            Some(Some(
+                "Edit ~/.config/homeboy/stacks/missing-stack.json or clone the checkout"
+            ))
+        );
     }
 }
 

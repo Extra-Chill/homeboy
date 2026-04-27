@@ -11,49 +11,11 @@
 //! command-run failure instead of a silent empty string.
 
 use super::spec::RigSpec;
+use crate::expand;
 
 /// Expand variables + tilde in a string.
 pub fn expand_vars(rig: &RigSpec, input: &str) -> String {
-    let substituted = substitute(rig, input);
-    shellexpand::tilde(&substituted).into_owned()
-}
-
-fn substitute(rig: &RigSpec, input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '$' && chars.peek() == Some(&'{') {
-            chars.next(); // consume '{'
-            let mut token = String::new();
-            let mut closed = false;
-            for inner in chars.by_ref() {
-                if inner == '}' {
-                    closed = true;
-                    break;
-                }
-                token.push(inner);
-            }
-            if !closed {
-                // Unterminated — emit literal to avoid data loss.
-                out.push_str("${");
-                out.push_str(&token);
-                continue;
-            }
-            match resolve_token(rig, &token) {
-                Some(value) => out.push_str(&value),
-                None => {
-                    // Unknown token: leave literal for diagnostics.
-                    out.push_str("${");
-                    out.push_str(&token);
-                    out.push('}');
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    expand::expand_with_tilde(input, |token| resolve_token(rig, token))
 }
 
 fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {

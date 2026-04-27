@@ -14,11 +14,12 @@
 //! to a per-PR error note; the rest of the report still renders.
 
 use serde::Serialize;
-use std::process::Command;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 
-use super::spec::{expand_path, StackPrEntry, StackSpec};
+use super::git::run_git;
+use super::pr_meta::fetch_pr_meta;
+use super::spec::{resolve_existing_component_path, StackPrEntry, StackSpec};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusOutput {
@@ -92,21 +93,7 @@ fn is_false(b: &bool) -> bool {
 
 /// Run `homeboy stack status <id>`.
 pub fn status(spec: &StackSpec) -> Result<StatusOutput> {
-    let path = expand_path(&spec.component_path);
-    if !std::path::Path::new(&path).exists() {
-        return Err(Error::validation_invalid_argument(
-            "component_path",
-            format!(
-                "Component path '{}' does not exist (stack '{}')",
-                path, spec.id
-            ),
-            None,
-            Some(vec![format!(
-                "Edit ~/.config/homeboy/stacks/{}.json or clone the checkout",
-                spec.id
-            )]),
-        ));
-    }
+    let path = resolve_existing_component_path(spec)?;
 
     // Single fetch of the base, so ahead-counts are honest. Failure here is
     // non-fatal — we want status to work offline.
@@ -187,8 +174,8 @@ fn build_status_row(
                 repo: pr.repo.clone(),
                 number: pr.number,
                 note: pr.note.clone(),
-                title: Some(meta.title),
-                url: Some(meta.url),
+                title: Some(meta.title_for_status()),
+                url: Some(meta.url_for_status()),
                 upstream_state: Some(meta.state),
                 review_decision: meta.review_decision,
                 merged_at: meta.merged_at,
@@ -211,94 +198,6 @@ fn build_status_row(
             error: Some(e.to_string()),
         },
     }
-}
-
-struct PrMeta {
-    head_sha: String,
-    state: String,
-    title: String,
-    url: String,
-    review_decision: Option<String>,
-    merged_at: Option<String>,
-}
-
-fn fetch_pr_meta(pr: &StackPrEntry) -> Result<PrMeta> {
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            &pr.number.to_string(),
-            "--repo",
-            &pr.repo,
-            "--json",
-            "headRefOid,state,title,url,reviewDecision,mergedAt",
-        ])
-        .output()
-        .map_err(|e| {
-            Error::git_command_failed(format!(
-                "gh pr view {}#{}: {} (is `gh` installed and authenticated?)",
-                pr.repo, pr.number, e
-            ))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::git_command_failed(format!(
-            "gh pr view {}#{} failed: {}",
-            pr.repo,
-            pr.number,
-            stderr.trim()
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
-        Error::validation_invalid_json(
-            e,
-            Some(format!("parse `gh pr view {}#{}`", pr.repo, pr.number)),
-            Some(stdout.chars().take(200).collect()),
-        )
-    })?;
-
-    let head_sha = parsed
-        .get("headRefOid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let state = parsed
-        .get("state")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let title = parsed
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let url = parsed
-        .get("url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let review_decision = parsed
-        .get("reviewDecision")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let merged_at = parsed
-        .get("mergedAt")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-
-    Ok(PrMeta {
-        head_sha,
-        state,
-        title,
-        url,
-        review_decision,
-        merged_at,
-    })
 }
 
 pub(crate) fn count_revs(path: &str, from: &str, to: &str) -> Option<usize> {
@@ -372,14 +271,6 @@ pub(crate) fn patch_in_base(path: &str, head_sha: &str, base_ref: &str) -> Optio
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     Some(stdout.lines().any(|l| l.starts_with("- ")))
-}
-
-fn run_git(path: &str, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::git_command_failed(format!("git {}: {}", args.join(" "), e)))
 }
 
 #[cfg(test)]

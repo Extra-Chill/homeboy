@@ -18,6 +18,9 @@ enum RawOutputMode {
 mod commands;
 mod help_topics;
 
+#[cfg(test)]
+mod test_support;
+
 use commands::utils::{args, entity_suggest, response as output, tty};
 use commands::{
     api, audit, auth, bench, build, changelog, changes, cli, component, config, db, deploy,

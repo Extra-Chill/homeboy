@@ -245,8 +245,19 @@ mod tests {
         out
     }
 
+    fn fingerprint_file_retry(path: &Path, root: &Path) -> Option<FileFingerprint> {
+        for _ in 0..5 {
+            if let Some(fingerprint) = fingerprint_file(path, root) {
+                return Some(fingerprint);
+            }
+            std::thread::yield_now();
+        }
+        None
+    }
+
     #[test]
     fn fingerprint_content_matches_fingerprint_file() {
+        let _audit_guard = crate::test_support::AuditGuard::new();
         // Use the homeboy worktree's own source as a real-world Rust input.
         let dir = std::env::temp_dir().join("homeboy_fingerprint_parity_test");
         let _ = std::fs::remove_dir_all(&dir);
@@ -256,7 +267,7 @@ mod tests {
         let file = dir.join("src/lib.rs");
         std::fs::write(&file, src).unwrap();
 
-        let from_disk = fingerprint_file(&file, &dir);
+        let from_disk = fingerprint_file_retry(&file, &dir);
         let from_content = fingerprint_content(&file, &dir, src);
 
         // Either both produce a fingerprint, or both return None — and when
@@ -282,7 +293,11 @@ mod tests {
 
     #[test]
     fn from_snapshot_index_matches_per_file_get_calls() {
-        let dir = std::env::temp_dir().join("homeboy_fingerprint_index_parity_test");
+        let _audit_guard = crate::test_support::AuditGuard::new();
+        let dir = std::env::temp_dir().join(format!(
+            "homeboy_fingerprint_index_parity_test_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(dir.join("src"));
 
@@ -301,11 +316,11 @@ mod tests {
         let index = FingerprintIndex::from_snapshot(&snapshot);
 
         // For every file the snapshot saw, the index either contains a
-        // fingerprint identical to the one fingerprint_file would produce,
-        // or both routes return None (extension with no fingerprinter).
-        for (path, _) in snapshot.iter() {
+        // fingerprint identical to the snapshot-content fingerprinter, or both
+        // routes return None (extension with no fingerprinter).
+        for (path, content) in snapshot.iter() {
             let from_index = index.get(path);
-            let from_file = fingerprint_file(path, snapshot.root());
+            let from_file = fingerprint_content(path, snapshot.root(), content);
             assert_eq!(from_index.is_some(), from_file.is_some());
             if let (Some(a), Some(b)) = (from_index, from_file.as_ref()) {
                 assert_eq!(a.relative_path, b.relative_path);

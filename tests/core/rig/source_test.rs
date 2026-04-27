@@ -1,34 +1,9 @@
 //! Rig source lifecycle tests. Covers `src/core/rig/source.rs`.
 
 use crate::rig::{install, list_sources, remove_source};
+use crate::test_support::HomeGuard;
 use std::fs;
 use std::path::Path;
-
-struct HomeGuard {
-    old_home: Option<String>,
-    _dir: tempfile::TempDir,
-}
-
-impl HomeGuard {
-    fn new() -> Self {
-        let old_home = std::env::var("HOME").ok();
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::env::set_var("HOME", dir.path());
-        Self {
-            old_home,
-            _dir: dir,
-        }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        match &self.old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-}
 
 fn write_rig(package: &Path, id: &str, body: &str) -> std::path::PathBuf {
     let rig_dir = package.join("rigs").join(id);

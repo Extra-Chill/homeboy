@@ -27,7 +27,9 @@
 //! - Conflict resolution cache
 
 pub mod apply;
+pub(crate) mod git;
 pub mod inspect;
+pub(crate) mod pr_meta;
 pub mod spec;
 pub mod status;
 pub mod sync;

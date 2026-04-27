@@ -16,6 +16,9 @@ macro_rules! log_status {
 
 pub mod core;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 // Re-export everything from core for ergonomic library use
 // Users can write `homeboy::config` instead of `homeboy::core::config`
 pub use core::release::changelog;

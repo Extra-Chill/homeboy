@@ -8,6 +8,7 @@ pub mod db;
 pub mod deploy;
 pub mod engine;
 pub mod error;
+pub(crate) mod expand;
 pub mod extension;
 pub mod fleet;
 pub mod git;

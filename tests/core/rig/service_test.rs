@@ -9,33 +9,12 @@ use crate::rig::service::ServiceStatus;
 #[cfg(unix)]
 mod lifecycle {
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-
-    use tempfile::TempDir;
 
     use crate::rig::service::{self, ServiceStatus};
     use crate::rig::spec::{DiscoverSpec, RigSpec, ServiceKind, ServiceSpec};
     use crate::rig::state::{RigState, ServiceState};
-
-    fn home_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
-        let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var("HOME").ok();
-        let dir = TempDir::new().expect("home tempdir");
-        std::env::set_var("HOME", dir.path());
-        let result = body(&dir);
-        match prior {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        drop(guard);
-        result
-    }
+    use crate::test_support::with_isolated_home;
 
     fn command_rig(id: &str, command: &str, cwd: Option<String>) -> RigSpec {
         let mut services = HashMap::new();

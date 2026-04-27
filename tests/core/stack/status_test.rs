@@ -8,47 +8,9 @@
 
 use crate::stack::status::{commit_reachable, count_revs, git_ref_exists, patch_in_base};
 use std::fs;
-use std::process::Command;
-use tempfile::TempDir;
 
-fn init_repo() -> (TempDir, String) {
-    let dir = TempDir::new().expect("tempdir");
-    let path = dir.path().to_string_lossy().to_string();
-    run(&path, &["init", "-q", "-b", "main"]);
-    run(&path, &["config", "user.email", "test@test.com"]);
-    run(&path, &["config", "user.name", "Test"]);
-    fs::write(dir.path().join("README.md"), "initial\n").unwrap();
-    run(&path, &["add", "."]);
-    run(&path, &["commit", "-q", "-m", "initial"]);
-    (dir, path)
-}
-
-fn run(path: &str, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .unwrap_or_else(|e| panic!("git {:?}: {}", args, e));
-    assert!(
-        out.status.success(),
-        "git {:?} failed: {} / {}",
-        args,
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-fn write_and_commit(dir: &TempDir, path: &str, file: &str, body: &str, msg: &str) -> String {
-    fs::write(dir.path().join(file), body).unwrap();
-    run(path, &["add", "."]);
-    run(path, &["commit", "-q", "-m", msg]);
-    let out = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(path)
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+mod support;
+use support::{commit_file, git, init_repo};
 
 // ---------------------------------------------------------------------------
 // git_ref_exists
@@ -75,7 +37,7 @@ fn git_ref_exists_false_for_missing_branch() {
 #[test]
 fn count_revs_zero_when_branches_at_same_commit() {
     let (_dir, path) = init_repo();
-    run(&path, &["branch", "twin"]);
+    git(&path, &["branch", "twin"]);
     assert_eq!(count_revs(&path, "main", "twin"), Some(0));
     assert_eq!(count_revs(&path, "twin", "main"), Some(0));
 }
@@ -83,10 +45,10 @@ fn count_revs_zero_when_branches_at_same_commit() {
 #[test]
 fn count_revs_returns_ahead_count() {
     let (dir, path) = init_repo();
-    run(&path, &["branch", "base"]);
-    write_and_commit(&dir, &path, "a.txt", "a\n", "a");
-    write_and_commit(&dir, &path, "b.txt", "b\n", "b");
-    write_and_commit(&dir, &path, "c.txt", "c\n", "c");
+    git(&path, &["branch", "base"]);
+    commit_file(&dir, &path, "a.txt", "a\n", "a");
+    commit_file(&dir, &path, "b.txt", "b\n", "b");
+    commit_file(&dir, &path, "c.txt", "c\n", "c");
     assert_eq!(count_revs(&path, "base", "main"), Some(3));
     // Reverse direction: base has 0 commits ahead of main.
     assert_eq!(count_revs(&path, "main", "base"), Some(0));
@@ -106,16 +68,16 @@ fn count_revs_none_for_invalid_ref() {
 #[test]
 fn commit_reachable_true_when_sha_in_branch_history() {
     let (dir, path) = init_repo();
-    let sha = write_and_commit(&dir, &path, "a.txt", "a\n", "a");
+    let sha = commit_file(&dir, &path, "a.txt", "a\n", "a");
     assert_eq!(commit_reachable(&path, &sha, "main"), Some(true));
 }
 
 #[test]
 fn commit_reachable_false_when_sha_on_different_branch() {
     let (dir, path) = init_repo();
-    run(&path, &["checkout", "-q", "-b", "feature"]);
-    let sha = write_and_commit(&dir, &path, "a.txt", "a\n", "feature only");
-    run(&path, &["checkout", "-q", "main"]);
+    git(&path, &["checkout", "-q", "-b", "feature"]);
+    let sha = commit_file(&dir, &path, "a.txt", "a\n", "feature only");
+    git(&path, &["checkout", "-q", "main"]);
     assert_eq!(commit_reachable(&path, &sha, "main"), Some(false));
     // But still reachable from the branch that owns it.
     assert_eq!(commit_reachable(&path, &sha, "feature"), Some(true));
@@ -143,16 +105,15 @@ fn patch_in_base_detects_squash_merged_content() {
     let (dir, path) = init_repo();
 
     // pr-feature: the PR's "head SHA" before merge.
-    run(&path, &["checkout", "-q", "-b", "pr-feature"]);
-    let pr_head_sha =
-        write_and_commit(&dir, &path, "feature.txt", "feature\n", "PR feature commit");
+    git(&path, &["checkout", "-q", "-b", "pr-feature"]);
+    let pr_head_sha = commit_file(&dir, &path, "feature.txt", "feature\n", "PR feature commit");
 
     // Back to base branch (still "main"); apply the SAME tree as a
     // different commit (this is what squash-merge does upstream).
-    run(&path, &["checkout", "-q", "main"]);
+    git(&path, &["checkout", "-q", "main"]);
     fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
-    run(&path, &["add", "."]);
-    run(&path, &["commit", "-q", "-m", "Squash-merge PR feature"]);
+    git(&path, &["add", "."]);
+    git(&path, &["commit", "-q", "-m", "Squash-merge PR feature"]);
 
     // pr_head_sha is on pr-feature but NOT main; main has its own commit
     // with the same tree. patch_in_base should detect equivalence.
@@ -171,12 +132,11 @@ fn patch_in_base_detects_squash_merged_content() {
 #[test]
 fn patch_in_base_returns_false_when_patch_absent() {
     let (dir, path) = init_repo();
-    run(&path, &["checkout", "-q", "-b", "pr-feature"]);
-    let pr_head_sha =
-        write_and_commit(&dir, &path, "feature.txt", "feature\n", "PR feature commit");
+    git(&path, &["checkout", "-q", "-b", "pr-feature"]);
+    let pr_head_sha = commit_file(&dir, &path, "feature.txt", "feature\n", "PR feature commit");
 
     // main has no equivalent commit.
-    run(&path, &["checkout", "-q", "main"]);
+    git(&path, &["checkout", "-q", "main"]);
 
     assert_eq!(
         patch_in_base(&path, &pr_head_sha, "main"),
