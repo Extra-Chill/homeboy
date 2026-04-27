@@ -155,7 +155,13 @@ resolve_phpstan_targets() {
             if [ -f "${PLUGIN_PATH}/${target}" ] && [[ "$target" == *.php ]]; then
                 printf '%s\0' "${PLUGIN_PATH}/${target}"
             elif [ -d "${PLUGIN_PATH}/${target}" ]; then
-                find "${PLUGIN_PATH}/${target}" -type f -name '*.php' -print0
+                find "${PLUGIN_PATH}/${target}" -type f -name '*.php' \
+                    -not -path "*/vendor/*" \
+                    -not -path "*/vendor_prefixed/*" \
+                    -not -path "*/node_extensions/*" \
+                    -not -path "*/build/*" \
+                    -not -path "*/dist/*" \
+                    -print0
             fi
         done
         return
@@ -185,6 +191,7 @@ if [ "$PHPSTAN_SCOPED" -eq 1 ]; then
 else
     php_file_count=$(find "$PLUGIN_PATH" -type f -name "*.php" \
         -not -path "*/vendor/*" \
+        -not -path "*/vendor_prefixed/*" \
         -not -path "*/node_extensions/*" \
         -not -path "*/build/*" \
         -not -path "*/dist/*" \

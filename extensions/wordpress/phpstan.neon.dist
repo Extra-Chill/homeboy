@@ -59,6 +59,7 @@ parameters:
     # level excludePaths in their own phpstan.neon.
     excludePaths:
         - */vendor/*
+        - */vendor_prefixed/*
         - */node_modules/*
         - */build/*
         - */dist/*

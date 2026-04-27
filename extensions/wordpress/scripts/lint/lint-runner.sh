@@ -35,6 +35,15 @@ RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner
 # shellcheck source=../lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
 
+# Seed context from Homeboy before any strict-mode access. The shared resolver
+# may be overridden by the runtime, but the lint runner still needs a safe local
+# fallback for direct invocation and older runtime helper shapes.
+EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(dirname "$(dirname "$SCRIPT_DIR")")}"
+COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-${HOMEBOY_PROJECT_PATH:-$(pwd)}}"
+PLUGIN_PATH="${HOMEBOY_PLUGIN_PATH:-$COMPONENT_PATH}"
+COMPONENT_ID="${HOMEBOY_COMPONENT_ID:-$(basename "$COMPONENT_PATH")}"
+export EXTENSION_PATH COMPONENT_PATH PLUGIN_PATH COMPONENT_ID
+
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Environment variables:"
@@ -71,6 +80,7 @@ RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/
 # shellcheck source=../lib/resolve-context.sh
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context
+export EXTENSION_PATH COMPONENT_PATH PLUGIN_PATH COMPONENT_ID
 
 COMPONENT_SHAPE="${HOMEBOY_COMPONENT_SHAPE:-}"
 if [ -z "$COMPONENT_SHAPE" ]; then
@@ -525,6 +535,7 @@ fixable_count=0
 
 # Build base phpcs arguments
 phpcs_base_args=(--standard="$PHPCS_CONFIG")
+phpcs_base_args+=(--ignore='*/vendor/*,*/vendor_prefixed/*,*/node_modules/*,*/build/*,*/dist/*')
 
 # Auto-detect parallelism from available CPU cores
 if [ -z "${PARALLEL_PROCS:-}" ]; then
