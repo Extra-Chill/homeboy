@@ -71,15 +71,14 @@ pub struct LintArgs {
 }
 
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput> {
-    // Resolve component ID — auto-discover from CWD if omitted
-    let effective_id = args.comp.resolve_id()?;
-
-    let ctx = execution_context::resolve(&ResolveOptions::with_capability(
-        &effective_id,
-        args.comp.path.clone(),
-        ExtensionCapability::Lint,
-        args.setting_args.setting.clone(),
-    ))?;
+    let ctx = execution_context::resolve(&ResolveOptions {
+        component_id: args.comp.component.clone(),
+        path_override: args.comp.path.clone(),
+        capability: Some(ExtensionCapability::Lint),
+        settings_overrides: args.setting_args.setting.clone(),
+        settings_json_overrides: Vec::new(),
+    })?;
+    let effective_id = ctx.component_id.clone();
 
     let stringified_settings: Vec<(String, String)> = ctx
         .settings

@@ -350,6 +350,32 @@ mod tests {
     }
 
     #[test]
+    fn resolve_capability_raw_path_reports_unsupported_shape() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+
+        let options = ResolveOptions {
+            component_id: Some(root.to_string_lossy().to_string()),
+            path_override: None,
+            capability: Some(ExtensionCapability::Lint),
+            settings_overrides: Vec::new(),
+            settings_json_overrides: Vec::new(),
+        };
+
+        let err = resolve(&options).expect_err("raw path without lint extension should fail");
+        let message = err.to_string();
+
+        assert!(
+            message.contains("has no extensions configured"),
+            "expected unsupported-shape error, got: {message}"
+        );
+        assert!(
+            !message.contains("component.not_found"),
+            "raw path should not be treated as a component id: {message}"
+        );
+    }
+
+    #[test]
     fn settings_overrides_replace_existing() {
         let options = ResolveOptions {
             component_id: Some("test".to_string()),

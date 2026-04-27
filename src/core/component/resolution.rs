@@ -207,6 +207,26 @@ pub fn resolve_effective(
                 })
             }
         } else {
+            let id_path = Path::new(id);
+            if id_path.is_dir() {
+                if let Some(mut discovered) = discover_from_portable(id_path) {
+                    discovered.local_path = id.to_string();
+                    discovered.resolve_remote_path();
+                    return Ok(discovered);
+                }
+
+                let name = id_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                return Ok(Component {
+                    id: name,
+                    local_path: id.to_string(),
+                    ..Component::default()
+                });
+            }
+
             // No --path provided. Before falling back to the registry, check
             // if the CWD (or its git root) is a checkout of this component.
             // This ensures `homeboy test foo` from a different clone of `foo`
@@ -222,5 +242,36 @@ pub fn resolve_effective(
             component.local_path = path.to_string();
         }
         Ok(component)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_effective_accepts_raw_directory_as_positional_component() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path().join("raw-repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+
+        let component = resolve_effective(Some(repo.to_str().unwrap()), None, None)
+            .expect("raw directory should resolve");
+
+        assert_eq!(component.id, "raw-repo");
+        assert_eq!(component.local_path, repo.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_effective_preserves_explicit_path_override_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path().join("override-repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+
+        let component = resolve_effective(Some("registered-id"), repo.to_str(), None)
+            .expect("explicit path override should resolve");
+
+        assert_eq!(component.id, "registered-id");
+        assert_eq!(component.local_path, repo.to_string_lossy());
     }
 }
