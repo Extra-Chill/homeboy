@@ -6,6 +6,7 @@ use homeboy::extension::{
     UpdateEntry,
 };
 use homeboy::project::{self, Project};
+use std::path::Path;
 
 use crate::commands::CmdResult;
 
@@ -69,6 +70,15 @@ enum ExtensionCommand {
         /// Override extension id
         #[arg(long)]
         id: Option<String>,
+    },
+    /// Install every extension configured by a component
+    InstallForComponent {
+        /// Git URL or local path to extension repository/directory
+        #[arg(long)]
+        source: String,
+        /// Component path containing homeboy.json (defaults to current directory)
+        #[arg(long)]
+        path: Option<String>,
     },
     /// Update an installed extension (git pull)
     Update {
@@ -154,6 +164,9 @@ pub fn run(
         ),
         ExtensionCommand::Setup { extension_id } => setup_extension(&extension_id),
         ExtensionCommand::Install { source, id } => install_extension(&source, id),
+        ExtensionCommand::InstallForComponent { source, path } => {
+            install_for_component(&source, path.as_deref())
+        }
         ExtensionCommand::Update {
             extension_id,
             all,
@@ -209,6 +222,13 @@ pub enum ExtensionOutput {
         linked: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_revision: Option<String>,
+    },
+    #[serde(rename = "extension.install_for_component")]
+    InstallForComponent {
+        component_id: String,
+        source: String,
+        installed: Vec<InstallEntry>,
+        skipped: Vec<String>,
     },
     #[serde(rename = "extension.update")]
     Update {
@@ -293,6 +313,15 @@ pub struct ExtensionDetail {
     pub settings: Vec<homeboy::extension::SettingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<RequiresDetail>,
+}
+
+#[derive(Serialize)]
+pub struct InstallEntry {
+    pub extension_id: String,
+    pub path: String,
+    pub linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -470,6 +499,47 @@ fn install_extension(source: &str, id: Option<String>) -> CmdResult<ExtensionOut
         },
         0,
     ))
+}
+
+fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
+    let component = resolve_install_component(path)?;
+    let result = homeboy::extension::install_for_component(&component, source)?;
+
+    let installed = result
+        .installed
+        .into_iter()
+        .map(|entry| InstallEntry {
+            linked: is_extension_linked(&entry.extension_id),
+            extension_id: entry.extension_id,
+            path: entry.path.to_string_lossy().to_string(),
+            source_revision: entry.source_revision,
+        })
+        .collect();
+
+    Ok((
+        ExtensionOutput::InstallForComponent {
+            component_id: result.component_id,
+            source: result.source,
+            installed,
+            skipped: result.skipped,
+        },
+        0,
+    ))
+}
+
+fn resolve_install_component(path: Option<&str>) -> homeboy::Result<homeboy::component::Component> {
+    if let Some(path) = path {
+        return homeboy::component::discover_from_portable(Path::new(path)).ok_or_else(|| {
+            homeboy::Error::validation_invalid_argument(
+                "path",
+                format!("No homeboy.json found at {}", path),
+                Some(path.to_string()),
+                None,
+            )
+        });
+    }
+
+    homeboy::component::resolve(None)
 }
 
 fn update_extension(

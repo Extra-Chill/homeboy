@@ -20,6 +20,14 @@ pub struct InstallResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct InstallForComponentResult {
+    pub component_id: String,
+    pub source: String,
+    pub installed: Vec<InstallResult>,
+    pub skipped: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct UpdateResult {
     pub extension_id: String,
     pub url: String,
@@ -103,6 +111,72 @@ pub fn install(source: &str, id_override: Option<&str>) -> Result<InstallResult>
     } else {
         install_from_path(source, id_override)
     }
+}
+
+/// Install every extension declared by a component from the same source.
+///
+/// Already-installed extensions are skipped so CI setup can be re-run safely.
+pub fn install_for_component(
+    component: &crate::component::Component,
+    source: &str,
+) -> Result<InstallForComponentResult> {
+    let extensions = component.extensions.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "component",
+            format!("Component '{}' has no extensions configured", component.id),
+            Some(component.id.clone()),
+            None,
+        )
+    })?;
+
+    if extensions.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "component",
+            format!("Component '{}' has no extensions configured", component.id),
+            Some(component.id.clone()),
+            None,
+        ));
+    }
+
+    let mut extension_ids: Vec<String> = extensions.keys().cloned().collect();
+    extension_ids.sort();
+
+    let mut installed = Vec::new();
+    let mut skipped = Vec::new();
+
+    for extension_id in extension_ids {
+        if load_extension(&extension_id).is_ok() {
+            skipped.push(extension_id);
+            continue;
+        }
+
+        installed.push(install_configured_extension(source, &extension_id)?);
+    }
+
+    Ok(InstallForComponentResult {
+        component_id: component.id.clone(),
+        source: source.to_string(),
+        installed,
+        skipped,
+    })
+}
+
+fn install_configured_extension(source: &str, extension_id: &str) -> Result<InstallResult> {
+    if is_git_url(source) {
+        return install(source, Some(extension_id));
+    }
+
+    let source_path = Path::new(source);
+    let candidate = source_path
+        .join(extension_id)
+        .join(format!("{}.json", extension_id));
+
+    if candidate.exists() {
+        let extension_path = source_path.join(extension_id);
+        return install(&extension_path.to_string_lossy(), Some(extension_id));
+    }
+
+    install(source, Some(extension_id))
 }
 
 /// Install a extension by cloning from a git repository URL.
