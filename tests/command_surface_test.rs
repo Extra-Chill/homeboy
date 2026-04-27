@@ -7,6 +7,7 @@ fn includes_current_top_level_commands() {
     assert!(surface.contains_path(&["audit"]));
     assert!(surface.contains_path(&["daemon"]));
     assert!(surface.contains_path(&["git"]));
+    assert!(surface.contains_path(&["self"]));
     assert!(surface.contains_path(&["stack"]));
 }
 
@@ -16,6 +17,7 @@ fn includes_first_level_subcommands() {
 
     assert!(surface.contains_path(&["git", "status"]));
     assert!(surface.contains_path(&["daemon", "serve"]));
+    assert!(surface.contains_path(&["self", "status"]));
     assert!(surface.contains_path(&["stack", "inspect"]));
 }
 

@@ -3,7 +3,7 @@ use clap::{Command, CommandFactory, Parser, Subcommand};
 use crate::commands::{
     api, audit, auth, bench, build, changelog, changes, component, config, daemon, db, deploy,
     extension, file, fleet, git, init, issues, lint, logs, project, refactor, release, review, rig,
-    server, ssh, stack, status, test, transfer, triage, undo, upgrade, validate, version,
+    self_cmd, server, ssh, stack, status, test, transfer, triage, undo, upgrade, validate, version,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -95,6 +95,9 @@ pub enum Commands {
     /// Manage local dev rigs (reproducible multi-component environments)
     #[command(visible_alias = "rigs")]
     Rig(rig::RigArgs),
+    /// Inspect the active Homeboy binary and install signals
+    #[command(name = "self")]
+    SelfCmd(self_cmd::SelfArgs),
     /// Manage stacks (combined-fixes branches built from base + cherry-picked PRs)
     #[command(visible_alias = "stacks")]
     Stack(stack::StackArgs),
@@ -176,4 +179,33 @@ fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<Command
             },
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_current_command_surface() {
+        let surface = current_command_surface();
+
+        assert!(surface.contains_path(&["self"]));
+        assert!(surface.contains_path(&["self", "status"]));
+    }
+
+    #[test]
+    fn test_command_surface_from() {
+        let surface = command_surface_from(Cli::command());
+
+        assert!(surface.contains_path(&["self"]));
+        assert!(surface.contains_path(&["self", "status"]));
+    }
+
+    #[test]
+    fn test_contains_path() {
+        let surface = current_command_surface();
+
+        assert!(surface.contains_path(&["self"]));
+        assert!(!surface.contains_path(&["self", "missing"]));
+    }
 }

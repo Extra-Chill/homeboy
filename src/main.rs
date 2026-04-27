@@ -195,7 +195,7 @@ fn main() -> std::process::ExitCode {
     // Startup update checks — skip for upgrade/update commands (they handle this themselves)
     if !matches!(
         &cli.command,
-        Commands::Upgrade(_) | Commands::Update(_) | Commands::Daemon(_)
+        Commands::Upgrade(_) | Commands::Update(_) | Commands::Daemon(_) | Commands::SelfCmd(_)
     ) {
         homeboy::upgrade::update_check::run_startup_check();
         homeboy::extension::update_check::run_startup_check();

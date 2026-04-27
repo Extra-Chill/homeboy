@@ -21,6 +21,7 @@ pub mod project;
 pub mod refactor;
 pub mod release;
 pub mod rig;
+pub mod self_status;
 pub mod server;
 pub mod stack;
 pub mod top_n;
