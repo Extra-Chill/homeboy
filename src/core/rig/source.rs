@@ -15,8 +15,8 @@ use super::install::{
 
 mod types;
 pub use types::{
-    InvalidRigSourceMetadata, RemovedRigSourceRig, RemovedRigSourceStack, RigSourceGroup,
-    RigSourceListResult, RigSourceRemoveResult, RigSourceRig, RigSourceStack,
+    FailedRigSourceUpdate, InvalidRigSourceMetadata, RemovedRigSourceRig, RemovedRigSourceStack,
+    RigSourceGroup, RigSourceListResult, RigSourceRemoveResult, RigSourceRig, RigSourceStack,
     RigSourceUpdateResult, RigSourceUpdatedRig, RigSourceUpdatedStack, SkippedRigSourceRig,
     SkippedRigSourceStack, SkippedRigSourceUpdate,
 };
@@ -173,6 +173,7 @@ pub fn update_all_sources() -> Result<RigSourceUpdateResult> {
         updated: Vec::new(),
         updated_stacks: Vec::new(),
         skipped: Vec::new(),
+        failed: Vec::new(),
     };
     for source in list_sources()?.sources {
         if source.linked {
@@ -192,10 +193,22 @@ pub fn update_all_sources() -> Result<RigSourceUpdateResult> {
             }
             continue;
         }
-        let result = update_group(source)?;
-        aggregate.updated.extend(result.updated);
-        aggregate.updated_stacks.extend(result.updated_stacks);
-        aggregate.skipped.extend(result.skipped);
+        match update_group(source.clone()) {
+            Ok(result) => {
+                aggregate.updated.extend(result.updated);
+                aggregate.updated_stacks.extend(result.updated_stacks);
+                aggregate.skipped.extend(result.skipped);
+                aggregate.failed.extend(result.failed);
+            }
+            Err(error) => {
+                aggregate.failed.push(FailedRigSourceUpdate {
+                    package_id: source.package_id,
+                    source: source.source,
+                    package_path: source.package_path,
+                    reason: error.message,
+                });
+            }
+        }
     }
     Ok(aggregate)
 }
@@ -308,6 +321,7 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
         updated,
         updated_stacks,
         skipped,
+        failed: Vec::new(),
     })
 }
 

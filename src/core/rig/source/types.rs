@@ -89,6 +89,8 @@ pub struct RigSourceUpdateResult {
     pub updated: Vec<RigSourceUpdatedRig>,
     pub updated_stacks: Vec<RigSourceUpdatedStack>,
     pub skipped: Vec<SkippedRigSourceUpdate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<FailedRigSourceUpdate>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,5 +121,13 @@ pub struct RigSourceUpdatedStack {
 pub struct SkippedRigSourceUpdate {
     pub id: String,
     pub source: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FailedRigSourceUpdate {
+    pub package_id: String,
+    pub source: String,
+    pub package_path: String,
     pub reason: String,
 }

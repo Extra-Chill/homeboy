@@ -312,6 +312,51 @@ fn update_git_source_refreshes_owned_stack_specs() {
 }
 
 #[test]
+fn update_all_reports_broken_sources_and_continues() {
+    let _home = HomeGuard::new();
+
+    let broken_package = tempfile::tempdir().expect("broken package");
+    write_rig(broken_package.path(), "broken", &minimal_rig("broken"));
+    let broken_bare = create_bare_source(broken_package.path());
+    let broken_source = broken_bare
+        .path()
+        .join("rig-package.git")
+        .to_string_lossy()
+        .to_string();
+    install(&broken_source, None, false).expect("install broken source");
+    let broken_metadata = crate::rig::read_source_metadata("broken").expect("broken metadata");
+    fs::remove_dir_all(&broken_metadata.package_path).expect("remove installed package clone");
+
+    let good_package = tempfile::tempdir().expect("good package");
+    let good_rig = write_rig(good_package.path(), "good", &minimal_rig("good"));
+    let good_bare = create_bare_source(good_package.path());
+    let good_source = good_bare
+        .path()
+        .join("rig-package.git")
+        .to_string_lossy()
+        .to_string();
+    install(&good_source, None, false).expect("install good source");
+    fs::write(
+        &good_rig,
+        minimal_rig("good").replace("good rig", "good rig updated"),
+    )
+    .expect("update good rig");
+    commit_package(good_package.path(), "update good rig");
+    run_git(good_package.path(), &["push", &good_source, "HEAD:main"]);
+
+    let result = update_all_sources().expect("update all continues after broken source");
+
+    assert_eq!(result.failed.len(), 1);
+    assert_eq!(result.failed[0].source, broken_source);
+    assert!(result.failed[0].reason.contains("missing"));
+    assert_eq!(result.updated.len(), 1);
+    assert_eq!(result.updated[0].id, "good");
+    let installed =
+        fs::read_to_string(crate::paths::rig_config("good").unwrap()).expect("installed good rig");
+    assert!(installed.contains("good rig updated"));
+}
+
+#[test]
 fn update_git_source_skips_user_replaced_stack_specs() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
