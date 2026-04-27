@@ -205,7 +205,7 @@ func makeTextCell(
     return textField
 }
 
-private func makeIconTextCell(
+func makeIconTextCell(
     text: String,
     iconName: String,
     iconColor: NSColor

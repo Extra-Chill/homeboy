@@ -433,6 +433,18 @@ struct GitSnapshot: Decodable {
     let baselineRef: String?
 }
 
+// MARK: - Git CLI Output Models
+
+struct GitStatusOutput: Decodable {
+    let action: String
+    let componentId: String
+    let exitCode: Int32
+    let path: String
+    let stderr: String
+    let stdout: String
+    let success: Bool
+}
+
 struct ReleaseSnapshot: Decodable {
     let tag: String?
     let date: String?
@@ -476,6 +488,23 @@ private init() {}
             args.append(contentsOf: ["--path", p])
         }
         return try await cli.executeCommand(args, dataType: InitOutput.self, source: "Init", timeout: 30)
+    }
+
+    // MARK: - Git Commands
+
+    /// Read-only wrapper for `homeboy git status`.
+    func gitStatus(componentId: String, path: String? = nil) async throws -> GitStatusOutput {
+        var args = ["git", "status", componentId]
+        if let path, !path.isEmpty {
+            args.append(contentsOf: ["--path", path])
+        }
+
+        return try await cli.executeCommand(
+            args,
+            dataType: GitStatusOutput.self,
+            source: "Git Status",
+            timeout: 30
+        )
     }
 
     // MARK: - Config Gap Commands
