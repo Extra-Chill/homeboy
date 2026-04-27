@@ -154,6 +154,10 @@ actor CLIVersionChecker {
 
     /// Check full version info including update availability
     func checkForUpdate() async -> VersionInfo {
+        if let upgradeCheck = await upgradeCheckVersionInfo() {
+            return upgradeCheck
+        }
+
         async let installedTask = installedVersion()
         async let latestTask = latestVersion()
 
@@ -176,6 +180,64 @@ actor CLIVersionChecker {
             isInstalled: isInstalled,
             updateAvailable: updateAvailable
         )
+    }
+
+    /// Prefer Homeboy's own upgrade surface so Desktop does not assume an install method.
+    private func upgradeCheckVersionInfo() async -> VersionInfo? {
+        guard let path = cliPath() else { return nil }
+
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("homeboy-upgrade-check-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = ["upgrade", "--check", "--output", outputURL.path]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            guard process.terminationStatus == 0,
+                  FileManager.default.fileExists(atPath: outputURL.path) else {
+                return nil
+            }
+
+            let data = try Data(contentsOf: outputURL)
+            let envelope = try JSONDecoder().decode(UpgradeCheckEnvelope.self, from: data)
+            guard envelope.success else { return nil }
+
+            return VersionInfo(
+                installed: envelope.data.currentVersion,
+                latest: envelope.data.latestVersion,
+                path: path,
+                isInstalled: true,
+                updateAvailable: envelope.data.updateAvailable
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private struct UpgradeCheckEnvelope: Decodable {
+        let success: Bool
+        let data: UpgradeCheckData
+    }
+
+    private struct UpgradeCheckData: Decodable {
+        let currentVersion: String?
+        let latestVersion: String?
+        let updateAvailable: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case currentVersion = "current_version"
+            case latestVersion = "latest_version"
+            case updateAvailable = "update_available"
+        }
     }
 
     /// Compare semantic versions: returns -1 if v1 < v2, 0 if equal, 1 if v1 > v2

@@ -207,7 +207,7 @@ struct CLIUpdateSheet: View {
         upgradeError = nil
 
         Task {
-            let success = await runBrewUpgrade()
+            let success = await runHomeboyUpgrade()
             await MainActor.run {
                 isUpgrading = false
                 if success {
@@ -217,16 +217,15 @@ struct CLIUpdateSheet: View {
         }
     }
 
-    private func runBrewUpgrade() async -> Bool {
-        let brewPaths = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
-        guard let brewPath = brewPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            await MainActor.run { upgradeError = AppError("Homebrew not found", source: "CLI Upgrade") }
+    private func runHomeboyUpgrade() async -> Bool {
+        guard let homeboyPath = await CLIVersionChecker.shared.cliPath() else {
+            await MainActor.run { upgradeError = AppError("Homeboy CLI not found", source: "CLI Upgrade") }
             return false
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: brewPath)
-        process.arguments = ["upgrade", "homeboy"]
+        process.executableURL = URL(fileURLWithPath: homeboyPath)
+        process.arguments = ["upgrade"]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -236,7 +235,9 @@ struct CLIUpdateSheet: View {
             try process.run()
 
             let handle = pipe.fileHandleForReading
+            var sawOutput = false
             for try await line in handle.bytes.lines {
+                sawOutput = true
                 await MainActor.run { upgradeOutput = line }
             }
 
@@ -244,6 +245,8 @@ struct CLIUpdateSheet: View {
 
             if process.terminationStatus == 0 {
                 await CLIVersionChecker.shared.clearCache()
+            } else if !sawOutput {
+                await MainActor.run { upgradeError = AppError("homeboy upgrade exited with status \(process.terminationStatus)", source: "CLI Upgrade") }
             }
 
             return process.terminationStatus == 0

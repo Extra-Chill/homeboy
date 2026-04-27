@@ -17,8 +17,8 @@ struct ExtensionsSettingsTab: View {
                         description: Text("Install extensions to extend functionality")
                     )
                 } else {
-                    ForEach(extensionManager.extensions) { extension in
-                        extensionRow(extension)
+                    ForEach(extensionManager.extensions) { loadedExtension in
+                        extensionRow(loadedExtension)
                     }
                 }
             }
@@ -65,8 +65,8 @@ struct ExtensionsSettingsTab: View {
             titleVisibility: .visible
         ) {
             Button("Uninstall", role: .destructive) {
-                if let extension = selectedExtensionForUninstall {
-                    Task { try? await extensionManager.uninstallExtension(extensionId: extension.id) }
+                if let loadedExtension = selectedExtensionForUninstall {
+                    Task { try? await extensionManager.uninstallExtension(extensionId: loadedExtension.id) }
                 }
                 selectedExtensionForUninstall = nil
             }
@@ -74,8 +74,8 @@ struct ExtensionsSettingsTab: View {
                 selectedExtensionForUninstall = nil
             }
         } message: {
-            if let extension = selectedExtensionForUninstall {
-                Text("Are you sure you want to uninstall \"\(extension.name)\"? This will delete all extension files including its virtual environment.")
+            if let loadedExtension = selectedExtensionForUninstall {
+                Text("Are you sure you want to uninstall \"\(loadedExtension.name)\"? This will delete all extension files including its virtual environment.")
             }
         }
     }
@@ -83,29 +83,29 @@ struct ExtensionsSettingsTab: View {
     // MARK: - Extension Row
     
     @ViewBuilder
-    private func extensionRow(_ extension: LoadedExtension) -> some View {
+    private func extensionRow(_ loadedExtension: LoadedExtension) -> some View {
         HStack {
-            Image(systemName: extension.icon)
+            Image(systemName: loadedExtension.icon)
                 .font(.title2)
                 .foregroundColor(.accentColor)
                 .frame(width: 32)
             
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
-                    Text(extension.name)
+                    Text(loadedExtension.name)
                         .font(.headline)
                     
-                    Text("v\(extension.manifest.version)")
+                    Text("v\(loadedExtension.manifest.version)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 
-                Text(extension.manifest.description)
+                Text(loadedExtension.manifest.description)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                 
-                Text("by \(extension.manifest.author)")
+                Text("by \(loadedExtension.manifest.author)")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
@@ -113,11 +113,11 @@ struct ExtensionsSettingsTab: View {
             Spacer()
             
             // Status badge
-                        statusBadge(for: extension.state, extensionName: extension.name)
+            statusBadge(for: loadedExtension.state, extensionName: loadedExtension.name)
             
             // Remove button
             Button("Remove") {
-                selectedExtensionForUninstall = extension
+                selectedExtensionForUninstall = loadedExtension
                 showUninstallConfirmation = true
             }
             .buttonStyle(.bordered)
@@ -180,4 +180,3 @@ struct ExtensionsSettingsTab: View {
     }
 
 }
-

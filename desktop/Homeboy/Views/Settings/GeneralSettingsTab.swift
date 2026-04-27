@@ -15,7 +15,7 @@ struct GeneralSettingsTab: View {
     @State private var upgradeOutput: String = ""
 
     private let installCommands = "brew tap extra-chill/tap\nbrew install homeboy"
-    private let upgradeCommand = "brew upgrade homeboy"
+    private let upgradeCommand = "homeboy upgrade"
 
     var body: some View {
         Form {
@@ -246,11 +246,11 @@ struct GeneralSettingsTab: View {
         upgradeOutput = ""
 
         Task {
-            let result = await runBrewUpgrade()
+            let result = await runHomeboyUpgrade()
             await MainActor.run {
                 isUpgrading = false
-                upgradeOutput = ""
                 if result {
+                    upgradeOutput = ""
                     // Clear cache and recheck version
                     Task {
                         await CLIVersionChecker.shared.clearCache()
@@ -261,19 +261,17 @@ struct GeneralSettingsTab: View {
         }
     }
 
-    private func runBrewUpgrade() async -> Bool {
-        // Find brew executable
-        let brewPaths = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
-        guard let brewPath = brewPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+    private func runHomeboyUpgrade() async -> Bool {
+        guard let homeboyPath = await CLIVersionChecker.shared.cliPath() else {
             await MainActor.run {
-                upgradeOutput = "Homebrew not found"
+                upgradeOutput = "Homeboy CLI not found"
             }
             return false
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: brewPath)
-        process.arguments = ["upgrade", "homeboy"]
+        process.executableURL = URL(fileURLWithPath: homeboyPath)
+        process.arguments = ["upgrade"]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -284,13 +282,20 @@ struct GeneralSettingsTab: View {
 
             // Read output asynchronously
             let handle = pipe.fileHandleForReading
+            var sawOutput = false
             for try await line in handle.bytes.lines {
+                sawOutput = true
                 await MainActor.run {
                     upgradeOutput = line
                 }
             }
 
             process.waitUntilExit()
+            if process.terminationStatus != 0, !sawOutput {
+                await MainActor.run {
+                    upgradeOutput = "homeboy upgrade exited with status \(process.terminationStatus)"
+                }
+            }
             return process.terminationStatus == 0
         } catch {
             await MainActor.run {
