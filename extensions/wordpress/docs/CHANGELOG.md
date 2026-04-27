@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.27.0] - 2026-04-27
+
+### Added
+- declare remote path inference rules
+
 ## [2.26.1] - 2026-04-27
 
 ### Fixed
