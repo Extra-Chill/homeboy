@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.27.1] - 2026-04-27
+
+### Fixed
+- adopt shared resolve context
+
 ## [2.27.0] - 2026-04-27
 
 ### Added
