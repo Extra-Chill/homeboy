@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.17.1] - 2026-04-27
+
+### Fixed
+- clarify zero-failure test comments
+
 ## [1.17.0] - 2026-04-27
 
 ### Added
