@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.23.0] - 2026-04-27
+
+### Added
+- preserve bench workload metrics
+
 ## [2.22.0] - 2026-04-27
 
 ### Added
