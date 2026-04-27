@@ -186,7 +186,7 @@ bench workflows:
 - `bench_workloads` supplies rig-owned workload files keyed by extension ID.
   Paths support `~`, `${env.NAME}`, `${components.<id>.path}`, and
   `${package.root}` expansion. `${package.root}` resolves to the installed
-  rig package root, so portable rig packages can keep sibling `bench/` files
+  rig package root, so portable rig packages can keep sibling `src/core/extension/bench/` files
   without hardcoded machine paths.
 
 ### Output shape (cross-rig)
