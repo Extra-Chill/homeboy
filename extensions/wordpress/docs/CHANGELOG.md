@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.29.0] - 2026-04-27
+
+### Added
+- declare cli auto flags
+
 ## [2.28.0] - 2026-04-27
 
 ### Added
