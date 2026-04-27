@@ -1,0 +1,17 @@
+{
+  "success": true,
+  "data": {
+    "command": "stack.list",
+    "stacks": [
+      {
+        "base": "origin/trunk",
+        "component": "studio",
+        "component_path": "~/Developer/studio",
+        "description": "Studio dev/combined-fixes stack",
+        "id": "studio-combined",
+        "pr_count": 5,
+        "target": "fork/dev/combined-fixes"
+      }
+    ]
+  }
+}

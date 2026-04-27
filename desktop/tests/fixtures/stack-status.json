@@ -1,0 +1,26 @@
+{
+  "success": true,
+  "data": {
+    "base": "origin/trunk",
+    "command": "stack.status",
+    "component_path": "/Users/chubes/Developer/studio",
+    "merged_count": 1,
+    "prs": [
+      {
+        "local_state": "missing",
+        "note": "Forward host stdin to wp-cli through the server daemon",
+        "number": 3211,
+        "repo": "Automattic/studio",
+        "review_decision": "REVIEW_REQUIRED",
+        "title": "Forward host stdin to wp-cli through the server daemon",
+        "upstream_state": "OPEN",
+        "url": "https://github.com/Automattic/studio/pull/3211"
+      }
+    ],
+    "stack_id": "studio-combined",
+    "success": true,
+    "target": "fork/dev/combined-fixes",
+    "target_ahead": 7,
+    "target_behind": 8
+  }
+}

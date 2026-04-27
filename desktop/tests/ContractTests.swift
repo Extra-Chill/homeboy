@@ -99,6 +99,47 @@ struct DbOutput: Decodable {
     let sql: String?
 }
 
+// MARK: - Stack Output Types (mirror HomeboyCLI.swift)
+
+struct StackListOutput: Decodable {
+    let command: String
+    let stacks: [StackListItem]?
+}
+
+struct StackListItem: Decodable {
+    let id: String
+    let description: String
+    let component: String
+    let componentPath: String
+    let base: String
+    let target: String
+    let prCount: Int
+}
+
+struct StackStatusOutput: Decodable {
+    let command: String
+    let success: Bool?
+    let stackId: String
+    let componentPath: String
+    let base: String
+    let target: String
+    let targetAhead: Int
+    let targetBehind: Int
+    let mergedCount: Int
+    let prs: [StackPullRequestStatus]
+}
+
+struct StackPullRequestStatus: Decodable {
+    let repo: String
+    let number: Int
+    let note: String?
+    let title: String?
+    let url: String?
+    let upstreamState: String
+    let localState: String
+    let reviewDecision: String?
+}
+
 // MARK: - Rig Output Types (mirror HomeboyCLI.swift)
 
 enum JSONValueTest: Decodable {
@@ -397,6 +438,9 @@ func runTests(testDir: String) throws {
 
     // Test 16: Rig command JSON contracts
     try testRigContracts(fixturesDir: fixturesDir, decoder: decoder)
+
+    // Test 17: Stack command JSON contracts
+    try testStackContracts(fixturesDir: fixturesDir, decoder: decoder)
 
     print("")
     print("All contract tests passed")
@@ -1221,6 +1265,40 @@ func testRigContracts(fixturesDir: String, decoder: JSONDecoder) throws {
             userInfo: [NSLocalizedDescriptionKey: "rig-check-failed.json failed check details did not decode"])
     }
     print("[PASS] Failed rig check data decodes without requiring success=true")
+    print("")
+}
+
+func testStackContracts(fixturesDir: String, decoder: JSONDecoder) throws {
+    print("Test: stack command contracts")
+    print("-----------------------------")
+
+    let listData = try Data(contentsOf: URL(fileURLWithPath: "\(fixturesDir)/stack-list.json"))
+    let listResult = try decoder.decode(CLIResponse<StackListOutput>.self, from: listData)
+    guard listResult.success, let stacks = listResult.data?.stacks, stacks.count == 1 else {
+        throw NSError(domain: "ContractTest", code: 90,
+            userInfo: [NSLocalizedDescriptionKey: "stack-list.json did not decode one stack"])
+    }
+    guard stacks[0].id == "studio-combined", stacks[0].prCount == 5 else {
+        throw NSError(domain: "ContractTest", code: 91,
+            userInfo: [NSLocalizedDescriptionKey: "stack-list.json summary fields did not decode"])
+    }
+    print("[PASS] Stack list summary decodes")
+
+    let statusData = try Data(contentsOf: URL(fileURLWithPath: "\(fixturesDir)/stack-status.json"))
+    let statusResult = try decoder.decode(CLIResponse<StackStatusOutput>.self, from: statusData)
+    guard statusResult.success, let status = statusResult.data else {
+        throw NSError(domain: "ContractTest", code: 92,
+            userInfo: [NSLocalizedDescriptionKey: "stack-status.json did not decode status data"])
+    }
+    guard status.stackId == "studio-combined", status.targetAhead == 7, status.targetBehind == 8 else {
+        throw NSError(domain: "ContractTest", code: 93,
+            userInfo: [NSLocalizedDescriptionKey: "stack-status.json target state did not decode"])
+    }
+    guard status.prs.first?.localState == "missing", status.prs.first?.reviewDecision == "REVIEW_REQUIRED" else {
+        throw NSError(domain: "ContractTest", code: 94,
+            userInfo: [NSLocalizedDescriptionKey: "stack-status.json PR state did not decode"])
+    }
+    print("[PASS] Stack status PR state decodes")
     print("")
 }
 

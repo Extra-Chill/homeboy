@@ -1351,6 +1351,59 @@ private init() {}
         )
         return output.snapshots ?? []
     }
+
+    // MARK: - Stack Commands
+
+    func stackList() async throws -> [StackListItem] {
+        let output: StackListOutput = try await cli.executeCommand(
+            ["stack", "list"],
+            dataType: StackListOutput.self,
+            source: "Stack List",
+            timeout: 30
+        )
+        return output.stacks ?? []
+    }
+
+    func stackShow(id: String) async throws -> StackSpec {
+        let output: StackShowOutput = try await cli.executeCommand(
+            ["stack", "show", id],
+            dataType: StackShowOutput.self,
+            source: "Stack Show",
+            timeout: 30
+        )
+        guard let stack = output.stack else {
+            throw CLIBridgeError.invalidResponse("Stack not found: \(id)")
+        }
+        return stack
+    }
+
+    func stackStatus(id: String) async throws -> StackStatusOutput {
+        try await cli.executeCommand(
+            ["stack", "status", id],
+            dataType: StackStatusOutput.self,
+            source: "Stack Status",
+            timeout: 120
+        )
+    }
+
+    func stackInspect(path: String? = nil, base: String? = nil, includePRs: Bool = true) async throws -> StackInspectOutput {
+        var args = ["stack", "inspect"]
+        if let path {
+            args.append(contentsOf: ["--path", path])
+        }
+        if let base {
+            args.append(contentsOf: ["--base", base])
+        }
+        if !includePRs {
+            args.append("--no-pr")
+        }
+        return try await cli.executeCommand(
+            args,
+            dataType: StackInspectOutput.self,
+            source: "Stack Inspect",
+            timeout: 120
+        )
+    }
 }
 
 // MARK: - New Command Output Types
@@ -1528,6 +1581,106 @@ struct UndoSnapshot: Decodable, Identifiable {
     let timestamp: String
     let componentId: String?
     let description: String?
+}
+
+// MARK: - Stack Output Types
+
+struct StackListOutput: Decodable {
+    let command: String
+    let stacks: [StackListItem]?
+}
+
+struct StackListItem: Decodable, Identifiable, Hashable {
+    let id: String
+    let description: String
+    let component: String
+    let componentPath: String
+    let base: String
+    let target: String
+    let prCount: Int
+}
+
+struct StackShowOutput: Decodable {
+    let command: String
+    let stack: StackSpec?
+}
+
+struct StackSpec: Decodable, Identifiable {
+    let id: String
+    let description: String
+    let component: String
+    let componentPath: String
+    let base: StackRef
+    let target: StackRef
+    let prs: [StackPullRequestSpec]
+}
+
+struct StackRef: Decodable {
+    let remote: String
+    let branch: String
+
+    var displayName: String { "\(remote)/\(branch)" }
+}
+
+struct StackPullRequestSpec: Decodable, Identifiable {
+    let repo: String
+    let number: Int
+    let note: String?
+
+    var id: String { "\(repo)#\(number)" }
+}
+
+struct StackStatusOutput: Decodable {
+    let command: String
+    let success: Bool?
+    let stackId: String
+    let componentPath: String
+    let base: String
+    let target: String
+    let targetAhead: Int
+    let targetBehind: Int
+    let mergedCount: Int
+    let prs: [StackPullRequestStatus]
+}
+
+struct StackPullRequestStatus: Decodable, Identifiable {
+    let repo: String
+    let number: Int
+    let note: String?
+    let title: String?
+    let url: String?
+    let upstreamState: String
+    let localState: String
+    let reviewDecision: String?
+
+    var id: String { "\(repo)#\(number)" }
+}
+
+struct StackInspectOutput: Decodable {
+    let command: String
+    let success: Bool?
+    let componentId: String?
+    let path: String
+    let branch: String
+    let base: String
+    let baseAutoDetected: Bool?
+    let mergedCount: Int
+    let commits: [StackInspectedCommit]
+}
+
+struct StackInspectedCommit: Decodable, Identifiable {
+    let sha: String
+    let subject: String
+    let author: String?
+    let date: String?
+    let prNumber: Int?
+    let prTitle: String?
+    let prUrl: String?
+    let prState: String?
+    let prLookupNote: String?
+
+    var id: String { sha }
+    var shortSha: String { String(sha.prefix(8)) }
 }
 
 // MARK: - Fleet Output Types
