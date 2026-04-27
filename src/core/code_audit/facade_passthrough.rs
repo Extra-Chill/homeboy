@@ -11,10 +11,10 @@ use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 
-const MIN_PUBLIC_METHODS: usize = 3;
-const DELEGATE_RATIO_THRESHOLD: f32 = 0.70;
-
 pub(super) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+    const MIN_PUBLIC_METHODS: usize = 3;
+    const DELEGATE_RATIO_THRESHOLD: f32 = 0.70;
+
     let call_site_counts = count_new_call_sites(fingerprints);
     let mut findings = Vec::new();
 
@@ -303,6 +303,26 @@ mod tests {
             visibility,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_run() {
+        let fp = make_fp(
+            "inc/Facade.php",
+            "Facade",
+            r#"<?php
+class Facade {
+    public function a() { return $this->inner->a(); }
+    public function b() { return $this->inner->b(); }
+    public function c() { return $this->inner->c(); }
+}
+"#,
+            &[("a", "public"), ("b", "public"), ("c", "public")],
+        );
+
+        let findings = run(&[&fp]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::FacadePassthrough);
     }
 
     #[test]
