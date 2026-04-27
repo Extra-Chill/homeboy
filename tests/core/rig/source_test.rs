@@ -1,9 +1,10 @@
 //! Rig source lifecycle tests. Covers `src/core/rig/source.rs`.
 
-use crate::rig::{install, list_sources, remove_source};
+use crate::rig::{install, list_sources, remove_source, update_all_sources, update_source_for_rig};
 use crate::test_support::HomeGuard;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 fn write_rig(package: &Path, id: &str, body: &str) -> std::path::PathBuf {
     let rig_dir = package.join("rigs").join(id);
@@ -27,6 +28,56 @@ fn minimal_rig(id: &str) -> String {
         }}"#,
         id, id, id
     )
+}
+
+fn run_git(dir: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit_package(package: &Path, message: &str) {
+    run_git(package, &["add", "."]);
+    run_git(
+        package,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            message,
+        ],
+    );
+}
+
+fn create_bare_source(package: &Path) -> tempfile::TempDir {
+    run_git(package, &["init"]);
+    commit_package(package, "initial rigs");
+
+    let bare = tempfile::tempdir().expect("bare parent");
+    let source_path = bare.path().join("rig-package.git");
+    let output = Command::new("git")
+        .args([
+            "clone",
+            "--bare",
+            package.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("git clone --bare");
+    assert!(output.status.success());
+    bare
 }
 
 #[test]
@@ -139,4 +190,74 @@ fn sources_list_reports_corrupt_metadata_and_missing_configs() {
     assert_eq!(result.sources[0].rigs[0].id, "missing");
     assert!(!result.sources[0].rigs[0].config_present);
     assert!(!result.sources[0].rigs[0].config_owned);
+}
+
+#[test]
+fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+    let bare = create_bare_source(package.path());
+    let source = bare
+        .path()
+        .join("rig-package.git")
+        .to_string_lossy()
+        .to_string();
+
+    install(&source, None, false).expect("install");
+    let before = crate::rig::read_source_metadata("alpha")
+        .expect("metadata")
+        .source_revision;
+
+    fs::write(
+        &source_rig,
+        minimal_rig("alpha").replace("alpha rig", "alpha rig updated"),
+    )
+    .expect("update rig");
+    commit_package(package.path(), "update alpha");
+    run_git(package.path(), &["push", &source, "HEAD:main"]);
+
+    let result = update_source_for_rig("alpha").expect("update rig source");
+
+    assert_eq!(result.updated.len(), 1);
+    assert!(result.skipped.is_empty());
+    assert_eq!(result.updated[0].id, "alpha");
+    assert_eq!(result.updated[0].previous_revision, before);
+    assert_ne!(result.updated[0].source_revision, before);
+    let installed =
+        fs::read_to_string(crate::paths::rig_config("alpha").unwrap()).expect("installed rig");
+    assert!(installed.contains("alpha rig updated"));
+    assert_eq!(
+        crate::rig::read_source_metadata("alpha")
+            .expect("metadata")
+            .source_revision,
+        result.updated[0].source_revision
+    );
+}
+
+#[test]
+fn update_all_skips_linked_local_sources() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+
+    install(package.path().to_str().unwrap(), None, false).expect("install linked");
+    let result = update_all_sources().expect("update all");
+
+    assert!(result.updated.is_empty());
+    assert_eq!(result.skipped.len(), 1);
+    assert_eq!(result.skipped[0].id, "alpha");
+    assert!(result.skipped[0].reason.contains("linked local sources"));
+}
+
+#[test]
+fn update_single_linked_local_source_errors() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+
+    install(package.path().to_str().unwrap(), None, false).expect("install linked");
+    let err = update_source_for_rig("alpha").expect_err("linked update error");
+
+    assert!(err.message.contains("linked local source"));
 }

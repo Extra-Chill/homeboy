@@ -41,8 +41,10 @@ pub use runner::{
 };
 pub use service::{DiscoveredProcess, ServiceStatus};
 pub use source::{
-    list_sources, remove_source, InvalidRigSourceMetadata, RemovedRigSourceRig, RigSourceGroup,
-    RigSourceListResult, RigSourceRemoveResult, RigSourceRig, SkippedRigSourceRig,
+    list_sources, remove_source, update_all_sources, update_source_for_rig,
+    InvalidRigSourceMetadata, RemovedRigSourceRig, RigSourceGroup, RigSourceListResult,
+    RigSourceRemoveResult, RigSourceRig, RigSourceUpdateResult, RigSourceUpdatedRig,
+    SkippedRigSourceRig, SkippedRigSourceUpdate,
 };
 pub use spec::{
     AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, BenchSpec, CheckSpec,

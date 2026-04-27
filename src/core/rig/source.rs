@@ -1,17 +1,20 @@
 //! Installed rig source lifecycle.
 
 use crate::error::{Error, Result};
+use crate::git;
 use crate::paths;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use super::install::RigSourceMetadata;
+use super::install::{link_or_copy_file, write_source_metadata, RigSourceMetadata};
 
 mod types;
 pub use types::{
     InvalidRigSourceMetadata, RemovedRigSourceRig, RigSourceGroup, RigSourceListResult,
-    RigSourceRemoveResult, RigSourceRig, SkippedRigSourceRig,
+    RigSourceRemoveResult, RigSourceRig, RigSourceUpdateResult, RigSourceUpdatedRig,
+    SkippedRigSourceRig, SkippedRigSourceUpdate,
 };
 
 pub fn list_sources() -> Result<RigSourceListResult> {
@@ -95,6 +98,145 @@ pub fn remove_source(selector: &str) -> Result<RigSourceRemoveResult> {
         skipped,
         removed_package_path,
     })
+}
+
+pub fn update_source_for_rig(id: &str) -> Result<RigSourceUpdateResult> {
+    let metadata = super::install::read_source_metadata(id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "rig_id",
+            format!("Rig '{}' has no installed source metadata", id),
+            Some(id.to_string()),
+            None,
+        )
+    })?;
+    if metadata.linked {
+        return Err(Error::validation_invalid_argument(
+            "rig_id",
+            format!("Rig '{}' was installed from a linked local source; reinstall or edit the source directly", id),
+            Some(id.to_string()),
+            None,
+        ));
+    }
+
+    let list = list_sources()?;
+    let source = list
+        .sources
+        .into_iter()
+        .find(|source| source.rigs.iter().any(|rig| rig.id == id))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "rig_id",
+                format!("No installed rig source contains '{}'", id),
+                Some(id.to_string()),
+                None,
+            )
+        })?;
+
+    update_group(source)
+}
+
+pub fn update_all_sources() -> Result<RigSourceUpdateResult> {
+    let mut aggregate = RigSourceUpdateResult {
+        updated: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for source in list_sources()?.sources {
+        if source.linked {
+            for rig in source.rigs {
+                aggregate.skipped.push(SkippedRigSourceUpdate {
+                    id: rig.id,
+                    source: source.source.clone(),
+                    reason: "linked local sources are updated in place outside homeboy".to_string(),
+                });
+            }
+            continue;
+        }
+        let result = update_group(source)?;
+        aggregate.updated.extend(result.updated);
+        aggregate.skipped.extend(result.skipped);
+    }
+    Ok(aggregate)
+}
+
+fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
+    let package_path = PathBuf::from(&source.package_path);
+    if !package_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            format!("Installed rig package is missing: {}", source.package_path),
+            Some(source.source),
+            None,
+        ));
+    }
+
+    let previous_revision = short_head_revision(&package_path);
+    git::pull_repo(&package_path)?;
+    let source_revision = short_head_revision(&package_path);
+
+    let mut updated = Vec::new();
+    let mut skipped = Vec::new();
+    for rig in source.rigs {
+        let rig_path = PathBuf::from(&rig.rig_path);
+        if !rig_path.is_file() {
+            skipped.push(SkippedRigSourceUpdate {
+                id: rig.id,
+                source: source.source.clone(),
+                reason: format!("rig spec missing after update: {}", rig_path.display()),
+            });
+            continue;
+        }
+        if !rig.config_owned {
+            skipped.push(SkippedRigSourceUpdate {
+                id: rig.id,
+                source: source.source.clone(),
+                reason: "config file no longer points at the recorded rig source".to_string(),
+            });
+            continue;
+        }
+
+        let config_path = PathBuf::from(&rig.config_path);
+        if config_path.exists() || fs::symlink_metadata(&config_path).is_ok() {
+            fs::remove_file(&config_path).map_err(|e| {
+                Error::internal_io(e.to_string(), Some("replace rig config link".into()))
+            })?;
+        }
+        link_or_copy_file(&rig_path, &config_path)?;
+
+        let metadata = RigSourceMetadata {
+            source: source.source.clone(),
+            package_path: source.package_path.clone(),
+            rig_path: rig.rig_path.clone(),
+            linked: false,
+            source_revision: source_revision.clone(),
+        };
+        write_source_metadata(&rig.id, &metadata)?;
+
+        updated.push(RigSourceUpdatedRig {
+            id: rig.id,
+            source: source.source.clone(),
+            path: rig.config_path,
+            spec_path: rig.rig_path,
+            previous_revision: previous_revision.clone(),
+            source_revision: source_revision.clone(),
+        });
+    }
+
+    Ok(RigSourceUpdateResult { updated, skipped })
+}
+
+fn short_head_revision(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(path)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let revision = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!revision.is_empty()).then_some(revision)
 }
 
 fn removed_rig_source_rig(rig: &RigSourceRig, metadata_path: &Path) -> RemovedRigSourceRig {

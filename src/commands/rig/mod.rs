@@ -12,6 +12,7 @@ use homeboy::rig;
 use self::output::{
     RigAppOutput, RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledSummary,
     RigListOutput, RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary, RigUpOutput,
+    RigUpdateOutput,
 };
 use super::CmdResult;
 
@@ -58,6 +59,14 @@ enum RigCommand {
         #[arg(long)]
         id: Option<String>,
         /// Install every rig in the package
+        #[arg(long)]
+        all: bool,
+    },
+    /// Update rigs installed from git-backed rig packages
+    Update {
+        /// Rig ID to update. Updates the source package that owns this rig.
+        rig_id: Option<String>,
+        /// Update every installed git-backed rig source package
         #[arg(long)]
         all: bool,
     },
@@ -110,6 +119,7 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Down { rig_id } => down(&rig_id),
         RigCommand::Status { rig_id } => status(&rig_id),
         RigCommand::Install { source, id, all } => install(&source, id.as_deref(), all),
+        RigCommand::Update { rig_id, all } => update(rig_id.as_deref(), all),
         RigCommand::Sources { command } => sources::run(command),
         RigCommand::App { command } => app(command),
     }
@@ -167,6 +177,37 @@ fn install(source: &str, id: Option<&str>, all: bool) -> CmdResult<RigCommandOut
                     source_revision: rig.source_revision,
                 })
                 .collect(),
+        }),
+        0,
+    ))
+}
+
+fn update(rig_id: Option<&str>, all: bool) -> CmdResult<RigCommandOutput> {
+    let report = match (rig_id, all) {
+        (Some(_), true) => {
+            return Err(homeboy::Error::validation_invalid_argument(
+                "rig_id",
+                "Pass either a rig ID or --all, not both",
+                rig_id.map(str::to_string),
+                None,
+            ))
+        }
+        (Some(id), false) => rig::update_source_for_rig(id)?,
+        (None, true) => rig::update_all_sources()?,
+        (None, false) => {
+            return Err(homeboy::Error::validation_invalid_argument(
+                "rig_id",
+                "Pass a rig ID or --all",
+                None,
+                None,
+            ))
+        }
+    };
+
+    Ok((
+        RigCommandOutput::Update(RigUpdateOutput {
+            command: "rig.update",
+            report,
         }),
         0,
     ))

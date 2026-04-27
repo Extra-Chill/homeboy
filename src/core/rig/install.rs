@@ -10,6 +10,7 @@ use crate::{extension, git, paths};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscoveredRig {
@@ -24,6 +25,15 @@ pub struct RigInstallResult {
     pub package_path: PathBuf,
     pub linked: bool,
     pub installed: Vec<InstalledRig>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSource {
+    pub source: String,
+    pub package_path: PathBuf,
+    pub discovery_path: PathBuf,
+    pub linked: bool,
+    pub source_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,7 +57,7 @@ pub struct RigSourceMetadata {
 
 pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallResult> {
     let prepared = prepare_source(source)?;
-    let discovered = discover_rigs(&prepared.package_path)?;
+    let discovered = discover_rigs(&prepared.discovery_path)?;
     let selected = select_rigs(discovered, id, all, source)?;
 
     fs::create_dir_all(paths::rigs()?)
@@ -101,15 +111,8 @@ pub fn read_source_metadata(id: &str) -> Option<RigSourceMetadata> {
     serde_json::from_str(&content).ok()
 }
 
-struct PreparedSource {
-    source: String,
-    package_path: PathBuf,
-    linked: bool,
-    source_revision: Option<String>,
-}
-
-fn prepare_source(source: &str) -> Result<PreparedSource> {
-    if extension::is_git_url(source) {
+pub(crate) fn prepare_source(source: &str) -> Result<PreparedSource> {
+    if extension::is_git_url(source) || source.contains(".git//") {
         prepare_git_source(source)
     } else {
         prepare_local_source(source)
@@ -117,7 +120,8 @@ fn prepare_source(source: &str) -> Result<PreparedSource> {
 }
 
 fn prepare_git_source(source: &str) -> Result<PreparedSource> {
-    let trimmed = source.trim_end_matches('/').trim_end_matches(".git");
+    let (root_source, subpath) = split_git_source_subpath(source)?;
+    let trimmed = root_source.trim_end_matches('/').trim_end_matches(".git");
     let parts = trimmed.rsplit(['/', ':']).take(2).collect::<Vec<_>>();
     let package_id = if parts.len() == 2 {
         extension::slugify_id(&format!("{}-{}", parts[1], parts[0]))?
@@ -133,19 +137,43 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
                 package_id,
                 package_path.display()
             ),
-            Some(source.to_string()),
+            Some(root_source.to_string()),
             None,
         ));
     }
     fs::create_dir_all(paths::rig_packages()?)
         .map_err(|e| Error::internal_io(e.to_string(), Some("create rig packages dir".into())))?;
-    git::clone_repo(source, &package_path)?;
+    git::clone_repo(root_source, &package_path)?;
+    let source_revision = short_head_revision(&package_path);
+    let discovery_path = match subpath {
+        Some(subpath) => package_path.join(subpath),
+        None => package_path.clone(),
+    };
     Ok(PreparedSource {
-        source: source.to_string(),
+        source: root_source.to_string(),
         package_path,
+        discovery_path,
         linked: false,
-        source_revision: None,
+        source_revision,
     })
+}
+
+fn split_git_source_subpath(source: &str) -> Result<(&str, Option<&str>)> {
+    let Some(marker) = source.find(".git//") else {
+        return Ok((source, None));
+    };
+    let root_end = marker + ".git".len();
+    let root = &source[..root_end];
+    let subpath = source[root_end + 2..].trim_matches('/');
+    if subpath.is_empty() || subpath.starts_with("..") || subpath.contains("/../") {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            "Rig package subpath must be a non-empty relative path",
+            Some(source.to_string()),
+            None,
+        ));
+    }
+    Ok((root, Some(subpath)))
 }
 
 fn prepare_local_source(source: &str) -> Result<PreparedSource> {
@@ -167,6 +195,7 @@ fn prepare_local_source(source: &str) -> Result<PreparedSource> {
     }
     Ok(PreparedSource {
         source: package_path.to_string_lossy().to_string(),
+        discovery_path: package_path.clone(),
         package_path,
         linked: true,
         source_revision: None,
@@ -288,7 +317,7 @@ fn select_rigs(
     ))
 }
 
-fn write_source_metadata(id: &str, metadata: &RigSourceMetadata) -> Result<()> {
+pub(crate) fn write_source_metadata(id: &str, metadata: &RigSourceMetadata) -> Result<()> {
     let path = paths::rig_source_metadata(id)?;
     let content = serde_json::to_string_pretty(metadata)
         .map_err(|e| Error::internal_json(e.to_string(), Some("serialize rig source".into())))?;
@@ -296,7 +325,7 @@ fn write_source_metadata(id: &str, metadata: &RigSourceMetadata) -> Result<()> {
         .map_err(|e| Error::internal_io(e.to_string(), Some("write rig source".into())))
 }
 
-fn link_or_copy_file(source: &Path, target: &Path) -> Result<()> {
+pub(crate) fn link_or_copy_file(source: &Path, target: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(source, target)
@@ -309,6 +338,21 @@ fn link_or_copy_file(source: &Path, target: &Path) -> Result<()> {
             .map(|_| ())
             .map_err(|e| Error::internal_io(e.to_string(), Some("copy rig spec".into())))
     }
+}
+
+fn short_head_revision(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(path)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let revision = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!revision.is_empty()).then_some(revision)
 }
 
 #[cfg(test)]

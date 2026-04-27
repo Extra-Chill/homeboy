@@ -1,0 +1,12 @@
+{
+  "id": "studio",
+  "description": "studio rig",
+  "components": {
+    "app": { "path": "${env.DEV_ROOT}/studio" }
+  },
+  "pipeline": {
+    "check": [
+      { "kind": "check", "label": "app exists", "file": "${components.app.path}" }
+    ]
+  }
+}

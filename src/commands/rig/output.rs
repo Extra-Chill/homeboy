@@ -20,6 +20,7 @@ pub enum RigCommandOutput {
     Down(RigDownOutput),
     Status(RigStatusOutput),
     Install(RigInstallOutput),
+    Update(RigUpdateOutput),
     Sources(RigSourcesOutput),
     App(RigAppOutput),
 }
@@ -102,6 +103,13 @@ pub struct RigInstalledSummary {
     pub spec_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RigUpdateOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub report: rig::RigSourceUpdateResult,
 }
 
 #[derive(Serialize)]

@@ -4,6 +4,7 @@ use crate::rig::{discover_rigs, install, read_source_metadata};
 use crate::test_support::HomeGuard;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 fn write_rig(package: &Path, id: &str, body: &str) -> std::path::PathBuf {
     let rig_dir = package.join("rigs").join(id);
@@ -27,6 +28,64 @@ fn minimal_rig(id: &str) -> String {
         }}"#,
         id, id, id
     )
+}
+
+fn write_single_rig(dir: &Path, id: &str, body: &str) -> std::path::PathBuf {
+    fs::create_dir_all(dir).expect("single rig dir");
+    let rig_path = dir.join("rig.json");
+    fs::write(&rig_path, body).expect("rig json");
+    assert!(body.contains(id));
+    rig_path
+}
+
+fn run_git(dir: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit_package(package: &Path) {
+    run_git(package, &["add", "."]);
+    run_git(
+        package,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "update rigs",
+        ],
+    );
+}
+
+fn bare_package(package: &Path) -> tempfile::TempDir {
+    run_git(package, &["init"]);
+    commit_package(package);
+
+    let bare = tempfile::tempdir().expect("bare parent");
+    let source_path = bare.path().join("rig-package.git");
+    let output = Command::new("git")
+        .args([
+            "clone",
+            "--bare",
+            package.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("git clone --bare");
+    assert!(output.status.success());
+    bare
 }
 
 #[test]
@@ -183,4 +242,65 @@ fn git_url_installs_clone_package_and_config_link() {
         .ends_with("rig-packages"));
     assert!(crate::paths::rig_config("alpha").unwrap().exists());
     assert_eq!(read_source_metadata("alpha").unwrap().source, source);
+}
+
+#[test]
+fn git_url_subpath_installs_single_rig_directory() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    let subdir = package.path().join("packages").join("studio");
+    write_single_rig(
+        &subdir,
+        "studio",
+        include_str!("../../fixtures/rig-package-subpath/packages/studio/rig.json"),
+    );
+    write_rig(package.path(), "other", &minimal_rig("other"));
+    let bare = bare_package(package.path());
+
+    let root_source = bare.path().join("rig-package.git");
+    let source = format!("{}//packages/studio", root_source.to_string_lossy());
+    let result = install(&source, None, false).expect("install subpath");
+
+    assert!(!result.linked);
+    assert_eq!(result.source, root_source.to_string_lossy());
+    assert_eq!(result.installed.len(), 1);
+    assert_eq!(result.installed[0].id, "studio");
+    assert!(result.installed[0]
+        .spec_path
+        .ends_with("packages/studio/rig.json"));
+    assert!(crate::paths::rig_config("studio").unwrap().exists());
+    assert!(!crate::paths::rig_config("other").unwrap().exists());
+
+    let metadata = read_source_metadata("studio").expect("metadata");
+    assert_eq!(metadata.source, root_source.to_string_lossy());
+    assert!(metadata.rig_path.ends_with("packages/studio/rig.json"));
+}
+
+#[test]
+fn git_url_subpath_preserves_multi_rig_ambiguity() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    let nested = package.path().join("nested");
+    write_rig(&nested, "alpha", &minimal_rig("alpha"));
+    write_rig(&nested, "beta", &minimal_rig("beta"));
+    let bare = bare_package(package.path());
+
+    let source = format!(
+        "{}//nested",
+        bare.path().join("rig-package.git").to_string_lossy()
+    );
+    let err = install(&source, None, false).expect_err("ambiguous subpath");
+
+    assert!(err.message.contains("multiple rigs"));
+    assert!(err.message.contains("alpha"));
+    assert!(err.message.contains("beta"));
+}
+
+#[test]
+fn git_url_subpath_rejects_invalid_relative_path() {
+    let _home = HomeGuard::new();
+    let err = install("https://example.com/rigs.git//../secrets", None, false)
+        .expect_err("invalid subpath");
+
+    assert!(err.message.contains("non-empty relative path"));
 }

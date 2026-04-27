@@ -56,3 +56,28 @@ pub struct SkippedRigSourceRig {
     pub config_path: String,
     pub reason: String,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RigSourceUpdateResult {
+    pub updated: Vec<RigSourceUpdatedRig>,
+    pub skipped: Vec<SkippedRigSourceUpdate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RigSourceUpdatedRig {
+    pub id: String,
+    pub source: String,
+    pub path: String,
+    pub spec_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkippedRigSourceUpdate {
+    pub id: String,
+    pub source: String,
+    pub reason: String,
+}
