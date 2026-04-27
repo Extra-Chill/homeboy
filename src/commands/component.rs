@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
 
@@ -433,12 +433,6 @@ struct ComponentEnvOutput {
     node_source: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ComponentEnvDetectorOutput {
-    php: Option<String>,
-    node: Option<String>,
-}
-
 fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
     let component = match (id, path) {
         // --path with explicit ID
@@ -567,7 +561,7 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
 fn run_component_env_detector(
     extension: &homeboy::extension::ExtensionManifest,
     component_path: &Path,
-) -> homeboy::Result<Option<ComponentEnvDetectorOutput>> {
+) -> homeboy::Result<Option<homeboy::extension::RuntimeRequirementsConfig>> {
     let Some(component_env) = extension.component_env.as_ref() else {
         return Ok(None);
     };
@@ -616,23 +610,23 @@ fn run_component_env_detector(
         return Ok(None);
     }
 
-    let detected =
-        serde_json::from_str::<ComponentEnvDetectorOutput>(trimmed).map_err(|error| {
-            homeboy::Error::validation_invalid_json(
-                error,
-                Some(format!(
-                    "parse component env detector output for extension '{}'",
-                    extension.id
-                )),
-                Some(trimmed.chars().take(200).collect()),
-            )
-        })?;
+    let detected = serde_json::from_str::<homeboy::extension::RuntimeRequirementsConfig>(trimmed)
+        .map_err(|error| {
+        homeboy::Error::validation_invalid_json(
+            error,
+            Some(format!(
+                "parse component env detector output for extension '{}'",
+                extension.id
+            )),
+            Some(trimmed.chars().take(200).collect()),
+        )
+    })?;
 
     Ok(Some(detected))
 }
 
 fn apply_component_env_detector_output(
-    detected: ComponentEnvDetectorOutput,
+    detected: homeboy::extension::RuntimeRequirementsConfig,
     node_version: &mut Option<String>,
     node_source: &mut Option<String>,
     php_version: &mut Option<String>,
@@ -1145,7 +1139,7 @@ mod tests {
         let mut php_source = Some("component".to_string());
 
         apply_component_env_detector_output(
-            ComponentEnvDetectorOutput {
+            homeboy::extension::RuntimeRequirementsConfig {
                 php: Some("8.2".to_string()),
                 node: None,
             },
