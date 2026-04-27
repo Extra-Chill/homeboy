@@ -8,6 +8,10 @@
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
         "comment_hygiene::src/commands/release.rs::LegacyComment",
+        "dead_code::src/commands/changelog.rs::UnreferencedExport",
+        "dead_code::src/commands/docs.rs::UnreferencedExport",
+        "dead_code::src/commands/file.rs::UnreferencedExport",
+        "dead_code::src/commands/logs.rs::UnreferencedExport",
         "dead_code::src/commands/utils/entity_suggest.rs::UnreferencedExport",
         "dead_code::src/commands/utils/entity_suggest.rs::UnreferencedExport",
         "dead_code::src/commands/utils/response.rs::UnreferencedExport",
@@ -751,6 +755,7 @@
         "test_coverage::src/core/upgrade/update_check.rs::MissingTestMethod",
         "test_coverage::src/core/upgrade/update_check.rs::MissingTestMethod",
         "test_coverage::src/core/upgrade/validation.rs::MissingTestFile",
+        "test_coverage::tests/command_surface_test.rs::OrphanedTest",
         "test_coverage::tests/commands/supports_test.rs::OrphanedTest",
         "test_coverage::tests/commands/test_scope_test.rs::OrphanedTest",
         "test_coverage::tests/core/lint_baseline_test.rs::OrphanedTest",

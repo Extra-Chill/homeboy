@@ -14,11 +14,16 @@ macro_rules! log_status {
     };
 }
 
+extern crate self as homeboy;
+
+pub mod cli_surface;
+#[doc(hidden)]
+pub mod commands;
 pub mod core;
+pub mod help_topics;
 
 #[cfg(test)]
 pub(crate) mod test_support;
-
 // Re-export everything from core for ergonomic library use
 // Users can write `homeboy::config` instead of `homeboy::core::config`
 pub use core::release::changelog;
