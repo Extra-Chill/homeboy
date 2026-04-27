@@ -515,7 +515,7 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
         }
     }
 
-    if let (Some(ref ext_id), Some(ref extension)) = (extension_id.as_ref(), extension.as_ref()) {
+    if let (Some(ext_id), Some(extension)) = (extension_id.as_ref(), extension.as_ref()) {
         if let Some(runtime) = extension.runtime.as_ref() {
             apply_extension_runtime_requirements(
                 ext_id,
