@@ -129,22 +129,30 @@ fn apply_finding_filters(
 
 /// Run the audit scan (scoped or full). Returns None if changed-since found no files.
 fn run_audit(args: &AuditRunWorkflowArgs) -> crate::Result<Option<CodeAuditResult>> {
+    let plan = if args.baseline_flags.baseline {
+        code_audit::AuditExecutionPlan::full()
+    } else {
+        code_audit::AuditExecutionPlan::from_filters(&args.only_kinds, &args.exclude_kinds)
+    };
+
     if let Some(ref git_ref) = args.changed_since {
         let changed = git::get_files_changed_since(&args.source_path, git_ref)?;
         if changed.is_empty() {
             crate::log_status!("audit", "No files changed since {}", git_ref);
             return Ok(None);
         }
-        Ok(Some(code_audit::audit_path_scoped(
+        Ok(Some(code_audit::audit_path_scoped_with_plan(
             &args.component_id,
             &args.source_path,
             &changed,
             Some(git_ref),
+            &plan,
         )?))
     } else {
-        Ok(Some(code_audit::audit_path_with_id(
+        Ok(Some(code_audit::audit_path_with_id_with_plan(
             &args.component_id,
             &args.source_path,
+            &plan,
         )?))
     }
 }
