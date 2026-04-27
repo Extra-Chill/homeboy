@@ -18,20 +18,28 @@
 //!
 //! See `docs/commands/bench.md` for the end-user view.
 
+pub mod aggregation;
+pub mod artifact;
 pub mod baseline;
+pub mod distribution;
 pub mod metrics;
 pub mod parsing;
 pub mod report;
 pub mod run;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use crate::component::Component;
 use crate::extension::{ExtensionCapability, ExtensionExecutionContext};
 
+pub use aggregation::aggregate_runs;
+pub use artifact::BenchArtifact;
 pub use baseline::{
     compare as compare_baseline, load_baseline, save_baseline, BenchBaseline,
     BenchBaselineComparison, BenchBaselineMetadata, BenchScenarioSnapshot, ScenarioDelta,
     DEFAULT_REGRESSION_THRESHOLD_PERCENT,
 };
+pub use distribution::BenchRunDistribution;
 pub use metrics::MetricDelta;
 pub use parsing::{
     parse_bench_results_file, parse_bench_results_str, BenchMemory, BenchMetrics, BenchResults,

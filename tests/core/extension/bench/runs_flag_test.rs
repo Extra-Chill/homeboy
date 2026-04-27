@@ -9,42 +9,17 @@
 //! 4. Scenarios missing from some runs aggregate from the runs that emitted
 //!    them instead of failing the whole bench.
 
-use std::collections::BTreeMap;
-
-use crate::extension::bench::parsing::{BenchArtifact, BenchMetrics, BenchResults, BenchScenario};
-use crate::extension::bench::run::aggregate_runs;
+use crate::extension::bench::aggregation::aggregate_runs;
+use crate::extension::bench::artifact::BenchArtifact;
+use crate::extension::bench::parsing::{BenchResults, BenchScenario};
+use crate::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
 
 fn scenario(id: &str, metrics: &[(&str, f64)]) -> BenchScenario {
-    let mut values = BTreeMap::new();
-    for (name, value) in metrics {
-        values.insert((*name).to_string(), *value);
-    }
-
-    BenchScenario {
-        id: id.to_string(),
-        file: None,
-        source: None,
-        default_iterations: None,
-        tags: Vec::new(),
-        iterations: 1,
-        metrics: BenchMetrics {
-            values,
-            distributions: BTreeMap::new(),
-        },
-        memory: None,
-        artifacts: BTreeMap::new(),
-        runs: None,
-        runs_summary: None,
-    }
+    scenario_with_iterations(id, metrics, 1)
 }
 
 fn results(scenarios: Vec<BenchScenario>) -> BenchResults {
-    BenchResults {
-        component_id: "bench-noop".to_string(),
-        iterations: 5,
-        scenarios,
-        metric_policies: BTreeMap::new(),
-    }
+    results_with_scenarios("bench-noop", 5, scenarios)
 }
 
 fn approx_eq(actual: f64, expected: f64) {
@@ -71,7 +46,7 @@ mod cases {
     }
 
     #[test]
-    fn runs_three_aggregates_correctly() {
+    fn test_aggregate_runs() {
         let aggregated = aggregate_runs(&[
             results(vec![scenario("__bootstrap", &[("install_ms", 100.0)])]),
             results(vec![scenario("__bootstrap", &[("install_ms", 200.0)])]),

@@ -1,6 +1,5 @@
 //! Bench main workflow: invoke extension runner, load JSON, apply baseline.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -11,10 +10,9 @@ use crate::component::Component;
 use crate::engine::baseline::BaselineFlags;
 use crate::engine::run_dir::{self, RunDir};
 use crate::error::{Error, Result};
+use crate::extension::bench::aggregate_runs;
 use crate::extension::bench::baseline::{self, BenchBaselineComparison};
-use crate::extension::bench::parsing::{
-    self, BenchMetrics, BenchResults, BenchRunDistribution, BenchRunSnapshot, BenchScenario,
-};
+use crate::extension::bench::parsing::{self, BenchResults, BenchScenario};
 use crate::extension::{
     resolve_execution_context, ExtensionCapability, ExtensionExecutionContext, ExtensionRunner,
 };
@@ -153,6 +151,36 @@ pub fn run_bench_list_workflow(
     })
 }
 
+fn validate_bench_run_args(args: &BenchRunWorkflowArgs) -> Result<()> {
+    require_positive("concurrency", args.concurrency as u64)?;
+    require_positive("runs", args.runs)?;
+    if args.concurrency > 1 && args.shared_state.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "concurrency",
+            "--concurrency > 1 requires --shared-state <DIR>; \
+             N parallel cold-boots without shared state are N independent \
+             runs, not a multi-instance contention test",
+            None,
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn require_positive(name: &str, value: u64) -> Result<()> {
+    if value == 0 {
+        return Err(Error::validation_invalid_argument(
+            name,
+            "must be >= 1",
+            None,
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
 /// Runs the extension's bench script and produces a structured result.
 ///
 /// Same runner contract as test/lint/build: the script writes a JSON
@@ -182,32 +210,7 @@ pub fn run_main_bench_workflow(
     args: BenchRunWorkflowArgs,
     run_dir: &RunDir,
 ) -> Result<BenchRunWorkflowResult> {
-    if args.concurrency == 0 {
-        return Err(Error::validation_invalid_argument(
-            "concurrency",
-            "must be >= 1",
-            None,
-            None,
-        ));
-    }
-    if args.runs == 0 {
-        return Err(Error::validation_invalid_argument(
-            "runs",
-            "must be >= 1",
-            None,
-            None,
-        ));
-    }
-    if args.concurrency > 1 && args.shared_state.is_none() {
-        return Err(Error::validation_invalid_argument(
-            "concurrency",
-            "--concurrency > 1 requires --shared-state <DIR>; \
-             N parallel cold-boots without shared state are N independent \
-             runs, not a multi-instance contention test",
-            None,
-            None,
-        ));
-    }
+    validate_bench_run_args(&args)?;
 
     if let Some(ref shared) = args.shared_state {
         std::fs::create_dir_all(shared).map_err(|e| {
@@ -380,145 +383,6 @@ fn run_single_dispatcher(
         None
     };
     Ok((parsed, runner_output.success, runner_output.exit_code))
-}
-
-pub fn aggregate_runs(runs: &[BenchResults]) -> Result<BenchResults> {
-    let first = runs
-        .first()
-        .ok_or_else(|| Error::internal_unexpected("cannot aggregate zero bench runs"))?;
-    let mut metric_policies = BTreeMap::new();
-    let mut grouped: BTreeMap<String, (BenchScenario, Vec<BenchScenario>)> = BTreeMap::new();
-
-    for result in runs {
-        if result.component_id != first.component_id {
-            return Err(Error::validation_invalid_argument(
-                "bench_results.component_id",
-                format!(
-                    "bench run component_id mismatch: expected `{}`, got `{}`",
-                    first.component_id, result.component_id
-                ),
-                None,
-                None,
-            ));
-        }
-        if result.iterations != first.iterations {
-            return Err(Error::validation_invalid_argument(
-                "bench_results.iterations",
-                format!(
-                    "bench run iterations mismatch: expected `{}`, got `{}`",
-                    first.iterations, result.iterations
-                ),
-                None,
-                None,
-            ));
-        }
-        for (key, policy) in &result.metric_policies {
-            metric_policies
-                .entry(key.clone())
-                .or_insert_with(|| policy.clone());
-        }
-        for scenario in &result.scenarios {
-            grouped
-                .entry(scenario.id.clone())
-                .and_modify(|(_, scenarios)| scenarios.push(scenario.clone()))
-                .or_insert_with(|| (scenario.clone(), vec![scenario.clone()]));
-        }
-    }
-
-    let scenarios = grouped
-        .into_values()
-        .map(|(template, scenarios)| aggregate_scenario(template, scenarios))
-        .collect();
-
-    Ok(BenchResults {
-        component_id: first.component_id.clone(),
-        iterations: first.iterations,
-        scenarios,
-        metric_policies,
-    })
-}
-
-fn aggregate_scenario(mut template: BenchScenario, scenarios: Vec<BenchScenario>) -> BenchScenario {
-    let mut metric_values: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-    for scenario in &scenarios {
-        for (name, value) in &scenario.metrics.values {
-            metric_values.entry(name.clone()).or_default().push(*value);
-        }
-    }
-
-    let mut values = BTreeMap::new();
-    let mut distributions = BTreeMap::new();
-    let mut summary = BTreeMap::new();
-    for (name, samples) in metric_values {
-        values.insert(name.clone(), percentile(&samples, 50.0));
-        distributions.insert(name.clone(), samples.clone());
-        summary.insert(name, distribution(&samples));
-    }
-
-    template.metrics = BenchMetrics {
-        values,
-        distributions,
-    };
-    template.memory = None;
-    template.runs = Some(
-        scenarios
-            .iter()
-            .map(|scenario| BenchRunSnapshot {
-                metrics: scenario.metrics.clone(),
-                memory: scenario.memory.clone(),
-                artifacts: scenario.artifacts.clone(),
-            })
-            .collect(),
-    );
-    template.runs_summary = Some(summary);
-    template
-}
-
-fn distribution(samples: &[f64]) -> BenchRunDistribution {
-    let n = samples.len() as f64;
-    let mean = samples.iter().sum::<f64>() / n;
-    let variance = samples
-        .iter()
-        .map(|value| {
-            let delta = value - mean;
-            delta * delta
-        })
-        .sum::<f64>()
-        / n;
-    let stdev = variance.sqrt();
-    let cv_pct = if mean == 0.0 {
-        0.0
-    } else {
-        stdev / mean * 100.0
-    };
-
-    BenchRunDistribution {
-        n: samples.len() as u64,
-        min: samples.iter().copied().fold(f64::INFINITY, f64::min),
-        max: samples.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-        mean,
-        stdev,
-        cv_pct,
-        p50: percentile(samples, 50.0),
-        p95: percentile(samples, 95.0),
-    }
-}
-
-fn percentile(samples: &[f64], pct: f64) -> f64 {
-    let mut sorted = samples.to_vec();
-    sorted.sort_by(|a, b| a.total_cmp(b));
-    if sorted.len() == 1 {
-        return sorted[0];
-    }
-    let rank = pct / 100.0 * (sorted.len() as f64 - 1.0);
-    let lower = rank.floor() as usize;
-    let upper = rank.ceil() as usize;
-    if lower == upper {
-        sorted[lower]
-    } else {
-        let weight = rank - lower as f64;
-        sorted[lower] * (1.0 - weight) + sorted[upper] * weight
-    }
 }
 
 /// Per-instance results filename within the run dir.
@@ -787,7 +651,3 @@ mod tests {
         assert!(format!("{}", err).contains("concurrency"));
     }
 }
-
-#[cfg(test)]
-#[path = "../../../../tests/core/extension/bench/runs_flag_test.rs"]
-mod runs_flag_test;

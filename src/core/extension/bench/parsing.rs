@@ -47,6 +47,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+use super::artifact::BenchArtifact;
+use super::distribution::BenchRunDistribution;
+
 /// Full bench run output from an extension script.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -108,18 +111,6 @@ pub struct BenchRunSnapshot {
     pub memory: Option<BenchMemory>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artifacts: BTreeMap<String, BenchArtifact>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct BenchRunDistribution {
-    pub n: u64,
-    pub min: f64,
-    pub max: f64,
-    pub mean: f64,
-    pub stdev: f64,
-    pub cv_pct: f64,
-    pub p50: f64,
-    pub p95: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -236,16 +227,6 @@ pub enum BenchMetricPhase {
 #[serde(deny_unknown_fields)]
 pub struct BenchMemory {
     pub peak_bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BenchArtifact {
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
 }
 
 /// Read and parse a `$HOMEBOY_BENCH_RESULTS_FILE` written by an extension.
