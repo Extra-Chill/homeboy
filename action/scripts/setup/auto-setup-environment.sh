@@ -34,6 +34,13 @@ if [ -f "composer.json" ]; then
   fi
 fi
 
+# ── Extension setup ──
+
+if [ -n "${EXTENSION}" ] && command -v homeboy &>/dev/null; then
+  echo "Setting up Homeboy extension dependencies (${EXTENSION})..."
+  homeboy extension setup "${EXTENSION}" 2>&1
+fi
+
 # ── npm install (Node projects) ──
 
 if [ -f "package.json" ] && [ -n "${PORTABLE_NODE:-}" ]; then

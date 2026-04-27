@@ -308,6 +308,7 @@ runs:
         PHP_INPUT: ${{ inputs.php-version }}
         NODE_INPUT: ${{ inputs.node-version }}
         COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
+        PORTABLE_EXTENSION: ${{ steps.read-config.outputs.portable-extension }}
       run: bash ${{ github.action_path }}/scripts/setup/detect-runtime-env.sh
 
     - name: Setup PHP
@@ -546,6 +547,7 @@ runs:
         && steps.categorized-issues.outcome != 'success'
         && (inputs.auto-issue == 'true' || (inputs.auto-issue == '' && github.event_name != 'pull_request'))
       shell: bash
+      continue-on-error: true
       env:
         GH_TOKEN: ${{ inputs.app-token || github.token }}
         RESULTS: ${{ steps.select-results.outputs.results }}
@@ -554,4 +556,8 @@ runs:
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-prepare-nonpr.outputs.committed }}
         AUTOFIX_PR_CREATED: ${{ steps.autofix-open-pr.outputs.created }}
-      run: bash ${{ github.action_path }}/scripts/issues/auto-file-issue.sh
+      run: |
+        bash ${{ github.action_path }}/scripts/issues/auto-file-issue.sh || {
+          echo "::warning::Auto-issue filing failed; preserving the original Homeboy command failure as the primary signal"
+          exit 0
+        }
