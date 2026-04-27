@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.17.3] - 2026-04-27
+
+### Fixed
+- route release commands outside quality results
+- verify GitHub Release after release
+
 ## [1.17.2] - 2026-04-27
 
 ### Fixed
