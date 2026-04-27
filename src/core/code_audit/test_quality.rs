@@ -58,6 +58,7 @@ struct TestFunction {
 }
 
 fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
+    let file_path = file.to_string();
     let mut product_symbols = BTreeSet::new();
     let simple = regex::Regex::new(
         r"(?m)^\s*use\s+(?:homeboy|crate|super)::[^;]*::([A-Za-z_][A-Za-z0-9_]*)\s*;",
@@ -89,7 +90,7 @@ fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
         .map(|(test, reason)| Finding {
             convention: "test_quality".to_string(),
             severity: Severity::Info,
-            file: file.to_string(),
+            file: file_path.clone(),
             description: format!("Vacuous test `{}`: {}", test.name, reason),
             suggestion:
                 "Delete the placeholder or replace it with a behavior test that calls product code"
