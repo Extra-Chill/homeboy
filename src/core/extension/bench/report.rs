@@ -7,7 +7,7 @@ use serde::Serialize;
 use super::baseline::BenchBaselineComparison;
 use super::distribution::BenchRunDistribution;
 use super::parsing::{BenchMetricPhase, BenchResults, BenchScenario};
-use super::run::BenchRunWorkflowResult;
+use super::run::{BenchRunFailure, BenchRunWorkflowResult};
 use crate::rig::RigStateSnapshot;
 
 #[derive(Serialize)]
@@ -29,6 +29,8 @@ pub struct BenchCommandOutput {
     /// path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rig_state: Option<RigStateSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<BenchRunFailure>,
 }
 
 pub fn from_main_workflow(result: BenchRunWorkflowResult) -> (BenchCommandOutput, i32) {
@@ -55,6 +57,7 @@ pub fn from_main_workflow_with_rig(
             baseline_comparison: result.baseline_comparison,
             hints: result.hints,
             rig_state,
+            failure: result.failure,
         },
         exit_code,
     )
@@ -100,8 +103,22 @@ pub struct BenchComparisonOutput {
     /// cross-rig comparison shape.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub summary: Vec<BenchScenarioComparisonSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<BenchComparisonFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hints: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct BenchComparisonFailure {
+    pub rig_id: String,
+    pub component_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
+    pub exit_code: i32,
+    pub stderr_tail: String,
 }
 
 #[derive(Serialize)]
@@ -114,6 +131,8 @@ pub struct RigBenchEntry {
     pub results: Option<BenchResults>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rig_state: Option<RigStateSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<BenchRunFailure>,
 }
 
 /// Per-scenario, per-metric percent deltas of each non-reference rig vs
@@ -511,7 +530,28 @@ pub fn aggregate_comparison(
     };
     let summary = BenchScenarioComparisonSummary::build(&entries);
 
+    let failures: Vec<BenchComparisonFailure> = entries
+        .iter()
+        .filter(|entry| entry.results.is_none())
+        .filter_map(|entry| {
+            entry
+                .failure
+                .as_ref()
+                .map(|failure| BenchComparisonFailure {
+                    rig_id: entry.rig_id.clone(),
+                    component_id: failure.component_id.clone(),
+                    component_path: failure.component_path.clone(),
+                    scenario_id: failure.scenario_id.clone(),
+                    exit_code: failure.exit_code,
+                    stderr_tail: failure.stderr_tail.clone(),
+                })
+        })
+        .collect();
+
     let mut hints = Vec::new();
+    for failure in &failures {
+        hints.push(format_failure_hint(failure));
+    }
     if entries.iter().any(|e| e.results.is_none()) {
         hints.push(
             "One or more rigs produced no parseable results; their columns are absent from `diff`."
@@ -533,9 +573,27 @@ pub fn aggregate_comparison(
             rigs: entries,
             diff,
             summary,
+            failures,
             hints: Some(hints),
         },
         exit_code,
+    )
+}
+
+fn format_failure_hint(failure: &BenchComparisonFailure) -> String {
+    let component = match &failure.component_path {
+        Some(path) => format!("{} ({})", failure.component_id, path),
+        None => failure.component_id.clone(),
+    };
+    let scenario = failure
+        .scenario_id
+        .as_deref()
+        .map(|id| format!("\n- scenario: {}", id))
+        .unwrap_or_default();
+
+    format!(
+        "Rig failed before producing parseable bench results:\n- rig: {}\n- component: {}{}\n- exit: {}\n- stderr: {}",
+        failure.rig_id, component, scenario, failure.exit_code, failure.stderr_tail
     )
 }
 
@@ -618,6 +676,25 @@ mod tests {
             exit_code: if passed { 0 } else { 1 },
             results,
             rig_state: None,
+            failure: None,
+        }
+    }
+
+    fn failed_entry_with_stderr(rig_id: &str) -> RigBenchEntry {
+        RigBenchEntry {
+            rig_id: rig_id.to_string(),
+            passed: false,
+            status: "failed".to_string(),
+            exit_code: 2,
+            results: None,
+            rig_state: None,
+            failure: Some(BenchRunFailure {
+                component_id: "studio".to_string(),
+                component_path: Some("/Users/chubes/Developer/studio@candidate".to_string()),
+                scenario_id: None,
+                exit_code: 2,
+                stderr_tail: "ERROR: Homeboy bench helper not found at /Users/chubes/.homeboy/runtime/bench-helper.sh".to_string(),
+            }),
         }
     }
 
@@ -631,6 +708,7 @@ mod tests {
             results: None,
             baseline_comparison: None,
             hints: None,
+            failure: None,
         });
 
         assert!(out.passed);
@@ -650,6 +728,7 @@ mod tests {
                 results: None,
                 baseline_comparison: None,
                 hints: Some(vec!["check output".to_string()]),
+                failure: None,
             },
             None,
         );
@@ -934,6 +1013,53 @@ mod tests {
         assert_eq!(rows[0]["assistant_message_count"], 2.0);
         assert_eq!(rows[1]["rig_id"], "next");
         assert_eq!(rows[1]["delta_p50_pct"], -20.0);
+    }
+
+    #[test]
+    fn aggregate_surfaces_no_parseable_failure_metadata() {
+        let r = results(vec![scenario("boot", &[("p95_ms", 100.0)])]);
+        let entries = vec![
+            entry("baseline", true, Some(r)),
+            failed_entry_with_stderr("candidate"),
+        ];
+        let (out, exit) = aggregate_comparison("studio".into(), 10, entries);
+
+        assert_eq!(exit, 2);
+        assert_eq!(out.failures.len(), 1);
+        let failure = &out.failures[0];
+        assert_eq!(failure.rig_id, "candidate");
+        assert_eq!(failure.component_id, "studio");
+        assert_eq!(failure.exit_code, 2);
+        assert!(failure
+            .stderr_tail
+            .contains("Homeboy bench helper not found"));
+
+        let value = serde_json::to_value(&out).unwrap();
+        let json_failure = &value["failures"][0];
+        assert_eq!(json_failure["rig_id"], "candidate");
+        assert_eq!(json_failure["component_id"], "studio");
+        assert!(json_failure["stderr_tail"]
+            .as_str()
+            .unwrap()
+            .contains("bench-helper.sh"));
+    }
+
+    #[test]
+    fn aggregate_puts_actionable_failure_block_before_generic_hint() {
+        let r = results(vec![scenario("boot", &[("p95_ms", 100.0)])]);
+        let entries = vec![
+            entry("baseline", true, Some(r)),
+            failed_entry_with_stderr("candidate"),
+        ];
+        let (out, _) = aggregate_comparison("studio".into(), 10, entries);
+        let hints = out.hints.as_ref().unwrap();
+
+        assert!(hints[0].starts_with("Rig failed before producing parseable bench results:"));
+        assert!(hints[0].contains("- rig: candidate"));
+        assert!(hints[0].contains("- component: studio (/Users/chubes/Developer/studio@candidate)"));
+        assert!(hints[0].contains("- exit: 2"));
+        assert!(hints[0].contains("Homeboy bench helper not found"));
+        assert!(hints[1].contains("no parseable results"));
     }
 }
 

@@ -290,6 +290,7 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
             exit_code: single_output.exit_code,
             results: single_output.results,
             rig_state: single_output.rig_state,
+            failure: single_output.failure,
         });
     }
 
@@ -923,6 +924,7 @@ JSON
             baseline_comparison: None,
             hints: None,
             rig_state: None,
+            failure: None,
         };
         let value = serde_json::to_value(BenchOutput::Single(single)).unwrap();
         assert!(value.get("comparison").is_none());

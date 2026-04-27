@@ -198,6 +198,7 @@ pub(super) fn run_single_rig(
             baseline_comparison: None,
             hints: if hints.is_empty() { None } else { Some(hints) },
             rig_state: Some(context.snapshot),
+            failure: None,
         },
         exit_code,
     ))
@@ -573,6 +574,7 @@ mod tests {
             baseline_comparison: None,
             hints: None,
             rig_state: None,
+            failure: None,
         }
     }
 

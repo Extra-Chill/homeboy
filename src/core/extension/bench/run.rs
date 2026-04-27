@@ -65,6 +65,19 @@ pub struct BenchRunWorkflowResult {
     pub results: Option<BenchResults>,
     pub baseline_comparison: Option<BenchBaselineComparison>,
     pub hints: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<BenchRunFailure>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchRunFailure {
+    pub component_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
+    pub exit_code: i32,
+    pub stderr_tail: String,
 }
 
 #[derive(Debug, Clone)]
@@ -227,7 +240,7 @@ pub fn run_main_bench_workflow(
 
     let execution_context = resolve_execution_context(component, ExtensionCapability::Bench)?;
 
-    let (parsed, runner_success, runner_exit_code) = if args.runs > 1 {
+    let (parsed, runner_success, runner_exit_code, failure_stderr_tail) = if args.runs > 1 {
         run_sequential_runs(&execution_context, component, &args, run_dir)?
     } else if args.concurrency <= 1 {
         let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
@@ -238,7 +251,17 @@ pub fn run_main_bench_workflow(
         } else {
             None
         };
-        (parsed, runner_output.success, runner_output.exit_code)
+        let failure_stderr_tail = if !runner_output.success {
+            Some(stderr_tail(&runner_output.stderr))
+        } else {
+            None
+        };
+        (
+            parsed,
+            runner_output.success,
+            runner_output.exit_code,
+            failure_stderr_tail,
+        )
     } else {
         run_concurrent_instances(&execution_context, component, &args, run_dir)?
     };
@@ -303,6 +326,20 @@ pub fn run_main_bench_workflow(
     let hints = if hints.is_empty() { None } else { Some(hints) };
 
     let exit_code = baseline_exit_override.unwrap_or(runner_exit_code);
+    let failure = if parsed.is_none() && !runner_success {
+        failure_stderr_tail.map(|stderr_tail| BenchRunFailure {
+            component_id: args.component_id.clone(),
+            component_path: args
+                .path_override
+                .clone()
+                .or_else(|| Some(component.local_path.clone())),
+            scenario_id: None,
+            exit_code: runner_exit_code,
+            stderr_tail,
+        })
+    } else {
+        None
+    };
 
     Ok(BenchRunWorkflowResult {
         status: status.to_string(),
@@ -312,7 +349,15 @@ pub fn run_main_bench_workflow(
         results: parsed,
         baseline_comparison,
         hints,
+        failure,
     })
+}
+
+fn stderr_tail(stderr: &str) -> String {
+    const MAX_LINES: usize = 20;
+    let lines: Vec<&str> = stderr.lines().collect();
+    let start = lines.len().saturating_sub(MAX_LINES);
+    lines[start..].join("\n")
 }
 
 fn run_sequential_runs(
@@ -320,13 +365,14 @@ fn run_sequential_runs(
     component: &Component,
     args: &BenchRunWorkflowArgs,
     run_dir: &RunDir,
-) -> Result<(Option<BenchResults>, bool, i32)> {
+) -> Result<(Option<BenchResults>, bool, i32, Option<String>)> {
     let mut parsed_runs = Vec::new();
     let mut all_success = true;
     let mut first_failure_exit: Option<i32> = None;
+    let mut first_failure_stderr_tail: Option<String> = None;
 
     for _ in 0..args.runs {
-        let (parsed, success, exit_code) = if args.concurrency <= 1 {
+        let (parsed, success, exit_code, stderr_tail) = if args.concurrency <= 1 {
             run_single_dispatcher(execution_context, component, args, run_dir)?
         } else {
             run_concurrent_instances(execution_context, component, args, run_dir)?
@@ -335,6 +381,9 @@ fn run_sequential_runs(
             all_success = false;
             if first_failure_exit.is_none() {
                 first_failure_exit = Some(exit_code);
+            }
+            if first_failure_stderr_tail.is_none() {
+                first_failure_stderr_tail = stderr_tail;
             }
         }
         if let Some(result) = parsed {
@@ -353,7 +402,7 @@ fn run_sequential_runs(
         first_failure_exit.unwrap_or(1)
     };
 
-    Ok((merged, all_success, exit_code))
+    Ok((merged, all_success, exit_code, first_failure_stderr_tail))
 }
 
 fn run_single_dispatcher(
@@ -361,7 +410,7 @@ fn run_single_dispatcher(
     component: &Component,
     args: &BenchRunWorkflowArgs,
     run_dir: &RunDir,
-) -> Result<(Option<BenchResults>, bool, i32)> {
+) -> Result<(Option<BenchResults>, bool, i32, Option<String>)> {
     let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
     if results_file.exists() {
         std::fs::remove_file(&results_file).map_err(|e| {
@@ -382,7 +431,17 @@ fn run_single_dispatcher(
     } else {
         None
     };
-    Ok((parsed, runner_output.success, runner_output.exit_code))
+    let failure_stderr_tail = if !runner_output.success {
+        Some(stderr_tail(&runner_output.stderr))
+    } else {
+        None
+    };
+    Ok((
+        parsed,
+        runner_output.success,
+        runner_output.exit_code,
+        failure_stderr_tail,
+    ))
 }
 
 /// Per-instance results filename within the run dir.
@@ -468,7 +527,7 @@ fn run_concurrent_instances(
     component: &Component,
     args: &BenchRunWorkflowArgs,
     run_dir: &RunDir,
-) -> Result<(Option<BenchResults>, bool, i32)> {
+) -> Result<(Option<BenchResults>, bool, i32, Option<String>)> {
     let concurrency = args.concurrency;
     let execution_context = Arc::new(execution_context.clone());
     let component = Arc::new(component.clone());
@@ -503,11 +562,15 @@ fn run_concurrent_instances(
     // First failure wins for the exit code surface; status is "all-or-nothing".
     let mut all_success = true;
     let mut first_failure_exit: Option<i32> = None;
+    let mut first_failure_stderr_tail: Option<String> = None;
     for (_, output) in &per_instance {
         if !output.success {
             all_success = false;
             if first_failure_exit.is_none() {
                 first_failure_exit = Some(output.exit_code);
+            }
+            if first_failure_stderr_tail.is_none() {
+                first_failure_stderr_tail = Some(stderr_tail(&output.stderr));
             }
         }
     }
@@ -559,7 +622,7 @@ fn run_concurrent_instances(
         })
     };
 
-    Ok((merged, all_success, exit_code))
+    Ok((merged, all_success, exit_code, first_failure_stderr_tail))
 }
 
 #[cfg(test)]
