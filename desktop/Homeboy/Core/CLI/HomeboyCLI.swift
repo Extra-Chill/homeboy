@@ -607,8 +607,8 @@ private init() {}
         if let desc = description {
             args += ["--description", desc]
         }
-        for pid in projectIds {
-            args += ["--project", pid]
+        if !projectIds.isEmpty {
+            args += ["--projects", projectIds.joined(separator: ",")]
         }
         let output: FleetOutput = try await cli.executeCommand(
             args,
@@ -735,7 +735,11 @@ private init() {}
         remotePath: String,
         buildArtifact: String? = nil
     ) async throws -> ComponentRecordCLI {
-        var args = ["component", "create", name, localPath, remotePath]
+        var args = [
+            "component", "create",
+            "--local-path", localPath,
+            "--remote-path", remotePath,
+        ]
         if let buildArtifact {
             args.append(contentsOf: ["--build-artifact", buildArtifact])
         }

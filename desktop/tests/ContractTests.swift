@@ -177,6 +177,9 @@ func runTests(testDir: String) throws {
     // Test 10: extension-list.json parsing
     try testExtensionList(fixturesDir: fixturesDir, decoder: decoder)
 
+    // Test 11: mutation command construction stays aligned with current homeboy parser
+    try testMutationCommandShapes(testDir: testDir)
+
     print("")
     print("All contract tests passed")
 }
@@ -701,6 +704,70 @@ func testExtensionList(fixturesDir: String, decoder: JSONDecoder) throws {
     }
     print("[PASS] Executable extension readiness flags decoded")
     print("")
+}
+
+func testMutationCommandShapes(testDir: String) throws {
+    print("Test: mutation command shapes")
+    print("-----------------------------")
+
+    let testURL = URL(fileURLWithPath: testDir)
+    let repoRoot = testURL.lastPathComponent == "tests" ? testURL.deletingLastPathComponent() : testURL
+    let cliURL = repoRoot.appendingPathComponent("Homeboy/Core/CLI/HomeboyCLI.swift")
+
+    guard FileManager.default.fileExists(atPath: cliURL.path) else {
+        throw NSError(domain: "ContractTest", code: 100,
+            userInfo: [NSLocalizedDescriptionKey: "HomeboyCLI.swift not found at \(cliURL.path)"])
+    }
+
+    let source = try String(contentsOf: cliURL, encoding: .utf8)
+    let fleetCreate = try sourceSlice(
+        source,
+        from: "func fleetCreate(",
+        to: "    /// Delete a fleet"
+    )
+    let componentCreate = try sourceSlice(
+        source,
+        from: "func componentCreate(",
+        to: "    func componentSet("
+    )
+
+    try assertContains(fleetCreate, "\"--projects\"", message: "fleet create must use current --projects flag")
+    try assertDoesNotContain(fleetCreate, "\"--project\"", message: "fleet create must not use legacy repeated --project flag")
+    try assertContains(fleetCreate, "joined(separator: \",\")", message: "fleet create should pass comma-separated project IDs")
+    print("[PASS] fleet create uses --projects")
+
+    try assertContains(componentCreate, "\"--local-path\"", message: "component create must pass local path as an explicit flag")
+    try assertContains(componentCreate, "\"--remote-path\"", message: "component create must pass remote path as an explicit flag")
+    try assertContains(componentCreate, "\"--build-artifact\"", message: "component create keeps build artifact flag")
+    try assertDoesNotContain(componentCreate, "\"component\", \"create\", name, localPath, remotePath", message: "component create must not use legacy positional name/localPath/remotePath")
+    print("[PASS] component create uses explicit flags")
+    print("")
+}
+
+func sourceSlice(_ source: String, from startMarker: String, to endMarker: String) throws -> String {
+    guard let start = source.range(of: startMarker)?.lowerBound else {
+        throw NSError(domain: "ContractTest", code: 101,
+            userInfo: [NSLocalizedDescriptionKey: "Missing source marker: \(startMarker)"])
+    }
+    guard let end = source.range(of: endMarker, range: start..<source.endIndex)?.lowerBound else {
+        throw NSError(domain: "ContractTest", code: 102,
+            userInfo: [NSLocalizedDescriptionKey: "Missing source marker: \(endMarker)"])
+    }
+    return String(source[start..<end])
+}
+
+func assertContains(_ haystack: String, _ needle: String, message: String) throws {
+    guard haystack.contains(needle) else {
+        throw NSError(domain: "ContractTest", code: 103,
+            userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+func assertDoesNotContain(_ haystack: String, _ needle: String, message: String) throws {
+    guard !haystack.contains(needle) else {
+        throw NSError(domain: "ContractTest", code: 104,
+            userInfo: [NSLocalizedDescriptionKey: message])
+    }
 }
 
 // MARK: - Entry Point
