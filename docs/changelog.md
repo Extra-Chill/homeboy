@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.112.0] - 2026-04-27
+
+### Added
+- resolve package-relative workloads
+- publish shared runtime helpers
+- delegate remote path inference to extensions
+- guard active resource leases
+
+### Changed
+- keep command path coverage out of pipeline core
+
 ## [0.111.0] - 2026-04-27
 
 ### Added
