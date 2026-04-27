@@ -460,19 +460,12 @@ pub(crate) fn validate_capability_script_exists(
 ) -> Result<()> {
     let script_path = extension_path.join(script_path);
     if !script_path.exists() {
-        let label = match capability {
-            super::ExtensionCapability::Lint => "lint",
-            super::ExtensionCapability::Test => "test",
-            super::ExtensionCapability::Build => "build",
-            super::ExtensionCapability::Bench => "bench",
-        };
-
         return Err(Error::validation_invalid_argument(
             "extension",
             format!(
                 "Extension at {} does not have {} infrastructure (missing {})",
                 extension_path.display(),
-                label,
+                capability.label(),
                 script_path.display()
             ),
             None,

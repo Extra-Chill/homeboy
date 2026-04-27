@@ -125,6 +125,39 @@ pub enum ExtensionCapability {
     Bench,
 }
 
+impl ExtensionCapability {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ExtensionCapability::Lint => "lint",
+            ExtensionCapability::Test => "test",
+            ExtensionCapability::Build => "build",
+            ExtensionCapability::Bench => "bench",
+        }
+    }
+
+    pub(crate) fn has_manifest_support(self, manifest: &ExtensionManifest) -> bool {
+        match self {
+            ExtensionCapability::Lint => manifest.has_lint(),
+            ExtensionCapability::Test => manifest.has_test(),
+            ExtensionCapability::Build => manifest.has_build(),
+            ExtensionCapability::Bench => manifest.has_bench(),
+        }
+    }
+
+    pub(crate) fn script_path<'a>(self, manifest: &'a ExtensionManifest) -> Option<&'a str> {
+        match self {
+            ExtensionCapability::Lint => manifest.lint_script(),
+            ExtensionCapability::Test => manifest.test_script(),
+            ExtensionCapability::Build => manifest.build_script(),
+            ExtensionCapability::Bench => manifest.bench_script(),
+        }
+    }
+
+    pub(crate) fn requires_script(self) -> bool {
+        self != ExtensionCapability::Build
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExtensionExecutionContext {
     pub component: Component,
@@ -150,26 +183,8 @@ fn no_extensions_error(component: &Component) -> Error {
     err
 }
 
-fn capability_label(capability: ExtensionCapability) -> &'static str {
-    match capability {
-        ExtensionCapability::Lint => "lint",
-        ExtensionCapability::Test => "test",
-        ExtensionCapability::Build => "build",
-        ExtensionCapability::Bench => "bench",
-    }
-}
-
-fn manifest_has_capability(manifest: &ExtensionManifest, capability: ExtensionCapability) -> bool {
-    match capability {
-        ExtensionCapability::Lint => manifest.has_lint(),
-        ExtensionCapability::Test => manifest.has_test(),
-        ExtensionCapability::Build => manifest.has_build(),
-        ExtensionCapability::Bench => manifest.has_bench(),
-    }
-}
-
 fn capability_missing_error(component: &Component, capability: ExtensionCapability) -> Error {
-    let capability_name = capability_label(capability);
+    let capability_name = capability.label();
     let mut err = Error::validation_invalid_argument(
         "extension",
         format!(
@@ -194,7 +209,7 @@ pub(crate) fn extension_guidance_hints(
     let link_hint = match capability {
         Some(capability) => format!(
             "Link an extension with {} support: homeboy component set {} --extension <extension_id>",
-            capability_label(capability),
+            capability.label(),
             component.id
         ),
         None => format!(
@@ -215,7 +230,7 @@ fn capability_ambiguous_error(
     capability: ExtensionCapability,
     matching: &[String],
 ) -> Error {
-    let capability_name = capability_label(capability);
+    let capability_name = capability.label();
     Error::validation_invalid_argument(
         "extension",
         format!(
@@ -273,7 +288,7 @@ pub fn resolve_extension_for_capability(
 
     for extension_id in extensions.keys() {
         let manifest = load_extension(extension_id)?;
-        if manifest_has_capability(&manifest, capability) {
+        if capability.has_manifest_support(&manifest) {
             matching.push(extension_id.clone());
         }
     }
@@ -291,34 +306,30 @@ pub fn resolve_execution_context(
 ) -> Result<ExtensionExecutionContext> {
     let extension_id = resolve_extension_for_capability(component, capability)?;
     let manifest = load_extension(&extension_id)?;
-    let script_path = match capability {
-        ExtensionCapability::Lint => manifest.lint_script(),
-        ExtensionCapability::Test => manifest.test_script(),
-        ExtensionCapability::Build => manifest.build_script(),
-        ExtensionCapability::Bench => manifest.bench_script(),
-    }
-    .map(|s| s.to_string())
-    // Build's extension_script is optional (builds can use local scripts or command templates),
-    // so we allow an empty script_path for Build. Lint/Test/Bench require it.
-    .or_else(|| {
-        if capability == ExtensionCapability::Build {
-            Some(String::new())
-        } else {
-            None
-        }
-    })
-    .ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "extension",
-            format!(
-                "Extension '{}' does not have {} infrastructure configured",
-                extension_id,
-                capability_label(capability)
-            ),
-            None,
-            None,
-        )
-    })?;
+    let script_path = capability
+        .script_path(&manifest)
+        .map(|s| s.to_string())
+        // Build's extension_script is optional (builds can use local scripts or command templates),
+        // so we allow an empty script_path for Build. Lint/Test/Bench require it.
+        .or_else(|| {
+            if capability.requires_script() {
+                None
+            } else {
+                Some(String::new())
+            }
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "extension",
+                format!(
+                    "Extension '{}' does not have {} infrastructure configured",
+                    extension_id,
+                    capability.label()
+                ),
+                None,
+                None,
+            )
+        })?;
 
     let extension_path = extension_path(&extension_id);
 
@@ -1088,6 +1099,31 @@ mod tests {
     use super::*;
     use crate::component::{Component, ScopedExtensionConfig};
     use std::collections::HashMap;
+
+    #[test]
+    fn extension_capability_owns_labels_and_scripts() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "Example",
+            "version": "0.0.0",
+            "lint": { "extension_script": "lint.sh" },
+            "test": { "extension_script": "test.sh" },
+            "build": { "extension_script": "build.sh" },
+            "bench": { "extension_script": "bench.sh" }
+        }))
+        .unwrap();
+
+        for (capability, label, script, requires_script) in [
+            (ExtensionCapability::Lint, "lint", "lint.sh", true),
+            (ExtensionCapability::Test, "test", "test.sh", true),
+            (ExtensionCapability::Build, "build", "build.sh", false),
+            (ExtensionCapability::Bench, "bench", "bench.sh", true),
+        ] {
+            assert_eq!(capability.label(), label);
+            assert!(capability.has_manifest_support(&manifest));
+            assert_eq!(capability.script_path(&manifest), Some(script));
+            assert_eq!(capability.requires_script(), requires_script);
+        }
+    }
 
     #[test]
     fn validate_required_extensions_passes_with_no_modules() {
