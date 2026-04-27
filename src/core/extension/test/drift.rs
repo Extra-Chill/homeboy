@@ -208,7 +208,11 @@ pub fn detect_drift(component: &str, opts: &DriftOptions) -> Result<DriftReport>
     // Also detect file renames
     let renames = get_renamed_files(&opts.root, &opts.since)?;
     for (old, new) in &renames {
-        if !is_test_path(old) {
+        if !is_test_path(old)
+            && !is_test_path(new)
+            && (matches_any_pattern(old, &opts.source_patterns)
+                || matches_any_pattern(new, &opts.source_patterns))
+        {
             changes.push(ProductionChange {
                 change_type: ChangeType::FileMove,
                 file: new.clone(),
@@ -734,6 +738,21 @@ fn looks_like_path(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn extract_method_rename() {
@@ -779,6 +798,31 @@ mod tests {
         assert_eq!(changes[0].change_type, ChangeType::MethodRename);
         assert_eq!(changes[0].old_symbol, "load_config");
         assert_eq!(changes[0].new_symbol.as_deref(), Some("read_config"));
+    }
+
+    #[test]
+    fn detect_drift_ignores_renames_outside_source_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run_git(root, &["init", "-q", "-b", "main"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test"]);
+
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("README.md"), "before\n").unwrap();
+        run_git(root, &["add", "README.md"]);
+        run_git(root, &["commit", "-q", "-m", "initial"]);
+        run_git(root, &["mv", "README.md", "docs/README.md"]);
+
+        let opts = DriftOptions {
+            root: root.to_path_buf(),
+            since: "HEAD".to_string(),
+            source_patterns: vec!["src/**/*.rs".to_string()],
+            test_patterns: vec!["tests/**/*.rs".to_string()],
+        };
+
+        let report = detect_drift("fixture", &opts).expect("drift report");
+        assert!(report.production_changes.is_empty());
     }
 
     #[test]
