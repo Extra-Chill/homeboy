@@ -1,6 +1,6 @@
 use clap::{Command, CommandFactory, Parser, Subcommand};
 
-use super::{
+use crate::commands::{
     api, audit, auth, bench, build, changelog, changes, component, config, db, deploy, extension,
     file, fleet, git, init, issues, lint, logs, project, refactor, release, review, rig, server,
     ssh, stack, status, test, transfer, triage, undo, upgrade, validate, version,

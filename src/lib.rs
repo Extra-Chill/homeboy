@@ -16,21 +16,14 @@ macro_rules! log_status {
 
 extern crate self as homeboy;
 
+pub mod cli_surface;
 #[doc(hidden)]
 pub mod commands;
 pub mod core;
 pub mod help_topics;
 
-/// Read-only Homeboy CLI command surface derived from the Clap command tree.
-pub mod cli_surface {
-    pub use crate::commands::surface::{
-        command_surface_from, current_command_surface, CommandSurface, CommandSurfaceEntry,
-    };
-}
-
 #[cfg(test)]
 pub(crate) mod test_support;
-
 // Re-export everything from core for ergonomic library use
 // Users can write `homeboy::config` instead of `homeboy::core::config`
 pub use core::release::changelog;
