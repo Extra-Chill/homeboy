@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.4.1] - 2026-04-27
+
+### Fixed
+- align manifest smoke with combined capabilities
+
 ## [2.4.0] - 2026-04-27
 
 ### Added
