@@ -375,6 +375,7 @@ JSON
             audit: None,
             executable: None,
             platform: None,
+            component_env: None,
             runtime: None,
             cli: None,
             build: None,

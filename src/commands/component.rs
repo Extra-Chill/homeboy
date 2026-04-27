@@ -497,27 +497,34 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
         }
     }
 
-    // For WordPress extensions: detect Requires PHP from plugin/theme header.
-    // This takes priority over homeboy.json since the header is the source of truth.
-    if extension_id.as_deref() == Some("wordpress") {
-        if let Some(detected_php) = detect_wordpress_requires_php(local_path) {
-            php_version = Some(detected_php);
-            php_source = Some("component".to_string());
+    let extension = if let Some(ref ext_id) = extension_id {
+        homeboy::extension::load_extension(ext_id).ok()
+    } else {
+        None
+    };
+
+    if let Some(ref extension) = extension {
+        if let Some(detected) = run_component_env_detector(extension, local_path)? {
+            apply_component_env_detector_output(
+                detected,
+                &mut node_version,
+                &mut node_source,
+                &mut php_version,
+                &mut php_source,
+            );
         }
     }
 
-    if let Some(ref ext_id) = extension_id {
-        if let Ok(extension) = homeboy::extension::load_extension(ext_id) {
-            if let Some(runtime) = extension.runtime.as_ref() {
-                apply_extension_runtime_requirements(
-                    ext_id,
-                    runtime,
-                    &mut node_version,
-                    &mut node_source,
-                    &mut php_version,
-                    &mut php_source,
-                );
-            }
+    if let (Some(ext_id), Some(extension)) = (extension_id.as_ref(), extension.as_ref()) {
+        if let Some(runtime) = extension.runtime.as_ref() {
+            apply_extension_runtime_requirements(
+                ext_id,
+                runtime,
+                &mut node_version,
+                &mut node_source,
+                &mut php_version,
+                &mut php_source,
+            );
         }
     }
 
@@ -551,6 +558,90 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
     ))
 }
 
+fn run_component_env_detector(
+    extension: &homeboy::extension::ExtensionManifest,
+    component_path: &Path,
+) -> homeboy::Result<Option<homeboy::extension::RuntimeRequirementsConfig>> {
+    let Some(component_env) = extension.component_env.as_ref() else {
+        return Ok(None);
+    };
+
+    let extension_path = extension.extension_path.as_ref().ok_or_else(|| {
+        homeboy::Error::validation_invalid_argument(
+            "extension",
+            "Extension manifest is missing extension_path",
+            Some(extension.id.clone()),
+            None,
+        )
+    })?;
+    let script_path = Path::new(extension_path).join(&component_env.detect_script);
+    if !script_path.exists() {
+        return Err(homeboy::Error::validation_invalid_argument(
+            "extension",
+            format!(
+                "Extension '{}' component env detector is missing {}",
+                extension.id,
+                script_path.display()
+            ),
+            None,
+            None,
+        ));
+    }
+
+    let command = homeboy::engine::shell::quote_path(&script_path.to_string_lossy());
+    let output = homeboy::server::execute_local_command_in_dir(
+        &command,
+        Some(&component_path.to_string_lossy()),
+        None,
+    );
+
+    if !output.success {
+        return Err(homeboy::Error::internal_io(
+            format!(
+                "Component env detector for extension '{}' failed with exit code {}",
+                extension.id, output.exit_code
+            ),
+            Some(output.stderr),
+        ));
+    }
+
+    let trimmed = output.stdout.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let detected = serde_json::from_str::<homeboy::extension::RuntimeRequirementsConfig>(trimmed)
+        .map_err(|error| {
+        homeboy::Error::validation_invalid_json(
+            error,
+            Some(format!(
+                "parse component env detector output for extension '{}'",
+                extension.id
+            )),
+            Some(trimmed.chars().take(200).collect()),
+        )
+    })?;
+
+    Ok(Some(detected))
+}
+
+fn apply_component_env_detector_output(
+    detected: homeboy::extension::RuntimeRequirementsConfig,
+    node_version: &mut Option<String>,
+    node_source: &mut Option<String>,
+    php_version: &mut Option<String>,
+    php_source: &mut Option<String>,
+) {
+    if let Some(php) = detected.php {
+        *php_version = Some(php);
+        *php_source = Some("component".to_string());
+    }
+    if let Some(node) = detected.node {
+        *node_version = Some(node);
+        *node_source = Some("component".to_string());
+    }
+}
+
 fn apply_extension_runtime_requirements(
     extension_id: &str,
     runtime: &homeboy::extension::RuntimeRequirementsConfig,
@@ -571,51 +662,6 @@ fn apply_extension_runtime_requirements(
             *php_source = Some(format!("extension:{}", extension_id));
         }
     }
-}
-
-/// Parse "Requires PHP: X.Y" from a WordPress plugin or theme header.
-fn detect_wordpress_requires_php(component_path: &Path) -> Option<String> {
-    // Check theme first (style.css)
-    let style_css = component_path.join("style.css");
-    if style_css.exists() {
-        if let Some(version) = grep_header_value(&style_css, "Requires PHP:") {
-            if grep_header_value(&style_css, "Theme Name:").is_some() {
-                return Some(version);
-            }
-        }
-    }
-
-    // Check plugin (*.php files in root with "Plugin Name:" header)
-    if let Ok(entries) = std::fs::read_dir(component_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("php")
-                && grep_header_value(&path, "Plugin Name:").is_some()
-            {
-                if let Some(version) = grep_header_value(&path, "Requires PHP:") {
-                    return Some(version);
-                }
-                // Found plugin file but no Requires PHP header
-                return None;
-            }
-        }
-    }
-
-    None
-}
-
-/// Read a "Key: Value" header line from a file (first 100 lines only).
-fn grep_header_value(file: &Path, key: &str) -> Option<String> {
-    let content = std::fs::read_to_string(file).ok()?;
-    for line in content.lines().take(100) {
-        if let Some(pos) = line.find(key) {
-            let value = line[pos + key.len()..].trim().to_string();
-            if !value.is_empty() {
-                return Some(value);
-            }
-        }
-    }
-    None
 }
 
 /// Dedicated flags for common component fields on `component set`.
@@ -947,6 +993,8 @@ fn shared(id: Option<&str>) -> CmdResult<ComponentOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn test_component_set_flags_has_any_all_none() {
@@ -1039,6 +1087,80 @@ mod tests {
         assert_eq!(node_source.as_deref(), Some("extension:nodejs"));
         assert_eq!(php.as_deref(), Some("8.3"));
         assert_eq!(php_source.as_deref(), Some("extension:nodejs"));
+    }
+
+    #[test]
+    fn component_env_detector_executes_extension_script() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let extension_dir = temp.path().join("extensions/demo");
+        let component_dir = temp.path().join("component");
+        fs::create_dir_all(extension_dir.join("scripts/env")).expect("extension dirs");
+        fs::create_dir_all(&component_dir).expect("component dir");
+
+        let script = extension_dir.join("scripts/env/detect.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf '{\"php\":\"8.2\",\"node\":\"22\"}'\n",
+        )
+        .expect("write detector");
+        let mut perms = fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).expect("chmod detector");
+
+        let mut extension: homeboy::extension::ExtensionManifest =
+            serde_json::from_value(serde_json::json!({
+                "name": "Demo",
+                "version": "1.0.0",
+                "component_env": { "detect_script": "scripts/env/detect.sh" }
+            }))
+            .expect("extension manifest");
+        extension.id = "demo".to_string();
+        extension.extension_path = Some(extension_dir.to_string_lossy().to_string());
+
+        let detected = run_component_env_detector(&extension, &component_dir)
+            .expect("detector should run")
+            .expect("detector output");
+
+        assert_eq!(detected.php.as_deref(), Some("8.2"));
+        assert_eq!(detected.node.as_deref(), Some("22"));
+    }
+
+    #[test]
+    fn component_env_detector_output_overrides_component_values_before_runtime_defaults() {
+        let runtime = homeboy::extension::RuntimeRequirementsConfig {
+            node: Some("24".to_string()),
+            php: Some("8.4".to_string()),
+        };
+        let mut node = Some("20".to_string());
+        let mut node_source = Some("component".to_string());
+        let mut php = Some("8.0".to_string());
+        let mut php_source = Some("component".to_string());
+
+        apply_component_env_detector_output(
+            homeboy::extension::RuntimeRequirementsConfig {
+                php: Some("8.2".to_string()),
+                node: None,
+            },
+            &mut node,
+            &mut node_source,
+            &mut php,
+            &mut php_source,
+        );
+        apply_extension_runtime_requirements(
+            "demo",
+            &runtime,
+            &mut node,
+            &mut node_source,
+            &mut php,
+            &mut php_source,
+        );
+
+        assert_eq!(php.as_deref(), Some("8.2"));
+        assert_eq!(php_source.as_deref(), Some("component"));
+        assert_eq!(node.as_deref(), Some("20"));
+        assert_eq!(node_source.as_deref(), Some("component"));
     }
 
     #[test]

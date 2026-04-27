@@ -187,6 +187,14 @@ pub struct PlatformCapability {
     pub commands: Vec<String>,
 }
 
+/// Component environment detection supplied by an extension.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentEnvConfig {
+    /// Script path relative to the extension directory.
+    /// Runs from the component root and emits JSON such as {"php":"8.1"}.
+    pub detect_script: String,
+}
+
 // ============================================================================
 // ExtensionManifest
 // ============================================================================
@@ -288,6 +296,8 @@ pub struct ExtensionManifest {
     pub executable: Option<ExecutableCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_env: Option<ComponentEnvConfig>,
 
     /// Runtime requirements needed to execute this extension's runner scripts.
     /// Component-declared requirements still win; these are fallbacks for the
