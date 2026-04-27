@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::cli_surface::current_command_surface;
 use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
 use super::conventions::AuditFinding;
@@ -82,40 +83,46 @@ fn stale_invocation_finding(
     let command = strings.first()?.as_str();
     let subcommand = strings.get(1).map(|s| s.as_str());
     let line = line_number(content, offset);
+    let surface = current_command_surface();
 
-    if command == "supports" {
+    if !surface.contains_path(&[command]) {
         return Some(Finding {
             convention: "cli_invocation".to_string(),
             severity: Severity::Warning,
             file: relative_path.to_string(),
             description: format!(
-                "Stale Homeboy CLI invocation at line {}: top-level command `supports` no longer exists",
-                line
+                "Stale Homeboy CLI invocation at line {}: top-level command `{}` no longer exists",
+                line, command
             ),
-            suggestion: "Remove `homeboy supports`; model the capability directly or probe the target command's help output.".to_string(),
+            suggestion: "Use a command exposed by the current Homeboy CLI surface; for removed capability probes, model the capability directly or inspect the target command's help output.".to_string(),
             kind: AuditFinding::StaleCliInvocation,
         });
     }
 
-    if command == "audit" {
-        if let Some(subcommand) = subcommand {
-            if STALE_AUDIT_SUBCOMMANDS.contains(&subcommand) {
-                return Some(Finding {
-                    convention: "cli_invocation".to_string(),
-                    severity: Severity::Warning,
-                    file: relative_path.to_string(),
-                    description: format!(
-                        "Stale Homeboy CLI invocation at line {}: `audit {}` is no longer a valid subcommand shape",
-                        line, subcommand
-                    ),
-                    suggestion: "Use `homeboy audit <component>` with finding filters where needed; audit no longer has `code`, `docs`, or `structure` subcommands.".to_string(),
-                    kind: AuditFinding::StaleCliInvocation,
-                });
-            }
+    if let Some(subcommand) = subcommand {
+        if !subcommand.starts_with('-')
+            && !surface.contains_path(&[command, subcommand])
+            && is_known_removed_subcommand(command, subcommand)
+        {
+            return Some(Finding {
+                convention: "cli_invocation".to_string(),
+                severity: Severity::Warning,
+                file: relative_path.to_string(),
+                description: format!(
+                    "Stale Homeboy CLI invocation at line {}: `{} {}` is no longer a valid subcommand shape",
+                    line, command, subcommand
+                ),
+                suggestion: "Use the current command shape from Homeboy's CLI surface; for audit slices, use `homeboy audit <component>` with finding filters where needed.".to_string(),
+                kind: AuditFinding::StaleCliInvocation,
+            });
         }
     }
 
     None
+}
+
+fn is_known_removed_subcommand(command: &str, subcommand: &str) -> bool {
+    command == "audit" && STALE_AUDIT_SUBCOMMANDS.contains(&subcommand)
 }
 
 fn looks_like_homeboy_invocation(content: &str, start: usize) -> bool {
