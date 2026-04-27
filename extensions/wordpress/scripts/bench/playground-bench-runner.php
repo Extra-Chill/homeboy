@@ -127,6 +127,51 @@ pg_run_install_stage(['config_path' => $config_path]);
 pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
 pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 
+/** Slugify a workload basename into a scenario id ("BulkImport.php" → "bulk-import"). */
+function pg_bench_scenario_id(string $basename): string {
+    $name = preg_replace('/\.php$/i', '', $basename);
+    $name = preg_replace('/([a-z0-9])([A-Z])/', '$1-$2', $name);
+    $name = strtolower($name);
+    $name = preg_replace('/[^a-z0-9]+/', '-', $name);
+    return trim($name, '-');
+}
+
+/**
+ * Normalize the optional bench_workloads setting into scenario IDs.
+ *
+ * Accepts either a JSON array (`["boot-timing"]`) or a comma-separated
+ * string (`"boot-timing,read-heavy"`). Values are slugified the same way
+ * workload basenames are, so callers can pass `Boot Timing` or
+ * `boot-timing` and hit the same workload ID.
+ */
+function pg_bench_normalize_workload_filter(string $raw): array {
+    if ($raw === '' || $raw === 'null') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        throw new RuntimeException('bench_workloads must be a JSON array or comma-separated string');
+    }
+    if ($decoded === null || $decoded === '') {
+        return [];
+    }
+
+    $values = is_array($decoded) ? $decoded : explode(',', (string) $decoded);
+    $normalized = [];
+    foreach ($values as $value) {
+        if (!is_scalar($value)) {
+            throw new RuntimeException('bench_workloads entries must be strings');
+        }
+        $id = pg_bench_scenario_id((string) $value);
+        if ($id !== '' && !in_array($id, $normalized, true)) {
+            $normalized[] = $id;
+        }
+    }
+
+    return $normalized;
+}
+
 // ---------------------------------------------------------------------------
 // Stage: discover_workloads — find every tests/bench/*.php file.
 //
@@ -170,6 +215,33 @@ try {
     }
 
     sort($workload_files);
+
+    $requested_workloads = pg_bench_normalize_workload_filter('{{BENCH_WORKLOADS_JSON}}');
+    if (!empty($requested_workloads)) {
+        $requested_lookup = array_fill_keys($requested_workloads, true);
+        $available_workloads = [];
+        $filtered_workload_files = [];
+
+        foreach ($workload_files as $workload_file) {
+            $scenario_id = pg_bench_scenario_id(basename($workload_file));
+            $available_workloads[] = $scenario_id;
+            if (isset($requested_lookup[$scenario_id])) {
+                $filtered_workload_files[] = $workload_file;
+            }
+        }
+
+        if (empty($filtered_workload_files)) {
+            throw new RuntimeException(sprintf(
+                'bench_workloads matched no workloads. Requested: %s. Available: %s',
+                implode(', ', $requested_workloads),
+                empty($available_workloads) ? '(none)' : implode(', ', $available_workloads)
+            ));
+        }
+
+        $workload_files = $filtered_workload_files;
+        pg_log('WORKLOAD_FILTER: requested=' . implode(',', $requested_workloads) . ' matched=' . count($workload_files));
+    }
+
     if (empty($workload_files)) {
         pg_log("NO_WORKLOAD_FILES");
     }
@@ -207,15 +279,6 @@ function pg_bench_percentile(array $sorted_ms, float $p): float {
     }
     $frac = $rank - $lo;
     return $sorted_ms[$lo] * (1 - $frac) + $sorted_ms[$hi] * $frac;
-}
-
-/** Slugify a workload basename into a scenario id ("BulkImport.php" → "bulk-import"). */
-function pg_bench_scenario_id(string $basename): string {
-    $name = preg_replace('/\.php$/i', '', $basename);
-    $name = preg_replace('/([a-z0-9])([A-Z])/', '$1-$2', $name);
-    $name = strtolower($name);
-    $name = preg_replace('/[^a-z0-9]+/', '-', $name);
-    return trim($name, '-');
 }
 
 pg_stage_begin('run_workloads');

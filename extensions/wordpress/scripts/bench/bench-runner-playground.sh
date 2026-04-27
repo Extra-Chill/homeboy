@@ -110,8 +110,17 @@ if [ ! -f "$PLAYGROUND_CLI" ]; then
     exit 1
 fi
 
+BENCH_WORKLOADS_FILTER_PROVIDED=0
+if [ -n "${HOMEBOY_BENCH_WORKLOADS:-}" ]; then
+    BENCH_WORKLOADS_FILTER_PROVIDED=1
+elif [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    if printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -e 'has("bench_workloads") and (.bench_workloads != null)' >/dev/null 2>&1; then
+        BENCH_WORKLOADS_FILTER_PROVIDED=1
+    fi
+fi
+
 BENCH_DIR="${PLUGIN_PATH}/tests/bench"
-if [ ! -d "$BENCH_DIR" ] && [ -z "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ]; then
+if [ ! -d "$BENCH_DIR" ] && [ -z "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ] && [ "$BENCH_WORKLOADS_FILTER_PROVIDED" != "1" ]; then
     echo ""
     echo "⚠ No tests/bench directory found at ${BENCH_DIR}"
     echo "  Skipping bench run — nothing to measure."
@@ -177,6 +186,27 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     if [ -n "$extracted" ]; then
         BENCH_ENV_JSON="$extracted"
     fi
+fi
+
+# Extract `bench_workloads` from the merged settings JSON. Components can
+# restrict a bench run to specific workload IDs under
+# `extensions.wordpress.settings.bench_workloads` in their homeboy.json:
+#
+#   { "bench_workloads": ["boot-timing", "read-heavy"] }
+#   { "bench_workloads": "boot-timing,read-heavy" }
+#
+# Direct runner invocations can use HOMEBOY_BENCH_WORKLOADS with the same
+# comma-separated string shape. The PHP runner normalizes both forms after
+# discovery so omitted workloads never enter the BenchResults envelope.
+BENCH_WORKLOADS_JSON="null"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c 'if has("bench_workloads") then .bench_workloads else null end' 2>/dev/null || echo "null")
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        BENCH_WORKLOADS_JSON="$extracted"
+    fi
+fi
+if [ "$BENCH_WORKLOADS_JSON" = "null" ] && [ -n "${HOMEBOY_BENCH_WORKLOADS:-}" ]; then
+    BENCH_WORKLOADS_JSON=$(jq -Rn --arg value "$HOMEBOY_BENCH_WORKLOADS" '$value')
 fi
 
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
@@ -306,6 +336,7 @@ sed \
     -e "s|{{RESULT_SUFFIX}}|${RESULT_SUFFIX}|g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_WORKLOADS_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{EXTRA_WORKLOADS_LIST}}${WP_CONFIG_DEFINES_DELIM}${EXTRA_WORKLOADS_LIST}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
