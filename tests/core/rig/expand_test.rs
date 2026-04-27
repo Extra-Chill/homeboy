@@ -18,6 +18,7 @@ fn rig_with(id: &str, components: HashMap<String, ComponentSpec>) -> RigSpec {
         pipeline: Default::default(),
         bench: None,
         bench_workloads: Default::default(),
+        app_launcher: None,
     }
 }
 

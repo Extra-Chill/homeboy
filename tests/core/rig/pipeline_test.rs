@@ -296,6 +296,7 @@ mod patch {
             pipeline,
             bench: None,
             bench_workloads: Default::default(),
+            app_launcher: None,
         }
     }
 
@@ -506,6 +507,7 @@ mod shared_path {
             pipeline,
             bench: None,
             bench_workloads: Default::default(),
+            app_launcher: None,
         }
     }
 

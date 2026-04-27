@@ -18,6 +18,7 @@ fn minimal_rig() -> RigSpec {
         pipeline: Default::default(),
         bench: None,
         bench_workloads: Default::default(),
+        app_launcher: None,
     }
 }
 

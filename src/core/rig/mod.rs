@@ -18,6 +18,7 @@
 //! DAG pipelines, extension-registered service kinds, `.app` wrappers,
 //! bench composition, spec sharing.
 
+pub mod app;
 pub mod check;
 pub mod expand;
 pub mod install;
@@ -27,6 +28,7 @@ pub mod service;
 pub mod spec;
 pub mod state;
 
+pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
 pub use install::{
     discover_rigs, install, read_source_metadata, DiscoveredRig, RigInstallResult,
     RigSourceMetadata,
@@ -38,8 +40,9 @@ pub use runner::{
 };
 pub use service::{DiscoveredProcess, ServiceStatus};
 pub use spec::{
-    BenchSpec, CheckSpec, ComponentSpec, DiscoverSpec, NewerThanSpec, PatchOp, PipelineStep,
-    RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, SymlinkSpec, TimeSource,
+    AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, BenchSpec, CheckSpec,
+    ComponentSpec, DiscoverSpec, NewerThanSpec, PatchOp, PipelineStep, RigSpec, ServiceKind,
+    ServiceSpec, SharedPathOp, SharedPathSpec, SymlinkSpec, TimeSource,
 };
 pub use state::{RigState, ServiceState};
 

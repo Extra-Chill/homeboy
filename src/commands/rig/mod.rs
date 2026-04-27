@@ -9,8 +9,8 @@ use clap::{Args, Subcommand};
 use homeboy::rig;
 
 use self::output::{
-    RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledSummary, RigListOutput,
-    RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary, RigUpOutput,
+    RigAppOutput, RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledSummary,
+    RigListOutput, RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary, RigUpOutput,
 };
 use super::CmdResult;
 
@@ -60,6 +60,39 @@ enum RigCommand {
         #[arg(long)]
         all: bool,
     },
+    /// Install, update, or remove this rig's desktop app launcher.
+    App {
+        #[command(subcommand)]
+        command: RigAppCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RigAppCommand {
+    /// Generate and install this rig's configured launcher.
+    Install {
+        /// Rig ID
+        rig_id: String,
+        /// Print generated paths without writing files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Regenerate this rig's configured launcher.
+    Update {
+        /// Rig ID
+        rig_id: String,
+        /// Print generated paths without writing files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove this rig's configured launcher.
+    Uninstall {
+        /// Rig ID
+        rig_id: String,
+        /// Print generated paths without deleting files.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOutput> {
@@ -71,6 +104,7 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Down { rig_id } => down(&rig_id),
         RigCommand::Status { rig_id } => status(&rig_id),
         RigCommand::Install { source, id, all } => install(&source, id.as_deref(), all),
+        RigCommand::App { command } => app(command),
     }
 }
 
@@ -187,6 +221,50 @@ fn status(rig_id: &str) -> CmdResult<RigCommandOutput> {
     Ok((
         RigCommandOutput::Status(RigStatusOutput {
             command: "rig.status",
+            report,
+        }),
+        0,
+    ))
+}
+
+fn app(command: RigAppCommand) -> CmdResult<RigCommandOutput> {
+    match command {
+        RigAppCommand::Install { rig_id, dry_run } => app_install(&rig_id, dry_run),
+        RigAppCommand::Update { rig_id, dry_run } => app_update(&rig_id, dry_run),
+        RigAppCommand::Uninstall { rig_id, dry_run } => app_uninstall(&rig_id, dry_run),
+    }
+}
+
+fn app_install(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(rig_id)?;
+    let report = rig::app::install(&rig, rig::AppLauncherOptions { dry_run })?;
+    Ok((
+        RigCommandOutput::App(RigAppOutput {
+            command: "rig.app.install",
+            report,
+        }),
+        0,
+    ))
+}
+
+fn app_update(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(rig_id)?;
+    let report = rig::app::update(&rig, rig::AppLauncherOptions { dry_run })?;
+    Ok((
+        RigCommandOutput::App(RigAppOutput {
+            command: "rig.app.update",
+            report,
+        }),
+        0,
+    ))
+}
+
+fn app_uninstall(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
+    let rig = rig::load(rig_id)?;
+    let report = rig::app::uninstall(&rig, rig::AppLauncherOptions { dry_run })?;
+    Ok((
+        RigCommandOutput::App(RigAppOutput {
+            command: "rig.app.uninstall",
             report,
         }),
         0,

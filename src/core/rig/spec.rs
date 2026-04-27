@@ -56,6 +56,67 @@ pub struct RigSpec {
     /// `${components.<id>.path}` expansion as other rig path fields.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub bench_workloads: HashMap<String, Vec<String>>,
+
+    /// Optional desktop launcher wrapper for this rig.
+    ///
+    /// v1 is macOS-only and generates a script-backed `.app` bundle that runs
+    /// `homeboy rig check` and `homeboy rig up` before opening the target app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_launcher: Option<AppLauncherSpec>,
+}
+
+/// Desktop launcher settings for a rig.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppLauncherSpec {
+    /// Launcher platform. v1 supports `macos` only.
+    pub platform: AppLauncherPlatform,
+
+    /// Display name for the generated launcher bundle.
+    pub wrapper_display_name: String,
+
+    /// Bundle identifier written to Info.plist.
+    pub wrapper_bundle_id: String,
+
+    /// Target app or executable to launch after rig prep succeeds.
+    /// Supports `~`, `${env.NAME}`, and `${components.<id>.path}` expansion.
+    pub target_app: String,
+
+    /// Directory that receives the generated wrapper. Defaults to
+    /// `/Applications`; tests and non-global installs can point this at a
+    /// writable directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_dir: Option<String>,
+
+    /// Preflight commands to run before `rig up`. Defaults to `rig:check`.
+    #[serde(
+        default = "default_app_preflight",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub preflight: Vec<AppLauncherPreflight>,
+
+    /// Failure behaviour for preflight. v1 implements the dialog + terminal
+    /// script path on macOS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_preflight_fail: Option<String>,
+}
+
+/// Platform strategy for a generated desktop launcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppLauncherPlatform {
+    Macos,
+}
+
+/// Preflight command run by a generated launcher before `rig up`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppLauncherPreflight {
+    #[serde(rename = "rig:check")]
+    RigCheck,
+}
+
+fn default_app_preflight() -> Vec<AppLauncherPreflight> {
+    vec![AppLauncherPreflight::RigCheck]
 }
 
 /// Bench composition for a rig. Pins which component(s) `homeboy bench
