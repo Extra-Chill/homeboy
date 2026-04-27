@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0186B7D809C9473D9EC3F424 /* APIAuthWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0186B7D709C9473D9EC3F424 /* APIAuthWorkspaceView.swift */; };
 		023E9AE450BF036FF40C0E76 /* ProjectConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = C794768AF4898995F64DB92D /* ProjectConfiguration.swift */; };
 		02AD314100925D82AE384CE8 /* GeneralSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8974EB4ED392FD3B52D70FD3 /* GeneralSettingsTab.swift */; };
 		0597F5E10CC3D748D36710F9 /* ConfigurationObserving.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6676A7C26F7EE42CD5B9E7A /* ConfigurationObserving.swift */; };
@@ -108,6 +109,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		0186B7D709C9473D9EC3F424 /* APIAuthWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIAuthWorkspaceView.swift; sourceTree = "<group>"; };
 		0354F3771ED337E0EDCAC7B5 /* ModuleResultsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleResultsView.swift; sourceTree = "<group>"; };
 		0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEntry.swift; sourceTree = "<group>"; };
 		0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
@@ -430,6 +432,7 @@
 			isa = PBXGroup;
 			children = (
 				E458125E00E4AA130D4F530D /* Table */,
+				0186B7D709C9473D9EC3F424 /* APIAuthWorkspaceView.swift */,
 				BA88D343E94C4C34E1069813 /* CodeTextView.swift */,
 				4ED098FFBF749CD6DD355B1B /* CollapsibleSplitView.swift */,
 				4406A9EEECAF8249580937A7 /* CopyableTextView.swift */,
@@ -698,6 +701,7 @@
 				58D7EB6E82E865D5736663C0 /* DeployerViewModel.swift in Sources */,
 				85F4F94606B3D49BEFDC227F /* DeploymentService.swift in Sources */,
 				AB378FCB8518F6BED6EEFB6F /* DisplayableError.swift in Sources */,
+				0186B7D809C9473D9EC3F424 /* APIAuthWorkspaceView.swift in Sources */,
 				5CA76C92A6AF0C42784FD35D /* ErrorView.swift in Sources */,
 				5B3425AA6A8A9C4C9EF5E29F /* FileBrowserSidebarView.swift in Sources */,
 				85A8C46096DE6DFF3BD11E63 /* FindableTextView.swift in Sources */,

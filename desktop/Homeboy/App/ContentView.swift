@@ -21,6 +21,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
     case remoteFileEditor = "File Editor"
     case remoteLogViewer = "Log Viewer"
     case databaseBrowser = "Database"
+    case apiAuth = "API/Auth"
     case settings = "Settings"
     
     var id: String { rawValue }
@@ -36,6 +37,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
         case .remoteFileEditor: return "doc.badge.gearshape"
         case .remoteLogViewer: return "doc.text.magnifyingglass"
         case .databaseBrowser: return "cylinder.split.1x2"
+        case .apiAuth: return "network.badge.shield.half.filled"
         case .settings: return "gear"
         }
     }
@@ -89,6 +91,8 @@ struct ContentView: View {
                 .opacity(selectedItem == .coreTool(.remoteLogViewer) ? 1 : 0)
             RemoteFileEditorView()
                 .opacity(selectedItem == .coreTool(.remoteFileEditor) ? 1 : 0)
+            APIAuthWorkspaceView()
+                .opacity(selectedItem == .coreTool(.apiAuth) ? 1 : 0)
             SettingsView()
                 .opacity(selectedItem == .coreTool(.settings) ? 1 : 0)
             

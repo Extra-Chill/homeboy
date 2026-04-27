@@ -231,6 +231,21 @@ struct RigPipelineStepTest: Decodable {
     let error: String?
 }
 
+// MARK: - API/Auth Output Types (mirror HomeboyCLI.swift)
+
+struct HomeboyAuthOutputTest: Decodable {
+    let projectId: String
+    let authenticated: Bool?
+    let success: Bool?
+}
+
+struct HomeboyAPIGetOutputTest: Decodable {
+    let projectId: String
+    let method: String
+    let endpoint: String
+    let response: JSONValueTest
+}
+
 struct WPTable: Decodable {
     let Name: String
     let Rows: String?
@@ -460,8 +475,59 @@ func runTests(testDir: String) throws {
     // Test 19: Git workspace command shapes
     try testGitWorkspaceCommandShapes(testDir: testDir)
 
+    // Test 20: API/Auth model decoding and command shapes
+    try testAPIAuthContracts(decoder: decoder)
+
     print("")
     print("All contract tests passed")
+}
+
+func testAPIAuthContracts(decoder: JSONDecoder) throws {
+    print("Test: API/Auth workspace contracts")
+    print("----------------------------------")
+
+    let authJSON = #"{"success":true,"data":{"project_id":"example","authenticated":true}}"#.data(using: .utf8)!
+    let auth = try decoder.decode(CLIResponse<HomeboyAuthOutputTest>.self, from: authJSON)
+    guard auth.data?.projectId == "example", auth.data?.authenticated == true else {
+        throw NSError(domain: "ContractTest", code: 120,
+            userInfo: [NSLocalizedDescriptionKey: "auth status output does not decode snake_case project_id/authenticated fields"])
+    }
+    print("[PASS] Auth status output decodes")
+
+    let apiJSON = #"{"success":true,"data":{"project_id":"example","method":"GET","endpoint":"/wp/v2/types","response":{"ok":true,"count":2}}}"#.data(using: .utf8)!
+    let api = try decoder.decode(CLIResponse<HomeboyAPIGetOutputTest>.self, from: apiJSON)
+    guard api.data?.projectId == "example", api.data?.method == "GET", api.data?.endpoint == "/wp/v2/types" else {
+        throw NSError(domain: "ContractTest", code: 121,
+            userInfo: [NSLocalizedDescriptionKey: "api GET output does not decode expected metadata fields"])
+    }
+    guard case .object(let responseObject) = api.data?.response,
+          case .bool(true) = responseObject["ok"],
+          case .int(2) = responseObject["count"] else {
+        throw NSError(domain: "ContractTest", code: 122,
+            userInfo: [NSLocalizedDescriptionKey: "api GET response does not preserve arbitrary JSON"])
+    }
+    print("[PASS] API GET output decodes arbitrary response JSON")
+
+    let source = try String(contentsOf: URL(fileURLWithPath: "Homeboy/Core/CLI/HomeboyCLI.swift"), encoding: .utf8)
+
+    func requireContains(_ needle: String, _ message: String, code: Int) throws {
+        guard source.contains(needle) else {
+            throw NSError(domain: "ContractTest", code: code,
+                userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        print("[PASS] \(message)")
+    }
+
+    try requireContains("[\"auth\", \"status\", \"--project\", projectId]",
+        "auth status wrapper uses current CLI shape", code: 123)
+    try requireContains("[\"auth\", \"login\", \"--project\", projectId, \"--identifier\", identifier, \"--password\", password]",
+        "auth login wrapper uses non-interactive CLI flags", code: 124)
+    try requireContains("[\"auth\", \"logout\", \"--project\", projectId]",
+        "auth logout wrapper uses current CLI shape", code: 125)
+    try requireContains("[\"api\", projectId, \"get\", endpoint]",
+        "api GET wrapper exposes only read-only API command", code: 126)
+
+    print("")
 }
 
 func testReleaseBuildPlanningFixtures(fixturesDir: String, decoder: JSONDecoder) throws {

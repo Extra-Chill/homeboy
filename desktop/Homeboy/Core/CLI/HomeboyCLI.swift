@@ -87,6 +87,21 @@ struct ApiConfigCLI: Decodable {
     let enabled: Bool
 }
 
+// MARK: - API/Auth CLI Output Models
+
+struct HomeboyAuthOutput: Decodable {
+    let projectId: String
+    let authenticated: Bool?
+    let success: Bool?
+}
+
+struct HomeboyAPIGetOutput: Decodable {
+    let projectId: String
+    let method: String
+    let endpoint: String
+    let response: JSONValue
+}
+
 struct SubTargetCLI: Decodable, Identifiable {
     let name: String
     let domain: String
@@ -601,6 +616,42 @@ private init() {}
             ["project", "delete", id],
             dataType: ProjectMutationOutput.self,
             source: "Project Delete"
+        )
+    }
+
+    // MARK: - API/Auth Commands
+
+    func authStatus(projectId: String) async throws -> HomeboyAuthOutput {
+        try await cli.executeCommand(
+            ["auth", "status", "--project", projectId],
+            dataType: HomeboyAuthOutput.self,
+            source: "API Auth Status"
+        )
+    }
+
+    func authLogin(projectId: String, identifier: String, password: String) async throws -> HomeboyAuthOutput {
+        try await cli.executeCommand(
+            ["auth", "login", "--project", projectId, "--identifier", identifier, "--password", password],
+            dataType: HomeboyAuthOutput.self,
+            source: "API Auth Login",
+            timeout: 60
+        )
+    }
+
+    func authLogout(projectId: String) async throws -> HomeboyAuthOutput {
+        try await cli.executeCommand(
+            ["auth", "logout", "--project", projectId],
+            dataType: HomeboyAuthOutput.self,
+            source: "API Auth Logout"
+        )
+    }
+
+    func apiGet(projectId: String, endpoint: String) async throws -> HomeboyAPIGetOutput {
+        try await cli.executeCommand(
+            ["api", projectId, "get", endpoint],
+            dataType: HomeboyAPIGetOutput.self,
+            source: "API GET",
+            timeout: 60
         )
     }
 

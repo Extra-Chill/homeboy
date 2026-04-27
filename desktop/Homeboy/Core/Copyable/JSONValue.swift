@@ -2,7 +2,7 @@ import Foundation
 
 /// Type-erased JSON value for parsing CLI error details.
 /// Preserves the structure of arbitrary JSON while allowing string representation for display.
-enum JSONValue: Decodable, Sendable, Equatable {
+enum JSONValue: Codable, Sendable, Equatable {
     case string(String)
     case int(Int)
     case double(Double)
@@ -58,6 +58,27 @@ enum JSONValue: Decodable, Sendable, Equatable {
         )
     }
 
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+
+        switch self {
+        case .string(let value):
+            try container.encode(value)
+        case .int(let value):
+            try container.encode(value)
+        case .double(let value):
+            try container.encode(value)
+        case .bool(let value):
+            try container.encode(value)
+        case .null:
+            try container.encodeNil()
+        case .array(let values):
+            try container.encode(values)
+        case .object(let dict):
+            try container.encode(dict)
+        }
+    }
+
     /// Flatten value to string for display in error context
     var stringValue: String {
         switch self {
@@ -78,6 +99,18 @@ enum JSONValue: Decodable, Sendable, Equatable {
             let pairs = dict.map { "\($0.key): \($0.value.stringValue)" }
             return "{\(pairs.joined(separator: ", "))}"
         }
+    }
+
+    var prettyPrintedJSONString: String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+        guard let data = try? encoder.encode(self),
+              let json = String(data: data, encoding: .utf8) else {
+            return stringValue
+        }
+
+        return json
     }
 
     /// Flatten nested object to key-value pairs with dotted keys for error context.
