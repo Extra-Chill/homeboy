@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.115.0] - 2026-04-27
+
+### Added
+- install stack specs from packages
+- add local job event model
+
+### Fixed
+- parse authenticated GitHub remotes
+
 ## [0.114.1] - 2026-04-27
 
 ### Fixed
