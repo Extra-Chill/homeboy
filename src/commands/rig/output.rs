@@ -34,6 +34,8 @@ pub struct RigListOutput {
 #[derive(Serialize)]
 pub struct RigSummary {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_id: Option<String>,
     pub description: String,
     pub component_count: usize,
     pub service_count: usize,

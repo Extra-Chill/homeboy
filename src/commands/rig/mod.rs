@@ -132,7 +132,8 @@ fn list() -> CmdResult<RigCommandOutput> {
         .map(|r| {
             let mut pipelines: Vec<String> = r.pipeline.keys().cloned().collect();
             pipelines.sort();
-            RigSummary {
+            let declared_id = rig::declared_id(&r.id)?;
+            Ok(RigSummary {
                 source: rig::read_source_metadata(&r.id).map(|source| RigSourceSummary {
                     source: source.source,
                     package_path: source.package_path,
@@ -141,13 +142,14 @@ fn list() -> CmdResult<RigCommandOutput> {
                     source_revision: source.source_revision,
                 }),
                 id: r.id,
+                declared_id,
                 description: r.description,
                 component_count: r.components.len(),
                 service_count: r.services.len(),
                 pipelines,
-            }
+            })
         })
-        .collect();
+        .collect::<homeboy::Result<Vec<_>>>()?;
 
     Ok((
         RigCommandOutput::List(RigListOutput {

@@ -1,6 +1,6 @@
 //! Rig install lifecycle tests. Covers `src/core/rig/install.rs`.
 
-use crate::rig::{discover_rigs, install, read_source_metadata};
+use crate::rig::{declared_id, discover_rigs, install, list, list_ids, load, read_source_metadata};
 use crate::test_support::HomeGuard;
 use std::fs;
 use std::path::Path;
@@ -186,6 +186,45 @@ fn install_rejects_existing_rig_collision() {
     install(package.path().to_str().unwrap(), None, false).expect("first install");
     let err = install(package.path().to_str().unwrap(), None, false).expect_err("collision");
     assert!(err.message.contains("already exists"));
+}
+
+#[test]
+fn installed_filename_is_runtime_identity_when_declared_id_differs() {
+    let _home = HomeGuard::new();
+    fs::create_dir_all(crate::paths::rigs().expect("rigs dir")).expect("rigs dir");
+    fs::write(
+        crate::paths::rig_config("replacement").expect("replacement rig path"),
+        minimal_rig("alpha"),
+    )
+    .expect("replacement rig");
+
+    let ids = list_ids().expect("list ids");
+    assert_eq!(ids, vec!["replacement"]);
+
+    let rigs = list().expect("list rigs");
+    assert_eq!(rigs.len(), 1);
+    assert_eq!(rigs[0].id, "replacement");
+    assert_eq!(
+        declared_id("replacement").expect("declared id"),
+        Some("alpha".to_string())
+    );
+
+    assert_eq!(
+        load("replacement").expect("load replacement").id,
+        "replacement"
+    );
+
+    let err = load("alpha").expect_err("alpha should not resolve");
+    assert_eq!(err.message, "Rig not found");
+    assert_eq!(err.details["id"], "alpha");
+    let hints = err
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(hints.contains("Did you mean: replacement?"));
+    assert!(!hints.contains("Did you mean: alpha?"));
 }
 
 #[test]

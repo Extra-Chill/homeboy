@@ -57,8 +57,7 @@ use crate::error::{Error, Result};
 use crate::paths;
 use std::fs;
 
-/// Load a rig spec by ID from `~/.config/homeboy/rigs/{id}.json`.
-pub fn load(id: &str) -> Result<RigSpec> {
+fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
     let path = paths::rig_config(id)?;
     if !path.exists() {
         let suggestions = list_ids().unwrap_or_default();
@@ -74,10 +73,19 @@ pub fn load(id: &str) -> Result<RigSpec> {
             Some(content.chars().take(200).collect()),
         )
     })?;
-    if spec.id.is_empty() {
-        spec.id = id.to_string();
-    }
-    Ok(spec)
+    let declared_id = (!spec.id.is_empty() && spec.id != id).then(|| spec.id.clone());
+    spec.id = id.to_string();
+    Ok((spec, declared_id))
+}
+
+/// Load a rig spec by ID from `~/.config/homeboy/rigs/{id}.json`.
+pub fn load(id: &str) -> Result<RigSpec> {
+    read_config(id).map(|(spec, _)| spec)
+}
+
+/// Return the JSON-declared rig ID when it differs from the installed ID.
+pub fn declared_id(id: &str) -> Result<Option<String>> {
+    read_config(id).map(|(_, declared_id)| declared_id)
 }
 
 /// List all rig specs in `~/.config/homeboy/rigs/`.
