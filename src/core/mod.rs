@@ -4,6 +4,7 @@ pub mod config;
 pub mod code_audit;
 pub mod component;
 pub mod context;
+pub mod daemon;
 pub mod db;
 pub mod deploy;
 pub mod engine;

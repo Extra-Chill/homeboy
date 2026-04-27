@@ -1,9 +1,9 @@
 use clap::{Command, CommandFactory, Parser, Subcommand};
 
 use crate::commands::{
-    api, audit, auth, bench, build, changelog, changes, component, config, db, deploy, extension,
-    file, fleet, git, init, issues, lint, logs, project, refactor, release, review, rig, server,
-    ssh, stack, status, test, transfer, triage, undo, upgrade, validate, version,
+    api, audit, auth, bench, build, changelog, changes, component, config, daemon, db, deploy,
+    extension, file, fleet, git, init, issues, lint, logs, project, refactor, release, review, rig,
+    server, ssh, stack, status, test, transfer, triage, undo, upgrade, validate, version,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -58,6 +58,8 @@ pub enum Commands {
     Component(component::ComponentArgs),
     /// Manage global Homeboy configuration
     Config(config::ConfigArgs),
+    /// Run the local-only HTTP API daemon
+    Daemon(daemon::DaemonArgs),
     /// Execute CLI-compatible extensions
     #[command(visible_alias = "extensions")]
     Extension(extension::ExtensionArgs),

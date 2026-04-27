@@ -284,6 +284,7 @@ pub mod changes;
 pub mod cli;
 pub mod component;
 pub mod config;
+pub mod daemon;
 pub mod db;
 pub mod deploy;
 pub mod docs;
@@ -362,6 +363,7 @@ pub fn run_json(
         crate::cli_surface::Commands::Deploy(args) => dispatch!(args, global, deploy),
         crate::cli_surface::Commands::Component(args) => dispatch!(args, global, component),
         crate::cli_surface::Commands::Config(args) => dispatch!(args, global, config),
+        crate::cli_surface::Commands::Daemon(args) => dispatch!(args, global, daemon),
         crate::cli_surface::Commands::Extension(args) => dispatch!(args, global, extension),
         crate::cli_surface::Commands::Docs(args) => dispatch!(args, global, docs),
         crate::cli_surface::Commands::Changelog(args) => dispatch!(args, global, changelog),

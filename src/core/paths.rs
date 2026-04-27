@@ -121,6 +121,16 @@ pub fn stacks() -> Result<PathBuf> {
     Ok(homeboy()?.join("stacks"))
 }
 
+/// Daemon runtime state directory (~/.config/homeboy/daemon/).
+pub fn daemon_state_dir() -> Result<PathBuf> {
+    Ok(homeboy()?.join("daemon"))
+}
+
+/// Daemon runtime state file (~/.config/homeboy/daemon/state.json).
+pub fn daemon_state_file() -> Result<PathBuf> {
+    Ok(daemon_state_dir()?.join("state.json"))
+}
+
 /// Stack config file path (~/.config/homeboy/stacks/{id}.json)
 pub fn stack_config(id: &str) -> Result<PathBuf> {
     Ok(stacks()?.join(format!("{}.json", id)))
