@@ -98,6 +98,160 @@ enum CLIBridgeError: LocalizedError {
     }
 }
 
+private struct CLIBridgeProjectListOutput: Decodable {
+    let projects: [CLIBridgeProjectListItem]?
+}
+
+private struct CLIBridgeProjectListItem: Decodable {
+    let id: String
+    let domain: String?
+
+    func toProjectConfiguration() -> ProjectConfiguration {
+        var config = ProjectConfiguration.empty(id: id, name: id)
+        config.domain = domain ?? ""
+        return config
+    }
+}
+
+private struct CLIBridgeProjectShowOutput: Decodable {
+    let id: String
+    let entity: CLIBridgeProjectEntity
+}
+
+private struct CLIBridgeProjectEntity: Decodable {
+    let domain: String?
+    let serverId: String?
+    let basePath: String?
+    let tablePrefix: String?
+    let remoteFiles: RemoteFileConfigCLI?
+    let remoteLogs: RemoteLogConfigCLI?
+    let database: DatabaseConfigCLI?
+    let tools: ToolsConfigCLI?
+    let api: ApiConfigCLI?
+    let subTargets: [SubTargetCLI]?
+    let sharedTables: [String]?
+    let components: [CLIBridgeProjectComponent]?
+
+    func toProjectConfiguration(id: String) -> ProjectConfiguration {
+        var config = ProjectConfiguration.empty(id: id, name: id)
+        config.domain = domain ?? ""
+        config.serverId = serverId
+        config.basePath = basePath
+        config.tablePrefix = tablePrefix
+        config.sharedTables = sharedTables ?? []
+        config.componentIds = components?.map(\.id) ?? []
+
+        if let remoteFiles {
+            config.remoteFiles = RemoteFileConfig(
+                pinnedFiles: remoteFiles.pinnedFiles.map { file in
+                    PinnedRemoteFile(id: UUID(), path: file.path, label: nil)
+                }
+            )
+        }
+
+        if let remoteLogs {
+            config.remoteLogs = RemoteLogConfig(
+                pinnedLogs: remoteLogs.pinnedLogs.map { log in
+                    PinnedRemoteLog(id: UUID(), path: log.path, label: nil, tailLines: log.tailLines)
+                }
+            )
+        }
+
+        if let database {
+            config.database = DatabaseConfig(
+                host: database.host,
+                port: database.port,
+                name: database.name,
+                user: database.user,
+                useSSHTunnel: database.useSshTunnel
+            )
+        }
+
+        if let tools {
+            config.tools = ToolsConfig(
+                bandcampScraper: BandcampScraperConfig(
+                    defaultTag: tools.bandcampScraper?.defaultTag ?? ""
+                ),
+                newsletter: NewsletterConfig(
+                    sendyListId: tools.newsletter?.sendyListId ?? ""
+                )
+            )
+        }
+
+        if let api {
+            config.api = APIConfig(enabled: api.enabled, baseURL: api.baseUrl)
+        }
+
+        config.subTargets = subTargets?.map { target in
+            SubTarget(
+                id: target.name.lowercased().replacingOccurrences(of: " ", with: "-"),
+                name: target.name,
+                domain: target.domain,
+                number: target.number,
+                isDefault: target.isDefault
+            )
+        } ?? []
+
+        return config
+    }
+}
+
+private struct CLIBridgeProjectComponent: Decodable {
+    let id: String
+}
+
+private struct CLIBridgeServerListOutput: Decodable {
+    let entities: [CLIBridgeServerEntity]?
+}
+
+private struct CLIBridgeServerShowOutput: Decodable {
+    let entity: CLIBridgeServerEntity
+}
+
+private struct CLIBridgeServerEntity: Decodable {
+    let id: String
+    let host: String
+    let user: String
+    let port: Int
+
+    func toServerConfig() -> ServerConfig {
+        ServerConfig(id: id, name: id, host: host, user: user, port: port)
+    }
+}
+
+private struct CLIBridgeComponentListOutput: Decodable {
+    let entities: [CLIBridgeComponentEntity]?
+}
+
+private struct CLIBridgeComponentShowOutput: Decodable {
+    let entity: CLIBridgeComponentEntity
+}
+
+private struct CLIBridgeComponentEntity: Decodable {
+    let id: String
+    let aliases: [String]?
+    let localPath: String
+    let remotePath: String
+    let buildArtifact: String?
+    let versionTargets: [VersionTarget]?
+    let changelogTarget: String?
+    let hooks: [String: [String]]?
+
+    func toComponentConfiguration() -> ComponentConfiguration {
+        ComponentConfiguration(
+            id: id,
+            aliases: aliases ?? [],
+            localPath: localPath,
+            remotePath: remotePath,
+            buildArtifact: buildArtifact,
+            extensions: nil,
+            versionTargets: versionTargets,
+            changelogTarget: changelogTarget,
+            hooks: hooks
+        )
+    }
+}
+
 /// Bridge for executing CLI commands from the GUI.
 /// This allows the GUI to shell out to the CLI binary instead of importing Core/ services directly.
 actor CLIBridge {
@@ -440,15 +594,18 @@ actor CLIBridge {
     // MARK: - Project CRUD
 
     func projectList() async throws -> [ProjectConfiguration] {
-        let response = try await execute(["project", "list", "--json"])
-        let result = try response.decodeResponse([ProjectConfiguration].self)
-        return result.data ?? []
+        let response = try await execute(["project", "list"])
+        let result = try response.decodeResponse(CLIBridgeProjectListOutput.self)
+        return result.data?.projects?.map { $0.toProjectConfiguration() } ?? []
     }
 
     func projectShow(id: String) async throws -> ProjectConfiguration {
-        let response = try await execute(["project", "show", id, "--json"])
-        let result = try response.decodeResponse(ProjectConfiguration.self)
-        return result.data!
+        let response = try await execute(["project", "show", id])
+        let result = try response.decodeResponse(CLIBridgeProjectShowOutput.self)
+        guard let data = result.data else {
+            throw CLIBridgeError.invalidResponse("Missing project data")
+        }
+        return data.entity.toProjectConfiguration(id: data.id)
     }
 
     func projectCreate(name: String, domain: String) async throws -> ProjectConfiguration {
@@ -480,15 +637,18 @@ actor CLIBridge {
     // MARK: - Server CRUD
 
     func serverList() async throws -> [ServerConfig] {
-        let response = try await execute(["server", "list", "--json"])
-        let result = try response.decodeResponse([ServerConfig].self)
-        return result.data ?? []
+        let response = try await execute(["server", "list"])
+        let result = try response.decodeResponse(CLIBridgeServerListOutput.self)
+        return result.data?.entities?.map { $0.toServerConfig() } ?? []
     }
 
     func serverShow(id: String) async throws -> ServerConfig {
-        let response = try await execute(["server", "show", id, "--json"])
-        let result = try response.decodeResponse(ServerConfig.self)
-        return result.data!
+        let response = try await execute(["server", "show", id])
+        let result = try response.decodeResponse(CLIBridgeServerShowOutput.self)
+        guard let data = result.data else {
+            throw CLIBridgeError.invalidResponse("Missing server data")
+        }
+        return data.entity.toServerConfig()
     }
 
     func serverSet(_ server: ServerConfig) async throws -> Void {
@@ -506,15 +666,18 @@ actor CLIBridge {
     // MARK: - Component CRUD
 
     func componentList() async throws -> [ComponentConfiguration] {
-        let response = try await execute(["component", "list", "--json"])
-        let result = try response.decodeResponse([ComponentConfiguration].self)
-        return result.data ?? []
+        let response = try await execute(["component", "list"])
+        let result = try response.decodeResponse(CLIBridgeComponentListOutput.self)
+        return result.data?.entities?.map { $0.toComponentConfiguration() } ?? []
     }
 
     func componentShow(id: String) async throws -> ComponentConfiguration {
-        let response = try await execute(["component", "show", id, "--json"])
-        let result = try response.decodeResponse(ComponentConfiguration.self)
-        return result.data!
+        let response = try await execute(["component", "show", id])
+        let result = try response.decodeResponse(CLIBridgeComponentShowOutput.self)
+        guard let data = result.data else {
+            throw CLIBridgeError.invalidResponse("Missing component data")
+        }
+        return data.entity.toComponentConfiguration()
     }
 
     func componentSet(_ component: ComponentConfiguration) async throws -> Void {

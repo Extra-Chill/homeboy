@@ -42,7 +42,7 @@ struct CLIDeploymentSummary: Decodable {
 
 struct ComponentListOutput: Decodable {
     let command: String
-    let components: [ComponentListItemCLI]?
+    let entities: [ComponentListItemCLI]?
 }
 
 struct ComponentListItemCLI: Decodable {
@@ -229,9 +229,9 @@ func testComponentList(fixturesDir: String, decoder: JSONDecoder) throws {
 
     print("[PASS] Parsed CLIResponse wrapper")
 
-    guard let components = output.components else {
+    guard let components = output.entities else {
         throw NSError(domain: "ContractTest", code: 13,
-            userInfo: [NSLocalizedDescriptionKey: "component-list.json: components field is nil"])
+            userInfo: [NSLocalizedDescriptionKey: "component-list.json: entities field is nil"])
     }
 
     print("[PASS] Parsed \(components.count) components from component-list.json")
