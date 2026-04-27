@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.23.1] - 2026-04-27
+
+### Fixed
+- lock extension deps to supported PHP floor
+
 ## [2.23.0] - 2026-04-27
 
 ### Added
