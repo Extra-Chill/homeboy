@@ -37,6 +37,7 @@
 pub mod apply;
 pub mod plan;
 pub mod reconcile;
+pub mod render;
 pub mod tracker;
 
 pub use apply::{apply_plan, ReconcileExecution, ReconcileResult};
@@ -45,4 +46,8 @@ pub use plan::{
     ReconcileSkipReason, TrackedIssue, TrackedIssueState,
 };
 pub use reconcile::reconcile;
+pub use render::{
+    build_findings_from_native_output, IssueRenderContext, ReconcileFindingsInput,
+    RenderedIssueGroup,
+};
 pub use tracker::{GithubTracker, Tracker};

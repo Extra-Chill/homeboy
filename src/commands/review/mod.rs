@@ -20,6 +20,7 @@ use homeboy::extension::lint::LintCommandOutput;
 use homeboy::extension::test::TestCommandOutput;
 use homeboy::git;
 
+use super::parse_key_val;
 use super::utils::args::{BaselineArgs, PositionalComponentArgs};
 use super::{audit, lint, test, CmdResult, GlobalArgs};
 
@@ -57,6 +58,11 @@ pub struct ReviewArgs {
     /// `homeboy git pr comment --body-file`.
     #[arg(long, value_name = "FORMAT", value_parser = ["pr-comment"])]
     pub report: Option<String>,
+
+    /// Action-level banner rendered above the PR-comment scope line.
+    /// Repeatable as `--banner key=value`.
+    #[arg(long, value_name = "KEY=VALUE", value_parser = parse_key_val)]
+    pub banner: Vec<(String, String)>,
 
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
@@ -332,8 +338,13 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
 /// the consumer (`homeboy git pr comment --header`) owns the wrapping
 /// section header.
 pub fn run_markdown(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<String> {
+    let banners = args.banner.clone();
     let (output, exit_code) = run(args, global)?;
-    let md = render::render_pr_comment(&output);
+    let md = if banners.is_empty() {
+        render::render_pr_comment(&output)
+    } else {
+        render::render_pr_comment_with_banners(&output, &banners)
+    };
     Ok((md, exit_code))
 }
 
@@ -533,6 +544,7 @@ mod tests {
             summary: false,
             json: false,
             report: None,
+            banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
         };
         assert_eq!(scope_flag_suffix(&args, true), " --changed-since=trunk");
@@ -551,6 +563,7 @@ mod tests {
             summary: false,
             json: false,
             report: None,
+            banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
         };
         assert_eq!(scope_flag_suffix(&args, true), " --changed-only");
@@ -571,6 +584,7 @@ mod tests {
             summary: false,
             json: false,
             report: None,
+            banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
         };
         assert_eq!(scope_flag_suffix(&args, true), "");

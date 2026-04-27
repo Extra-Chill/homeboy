@@ -13,10 +13,11 @@ use std::path::PathBuf;
 
 use homeboy::code_audit::FindingConfidence;
 use homeboy::issues::{
-    apply_plan, reconcile, GithubTracker, IssueGroup, ReconcileConfig, ReconcilePlan,
-    ReconcileResult, Tracker,
+    apply_plan, build_findings_from_native_output, reconcile, GithubTracker, IssueRenderContext,
+    ReconcileConfig, ReconcileFindingsInput, ReconcilePlan, ReconcileResult, Tracker,
 };
 
+use super::parse_key_val;
 use super::CmdResult;
 
 #[derive(Args)]
@@ -63,7 +64,17 @@ enum IssuesCommand {
         /// `body` is rendered as-is into new or updated issues — callers
         /// own the finding-table format.
         #[arg(long, value_name = "PATH")]
-        findings: String,
+        findings: Option<String>,
+
+        /// Native Homeboy command output to normalize before reconcile.
+        /// Repeatable as `--from-output audit=/tmp/audit.json`.
+        #[arg(long = "from-output", value_name = "COMMAND=PATH", value_parser = parse_key_val)]
+        from_output: Vec<(String, String)>,
+
+        /// Optional run URL appended to generated issue bodies when using
+        /// `--from-output`.
+        #[arg(long, value_name = "URL")]
+        run_url: Option<String>,
 
         /// Read suppressions from `homeboy.json`'s `audit.suppressed_categories`
         /// and `issues.suppression_labels`. When false, suppression must be
@@ -108,12 +119,25 @@ enum IssuesCommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
+
+    /// Convert native command output into the canonical reconcile input shape.
+    BuildFindings {
+        /// Native Homeboy command output to normalize. Repeatable as
+        /// `--from-output audit=/tmp/audit.json`.
+        #[arg(long = "from-output", value_name = "COMMAND=PATH", value_parser = parse_key_val)]
+        from_output: Vec<(String, String)>,
+
+        /// Optional run URL appended to generated issue bodies.
+        #[arg(long, value_name = "URL")]
+        run_url: Option<String>,
+    },
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum IssuesCommandOutput {
     Reconcile(ReconcileOutput),
+    BuildFindings(ReconcileFindingsInput),
 }
 
 /// What the CLI emits for `homeboy issues reconcile`. Both dry-run and
@@ -150,6 +174,8 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
             component_id,
             tracker: _tracker,
             findings,
+            from_output,
+            run_url,
             suppress_from_config,
             suppress_category,
             suppress_label,
@@ -159,9 +185,9 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
             apply,
             path,
         } => {
-            let findings_input = read_findings(&findings)?;
+            let findings_input = read_reconcile_input(findings.as_deref(), &from_output, run_url)?;
             let command_label = findings_input.command.clone();
-            let groups = findings_input.into_groups(&component_id);
+            let groups = into_issue_groups(findings_input, &component_id);
 
             // Build reconcile config: CLI overrides take priority; otherwise
             // read homeboy.json when the flag is set; otherwise empty.
@@ -210,6 +236,13 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
                 Ok((IssuesCommandOutput::Reconcile(output), 0))
             }
         }
+        IssuesCommand::BuildFindings {
+            from_output,
+            run_url,
+        } => {
+            let findings_input = build_findings_input(&from_output, run_url)?;
+            Ok((IssuesCommandOutput::BuildFindings(findings_input), 0))
+        }
     }
 }
 
@@ -220,43 +253,101 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
 /// Findings input shape. Designed to be a minimal superset of the JSON the
 /// action's bash already produces, so the migration path doesn't require
 /// changing the audit/lint/test output formats.
-#[derive(Debug)]
-struct FindingsInput {
-    command: String,
-    groups: BTreeMap<String, GroupRow>,
+fn into_issue_groups(
+    input: ReconcileFindingsInput,
+    component_id: &str,
+) -> Vec<homeboy::issues::IssueGroup> {
+    input
+        .groups
+        .into_iter()
+        .map(|(category, row)| homeboy::issues::IssueGroup {
+            command: input.command.clone(),
+            component_id: component_id.to_string(),
+            category,
+            count: row.count,
+            label: row.label,
+            body: row.body,
+            confidence: row.confidence,
+        })
+        .collect()
 }
 
-#[derive(Debug, Default)]
-struct GroupRow {
-    count: usize,
-    label: String,
-    body: String,
-    confidence: Option<FindingConfidence>,
-}
-
-impl FindingsInput {
-    fn into_groups(self, component_id: &str) -> Vec<IssueGroup> {
-        self.groups
-            .into_iter()
-            .map(|(category, row)| IssueGroup {
-                command: self.command.clone(),
-                component_id: component_id.to_string(),
-                category,
-                count: row.count,
-                label: row.label,
-                body: row.body,
-                confidence: row.confidence,
-            })
-            .collect()
+fn read_reconcile_input(
+    findings: Option<&str>,
+    from_output: &[(String, String)],
+    run_url: Option<String>,
+) -> homeboy::Result<ReconcileFindingsInput> {
+    match (findings, from_output.is_empty()) {
+        (Some(path), true) => read_findings(path),
+        (None, false) => build_findings_input(from_output, run_url),
+        (Some(_), false) => Err(homeboy::Error::validation_invalid_argument(
+            "findings",
+            "Use either --findings or --from-output, not both",
+            None,
+            None,
+        )),
+        (None, true) => Err(homeboy::Error::validation_invalid_argument(
+            "findings",
+            "Missing --findings or --from-output",
+            None,
+            Some(vec![
+                "Pass --findings <path> for pre-rendered input".to_string(),
+                "Pass --from-output audit=<path> to normalize native command output".to_string(),
+            ]),
+        )),
     }
 }
 
-fn read_findings(path: &str) -> homeboy::Result<FindingsInput> {
+fn build_findings_input(
+    from_output: &[(String, String)],
+    run_url: Option<String>,
+) -> homeboy::Result<ReconcileFindingsInput> {
+    if from_output.is_empty() {
+        return Err(homeboy::Error::validation_invalid_argument(
+            "from-output",
+            "At least one --from-output COMMAND=PATH pair is required",
+            None,
+            None,
+        ));
+    }
+
+    let context = IssueRenderContext { run_url };
+    let mut merged = ReconcileFindingsInput::default();
+    let mut command_label: Option<&str> = None;
+    for (command, path) in from_output {
+        if let Some(existing) = command_label {
+            if existing != command {
+                return Err(homeboy::Error::validation_invalid_argument(
+                    "from-output",
+                    "Multiple command labels in one issue reconcile input are not supported yet",
+                    None,
+                    Some(vec![
+                        "Run one reconcile per command label for now".to_string(),
+                        "Use repeated --from-output only to merge split output files from the same command".to_string(),
+                    ]),
+                ));
+            }
+        } else {
+            command_label = Some(command);
+        }
+        let value = read_json_value(path, "native command output")?;
+        let rendered = build_findings_from_native_output(command, value, &context)?;
+        merged.merge(rendered);
+    }
+    Ok(merged)
+}
+
+fn read_findings(path: &str) -> homeboy::Result<ReconcileFindingsInput> {
+    let value = read_json_value(path, "findings")?;
+    parse_findings_value(value)
+}
+
+fn read_json_value(path: &str, label: &str) -> homeboy::Result<Value> {
     let raw = if path == "-" {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf).map_err(|e| {
             homeboy::Error::internal_io(
-                format!("read findings from stdin: {}", e),
+                format!("read {} from stdin: {}", label, e),
                 Some("stdin".into()),
             )
         })?;
@@ -264,7 +355,7 @@ fn read_findings(path: &str) -> homeboy::Result<FindingsInput> {
     } else {
         std::fs::read_to_string(path).map_err(|e| {
             homeboy::Error::internal_io(
-                format!("read findings file: {}", e),
+                format!("read {} file: {}", label, e),
                 Some(path.to_string()),
             )
         })?
@@ -278,10 +369,10 @@ fn read_findings(path: &str) -> homeboy::Result<FindingsInput> {
         )
     })?;
 
-    parse_findings_value(value)
+    Ok(value)
 }
 
-fn parse_findings_value(value: Value) -> homeboy::Result<FindingsInput> {
+fn parse_findings_value(value: Value) -> homeboy::Result<ReconcileFindingsInput> {
     let obj = value.as_object().ok_or_else(|| {
         homeboy::Error::validation_invalid_argument(
             "findings",
@@ -304,7 +395,7 @@ fn parse_findings_value(value: Value) -> homeboy::Result<FindingsInput> {
         })?
         .to_string();
 
-    let mut groups: BTreeMap<String, GroupRow> = BTreeMap::new();
+    let mut groups: BTreeMap<String, homeboy::issues::RenderedIssueGroup> = BTreeMap::new();
     if let Some(groups_value) = obj.get("groups") {
         let groups_obj = groups_value.as_object().ok_or_else(|| {
             homeboy::Error::validation_invalid_argument(
@@ -317,7 +408,7 @@ fn parse_findings_value(value: Value) -> homeboy::Result<FindingsInput> {
         for (category, row_value) in groups_obj {
             let row_obj = row_value.as_object().ok_or_else(|| {
                 homeboy::Error::validation_invalid_argument(
-                    &format!("findings.groups.{}", category),
+                    format!("findings.groups.{}", category),
                     "Each group must be a JSON object with `count`, optional `label`, optional `body`, optional `confidence`",
                     None,
                     None,
@@ -344,7 +435,7 @@ fn parse_findings_value(value: Value) -> homeboy::Result<FindingsInput> {
                 .and_then(parse_confidence);
             groups.insert(
                 category.clone(),
-                GroupRow {
+                homeboy::issues::RenderedIssueGroup {
                     count,
                     label,
                     body,
@@ -354,7 +445,7 @@ fn parse_findings_value(value: Value) -> homeboy::Result<FindingsInput> {
         }
     }
 
-    Ok(FindingsInput { command, groups })
+    Ok(ReconcileFindingsInput { command, groups })
 }
 
 fn parse_confidence(raw: &str) -> Option<FindingConfidence> {
@@ -556,7 +647,7 @@ mod tests {
         });
 
         let parsed = parse_findings_value(input).unwrap();
-        let groups = parsed.into_groups("homeboy");
+        let groups = into_issue_groups(parsed, "homeboy");
 
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].confidence, Some(FindingConfidence::Heuristic));

@@ -6,16 +6,14 @@
 //!
 //! Shape (top-down):
 //!
-//! 1. Scope banner: `:zap:` for changed-since/changed-only, `:information_source:` for full.
-//! 2. Total findings line.
-//! 3. Three stage blocks in fixed order — audit, lint, test. Each stage:
+//! 1. Optional caller-supplied banners for action-level signals.
+//! 2. Scope banner: `:zap:` for changed-since/changed-only, `:information_source:` for full.
+//! 3. Total findings line.
+//! 4. Three stage blocks in fixed order — audit, lint, test. Each stage:
 //!    - icon + name header (`:white_check_mark:`, `:x:`, `:fast_forward:`)
 //!    - up to 10 finding bullets (top categories / sniff codes / failure summary)
 //!    - blockquote with the deep-dive hint
 //!
-//! Action-level signals (autofix banners, binary-source warnings, tooling
-//! versions) are out of scope — those are not present in `ReviewCommandOutput`.
-//! See follow-up: `feat(review): --banner key=value for action-level signals`.
 
 use std::fmt::Write as _;
 
@@ -32,8 +30,17 @@ const TOP_N: usize = 10;
 
 /// Render a `ReviewCommandOutput` into a PR-comment-ready markdown body.
 pub fn render_pr_comment(output: &ReviewCommandOutput) -> String {
+    render_pr_comment_with_banners(output, &[])
+}
+
+/// Render a `ReviewCommandOutput` with optional action-level banner lines.
+pub fn render_pr_comment_with_banners(
+    output: &ReviewCommandOutput,
+    banners: &[(String, String)],
+) -> String {
     let mut out = String::new();
 
+    render_banners(&mut out, banners);
     render_scope_banner(&mut out, output);
     render_total_findings(&mut out, output);
     render_top_hints(&mut out, output);
@@ -48,6 +55,26 @@ pub fn render_pr_comment(output: &ReviewCommandOutput) -> String {
 }
 
 // ── Top-level banners ───────────────────────────────────────────────────
+
+fn render_banners(out: &mut String, banners: &[(String, String)]) {
+    if banners.is_empty() {
+        return;
+    }
+
+    for (key, value) in banners {
+        let _ = writeln!(out, "> {} **{}:** {}", banner_icon(key), key, value);
+    }
+    out.push('\n');
+}
+
+fn banner_icon(key: &str) -> &'static str {
+    match key {
+        "autofix" => ":wrench:",
+        "binary-source" => ":warning:",
+        "scope-mode" => ":information_source:",
+        _ => ":information_source:",
+    }
+}
 
 fn render_scope_banner(out: &mut String, output: &ReviewCommandOutput) {
     match output.summary.scope.as_str() {
@@ -605,6 +632,26 @@ mod tests {
         assert!(
             md.contains(":information_source: Scope: **full**"),
             "missing full-scope banner:\n{}",
+            md
+        );
+    }
+
+    #[test]
+    fn renders_action_banners_before_scope_banner() {
+        let env = passing_envelope();
+        let banners = vec![
+            ("autofix".to_string(), "applied 3 file(s)".to_string()),
+            ("binary-source".to_string(), "fallback".to_string()),
+            ("custom".to_string(), "value".to_string()),
+        ];
+        let md = render_pr_comment_with_banners(&env, &banners);
+
+        assert!(md.starts_with("> :wrench: **autofix:** applied 3 file(s)"));
+        assert!(md.contains("> :warning: **binary-source:** fallback"));
+        assert!(md.contains("> :information_source: **custom:** value"));
+        assert!(
+            md.find("**custom:** value").unwrap() < md.find("Scope: **full**").unwrap(),
+            "banners should render before scope banner:\n{}",
             md
         );
     }
