@@ -37,8 +37,8 @@
 // Writes the BenchResults JSON envelope (homeboy/src/core/extension/
 // bench/parsing.rs::BenchResults shape) to HOMEBOY_BENCH_RESULTS_FILE.
 
-import { readdir } from 'node:fs/promises';
-import { resolve, relative, basename, delimiter } from 'node:path';
+import { mkdir, readdir, writeFile } from 'node:fs/promises';
+import { resolve, relative, basename, delimiter, dirname } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 
