@@ -222,6 +222,9 @@ pub enum AuditFinding {
     StaleCliInvocation,
     /// Homeboy shell-out consumer uses a known-stale argument shape.
     StaleCliArgumentShape,
+    /// Nested Rust test file is not wired into Cargo via a source-module
+    /// `#[path = "..."] mod ...;` declaration.
+    UnwiredNestedRustTest,
 }
 
 impl AuditFinding {
@@ -277,6 +280,7 @@ impl AuditFinding {
             "global_env_mutation_guard",
             "stale_cli_invocation",
             "stale_cli_argument_shape",
+            "unwired_nested_rust_test",
         ]
     }
 }

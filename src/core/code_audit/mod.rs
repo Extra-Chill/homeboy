@@ -42,6 +42,7 @@ pub mod report;
 mod requested_detectors;
 mod requirements;
 pub mod run;
+mod rust_test_wiring;
 mod shadow_modules;
 mod shared_scaffolding;
 mod signatures;
@@ -546,6 +547,19 @@ fn audit_internal(
             topology_findings.len()
         );
         all_findings.extend(topology_findings);
+    }
+
+    // Phase 4i2: Rust nested test harness wiring checks. Cargo only
+    // auto-discovers direct `tests/*.rs` integration tests; nested tests need
+    // explicit `#[path = "..."]` wiring from a source module.
+    let rust_test_wiring_findings = rust_test_wiring::run(root);
+    if !rust_test_wiring_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Rust test wiring: {} finding(s) (nested tests not wired into Cargo)",
+            rust_test_wiring_findings.len()
+        );
+        all_findings.extend(rust_test_wiring_findings);
     }
 
     // Phase 4j: Documentation drift detection (broken/stale references in markdown)

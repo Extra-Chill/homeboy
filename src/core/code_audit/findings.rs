@@ -77,7 +77,8 @@ impl AuditFinding {
             AuditFinding::MissingImport
             | AuditFinding::CompilerWarning
             | AuditFinding::BrokenDocReference
-            | AuditFinding::StaleDocReference => FindingConfidence::Structural,
+            | AuditFinding::StaleDocReference
+            | AuditFinding::UnwiredNestedRustTest => FindingConfidence::Structural,
 
             // Depends on cross-file reference resolution or declared ownership maps.
             AuditFinding::UnusedParameter
