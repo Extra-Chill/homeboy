@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.0] - 2026-04-27
+
+### Added
+- declare drift selection config
+
 ## [2.29.0] - 2026-04-27
 
 ### Added
