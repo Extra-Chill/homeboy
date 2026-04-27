@@ -5,6 +5,7 @@ use crate::engine::shell;
 use crate::engine::{template, validation};
 use crate::error::{Error, Result};
 use crate::project::{self, Project};
+use crate::rig::toolchain;
 use crate::server::http::ApiClient;
 use crate::server::{
     execute_local_command_in_dir, execute_local_command_interactive,
@@ -863,6 +864,10 @@ pub fn build_exec_env(
         env.extend(helper_pairs);
     }
 
+    if let Some(path) = toolchain::command_step_path() {
+        env.push(("PATH".to_string(), path.to_string_lossy().to_string()));
+    }
+
     if let Some(pbp) = project_base_path {
         env.push((exec_context::PROJECT_PATH.to_string(), pbp.to_string()));
     }
@@ -1075,6 +1080,18 @@ mod tests {
 
         assert!(helper.is_some());
         assert!(helper.unwrap().ends_with("runner-steps.sh"));
+    }
+
+    #[test]
+    fn build_exec_env_includes_toolchain_path() {
+        let env = build_exec_env("nodejs", None, None, "{}", Some("/tmp/ext"), None, None, None);
+
+        let path = env
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.clone());
+
+        assert!(path.is_some(), "expected extension env to include PATH");
     }
 
     #[test]
