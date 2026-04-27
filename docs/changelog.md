@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.105.0] - 2026-04-27
+
+### Added
+- derive PR next-action labels
+- add workspace portfolio view
+- add failing check drilldown
+
+### Fixed
+- use installed id for rig lookup
+
 ## [0.104.0] - 2026-04-27
 
 ### Added
