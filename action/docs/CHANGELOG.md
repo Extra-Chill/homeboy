@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [1.17.0] - 2026-04-27
+
+### Added
+- add opt-in differential gating
+
 ## [1.16.12] - 2026-04-27
 
 ### Fixed
