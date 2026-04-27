@@ -12,9 +12,9 @@ use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 
 /// Thresholds for structural findings.
-const GOD_FILE_LINE_THRESHOLD: usize = 1000;
-const HIGH_ITEM_COUNT_THRESHOLD: usize = 15;
-const DIRECTORY_SPRAWL_FILE_THRESHOLD: usize = 25;
+const GOD_FILE_LINE_THRESHOLD: usize = 1500;
+const HIGH_ITEM_COUNT_THRESHOLD: usize = 30;
+const DIRECTORY_SPRAWL_FILE_THRESHOLD: usize = 50;
 
 /// Known source file extensions for structural analysis.
 /// Matches the walker's known extensions so we analyze the same files.
@@ -61,7 +61,7 @@ pub(crate) fn analyze_structure(root: &Path) -> Vec<Finding> {
         // Check line count
         let line_count = content.lines().count();
         if line_count > GOD_FILE_LINE_THRESHOLD {
-            let suggestion = "Consider decomposing into focused modules.                      Use `homeboy refactor move` to extract related groups of items.".to_string();
+            let suggestion = "Review whether the file has crossed a real responsibility boundary before extracting focused modules.".to_string();
             findings.push(Finding {
                 convention: "structural".to_string(),
                 severity: Severity::Warning,
@@ -86,7 +86,7 @@ pub(crate) fn analyze_structure(root: &Path) -> Vec<Finding> {
                     "File has {} top-level items (threshold: {})",
                     item_count, HIGH_ITEM_COUNT_THRESHOLD
                 ),
-                suggestion: "Group related items and extract into focused modules".to_string(),
+                suggestion: "Review whether the top-level items represent multiple responsibilities before extracting focused modules".to_string(),
                 kind: AuditFinding::HighItemCount,
             });
         }
@@ -107,7 +107,7 @@ pub(crate) fn analyze_structure(root: &Path) -> Vec<Finding> {
                 count, DIRECTORY_SPRAWL_FILE_THRESHOLD
             ),
             suggestion:
-                "Directory sprawl detected — group related files into focused subdirectories"
+                "Review whether the directory contains multiple discoverable subdomains before adding subdirectories"
                     .to_string(),
             kind: AuditFinding::DirectorySprawl,
         });
@@ -369,13 +369,13 @@ export default function main() {}
     }
 
     #[test]
-    fn god_file_detected() {
+    fn god_file_detected_at_actionable_threshold() {
         let dir = std::env::temp_dir().join("homeboy_structural_god_test");
         let _ = std::fs::create_dir_all(&dir);
 
-        // Create a file with 1100 lines (above 1000-line threshold)
+        // Create a file above the actionable threshold.
         let mut content = String::new();
-        for i in 0..1100 {
+        for i in 0..1600 {
             content.push_str(&format!("fn func_{}() {{}}\n", i));
         }
         std::fs::write(dir.join("big.rs"), &content).unwrap();
@@ -391,7 +391,40 @@ export default function main() {}
 
         assert_eq!(god_findings.len(), 1, "Should flag big.rs as god file");
         assert_eq!(god_findings[0].file, "big.rs");
-        assert!(god_findings[0].description.contains("1100 lines"));
+        assert!(god_findings[0].description.contains("1600 lines"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn count_only_structural_smells_below_actionable_threshold_are_ignored() {
+        let dir = std::env::temp_dir().join("homeboy_structural_review_only_test");
+        let root = dir.join("src/core");
+        let _ = std::fs::create_dir_all(&root);
+
+        let mut large_but_not_actionable = String::new();
+        large_but_not_actionable.push_str("fn large() {\n");
+        for i in 0..1200 {
+            large_but_not_actionable.push_str(&format!("    let line_{} = {};\n", i, i));
+        }
+        large_but_not_actionable.push_str("}\n");
+        std::fs::write(root.join("large.rs"), large_but_not_actionable).unwrap();
+
+        let mut many_but_not_actionable = String::new();
+        for i in 0..25 {
+            many_but_not_actionable.push_str(&format!("fn item_{}() {{}}\n", i));
+        }
+        std::fs::write(root.join("many_items.rs"), many_but_not_actionable).unwrap();
+
+        for i in 0..40 {
+            std::fs::write(root.join(format!("module_{}.rs", i)), "pub fn run() {}\n").unwrap();
+        }
+
+        let findings = analyze_structure(&dir);
+        assert!(
+            findings.is_empty(),
+            "Moderate count-only smells should stay review-only instead of producing audit findings"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
