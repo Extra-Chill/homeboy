@@ -126,7 +126,7 @@ Use these outputs to gate downstream jobs:
 | `scope` | No | `changed` | Execution scope: `changed` for PRs or `full` for entire codebase |
 | `lint-changed-only` | No | `true` | Deprecated: use `scope` instead |
 | `test-scope` | No | `changed` | Deprecated: use `scope` instead |
-| `auto-issue` | No | `false` | Auto-file issue on non-PR failures |
+| `auto-issue` | No | *(auto)* | Auto-file issue on non-PR failures. Empty means enabled for non-PR events and disabled for PRs; set `false` to suppress issue filing. |
 | `comment-key` | No | *(auto)* | Shared PR comment key so multiple jobs aggregate into one sticky comment |
 | `comment-section-key` | No | *(auto)* | Section key within the shared PR comment |
 | `comment-section-title` | No | *(auto)* | Visible heading for this section in the shared PR comment |
@@ -327,28 +327,149 @@ jobs:
     # ... cargo-dist, crates.io, Homebrew
 ```
 
-### Recommended Org-wide CI Profile
+### Recommended CI Profile
 
-Use two workflows:
+Prefer two lanes:
 
-1. **PR workflow** (fast + scoped)
-   - `commands: lint,test,audit`
-   - `scope: 'changed'`
-   - `concurrency` group per PR number to cancel stale runs
+1. **PR lane:** fast, scoped feedback for the author.
+2. **Main lane:** full-suite signal that can maintain issues when something reaches `main`.
 
-2. **Release workflow** (continuous)
-   - trigger on `push` to `main` + `workflow_dispatch`
-   - `commands: lint,test,audit` with `auto-issue: 'true'`
-   - separate release workflow uses `commands: release`
-   - quality gate before release
+This keeps PR comments lightweight while preventing the issue tracker from becoming a noisy task queue for speculative or changed-file-only findings.
 
-> **Avoid cron-based release triggers.** A `schedule` cron fires every 15 minutes regardless of whether there are new commits — that's 96 unnecessary CI runs per day. Push-to-main triggers the release pipeline only when there's actually something to release.
+#### Two-workflow strategy
 
-### Scope behavior
+Use `homeboy-pr.yml` for scoped PR checks:
 
-`scope: 'changed'` is a thin wrapper around the Homeboy CLI. On PRs, the action resolves the base SHA and passes `--changed-since <base-sha>` to Homeboy for `audit`, `lint`, and `test`.
+```yaml
+name: Homeboy PR
+
+on:
+  pull_request:
+
+concurrency:
+  group: homeboy-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          extension: wordpress
+          commands: lint,test,audit
+          scope: changed
+          php-version: '8.3'
+```
+
+Use `homeboy-main.yml` for full checks and issue maintenance:
+
+```yaml
+name: Homeboy Main
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: homeboy-main-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          extension: wordpress
+          commands: lint,test,audit
+          scope: full
+          auto-issue: 'true'
+          php-version: '8.3'
+```
+
+If you also run continuous release, keep release as its own workflow or separate job after the full quality gate. Release jobs should run `commands: release`; they should not be the only place full `lint,test,audit` runs.
+
+> **Avoid cron-based release triggers.** A `schedule` cron fires whether there are new commits or not. Push-to-main triggers the quality/release pipeline only when there is new code to evaluate.
+
+#### Single workflow with event-aware inputs
+
+If you prefer one workflow, make the scope and issue-filing policy event-aware:
+
+```yaml
+name: Homeboy CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: Extra-Chill/homeboy-action@v1
+        with:
+          extension: wordpress
+          commands: lint,test,audit
+          scope: ${{ github.event_name == 'pull_request' && 'changed' || 'full' }}
+          auto-issue: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
+          php-version: '8.3'
+```
+
+#### Compatibility notes
+
+`scope: changed` is a thin wrapper around the Homeboy CLI. On PRs, the action resolves the base SHA and passes `--changed-since <base-sha>` to Homeboy for `audit`, `lint`, and `test`.
+
+Use changed scope for a command only when the installed Homeboy CLI and extension implement changed-file semantics for that command. If a command does not support changed scope yet, prefer one of these patterns:
+
+- Omit that command from the PR lane and keep it in the main lane.
+- Run that command with `scope: full` in a separate PR job if the runtime cost is acceptable.
+- Fix changed-scope support in Homeboy or the extension rather than emulating it in workflow YAML.
 
 The action does **not** probe for or emulate missing CLI features. If the installed Homeboy version does not support a requested scoped command, that is a Homeboy CLI compatibility problem to fix in Homeboy itself.
+
+#### Audit signal hygiene
+
+Use auto-filed issues as a **task queue**, not as a dumping ground for every metric Homeboy can calculate. A good auto-filed issue should be current, concrete, and safe for a human or coding agent to act on.
+
+Recommended policy:
+
+| Signal type | CI handling |
+|-------------|-------------|
+| High-confidence, low-count findings | Allow auto-issue filing. These make good task-queue entries. |
+| Test failures with clear clusters | Allow auto-issue filing from the main lane. Keep PR feedback in comments. |
+| High-count trend metrics | Keep in job summaries or dashboards. Do not turn every item into a task issue. |
+| Known noisy or research-only audit rules | Suppress from auto-issue filing with Homeboy audit config; keep them visible in full audit output. |
+
+The main lane is the right place to maintain issue state because it runs against the full repository and can update, close, or suppress stale findings consistently. PR lanes should focus on author feedback and should not maintain long-lived audit issues from partial data.
+
+When a rule is useful as a health metric but not safe as an actionable task list, configure it as dashboard-only or suppress it from issue reconciliation in Homeboy's audit config. Homeboy Action passes `--suppress-from-config` to `homeboy issues reconcile`, so repository-level audit policy is honored during auto-issue maintenance.
 
 ### Fork PR Note
 
