@@ -30,6 +30,7 @@ mod facade_passthrough;
 mod field_patterns;
 mod findings;
 pub mod fingerprint;
+mod global_env_guard;
 mod idiomatic;
 pub(crate) mod impact;
 pub(crate) mod import_matching;
@@ -630,6 +631,17 @@ fn audit_internal(
             requested_findings.len()
         );
         all_findings.extend(requested_findings);
+    }
+
+    // Phase 4v: Process-global environment mutation guard consistency in tests.
+    let env_guard_findings = global_env_guard::run(&all_fingerprints);
+    if !env_guard_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Global env guards: {} finding(s) (test env mutation without shared guard)",
+            env_guard_findings.len()
+        );
+        all_findings.extend(env_guard_findings);
     }
 
     // Phase 4s: Shared scaffolding detection — groups of classes sharing the
