@@ -319,6 +319,145 @@ mod dag {
     }
 }
 
+// ---- Extension-backed lifecycle steps ---------------------------------------
+
+mod extension_lifecycle {
+    use std::collections::HashMap;
+    use std::fs;
+
+    use crate::component::ScopedExtensionConfig;
+    use crate::rig::pipeline::run_pipeline;
+    use crate::rig::spec::{ComponentSpec, PipelineStep, RigSpec};
+    use crate::test_support;
+
+    fn rig_with_step(component_path: String, step: PipelineStep) -> RigSpec {
+        let mut component_settings = HashMap::new();
+        component_settings.insert(
+            "rig_local".to_string(),
+            serde_json::Value::String("yes".to_string()),
+        );
+
+        let mut extensions = HashMap::new();
+        extensions.insert(
+            "nodejs".to_string(),
+            ScopedExtensionConfig {
+                version: None,
+                settings: component_settings,
+            },
+        );
+
+        let mut components = HashMap::new();
+        components.insert(
+            "studio".to_string(),
+            ComponentSpec {
+                path: component_path,
+                remote_url: None,
+                triage_remote_url: None,
+                stack: None,
+                branch: None,
+                extensions: Some(extensions),
+            },
+        );
+
+        let mut pipeline = HashMap::new();
+        pipeline.insert("up".to_string(), vec![step]);
+
+        RigSpec {
+            id: "extension-step-test".to_string(),
+            description: String::new(),
+            components,
+            services: Default::default(),
+            symlinks: Vec::new(),
+            shared_paths: Vec::new(),
+            resources: Default::default(),
+            pipeline,
+            bench: None,
+            app_launcher: None,
+            bench_workloads: Default::default(),
+        }
+    }
+
+    fn write_nodejs_build_extension(home: &std::path::Path) {
+        let extension_dir = home.join(".config/homeboy/extensions/nodejs");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("nodejs.json"),
+            r#"{
+                "name": "Node.js",
+                "version": "1.0.0",
+                "build": {
+                    "extension_script": "build.sh",
+                    "command_template": "sh {{script}}",
+                    "script_names": []
+                }
+            }"#,
+        )
+        .expect("extension manifest");
+        fs::write(
+            extension_dir.join("build.sh"),
+            "printf '%s\n' \"$HOMEBOY_COMPONENT_PATH\" > build-path.txt\nprintf '%s\n' \"$HOMEBOY_SETTINGS_JSON\" > build-settings.json\n",
+        )
+        .expect("extension script");
+    }
+
+    #[test]
+    fn test_extension_build_uses_rig_component_path_and_extension_config() {
+        test_support::with_isolated_home(|home| {
+            write_nodejs_build_extension(home.path());
+            let component_dir = tempfile::tempdir().expect("component dir");
+            let component_path = component_dir.path().to_string_lossy().to_string();
+            let rig = rig_with_step(
+                component_path.clone(),
+                PipelineStep::Extension {
+                    step_id: None,
+                    depends_on: Vec::new(),
+                    component: "studio".to_string(),
+                    op: "build".to_string(),
+                    label: None,
+                },
+            );
+
+            let out = run_pipeline(&rig, "up", true).expect("pipeline");
+            assert!(out.is_success(), "outcomes: {:?}", out.steps);
+            assert_eq!(out.steps[0].kind, "extension");
+
+            let build_path = fs::read_to_string(component_dir.path().join("build-path.txt"))
+                .expect("build path marker");
+            assert_eq!(build_path.trim(), component_path);
+
+            let settings = fs::read_to_string(component_dir.path().join("build-settings.json"))
+                .expect("settings marker");
+            assert!(settings.contains("rig_local"), "settings: {settings}");
+            assert!(settings.contains("yes"), "settings: {settings}");
+        });
+    }
+
+    #[test]
+    fn test_extension_step_reports_unsupported_op() {
+        let component_dir = tempfile::tempdir().expect("component dir");
+        let rig = rig_with_step(
+            component_dir.path().to_string_lossy().to_string(),
+            PipelineStep::Extension {
+                step_id: None,
+                depends_on: Vec::new(),
+                component: "studio".to_string(),
+                op: "setup".to_string(),
+                label: None,
+            },
+        );
+
+        let out = run_pipeline(&rig, "up", true).expect("pipeline");
+        assert!(!out.is_success());
+        assert_eq!(out.steps[0].kind, "extension");
+        let error = out.steps[0].error.as_deref().expect("error");
+        assert!(
+            error.contains("extension op 'setup' is not supported"),
+            "{error}"
+        );
+        assert!(error.contains("supported ops: build"), "{error}");
+    }
+}
+
 // ---- Patch step end-to-end -------------------------------------------------
 //
 // The patch step is the smallest of the three new pipeline kinds and the

@@ -7,8 +7,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::stack::{
-    self, ApplyOutput, DiffOutput, GitRef, InspectOptions, InspectOutput, PushOutput,
-    RebaseOutput, StackPrEntry, StackSpec, StatusOutput, SyncOutput,
+    self, ApplyOutput, DiffOutput, GitRef, InspectOptions, InspectOutput, PushOutput, RebaseOutput,
+    StackPrEntry, StackSpec, StatusOutput, SyncOutput,
 };
 
 use super::CmdResult;

@@ -166,42 +166,42 @@ fn test_sync_entry_serializes_counts_and_refs() {
     components.insert("a".to_string(), component("/tmp/a", Some("a-stack")));
     let rig = rig_with_components(components);
 
-	let report = run_sync_with(&rig, false, |stack_id, _dry_run| {
-		Ok(SyncOutput {
-			preview: SyncPreview {
-				stack_id: stack_id.to_string(),
-				component_path: "/tmp/component".to_string(),
-				branch: "dev/combined-fixes".to_string(),
-				base: GitRef {
-					remote: "origin".to_string(),
-					branch: "main".to_string(),
-				}
-				.display(),
-				target: GitRef {
-					remote: "fork".to_string(),
-					branch: "dev/combined-fixes".to_string(),
-				}
-				.display(),
-				dropped: Vec::new(),
-				replayed: Vec::new(),
-				uncertain: Vec::new(),
-				target_exists: true,
-				target_ahead: Some(0),
-				target_behind: Some(0),
-				dropped_count: 1,
-				replayed_count: 3,
-				uncertain_count: 0,
-				would_mutate: true,
-				blocked: false,
-				success: true,
-			},
-			applied: Vec::new(),
-			dry_run: false,
-			picked_count: 2,
-			skipped_count: 1,
-			success: true,
-		})
-	});
+    let report = run_sync_with(&rig, false, |stack_id, _dry_run| {
+        Ok(SyncOutput {
+            preview: SyncPreview {
+                stack_id: stack_id.to_string(),
+                component_path: "/tmp/component".to_string(),
+                branch: "dev/combined-fixes".to_string(),
+                base: GitRef {
+                    remote: "origin".to_string(),
+                    branch: "main".to_string(),
+                }
+                .display(),
+                target: GitRef {
+                    remote: "fork".to_string(),
+                    branch: "dev/combined-fixes".to_string(),
+                }
+                .display(),
+                dropped: Vec::new(),
+                replayed: Vec::new(),
+                uncertain: Vec::new(),
+                target_exists: true,
+                target_ahead: Some(0),
+                target_behind: Some(0),
+                dropped_count: 1,
+                replayed_count: 3,
+                uncertain_count: 0,
+                would_mutate: true,
+                blocked: false,
+                success: true,
+            },
+            applied: Vec::new(),
+            dry_run: false,
+            picked_count: 2,
+            skipped_count: 1,
+            success: true,
+        })
+    });
 
     let json = serde_json::to_string(&report).expect("serialize");
     assert!(json.contains("\"component_id\":\"a\""));

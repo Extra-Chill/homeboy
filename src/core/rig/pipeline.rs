@@ -22,6 +22,7 @@ use super::spec::{
 use super::stack as rig_stack;
 use super::state::{now_rfc3339, RigState, SharedPathState};
 use super::toolchain;
+use crate::component::Component;
 use crate::error::{Error, Result};
 
 /// Result of one pipeline step.
@@ -117,6 +118,7 @@ fn run_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
     match step {
         PipelineStep::Service { id, op, .. } => run_service_step(rig, id, *op),
         PipelineStep::Build { component, .. } => run_build_step(rig, component),
+        PipelineStep::Extension { component, op, .. } => run_extension_step(rig, component, op),
         PipelineStep::Git {
             component,
             op,
@@ -244,6 +246,7 @@ fn step_id(step: &PipelineStep) -> Option<&str> {
     match step {
         PipelineStep::Service { step_id, .. }
         | PipelineStep::Build { step_id, .. }
+        | PipelineStep::Extension { step_id, .. }
         | PipelineStep::Git { step_id, .. }
         | PipelineStep::Stack { step_id, .. }
         | PipelineStep::Command { step_id, .. }
@@ -258,6 +261,7 @@ fn step_dependencies(step: &PipelineStep) -> &[String] {
     match step {
         PipelineStep::Service { depends_on, .. }
         | PipelineStep::Build { depends_on, .. }
+        | PipelineStep::Extension { depends_on, .. }
         | PipelineStep::Git { depends_on, .. }
         | PipelineStep::Stack { depends_on, .. }
         | PipelineStep::Command { depends_on, .. }
@@ -293,9 +297,23 @@ fn resolve_component_path(rig: &RigSpec, component_id: &str) -> Result<(Componen
     Ok((component.clone(), path))
 }
 
+fn resolve_rig_component(rig: &RigSpec, component_id: &str) -> Result<Component> {
+    let (component, path) = resolve_component_path(rig, component_id)?;
+    let mut resolved = Component {
+        id: component_id.to_string(),
+        local_path: path,
+        remote_url: component.remote_url,
+        triage_remote_url: component.triage_remote_url,
+        extensions: component.extensions,
+        ..Component::default()
+    };
+    resolved.resolve_remote_path();
+    Ok(resolved)
+}
+
 fn run_build_step(rig: &RigSpec, component_id: &str) -> Result<()> {
-    let (_, path) = resolve_component_path(rig, component_id)?;
-    let (result, exit_code) = crate::build::run_with_path(component_id, &path)?;
+    let component = resolve_rig_component(rig, component_id)?;
+    let (result, exit_code) = crate::build::run_component(&component)?;
 
     if exit_code != 0 {
         let detail = match &result {
@@ -326,6 +344,20 @@ fn run_build_step(rig: &RigSpec, component_id: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn run_extension_step(rig: &RigSpec, component_id: &str, op: &str) -> Result<()> {
+    match op {
+        "build" => run_build_step(rig, component_id),
+        other => Err(Error::rig_pipeline_failed(
+            &rig.id,
+            "extension",
+            format!(
+                "extension op '{}' is not supported for component '{}'; supported ops: build",
+                other, component_id
+            ),
+        )),
+    }
 }
 
 fn run_git_step(rig: &RigSpec, component_id: &str, op: GitOp, extra_args: &[String]) -> Result<()> {
@@ -1019,6 +1051,7 @@ fn step_kind(step: &PipelineStep) -> &'static str {
     match step {
         PipelineStep::Service { .. } => "service",
         PipelineStep::Build { .. } => "build",
+        PipelineStep::Extension { .. } => "extension",
         PipelineStep::Git { .. } => "git",
         PipelineStep::Stack { .. } => "stack",
         PipelineStep::Command { .. } => "command",
@@ -1037,6 +1070,14 @@ fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> String {
         } => label
             .clone()
             .unwrap_or_else(|| format!("build {}", component)),
+        PipelineStep::Extension {
+            component,
+            op,
+            label,
+            ..
+        } => label
+            .clone()
+            .unwrap_or_else(|| format!("extension {} {}", op, component)),
         PipelineStep::Git {
             component,
             op,

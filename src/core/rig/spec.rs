@@ -362,6 +362,28 @@ pub enum PipelineStep {
         label: Option<String>,
     },
 
+    /// Delegate a component lifecycle operation to its configured extension.
+    ///
+    /// V1 intentionally exposes only operations that Homeboy core already knows
+    /// how to dispatch through extension infrastructure. Use `command` for
+    /// one-off shell escape hatches; add new extension ops only when the
+    /// extension layer owns the corresponding lifecycle contract.
+    Extension {
+        /// Optional stable node ID for dependency-aware pipeline ordering.
+        #[serde(default, rename = "id", skip_serializing_if = "Option::is_none")]
+        step_id: Option<String>,
+        /// Step IDs that must run before this step.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        depends_on: Vec<String>,
+        /// Component ID — must exist in the rig's `components` map.
+        component: String,
+        /// Extension-owned operation. V1 supports `build`.
+        op: String,
+        /// Human-readable label shown during execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Delegate to `homeboy git`.
     ///
     /// Wraps homeboy's own git primitive with a path override so rigs can

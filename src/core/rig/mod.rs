@@ -7,8 +7,8 @@
 //! Phase 1 scope:
 //! - Spec schema with components, services, symlinks, shared paths, and linear pipelines
 //! - Service kinds: `http-static`, `command`, `external` (adopted)
-//! - Pipeline step kinds: `service`, `build`, `git`, `stack`, `command`,
-//!   `symlink`, `shared-path`, `patch`, `check`
+//! - Pipeline step kinds: `service`, `build`, `extension`, `git`, `stack`,
+//!   `command`, `symlink`, `shared-path`, `patch`, `check`
 //! - Check probes: `http`, `file` (+ `contains`), `command`, `newer_than`
 //!   (mtime / process-start staleness)
 //! - State file at `~/.config/homeboy/rigs/{id}.state/state.json`

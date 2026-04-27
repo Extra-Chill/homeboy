@@ -237,6 +237,34 @@ fn test_spec_build_step_parses() {
 }
 
 #[test]
+fn test_spec_extension_step_parses() {
+    let json = r#"{
+        "id": "r",
+        "components": { "studio": { "path": "/tmp/studio" } },
+        "pipeline": {
+            "up": [
+                { "kind": "extension", "component": "studio", "op": "build", "label": "extension build" }
+            ]
+        }
+    }"#;
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    let steps = spec.pipeline.get("up").unwrap();
+    match &steps[0] {
+        PipelineStep::Extension {
+            component,
+            op,
+            label,
+            ..
+        } => {
+            assert_eq!(component, "studio");
+            assert_eq!(op, "build");
+            assert_eq!(label.as_deref(), Some("extension build"));
+        }
+        other => panic!("expected Extension, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_spec_pipeline_step_id_and_dependencies_parse() {
     let json = r#"{
         "id": "r",
