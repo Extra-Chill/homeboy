@@ -1152,6 +1152,8 @@ func testHomeboyCLIHelperCommandShapes() throws {
         "log line counts are converted before parser validation", code: 85)
     try requireContains("[\"-C\", String(context)]",
         "log context counts are converted before parser validation", code: 86)
+    try requireContains("let args = [\"status\", \"--full\"]",
+        "workspace discovery uses homeboy status --full", code: 92)
 
     try requireNotContains("[\"--type\", type]",
         "file find no longer uses stale --type flag", code: 87)
@@ -1163,6 +1165,8 @@ func testHomeboyCLIHelperCommandShapes() throws {
         "helper commands do not pass literal limit interpolation templates", code: 90)
     try requireNotContains(#"\(context)"#,
         "helper commands do not pass literal context interpolation templates", code: 91)
+    try requireNotContains("var args = [\"init\"]",
+        "workspace discovery no longer uses deprecated homeboy init", code: 93)
 
     print("")
 }

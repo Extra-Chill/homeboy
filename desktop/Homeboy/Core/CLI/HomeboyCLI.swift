@@ -366,9 +366,9 @@ struct ProjectMutationOutput: Decodable {
     let deleted: [String]?
 }
 
-// MARK: - Init Output Models (NEW)
+// MARK: - Workspace Status Output Models
 
-/// Output from `homeboy init --json` command
+/// Output from `homeboy status --full --json` command
 /// Provides full context including extensions, components, and config gaps
 struct InitOutput: Decodable {
     let command: String
@@ -535,16 +535,13 @@ private init() {}
         return decoded
     }
 
-    // MARK: - Init Command
+    // MARK: - Workspace Status Command
 
-    /// Run `homeboy init` to get full context including extensions and components
+    /// Run `homeboy status --full` to get full context including extensions and components
     /// This is the primary way the desktop app discovers the workspace state
-    func initWorkspace(path: String? = nil) async throws -> InitOutput {
-        var args = ["init"]
-        if let p = path {
-            args.append(contentsOf: ["--path", p])
-        }
-        return try await cli.executeCommand(args, dataType: InitOutput.self, source: "Init", timeout: 30)
+    func initWorkspace() async throws -> InitOutput {
+        let args = ["status", "--full"]
+        return try await cli.executeCommand(args, dataType: InitOutput.self, source: "Status", timeout: 30)
     }
 
     // MARK: - Git Commands
