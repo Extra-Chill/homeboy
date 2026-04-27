@@ -20,6 +20,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/github-release.sh"
+
 RELEASE_BRANCH="${RELEASE_BRANCH:-main}"
 DRY_RUN="${RELEASE_DRY_RUN:-false}"
 
@@ -220,6 +223,8 @@ ACTUAL_BUMP="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.bump_type // em
 ACTUAL_VERSION="${ACTUAL_VERSION:-${NEW_VERSION}}"
 ACTUAL_TAG="${ACTUAL_TAG:-v${NEW_VERSION}}"
 ACTUAL_BUMP="${ACTUAL_BUMP:-${BUMP_TYPE}}"
+
+homeboy_verify_github_release_exists "${ACTUAL_TAG}" "${GITHUB_REPOSITORY:-}"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

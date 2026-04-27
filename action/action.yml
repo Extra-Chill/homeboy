@@ -140,6 +140,10 @@ inputs:
     description: 'Branch that releases are allowed from.'
     required: false
     default: 'main'
+  release-verify-github-release:
+    description: 'Verify that a successful release has a GitHub Release for the emitted tag. Set false for tag-only release consumers.'
+    required: false
+    default: 'true'
 
 outputs:
   results:
@@ -486,6 +490,7 @@ runs:
         GH_TOKEN: ${{ inputs.app-token || github.token }}
         RELEASE_DRY_RUN: ${{ inputs.release-dry-run }}
         RELEASE_BRANCH: ${{ inputs.release-branch }}
+        HOMEBOY_VERIFY_GITHUB_RELEASE: ${{ inputs.release-verify-github-release }}
         COMPONENT_NAME: ${{ inputs.component }}
       run: bash ${{ github.action_path }}/scripts/release/run-release.sh
 

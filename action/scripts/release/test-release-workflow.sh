@@ -38,5 +38,8 @@ assert_not_contains 'docs/CHANGELOG.md' "${WORKFLOW}" "release workflow does not
 
 assert_contains 'commands: release' "${WORKFLOW}" "release workflow delegates to homeboy-action release command"
 assert_not_contains '--no-github-release' "${RUN_RELEASE}" "run-release lets Homeboy core create GitHub Releases"
+assert_contains 'homeboy_verify_github_release_exists "${ACTUAL_TAG}" "${GITHUB_REPOSITORY:-}"' "${RUN_RELEASE}" "run-release verifies the GitHub Release after successful release"
+assert_contains 'release-verify-github-release:' "${ROOT_DIR}/action.yml" "action exposes GitHub Release verification toggle"
+assert_contains 'HOMEBOY_VERIFY_GITHUB_RELEASE: ${{ inputs.release-verify-github-release }}' "${ROOT_DIR}/action.yml" "action passes verification toggle to release script"
 
 printf 'All release workflow checks passed.\n'
