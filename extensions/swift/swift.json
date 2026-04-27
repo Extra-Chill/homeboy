@@ -6,9 +6,10 @@
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["swift", "xcodeproj", "xcworkspace", "yml"],
-    "capabilities": ["validate"]
+    "capabilities": ["fingerprint", "validate"]
   },
   "scripts": {
+    "fingerprint": "scripts/fingerprint.sh",
     "validate": "scripts/validate.sh"
   },
   "platform": {

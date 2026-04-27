@@ -44,7 +44,9 @@ assert_true("Tests" in mapping.get("test_dirs", []), "missing uppercase Tests di
 assert_true(mapping.get("test_file_pattern") == "{dir}/{name}Tests.{ext}", "unexpected test file pattern")
 
 capabilities = provides.get("capabilities", [])
+assert_true("fingerprint" in capabilities, "missing fingerprint capability")
 assert_true("validate" in capabilities, "missing validate capability")
+assert_true(manifest.get("scripts", {}).get("fingerprint") == "scripts/fingerprint.sh", "missing fingerprint script")
 assert_true(manifest.get("scripts", {}).get("validate") == "scripts/validate.sh", "missing validate script")
 assert_true(manifest.get("lint", {}).get("extension_script") == "scripts/lint-runner.sh", "missing lint runner")
 assert_true(manifest.get("test", {}).get("extension_script") == "scripts/test-runner.sh", "missing test runner")
