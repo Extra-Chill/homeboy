@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.3.0] - 2026-04-27
+
+### Added
+- add CLT-safe validation runner
+
 ## [2.2.0] - 2026-04-27
 
 ### Added
