@@ -269,7 +269,7 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
 
                     if removeResponse.success {
                         // Re-add with new tail lines
-                        let addArgs = ["project", "pin", "add", projectId, log.path, "--type", "log", "--tail", String(lines)]
+                        let addArgs = ["project", "pin", "add", "--type", "log", "--tail", String(lines), projectId, log.path]
                         let addResponse = try await cli.execute(addArgs, timeout: 30)
 
                         if !addResponse.success {
@@ -310,8 +310,8 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
 
         Task {
             do {
-                // homeboy project pin add <project> <path> --type log --tail <lines> --json
-                let args = ["project", "pin", "add", projectId, log.path, "--type", "log", "--tail", String(log.tailLines)]
+                // homeboy project pin add --type log --tail <lines> <project> <path>
+                let args = ["project", "pin", "add", "--type", "log", "--tail", String(log.tailLines), projectId, log.path]
                 let response = try await cli.execute(args, timeout: 30)
 
                 if response.success {

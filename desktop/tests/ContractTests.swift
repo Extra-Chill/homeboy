@@ -135,6 +135,9 @@ func runTests(testDir: String) throws {
     // Test 7: versionTargets parsing
     try testVersionTargetsParsing(fixturesDir: fixturesDir, decoder: decoder)
 
+    // Test 8: Remote Log Viewer pin command shape
+    try testRemoteLogViewerPinCommandShape(testDir: testDir)
+
     print("")
     print("All contract tests passed")
 }
@@ -504,6 +507,39 @@ func testVersionTargetsParsing(fixturesDir: String, decoder: JSONDecoder) throws
             userInfo: [NSLocalizedDescriptionKey: "versionPattern computed property should not be nil"])
     }
     print("[PASS] versionPattern computed property: present")
+    print("")
+}
+
+func testRemoteLogViewerPinCommandShape(testDir: String) throws {
+    print("Test: Remote Log Viewer pin command shape")
+    print("-----------------------------------------")
+
+    let sourcePath = URL(fileURLWithPath: testDir)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/RemoteLogViewerViewModel.swift")
+
+    let source = try String(contentsOf: sourcePath, encoding: .utf8)
+    let currentPinCommand = #"["project", "pin", "add", "--type", "log", "--tail", String(log.tailLines), projectId, log.path]"#
+    let currentTailUpdateCommand = #"["project", "pin", "add", "--type", "log", "--tail", String(lines), projectId, log.path]"#
+    let oldPositionalFirstCommand = #"["project", "pin", "add", projectId, log.path, "--type", "log", "--tail"#
+
+    guard source.contains(currentPinCommand) else {
+        throw NSError(domain: "ContractTest", code: 70,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewer pin command does not use current homeboy project pin add syntax"])
+    }
+    print("[PASS] Pin command puts --type/--tail before project/path")
+
+    guard source.contains(currentTailUpdateCommand) else {
+        throw NSError(domain: "ContractTest", code: 71,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewer tail update command does not preserve current pin syntax"])
+    }
+    print("[PASS] Tail-line update command preserves --tail before project/path")
+
+    guard !source.contains(oldPositionalFirstCommand) else {
+        throw NSError(domain: "ContractTest", code: 72,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewer still contains old positional-first project pin add syntax"])
+    }
+    print("[PASS] Old positional-first log pin syntax is absent")
     print("")
 }
 
