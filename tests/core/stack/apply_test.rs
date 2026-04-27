@@ -10,53 +10,10 @@
 //! fixture spec described in the PR body.
 
 use crate::stack::apply::{checkout_force, cherry_pick, url_matches, CherryPickResult};
-use std::fs;
 use std::process::Command;
-use tempfile::TempDir;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Init an empty git repo with one initial commit on `main`.
-fn init_repo() -> (TempDir, String) {
-    let dir = TempDir::new().expect("tempdir");
-    let path = dir.path().to_string_lossy().to_string();
-    run(&path, &["init", "-q", "-b", "main"]);
-    run(&path, &["config", "user.email", "test@test.com"]);
-    run(&path, &["config", "user.name", "Test"]);
-    fs::write(dir.path().join("README.md"), "initial\n").unwrap();
-    run(&path, &["add", "."]);
-    run(&path, &["commit", "-q", "-m", "initial"]);
-    (dir, path)
-}
-
-fn run(path: &str, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .unwrap_or_else(|e| panic!("git {:?}: {}", args, e));
-    assert!(
-        out.status.success(),
-        "git {:?} failed: {} / {}",
-        args,
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-fn write_and_commit(dir: &TempDir, path: &str, file: &str, body: &str, msg: &str) -> String {
-    fs::write(dir.path().join(file), body).unwrap();
-    run(path, &["add", "."]);
-    run(path, &["commit", "-q", "-m", msg]);
-    let out = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(path)
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+mod support;
+use support::{commit_file, git, init_repo, rev_parse};
 
 // ---------------------------------------------------------------------------
 // cherry_pick
@@ -67,9 +24,9 @@ fn cherry_pick_succeeds_picked() {
     let (dir, path) = init_repo();
     // Create a feature branch with a non-conflicting commit, then go back
     // to main and cherry-pick it cleanly.
-    run(&path, &["checkout", "-q", "-b", "feature"]);
-    let sha = write_and_commit(&dir, &path, "a.txt", "feature change\n", "feature commit");
-    run(&path, &["checkout", "-q", "main"]);
+    git(&path, &["checkout", "-q", "-b", "feature"]);
+    let sha = commit_file(&dir, &path, "a.txt", "feature change\n", "feature commit");
+    git(&path, &["checkout", "-q", "main"]);
 
     let result = cherry_pick(&path, &sha).expect("cherry_pick");
     assert!(
@@ -92,8 +49,8 @@ fn cherry_pick_skips_empty_when_change_already_in_base() {
     let (dir, path) = init_repo();
     // Make a commit on main, branch off, attempt to cherry-pick it back —
     // the change is already in base, so the pick should be empty.
-    let sha = write_and_commit(&dir, &path, "a.txt", "shared change\n", "shared commit");
-    run(&path, &["checkout", "-q", "-b", "feature"]);
+    let sha = commit_file(&dir, &path, "a.txt", "shared change\n", "shared commit");
+    git(&path, &["checkout", "-q", "-b", "feature"]);
 
     let result = cherry_pick(&path, &sha).expect("cherry_pick");
     assert!(
@@ -121,10 +78,10 @@ fn cherry_pick_returns_conflict_with_message() {
     let (dir, path) = init_repo();
     // Both branches modify the same line of the same file → guaranteed
     // conflict on cherry-pick.
-    write_and_commit(&dir, &path, "f.txt", "main version\n", "main edit");
-    run(&path, &["checkout", "-q", "-b", "feature", "HEAD~1"]);
-    let conflict_sha = write_and_commit(&dir, &path, "f.txt", "feature version\n", "feature edit");
-    run(&path, &["checkout", "-q", "main"]);
+    commit_file(&dir, &path, "f.txt", "main version\n", "main edit");
+    git(&path, &["checkout", "-q", "-b", "feature", "HEAD~1"]);
+    let conflict_sha = commit_file(&dir, &path, "f.txt", "feature version\n", "feature edit");
+    git(&path, &["checkout", "-q", "main"]);
 
     let result = cherry_pick(&path, &conflict_sha).expect("cherry_pick");
     match result {
@@ -150,34 +107,21 @@ fn cherry_pick_returns_conflict_with_message() {
 fn checkout_force_recreates_branch_from_base() {
     let (dir, path) = init_repo();
     // Add commits to main so HEAD ≠ initial.
-    write_and_commit(&dir, &path, "x.txt", "x\n", "x");
-    write_and_commit(&dir, &path, "y.txt", "y\n", "y");
+    commit_file(&dir, &path, "x.txt", "x\n", "x");
+    commit_file(&dir, &path, "y.txt", "y\n", "y");
 
     // Tag main HEAD as our "base remote ref" stand-in.
-    run(&path, &["tag", "base"]);
+    git(&path, &["tag", "base"]);
 
     // Create a divergent target branch with a stale commit.
-    run(&path, &["checkout", "-q", "-b", "target"]);
-    write_and_commit(&dir, &path, "stale.txt", "stale\n", "stale on target");
+    git(&path, &["checkout", "-q", "-b", "target"]);
+    commit_file(&dir, &path, "stale.txt", "stale\n", "stale on target");
 
     // Now force-recreate target from base — stale commit must vanish.
     checkout_force(&path, "target", "base").expect("checkout_force");
 
     // HEAD should be at base (not the stale commit).
-    let head = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(&path)
-        .output()
-        .unwrap();
-    let base_sha = Command::new("git")
-        .args(["rev-parse", "base"])
-        .current_dir(&path)
-        .output()
-        .unwrap();
-    assert_eq!(
-        head.stdout, base_sha.stdout,
-        "after force-checkout, HEAD must match base"
-    );
+    assert_eq!(rev_parse(&path, "HEAD"), rev_parse(&path, "base"));
 
     // The stale file must be gone.
     assert!(

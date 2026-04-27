@@ -483,6 +483,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_run() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(run(dir.path()).is_empty());
+    }
+
+    #[test]
     fn extracts_rust_struct_fields() {
         let content = r#"
 pub struct Config {
@@ -662,12 +668,20 @@ struct Foo {
     std: io::Result<()>,
 }
 "#;
+    }
+
+    #[test]
+    fn fixture_two() {
         let _ = r#"
 struct Foo {
     std: fs::PathBuf,
     std: io::Result<()>,
 }
 "#;
+    }
+
+    #[test]
+    fn fixture_three() {
         let _ = r#"
 struct Foo {
     std: fs::PathBuf,

@@ -7,56 +7,9 @@
 //! GitHub) — `no_pr: true` keeps tests deterministic.
 
 use crate::stack::inspect::{inspect_at, InspectOptions};
-use std::fs;
-use std::process::Command;
-use tempfile::TempDir;
 
-/// Create a fresh git repo with a single committed file.
-fn init_repo() -> (TempDir, String) {
-    let dir = TempDir::new().expect("tempdir");
-    let path = dir.path().to_string_lossy().to_string();
-    Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(&path)
-        .output()
-        .expect("git init");
-    Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(&path)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(&path)
-        .output()
-        .unwrap();
-    fs::write(dir.path().join("README.md"), "initial\n").unwrap();
-    Command::new("git")
-        .args(["add", "."])
-        .current_dir(&path)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-q", "-m", "initial"])
-        .current_dir(&path)
-        .output()
-        .unwrap();
-    (dir, path)
-}
-
-fn add_commit(dir: &TempDir, path: &str, file: &str, contents: &str, message: &str) {
-    fs::write(dir.path().join(file), contents).unwrap();
-    Command::new("git")
-        .args(["add", "."])
-        .current_dir(path)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-q", "-m", message])
-        .current_dir(path)
-        .output()
-        .unwrap();
-}
+mod support;
+use support::{commit_file, git, init_repo};
 
 #[test]
 fn empty_stack_when_branch_is_at_base() {
@@ -85,15 +38,11 @@ fn empty_stack_when_branch_is_at_base() {
 #[test]
 fn lists_commits_oldest_first_over_explicit_base() {
     let (dir, path) = init_repo();
-    Command::new("git")
-        .args(["tag", "base"])
-        .current_dir(&path)
-        .output()
-        .unwrap();
+    git(&path, &["tag", "base"]);
 
-    add_commit(&dir, &path, "a.txt", "a\n", "first new");
-    add_commit(&dir, &path, "b.txt", "b\n", "second new");
-    add_commit(&dir, &path, "c.txt", "c\n", "third new");
+    commit_file(&dir, &path, "a.txt", "a\n", "first new");
+    commit_file(&dir, &path, "b.txt", "b\n", "second new");
+    commit_file(&dir, &path, "c.txt", "c\n", "third new");
 
     let out = inspect_at(
         None,

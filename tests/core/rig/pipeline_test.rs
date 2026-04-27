@@ -480,13 +480,11 @@ mod patch {
 mod shared_path {
     use std::collections::HashMap;
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
-
-    use tempfile::TempDir;
 
     use crate::rig::pipeline::{cleanup_shared_paths, run_pipeline};
     use crate::rig::spec::{PipelineStep, RigSpec, SharedPathOp, SharedPathSpec};
     use crate::rig::state::RigState;
+    use crate::test_support::with_isolated_home;
 
     fn rig_with_shared_path(id: &str, shared: SharedPathSpec, op: SharedPathOp) -> RigSpec {
         let mut pipeline = HashMap::new();
@@ -510,25 +508,6 @@ mod shared_path {
             bench_workloads: Default::default(),
             app_launcher: None,
         }
-    }
-
-    fn home_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
-        let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var("HOME").ok();
-        let dir = TempDir::new().expect("home tempdir");
-        std::env::set_var("HOME", dir.path());
-        let result = body(&dir);
-        match prior {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        drop(guard);
-        result
     }
 
     fn shared(link: &std::path::Path, target: &std::path::Path) -> SharedPathSpec {

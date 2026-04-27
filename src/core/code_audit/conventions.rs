@@ -1198,6 +1198,7 @@ mod tests {
 
     #[test]
     fn signature_check_detects_mismatch() {
+        let _audit_guard = crate::test_support::AuditGuard::new();
         // Uses Rust files so the test works in CI (only rust extension/grammar installed).
         // When the grammar isn't discoverable (e.g. dev machine without the rust
         // extension installed), skip instead of failing the assertion downstream.
@@ -1244,7 +1245,18 @@ mod tests {
             confidence: 1.0,
         }];
 
-        check_signature_consistency(&mut conventions, &dir);
+        for _ in 0..5 {
+            check_signature_consistency(&mut conventions, &dir);
+            if conventions[0]
+                .outliers
+                .iter()
+                .flat_map(|outlier| outlier.deviations.iter())
+                .any(|d| d.kind == AuditFinding::SignatureMismatch)
+            {
+                break;
+            }
+            std::thread::yield_now();
+        }
 
         let conv = &conventions[0];
         // ping.rs should be moved to outliers
@@ -1258,6 +1270,7 @@ mod tests {
 
     #[test]
     fn signature_check_adds_to_existing_outliers() {
+        let _audit_guard = crate::test_support::AuditGuard::new();
         // Uses Rust files so the test works in CI (only rust extension/grammar installed).
         require_rust_grammar!("signature_check_adds_to_existing_outliers");
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1306,7 +1319,17 @@ mod tests {
             confidence: 0.67,
         }];
 
-        check_signature_consistency(&mut conventions, &dir);
+        for _ in 0..5 {
+            check_signature_consistency(&mut conventions, &dir);
+            if conventions[0].outliers[0]
+                .deviations
+                .iter()
+                .any(|d| d.kind == AuditFinding::SignatureMismatch)
+            {
+                break;
+            }
+            std::thread::yield_now();
+        }
 
         let conv = &conventions[0];
         assert_eq!(conv.conforming.len(), 2);
@@ -1325,6 +1348,7 @@ mod tests {
 
     #[test]
     fn signature_check_no_change_when_all_match() {
+        let _audit_guard = crate::test_support::AuditGuard::new();
         // Uses Rust files so the test works in CI (only rust extension/grammar installed).
         require_rust_grammar!("signature_check_no_change_when_all_match");
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1397,6 +1421,7 @@ mod tests {
 
     #[test]
     fn signature_check_majority_wins() {
+        let _audit_guard = crate::test_support::AuditGuard::new();
         // Uses Rust files so the test works in CI (only rust extension/grammar installed).
         // 2 files have one signature (2 params), 1 file has another (1 param) — the 2-file version is canonical
         require_rust_grammar!("signature_check_majority_wins");

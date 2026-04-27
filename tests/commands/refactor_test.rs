@@ -62,28 +62,3 @@ fn test_apply_plan_skeletons() {
 
     let _ = fs::remove_dir_all(root);
 }
-
-#[test]
-fn test_run() {
-    // Command dispatch is exercised indirectly by command tests and CLI snapshots.
-    // Keep this named coverage test to satisfy audit's method mapping.
-    assert!(true);
-}
-
-#[test]
-fn test_run_rename() {
-    // run_rename behavior is covered by refactor::rename core tests.
-    assert!(true);
-}
-
-#[test]
-fn test_run_add() {
-    // run_add mode routing is validated in command-level integration paths.
-    assert!(true);
-}
-
-#[test]
-fn test_run_add_from_audit() {
-    // run_add_from_audit parsing/wiring is exercised by add-from-audit flows.
-    assert!(true);
-}

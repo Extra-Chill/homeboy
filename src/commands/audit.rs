@@ -220,6 +220,7 @@ mod tests {
     /// Fixes are now owned by `homeboy refactor --from audit --write`.
     #[test]
     fn audit_detects_outliers_in_convention_group() {
+        let _audit_guard = crate::test_support::AuditGuard::new();
         let root = tmp_dir("audit-read-only");
         fs::create_dir_all(root.join("commands")).unwrap();
 

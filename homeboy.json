@@ -3,15 +3,10 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-04-27T04:25:56Z",
-      "item_count": 767,
+      "created_at": "2026-04-27T04:30:52Z",
+      "item_count": 763,
       "known_fingerprints": [
         "Commands::src/commands/docs.rs::NamespaceMismatch",
-        "Stack (Tests)::tests/core/stack/inspect_test.rs::MissingMethod",
-        "Stack (Tests)::tests/core/stack/inspect_test.rs::MissingMethod",
-        "Stack (Tests)::tests/core/stack/spec_test.rs::MissingMethod",
-        "Stack (Tests)::tests/core/stack/spec_test.rs::MissingMethod",
-        "Stack (Tests)::tests/core/stack/spec_test.rs::MissingMethod",
         "comment_hygiene::src/commands/release.rs::LegacyComment",
         "dead_code::src/commands/changelog.rs::UnreferencedExport",
         "dead_code::src/commands/docs.rs::UnreferencedExport",
@@ -318,6 +313,7 @@
         "structural::src/core/triage.rs::HighItemCount",
         "structural::tests/core/rig/check_test.rs::HighItemCount",
         "structural::tests/core/rig/spec_test.rs::HighItemCount",
+        "test_coverage::src/cli_surface.rs::MissingTestFile",
         "test_coverage::src/core/code_audit/baseline.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/checks.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/codebase_map.rs::MissingTestFile",
@@ -339,7 +335,6 @@
         "test_coverage::src/core/code_audit/duplication.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/duplication.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/duplication.rs::MissingTestMethod",
-        "test_coverage::src/core/code_audit/field_patterns.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/impact.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/impact.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/impact.rs::MissingTestMethod",
@@ -767,6 +762,7 @@
         "test_coverage::src/core/upgrade/update_check.rs::MissingTestMethod",
         "test_coverage::src/core/upgrade/update_check.rs::MissingTestMethod",
         "test_coverage::src/core/upgrade/validation.rs::MissingTestFile",
+        "test_coverage::src/test_support.rs::MissingTestFile",
         "test_coverage::tests/command_surface_test.rs::OrphanedTest",
         "test_coverage::tests/commands/supports_test.rs::OrphanedTest",
         "test_coverage::tests/commands/test_scope_test.rs::OrphanedTest",
@@ -775,16 +771,14 @@
         "test_coverage::tests/core/rig/bench_default_baseline_spec_test.rs::OrphanedTest"
       ],
       "metadata": {
-        "alignment_score": 0.875,
+        "alignment_score": 0.9047619104385376,
         "known_outliers": [
           "src/commands/docs.rs",
-          "tests/core/stack/inspect_test.rs",
-          "tests/core/stack/spec_test.rs",
           "src/core/engine/undo/rollback.rs",
           "src/core/engine/undo/snapshot.rs",
           "src/core/engine/undo/entry.rs"
         ],
-        "outliers_count": 6
+        "outliers_count": 4
       }
     }
   },

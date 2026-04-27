@@ -6,46 +6,18 @@
 //! `run` dispatcher minimal and the contract auditable from one
 //! place.
 //!
-//! Each test that reads a rig spec from disk does so under an
-//! isolated `HOME` tempdir, mirroring `runner_test.rs::with_isolated_home`
-//! so concurrent test threads don't race on `paths::homeboy()`.
-
-use std::sync::{Mutex, OnceLock};
-
-use tempfile::TempDir;
+//! Each test that reads a rig spec from disk does so under the shared
+//! isolated-`HOME` guard so parallel rig tests do not race on `paths::homeboy()`.
 
 use super::{maybe_expand_default_baseline, BenchArgs, BenchRunArgs};
 use crate::commands::utils::args::{
     BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
 };
-
-/// Serializes `HOME` env-var mutation across dispatch tests so
-/// concurrent threads can't clobber each other's `~/.config/homeboy/rigs/`
-/// fixture targets. Mirrors `runner_test.rs`.
-fn home_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-/// Run `body` with `HOME` pointed at a fresh tempdir, restoring the
-/// prior value when `body` returns.
-fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
-    let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let prior = std::env::var("HOME").ok();
-    let dir = TempDir::new().expect("tempdir");
-    std::env::set_var("HOME", dir.path());
-    let result = body(&dir);
-    match prior {
-        Some(v) => std::env::set_var("HOME", v),
-        None => std::env::remove_var("HOME"),
-    }
-    drop(guard);
-    result
-}
+use crate::test_support::with_isolated_home;
 
 /// Write a rig spec JSON under `~/.config/homeboy/rigs/{id}.json` for
 /// the duration of an isolated-`HOME` block.
-fn write_rig_fixture(home: &TempDir, id: &str, json: &str) {
+fn write_rig_fixture(home: &tempfile::TempDir, id: &str, json: &str) {
     let dir = home.path().join(".config").join("homeboy").join("rigs");
     std::fs::create_dir_all(&dir).expect("mkdir rigs");
     std::fs::write(dir.join(format!("{}.json", id)), json).expect("write fixture");
