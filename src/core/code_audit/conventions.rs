@@ -213,11 +213,6 @@ pub enum AuditFinding {
     /// Comments/docblocks promise network/site-option storage while nearby code
     /// uses single-site get_option/update_option calls.
     OptionScopeDrift,
-    /// Test function is structurally too weak to prove product behavior.
-    VacuousTest,
-    /// Test mutates a process-global environment variable behind a local guard
-    /// instead of a shared test-support guard.
-    InconsistentGlobalEnvGuard,
 }
 
 impl AuditFinding {
@@ -269,8 +264,6 @@ impl AuditFinding {
             "json_like_exact_match",
             "constant_backed_slug_literal",
             "option_scope_drift",
-            "vacuous_test",
-            "inconsistent_global_env_guard",
         ]
     }
 }
