@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.13.0] - 2026-04-27
+
+### Added
+- declare drift selection config
+
 ## [1.12.1] - 2026-04-27
 
 ### Fixed
