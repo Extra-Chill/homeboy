@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::code_audit::{AuditFinding, FindingConfidence};
+
 /// One row of incoming findings: "command produced N findings of category X
 /// for component Y." This is the input grain reconcile reasons over.
 ///
@@ -32,6 +34,11 @@ pub struct IssueGroup {
     /// them in. Empty falls back to a minimal "<count> findings" body.
     #[serde(default)]
     pub body: String,
+    /// Optional confidence tier for this group. Audit callers can pass this
+    /// through from the finding stream; when omitted, reconcile falls back to
+    /// category-level defaults.
+    #[serde(default)]
+    pub confidence: Option<FindingConfidence>,
 }
 
 /// One issue from the tracker.
@@ -70,7 +77,7 @@ impl TrackedIssueState {
 }
 
 /// Configuration that affects reconcile decisions but not finding shape.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconcileConfig {
     /// Categories whose findings are unconditionally muted. No new issue is
     /// filed; existing OPEN issues for these categories are left alone.
@@ -86,6 +93,12 @@ pub struct ReconcileConfig {
     #[serde(default)]
     pub suppression_labels: Vec<String>,
 
+    /// Categories that should remain visible in reports but should not file
+    /// brand-new tracker issues by default. Existing open issues can still be
+    /// updated/closed so old tracker state converges naturally.
+    #[serde(default = "default_review_only_categories")]
+    pub review_only_categories: Vec<String>,
+
     /// When true, also refresh the body of closed-not_planned issues with
     /// the latest finding count + run link. This keeps the closed issue
     /// useful as a "current state" reference even though it stays closed.
@@ -94,8 +107,35 @@ pub struct ReconcileConfig {
     pub refresh_closed_not_planned: bool,
 }
 
+impl Default for ReconcileConfig {
+    fn default() -> Self {
+        Self {
+            suppressed_categories: Vec::new(),
+            suppression_labels: Vec::new(),
+            review_only_categories: default_review_only_categories(),
+            refresh_closed_not_planned: default_refresh_closed(),
+        }
+    }
+}
+
 fn default_refresh_closed() -> bool {
     true
+}
+
+pub fn default_review_only_categories() -> Vec<String> {
+    AuditFinding::all_names()
+        .iter()
+        .copied()
+        .filter(|name| {
+            let Ok(finding) = name.parse::<AuditFinding>() else {
+                return false;
+            };
+
+            finding.confidence() == FindingConfidence::Heuristic
+                || matches!(finding, AuditFinding::UnusedParameter)
+        })
+        .map(String::from)
+        .collect()
 }
 
 /// One concrete action the reconciler decided on. Order matters in the plan:
@@ -169,6 +209,9 @@ pub enum ReconcileSkipReason {
     ClosedNotPlannedNoRefresh,
     /// No findings AND no existing open issue → nothing to do.
     NoFindingsNoIssue,
+    /// Category is advisory/review-only, so reconcile will not file a brand-new
+    /// tracker issue for it by default.
+    ReviewOnlyCategory,
 }
 
 /// The full reconciliation plan: every action, in execution order.

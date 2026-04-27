@@ -98,11 +98,12 @@ fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
     // Find field GROUPS that co-occur — fields that appear together in
     // the same structs across multiple locations.
     // Strategy: for each pair of fields, check if they always appear together.
-    let repeated_fields: Vec<&FieldSignature> = field_locations
+    let mut repeated_fields: Vec<&FieldSignature> = field_locations
         .iter()
         .filter(|(_, locs)| locs.len() >= MIN_OCCURRENCES)
         .map(|(field, _)| field)
         .collect();
+    repeated_fields.sort_by(|a, b| a.name.cmp(&b.name).then(a.field_type.cmp(&b.field_type)));
 
     // Group repeated fields by the set of structs they appear in.
     // Fields that appear in the exact same set of structs form a co-occurring group.
@@ -122,7 +123,11 @@ fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
 
     let mut findings = Vec::new();
 
-    for (locations, fields) in &struct_set_to_fields {
+    let mut grouped_entries: Vec<(&Vec<(String, String)>, &Vec<FieldSignature>)> =
+        struct_set_to_fields.iter().collect();
+    grouped_entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    for (locations, fields) in grouped_entries {
         if fields.len() < MIN_GROUP_SIZE {
             continue;
         }
@@ -130,7 +135,9 @@ fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
             continue;
         }
 
-        let field_names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        let mut sorted_fields = fields.clone();
+        sorted_fields.sort_by(|a, b| a.name.cmp(&b.name).then(a.field_type.cmp(&b.field_type)));
+        let field_names: Vec<&str> = sorted_fields.iter().map(|f| f.name.as_str()).collect();
         let struct_names: Vec<String> = locations
             .iter()
             .map(|(file, name)| format!("{}::{}", file, name))
@@ -595,6 +602,46 @@ class {} {{
         assert!(findings
             .iter()
             .all(|f| f.kind == AuditFinding::RepeatedFieldPattern));
+    }
+
+    #[test]
+    fn repeated_pattern_description_orders_fields_deterministically() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        for name in &["alpha.rs", "beta.rs", "gamma.rs"] {
+            std::fs::write(
+                src.join(name),
+                format!(
+                    "struct {} {{\n    zebra: bool,\n    alpha: bool,\n    middle: bool,\n}}\n",
+                    name.replace(".rs", "").to_uppercase()
+                ),
+            )
+            .unwrap();
+        }
+
+        let findings = detect_repeated_field_patterns(dir.path());
+        assert!(
+            !findings.is_empty(),
+            "Should detect repeated [alpha, middle, zebra] pattern"
+        );
+        assert!(
+            findings.iter().all(|f| f
+                .description
+                .contains("Repeated field group [alpha, middle, zebra]")),
+            "field order in descriptions must be stable and lexical: {:?}",
+            findings
+                .iter()
+                .map(|f| f.description.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.suggestion.contains("[alpha, middle, zebra]")),
+            "field order in suggestions must match descriptions"
+        );
     }
 
     #[test]

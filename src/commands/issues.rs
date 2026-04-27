@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 
+use homeboy::code_audit::FindingConfidence;
 use homeboy::issues::{
     apply_plan, reconcile, GithubTracker, IssueGroup, ReconcileConfig, ReconcilePlan,
     ReconcileResult, Tracker,
@@ -80,6 +81,12 @@ enum IssuesCommand {
         #[arg(long, value_name = "LABEL")]
         suppress_label: Vec<String>,
 
+        /// Override review-only categories (repeatable). Replaces the default
+        /// heuristic/threshold list and homeboy.json's
+        /// `issues.review_only_categories` when set.
+        #[arg(long, value_name = "CATEGORY")]
+        review_only_category: Vec<String>,
+
         /// Don't refresh the body of closed-not_planned issues with the
         /// latest finding count. Default is to refresh (so the closed
         /// issue stays useful as a "current state" reference).
@@ -146,6 +153,7 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
             suppress_from_config,
             suppress_category,
             suppress_label,
+            review_only_category,
             no_refresh_closed,
             list_limit,
             apply,
@@ -163,6 +171,7 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
                 suppress_from_config,
                 suppress_category,
                 suppress_label,
+                review_only_category,
                 no_refresh_closed,
             )?;
 
@@ -222,6 +231,7 @@ struct GroupRow {
     count: usize,
     label: String,
     body: String,
+    confidence: Option<FindingConfidence>,
 }
 
 impl FindingsInput {
@@ -235,6 +245,7 @@ impl FindingsInput {
                 count: row.count,
                 label: row.label,
                 body: row.body,
+                confidence: row.confidence,
             })
             .collect()
     }
@@ -307,7 +318,7 @@ fn parse_findings_value(value: Value) -> homeboy::Result<FindingsInput> {
             let row_obj = row_value.as_object().ok_or_else(|| {
                 homeboy::Error::validation_invalid_argument(
                     &format!("findings.groups.{}", category),
-                    "Each group must be a JSON object with `count`, optional `label`, optional `body`",
+                    "Each group must be a JSON object with `count`, optional `label`, optional `body`, optional `confidence`",
                     None,
                     None,
                 )
@@ -327,11 +338,32 @@ fn parse_findings_value(value: Value) -> homeboy::Result<FindingsInput> {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            groups.insert(category.clone(), GroupRow { count, label, body });
+            let confidence = row_obj
+                .get("confidence")
+                .and_then(|v| v.as_str())
+                .and_then(parse_confidence);
+            groups.insert(
+                category.clone(),
+                GroupRow {
+                    count,
+                    label,
+                    body,
+                    confidence,
+                },
+            );
         }
     }
 
     Ok(FindingsInput { command, groups })
+}
+
+fn parse_confidence(raw: &str) -> Option<FindingConfidence> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "structural" => Some(FindingConfidence::Structural),
+        "graph" => Some(FindingConfidence::Graph),
+        "heuristic" => Some(FindingConfidence::Heuristic),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -344,18 +376,22 @@ fn build_reconcile_config(
     suppress_from_config: bool,
     cli_categories: Vec<String>,
     cli_labels: Vec<String>,
+    cli_review_only_categories: Vec<String>,
     no_refresh_closed: bool,
 ) -> homeboy::Result<ReconcileConfig> {
     let mut config = ReconcileConfig {
-        suppressed_categories: Vec::new(),
-        suppression_labels: Vec::new(),
         refresh_closed_not_planned: !no_refresh_closed,
+        ..ReconcileConfig::default()
     };
 
     if suppress_from_config {
-        if let Some((suppressed, labels)) = read_suppressions(component_id, path)? {
+        if let Some(reconcile_config) = read_suppressions(component_id, path)? {
+            let (suppressed, labels, review_only) = reconcile_config;
             config.suppressed_categories = suppressed;
             config.suppression_labels = labels;
+            if let Some(review_only) = review_only {
+                config.review_only_categories = review_only;
+            }
         }
     }
 
@@ -365,6 +401,9 @@ fn build_reconcile_config(
     }
     if !cli_labels.is_empty() {
         config.suppression_labels = cli_labels;
+    }
+    if !cli_review_only_categories.is_empty() {
+        config.review_only_categories = cli_review_only_categories;
     }
 
     // Sane default for suppression_labels when neither config nor CLI set
@@ -383,7 +422,7 @@ fn build_reconcile_config(
 fn read_suppressions(
     component_id: &str,
     path: Option<&str>,
-) -> homeboy::Result<Option<(Vec<String>, Vec<String>)>> {
+) -> homeboy::Result<Option<(Vec<String>, Vec<String>, Option<Vec<String>>)>> {
     let component_dir = match path {
         Some(p) => PathBuf::from(p),
         None => match homeboy::component::resolve_effective(Some(component_id), None, None) {
@@ -417,10 +456,19 @@ fn read_suppressions(
         })
         .unwrap_or_default();
 
-    if categories.is_empty() && labels.is_empty() {
+    let review_only = raw
+        .pointer("/issues/review_only_categories")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        });
+
+    if categories.is_empty() && labels.is_empty() && review_only.is_none() {
         Ok(None)
     } else {
-        Ok(Some((categories, labels)))
+        Ok(Some((categories, labels, review_only)))
     }
 }
 
@@ -486,5 +534,56 @@ fn summarize_plan(plan: &ReconcilePlan) -> PlanSummary {
         close: counts.close,
         close_duplicate: counts.close_duplicate,
         skip: counts.skip,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_findings_accepts_confidence_per_group() {
+        let input = serde_json::json!({
+            "command": "audit",
+            "groups": {
+                "god_file": {
+                    "count": 2,
+                    "label": "god file",
+                    "body": "body",
+                    "confidence": "heuristic"
+                }
+            }
+        });
+
+        let parsed = parse_findings_value(input).unwrap();
+        let groups = parsed.into_groups("homeboy");
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].confidence, Some(FindingConfidence::Heuristic));
+    }
+
+    #[test]
+    fn default_reconcile_config_marks_thresholds_and_heuristics_review_only() {
+        let config = ReconcileConfig::default();
+
+        assert!(config.review_only_categories.contains(&"god_file".into()));
+        assert!(config
+            .review_only_categories
+            .contains(&"directory_sprawl".into()));
+        assert!(config
+            .review_only_categories
+            .contains(&"missing_test_file".into()));
+        assert!(config
+            .review_only_categories
+            .contains(&"parallel_implementation".into()));
+        assert!(config
+            .review_only_categories
+            .contains(&"unused_parameter".into()));
+        assert!(!config
+            .review_only_categories
+            .contains(&"unreferenced_export".into()));
+        assert!(!config
+            .review_only_categories
+            .contains(&"compiler_warning".into()));
     }
 }

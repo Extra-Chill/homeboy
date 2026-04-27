@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::code_audit::FindingConfidence;
+
 use super::plan::{
     IssueGroup, ReconcileAction, ReconcileConfig, ReconcilePlan, ReconcileSkipReason, TrackedIssue,
     TrackedIssueState,
@@ -60,6 +62,7 @@ pub fn reconcile(
             group.category.clone(),
         );
         let matches = by_category.get(&key).cloned().unwrap_or_default();
+        let review_only = is_review_only(group, config);
 
         // Phase 2: dispatch on (existing-issue-shape, count).
         let (open_matches, closed_matches): (Vec<_>, Vec<_>) =
@@ -163,6 +166,15 @@ pub fn reconcile(
                 }
                 TrackedIssueState::ClosedCompleted => {
                     // Resolved-then-returned: file a fresh issue.
+                    if review_only {
+                        actions.push(ReconcileAction::Skip {
+                            category: group.category.clone(),
+                            component_id: group.component_id.clone(),
+                            reason: ReconcileSkipReason::ReviewOnlyCategory,
+                        });
+                        continue;
+                    }
+
                     actions.push(ReconcileAction::FileNew {
                         command: group.command.clone(),
                         component_id: group.component_id.clone(),
@@ -179,6 +191,15 @@ pub fn reconcile(
         }
 
         // No issue ever existed (open or closed) for this category.
+        if review_only {
+            actions.push(ReconcileAction::Skip {
+                category: group.category.clone(),
+                component_id: group.component_id.clone(),
+                reason: ReconcileSkipReason::ReviewOnlyCategory,
+            });
+            continue;
+        }
+
         actions.push(ReconcileAction::FileNew {
             command: group.command.clone(),
             component_id: group.component_id.clone(),
@@ -191,6 +212,14 @@ pub fn reconcile(
     }
 
     ReconcilePlan { actions }
+}
+
+fn is_review_only(group: &IssueGroup, config: &ReconcileConfig) -> bool {
+    config
+        .review_only_categories
+        .iter()
+        .any(|category| category == &group.category)
+        || matches!(group.confidence, Some(FindingConfidence::Heuristic))
 }
 
 fn pick_preferred_closed<'a>(closed: &[&'a TrackedIssue]) -> Option<&'a TrackedIssue> {
@@ -285,6 +314,7 @@ mod tests {
             count,
             label: String::new(),
             body: format!("count={}", count),
+            confidence: None,
         }
     }
 
@@ -319,6 +349,7 @@ mod tests {
         ReconcileConfig {
             suppressed_categories: vec![],
             suppression_labels: vec!["wontfix".into(), "upstream-bug".into()],
+            review_only_categories: vec![],
             refresh_closed_not_planned: true,
         }
     }
@@ -474,6 +505,79 @@ mod tests {
         }
     }
 
+    #[test]
+    fn review_only_category_skips_brand_new_issue() {
+        let mut config = cfg();
+        config.review_only_categories = vec!["god_file".into()];
+        let groups = vec![group("god_file", 23)];
+
+        let plan = reconcile(&groups, &[], &config);
+
+        assert_eq!(plan.actions.len(), 1);
+        match &plan.actions[0] {
+            ReconcileAction::Skip { reason, .. } => {
+                assert_eq!(*reason, ReconcileSkipReason::ReviewOnlyCategory);
+            }
+            other => panic!("expected Skip(ReviewOnlyCategory), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn review_only_category_still_updates_existing_open_issue() {
+        let mut config = cfg();
+        config.review_only_categories = vec!["god_file".into()];
+        let groups = vec![group("god_file", 23)];
+        let existing = vec![issue(675, "god file", TrackedIssueState::Open, 17)];
+
+        let plan = reconcile(&groups, &existing, &config);
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(
+            matches!(&plan.actions[0], ReconcileAction::Update { number, .. } if *number == 675)
+        );
+    }
+
+    #[test]
+    fn review_only_category_does_not_refile_closed_completed_issue() {
+        let mut config = cfg();
+        config.review_only_categories = vec!["god_file".into()];
+        let groups = vec![group("god_file", 23)];
+        let existing = vec![issue(
+            675,
+            "god file",
+            TrackedIssueState::ClosedCompleted,
+            0,
+        )];
+
+        let plan = reconcile(&groups, &existing, &config);
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(matches!(
+            &plan.actions[0],
+            ReconcileAction::Skip {
+                reason: ReconcileSkipReason::ReviewOnlyCategory,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn heuristic_confidence_group_is_review_only_even_when_category_is_unknown() {
+        let mut heuristic = group("extension_specific_hint", 3);
+        heuristic.confidence = Some(FindingConfidence::Heuristic);
+
+        let plan = reconcile(&[heuristic], &[], &cfg());
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(matches!(
+            &plan.actions[0],
+            ReconcileAction::Skip {
+                reason: ReconcileSkipReason::ReviewOnlyCategory,
+                ..
+            }
+        ));
+    }
+
     // --------------------------------------------------------------- ROW 8
 
     #[test]
@@ -624,6 +728,7 @@ mod tests {
             count: 1,
             label: String::new(),
             body: String::new(),
+            confidence: None,
         }];
         let plan = reconcile(&groups, &[], &cfg());
         match &plan.actions[0] {
@@ -643,6 +748,7 @@ mod tests {
             count: 3,
             label: "i18n / l10n".into(),
             body: String::new(),
+            confidence: None,
         }];
         let plan = reconcile(&groups, &[], &cfg());
         match &plan.actions[0] {
