@@ -1140,6 +1140,7 @@ JSON
             exit_code: 0,
             iterations: 10,
             results: None,
+            gate_failures: Vec::new(),
             baseline_comparison: None,
             hints: None,
             rig_state: None,

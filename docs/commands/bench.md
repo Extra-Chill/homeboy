@@ -81,6 +81,35 @@ metadata such as `file`, `source`, `default_iterations`, and `tags`.
 This is the safe first step for agent-driven or CI-driven perf work: inspect
 what can be measured before deciding which full bench run is worth paying for.
 
+## Semantic Gates
+
+Bench runners can attach scenario-level correctness gates to non-timing
+metrics. Gates are evaluated after metrics are parsed and aggregated. Any
+failed gate marks the scenario and run failed, even when timing metrics
+improve, and the failure details are emitted before baseline comparison data
+in the JSON output.
+
+Supported operators are `eq`, `gte`, and `lte`:
+
+```json
+{
+  "id": "studio-agent-loop",
+  "iterations": 10,
+  "metrics": {
+    "p95_ms": 1200.0,
+    "assistant_message_count": 1,
+    "identifies_studio_rate": 1.0
+  },
+  "gates": [
+    { "metric": "assistant_message_count", "op": "gte", "value": 1 },
+    { "metric": "identifies_studio_rate", "op": "eq", "value": 1.0 }
+  ]
+}
+```
+
+Failed gates add `gate_results`, set the scenario's `passed` field to
+`false`, and add top-level `gate_failures` to the bench output.
+
 ## Examples
 
 ```bash

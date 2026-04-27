@@ -66,6 +66,8 @@ pub struct BenchRunWorkflowResult {
     pub exit_code: i32,
     pub iterations: u64,
     pub results: Option<BenchResults>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gate_failures: Vec<String>,
     pub baseline_comparison: Option<BenchBaselineComparison>,
     pub hints: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -336,7 +338,7 @@ pub fn run_main_bench_workflow(
         apply_scenario_filter(discovered, &args.scenario_ids)?;
     }
 
-    let (parsed, runner_success, runner_exit_code, failure_stderr_tail) = if args.runs > 1 {
+    let (mut parsed, runner_success, runner_exit_code, failure_stderr_tail) = if args.runs > 1 {
         run_sequential_runs(&execution_context, component, &args, run_dir)?
     } else if args.concurrency <= 1 {
         let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
@@ -365,11 +367,21 @@ pub fn run_main_bench_workflow(
         run_concurrent_instances(&execution_context, component, &args, run_dir)?
     };
 
-    let status = if runner_success { "passed" } else { "failed" };
+    let gate_failures = parsed
+        .as_mut()
+        .map(parsing::evaluate_gates)
+        .unwrap_or_default();
+    let gates_passed = gate_failures.is_empty();
+
+    let status = if runner_success && gates_passed {
+        "passed"
+    } else {
+        "failed"
+    };
 
     let rig_id = args.rig_id.as_deref();
 
-    if args.baseline_flags.baseline {
+    if args.baseline_flags.baseline && gates_passed {
         if let Some(ref r) = parsed {
             let _ = baseline::save_baseline(source_path, &args.component_id, r, rig_id)?;
         }
@@ -420,11 +432,20 @@ pub fn run_main_bench_workflow(
             ));
         }
     }
+    for failure in &gate_failures {
+        hints.push(failure.clone());
+    }
     hints.push("Full options: homeboy docs commands/bench".to_string());
 
     let hints = if hints.is_empty() { None } else { Some(hints) };
 
-    let exit_code = baseline_exit_override.unwrap_or(runner_exit_code);
+    let exit_code = if runner_exit_code != 0 {
+        runner_exit_code
+    } else if !gates_passed {
+        1
+    } else {
+        baseline_exit_override.unwrap_or(0)
+    };
     let failure = if parsed.is_none() && !runner_success {
         failure_stderr_tail.map(|stderr_tail| BenchRunFailure {
             component_id: args.component_id.clone(),
@@ -446,6 +467,7 @@ pub fn run_main_bench_workflow(
         exit_code,
         iterations: args.iterations,
         results: parsed,
+        gate_failures,
         baseline_comparison,
         hints,
         failure,
@@ -775,6 +797,9 @@ mod tests {
                     values: BTreeMap::new(),
                     distributions: BTreeMap::new(),
                 },
+                gates: Vec::new(),
+                gate_results: Vec::new(),
+                passed: true,
                 memory: None,
                 artifacts: BTreeMap::new(),
                 runs: None,
