@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.111.0] - 2026-04-27
+
+### Added
+- add read-only endpoint contract
+- add local HTTP daemon MVP
+- install configured component extensions
+- add extension lifecycle step
+
+### Fixed
+- bootstrap runner toolchain path
+- include nvm node bins in command path
+- bootstrap command step toolchain path
+
 ## [0.110.0] - 2026-04-27
 
 ### Added
