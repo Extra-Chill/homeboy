@@ -116,6 +116,7 @@ Use these outputs to gate downstream jobs:
 | `expected-commands` | No | *(falls back to `commands`)* | Full set of command types expected to run across the workflow (e.g. `audit,lint,test`). Set this on every invocation when a workflow splits audit/lint/test across separate steps, otherwise each invocation will close sibling invocations' issues during reconciliation. |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |
+| `differential-gating` | No | `false` | On PRs, compare `audit`/`test` counts against the base SHA and fail only when the PR is worse. Opt-in; `lint` still gates on exit code. PR autofix is skipped while enabled. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
 | `node-version` | No | | Node.js version (sets up via `actions/setup-node`) |
 | `autofix` | No | `false` | On PR failures, run safe autofixes, commit, push, and re-run checks |
@@ -454,6 +455,27 @@ Use changed scope for a command only when the installed Homeboy CLI and extensio
 
 The action does **not** probe for or emulate missing CLI features. If the installed Homeboy version does not support a requested scoped command, that is a Homeboy CLI compatibility problem to fix in Homeboy itself.
 
+### Differential gating
+
+Set `differential-gating: 'true'` to make PR `audit` and `test` checks compare against the pull request base SHA instead of failing solely because the current branch has existing debt:
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v1
+  with:
+    extension: rust
+    commands: audit,test,lint
+    differential-gating: 'true'
+```
+
+When enabled on pull requests:
+
+1. `audit` and `test` run in full-scope mode on the PR branch.
+2. The action temporarily checks out the base SHA in the same workspace and captures base `audit`/`test` JSON.
+3. The final gate passes `audit`/`test` failures when the parsed PR count is less than or equal to the parsed base count.
+4. `lint` is unchanged and still gates on the command exit code.
+
+If the baseline checkout cannot be run safely or the structured counts cannot be parsed, the original failure is preserved.
+
 #### Audit signal hygiene
 
 Use auto-filed issues as a **task queue**, not as a dumping ground for every metric Homeboy can calculate. A good auto-filed issue should be current, concrete, and safe for a human or coding agent to act on.
@@ -470,7 +492,6 @@ Recommended policy:
 The main lane is the right place to maintain issue state because it runs against the full repository and can update, close, or suppress stale findings consistently. PR lanes should focus on author feedback and should not maintain long-lived audit issues from partial data.
 
 When a rule is useful as a health metric but not safe as an actionable task list, configure it as dashboard-only or suppress it from issue reconciliation in Homeboy's audit config. Homeboy Action passes `--suppress-from-config` to `homeboy issues reconcile`, so repository-level audit policy is honored during auto-issue maintenance.
-
 ### Fork PR Note
 
 On fork-based pull requests, GitHub may provide a restricted `GITHUB_TOKEN` that cannot write PR comments. Homeboy Action treats the PR comment step as best-effort — lint/test/audit execution still runs and determines job pass/fail.

@@ -20,6 +20,12 @@ scope_flags_for() {
   fi
 
   case "${base_cmd}" in
+    audit|test)
+      if [ "${HOMEBOY_DIFFERENTIAL_GATING:-false}" = "true" ]; then
+        return
+      fi
+      printf '%s' "--changed-since ${SCOPE_BASE_REF}"
+      ;;
     audit|lint|test|refactor|review)
       printf '%s' "--changed-since ${SCOPE_BASE_REF}"
       ;;

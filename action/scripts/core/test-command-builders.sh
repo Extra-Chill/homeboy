@@ -38,6 +38,7 @@ assert_equals \
 # ── Scoped (changed mode) ──
 SCOPE_MODE="changed"
 SCOPE_BASE_REF="origin/main"
+unset HOMEBOY_DIFFERENTIAL_GATING || true
 assert_equals \
   "homeboy lint data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
@@ -57,6 +58,24 @@ assert_equals \
   "homeboy audit data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
   "audit keeps path with changed-since"
+
+HOMEBOY_DIFFERENTIAL_GATING="true"
+assert_equals \
+  "homeboy audit data-machine --path /tmp/workspace" \
+  "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
+  "differential audit uses full scope"
+
+assert_equals \
+  "homeboy test data-machine --path /tmp/workspace" \
+  "$(build_run_command "test" "${COMPONENT}" "${WORKSPACE}")" \
+  "differential test uses full scope"
+
+assert_equals \
+  "homeboy lint data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
+  "differential lint keeps changed scope"
+
+unset HOMEBOY_DIFFERENTIAL_GATING
 
 assert_equals \
   "homeboy review data-machine --path /tmp/workspace --report=pr-comment --changed-since origin/main" \

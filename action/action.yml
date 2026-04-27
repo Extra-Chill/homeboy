@@ -52,6 +52,10 @@ inputs:
     description: 'Additional arguments to pass to each command.'
     required: false
     default: ''
+  differential-gating:
+    description: 'On PRs, compare audit/test failure counts against the base SHA and fail only when the PR is worse. Opt-in; lint remains normal exit-code gating. PR autofix is skipped while enabled.'
+    required: false
+    default: 'false'
 
   # ── Environment setup ──
   auto-setup:
@@ -371,8 +375,26 @@ runs:
       env:
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
+        HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
         RUN_GROUP_PREFIX: homeboy
       run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
+
+    - name: Run baseline Homeboy commands
+      id: run-baseline-commands
+      continue-on-error: true
+      if: |
+        steps.check-pr-state.outputs.active != 'false'
+        && github.event_name == 'pull_request'
+        && inputs.differential-gating == 'true'
+        && steps.resolve-commands.outputs.resolved-commands != ''
+      shell: bash
+      env:
+        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
+        COMPONENT_NAME: ${{ inputs.component }}
+        EXTRA_ARGS: ${{ inputs.args }}
+        HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
+        RUN_GROUP_PREFIX: homeboy baseline
+      run: bash ${{ github.action_path }}/scripts/core/run-baseline-commands.sh
 
     # ── Phase 6: Autofix ──
     # Autofix defaults: enabled when app-token is provided.
@@ -385,6 +407,7 @@ runs:
         && github.event_name == 'pull_request'
         && steps.run-commands.outputs.results != ''
         && inputs.autofix == 'true'
+        && inputs.differential-gating != 'true'
         && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
       shell: bash
       env:
@@ -441,6 +464,7 @@ runs:
       shell: bash
       env:
         FIRST_RESULTS: ${{ steps.run-commands.outputs.results }}
+        HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
       run: bash ${{ github.action_path }}/scripts/core/select-final-results.sh
 
     - name: Generate failure digest
