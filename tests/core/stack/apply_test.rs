@@ -9,7 +9,10 @@
 //! End-to-end correctness is verified out-of-band via the live-verify
 //! fixture spec described in the PR body.
 
-use crate::stack::apply::{checkout_force, cherry_pick, url_matches, CherryPickResult};
+use crate::stack::apply::{checkout_force, cherry_pick, rebase, url_matches, CherryPickResult};
+use crate::stack::{save, GitRef, StackSpec};
+use crate::test_support::with_isolated_home;
+use std::fs;
 use std::process::Command;
 
 mod support;
@@ -128,6 +131,62 @@ fn checkout_force_recreates_branch_from_base() {
         !dir.path().join("stale.txt").exists(),
         "stale file should be removed by force-checkout"
     );
+}
+
+// ---------------------------------------------------------------------------
+// rebase
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rebase_rebuilds_target_without_editing_spec() {
+    with_isolated_home(|home| {
+        let (dir, path) = init_repo();
+        git(&path, &["remote", "add", "origin", &path]);
+        commit_file(&dir, &path, "base.txt", "base\n", "base commit");
+
+        // Target starts stale and must be rebuilt from origin/main.
+        git(&path, &["checkout", "-q", "-b", "stack-target"]);
+        commit_file(&dir, &path, "stale.txt", "stale\n", "stale target commit");
+        git(&path, &["checkout", "-q", "main"]);
+
+        let spec = StackSpec {
+            id: "rebase-no-edit".to_string(),
+            description: "prove rebase does not mutate specs".to_string(),
+            component: "homeboy".to_string(),
+            component_path: path.clone(),
+            base: GitRef {
+                remote: "origin".to_string(),
+                branch: "main".to_string(),
+            },
+            target: GitRef {
+                remote: "origin".to_string(),
+                branch: "stack-target".to_string(),
+            },
+            prs: Vec::new(),
+        };
+        save(&spec).expect("save stack spec");
+        let spec_path = home
+            .path()
+            .join(".config/homeboy/stacks/rebase-no-edit.json");
+        let before = fs::read_to_string(&spec_path).expect("read spec before rebase");
+
+        let output = rebase(&spec).expect("rebase stack");
+        assert!(output.success);
+        assert_eq!(output.picked_count, 0);
+        assert_eq!(output.skipped_count, 0);
+
+        let after = fs::read_to_string(&spec_path).expect("read spec after rebase");
+        assert_eq!(after, before, "stack rebase must not edit the spec file");
+
+        assert_eq!(
+            rev_parse(&path, "stack-target"),
+            rev_parse(&path, "origin/main")
+        );
+        assert!(
+            !dir.path().join("stale.txt").exists(),
+            "rebase should recreate target from base and remove stale files"
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------

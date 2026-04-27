@@ -73,8 +73,26 @@ pub struct ApplyOutput {
     pub success: bool,
 }
 
+/// Output envelope for `homeboy stack rebase`.
+///
+/// `rebase` intentionally reports the same data as `apply`: both verbs rebuild
+/// the target branch from base plus the PRs currently listed in the spec. The
+/// distinction is vocabulary — `rebase` is the upkeep-safe variant that never
+/// edits the spec, while `sync` adds spec maintenance on top.
+pub type RebaseOutput = ApplyOutput;
+
 /// Apply a stack spec: build `target` from `base + prs`.
 pub fn apply(spec: &StackSpec) -> Result<ApplyOutput> {
+    rebuild(spec, "apply")
+}
+
+/// Rebase a stack spec: rebuild `target` from `base + prs` without editing the
+/// stack spec, even when some listed PRs have merged upstream.
+pub fn rebase(spec: &StackSpec) -> Result<RebaseOutput> {
+    rebuild(spec, "rebase")
+}
+
+fn rebuild(spec: &StackSpec, rerun_verb: &str) -> Result<ApplyOutput> {
     let path = resolve_existing_component_path(spec)?;
 
     // 2. Fetch base — must succeed.
@@ -145,8 +163,8 @@ pub fn apply(spec: &StackSpec) -> Result<ApplyOutput> {
                     &pr.repo,
                     format!(
                         "{}\n  Resolve manually with standard git tools, then re-run \
-                         `homeboy stack apply {}`. (Phase 2 will add `--continue`.)",
-                        message, spec.id
+                         `homeboy stack {} {}`. (Phase 3 will add `--continue`.)",
+                        message, rerun_verb, spec.id
                     ),
                 ));
             }

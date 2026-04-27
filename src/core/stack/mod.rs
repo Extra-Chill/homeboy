@@ -16,13 +16,12 @@
 //! - Spec schema with `id` / `component` / `component_path` / `base` / `target` / `prs`
 //! - State directory at `~/.config/homeboy/stacks/{id}.json` (mirror of rig layout)
 //! - CLI verbs: `list`, `show`, `create`, `add-pr`, `remove-pr`, `apply`,
-//!   `status`, `inspect`
+//!   `rebase`, `sync`, `status`, `inspect`
 //! - Pause-and-resume on cherry-pick conflicts (apply exits non-zero with a
 //!   clear message; user resolves manually with raw git tools)
 //!
 //! Deferred to Phase 2+ (Extra-Chill/homeboy#1462):
-//! - `sync` (auto-drop merged PRs after rebase) — requires `rebase` first
-//! - `rebase`, `push`, `diff`, `continue` / `--reset` resume primitives
+//! - `push`, `diff`, `continue` / `--reset` resume primitives
 //! - Per-PR `--squash` / `--merge` / `--preserve` flags
 //! - Conflict resolution cache
 
@@ -35,7 +34,7 @@ pub mod spec;
 pub mod status;
 pub mod sync;
 
-pub use apply::{apply, AppliedPr, ApplyOutput, PickOutcome};
+pub use apply::{apply, rebase, AppliedPr, ApplyOutput, PickOutcome, RebaseOutput};
 pub use inspect::{inspect, inspect_at, InspectCommit, InspectOptions, InspectOutput, InspectPr};
 pub use push::{push, PushOutput, PushStatus};
 pub use spec::{
