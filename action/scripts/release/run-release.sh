@@ -83,6 +83,16 @@ write_release_outputs() {
   return 0
 }
 
+configure_release_git_auth() {
+  if [ "${DRY_RUN}" = "true" ] || [ -z "${GH_TOKEN:-}" ]; then
+    return 0
+  fi
+
+  local encoded_token
+  encoded_token="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
+  git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic ${encoded_token}"
+}
+
 COMP_ID="$(resolve_component_id)"
 
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -109,6 +119,7 @@ fi
 # PRs may merge while the pipeline is in flight. Pull before invoking Homeboy so
 # core releases from the actual branch head.
 git pull --ff-only origin "${RELEASE_BRANCH}" 2>/dev/null || true
+configure_release_git_auth
 
 RELEASE_OUTPUT_FILE="$(mktemp)"
 RELEASE_ARGS=(
