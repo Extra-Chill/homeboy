@@ -156,6 +156,14 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     fi
 fi
 
+CHANGED_TEST_FILES_JSON="[]"
+if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
+    CHANGED_TEST_FILES_JSON=$(printf '%s' "${HOMEBOY_CHANGED_TEST_FILES}" | php -r '
+        $files = array_values(array_filter(array_map("trim", explode("\n", stream_get_contents(STDIN)))));
+        echo json_encode($files, JSON_UNESCAPED_SLASHES);
+    ' 2>/dev/null || printf '[]')
+fi
+
 # PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
 # mount the component-under-test. When homeboy core tells us the canonical
 # component id (HOMEBOY_COMPONENT_ID), use it — basename($PLUGIN_PATH)
@@ -244,6 +252,7 @@ sed \
     -e "s|{{PLAYGROUND_DEP_MOUNTS}}|${PLAYGROUND_DEP_MOUNTS}|g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{CHANGED_TEST_FILES_JSON}}${WP_CONFIG_DEFINES_DELIM}${CHANGED_TEST_FILES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
 echo "Running PHPUnit tests via WordPress Playground..."

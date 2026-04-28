@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
+
+assert_contains() {
+    local file="$1"
+    local expected="$2"
+    if ! grep -Fq "$expected" "$file"; then
+        echo "Expected $file to contain: $expected" >&2
+        sed 's/^/  /' "$file" >&2
+        exit 1
+    fi
+}
+
+assert_not_contains() {
+    local file="$1"
+    local unexpected="$2"
+    if grep -Fq "$unexpected" "$file"; then
+        echo "Expected $file not to contain: $unexpected" >&2
+        sed 's/^/  /' "$file" >&2
+        exit 1
+    fi
+}
+
+component_dir="${TMPDIR}/component"
+mkdir -p "${component_dir}/inc" "${component_dir}/assets" "${EXTENSION_PATH}/node_modules/.bin"
+touch "${EXTENSION_PATH}/.eslintrc.json"
+printf '%s\n' '<?php' > "${component_dir}/inc/Thing.php"
+printf '%s\n' 'const answer = 42;' > "${component_dir}/assets/app.js"
+
+eslint_log="${TMPDIR}/eslint-args.txt"
+cat > "${EXTENSION_PATH}/node_modules/.bin/eslint" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "${ESLINT_LOG}"
+printf '[]\n'
+SH
+chmod +x "${EXTENSION_PATH}/node_modules/.bin/eslint"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component_dir" \
+HOMEBOY_COMPONENT_TEXT_DOMAIN="component" \
+HOMEBOY_SUMMARY_MODE=1 \
+HOMEBOY_LINT_GLOB="{${component_dir}/inc/Thing.php}" \
+ESLINT_LOG="$eslint_log" \
+    bash "${EXTENSION_PATH}/scripts/lint/eslint-runner.sh" > "${TMPDIR}/php-only.out"
+
+if [ -f "$eslint_log" ]; then
+    echo "Expected ESLint not to run for PHP-only glob" >&2
+    exit 1
+fi
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component_dir" \
+HOMEBOY_COMPONENT_TEXT_DOMAIN="component" \
+HOMEBOY_SUMMARY_MODE=1 \
+HOMEBOY_LINT_GLOB="{${component_dir}/inc/Thing.php,${component_dir}/assets/app.js}" \
+ESLINT_LOG="$eslint_log" \
+    bash "${EXTENSION_PATH}/scripts/lint/eslint-runner.sh" > "${TMPDIR}/mixed.out"
+
+assert_contains "${TMPDIR}/mixed.out" "Linting 1 JS files matching"
+assert_contains "$eslint_log" "${component_dir}/assets/app.js"
+assert_not_contains "$eslint_log" "${component_dir}/inc/Thing.php"
+
+echo "ESLint glob filter smoke passed"
