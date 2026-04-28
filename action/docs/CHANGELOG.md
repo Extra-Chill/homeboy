@@ -2,6 +2,23 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.1.0] - 2026-04-28
+
+### Added
+- expose bench as a CI command
+- install configured component extensions
+
+### Changed
+- delegate release decisions to homeboy
+- align v2 action channel
+
+### Fixed
+- keep failure cache outside checkout
+- fix(pr-comment): render unknown command status as warning
+- fail closed on malformed results
+- remove duplicated action footer
+- fall back when latest release asset is missing
+
 ## [1.17.3] - 2026-04-27
 
 ### Fixed
