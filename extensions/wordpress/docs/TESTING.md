@@ -1,9 +1,9 @@
 # Testing
 
 The WordPress extension runs PHPUnit inside [WordPress Playground][playground]
-(PHP-WASM + embedded SQLite). There is no host PHP, MySQL, or WordPress
-installation to configure. Components only need a `tests/` directory with
-PHPUnit test files.
+(PHP-WASM + embedded SQLite) by default. There is no host PHP, MySQL, or
+WordPress installation to configure. Components only need a `tests/` directory
+with PHPUnit test files.
 
 [playground]: https://www.npmjs.com/package/@wp-playground/cli
 
@@ -21,9 +21,10 @@ HOMEBOY_DEBUG=1 homeboy test <component-id>
 ```
 
 Tests run through `scripts/test/test-runner.sh`, which dispatches to the
-Playground runner (`test-runner-playground.sh` + `playground-runner.php`).
-The runner mounts the component under `/wordpress/wp-content/plugins/<slug>`,
-boots WordPress in-process, discovers test files, and runs PHPUnit.
+configured backend. The default Playground runner (`test-runner-playground.sh`
+and `playground-runner.php`) mounts the component under
+`/wordpress/wp-content/plugins/<slug>`, boots WordPress in-process, discovers
+test files, and runs PHPUnit.
 
 ## Requirements
 
@@ -37,6 +38,20 @@ A component needs:
 A component **must not** carry its own `tests/bootstrap.php` or
 `phpunit.xml` — the extension owns bootstrap. Local PHPUnit configs are
 rejected with a clear error.
+
+## Host smoke backend
+
+Pure PHP smoke suites can opt out of Playground and run directly under host
+PHP:
+
+```bash
+homeboy component set <component-id> test_backend host-smoke
+```
+
+The host-smoke backend discovers `tests/**/*-smoke.php`, runs each script in a
+separate `php` process, emits `HOST_SMOKE_*` markers, and fails fast with the
+failing script name. It does not bootstrap WordPress, connect to MySQL, or start
+Playground.
 
 ## Dependencies
 

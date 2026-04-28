@@ -3,11 +3,12 @@ set -euo pipefail
 
 # Setup script for WordPress Homeboy extension.
 #
-# Installs npm dependencies (including @wp-playground/cli for the Playground
-# test backend) and PHP dev dependencies (PHPCS, PHPStan for linting).
+# Installs npm dependencies (including @wp-playground/cli for the default
+# Playground test backend) and PHP dev dependencies (PHPCS, PHPStan for linting).
 #
-# The legacy wp-phpunit dependency was removed in Phase 3 (#214) — test
-# execution now runs entirely inside WordPress Playground.
+# The legacy wp-phpunit dependency was removed in Phase 3 (#214) — WordPress
+# PHPUnit execution now runs inside Playground. The host-smoke backend is only
+# for standalone PHP smoke scripts.
 
 EXTENSION_PATH="$(pwd)"
 
@@ -48,4 +49,5 @@ if [ -f "package.json" ]; then
 fi
 
 echo "WordPress extension setup complete."
-echo "Test backend: Playground (PHP-WASM + embedded SQLite)"
+echo "Default test backend: Playground (PHP-WASM + embedded SQLite)"
+echo "Host smoke backend: set test_backend=host-smoke for standalone tests/**/*-smoke.php"

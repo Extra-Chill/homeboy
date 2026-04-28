@@ -131,20 +131,24 @@ The extension supports two test execution backends:
 
 | Backend | Description | Default |
 |---------|-------------|---------|
-| `host` | PHPUnit with host PHP + wp-phpunit + SQLite/MySQL | Yes |
-| `playground` | PHPUnit inside WordPress Playground (PHP-WASM + SQLite) | No |
+| `playground` | PHPUnit inside WordPress Playground (PHP-WASM + SQLite) | Yes |
+| `host-smoke` / `host` | Standalone `tests/**/*-smoke.php` scripts under host PHP | No |
 
 ```bash
 # Switch a component to Playground backend
 homeboy component set my-plugin test_backend playground
 
-# Switch back to host backend
-homeboy component set my-plugin test_backend host
+# Run standalone host PHP smoke scripts instead
+homeboy component set my-plugin test_backend host-smoke
 ```
 
-The Playground backend is **opt-in** and does not affect the default host
-backend. It boots a WordPress Playground instance, mounts the plugin, and
-runs PHPUnit inside PHP-WASM. No host PHP or MySQL is required.
+The Playground backend is the default. It boots a WordPress Playground
+instance, mounts the plugin, and runs PHPUnit inside PHP-WASM. No host PHP or
+MySQL is required.
+
+The host-smoke backend is for pure PHP smoke suites that do not need WordPress.
+It discovers `tests/**/*-smoke.php`, runs each file in its own host PHP process,
+and fails fast with the failing script name.
 
 **Limitations (Phase 1):**
 - WordPress version is pinned to match the wp-phpunit package (currently 6.9.x).
@@ -198,7 +202,8 @@ Files that can be safely removed after migration:
 wordpress/
 ├── scripts/
 │   ├── test/
-│   │   ├── test-runner.sh              # Main test orchestration (host backend)
+│   │   ├── test-runner.sh              # Main test router
+│   │   ├── test-runner-host-smoke.sh   # Host PHP smoke-script backend
 │   │   ├── test-runner-playground.sh   # Playground backend runner
 │   │   ├── generate-config.sh          # WordPress config generation
 │   │   ├── parse-test-results.sh       # Result parsing for homeboy core

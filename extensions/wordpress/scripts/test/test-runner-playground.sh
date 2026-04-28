@@ -46,6 +46,7 @@ DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/v
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 PLAYGROUND_PATHS_HELPER="${SCRIPT_DIR}/../lib/playground-paths.sh"
 CLEANUP_NOISE_HELPER="${SCRIPT_DIR}/../lib/playground-cleanup-noise.sh"
+PROCESS_CLEANUP_HELPER="${SCRIPT_DIR}/../lib/playground-process-cleanup.sh"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context --component-alias PLUGIN_PATH
@@ -65,6 +66,8 @@ fi
 source "$PLAYGROUND_PATHS_HELPER"
 # shellcheck source=../lib/playground-cleanup-noise.sh
 source "$CLEANUP_NOISE_HELPER"
+# shellcheck source=../lib/playground-process-cleanup.sh
+source "$PROCESS_CLEANUP_HELPER"
 # shellcheck source=/dev/null
 if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
     source "$FAILURE_TRAP_HELPER"
@@ -253,6 +256,11 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
 fi
 
 PHPUNIT_TMPFILE=$(mktemp)
+PLAYGROUND_WORKERS_BEFORE=$(homeboy_playground_snapshot_workers)
+cleanup_playground_workers() {
+    homeboy_playground_cleanup_new_workers "$PLAYGROUND_WORKERS_BEFORE"
+}
+trap cleanup_playground_workers EXIT
 
 set +e
 "$PLAYGROUND_CLI" php \
@@ -264,6 +272,8 @@ set +e
     2>&1 | homeboy_filter_playground_cleanup_noise | tee "$PHPUNIT_TMPFILE"
 playground_exit=${PIPESTATUS[0]}
 set -e
+cleanup_playground_workers
+trap - EXIT
 
 rm -f "$WRAPPER_TMPFILE"
 

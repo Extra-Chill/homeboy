@@ -6,5 +6,17 @@
       "file": "wordpress.json",
       "pattern": "\"version\":\\s*\"([0-9.]+)\""
     }
-  ]
+  ],
+  "self_checks": {
+    "lint": [
+      "jq empty wordpress.json",
+      "bash -n scripts/test/test-runner.sh scripts/test/test-runner-playground.sh scripts/test/test-runner-host-smoke.sh scripts/lib/playground-process-cleanup.sh scripts/test/host-smoke-runner-smoke.sh scripts/test/playground-process-cleanup-smoke.sh"
+    ],
+    "test": [
+      "bash scripts/test/host-smoke-runner-smoke.sh",
+      "bash scripts/test/playground-process-cleanup-smoke.sh",
+      "bash scripts/test/playground-cleanup-noise-smoke.sh",
+      "bash scripts/test/playground-no-test-files-smoke.sh"
+    ]
+  }
 }

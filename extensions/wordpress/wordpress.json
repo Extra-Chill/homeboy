@@ -356,9 +356,16 @@
   },
   "testing": {
     "backend": "playground",
-    "description": "All tests run inside WordPress Playground (PHP-WASM + embedded SQLite). Zero host setup required."
+    "description": "Plugin/theme PHPUnit runs inside WordPress Playground by default. Pure PHP smoke suites can opt into the host-smoke backend."
   },
   "settings": [
+    {
+      "id": "test_backend",
+      "label": "Test backend",
+      "type": "string",
+      "default": "playground",
+      "description": "WordPress test backend. Use 'playground' for PHPUnit inside WordPress Playground, or 'host-smoke' / 'host' for standalone tests/**/*-smoke.php scripts run under host PHP without WordPress bootstrap."
+    },
     {
       "id": "validation_dependencies",
       "label": "Validation Dependencies",

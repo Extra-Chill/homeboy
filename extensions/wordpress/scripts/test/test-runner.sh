@@ -3,8 +3,9 @@ set -euo pipefail
 
 # Test runner router for WordPress Homeboy extension.
 #
-# Plugin/theme tests run inside WordPress Playground. Core-dev checkouts
-# (wordpress-develop) dispatch to WordPress core's native PHPUnit runner.
+# Plugin/theme tests run inside WordPress Playground by default. Core-dev
+# checkouts (wordpress-develop) dispatch to WordPress core's native PHPUnit
+# runner. Pure host-PHP smoke suites can opt into the host-smoke backend.
 
 # Bash 4.0+ required — lint-runner.sh (called during test runs) uses
 # associative arrays which are bash 4+ only. Fail early with a clear
@@ -39,6 +40,12 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Component path: ${COMPONENT_PATH:-$(pwd)}"
 fi
 
+TEST_BACKEND=""
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    TEST_BACKEND=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.test_backend // .testing.backend // empty' 2>/dev/null || true)
+fi
+TEST_BACKEND="${HOMEBOY_WORDPRESS_TEST_BACKEND:-${TEST_BACKEND:-playground}}"
+
 COMPONENT_SHAPE="${HOMEBOY_COMPONENT_SHAPE:-}"
 if [ -z "$COMPONENT_SHAPE" ]; then
     DETECT_COMPONENT_HELPER="${HOMEBOY_RUNTIME_DETECT_COMPONENT:-${SCRIPT_DIR}/../lib/detect-component.sh}"
@@ -54,6 +61,18 @@ case "$COMPONENT_SHAPE" in
         exec bash "${SCRIPT_DIR}/test-runner-core-dev.sh" "$@"
         ;;
     *)
-        exec bash "${SCRIPT_DIR}/test-runner-playground.sh" "$@"
+        case "$TEST_BACKEND" in
+            host|host-smoke)
+                exec bash "${SCRIPT_DIR}/test-runner-host-smoke.sh" "$@"
+                ;;
+            ""|playground)
+                exec bash "${SCRIPT_DIR}/test-runner-playground.sh" "$@"
+                ;;
+            *)
+                echo "ERROR: Unsupported WordPress test backend: ${TEST_BACKEND}" >&2
+                echo "Supported backends: playground, host, host-smoke" >&2
+                exit 2
+                ;;
+        esac
         ;;
 esac
