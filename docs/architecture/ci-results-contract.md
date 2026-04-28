@@ -189,7 +189,6 @@ and `test.json` stay Homeboy-owned payloads.
 PR review agents should:
 
 - Wait while the GitHub check is pending instead of reviewing stale results.
-- Read `homeboy-ci-results/review.json` when present.
 - Fall back to `audit.json`, `lint.json`, and `test.json` when `review.json` is absent.
 - Use `success`, `data.summary.passed`, and per-stage `passed` fields for status.
 - Use `finding_count` for quick triage and the nested stage `output` for details.

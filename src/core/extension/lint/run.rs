@@ -247,37 +247,6 @@ fn resolve_effective_glob(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::component::SelfCheckConfig;
-
-    #[test]
-    fn test_run_self_check_lint_workflow() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(dir.path().join("lint.sh"), "printf lint-ok\n")
-            .expect("script should be written");
-
-        let mut component = Component::new(
-            "fixture".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "".to_string(),
-            None,
-        );
-        component.self_checks = Some(SelfCheckConfig {
-            lint: vec!["sh lint.sh".to_string()],
-            test: Vec::new(),
-        });
-
-        let result = run_self_check_lint_workflow(&component, dir.path(), "fixture".to_string())
-            .expect("lint self-check should run");
-
-        assert_eq!(result.status, "passed");
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(result.component, "fixture");
-    }
-}
-
 /// Process baseline lifecycle — save, load, compare.
 fn process_baseline(
     source_path: &PathBuf,
@@ -320,4 +289,35 @@ fn process_baseline(
     }
 
     Ok((baseline_comparison, baseline_exit_override))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::SelfCheckConfig;
+
+    #[test]
+    fn test_run_self_check_lint_workflow() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("lint.sh"), "printf lint-ok\n")
+            .expect("script should be written");
+
+        let mut component = Component::new(
+            "fixture".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "".to_string(),
+            None,
+        );
+        component.self_checks = Some(SelfCheckConfig {
+            lint: vec!["sh lint.sh".to_string()],
+            test: Vec::new(),
+        });
+
+        let result = run_self_check_lint_workflow(&component, dir.path(), "fixture".to_string())
+            .expect("lint self-check should run");
+
+        assert_eq!(result.status, "passed");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.component, "fixture");
+    }
 }
