@@ -68,9 +68,37 @@ DEPENDENCY_CONFIG=""
 homeboy_mktemp() {
     local template="$1"
     local tmpdir="${HOMEBOY_CACHE_DIR:-${TMPDIR:-/tmp}}"
+    local tmpfile=""
+    local basefile=""
+    local prefix=""
+    local suffix=""
 
     if [ -d "$tmpdir" ] && [ -w "$tmpdir" ]; then
-        mktemp "${tmpdir%/}/${template}" 2>/dev/null && return 0
+        tmpfile=$(mktemp "${tmpdir%/}/${template}" 2>/dev/null || true)
+        if [ -n "$tmpfile" ] && [[ "$tmpfile" != *XXXXXX* ]]; then
+            printf '%s\n' "$tmpfile"
+            return 0
+        fi
+
+        # BSD mktemp leaves XXXXXX literal when the random token is not the
+        # final path segment. PHPStan 2 requires generated config files to keep
+        # their .neon suffix, so create a unique base first and rename it.
+        [ -n "$tmpfile" ] && rm -f "$tmpfile"
+        if [[ "$template" == *XXXXXX* ]]; then
+            prefix="${template%%XXXXXX*}"
+            suffix="${template#*XXXXXX}"
+            if [ -n "$suffix" ]; then
+                basefile=$(mktemp "${tmpdir%/}/${prefix}XXXXXX" 2>/dev/null || true)
+                if [ -n "$basefile" ]; then
+                    tmpfile="${basefile}${suffix}"
+                    if [ ! -e "$tmpfile" ] && mv "$basefile" "$tmpfile"; then
+                        printf '%s\n' "$tmpfile"
+                        return 0
+                    fi
+                    rm -f "$basefile"
+                fi
+            fi
+        fi
     fi
 
     mktemp 2>/dev/null
