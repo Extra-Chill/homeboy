@@ -45,6 +45,7 @@ FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 PLAYGROUND_PATHS_HELPER="${SCRIPT_DIR}/../lib/playground-paths.sh"
+CLEANUP_NOISE_HELPER="${SCRIPT_DIR}/../lib/playground-cleanup-noise.sh"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context --component-alias PLUGIN_PATH
@@ -62,6 +63,8 @@ if [ -f "$PHP_PREFLIGHT_HELPER" ]; then
 fi
 # shellcheck source=../lib/playground-paths.sh
 source "$PLAYGROUND_PATHS_HELPER"
+# shellcheck source=../lib/playground-cleanup-noise.sh
+source "$CLEANUP_NOISE_HELPER"
 # shellcheck source=/dev/null
 if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
     source "$FAILURE_TRAP_HELPER"
@@ -258,7 +261,7 @@ set +e
     --wp=6.9 \
     --verbosity=normal \
     -- /runner.php \
-    2>&1 | tee "$PHPUNIT_TMPFILE"
+    2>&1 | homeboy_filter_playground_cleanup_noise | tee "$PHPUNIT_TMPFILE"
 playground_exit=${PIPESTATUS[0]}
 set -e
 
