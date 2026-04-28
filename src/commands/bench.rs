@@ -563,12 +563,29 @@ mod tests {
             &script_path,
             r#"#!/bin/sh
 if [ -n "$HOMEBOY_BENCH_EXTRA_WORKLOADS" ]; then
-  all_scenarios="rig-extra rig-slow"
+  all_scenarios=""
+  old_ifs="$IFS"
+  IFS=":"
+  for workload in $HOMEBOY_BENCH_EXTRA_WORKLOADS; do
+    name="$(basename "$workload")"
+    name="${name%%.bench.*}"
+    name="${name%.*}"
+    if [ -n "$all_scenarios" ]; then
+      all_scenarios="$all_scenarios $name"
+    else
+      all_scenarios="$name"
+    fi
+  done
+  IFS="$old_ifs"
 else
   all_scenarios="in-tree slow"
 fi
 
-if [ "$HOMEBOY_BENCH_LIST_ONLY" = "1" ] || [ -z "$HOMEBOY_BENCH_SCENARIOS" ]; then
+# Rig-declared workload selection is owned by Homeboy core because the core
+# process builds HOMEBOY_BENCH_EXTRA_WORKLOADS. This intentionally ignores
+# HOMEBOY_BENCH_SCENARIOS when extra workloads are present, matching the real
+# Node runner class that caused #1843.
+if [ -n "$HOMEBOY_BENCH_EXTRA_WORKLOADS" ] || [ "$HOMEBOY_BENCH_LIST_ONLY" = "1" ] || [ -z "$HOMEBOY_BENCH_SCENARIOS" ]; then
   selected="$all_scenarios"
 else
   selected=$(printf '%s' "$HOMEBOY_BENCH_SCENARIOS" | tr ',' ' ')
@@ -642,7 +659,10 @@ JSON
                         }}
                     }},
                     "bench": {{ "default_component": "{component_id}" }},
-                    "bench_workloads": {{ "nodejs": ["${{components.{component_id}.path}}/private.bench.js"] }}
+                    "bench_workloads": {{ "nodejs": [
+                        "${{components.{component_id}.path}}/rig-extra.bench.js",
+                        "${{components.{component_id}.path}}/rig-slow.bench.mjs"
+                    ] }}
                 }}"#,
                 path.display()
             ),
@@ -824,6 +844,31 @@ JSON
     }
 
     #[test]
+    fn parses_rig_run_options_without_component() {
+        let cli = TestCli::try_parse_from([
+            "bench",
+            "--rig",
+            "studio-agent-sdk,studio-agent-pi",
+            "--scenario",
+            "studio-agent-runtime",
+            "--runs",
+            "3",
+            "--iterations",
+            "1",
+        ])
+        .expect("rig bench options without component should parse");
+
+        assert_eq!(
+            cli.bench.run.rig,
+            vec!["studio-agent-sdk", "studio-agent-pi"]
+        );
+        assert_eq!(cli.bench.run.scenario_ids, vec!["studio-agent-runtime"]);
+        assert_eq!(cli.bench.run.runs, 3);
+        assert_eq!(cli.bench.run.iterations, 1);
+        assert!(cli.bench.run.comp.id().is_none());
+    }
+
+    #[test]
     fn run_selects_multiple_scenarios() {
         with_isolated_home(|home| {
             write_bench_extension(home);
@@ -909,6 +954,107 @@ JSON
                         let scenarios = rig.results.expect("rig results").scenarios;
                         assert_eq!(scenarios.len(), 1);
                         assert_eq!(scenarios[0].id, "rig-slow");
+                    }
+                }
+                _ => panic!("expected comparison output"),
+            }
+        });
+    }
+
+    #[test]
+    fn single_rig_selector_filters_extra_workloads_before_execution() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig(home, "rig-a", "studio", component_dir.path());
+
+            let (output, exit_code) = run(
+                run_args(
+                    None,
+                    vec!["rig-a".to_string()],
+                    vec!["rig-slow".to_string()],
+                ),
+                &GlobalArgs {},
+            )
+            .expect("single-rig selected bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    assert_eq!(result.iterations, 1);
+                    let scenarios = result.results.expect("results").scenarios;
+                    assert_eq!(scenarios.len(), 1);
+                    assert_eq!(scenarios[0].id, "rig-slow");
+                    assert_eq!(scenarios[0].iterations, 1);
+                }
+                _ => panic!("expected single output"),
+            }
+        });
+    }
+
+    #[test]
+    fn single_rig_runs_preserve_run_level_summaries_after_selection() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig(home, "rig-a", "studio", component_dir.path());
+            let mut args = run_args(
+                None,
+                vec!["rig-a".to_string()],
+                vec!["rig-slow".to_string()],
+            );
+            args.run.runs = 3;
+
+            let (output, exit_code) = run(args, &GlobalArgs {})
+                .expect("single-rig selected bench should run multiple runs");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    let scenarios = result.results.expect("results").scenarios;
+                    assert_eq!(scenarios.len(), 1);
+                    let runs = scenarios[0].runs.as_ref().expect("per-run metrics");
+                    assert_eq!(runs.len(), 3);
+                    assert!(scenarios[0].runs_summary.as_ref().is_some_and(|summary| {
+                        summary.get("p95_ms").is_some_and(|metric| metric.n == 3)
+                    }));
+                }
+                _ => panic!("expected single output"),
+            }
+        });
+    }
+
+    #[test]
+    fn cross_rig_runs_preserve_run_level_summaries_after_selection() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig(home, "rig-a", "studio", component_a.path());
+            write_rig(home, "rig-b", "studio", component_b.path());
+            let mut args = run_args(
+                None,
+                vec!["rig-a".to_string(), "rig-b".to_string()],
+                vec!["rig-slow".to_string()],
+            );
+            args.run.runs = 3;
+
+            let (output, exit_code) = run(args, &GlobalArgs {})
+                .expect("cross-rig selected bench should run multiple runs");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Comparison(result) => {
+                    assert_eq!(result.rigs.len(), 2);
+                    assert!(result
+                        .summary
+                        .iter()
+                        .all(|summary| summary.rows.iter().all(|row| row.n == Some(3))));
+                    for rig in result.rigs {
+                        let scenarios = rig.results.expect("rig results").scenarios;
+                        assert_eq!(scenarios.len(), 1);
+                        assert_eq!(scenarios[0].id, "rig-slow");
+                        assert_eq!(scenarios[0].runs.as_ref().expect("runs").len(), 3);
                     }
                 }
                 _ => panic!("expected comparison output"),

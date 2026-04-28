@@ -212,6 +212,60 @@ fn apply_scenario_filter(
     Ok(results)
 }
 
+fn scenario_id_for_workload_path(path: &std::path::Path) -> String {
+    let basename = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let name = basename
+        .split_once(".bench.")
+        .map(|(stem, _)| stem)
+        .unwrap_or_else(|| {
+            basename
+                .rsplit_once('.')
+                .map(|(stem, _)| stem)
+                .unwrap_or(&basename)
+        });
+
+    let mut slug = String::new();
+    let mut prev_was_separator = true;
+    let mut prev_was_lower_or_digit = false;
+    for ch in name.chars() {
+        if ch.is_ascii_uppercase() && prev_was_lower_or_digit && !prev_was_separator {
+            slug.push('-');
+        }
+
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_was_separator = false;
+            prev_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        } else if !prev_was_separator {
+            slug.push('-');
+            prev_was_separator = true;
+            prev_was_lower_or_digit = false;
+        } else {
+            prev_was_lower_or_digit = false;
+        }
+    }
+
+    slug.trim_matches('-').to_string()
+}
+
+fn filter_extra_workloads_by_scenario_ids(
+    workloads: &[PathBuf],
+    scenario_ids: &[String],
+) -> Vec<PathBuf> {
+    if scenario_ids.is_empty() {
+        return workloads.to_vec();
+    }
+
+    workloads
+        .iter()
+        .filter(|path| scenario_ids.contains(&scenario_id_for_workload_path(path)))
+        .cloned()
+        .collect()
+}
+
 fn discover_bench_scenarios(
     execution_context: &ExtensionExecutionContext,
     component: &Component,
@@ -333,39 +387,49 @@ pub fn run_main_bench_workflow(
 
     let execution_context = resolve_execution_context(component, ExtensionCapability::Bench)?;
 
+    let mut execution_args = args.clone();
     if !args.scenario_ids.is_empty() {
         let discovered = discover_bench_scenarios(&execution_context, component, &args, run_dir)?;
         apply_scenario_filter(discovered, &args.scenario_ids)?;
+        execution_args.extra_workloads =
+            filter_extra_workloads_by_scenario_ids(&args.extra_workloads, &args.scenario_ids);
     }
 
-    let (mut parsed, runner_success, runner_exit_code, failure_stderr_tail) = if args.runs > 1 {
-        run_sequential_runs(&execution_context, component, &args, run_dir)?
-    } else if args.concurrency <= 1 {
-        let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
-        let runner_output =
-            build_runner(&execution_context, component, &args, run_dir, None)?.run()?;
-        let parsed = if results_file.exists() {
-            parsing::parse_bench_results_file(&results_file)
-                .ok()
-                .map(|results| apply_scenario_filter(results, &args.scenario_ids))
-                .transpose()?
+    let (mut parsed, runner_success, runner_exit_code, failure_stderr_tail) =
+        if execution_args.runs > 1 {
+            run_sequential_runs(&execution_context, component, &execution_args, run_dir)?
+        } else if execution_args.concurrency <= 1 {
+            let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
+            let runner_output = build_runner(
+                &execution_context,
+                component,
+                &execution_args,
+                run_dir,
+                None,
+            )?
+            .run()?;
+            let parsed = if results_file.exists() {
+                parsing::parse_bench_results_file(&results_file)
+                    .ok()
+                    .map(|results| apply_scenario_filter(results, &execution_args.scenario_ids))
+                    .transpose()?
+            } else {
+                None
+            };
+            let failure_stderr_tail = if !runner_output.success {
+                Some(stderr_tail(&runner_output.stderr))
+            } else {
+                None
+            };
+            (
+                parsed,
+                runner_output.success,
+                runner_output.exit_code,
+                failure_stderr_tail,
+            )
         } else {
-            None
+            run_concurrent_instances(&execution_context, component, &execution_args, run_dir)?
         };
-        let failure_stderr_tail = if !runner_output.success {
-            Some(stderr_tail(&runner_output.stderr))
-        } else {
-            None
-        };
-        (
-            parsed,
-            runner_output.success,
-            runner_output.exit_code,
-            failure_stderr_tail,
-        )
-    } else {
-        run_concurrent_instances(&execution_context, component, &args, run_dir)?
-    };
 
     let gate_failures = parsed
         .as_mut()
@@ -777,6 +841,31 @@ mod tests {
         assert_eq!(
             extra_workloads_env_value(&paths).unwrap(),
             "/tmp/bench-one.php:/tmp/bench-two.php"
+        );
+    }
+
+    #[test]
+    fn filter_extra_workloads_by_selected_scenario_ids_matches_runner_slugs() {
+        let workloads = vec![
+            PathBuf::from("/tmp/bench/studio-agent-runtime.bench.mjs"),
+            PathBuf::from("/tmp/bench/studio-bfb-write-path.bench.js"),
+            PathBuf::from("/tmp/bench/WpAdminLoad.php"),
+        ];
+
+        let filtered = filter_extra_workloads_by_scenario_ids(
+            &workloads,
+            &[
+                "studio-agent-runtime".to_string(),
+                "wp-admin-load".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            filtered,
+            vec![
+                PathBuf::from("/tmp/bench/studio-agent-runtime.bench.mjs"),
+                PathBuf::from("/tmp/bench/WpAdminLoad.php"),
+            ]
         );
     }
 
