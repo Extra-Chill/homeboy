@@ -14,7 +14,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(about = "CLI tool for development and deployment automation")]
 pub struct Cli {
     /// Write structured JSON output to a file (in addition to stdout).
-    /// The file contains only the JSON envelope — no log text, no timestamps.
+    /// The file contains command-specific JSON — no log text.
     #[arg(long, global = true, value_name = "PATH")]
     pub output: Option<String>,
 

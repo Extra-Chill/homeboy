@@ -202,6 +202,7 @@ fn main() -> std::process::ExitCode {
     }
 
     let mode = response_mode(&cli.command);
+    let is_review_command = matches!(cli.command, Commands::Review(_));
 
     match mode {
         ResponseMode::Json => {}
@@ -280,10 +281,12 @@ fn main() -> std::process::ExitCode {
     let (json_result, exit_code) = commands::run_json(cli.command, &global);
 
     // Write JSON to --output file if specified (before printing to stdout).
-    // The file always gets written, even on failure, so consumers can read
-    // structured error data instead of scraping log output.
+    // Review writes its stable machine-readable artifact directly; other
+    // commands retain the generic CLI envelope.
     if let Some(ref path) = output_file {
-        output::write_json_to_file(&json_result, path, exit_code);
+        if !is_review_command || !review::write_artifact_to_file(&json_result, path, exit_code) {
+            output::write_json_to_file(&json_result, path, exit_code);
+        }
     }
 
     match mode {

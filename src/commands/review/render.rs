@@ -301,6 +301,7 @@ mod tests {
     fn passing_envelope() -> ReviewCommandOutput {
         ReviewCommandOutput {
             command: "review".to_string(),
+            artifact: super::super::build_artifact("my-comp", "", "abc123", Vec::new()),
             summary: super::super::ReviewSummary {
                 passed: true,
                 status: "passed".to_string(),
@@ -570,6 +571,7 @@ mod tests {
     fn renders_all_stages_skipped() {
         let env = ReviewCommandOutput {
             command: "review".to_string(),
+            artifact: super::super::build_artifact("my-comp", "main", "abc123", Vec::new()),
             summary: super::super::ReviewSummary {
                 passed: true,
                 status: "passed".to_string(),

@@ -12,8 +12,12 @@
 //!
 //! See: https://github.com/Extra-Chill/homeboy/issues/1500
 
+use chrono::Utc;
 use clap::Args;
 use serde::Serialize;
+use serde_json::Value;
+use std::path::Path;
+use std::process::Command;
 
 use homeboy::code_audit::AuditCommandOutput;
 use homeboy::extension::lint::LintCommandOutput;
@@ -127,10 +131,33 @@ pub struct ReviewSummary {
 #[derive(Serialize)]
 pub struct ReviewCommandOutput {
     pub command: String,
+    pub artifact: ReviewArtifact,
     pub summary: ReviewSummary,
     pub audit: ReviewStage<AuditCommandOutput>,
     pub lint: ReviewStage<LintCommandOutput>,
     pub test: ReviewStage<TestCommandOutput>,
+}
+
+/// Stable machine-readable artifact for automated PR review consumers.
+#[derive(Serialize, Clone)]
+pub struct ReviewArtifact {
+    pub schema: String,
+    pub component: String,
+    pub status: String,
+    pub generated_at: String,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub commands: Vec<ReviewArtifactCommand>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct ReviewArtifactCommand {
+    pub name: String,
+    pub status: String,
+    pub exit_code: i32,
+    pub summary: String,
+    pub findings: Vec<Value>,
+    pub artifacts: Vec<Value>,
 }
 
 pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutput> {
@@ -170,6 +197,19 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
 
         let output = ReviewCommandOutput {
             command: "review".to_string(),
+            artifact: ReviewArtifact {
+                schema: "homeboy/review/v1".to_string(),
+                component: component_label.clone(),
+                status: "skipped".to_string(),
+                generated_at: generated_at_now(),
+                base_ref: args.changed_since.clone().unwrap_or_default(),
+                head_ref: git_ref(&source_path, "HEAD").unwrap_or_default(),
+                commands: vec![
+                    artifact_command(&stage_skipped::<Value>("audit", "no files changed")),
+                    artifact_command(&stage_skipped::<Value>("lint", "no files changed")),
+                    artifact_command(&stage_skipped::<Value>("test", "no files changed")),
+                ],
+            },
             summary: ReviewSummary {
                 passed: true,
                 status: "passed".to_string(),
@@ -320,8 +360,20 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
         hints: top_hints,
     };
 
+    let artifact = build_artifact(
+        &component_label,
+        args.changed_since.as_deref().unwrap_or(""),
+        git_ref(&source_path, "HEAD").unwrap_or_default().as_str(),
+        vec![
+            artifact_command(&audit_stage),
+            artifact_command(&lint_stage),
+            artifact_command(&test_stage),
+        ],
+    );
+
     let output = ReviewCommandOutput {
         command: "review".to_string(),
+        artifact,
         summary,
         audit: audit_stage,
         lint: lint_stage,
@@ -348,6 +400,51 @@ pub fn run_markdown(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<String> 
     Ok((md, exit_code))
 }
 
+/// Write the stable review artifact to `--output` for automated consumers.
+/// Falls back to the generic JSON envelope if the review command failed before
+/// producing an artifact.
+pub fn write_artifact_to_file(
+    result: &homeboy::Result<Value>,
+    path: &str,
+    _exit_code: i32,
+) -> bool {
+    let Ok(data) = result else {
+        return false;
+    };
+    let Some(artifact) = data.get("artifact") else {
+        return false;
+    };
+
+    let json = match serde_json::to_string_pretty(artifact) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to serialize review artifact for --output: {}",
+                e
+            );
+            return true;
+        }
+    };
+
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "Warning: failed to create --output directory '{}': {}",
+                    parent.display(),
+                    e
+                );
+                return true;
+            }
+        }
+    }
+
+    if let Err(e) = std::fs::write(path, json) {
+        eprintln!("Warning: failed to write --output file '{}': {}", path, e);
+    }
+    true
+}
+
 fn stage_skipped<T: Serialize>(stage: &str, reason: &str) -> ReviewStage<T> {
     ReviewStage {
         stage: stage.to_string(),
@@ -369,6 +466,86 @@ fn scope_flag_suffix(args: &ReviewArgs, include_changed_only: bool) -> String {
     } else {
         String::new()
     }
+}
+
+fn build_artifact(
+    component: &str,
+    base_ref: &str,
+    head_ref: &str,
+    commands: Vec<ReviewArtifactCommand>,
+) -> ReviewArtifact {
+    let status = artifact_status(&commands).to_string();
+    ReviewArtifact {
+        schema: "homeboy/review/v1".to_string(),
+        component: component.to_string(),
+        status,
+        generated_at: generated_at_now(),
+        base_ref: base_ref.to_string(),
+        head_ref: head_ref.to_string(),
+        commands,
+    }
+}
+
+fn artifact_command<T: Serialize>(stage: &ReviewStage<T>) -> ReviewArtifactCommand {
+    ReviewArtifactCommand {
+        name: stage.stage.clone(),
+        status: if !stage.ran {
+            "skipped"
+        } else if stage.passed {
+            "passed"
+        } else {
+            "failed"
+        }
+        .to_string(),
+        exit_code: stage.exit_code,
+        summary: if !stage.ran {
+            stage
+                .skipped_reason
+                .clone()
+                .unwrap_or_else(|| "skipped".to_string())
+        } else {
+            format!(
+                "{} finding(s); {}",
+                stage.finding_count,
+                if stage.passed { "passed" } else { "failed" }
+            )
+        },
+        findings: Vec::new(),
+        artifacts: Vec::new(),
+    }
+}
+
+fn artifact_status(commands: &[ReviewArtifactCommand]) -> &'static str {
+    let ran = commands
+        .iter()
+        .filter(|command| command.status != "skipped")
+        .count();
+    if ran == 0 {
+        return "skipped";
+    }
+    if commands.iter().any(|command| command.status == "failed") {
+        return "failed";
+    }
+    if ran < commands.len() {
+        return "partial";
+    }
+    "passed"
+}
+
+fn generated_at_now() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn git_ref(path: &str, git_ref: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", git_ref])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn audit_finding_count(output: &AuditCommandOutput) -> usize {
@@ -530,6 +707,121 @@ mod tests {
         assert!(stage.passed);
         assert_eq!(stage.exit_code, 0);
         assert_eq!(stage.skipped_reason.as_deref(), Some("no files changed"));
+    }
+
+    #[test]
+    fn artifact_command_maps_stage_statuses() {
+        let skipped: ReviewStage<serde_json::Value> = stage_skipped("audit", "no files changed");
+        let skipped_command = artifact_command(&skipped);
+        assert_eq!(skipped_command.name, "audit");
+        assert_eq!(skipped_command.status, "skipped");
+        assert_eq!(skipped_command.exit_code, 0);
+        assert_eq!(skipped_command.summary, "no files changed");
+        assert!(skipped_command.findings.is_empty());
+        assert!(skipped_command.artifacts.is_empty());
+
+        let failed = ReviewStage {
+            stage: "lint".to_string(),
+            ran: true,
+            passed: false,
+            exit_code: 1,
+            finding_count: 3,
+            hint: "Deep dive: homeboy lint".to_string(),
+            skipped_reason: None,
+            output: Some(serde_json::json!({ "ok": false })),
+        };
+        let failed_command = artifact_command(&failed);
+        assert_eq!(failed_command.name, "lint");
+        assert_eq!(failed_command.status, "failed");
+        assert_eq!(failed_command.exit_code, 1);
+        assert_eq!(failed_command.summary, "3 finding(s); failed");
+    }
+
+    #[test]
+    fn artifact_status_covers_contract_values() {
+        let passed = ReviewArtifactCommand {
+            name: "lint".to_string(),
+            status: "passed".to_string(),
+            exit_code: 0,
+            summary: "0 finding(s); passed".to_string(),
+            findings: Vec::new(),
+            artifacts: Vec::new(),
+        };
+        let skipped = ReviewArtifactCommand {
+            name: "test".to_string(),
+            status: "skipped".to_string(),
+            exit_code: 0,
+            summary: "no files changed".to_string(),
+            findings: Vec::new(),
+            artifacts: Vec::new(),
+        };
+        let failed = ReviewArtifactCommand {
+            name: "audit".to_string(),
+            status: "failed".to_string(),
+            exit_code: 1,
+            summary: "1 finding(s); failed".to_string(),
+            findings: Vec::new(),
+            artifacts: Vec::new(),
+        };
+
+        assert_eq!(artifact_status(std::slice::from_ref(&skipped)), "skipped");
+        assert_eq!(artifact_status(std::slice::from_ref(&passed)), "passed");
+        assert_eq!(artifact_status(&[passed.clone(), skipped]), "partial");
+        assert_eq!(artifact_status(&[passed, failed]), "failed");
+    }
+
+    #[test]
+    fn build_artifact_uses_review_schema_and_refs() {
+        let command = ReviewArtifactCommand {
+            name: "lint".to_string(),
+            status: "passed".to_string(),
+            exit_code: 0,
+            summary: "0 finding(s); passed".to_string(),
+            findings: Vec::new(),
+            artifacts: Vec::new(),
+        };
+
+        let artifact = build_artifact("homeboy", "origin/main", "abc123", vec![command]);
+
+        assert_eq!(artifact.schema, "homeboy/review/v1");
+        assert_eq!(artifact.component, "homeboy");
+        assert_eq!(artifact.status, "passed");
+        assert_eq!(artifact.base_ref, "origin/main");
+        assert_eq!(artifact.head_ref, "abc123");
+        assert_eq!(artifact.commands.len(), 1);
+        assert!(artifact.generated_at.contains('T'));
+    }
+
+    #[test]
+    fn write_artifact_to_file_writes_direct_artifact_and_creates_parent_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("homeboy-ci-results").join("review.json");
+        let result = Ok(serde_json::json!({
+            "command": "review",
+            "artifact": {
+                "schema": "homeboy/review/v1",
+                "component": "homeboy",
+                "status": "passed",
+                "generated_at": "2026-04-28T00:00:00Z",
+                "base_ref": "origin/main",
+                "head_ref": "abc123",
+                "commands": []
+            }
+        }));
+
+        assert!(write_artifact_to_file(
+            &result,
+            path.to_str().expect("utf8 path"),
+            0
+        ));
+
+        let written = std::fs::read_to_string(path).expect("artifact written");
+        let json: serde_json::Value = serde_json::from_str(&written).expect("valid json");
+        assert_eq!(json["schema"], "homeboy/review/v1");
+        assert!(
+            json.get("success").is_none(),
+            "artifact is not CLI envelope"
+        );
     }
 
     #[test]
