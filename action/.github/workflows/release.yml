@@ -46,7 +46,7 @@ jobs:
         id: failure-cache
         uses: actions/cache/restore@v4
         with:
-          path: .release-last-failed
+          path: ${{ runner.temp }}/homeboy-release-last-failed
           key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
             release-last-failed-${{ github.ref_name }}-
@@ -62,8 +62,9 @@ jobs:
         id: check
         run: |
           HEAD_SHA="$(git rev-parse HEAD)"
-          if [ -f .release-last-failed ]; then
-            LAST_FAILED="$(tr -d '[:space:]' < .release-last-failed)"
+          FAILURE_MARKER="${RUNNER_TEMP}/homeboy-release-last-failed"
+          if [ -f "${FAILURE_MARKER}" ]; then
+            LAST_FAILED="$(tr -d '[:space:]' < "${FAILURE_MARKER}")"
             if [ "${HEAD_SHA}" = "${LAST_FAILED}" ]; then
               echo "::notice::HEAD ${HEAD_SHA:0:8} matches last failed release attempt — skipping until new commits"
               echo "should-release=false" >> "$GITHUB_OUTPUT"
@@ -122,12 +123,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Save failed SHA
-        run: git rev-parse HEAD > .release-last-failed
+        run: git rev-parse HEAD > "${RUNNER_TEMP}/homeboy-release-last-failed"
 
       - name: Cache failed SHA
         uses: actions/cache/save@v4
         with:
-          path: .release-last-failed
+          path: ${{ runner.temp }}/homeboy-release-last-failed
           key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
 
   # ── Clear failure cache on success ──

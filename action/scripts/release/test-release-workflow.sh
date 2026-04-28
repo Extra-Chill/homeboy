@@ -40,6 +40,9 @@ assert_not_contains 'gh release create' "${WORKFLOW}" "release workflow does not
 assert_not_contains 'docs/CHANGELOG.md' "${WORKFLOW}" "release workflow does not parse changelog notes"
 
 assert_contains 'commands: release' "${WORKFLOW}" "release workflow delegates to homeboy-action release command"
+assert_contains 'runner.temp }}/homeboy-release-last-failed' "${WORKFLOW}" "release failure cache lives outside checkout"
+assert_not_contains 'path: .release-last-failed' "${WORKFLOW}" "release failure cache is not restored into checkout"
+assert_not_contains '< .release-last-failed' "${WORKFLOW}" "release failure marker is not read from checkout"
 assert_not_contains '--no-github-release' "${RUN_RELEASE}" "run-release lets Homeboy core create GitHub Releases"
 assert_contains '--git-identity bot' "${RUN_RELEASE}" "run-release delegates bot identity to Homeboy core"
 assert_not_contains 'git config user.name' "${RUN_RELEASE}" "run-release does not configure git identity directly"
