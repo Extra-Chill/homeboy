@@ -135,8 +135,16 @@ pub struct BenchRunArgs {
     rig: Vec<String>,
 
     /// Only run matching benchmark scenario ids. Repeat to select multiple.
-    #[arg(long = "scenario", value_name = "SCENARIO_ID")]
+    #[arg(
+        long = "scenario",
+        value_name = "SCENARIO_ID",
+        conflicts_with = "profile"
+    )]
     scenario_ids: Vec<String>,
+
+    /// Run the named rig-defined bench profile.
+    #[arg(long, value_name = "PROFILE")]
+    profile: Option<String>,
 
     /// Skip auto-upgrading single-rig runs into a comparison even when
     /// the rig spec declares `bench.default_baseline_rig`. Use with
@@ -171,6 +179,7 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
         "--concurrency",
         "--regression-threshold",
         "--scenario",
+        "--profile",
         "--rig",
         "--setting",
         "--path",
@@ -289,6 +298,9 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
             None,
             None,
         ));
+    }
+    if let Some(profile) = &run_args.profile {
+        matrix::validate_profile_available_for_rigs(&run_args.rig, profile)?;
     }
 
     let mut entries = Vec::with_capacity(run_args.rig.len());
@@ -654,6 +666,16 @@ JSON
     }
 
     fn write_rig(home: &TempDir, rig_id: &str, component_id: &str, path: &std::path::Path) {
+        write_rig_with_profiles(home, rig_id, component_id, path, "{}");
+    }
+
+    fn write_rig_with_profiles(
+        home: &TempDir,
+        rig_id: &str,
+        component_id: &str,
+        path: &std::path::Path,
+        bench_profiles: &str,
+    ) {
         let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
         fs::create_dir_all(&rig_dir).expect("mkdir rigs");
         fs::write(
@@ -670,7 +692,8 @@ JSON
                     "bench_workloads": {{ "nodejs": [
                         "${{components.{component_id}.path}}/rig-extra.bench.js",
                         "${{components.{component_id}.path}}/rig-slow.bench.mjs"
-                    ] }}
+                    ] }},
+                    "bench_profiles": {bench_profiles}
                 }}"#,
                 path.display()
             ),
@@ -744,9 +767,20 @@ JSON
                 json_summary: false,
                 rig,
                 scenario_ids,
+                profile: None,
                 ignore_default_baseline: false,
             },
         }
+    }
+
+    fn run_args_with_profile(
+        component: Option<&str>,
+        rig: Vec<String>,
+        profile: &str,
+    ) -> BenchArgs {
+        let mut args = run_args(component, rig, Vec::new());
+        args.run.profile = Some(profile.to_string());
+        args
     }
 
     #[test]
@@ -785,6 +819,32 @@ JSON
                 "wp-admin-load".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parses_profile_flag() {
+        let cli = TestCli::try_parse_from(["bench", "--rig", "studio-bfb", "--profile", "smoke"])
+            .expect("bench --profile should parse");
+
+        assert_eq!(cli.bench.run.profile.as_deref(), Some("smoke"));
+    }
+
+    #[test]
+    fn scenario_and_profile_conflict() {
+        let err = match TestCli::try_parse_from([
+            "bench",
+            "--rig",
+            "studio-bfb",
+            "--profile",
+            "smoke",
+            "--scenario",
+            "boot",
+        ]) {
+            Ok(_) => panic!("--scenario and --profile should conflict"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("cannot be used with"));
     }
 
     #[test]
@@ -1030,6 +1090,37 @@ JSON
     }
 
     #[test]
+    fn run_profile_selects_rig_profile_scenarios() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig_with_profiles(
+                home,
+                "studio-bfb",
+                "studio",
+                component_dir.path(),
+                r#"{ "substrate": ["rig-extra"] }"#,
+            );
+
+            let (output, exit_code) = run(
+                run_args_with_profile(None, vec!["studio-bfb".to_string()], "substrate"),
+                &GlobalArgs {},
+            )
+            .expect("profile bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    let scenarios = result.results.expect("results").scenarios;
+                    assert_eq!(scenarios.len(), 1);
+                    assert_eq!(scenarios[0].id, "rig-extra");
+                }
+                _ => panic!("expected single output"),
+            }
+        });
+    }
+
+    #[test]
     fn single_rig_runs_preserve_run_level_summaries_after_selection() {
         with_isolated_home(|home| {
             write_bench_extension(home);
@@ -1058,6 +1149,62 @@ JSON
                 }
                 _ => panic!("expected single output"),
             }
+        });
+    }
+
+    #[test]
+    fn unknown_profile_lists_available_profiles() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig_with_profiles(
+                home,
+                "studio-bfb",
+                "studio",
+                component_dir.path(),
+                r#"{ "substrate": ["rig-extra"], "smoke": ["rig-slow"] }"#,
+            );
+
+            let err = match run(
+                run_args_with_profile(None, vec!["studio-bfb".to_string()], "agentic"),
+                &GlobalArgs {},
+            ) {
+                Ok(_) => panic!("unknown profile should fail"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+
+            assert!(message.contains("agentic"), "got: {}", message);
+            assert!(message.contains("substrate"), "got: {}", message);
+            assert!(message.contains("smoke"), "got: {}", message);
+        });
+    }
+
+    #[test]
+    fn profile_with_unknown_scenario_lists_discovered_scenarios() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig_with_profiles(
+                home,
+                "studio-bfb",
+                "studio",
+                component_dir.path(),
+                r#"{ "broken": ["missing-scenario"] }"#,
+            );
+
+            let err = match run(
+                run_args_with_profile(None, vec!["studio-bfb".to_string()], "broken"),
+                &GlobalArgs {},
+            ) {
+                Ok(_) => panic!("unknown scenario in profile should fail"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+
+            assert!(message.contains("missing-scenario"), "got: {}", message);
+            assert!(message.contains("rig-extra"), "got: {}", message);
+            assert!(message.contains("rig-slow"), "got: {}", message);
         });
     }
 
@@ -1093,6 +1240,105 @@ JSON
                         assert_eq!(scenarios[0].id, "rig-slow");
                         assert_eq!(scenarios[0].runs.as_ref().expect("runs").len(), 3);
                     }
+                }
+                _ => panic!("expected comparison output"),
+            }
+        });
+    }
+
+    #[test]
+    fn cross_rig_profile_requires_every_rig_to_define_profile() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig_with_profiles(
+                home,
+                "rig-a",
+                "studio",
+                component_a.path(),
+                r#"{ "substrate": ["rig-extra"] }"#,
+            );
+            write_rig_with_profiles(
+                home,
+                "rig-b",
+                "studio",
+                component_b.path(),
+                r#"{ "smoke": ["rig-slow"] }"#,
+            );
+
+            let err = match run(
+                run_args_with_profile(
+                    None,
+                    vec!["rig-a".to_string(), "rig-b".to_string()],
+                    "substrate",
+                ),
+                &GlobalArgs {},
+            ) {
+                Ok(_) => panic!("missing cross-rig profile should fail"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+
+            assert!(message.contains("rig-b"), "got: {}", message);
+            assert!(message.contains("substrate"), "got: {}", message);
+            assert!(message.contains("smoke"), "got: {}", message);
+        });
+    }
+
+    #[test]
+    fn cross_rig_profile_selects_profile_for_each_rig() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig_with_profiles(
+                home,
+                "rig-a",
+                "studio",
+                component_a.path(),
+                r#"{ "substrate": ["rig-extra"] }"#,
+            );
+            write_rig_with_profiles(
+                home,
+                "rig-b",
+                "studio",
+                component_b.path(),
+                r#"{ "substrate": ["rig-slow"] }"#,
+            );
+
+            let (output, exit_code) = run(
+                run_args_with_profile(
+                    None,
+                    vec!["rig-a".to_string(), "rig-b".to_string()],
+                    "substrate",
+                ),
+                &GlobalArgs {},
+            )
+            .expect("cross-rig profile bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Comparison(result) => {
+                    assert_eq!(result.rigs.len(), 2);
+                    assert_eq!(
+                        result.rigs[0]
+                            .results
+                            .as_ref()
+                            .expect("rig a results")
+                            .scenarios[0]
+                            .id,
+                        "rig-extra"
+                    );
+                    assert_eq!(
+                        result.rigs[1]
+                            .results
+                            .as_ref()
+                            .expect("rig b results")
+                            .scenarios[0]
+                            .id,
+                        "rig-slow"
+                    );
                 }
                 _ => panic!("expected comparison output"),
             }

@@ -53,6 +53,93 @@ fn rig_bench_components(spec: &RigSpec) -> Vec<String> {
         .unwrap_or_default()
 }
 
+pub(super) fn validate_profile_available_for_rigs(
+    rig_ids: &[String],
+    profile: &str,
+) -> homeboy::Result<()> {
+    let mut missing = Vec::new();
+    let mut available_by_rig = Vec::new();
+
+    for rig_id in rig_ids {
+        let spec = rig::load(rig_id)?;
+        if !spec.bench_profiles.contains_key(profile) {
+            missing.push(rig_id.clone());
+        }
+        available_by_rig.push((spec.id.clone(), available_profile_names(&spec)));
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let available = available_by_rig
+        .into_iter()
+        .map(|(rig_id, profiles)| format!("{}: {}", rig_id, format_available_profiles(&profiles)))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    Err(homeboy::Error::validation_invalid_argument(
+        "profile",
+        format!(
+            "bench profile '{}' is not defined by rig(s): {}; available profiles: {}",
+            profile,
+            missing.join(", "),
+            available
+        ),
+        Some(profile.to_string()),
+        None,
+    ))
+}
+
+fn available_profile_names(spec: &RigSpec) -> Vec<String> {
+    let mut profiles: Vec<String> = spec.bench_profiles.keys().cloned().collect();
+    profiles.sort();
+    profiles
+}
+
+fn format_available_profiles(profiles: &[String]) -> String {
+    if profiles.is_empty() {
+        "<none>".to_string()
+    } else {
+        profiles.join(", ")
+    }
+}
+
+fn selected_scenario_ids(
+    args: &BenchRunArgs,
+    rig_spec: Option<&RigSpec>,
+) -> homeboy::Result<Vec<String>> {
+    let Some(profile) = &args.profile else {
+        return Ok(args.scenario_ids.clone());
+    };
+
+    let Some(spec) = rig_spec else {
+        return Err(homeboy::Error::validation_invalid_argument(
+            "profile",
+            "--profile requires --rig because profiles are declared in rig specs",
+            Some(profile.clone()),
+            None,
+        ));
+    };
+
+    let Some(scenario_ids) = spec.bench_profiles.get(profile) else {
+        let available = available_profile_names(spec);
+        return Err(homeboy::Error::validation_invalid_argument(
+            "profile",
+            format!(
+                "unknown bench profile '{}' for rig '{}'; available profiles: {}",
+                profile,
+                spec.id,
+                format_available_profiles(&available)
+            ),
+            Some(profile.clone()),
+            Some(available),
+        ));
+    };
+
+    Ok(scenario_ids.clone())
+}
+
 pub(super) fn rig_component_path(spec: &RigSpec, component_id: &str) -> Option<String> {
     spec.components
         .get(component_id)
@@ -332,7 +419,7 @@ fn run_component_with_rig_context(
             regression_threshold_percent: args.regression_threshold,
             json_summary: args.json_summary,
             passthrough_args: passthrough_args.to_vec(),
-            scenario_ids: args.scenario_ids.clone(),
+            scenario_ids: selected_scenario_ids(args, rig_spec)?,
             rig_id: rig_id.clone(),
             shared_state: shared_state_override.or_else(|| args.shared_state.clone()),
             concurrency: args.concurrency,
@@ -427,6 +514,7 @@ mod tests {
             json_summary: false,
             rig: vec!["rig".to_string()],
             scenario_ids: Vec::new(),
+            profile: None,
             ignore_default_baseline: false,
         };
 

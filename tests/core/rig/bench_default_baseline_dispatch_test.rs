@@ -56,6 +56,7 @@ fn make_args(
             json_summary: false,
             rig,
             scenario_ids: Vec::new(),
+            profile: None,
             ignore_default_baseline,
         },
     }
