@@ -27,7 +27,20 @@ pub struct AuditSummaryOutput {
     pub top_findings: Vec<AuditSummaryFinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixability: Option<AuditFixability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_since: Option<AuditChangedSinceSummary>,
     pub exit_code: i32,
+}
+
+/// Changed-since audit classification.
+///
+/// `introduced_findings` are findings not present in the selected baseline and
+/// therefore block the PR. `contextual_findings` are existing findings in the
+/// touched/impact scope that are shown for context only.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct AuditChangedSinceSummary {
+    pub introduced_findings: usize,
+    pub contextual_findings: usize,
 }
 
 /// Individual finding in the summary.
@@ -81,6 +94,8 @@ pub enum AuditCommandOutput {
         #[serde(flatten)]
         result: CodeAuditResult,
         baseline_comparison: baseline::BaselineComparison,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        changed_since: Option<AuditChangedSinceSummary>,
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<AuditSummaryOutput>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,7 +167,19 @@ pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSum
         info,
         top_findings,
         fixability: None,
+        changed_since: None,
         exit_code,
+    }
+}
+
+pub fn build_changed_since_summary(
+    result: &CodeAuditResult,
+    comparison: &baseline::BaselineComparison,
+) -> AuditChangedSinceSummary {
+    let introduced_findings = comparison.new_items.len();
+    AuditChangedSinceSummary {
+        introduced_findings,
+        contextual_findings: result.findings.len().saturating_sub(introduced_findings),
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::code_audit::report::{
-    build_audit_summary, compute_fixability, finding_kind_key, from_main_workflow,
-    AuditCommandOutput,
+    build_audit_summary, build_changed_since_summary, compute_fixability, finding_kind_key,
+    from_main_workflow, AuditChangedSinceSummary, AuditCommandOutput,
 };
 use crate::code_audit::test_helpers::{empty_result, make_finding};
 use crate::code_audit::{AuditFinding, Finding, FindingConfidence, Severity};
@@ -78,6 +78,68 @@ fn test_build_audit_summary_preserves_alignment_score() {
     let summary = build_audit_summary(&result, 0);
 
     assert_eq!(summary.alignment_score, Some(0.85));
+}
+
+#[test]
+fn test_build_audit_summary_omits_changed_since_by_default() {
+    let result = empty_result();
+    let summary = build_audit_summary(&result, 0);
+
+    assert!(summary.changed_since.is_none());
+}
+
+#[test]
+fn test_build_changed_since_summary_splits_introduced_from_context() {
+    let mut result = empty_result();
+    result.findings.push(Finding {
+        convention: "structural".to_string(),
+        severity: Severity::Warning,
+        file: "src/large.rs".to_string(),
+        description: "Existing large file debt".to_string(),
+        suggestion: "Consider decomposing into focused modules".to_string(),
+        kind: AuditFinding::GodFile,
+    });
+    result.findings.push(Finding {
+        convention: "dead_code".to_string(),
+        severity: Severity::Warning,
+        file: "src/large.rs".to_string(),
+        description: "New unused export".to_string(),
+        suggestion: "Remove or reference the export".to_string(),
+        kind: AuditFinding::UnreferencedExport,
+    });
+
+    let comparison = crate::engine::baseline::Comparison {
+        new_items: vec![crate::engine::baseline::NewItem {
+            fingerprint: "dead_code::src/large.rs::UnreferencedExport".to_string(),
+            description: "New unused export".to_string(),
+            context_label: "dead_code".to_string(),
+        }],
+        resolved_fingerprints: vec![],
+        delta: 1,
+        drift_increased: true,
+    };
+
+    assert_eq!(
+        build_changed_since_summary(&result, &comparison),
+        AuditChangedSinceSummary {
+            introduced_findings: 1,
+            contextual_findings: 1,
+        }
+    );
+}
+
+#[test]
+fn test_changed_since_summary_serializes_as_additive_summary_field() {
+    let mut summary = build_audit_summary(&empty_result(), 0);
+    summary.changed_since = Some(AuditChangedSinceSummary {
+        introduced_findings: 0,
+        contextual_findings: 3,
+    });
+
+    let value = serde_json::to_value(summary).expect("summary serializes");
+
+    assert_eq!(value["changed_since"]["introduced_findings"], 0);
+    assert_eq!(value["changed_since"]["contextual_findings"], 3);
 }
 
 #[test]
