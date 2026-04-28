@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.5] - 2026-04-28
+
+### Fixed
+- load runtime context for scoped PHPStan
+- scope lint profile to runtime files
+
 ## [2.30.4] - 2026-04-28
 
 ### Fixed
