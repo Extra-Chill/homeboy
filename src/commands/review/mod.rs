@@ -652,6 +652,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_repeatable_pr_comment_banners_in_order() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "my-comp",
+            "--report=pr-comment",
+            "--banner",
+            "autofix=applied 3 file(s)",
+            "--banner=binary-source=fallback",
+            "--banner",
+            "custom=value=with=equals",
+        ])
+        .expect("should parse repeatable banners");
+
+        assert_eq!(
+            cli.review.banner,
+            vec![
+                ("autofix".to_string(), "applied 3 file(s)".to_string()),
+                ("binary-source".to_string(), "fallback".to_string()),
+                ("custom".to_string(), "value=with=equals".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_unknown_report_format() {
         let result = TestCli::try_parse_from(["test", "my-comp", "--report=slack"]);
         assert!(
