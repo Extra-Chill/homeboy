@@ -36,6 +36,11 @@ pub struct AuditArgs {
     /// Include compact machine-readable summary for CI wrappers
     #[arg(long)]
     pub json_summary: bool,
+
+    /// Include automated-fixability metadata. This can be expensive because it
+    /// runs the refactor planner after audit completes.
+    #[arg(long)]
+    pub fixability: bool,
 }
 
 fn parse_finding_kinds(
@@ -107,6 +112,7 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         },
         changed_since: args.changed_since,
         json_summary: args.json_summary,
+        include_fixability: args.fixability,
     })?;
 
     Ok(report::from_main_workflow(workflow))
@@ -251,6 +257,7 @@ mod tests {
             },
             changed_since: None,
             json_summary: false,
+            fixability: false,
         };
 
         let (output, code) = run(args, &crate::commands::GlobalArgs {}).expect("audit should run");

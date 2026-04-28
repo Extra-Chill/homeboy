@@ -25,6 +25,7 @@ pub struct AuditRunWorkflowArgs {
     pub baseline_flags: crate::engine::baseline::BaselineFlags,
     pub changed_since: Option<String>,
     pub json_summary: bool,
+    pub include_fixability: bool,
 }
 
 /// Result of the main audit workflow — ready for report assembly.
@@ -247,13 +248,13 @@ fn run_comparison_workflow(
 
     if args.json_summary {
         let mut summary = report::build_audit_summary(&result, exit_code);
-        summary.fixability = report::compute_fixability(&result);
+        summary.fixability = compute_fixability_if_requested(&result, args);
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Summary(summary),
             exit_code,
         })
     } else {
-        let fixability = report::compute_fixability(&result);
+        let fixability = compute_fixability_if_requested(&result, args);
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Full {
                 passed: exit_code == 0,
@@ -290,13 +291,13 @@ fn build_comparison_output(
 
     if args.json_summary {
         let mut summary = report::build_audit_summary(&result, exit_code);
-        summary.fixability = report::compute_fixability(&result);
+        summary.fixability = compute_fixability_if_requested(&result, args);
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Summary(summary),
             exit_code,
         })
     } else {
-        let fixability = report::compute_fixability(&result);
+        let fixability = compute_fixability_if_requested(&result, args);
 
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Compared {
@@ -309,6 +310,15 @@ fn build_comparison_output(
             exit_code,
         })
     }
+}
+
+fn compute_fixability_if_requested(
+    result: &CodeAuditResult,
+    args: &AuditRunWorkflowArgs,
+) -> Option<report::AuditFixability> {
+    args.include_fixability
+        .then(|| report::compute_fixability(result))
+        .flatten()
 }
 
 /// Determine exit code for audit results.

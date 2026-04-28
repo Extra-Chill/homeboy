@@ -1534,6 +1534,7 @@ mod tests {
                 open: items.len(),
                 items,
             }),
+            &[],
         );
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "needs_rebase");

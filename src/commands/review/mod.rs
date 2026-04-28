@@ -201,6 +201,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
         baseline_args: args.baseline_args.clone(),
         changed_since: args.changed_since.clone(),
         json_summary: args.summary,
+        fixability: false,
     };
     let (audit_output, audit_exit) = audit::run(audit_args, global)?;
     let audit_passed = audit_exit == 0;

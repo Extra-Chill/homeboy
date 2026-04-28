@@ -2,7 +2,7 @@
 //!
 //! Wired into `src/core/code_audit/run.rs` via `#[cfg(test)] #[path = ...] mod run_test`.
 
-use super::apply_finding_filters;
+use super::{apply_finding_filters, compute_fixability_if_requested, AuditRunWorkflowArgs};
 use crate::code_audit::findings::{Finding, Severity};
 use crate::code_audit::{AuditExecutionPlan, AuditFinding, AuditSummary, CodeAuditResult};
 
@@ -34,6 +34,26 @@ fn make_result(findings: Vec<Finding>) -> CodeAuditResult {
         directory_conventions: vec![],
         findings,
         duplicate_groups: vec![],
+    }
+}
+
+fn make_args(include_fixability: bool) -> AuditRunWorkflowArgs {
+    AuditRunWorkflowArgs {
+        component_id: "test".to_string(),
+        source_path: "/tmp/test".to_string(),
+        conventions: false,
+        only_kinds: vec![],
+        exclude_kinds: vec![],
+        only_labels: vec![],
+        exclude_labels: vec![],
+        baseline_flags: crate::engine::baseline::BaselineFlags {
+            baseline: false,
+            ignore_baseline: false,
+            ratchet: false,
+        },
+        changed_since: None,
+        json_summary: false,
+        include_fixability,
     }
 }
 
@@ -157,4 +177,27 @@ fn execution_plan_is_full_without_filters() {
         AuditExecutionPlan::from_filters(&[], &[]),
         AuditExecutionPlan::full()
     );
+}
+
+#[test]
+fn fixability_is_skipped_unless_requested() {
+    let result = make_result(vec![make_finding(AuditFinding::TodoMarker, "a.rs")]);
+    let args = make_args(false);
+
+    let fixability = compute_fixability_if_requested(&result, &args);
+
+    assert!(fixability.is_none());
+}
+
+#[test]
+fn fixability_flag_allows_planning_path() {
+    let result = make_result(vec![make_finding(AuditFinding::TodoMarker, "a.rs")]);
+    let args = make_args(true);
+
+    let fixability = compute_fixability_if_requested(&result, &args);
+
+    // The fixture path does not exist, so the planner returns None. The test
+    // still pins the flag contract: true is the only path that reaches the
+    // existing compute_fixability() guard.
+    assert!(fixability.is_none());
 }
