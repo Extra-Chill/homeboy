@@ -218,6 +218,7 @@ fn run_args(component: Option<&str>, rig: Vec<String>, scenario_ids: Vec<String>
             _json: HiddenJsonArgs::default(),
             json_summary: false,
             rig,
+            rig_order: BenchRigOrder::Input,
             scenario_ids,
             profile: None,
             ignore_default_baseline: false,
@@ -414,6 +415,20 @@ fn parses_rig_run_options_without_component() {
 }
 
 #[test]
+fn parses_rig_order_flag() {
+    let cli = TestCli::try_parse_from([
+        "bench",
+        "--rig",
+        "studio-agent-sdk,studio-agent-pi",
+        "--rig-order",
+        "reverse",
+    ])
+    .expect("bench --rig-order should parse");
+
+    assert_eq!(cli.bench.run.rig_order, BenchRigOrder::Reverse);
+}
+
+#[test]
 fn run_selects_multiple_scenarios() {
     with_isolated_home(|home| {
         write_bench_extension(home);
@@ -500,6 +515,37 @@ fn cross_rig_run_passes_selector_to_each_rig() {
                     assert_eq!(scenarios.len(), 1);
                     assert_eq!(scenarios[0].id, "rig-slow");
                 }
+            }
+            _ => panic!("expected comparison output"),
+        }
+    });
+}
+
+#[test]
+fn cross_rig_reverse_order_flips_reference_and_execution_order() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_a = tempfile::TempDir::new().expect("component a");
+        let component_b = tempfile::TempDir::new().expect("component b");
+        write_rig(home, "rig-a", "studio", component_a.path());
+        write_rig(home, "rig-b", "studio", component_b.path());
+
+        let mut args = run_args(
+            None,
+            vec!["rig-a".to_string(), "rig-b".to_string()],
+            vec!["rig-slow".to_string()],
+        );
+        args.run.rig_order = BenchRigOrder::Reverse;
+
+        let (output, exit_code) = run(args, &GlobalArgs {})
+            .expect("cross-rig selected bench should run in reverse order");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::Comparison(result) => {
+                assert_eq!(result.rigs.len(), 2);
+                assert_eq!(result.rigs[0].rig_id, "rig-b");
+                assert_eq!(result.rigs[1].rig_id, "rig-a");
             }
             _ => panic!("expected comparison output"),
         }
@@ -1150,6 +1196,19 @@ fn filter_strips_shared_state_and_concurrency_forms() {
         "--concurrency=4".to_string(),
         "--keep".to_string(),
     ];
+    assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
+}
+
+#[test]
+fn filter_strips_rig_order_forms() {
+    let args = vec![
+        "--rig-order".to_string(),
+        "reverse".to_string(),
+        "--filter=Scenario".to_string(),
+    ];
+    assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
+
+    let args = vec!["--rig-order=reverse".to_string(), "--keep".to_string()];
     assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
 }
 
