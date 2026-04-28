@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.6] - 2026-04-28
+
+### Fixed
+- respect scoped lint and test files
+
 ## [2.30.5] - 2026-04-28
 
 ### Fixed
