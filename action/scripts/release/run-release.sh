@@ -2,13 +2,14 @@
 #
 # CI-driven continuous release pipeline.
 #
-# Delegates entirely to `homeboy release` — bump type, changelog generation,
-# version bumping, commit, tag, and push are all handled by homeboy core.
+# Release decisions belong to `homeboy release`. This wrapper only resolves the
+# GitHub Actions workspace, applies branch safety, and translates structured
+# Homeboy output into composite-action outputs.
 #
 # Env vars:
-#   RELEASE_BRANCH      — branch to release from (default: main)
-#   COMPONENT_NAME      — component ID override
-#   RELEASE_DRY_RUN     — if "true", preview without making changes
+#   RELEASE_BRANCH      - branch to release from (default: main)
+#   COMPONENT_NAME      - component ID override
+#   RELEASE_DRY_RUN     - if "true", preview without making changes
 #
 # Outputs (GITHUB_OUTPUT):
 #   released:        true|false
@@ -16,7 +17,6 @@
 #   release-tag:     the git tag (e.g. v0.63.0)
 #   bump-type:       patch|minor|major
 #   skipped-reason:  why release was skipped (if released=false)
-#
 
 set -euo pipefail
 
@@ -26,7 +26,6 @@ source "${SCRIPT_DIR}/github-release.sh"
 RELEASE_BRANCH="${RELEASE_BRANCH:-main}"
 DRY_RUN="${RELEASE_DRY_RUN:-false}"
 
-# Resolve workspace — use component subdirectory when set
 COMPONENT_DIR="${COMPONENT_DIR:-.}"
 if [ -n "${COMPONENT_DIR}" ] && [ "${COMPONENT_DIR}" != "." ]; then
   WORKSPACE="${GITHUB_WORKSPACE:-.}/${COMPONENT_DIR}"
@@ -40,41 +39,57 @@ json_field() {
   jq -r "${jq_expr}" "${file_path}" 2>/dev/null || true
 }
 
-run_release_command() {
-  local output_file="$1"
-  shift
-  local exit_code=0
-  set +e
-  homeboy --output "${output_file}" release "$@"
-  exit_code=$?
-  set -e
-  if [ ! -s "${output_file}" ]; then
-    echo "::warning::homeboy release did not write structured output to ${output_file}"
-  fi
-  return "${exit_code}"
+write_output() {
+  local key="$1"
+  local value="$2"
+
+  echo "${key}=${value}" >> "${GITHUB_OUTPUT}"
 }
 
-# --- Step 1: Resolve component ID ---
+resolve_component_id() {
+  if [ -n "${COMPONENT_NAME:-}" ]; then
+    echo "${COMPONENT_NAME}"
+    return 0
+  fi
 
-COMP_ID="${COMPONENT_NAME:-}"
-if [ -z "${COMP_ID}" ]; then
   if [ -f "${WORKSPACE}/homeboy.json" ]; then
-    COMP_ID="$(jq -r '.id // empty' "${WORKSPACE}/homeboy.json" 2>/dev/null || true)"
+    local configured_id
+    configured_id="$(jq -r '.id // empty' "${WORKSPACE}/homeboy.json" 2>/dev/null || true)"
+    if [ -n "${configured_id}" ]; then
+      echo "${configured_id}"
+      return 0
+    fi
   fi
-  if [ -z "${COMP_ID}" ]; then
-    COMP_ID="$(basename "${GITHUB_REPOSITORY:-unknown}")"
-  fi
-fi
 
-# --- Step 2: Validate branch ---
+  basename "${GITHUB_REPOSITORY:-unknown}"
+}
+
+write_release_outputs() {
+  local output_file="$1"
+  local released="$2"
+  local skipped_reason="${3:-}"
+
+  local version tag bump_type
+  version="$(json_field "${output_file}" '.data.result.new_version // empty')"
+  tag="$(json_field "${output_file}" '.data.result.tag // empty')"
+  bump_type="$(json_field "${output_file}" '.data.result.bump_type // empty')"
+
+  write_output "released" "${released}"
+  [ -n "${version}" ] && write_output "release-version" "${version}"
+  [ -n "${tag}" ] && write_output "release-tag" "${tag}"
+  [ -n "${bump_type}" ] && write_output "bump-type" "${bump_type}"
+  [ -n "${skipped_reason}" ] && write_output "skipped-reason" "${skipped_reason}"
+
+  return 0
+}
+
+COMP_ID="$(resolve_component_id)"
 
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
-  echo "::notice::Not on ${RELEASE_BRANCH} (current: ${CURRENT_BRANCH}) — skipping release"
-  {
-    echo "released=false"
-    echo "skipped-reason=wrong-branch"
-  } >> "${GITHUB_OUTPUT}"
+  echo "::notice::Not on ${RELEASE_BRANCH} (current: ${CURRENT_BRANCH}) - skipping release"
+  write_output "released" "false"
+  write_output "skipped-reason" "wrong-branch"
   exit 0
 fi
 
@@ -85,158 +100,82 @@ fi
 
 if [ "${CURRENT_BRANCH}" != "${DEFAULT_BRANCH}" ]; then
   echo "::error::Refusing to release from non-default branch '${CURRENT_BRANCH}' (default: '${DEFAULT_BRANCH}')"
-  {
-    echo "released=false"
-    echo "skipped-reason=wrong-default-branch"
-  } >> "${GITHUB_OUTPUT}"
+  write_output "released" "false"
+  write_output "skipped-reason" "wrong-default-branch"
   exit 1
 fi
 
-# --- Step 2b: Sync with remote ---
-# The quality gate runs in separate jobs that may push autofix commits
-# or new PRs may merge while the pipeline is in flight. Pull to ensure
-# we release from the actual HEAD of the branch.
-
+# The quality gate runs in separate jobs that may push autofix commits or new
+# PRs may merge while the pipeline is in flight. Pull before invoking Homeboy so
+# core releases from the actual branch head.
 git pull --ff-only origin "${RELEASE_BRANCH}" 2>/dev/null || true
 
-# --- Step 3: Check for releasable commits via homeboy ---
+RELEASE_OUTPUT_FILE="$(mktemp)"
+RELEASE_ARGS=(
+  "${COMP_ID}"
+  --path "${WORKSPACE}"
+  --skip-checks
+  --skip-publish
+  --git-identity bot
+)
 
-DRY_RUN_FLAGS="--dry-run --skip-checks --skip-publish"
-DRY_RUN_OUTPUT_FILE="$(mktemp)"
-run_release_command "${DRY_RUN_OUTPUT_FILE}" "${COMP_ID}" ${DRY_RUN_FLAGS} --path "${WORKSPACE}" || true
+if [ "${DRY_RUN}" = "true" ]; then
+  RELEASE_ARGS+=(--dry-run)
+fi
 
-# Parse the response — check for skipped_reason
-SKIPPED_REASON="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.data.result.skipped_reason // empty')"
+set +e
+homeboy --output "${RELEASE_OUTPUT_FILE}" release "${RELEASE_ARGS[@]}"
+RELEASE_EXIT=$?
+set -e
+
+if [ ! -s "${RELEASE_OUTPUT_FILE}" ]; then
+  echo "::error::homeboy release did not write structured output to ${RELEASE_OUTPUT_FILE}"
+  write_output "released" "false"
+  write_output "skipped-reason" "release-output-missing"
+  rm -f "${RELEASE_OUTPUT_FILE}"
+  exit 1
+fi
+
+SUCCESS="$(json_field "${RELEASE_OUTPUT_FILE}" '.success // false')"
+SKIPPED_REASON="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.skipped_reason // empty')"
 
 if [ -n "${SKIPPED_REASON}" ]; then
   echo "::notice::Release skipped: ${SKIPPED_REASON}"
-  {
-    echo "released=false"
-    echo "skipped-reason=${SKIPPED_REASON}"
-  } >> "${GITHUB_OUTPUT}"
-
-  # If major requires flag, surface the bump type for the workflow to decide
-  BUMP_TYPE="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.data.result.bump_type // empty')"
-  if [ "${SKIPPED_REASON}" = "major-requires-flag" ]; then
-    echo "bump-type=${BUMP_TYPE}" >> "${GITHUB_OUTPUT}"
-  fi
-
-  rm -f "${DRY_RUN_OUTPUT_FILE}"
+  write_release_outputs "${RELEASE_OUTPUT_FILE}" "false" "${SKIPPED_REASON}"
+  rm -f "${RELEASE_OUTPUT_FILE}"
   exit 0
 fi
 
-# Check for errors (validation failures, etc.)
-SUCCESS="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.success // false')"
-if [ "${SUCCESS}" != "true" ]; then
-  ERROR_MSG="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.error.message // "Unknown error"')"
-  if [ -z "${ERROR_MSG}" ] || [ "${ERROR_MSG}" = "null" ]; then
-    ERROR_MSG="Unknown error"
-  fi
-  echo "::error::Release dry-run failed: ${ERROR_MSG}"
-  {
-    echo "released=false"
-    echo "skipped-reason=dry-run-failed"
-  } >> "${GITHUB_OUTPUT}"
-  rm -f "${DRY_RUN_OUTPUT_FILE}"
-  exit 1
-fi
-
-# Extract planned version and bump type from dry-run
-BUMP_TYPE="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.data.result.bump_type // empty')"
-NEW_VERSION="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.data.result.new_version // empty')"
-RELEASABLE="$(json_field "${DRY_RUN_OUTPUT_FILE}" '.data.result.releasable_commits // 0')"
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Release: ${COMP_ID}"
-echo "  Releasable commits: ${RELEASABLE}"
-echo "  Bump type: ${BUMP_TYPE}"
-echo "  New version: ${NEW_VERSION}"
-echo "  Dry run: ${DRY_RUN}"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-
-# --- Step 4: Configure git identity ---
-
-BOT_NAME="homeboy-ci[bot]"
-BOT_EMAIL="266378653+homeboy-ci[bot]@users.noreply.github.com"
-git config user.name "${BOT_NAME}"
-git config user.email "${BOT_EMAIL}"
-export GIT_AUTHOR_NAME="${BOT_NAME}"
-export GIT_AUTHOR_EMAIL="${BOT_EMAIL}"
-export GIT_COMMITTER_NAME="${BOT_NAME}"
-export GIT_COMMITTER_EMAIL="${BOT_EMAIL}"
-
-if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
-  REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-  git -c "http.https://github.com/.extraheader=" remote set-url origin "${REMOTE_URL}"
-  git -c "http.https://github.com/.extraheader=" remote set-url --push origin "${REMOTE_URL}"
-fi
-
-# --- Step 5: Dry run check ---
-
-if [ "${DRY_RUN}" = "true" ]; then
-  echo "::notice::Dry run — would release v${NEW_VERSION} (${BUMP_TYPE})"
-  {
-    echo "released=false"
-    echo "release-version=${NEW_VERSION}"
-    echo "release-tag=v${NEW_VERSION}"
-    echo "bump-type=${BUMP_TYPE}"
-    echo "skipped-reason=dry-run"
-  } >> "${GITHUB_OUTPUT}"
-  rm -f "${DRY_RUN_OUTPUT_FILE}"
-  exit 0
-fi
-
-# --- Step 6: Run the actual release ---
-
-RELEASE_FLAGS="--skip-checks --skip-publish --path ${WORKSPACE}"
-if [ "${BUMP_TYPE}" = "major" ]; then
-  RELEASE_FLAGS="${RELEASE_FLAGS} --major"
-fi
-
-RELEASE_OUTPUT_FILE="$(mktemp)"
-run_release_command "${RELEASE_OUTPUT_FILE}" "${COMP_ID}" ${RELEASE_FLAGS} || true
-
-# Check success
-RELEASE_SUCCESS="$(json_field "${RELEASE_OUTPUT_FILE}" '.success // false')"
-if [ "${RELEASE_SUCCESS}" != "true" ]; then
+if [ "${SUCCESS}" != "true" ] || [ "${RELEASE_EXIT}" -ne 0 ]; then
   ERROR_MSG="$(json_field "${RELEASE_OUTPUT_FILE}" '.error.message // "Unknown error"')"
   if [ -z "${ERROR_MSG}" ] || [ "${ERROR_MSG}" = "null" ]; then
     ERROR_MSG="Unknown error"
   fi
+
   echo "::error::Release failed: ${ERROR_MSG}"
-  {
-    echo "released=false"
-    echo "skipped-reason=release-failed"
-  } >> "${GITHUB_OUTPUT}"
-  rm -f "${DRY_RUN_OUTPUT_FILE}" "${RELEASE_OUTPUT_FILE}"
+  write_release_outputs "${RELEASE_OUTPUT_FILE}" "false" "release-failed"
+  rm -f "${RELEASE_OUTPUT_FILE}"
   exit 1
 fi
 
-# Extract results from actual release
-ACTUAL_VERSION="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.new_version // empty')"
-ACTUAL_TAG="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.tag // empty')"
-ACTUAL_BUMP="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.bump_type // empty')"
+VERSION="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.new_version // empty')"
+TAG="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.tag // empty')"
+BUMP_TYPE="$(json_field "${RELEASE_OUTPUT_FILE}" '.data.result.bump_type // empty')"
 
-# Fallback to dry-run values if extraction from run fails
-ACTUAL_VERSION="${ACTUAL_VERSION:-${NEW_VERSION}}"
-ACTUAL_TAG="${ACTUAL_TAG:-v${NEW_VERSION}}"
-ACTUAL_BUMP="${ACTUAL_BUMP:-${BUMP_TYPE}}"
+if [ "${DRY_RUN}" = "true" ]; then
+  echo "::notice::Dry run - would release ${TAG:-v${VERSION}} (${BUMP_TYPE})"
+  write_release_outputs "${RELEASE_OUTPUT_FILE}" "false" "dry-run"
+  rm -f "${RELEASE_OUTPUT_FILE}"
+  exit 0
+fi
 
-homeboy_verify_github_release_exists "${ACTUAL_TAG}" "${GITHUB_REPOSITORY:-}"
+homeboy_verify_github_release_exists "${TAG}" "${GITHUB_REPOSITORY:-}"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Released v${ACTUAL_VERSION} (${ACTUAL_BUMP})"
-echo "  Tag ${ACTUAL_TAG} pushed — build/publish workflow will trigger"
+echo "  Released ${TAG} (${BUMP_TYPE})"
+echo "  Tag pushed - build/publish workflow will trigger"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-{
-  echo "released=true"
-  echo "release-version=${ACTUAL_VERSION}"
-  echo "release-tag=${ACTUAL_TAG}"
-  echo "bump-type=${ACTUAL_BUMP}"
-} >> "${GITHUB_OUTPUT}"
-
-rm -f "${DRY_RUN_OUTPUT_FILE}" "${RELEASE_OUTPUT_FILE}"
+write_release_outputs "${RELEASE_OUTPUT_FILE}" "true"
+rm -f "${RELEASE_OUTPUT_FILE}"
