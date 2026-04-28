@@ -89,15 +89,30 @@ summary_json_for_command() {
 
 command_status() {
   local command="$1"
-  echo "${RESULTS}" | jq -r --arg cmd "${command}" '.[$cmd] // "unknown"' 2>/dev/null || echo "unknown"
+  echo "${RESULTS}" | jq -r --arg cmd "${command}" 'if .[$cmd] == "pass" or .[$cmd] == "fail" then .[$cmd] else "unknown" end' 2>/dev/null || echo "unknown"
 }
 
 command_icon() {
   local status="$1"
-  if [ "${status}" = "pass" ]; then
-    printf '%s\n' "white_check_mark"
-  else
-    printf '%s\n' "x"
+  case "${status}" in
+    pass)
+      printf '%s\n' "white_check_mark"
+      ;;
+    fail)
+      printf '%s\n' "x"
+      ;;
+    *)
+      printf '%s\n' "warning"
+      ;;
+  esac
+}
+
+command_status_note() {
+  local command="$1"
+  local status="$2"
+
+  if [ "${status}" = "unknown" ]; then
+    printf '%s\n' "- Could not parse a pass/fail result for ${command}; check the action logs or result artifact."
   fi
 }
 

@@ -122,6 +122,11 @@ append_command_sections() {
       SECTION_BODY+="- No structured ${CMD} summary artifact was generated."$'\n'
     fi
 
+    STATUS_NOTE="$(command_status_note "${CMD}" "${STATUS}")"
+    if [ -n "${STATUS_NOTE}" ]; then
+      SECTION_BODY+="${STATUS_NOTE}"$'\n'
+    fi
+
     SECTION_BODY+=$'\n'
   done
 }
