@@ -20,13 +20,15 @@ fn test_bench_spec_deserializes_both_fields() {
             "id": "candidate",
             "bench": {
                 "default_component": "homeboy",
-                "default_baseline_rig": "homeboy-main"
+                "default_baseline_rig": "homeboy-main",
+                "warmup_iterations": 3
             }
         }"#,
     );
     assert_eq!(spec.default_component.as_deref(), Some("homeboy"));
     assert!(spec.components.is_empty());
     assert_eq!(spec.default_baseline_rig.as_deref(), Some("homeboy-main"));
+    assert_eq!(spec.warmup_iterations, Some(3));
 }
 
 #[test]
@@ -159,6 +161,7 @@ fn test_bench_spec_default_component_only_back_compat() {
     assert_eq!(spec.default_component.as_deref(), Some("homeboy"));
     assert!(spec.components.is_empty());
     assert!(spec.default_baseline_rig.is_none());
+    assert!(spec.warmup_iterations.is_none());
 }
 
 #[test]
@@ -189,11 +192,12 @@ fn test_rig_spec_without_bench_block_back_compat() {
 fn test_bench_spec_round_trip_preserves_both_fields() {
     let original_json = r#"{
         "id": "candidate",
-        "bench": {
-            "default_component": "homeboy",
-            "default_baseline_rig": "homeboy-main"
-        }
-    }"#;
+            "bench": {
+                "default_component": "homeboy",
+                "default_baseline_rig": "homeboy-main",
+                "warmup_iterations": 4
+            }
+        }"#;
     let spec: RigSpec = serde_json::from_str(original_json).expect("parse");
     let re_serialized = serde_json::to_string(&spec).expect("serialize");
     let reparsed: RigSpec = serde_json::from_str(&re_serialized).expect("reparse");
@@ -202,6 +206,7 @@ fn test_bench_spec_round_trip_preserves_both_fields() {
     assert_eq!(bench.default_component.as_deref(), Some("homeboy"));
     assert!(bench.components.is_empty());
     assert_eq!(bench.default_baseline_rig.as_deref(), Some("homeboy-main"));
+    assert_eq!(bench.warmup_iterations, Some(4));
 }
 
 #[test]
@@ -247,6 +252,7 @@ fn test_bench_spec_skips_serializing_none_fields() {
         re_serialized
     );
     assert!(re_serialized.contains("default_baseline_rig"));
+    assert!(!re_serialized.contains("warmup_iterations"));
 }
 
 #[test]

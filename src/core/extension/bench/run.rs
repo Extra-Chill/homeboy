@@ -30,6 +30,7 @@ pub struct BenchRunWorkflowArgs {
     /// object, not a JSON-string-of-an-object.
     pub settings_json: Vec<(String, serde_json::Value)>,
     pub iterations: u64,
+    pub warmup_iterations: Option<u64>,
     pub runs: u64,
     pub baseline_flags: BaselineFlags,
     pub regression_threshold_percent: f64,
@@ -124,6 +125,7 @@ pub fn run_bench_list_workflow(
             settings: args.settings,
             settings_json: args.settings_json,
             iterations: 0,
+            warmup_iterations: None,
             runs: 1,
             baseline_flags: BaselineFlags {
                 baseline: false,
@@ -599,6 +601,13 @@ fn build_runner(
         .env("HOMEBOY_BENCH_ITERATIONS", &args.iterations.to_string())
         .script_args(&args.passthrough_args);
 
+    if let Some(warmup_iterations) = args.warmup_iterations {
+        runner = runner.env(
+            "HOMEBOY_BENCH_WARMUP_ITERATIONS",
+            &warmup_iterations.to_string(),
+        );
+    }
+
     if !args.extra_workloads.is_empty() {
         runner = runner.env(
             "HOMEBOY_BENCH_EXTRA_WORKLOADS",
@@ -826,6 +835,7 @@ mod tests {
                 settings: Vec::new(),
                 settings_json: Vec::new(),
                 iterations: 1,
+                warmup_iterations: None,
                 runs: 1,
                 baseline_flags: BaselineFlags {
                     baseline: false,

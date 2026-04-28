@@ -194,6 +194,12 @@ pub struct BenchSpec {
     /// pass `--ignore-default-baseline`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_baseline_rig: Option<String>,
+
+    /// Warmup iterations to forward to bench runners for this rig. CLI
+    /// `homeboy bench --warmup <N>` overrides this value; omitted keeps
+    /// the runner's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmup_iterations: Option<u64>,
 }
 
 /// Component reference inside a rig spec. Decoupled from the global component

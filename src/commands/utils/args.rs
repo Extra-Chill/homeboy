@@ -143,6 +143,7 @@ pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
             "",
             &[
                 "--iterations",
+                "--warmup",
                 "--runs",
                 "--baseline",
                 "--ignore-baseline",
@@ -470,6 +471,24 @@ mod normalize_tests {
             "my-comp",
             "--runs",
             "5",
+            "--iterations",
+            "1",
+        ]);
+        let expected = input.clone();
+        assert_eq!(normalize_trailing_flags(input), expected);
+    }
+
+    /// `bench` owns warmup control. It must remain a named CLI flag even
+    /// when placed after the positional component so clap can reject
+    /// negative values instead of passing them through to the runner.
+    #[test]
+    fn bench_warmup_flag_after_component_is_not_separated() {
+        let input = argv(&[
+            "homeboy",
+            "bench",
+            "my-comp",
+            "--warmup",
+            "-1",
             "--iterations",
             "1",
         ]);

@@ -87,6 +87,14 @@ fn component_shared_state(
     })
 }
 
+fn effective_warmup_iterations(args: &BenchRunArgs, rig_spec: Option<&RigSpec>) -> Option<u64> {
+    args.warmup.or_else(|| {
+        rig_spec
+            .and_then(|spec| spec.bench.as_ref())
+            .and_then(|bench| bench.warmup_iterations)
+    })
+}
+
 fn suffix_component_results(mut results: BenchResults, component_id: &str) -> BenchResults {
     for scenario in &mut results.scenarios {
         scenario.id = format!("{}:c{}", scenario.id, component_id);
@@ -311,6 +319,7 @@ fn run_component_with_rig_context(
                 })
                 .collect(),
             iterations: args.iterations,
+            warmup_iterations: effective_warmup_iterations(args, rig_spec),
             runs: args.runs,
             baseline_flags: homeboy::engine::baseline::BaselineFlags {
                 baseline: args.baseline_args.baseline,
@@ -403,6 +412,7 @@ mod tests {
                 path: None,
             },
             iterations: 1,
+            warmup: None,
             runs: 1,
             shared_state: Some(PathBuf::from("/tmp/shared")),
             concurrency: 1,
