@@ -119,6 +119,9 @@ generate_dependency_config() {
     local tmpfile
     local has_dependencies=0
     local has_baseline=0
+    local has_component_context=0
+    local context_path
+    local scan_file_count=0
 
     tmpfile=$(homeboy_mktemp 'phpstan-dependencies.XXXXXX.neon')
 
@@ -143,14 +146,60 @@ generate_dependency_config() {
             has_dependencies=1
             printf '        - %s\n' "$dependency_path"
         done < <(homeboy_resolve_validation_dependency_paths "$PLUGIN_PATH")
+
+        if [ -n "${HOMEBOY_LINT_FILE:-}" ] || [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
+            while IFS= read -r context_path; do
+                [ -z "$context_path" ] && continue
+                has_component_context=1
+                printf '        - %s\n' "$context_path"
+            done < <(homeboy_resolve_phpstan_context_directories "$PLUGIN_PATH")
+
+            while IFS= read -r context_path; do
+                [ -z "$context_path" ] && continue
+                if [ "$scan_file_count" -eq 0 ]; then
+                    printf '%s\n' '    scanFiles:'
+                fi
+                scan_file_count=$((scan_file_count + 1))
+                has_component_context=1
+                printf '        - %s\n' "$context_path"
+            done < <(homeboy_resolve_phpstan_context_files "$PLUGIN_PATH")
+        fi
     } > "$tmpfile"
 
-    if [ "$has_dependencies" -eq 1 ] || [ "$has_baseline" -eq 1 ]; then
+    if [ "$has_dependencies" -eq 1 ] || [ "$has_baseline" -eq 1 ] || [ "$has_component_context" -eq 1 ]; then
         printf '%s\n' "$tmpfile"
     else
         rm -f "$tmpfile"
         printf '%s\n' ''
     fi
+}
+
+homeboy_resolve_phpstan_context_directories() {
+    local component_path="$1"
+    local candidate
+
+    find "$component_path" -mindepth 1 -maxdepth 1 -type d \
+        -not -name 'vendor' \
+        -not -name 'vendor_prefixed' \
+        -not -name 'node_modules' \
+        -not -name 'build' \
+        -not -name 'dist' \
+        -not -name 'tests' \
+        -print 2>/dev/null | while IFS= read -r candidate; do
+            if find "$candidate" -type f -name '*.php' -print -quit 2>/dev/null | grep -q .; then
+                printf '%s\n' "$candidate"
+            fi
+        done
+
+    if [ -d "${component_path}/vendor_prefixed" ]; then
+        printf '%s\n' "${component_path}/vendor_prefixed"
+    fi
+}
+
+homeboy_resolve_phpstan_context_files() {
+    local component_path="$1"
+
+    find "$component_path" -mindepth 1 -maxdepth 1 -type f -name '*.php' -print 2>/dev/null
 }
 
 cleanup_dependency_config() {
@@ -294,6 +343,7 @@ fi
 generate_composite_autoload() {
     local tmpfile
     local component_autoload="${PLUGIN_PATH}/vendor/autoload.php"
+    local component_prefixed_autoload="${PLUGIN_PATH}/vendor_prefixed/autoload.php"
 
     tmpfile=$(homeboy_mktemp 'homeboy-phpstan-autoload.XXXXXX')
 
@@ -304,13 +354,21 @@ generate_composite_autoload() {
         while IFS= read -r dependency_path; do
             [ -z "$dependency_path" ] && continue
             local dependency_autoload="${dependency_path}/vendor/autoload.php"
+            local dependency_prefixed_autoload="${dependency_path}/vendor_prefixed/autoload.php"
             if [ -f "$dependency_autoload" ]; then
                 printf '    %s,\n' "$(printf '%s' "$dependency_autoload" | jq -Rsa .)"
+            fi
+            if [ -f "$dependency_prefixed_autoload" ]; then
+                printf '    %s,\n' "$(printf '%s' "$dependency_prefixed_autoload" | jq -Rsa .)"
             fi
         done < <(homeboy_resolve_validation_dependency_paths "$PLUGIN_PATH")
 
         if [ -f "$component_autoload" ]; then
             printf '    %s,\n' "$(printf '%s' "$component_autoload" | jq -Rsa .)"
+        fi
+
+        if [ -f "$component_prefixed_autoload" ]; then
+            printf '    %s,\n' "$(printf '%s' "$component_prefixed_autoload" | jq -Rsa .)"
         fi
 
         printf '%s\n' '];'
