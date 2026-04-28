@@ -5,7 +5,9 @@ use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::engine::run_dir::RunDir;
 use homeboy::extension::bench as extension_bench;
 use homeboy::extension::bench::report::collect_artifacts;
-use homeboy::extension::bench::{BenchCommandOutput, BenchResults, BenchRunWorkflowArgs};
+use homeboy::extension::bench::{
+    BenchCommandOutput, BenchResults, BenchRunExecution, BenchRunWorkflowArgs,
+};
 use homeboy::extension::ExtensionCapability;
 use homeboy::rig::{self, BenchSpec, RigSpec, RigStateSnapshot};
 
@@ -410,7 +412,10 @@ fn run_component_with_rig_context(
                 .collect(),
             iterations: args.iterations,
             warmup_iterations: effective_warmup_iterations(args, rig_spec),
-            runs: args.runs,
+            execution: BenchRunExecution {
+                runs: args.runs,
+                concurrency: args.concurrency,
+            },
             baseline_flags: homeboy::engine::baseline::BaselineFlags {
                 baseline: args.baseline_args.baseline,
                 ignore_baseline: args.baseline_args.ignore_baseline,
@@ -422,7 +427,6 @@ fn run_component_with_rig_context(
             scenario_ids: selected_scenario_ids(args, rig_spec)?,
             rig_id: rig_id.clone(),
             shared_state: shared_state_override.or_else(|| args.shared_state.clone()),
-            concurrency: args.concurrency,
             extra_workloads,
         },
         &run_dir,

@@ -44,7 +44,7 @@ pub use distribution::BenchRunDistribution;
 pub use metrics::MetricDelta;
 pub use parsing::{
     evaluate_gates, parse_bench_results_file, parse_bench_results_str, BenchGate, BenchGateOp,
-    BenchGateResult, BenchMemory, BenchMetrics, BenchResults, BenchScenario,
+    BenchGateResult, BenchMemory, BenchMetrics, BenchResults, BenchRunExecution, BenchScenario,
 };
 pub use report::{
     aggregate_comparison, from_main_workflow, from_main_workflow_with_rig, BenchArtifactRef,
