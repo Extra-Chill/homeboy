@@ -48,6 +48,6 @@ assert_contains '^2\.' "${VERSION_FILE}" "VERSION is aligned with the v2 action 
 assert_not_contains 'Extra-Chill/homeboy-action@v1' "${README}" "README examples use the v2 action channel"
 assert_contains 'Extra-Chill/homeboy-action@v2' "${README}" "README documents the v2 action channel"
 assert_not_contains 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1' "${COMMENT_SECTIONS}" "PR comment footer does not advertise v1"
-assert_contains 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v2' "${COMMENT_SECTIONS}" "PR comment footer advertises v2"
+assert_not_contains 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v2' "${COMMENT_SECTIONS}" "PR comment footer does not duplicate action metadata"
 
 printf 'All release workflow checks passed.\n'

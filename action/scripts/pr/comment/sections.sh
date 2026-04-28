@@ -159,6 +159,4 @@ build_tooling_section() {
   printf '%s\n' "- Extension revision: \`${extension_revision}\`"
   printf '%s\n' "- Action: \`${action_repository}@${action_ref}\`"
   printf '\n</details>\n\n'
-  printf '%s\n' '---'
-  printf '%s\n' "*[Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v2*"
 }
