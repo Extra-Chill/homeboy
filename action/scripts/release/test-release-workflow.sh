@@ -8,6 +8,7 @@ RUN_RELEASE="${ROOT_DIR}/scripts/release/run-release.sh"
 README="${ROOT_DIR}/README.md"
 COMMENT_SECTIONS="${ROOT_DIR}/scripts/pr/comment/sections.sh"
 VERSION_FILE="${ROOT_DIR}/VERSION"
+HOMEBOY_CONFIG="${ROOT_DIR}/homeboy.json"
 
 assert_not_contains() {
   local needle="$1"
@@ -50,6 +51,10 @@ assert_not_contains 'remote set-url origin' "${RUN_RELEASE}" "run-release does n
 assert_contains 'homeboy_verify_github_release_exists "${TAG}" "${GITHUB_REPOSITORY:-}"' "${RUN_RELEASE}" "run-release verifies the GitHub Release after successful release"
 assert_contains 'release-verify-github-release:' "${ROOT_DIR}/action.yml" "action exposes GitHub Release verification toggle"
 assert_contains 'HOMEBOY_VERIFY_GITHUB_RELEASE: ${{ inputs.release-verify-github-release }}' "${ROOT_DIR}/action.yml" "action passes verification toggle to release script"
+assert_contains 'git/ref/tags/v${release_version}' "${HOMEBOY_CONFIG}" "post-release hook reads the pushed release tag ref"
+assert_contains 'release_sha' "${HOMEBOY_CONFIG}" "post-release hook points v2 at the pushed release tag target"
+assert_not_contains 'sha=$(git rev-parse HEAD)' "${HOMEBOY_CONFIG}" "post-release hook does not point v2 at an unpushed local release commit"
+assert_not_contains 'Skipping v2 tag update.*||' "${HOMEBOY_CONFIG}" "post-release hook does not swallow failed v2 tag updates"
 assert_contains '^2\.' "${VERSION_FILE}" "VERSION is aligned with the v2 action channel"
 assert_not_contains 'Extra-Chill/homeboy-action@v1' "${README}" "README examples use the v2 action channel"
 assert_contains 'Extra-Chill/homeboy-action@v2' "${README}" "README documents the v2 action channel"

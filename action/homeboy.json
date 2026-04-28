@@ -12,7 +12,7 @@
   ],
   "hooks": {
     "post:release": [
-      "current_branch=$(git rev-parse --abbrev-ref HEAD) && [ \"$current_branch\" = \"main\" ] && gh api repos/Extra-Chill/homeboy-action/git/refs/tags/v2 --method PATCH -f sha=$(git rev-parse HEAD) -F force=true || { echo \"Skipping v2 tag update (branch: $current_branch)\"; }"
+      "current_branch=$(git rev-parse --abbrev-ref HEAD); if [ \"$current_branch\" != \"main\" ]; then echo \"Skipping v2 tag update (branch: $current_branch)\"; exit 0; fi; release_version=$(tr -d '[:space:]' < VERSION); release_sha=$(gh api repos/Extra-Chill/homeboy-action/git/ref/tags/v${release_version} --jq .object.sha); gh api repos/Extra-Chill/homeboy-action/git/refs/tags/v2 --method PATCH -f sha=\"$release_sha\" -F force=true"
     ]
   }
 }
