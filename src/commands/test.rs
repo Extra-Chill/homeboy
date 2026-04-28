@@ -3,7 +3,9 @@ use clap::Args;
 use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::engine::run_dir::RunDir;
 use homeboy::extension::test as extension_test;
-use homeboy::extension::test::{detect_test_drift, report, TestCommandOutput, TestRunWorkflowArgs};
+use homeboy::extension::test::{
+    detect_test_drift, report, run_self_check_test_workflow, TestCommandOutput, TestRunWorkflowArgs,
+};
 use homeboy::extension::ExtensionCapability;
 
 use super::utils::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
@@ -135,6 +137,29 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 }
 
 pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput> {
+    let source_ctx = execution_context::resolve(&ResolveOptions {
+        component_id: args.comp.component.clone(),
+        path_override: args.comp.path.clone(),
+        capability: None,
+        settings_overrides: args.setting_args.setting.clone(),
+        settings_json_overrides: args.setting_args.setting_json.clone(),
+    })?;
+
+    if !args.drift
+        && source_ctx
+            .component
+            .has_self_check(ExtensionCapability::Test)
+    {
+        let workflow = run_self_check_test_workflow(
+            &source_ctx.component,
+            &source_ctx.source_path,
+            source_ctx.component_id.clone(),
+            args.json_summary,
+        )?;
+
+        return Ok(report::from_main_workflow(workflow));
+    }
+
     let ctx = execution_context::resolve(&ResolveOptions {
         component_id: args.comp.component.clone(),
         path_override: args.comp.path.clone(),

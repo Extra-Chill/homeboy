@@ -9,10 +9,11 @@ use crate::engine::baseline::BaselineFlags;
 use crate::engine::run_dir::{self, RunDir};
 use crate::extension::lint::baseline::{self as lint_baseline, LintFinding};
 use crate::extension::lint::build_lint_runner;
+use crate::extension::{self, ExtensionCapability};
 use crate::git;
 use crate::refactor::AppliedRefactor;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Arguments for the main lint workflow — populated by the command layer from CLI flags.
 #[derive(Debug, Clone)]
@@ -166,6 +167,32 @@ pub fn run_main_lint_workflow(
     })
 }
 
+pub fn run_self_check_lint_workflow(
+    component: &Component,
+    source_path: &Path,
+    component_label: String,
+) -> crate::Result<LintRunWorkflowResult> {
+    let output =
+        extension::self_check::run_self_checks(component, ExtensionCapability::Lint, source_path)?;
+    let status = if output.success { "passed" } else { "failed" }.to_string();
+    let hints = (!output.success).then(|| {
+        vec![format!(
+            "Fix the failing self-check command declared in {}'s homeboy.json self_checks.lint",
+            component.id
+        )]
+    });
+
+    Ok(LintRunWorkflowResult {
+        status,
+        component: component_label,
+        exit_code: output.exit_code,
+        autofix: None,
+        hints,
+        baseline_comparison: None,
+        lint_findings: Some(Vec::new()),
+    })
+}
+
 /// Resolve effective glob from --changed-only or --changed-since flags.
 ///
 /// Returns `Some("")` (empty string) when changed-file mode is active but no files
@@ -217,6 +244,37 @@ fn resolve_effective_glob(
         }
     } else {
         Ok(args.glob.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::SelfCheckConfig;
+
+    #[test]
+    fn test_run_self_check_lint_workflow() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("lint.sh"), "printf lint-ok\n")
+            .expect("script should be written");
+
+        let mut component = Component::new(
+            "fixture".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "".to_string(),
+            None,
+        );
+        component.self_checks = Some(SelfCheckConfig {
+            lint: vec!["sh lint.sh".to_string()],
+            test: Vec::new(),
+        });
+
+        let result = run_self_check_lint_workflow(&component, dir.path(), "fixture".to_string())
+            .expect("lint self-check should run");
+
+        assert_eq!(result.status, "passed");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.component, "fixture");
     }
 }
 

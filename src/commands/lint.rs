@@ -3,7 +3,8 @@ use clap::Args;
 use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::engine::run_dir::RunDir;
 use homeboy::extension::lint::{
-    report, run_main_lint_workflow, LintCommandOutput, LintRunWorkflowArgs,
+    report, run_main_lint_workflow, run_self_check_lint_workflow, LintCommandOutput,
+    LintRunWorkflowArgs,
 };
 use homeboy::extension::ExtensionCapability;
 use homeboy::refactor::plan::{run_lint_refactor, LintSourceOptions};
@@ -71,6 +72,28 @@ pub struct LintArgs {
 }
 
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput> {
+    let source_ctx = execution_context::resolve(&ResolveOptions {
+        component_id: args.comp.component.clone(),
+        path_override: args.comp.path.clone(),
+        capability: None,
+        settings_overrides: args.setting_args.setting.clone(),
+        settings_json_overrides: Vec::new(),
+    })?;
+
+    if !args.fix
+        && source_ctx
+            .component
+            .has_self_check(ExtensionCapability::Lint)
+    {
+        let workflow = run_self_check_lint_workflow(
+            &source_ctx.component,
+            &source_ctx.source_path,
+            source_ctx.component_id.clone(),
+        )?;
+
+        return Ok(report::from_main_workflow(workflow));
+    }
+
     let ctx = execution_context::resolve(&ResolveOptions {
         component_id: args.comp.component.clone(),
         path_override: args.comp.path.clone(),

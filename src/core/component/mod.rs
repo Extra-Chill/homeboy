@@ -117,6 +117,14 @@ pub struct ScopeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SelfCheckConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lint: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(from = "RawComponent", into = "RawComponent")]
 pub struct Component {
     pub id: String,
@@ -149,6 +157,8 @@ pub struct Component {
     pub docs_dir: Option<String>,
     pub docs_dirs: Vec<String>,
     pub scopes: Option<ScopeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_checks: Option<SelfCheckConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditConfig>,
     /// Override the CLI path used by extension deploy install steps.
@@ -216,6 +226,8 @@ struct RawComponent {
     #[serde(skip_serializing_if = "Option::is_none")]
     scopes: Option<ScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    self_checks: Option<SelfCheckConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     audit: Option<AuditConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cli_path: Option<String>,
@@ -266,6 +278,7 @@ impl From<RawComponent> for Component {
             docs_dir: raw.docs_dir,
             docs_dirs: raw.docs_dirs,
             scopes: raw.scopes,
+            self_checks: raw.self_checks,
             audit: raw.audit,
             cli_path: raw.cli_path,
         }
@@ -300,6 +313,7 @@ impl From<Component> for RawComponent {
             docs_dir: c.docs_dir,
             docs_dirs: c.docs_dirs,
             scopes: c.scopes,
+            self_checks: c.self_checks,
             audit: c.audit,
             cli_path: c.cli_path,
         }
@@ -371,6 +385,7 @@ impl Component {
             docs_dir: None,
             docs_dirs: Vec::new(),
             scopes: None,
+            self_checks: None,
             audit: None,
             cli_path: None,
         }
@@ -454,6 +469,25 @@ impl Component {
     pub fn is_file_component(&self) -> bool {
         self.deploy_strategy.as_deref() == Some("file")
             || (std::path::Path::new(&self.local_path).is_file() && self.deploy_strategy.is_none())
+    }
+
+    pub fn self_check_commands(
+        &self,
+        capability: crate::extension::ExtensionCapability,
+    ) -> &[String] {
+        let Some(checks) = self.self_checks.as_ref() else {
+            return &[];
+        };
+
+        match capability {
+            crate::extension::ExtensionCapability::Lint => &checks.lint,
+            crate::extension::ExtensionCapability::Test => &checks.test,
+            _ => &[],
+        }
+    }
+
+    pub fn has_self_check(&self, capability: crate::extension::ExtensionCapability) -> bool {
+        !self.self_check_commands(capability).is_empty()
     }
 
     /// Ensure `remote_path` is populated. If empty, attempt auto-resolution.

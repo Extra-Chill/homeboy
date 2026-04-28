@@ -35,7 +35,10 @@ pub use parsing::{
     parse_test_results_text, parse_test_results_text_with_spec, CoverageOutput, TestSummaryOutput,
 };
 pub use report::{FailedTest, TestCommandOutput};
-pub use run::{run_main_test_workflow, RawTestOutput, TestRunWorkflowArgs, TestRunWorkflowResult};
+pub use run::{
+    run_main_test_workflow, run_self_check_test_workflow, RawTestOutput, TestRunWorkflowArgs,
+    TestRunWorkflowResult,
+};
 pub use workflow::{
     auto_fix_test_drift, detect_test_drift, AutoFixDriftOutput, AutoFixDriftWorkflowResult,
     DriftWorkflowResult, MainTestWorkflowResult,

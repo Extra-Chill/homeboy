@@ -7,7 +7,10 @@ use crate::extension::{ExtensionCapability, ExtensionExecutionContext, Extension
 
 pub use baseline::{BaselineComparison, LintBaseline, LintBaselineMetadata, LintFinding};
 pub use report::LintCommandOutput;
-pub use run::{run_main_lint_workflow, LintRunWorkflowArgs, LintRunWorkflowResult};
+pub use run::{
+    run_main_lint_workflow, run_self_check_lint_workflow, LintRunWorkflowArgs,
+    LintRunWorkflowResult,
+};
 
 use crate::engine::run_dir::RunDir;
 

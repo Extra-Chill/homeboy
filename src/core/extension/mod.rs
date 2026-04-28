@@ -10,6 +10,7 @@ mod runner;
 mod runner_contract;
 mod runtime_helper;
 mod scope;
+pub mod self_check;
 pub mod test;
 pub mod update_check;
 pub mod version;
