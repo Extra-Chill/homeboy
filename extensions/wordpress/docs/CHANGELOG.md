@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.4] - 2026-04-28
+
+### Fixed
+- support host smoke test backend
+
 ## [2.30.3] - 2026-04-28
 
 ### Fixed
