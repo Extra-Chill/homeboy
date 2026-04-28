@@ -38,6 +38,8 @@
     <exclude-pattern>/node_modules/*</exclude-pattern>
     <exclude-pattern>/build/*</exclude-pattern>
     <exclude-pattern>/dist/*</exclude-pattern>
+    <exclude-pattern>/tools/*</exclude-pattern>
+    <exclude-pattern>/scoper.inc.php</exclude-pattern>
     <exclude-pattern>/tests/*</exclude-pattern>
 
     <!-- Text domain is auto-detected from plugin header by test-runner.sh -->

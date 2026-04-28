@@ -166,13 +166,32 @@ fi
 PHPSTAN_TARGETS=("$PLUGIN_PATH")
 PHPSTAN_SCOPED=0
 
+homeboy_phpstan_relpath() {
+    local path="$1"
+    path="${path#$PLUGIN_PATH/}"
+    path="${path#./}"
+    printf '%s\n' "$path"
+}
+
+homeboy_phpstan_runtime_file() {
+    local rel_path="$1"
+
+    case "$rel_path" in
+        scoper.inc.php|tools/*|tests/smoke-*.php|tests/*UnitTest.php|tests/*Test.php|vendor_prefixed/*|vendor/*)
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
 resolve_phpstan_targets() {
     local matched=()
     local target
 
     if [ -n "${HOMEBOY_LINT_FILE:-}" ]; then
         target="${PLUGIN_PATH}/${HOMEBOY_LINT_FILE}"
-        if [ -f "$target" ] && [[ "$target" == *.php ]]; then
+        if [ -f "$target" ] && [[ "$target" == *.php ]] && homeboy_phpstan_runtime_file "$(homeboy_phpstan_relpath "$target")"; then
             matched+=("$target")
         fi
     elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
@@ -180,7 +199,7 @@ resolve_phpstan_targets() {
             cd "$PLUGIN_PATH"
             eval 'for f in '"${HOMEBOY_LINT_GLOB}"'; do [ -e "$f" ] && printf "%s\0" "$f"; done'
         ) | while IFS= read -r -d '' target; do
-            if [ -f "${PLUGIN_PATH}/${target}" ] && [[ "$target" == *.php ]]; then
+            if [ -f "${PLUGIN_PATH}/${target}" ] && [[ "$target" == *.php ]] && homeboy_phpstan_runtime_file "$target"; then
                 printf '%s\0' "${PLUGIN_PATH}/${target}"
             elif [ -d "${PLUGIN_PATH}/${target}" ]; then
                 find "${PLUGIN_PATH}/${target}" -type f -name '*.php' \
@@ -189,6 +208,9 @@ resolve_phpstan_targets() {
                     -not -path "*/node_extensions/*" \
                     -not -path "*/build/*" \
                     -not -path "*/dist/*" \
+                    -not -path "*/tools/*" \
+                    -not -path "*/tests/*" \
+                    -not -name "scoper.inc.php" \
                     -print0
             fi
         done
@@ -223,6 +245,8 @@ else
         -not -path "*/node_extensions/*" \
         -not -path "*/build/*" \
         -not -path "*/dist/*" \
+        -not -path "*/tools/*" \
+        -not -name "scoper.inc.php" \
         -not -path "*/tests/*" \
         2>/dev/null | wc -l | tr -d ' ')
 fi

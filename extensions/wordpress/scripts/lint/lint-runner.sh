@@ -163,6 +163,86 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "Fix-only: ${HOMEBOY_FIX_ONLY:-0}"
 fi
 
+homeboy_lint_relpath() {
+    local path="$1"
+    path="${path#$PLUGIN_PATH/}"
+    path="${path#./}"
+    printf '%s\n' "$path"
+}
+
+homeboy_wordpress_runtime_lint_file() {
+    local rel_path="$1"
+
+    case "$rel_path" in
+        scoper.inc.php|tools/*|tests/smoke-*.php|tests/*UnitTest.php|tests/*Test.php|vendor_prefixed/*|vendor/*)
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+homeboy_php_syntax_check() {
+    local syntax_errors=0
+    local lint_target php_file rel_path
+
+    for lint_target in "$@"; do
+        if [ -d "$lint_target" ]; then
+            while IFS= read -r -d '' php_file; do
+                rel_path=$(homeboy_lint_relpath "$php_file")
+                if ! homeboy_wordpress_runtime_lint_file "$rel_path"; then
+                    if ! php -l "$php_file" > /dev/null 2>&1; then
+                        php -l "$php_file" || true
+                        syntax_errors=$((syntax_errors + 1))
+                    fi
+                fi
+            done < <(find "$lint_target" -type f -name '*.php' -print0)
+        elif [ -f "$lint_target" ] && [[ "$lint_target" == *.php ]]; then
+            if ! php -l "$lint_target" > /dev/null 2>&1; then
+                php -l "$lint_target" || true
+                syntax_errors=$((syntax_errors + 1))
+            fi
+        fi
+    done
+
+    if [ "$syntax_errors" -gt 0 ]; then
+        echo "PHP syntax check failed for ${syntax_errors} non-runtime file(s)"
+        return 1
+    fi
+
+    return 0
+}
+
+# The WordPress lint profile targets production plugin/theme runtime files. Keep
+# php-scoper config, build tooling, smoke harnesses, PHPUnit tests, and generated
+# vendored code out of that profile; syntax checking is enough for those roles.
+if [ -n "${HOMEBOY_LINT_FILE:-}" ] || [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
+    RUNTIME_LINT_FILES=()
+    NON_RUNTIME_LINT_FILES=()
+
+    for lint_target in "${LINT_FILES[@]}"; do
+        rel_target=$(homeboy_lint_relpath "$lint_target")
+        if [ -f "$lint_target" ] && ! homeboy_wordpress_runtime_lint_file "$rel_target"; then
+            NON_RUNTIME_LINT_FILES+=("$lint_target")
+        else
+            RUNTIME_LINT_FILES+=("$lint_target")
+        fi
+    done
+
+    if [ "${#NON_RUNTIME_LINT_FILES[@]}" -gt 0 ]; then
+        echo "Non-runtime WordPress lint profile: syntax-checking ${#NON_RUNTIME_LINT_FILES[@]} file(s)"
+        homeboy_php_syntax_check "${NON_RUNTIME_LINT_FILES[@]}"
+    fi
+
+    if [ "${#RUNTIME_LINT_FILES[@]}" -eq 0 ]; then
+        echo "Skipping production WordPress lint profile for non-runtime file scope"
+        echo "Linting passed"
+        exit 0
+    fi
+
+    LINT_FILES=("${RUNTIME_LINT_FILES[@]}")
+fi
+
 PHPCS_BIN="${EXTENSION_PATH}/vendor/bin/phpcs"
 PHPCBF_BIN="${EXTENSION_PATH}/vendor/bin/phpcbf"
 YODA_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/yoda-fixer.php"
@@ -527,7 +607,7 @@ fixable_count=0
 
 # Build base phpcs arguments
 phpcs_base_args=(--standard="$PHPCS_CONFIG")
-phpcs_base_args+=(--ignore='*/vendor/*,*/vendor_prefixed/*,*/node_modules/*,*/build/*,*/dist/*')
+phpcs_base_args+=(--ignore='*/vendor/*,*/vendor_prefixed/*,*/node_modules/*,*/build/*,*/dist/*,*/tools/*,*/scoper.inc.php')
 
 # Auto-detect parallelism from available CPU cores
 if [ -z "${PARALLEL_PROCS:-}" ]; then
