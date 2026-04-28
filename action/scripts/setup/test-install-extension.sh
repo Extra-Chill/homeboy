@@ -39,23 +39,23 @@ export HOMEBOY_CALL_LOG="${TMP_DIR}/calls.log"
 
 EXTENSION_INPUT="" bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null
 assert_equals \
-  "extension install-for-component --path packages/plugin --source /extensions" \
+  $'extension uninstall wordpress\nextension install-for-component --path packages/plugin --source /extensions' \
   "$(cat "${HOMEBOY_CALL_LOG}")" \
-  "configured extensions use core install-for-component"
+  "configured extensions refresh cached copy before install-for-component"
 
 : > "${HOMEBOY_CALL_LOG}"
 HOMEBOY_INSTALL_FOR_COMPONENT_HELP_STATUS="1" EXTENSION_INPUT="" bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null
 assert_equals \
-  "extension install /extensions --id wordpress" \
+  $'extension uninstall wordpress\nextension install /extensions --id wordpress' \
   "$(cat "${HOMEBOY_CALL_LOG}")" \
-  "older homeboy falls back to first configured extension"
+  "older homeboy refreshes cached copy before fallback install"
 
 : > "${HOMEBOY_CALL_LOG}"
 EXTENSION_INPUT="nodejs" bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null
 assert_equals \
-  "extension install /extensions --id nodejs" \
+  $'extension uninstall nodejs\nextension install /extensions --id nodejs' \
   "$(cat "${HOMEBOY_CALL_LOG}")" \
-  "explicit extension input keeps single-extension override"
+  "explicit extension input refreshes cached copy before install"
 
 : > "${HOMEBOY_CALL_LOG}"
 if EXTENSION_INPUT="wordpress,nodejs" bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null 2>"${TMP_DIR}/comma.err"; then
