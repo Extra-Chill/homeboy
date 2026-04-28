@@ -6,6 +6,23 @@ OPERATIONS_RESULTS="${OPERATIONS_RESULTS:-}"
 HAS_QUALITY_COMMANDS=true
 HAS_OPERATIONS_COMMANDS=true
 
+validate_results_json() {
+  local label="$1"
+  local json="$2"
+
+  if [ -z "${json}" ]; then
+    return 0
+  fi
+
+  if ! printf '%s\n' "${json}" | jq -e 'type == "object"' > /dev/null 2>&1; then
+    echo "::error::${label} results are not valid JSON object data"
+    return 1
+  fi
+}
+
+validate_results_json "Quality command" "${RESULTS:-}"
+validate_results_json "Operations command" "${OPERATIONS_RESULTS}"
+
 if [ -z "${RESULTS:-}" ] || [ "${RESULTS}" = "{}" ]; then
   HAS_QUALITY_COMMANDS=false
 
@@ -35,7 +52,7 @@ FAILED=false
 
 # Check quality command results
 if [ "${HAS_QUALITY_COMMANDS}" = true ]; then
-  if echo "${RESULTS}" | jq -e 'to_entries | any(.value == "fail")' > /dev/null; then
+  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "fail")' > /dev/null; then
     echo "::error::One or more quality commands failed"
     FAILED=true
   fi
@@ -43,7 +60,7 @@ fi
 
 # Check operations command results
 if [ -n "${OPERATIONS_RESULTS}" ] && [ "${OPERATIONS_RESULTS}" != "{}" ]; then
-  if echo "${OPERATIONS_RESULTS}" | jq -e 'to_entries | any(.value == "fail")' > /dev/null; then
+  if printf '%s\n' "${OPERATIONS_RESULTS}" | jq -e 'to_entries | any(.value == "fail")' > /dev/null; then
     echo "::error::One or more operations commands (fleet/deploy) failed"
     FAILED=true
   fi
