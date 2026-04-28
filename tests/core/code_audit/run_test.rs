@@ -2,9 +2,16 @@
 //!
 //! Wired into `src/core/code_audit/run.rs` via `#[cfg(test)] #[path = ...] mod run_test`.
 
-use super::{apply_finding_filters, compute_fixability_if_requested, AuditRunWorkflowArgs};
+use super::{
+    apply_finding_filters, compute_fixability_if_requested, scope_convention_outliers_to_findings,
+    AuditRunWorkflowArgs,
+};
+use crate::code_audit::checks::CheckStatus;
+use crate::code_audit::conventions::{Deviation, Outlier};
 use crate::code_audit::findings::{Finding, Severity};
-use crate::code_audit::{AuditExecutionPlan, AuditFinding, AuditSummary, CodeAuditResult};
+use crate::code_audit::{
+    AuditExecutionPlan, AuditFinding, AuditSummary, CodeAuditResult, ConventionReport,
+};
 
 fn make_finding(kind: AuditFinding, file: &str) -> Finding {
     Finding {
@@ -34,6 +41,38 @@ fn make_result(findings: Vec<Finding>) -> CodeAuditResult {
         directory_conventions: vec![],
         findings,
         duplicate_groups: vec![],
+    }
+}
+
+fn make_convention_report(name: &str, outliers: Vec<Outlier>) -> ConventionReport {
+    ConventionReport {
+        name: name.to_string(),
+        glob: "src/**/*.rs".to_string(),
+        status: CheckStatus::Drift,
+        expected_methods: vec!["run".to_string()],
+        expected_registrations: vec![],
+        expected_interfaces: vec![],
+        expected_namespace: None,
+        expected_imports: vec![],
+        conforming: vec!["src/changed.rs".to_string()],
+        outliers,
+        total_files: 3,
+        confidence: 0.75,
+    }
+}
+
+fn make_outlier(file: &str, kinds: Vec<AuditFinding>) -> Outlier {
+    Outlier {
+        file: file.to_string(),
+        noisy: false,
+        deviations: kinds
+            .into_iter()
+            .map(|kind| Deviation {
+                kind,
+                description: "deviates".to_string(),
+                suggestion: "fix it".to_string(),
+            })
+            .collect(),
     }
 }
 
@@ -140,6 +179,41 @@ fn only_with_no_matches_leaves_zero_findings_and_clean_exit() {
 
     assert!(result.findings.is_empty());
     assert_eq!(result.summary.outliers_found, 0);
+}
+
+#[test]
+fn scoped_convention_outliers_follow_scoped_findings() {
+    let mut result = make_result(vec![make_finding(
+        AuditFinding::MissingMethod,
+        "src/changed.rs",
+    )]);
+    result.findings[0].convention = "ability convention".to_string();
+    result.summary.outliers_found = 3;
+    result.conventions = vec![make_convention_report(
+        "ability convention",
+        vec![
+            make_outlier(
+                "src/changed.rs",
+                vec![
+                    AuditFinding::MissingMethod,
+                    AuditFinding::MissingRegistration,
+                ],
+            ),
+            make_outlier("src/unrelated.rs", vec![AuditFinding::MissingMethod]),
+        ],
+    )];
+
+    scope_convention_outliers_to_findings(&mut result);
+
+    assert_eq!(result.conventions.len(), 1);
+    assert_eq!(result.conventions[0].outliers.len(), 1);
+    assert_eq!(result.conventions[0].outliers[0].file, "src/changed.rs");
+    assert_eq!(result.conventions[0].outliers[0].deviations.len(), 1);
+    assert_eq!(
+        result.conventions[0].outliers[0].deviations[0].kind,
+        AuditFinding::MissingMethod
+    );
+    assert_eq!(result.summary.outliers_found, 1);
 }
 
 #[test]

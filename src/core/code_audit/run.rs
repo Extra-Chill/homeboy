@@ -5,6 +5,7 @@
 
 use crate::code_audit::{self, baseline, CodeAuditResult};
 use crate::git;
+use std::collections::HashSet;
 use std::path::Path;
 
 use super::report::{self, AuditCommandOutput};
@@ -97,6 +98,10 @@ pub fn run_main_audit_workflow(
     // `default_audit_exit_code` reflects the filtered view.
     apply_finding_filters(&mut result, &args.only_kinds, &args.exclude_kinds);
 
+    if args.changed_since.is_some() {
+        scope_convention_outliers_to_findings(&mut result);
+    }
+
     // Default: compare against baseline or return full result
     run_comparison_workflow(result, &args)
 }
@@ -125,6 +130,43 @@ fn apply_finding_filters(
     // closest proxy available without re-running the per-convention check —
     // this keeps `default_audit_exit_code(...) -> outliers_found > 0`
     // honest under filtering.
+    result.summary.outliers_found = result.findings.len();
+}
+
+/// Keep the diagnostic convention report aligned with scoped actionable findings.
+///
+/// Scoped audits already filter `result.findings` to changed files plus impact
+/// call sites. The full convention report is still useful for `audit
+/// --conventions`, but PR-facing machine output treats `conventions[].outliers`
+/// as actionable too. For changed-since audit output, only retain convention
+/// outlier deviations that correspond to the scoped finding set.
+fn scope_convention_outliers_to_findings(result: &mut CodeAuditResult) {
+    let scoped_findings: HashSet<(String, String, code_audit::AuditFinding)> = result
+        .findings
+        .iter()
+        .map(|finding| {
+            (
+                finding.convention.clone(),
+                finding.file.clone(),
+                finding.kind.clone(),
+            )
+        })
+        .collect();
+
+    for convention in &mut result.conventions {
+        convention.outliers.retain_mut(|outlier| {
+            outlier.deviations.retain(|deviation| {
+                scoped_findings.contains(&(
+                    convention.name.clone(),
+                    outlier.file.clone(),
+                    deviation.kind.clone(),
+                ))
+            });
+
+            !outlier.deviations.is_empty()
+        });
+    }
+
     result.summary.outliers_found = result.findings.len();
 }
 
