@@ -14,9 +14,10 @@
 //
 // Discovers `bench/**/*.bench.{ts,mjs,js}` under the project root.
 // Each workload file must export a default async function. The function may
-// return `{ metrics: Record<string, number> }` to report workload-owned custom
-// metrics, which are averaged across measured iterations and merged beside the
-// dispatcher-owned timing metrics.
+// return `{ metrics: Record<string, number>, artifacts: Record<string, object> }`
+// to report workload-owned custom metrics and artifacts. Metrics are averaged
+// across measured iterations and merged beside the dispatcher-owned timing
+// metrics; artifacts are preserved under the scenario in the results envelope.
 //
 //     // bench/cold-boot.bench.ts
 //     export default async function () {
@@ -93,31 +94,72 @@ function parseWarmupIterations(value) {
 
 function validateWorkloadResult(value, iterationLabel) {
     if (value === undefined) {
-        return {};
+        return { metrics: {}, artifacts: {} };
     }
 
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
         throw new Error(`${iterationLabel} returned invalid result shape (expected undefined or an object)`);
     }
 
-    const { metrics } = value;
-    if (metrics === undefined) {
-        return {};
-    }
+    const { metrics, artifacts } = value;
 
-    if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) {
+    if (metrics !== undefined && (!metrics || typeof metrics !== 'object' || Array.isArray(metrics))) {
         throw new Error(`${iterationLabel} returned invalid metrics shape (expected an object)`);
     }
 
-    const validated = {};
-    for (const [key, metricValue] of Object.entries(metrics)) {
+    const validatedMetrics = {};
+    for (const [key, metricValue] of Object.entries(metrics || {})) {
         if (TIMING_METRIC_KEYS.has(key)) {
             throw new Error(`${iterationLabel} returned metric "${key}", which is owned by the bench dispatcher`);
         }
         if (typeof metricValue !== 'number' || !Number.isFinite(metricValue)) {
             throw new Error(`${iterationLabel} returned metric "${key}" with non-finite numeric value`);
         }
-        validated[key] = metricValue;
+        validatedMetrics[key] = metricValue;
+    }
+
+    return {
+        metrics: validatedMetrics,
+        artifacts: validateWorkloadArtifacts(artifacts, iterationLabel),
+    };
+}
+
+function validateWorkloadArtifacts(artifacts, iterationLabel) {
+    if (artifacts === undefined) {
+        return {};
+    }
+
+    if (!artifacts || typeof artifacts !== 'object' || Array.isArray(artifacts)) {
+        throw new Error(`${iterationLabel} returned invalid artifacts shape (expected an object)`);
+    }
+
+    const validated = {};
+    for (const [key, artifact] of Object.entries(artifacts)) {
+        if (typeof artifact === 'string') {
+            if (artifact.length === 0) {
+                throw new Error(`${iterationLabel} returned artifact "${key}" with empty path`);
+            }
+            validated[key] = { path: artifact };
+            continue;
+        }
+
+        if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
+            throw new Error(`${iterationLabel} returned artifact "${key}" with invalid shape (expected string path or object)`);
+        }
+        if (typeof artifact.path !== 'string' || artifact.path.length === 0) {
+            throw new Error(`${iterationLabel} returned artifact "${key}" without a non-empty string path`);
+        }
+        if (artifact.kind !== undefined && typeof artifact.kind !== 'string') {
+            throw new Error(`${iterationLabel} returned artifact "${key}" with non-string kind`);
+        }
+        if (artifact.label !== undefined && typeof artifact.label !== 'string') {
+            throw new Error(`${iterationLabel} returned artifact "${key}" with non-string label`);
+        }
+
+        const normalized = { path: artifact.path };
+        if (artifact.kind !== undefined) normalized.kind = artifact.kind;
+        if (artifact.label !== undefined) normalized.label = artifact.label;
+        validated[key] = normalized;
     }
 
     return validated;
@@ -137,6 +179,10 @@ function aggregateCustomMetrics(iterationMetrics) {
     return Object.fromEntries(
         [...sums.entries()].map(([key, sum]) => [key, sum / counts.get(key)])
     );
+}
+
+function aggregateArtifacts(iterationArtifacts) {
+    return Object.assign({}, ...iterationArtifacts);
 }
 
 async function discoverWorkloads(dir) {
@@ -186,11 +232,14 @@ async function runWorkload(file) {
 
     const timings = [];
     const customMetrics = [];
+    const customArtifacts = [];
     let peakRss = 0;
     for (let i = 0; i < ITERATIONS; i++) {
         const start = performance.now();
         try {
-            customMetrics.push(validateWorkloadResult(await fn(), `iteration ${i + 1}/${ITERATIONS}`));
+            const workloadResult = validateWorkloadResult(await fn(), `iteration ${i + 1}/${ITERATIONS}`);
+            customMetrics.push(workloadResult.metrics);
+            customArtifacts.push(workloadResult.artifacts);
         } catch (err) {
             return { error: `iteration ${i + 1}/${ITERATIONS} threw: ${err.message}` };
         }
@@ -200,7 +249,12 @@ async function runWorkload(file) {
     }
 
     timings.sort((a, b) => a - b);
-    return { timings, peakRss, customMetrics: aggregateCustomMetrics(customMetrics) };
+    return {
+        timings,
+        peakRss,
+        customMetrics: aggregateCustomMetrics(customMetrics),
+        customArtifacts: aggregateArtifacts(customArtifacts),
+    };
 }
 
 async function main() {
@@ -267,14 +321,18 @@ async function main() {
             max_ms: t[t.length - 1],
         };
 
-        scenarios.push({
+        const scenario = {
             id,
             file: rel,
             source,
             iterations: t.length,
             metrics: { ...timingMetrics, ...result.customMetrics },
             memory: { peak_bytes: result.peakRss },
-        });
+        };
+        if (Object.keys(result.customArtifacts).length > 0) {
+            scenario.artifacts = result.customArtifacts;
+        }
+        scenarios.push(scenario);
 
         process.stdout.write(
             `WORKLOAD_DONE:  ${id}  p50=${homeboyBenchPercentile(t, 0.50).toFixed(2)}ms  p95=${homeboyBenchPercentile(t, 0.95).toFixed(2)}ms\n`

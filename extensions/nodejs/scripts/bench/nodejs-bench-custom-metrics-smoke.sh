@@ -5,6 +5,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-node-bench-metrics.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+HELPER_JS="$TMP_DIR/bench-helper.mjs"
+cat > "$HELPER_JS" <<'EOF'
+import { basename } from 'node:path';
+import { writeFile } from 'node:fs/promises';
+
+export function homeboyBenchPercentile(values, percentile) {
+  if (values.length === 0) return 0;
+  if (values.length === 1) return values[0];
+  const index = (values.length - 1) * percentile;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return values[lower];
+  return values[lower] + (values[upper] - values[lower]) * (index - lower);
+}
+
+export function homeboyBenchScenarioId(file, suffixPattern) {
+  return basename(file).replace(suffixPattern, '');
+}
+
+export async function homeboyWriteBenchResults(file, componentId, iterations, scenarios) {
+  await writeFile(file, JSON.stringify({ component_id: componentId, iterations, scenarios }, null, 2));
+}
+EOF
+
 assert_json() {
     local file="$1"
     local script="$2"
@@ -14,7 +38,8 @@ assert_json() {
 run_runner() {
     local project_dir="$1"
     local results_file="$2"
-    HOMEBOY_COMPONENT_PATH="$project_dir" \
+    HOMEBOY_RUNTIME_BENCH_HELPER_JS="$HELPER_JS" \
+        HOMEBOY_COMPONENT_PATH="$project_dir" \
         HOMEBOY_COMPONENT_ID="node-bench-smoke" \
         HOMEBOY_BENCH_ITERATIONS="3" \
         HOMEBOY_BENCH_RESULTS_FILE="$results_file" \
