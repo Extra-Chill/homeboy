@@ -308,7 +308,7 @@ runs:
       run: bash ${{ github.action_path }}/scripts/setup/resolve-binary-source.sh
 
     - name: Install extension
-      if: steps.read-config.outputs.portable-extension != '' && (inputs.binary-path != '' || steps.cache-homeboy.outputs.cache-hit != 'true' || steps.source-build.outputs.built == 'true')
+      if: steps.read-config.outputs.portable-extension != ''
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
