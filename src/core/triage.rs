@@ -1016,10 +1016,10 @@ const PR_ACTION_PRIORITY: &[&str] = &[
 
 fn pr_action_severity(kind: &str) -> &'static str {
     match kind {
-        "draft_with_failing_checks" | "checks_failed" | "approved_but_dirty" | "needs_rebase" => {
-            "high"
+        "draft_with_failing_checks" | "checks_failed" | "approved_but_dirty" => "high",
+        "needs_rebase" | "review_required" | "approved_but_pending_checks" | "clean_and_ready" => {
+            "medium"
         }
-        "review_required" | "approved_but_pending_checks" | "clean_and_ready" => "medium",
         _ => "low",
     }
 }
@@ -1416,6 +1416,71 @@ mod tests {
                 "approved_but_pending_checks",
             ]
         );
+    }
+
+    #[test]
+    fn parse_prs_marks_behind_and_dirty_as_needs_rebase() {
+        let raw = r#"[
+            {
+              "number": 1,
+              "title": "Behind",
+              "url": "https://github.com/o/r/pull/1",
+              "state": "OPEN",
+              "isDraft": false,
+              "reviewDecision": "",
+              "mergeStateStatus": "BEHIND",
+              "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
+              "labels": [],
+              "assignees": [],
+              "author": {"login":"chubes4"},
+              "updatedAt": "2026-04-26T00:00:00Z"
+            },
+            {
+              "number": 2,
+              "title": "Dirty",
+              "url": "https://github.com/o/r/pull/2",
+              "state": "OPEN",
+              "isDraft": false,
+              "reviewDecision": "",
+              "mergeStateStatus": "DIRTY",
+              "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
+              "labels": [],
+              "assignees": [],
+              "author": {"login":"chubes4"},
+              "updatedAt": "2026-04-26T00:00:00Z"
+            },
+            {
+              "number": 3,
+              "title": "Unstable",
+              "url": "https://github.com/o/r/pull/3",
+              "state": "OPEN",
+              "isDraft": false,
+              "reviewDecision": "",
+              "mergeStateStatus": "UNSTABLE",
+              "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
+              "labels": [],
+              "assignees": [],
+              "author": {"login":"chubes4"},
+              "updatedAt": "2026-04-26T00:00:00Z"
+            }
+        ]"#;
+
+        let items = parse_prs(raw, None, false).unwrap();
+        assert_eq!(items[0].next_action.as_deref(), Some("needs_rebase"));
+        assert_eq!(items[1].next_action.as_deref(), Some("needs_rebase"));
+        assert!(items[2].next_action.is_none());
+
+        let actions = build_actions(
+            None,
+            Some(&TriagePrBucket {
+                open: items.len(),
+                items,
+            }),
+        );
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "needs_rebase");
+        assert_eq!(actions[0].severity, "medium");
+        assert_eq!(actions[0].label, "2 PRs need rebase");
     }
 
     #[test]
