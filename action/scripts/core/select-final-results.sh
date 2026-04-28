@@ -2,7 +2,10 @@
 
 set -euo pipefail
 
-RESULTS="${FIRST_RESULTS:-{}}"
+RESULTS="${FIRST_RESULTS:-}"
+if [ -z "${RESULTS}" ]; then
+  RESULTS='{}'
+fi
 
 if [ "${HOMEBOY_DIFFERENTIAL_GATING:-false}" = "true" ] \
   && [ -n "${HOMEBOY_OUTPUT_DIR:-}" ] \
@@ -15,4 +18,8 @@ if [ "${HOMEBOY_DIFFERENTIAL_GATING:-false}" = "true" ] \
     "${HOMEBOY_BASE_OUTPUT_DIR}")"
 fi
 
-echo "results=${RESULTS}" >> "${GITHUB_OUTPUT}"
+{
+  echo 'results<<__HOMEBOY_RESULTS__'
+  printf '%s\n' "${RESULTS}"
+  echo '__HOMEBOY_RESULTS__'
+} >> "${GITHUB_OUTPUT}"
