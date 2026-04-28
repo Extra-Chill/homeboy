@@ -2,6 +2,15 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.1.1] - 2026-04-28
+
+### Fixed
+- self-release from checkout
+- configure git push auth
+- preserve JSON command results
+- move v2 to released tag target
+- refresh extensions on cache hits
+
 ## [2.1.0] - 2026-04-28
 
 ### Added
