@@ -309,8 +309,8 @@ fi
 #   1. STAGE_FATAL/STAGE_FAIL in result file  -> bootstrap failure, show stage+msg
 #   2. SOME TESTS FAILED in result file       -> PHPUnit assertion failures
 #   3. Parse/fatal patterns in stdout         -> PHP crashed before writing log
-#   4. playground_exit != 0 with no log       -> unknown crash, dump raw output
-#   5. NO_TEST_FILES in result file           -> discovery found nothing
+#   4. NO_TEST_FILES in result file           -> discovery found nothing
+#   5. playground_exit != 0 with no log       -> unknown crash, dump raw output
 #   6. Zero-test PHPUnit run                  -> suite empty
 # ----------------------------------------------------------------------------
 
@@ -373,7 +373,30 @@ if [ $playground_exit -ne 0 ] && echo "$PHPUNIT_STDOUT" | grep -qE '^(PHP Parse 
     exit $playground_exit
 fi
 
-# Case 5: playground exited non-zero and we still can't classify it.
+# Case 5: discovery found zero PHPUnit files. Repos without component PHPUnit
+# config may intentionally rely on smoke scripts outside this runner's contract.
+# If a component declares PHPUnit config, keep failing loudly so misconfigured
+# discovery cannot become a false green.
+if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
+    dump_diagnostics "NO PHPUNIT TEST FILES DISCOVERED"
+    if [ -f "${PLUGIN_PATH}/phpunit.xml" ] || [ -f "${PLUGIN_PATH}/phpunit.xml.dist" ]; then
+        echo ""
+        echo "PHPUnit config exists, but no files matched the WordPress runner discovery contract."
+        echo "  Check phpunit.xml(.dist), tests/ directory layout, and Test.php/test- naming."
+        FAILED_STEP="PHPUnit tests (configured suite discovered no test files, playground)"
+        rm -f "$RESULT_FILE"
+        exit 1
+    fi
+
+    echo ""
+    echo "Skipping PHPUnit tests: no files matched the WordPress runner discovery contract."
+    echo "  Contract: files under ${TEST_DIR} ending in Test.php or starting with test-."
+    echo "  Add matching PHPUnit files or a component phpunit.xml(.dist) if this suite should run here."
+    rm -f "$RESULT_FILE"
+    exit 0
+fi
+
+# Case 6: playground exited non-zero and we still can't classify it.
 # Don't exit 0 here — that's the bug the old code had.
 if [ $playground_exit -ne 0 ]; then
     FAILED_STEP="Playground exited with code $playground_exit (unclassified)"
@@ -382,19 +405,11 @@ if [ $playground_exit -ne 0 ]; then
     exit $playground_exit
 fi
 
-# Case 6: no output at all (not even a result file). Shouldn't happen on a
+# Case 7: no output at all (not even a result file). Shouldn't happen on a
 # clean exit, but guard anyway.
 if [ -z "$PHPUNIT_OUTPUT" ] && [ -z "$PHPUNIT_STDOUT" ]; then
     dump_diagnostics "NO OUTPUT CAPTURED"
     FAILED_STEP="PHPUnit tests (no output, playground)"
-    rm -f "$RESULT_FILE"
-    exit 1
-fi
-
-# Case 7: discovery found zero test files.
-if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
-    dump_diagnostics "NO TEST FILES DISCOVERED"
-    FAILED_STEP="PHPUnit tests (no test files, playground)"
     rm -f "$RESULT_FILE"
     exit 1
 fi
