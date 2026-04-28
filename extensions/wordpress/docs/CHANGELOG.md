@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.3] - 2026-04-28
+
+### Fixed
+- classify empty PHPUnit discovery
+- quiet stale Playground temp ENOENT noise
+- preserve PHPStan temp config suffixes
+
 ## [2.30.2] - 2026-04-27
 
 ### Fixed
