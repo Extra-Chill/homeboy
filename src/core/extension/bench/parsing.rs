@@ -64,9 +64,60 @@ fn is_true(value: &bool) -> bool {
 pub struct BenchResults {
     pub component_id: String,
     pub iterations: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_metadata: Option<BenchRunMetadata>,
     pub scenarios: Vec<BenchScenario>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metric_policies: BTreeMap<String, BenchMetricPolicy>,
+}
+
+/// Homeboy-owned reproducibility metadata for a bench invocation.
+///
+/// Extension runners are not required to emit this block. Homeboy stamps it
+/// after parsing so stored bench artifacts explain what ran without requiring
+/// each language runner to duplicate CLI/runtime bookkeeping.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BenchRunMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homeboy_version: Option<String>,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_state: Option<String>,
+    pub iterations: u64,
+    pub runs: u64,
+    pub concurrency: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warmup_iterations: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_scenarios: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_overrides: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workloads: Vec<BenchWorkloadMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<BenchRunnerMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BenchWorkloadMetadata {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BenchRunnerMetadata {
+    pub extension: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
 }
 
 /// One scenario's measurements.

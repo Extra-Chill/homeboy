@@ -733,6 +733,7 @@ mod tests {
         BenchResults {
             component_id: "studio".to_string(),
             iterations: 10,
+            run_metadata: None,
             scenarios,
             metric_policies: BTreeMap::new(),
         }

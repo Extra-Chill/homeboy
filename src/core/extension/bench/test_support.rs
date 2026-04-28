@@ -41,6 +41,7 @@ pub(crate) fn results_with_scenarios(
     BenchResults {
         component_id: component_id.to_string(),
         iterations,
+        run_metadata: None,
         scenarios,
         metric_policies: BTreeMap::new(),
     }

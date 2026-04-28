@@ -383,6 +383,7 @@ mod tests {
         BenchResults {
             component_id: "demo".to_string(),
             iterations: 10,
+            run_metadata: None,
             scenarios,
             metric_policies: BTreeMap::new(),
         }
@@ -395,6 +396,7 @@ mod tests {
         BenchResults {
             component_id: "demo".to_string(),
             iterations: 10,
+            run_metadata: None,
             scenarios,
             metric_policies,
         }
