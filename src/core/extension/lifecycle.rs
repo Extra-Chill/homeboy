@@ -594,11 +594,6 @@ fn update_linked_extension(
 
     git::pull_repo(&git_root)?;
 
-    // Update .source-revision on the extension symlink target
-    if let Some(rev) = get_short_head_revision(&source_dir) {
-        let _ = std::fs::write(extension_dir.join(".source-revision"), &rev);
-    }
-
     // Auto-run setup if extension defines a setup_command
     if let Ok(extension) = load_extension(extension_id) {
         if extension
@@ -779,7 +774,7 @@ pub fn read_source_revision(extension_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{install, install_for_component, is_workdir_clean};
+    use super::{install, install_for_component, is_workdir_clean, read_source_revision, update};
     use crate::component;
     use crate::test_support::with_isolated_home;
     use std::fs;
@@ -823,6 +818,72 @@ mod tests {
             ),
         )
         .expect("component config");
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn commit_all(dir: &Path, message: &str) -> bool {
+        run_git(dir, &["add", "."])
+            && run_git(
+                dir,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-m",
+                    message,
+                ],
+            )
+    }
+
+    fn prepare_git_extension_repo(repo: &Path, extension_id: &str) -> Option<TempDir> {
+        write_extension_fixture(repo, extension_id);
+        if !run_git(repo, &["init", "--quiet"]) || !commit_all(repo, "init") {
+            return None;
+        }
+
+        let remote_parent = TempDir::new().expect("remote parent");
+        let remote_path = remote_parent.path().join("extension.git");
+        let remote_path_str = remote_path.to_string_lossy().to_string();
+        if !run_git(
+            repo,
+            &["clone", "--bare", repo.to_str().unwrap(), &remote_path_str],
+        ) {
+            return None;
+        }
+        if !run_git(repo, &["remote", "add", "origin", &remote_path_str]) {
+            return None;
+        }
+        if !run_git(repo, &["fetch", "origin", "--quiet"]) {
+            return None;
+        }
+        let branch = if run_git(repo, &["rev-parse", "--verify", "main"]) {
+            "main"
+        } else {
+            "master"
+        };
+        if !run_git(
+            repo,
+            &[
+                "branch",
+                "--set-upstream-to",
+                &format!("origin/{branch}"),
+                branch,
+            ],
+        ) {
+            return None;
+        }
+
+        Some(remote_parent)
     }
 
     #[test]
@@ -905,6 +966,62 @@ mod tests {
 
             assert_eq!(result.component_id, "multi-extension-component");
             assert_eq!(result.installed.len(), 2);
+        });
+    }
+
+    #[test]
+    fn linked_update_does_not_write_source_revision_to_source_checkout() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            let _remote = match prepare_git_extension_repo(&source, "wordpress") {
+                Some(remote) => remote,
+                None => return,
+            };
+
+            let extension_source = source.join("wordpress");
+            install(&extension_source.to_string_lossy(), Some("wordpress"))
+                .expect("install linked extension");
+
+            let before = read_source_revision("wordpress").expect("linked git revision");
+            assert!(!extension_source.join(".source-revision").exists());
+
+            update("wordpress", false).expect("update linked extension");
+
+            assert!(
+                !extension_source.join(".source-revision").exists(),
+                "linked update must not write metadata into the source checkout"
+            );
+            assert_eq!(
+                read_source_revision("wordpress"),
+                Some(before),
+                "linked extensions should resolve revisions through git discovery"
+            );
+        });
+    }
+
+    #[test]
+    fn cloned_monorepo_install_preserves_source_revision_marker() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            let remote = match prepare_git_extension_repo(&source, "wordpress") {
+                Some(remote) => remote,
+                None => return,
+            };
+            let remote_url = remote.path().join("extension.git");
+
+            let result = install(&remote_url.to_string_lossy(), Some("wordpress"))
+                .expect("install cloned extension");
+
+            assert!(result.path.join(".source-revision").exists());
+            assert_eq!(
+                read_source_revision("wordpress"),
+                result.source_revision,
+                "monorepo installs keep the stored source revision after .git is discarded"
+            );
         });
     }
 
