@@ -339,6 +339,7 @@ mod tests {
         BenchResults {
             component_id: "demo".to_string(),
             iterations: 10,
+            run_metadata: None,
             scenarios: vec![BenchScenario {
                 id: "scenario".to_string(),
                 file: None,

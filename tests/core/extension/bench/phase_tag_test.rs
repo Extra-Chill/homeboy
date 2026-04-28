@@ -55,6 +55,7 @@ fn results_with(
     BenchResults {
         component_id: "demo".to_string(),
         iterations: 10,
+        run_metadata: None,
         scenarios,
         metric_policies: policies,
     }

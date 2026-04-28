@@ -57,6 +57,7 @@ pub fn aggregate_runs(runs: &[BenchResults]) -> Result<BenchResults> {
     Ok(BenchResults {
         component_id: first.component_id.clone(),
         iterations: first.iterations,
+        run_metadata: first.run_metadata.clone(),
         scenarios,
         metric_policies,
     })
