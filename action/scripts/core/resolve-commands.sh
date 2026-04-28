@@ -6,7 +6,7 @@
 # use it as-is. Otherwise, infer from the GitHub event context.
 #
 # Commands are split into three categories:
-#   1. Quality commands: audit, lint, test, refactor
+#   1. Quality-style commands: audit, lint, test, refactor, bench
 #      These run in canonical order with component/workspace/scope handling.
 #   2. Release command: release
 #      This is handled by the dedicated release workflow step.

@@ -61,6 +61,11 @@ def main() -> int:
     assert_contains(tooling_failure, "runner/tooling failure", "test failure classification")
     assert_not_contains(tooling_failure, "Failed tests: **0**", "misleading zero failed tests line")
 
+    bench = render("bench", "bench-summary-input.json")
+    assert_contains(bench, "Benchmark scenarios: **1**", "bench scenario count")
+    assert_contains(bench, "pipeline-scale: p50 120.50, p95 141.25", "bench primary metrics")
+    assert_contains(bench, "delta 4.20%", "bench delta metric")
+
     full_digest = render_markdown(
         lint_digest={},
         test_digest={},

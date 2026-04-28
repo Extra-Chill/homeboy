@@ -52,6 +52,26 @@ inputs:
     description: 'Additional arguments to pass to each command.'
     required: false
     default: ''
+  rig:
+    description: 'Bench rig pair/list to pass to `homeboy bench --rig` when command includes bench.'
+    required: false
+    default: ''
+  scenario:
+    description: 'Bench scenario ID to pass to `homeboy bench --scenario` when command includes bench.'
+    required: false
+    default: ''
+  runs:
+    description: 'Bench run count to pass to `homeboy bench --runs` when command includes bench.'
+    required: false
+    default: ''
+  iterations:
+    description: 'Bench iteration count to pass to `homeboy bench --iterations` when command includes bench.'
+    required: false
+    default: ''
+  regression-threshold:
+    description: 'Bench regression threshold to pass to `homeboy bench --regression-threshold` when command includes bench.'
+    required: false
+    default: ''
   differential-gating:
     description: 'On PRs, compare audit/test failure counts against the base SHA and fail only when the PR is worse. Opt-in; lint remains normal exit-code gating. PR autofix is skipped while enabled.'
     required: false
@@ -381,9 +401,22 @@ runs:
       env:
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
+        BENCH_RIG: ${{ inputs.rig }}
+        BENCH_SCENARIO: ${{ inputs.scenario }}
+        BENCH_RUNS: ${{ inputs.runs }}
+        BENCH_ITERATIONS: ${{ inputs.iterations }}
+        BENCH_REGRESSION_THRESHOLD: ${{ inputs.regression-threshold }}
         HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
         RUN_GROUP_PREFIX: homeboy
       run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
+
+    - name: Upload Homeboy CI results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: homeboy-ci-results
+        path: homeboy-ci-results/*.json
+        if-no-files-found: ignore
 
     - name: Run baseline Homeboy commands
       id: run-baseline-commands

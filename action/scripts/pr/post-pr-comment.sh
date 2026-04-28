@@ -51,10 +51,10 @@ COMMENT_KEY="$(derive_comment_key)"
 SECTION_KEY="$(derive_section_key)"
 SECTION_TITLE="$(derive_section_title)"
 HEADER="## Homeboy Results — \`${COMP_ID}\`"
-# Preserve the current rendered order (lint, build, test, audit). Core's
+# Preserve the current rendered order (lint, build, test, audit, bench). Core's
 # default is alphabetical; `tooling` is pinned last so the versions block
 # stays at the bottom of the comment.
-SECTION_ORDER="lint,build,test,audit,tooling"
+SECTION_ORDER="lint,build,test,audit,bench,tooling"
 
 build_section_body
 

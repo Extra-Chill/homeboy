@@ -93,6 +93,19 @@ assert_equals \
   "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
   "run command keeps output path before extra args"
 
+unset EXTRA_ARGS
+BENCH_RIG="main,pr"
+BENCH_SCENARIO="pipeline-scale"
+BENCH_RUNS="3"
+BENCH_ITERATIONS="10"
+BENCH_REGRESSION_THRESHOLD="5"
+assert_equals \
+  "homeboy --output /tmp/workspace/out.json bench data-machine --path /tmp/workspace --rig main,pr --scenario pipeline-scale --runs 3 --iterations 10 --regression-threshold 5" \
+  "$(build_run_command "bench" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "bench includes first-class benchmark flags"
+unset BENCH_RIG BENCH_SCENARIO BENCH_RUNS BENCH_ITERATIONS BENCH_REGRESSION_THRESHOLD
+EXTRA_ARGS="--format json"
+
 assert_equals \
   "homeboy refactor data-machine --from lint --write --path /tmp/workspace --changed-since origin/main --format json" \
   "$(build_autofix_command "refactor --from lint --write" "${COMPONENT}" "${WORKSPACE}")" \
@@ -201,6 +214,11 @@ assert_equals \
   "audit,lint,test,refactor --all" \
   "$(canonicalize_commands "deploy --fleet prod data-machine,audit,lint,test,fleet status my-fleet,refactor --all")" \
   "canonicalize strips all operations and preserves order"
+
+assert_equals \
+  "audit,lint,test,refactor --all,bench" \
+  "$(canonicalize_commands "bench,audit,lint,test,refactor --all")" \
+  "canonicalize places bench after quality commands"
 
 assert_equals \
   "" \

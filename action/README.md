@@ -1,6 +1,6 @@
 # Homeboy Action
 
-GitHub Action for running [Homeboy](https://github.com/Extra-Chill/homeboy) lint, test, audit, and release commands in CI.
+GitHub Action for running [Homeboy](https://github.com/Extra-Chill/homeboy) lint, test, audit, bench, and release commands in CI.
 
 Works with **any Homeboy extension** — WordPress, Rust, Node, or your own custom extension.
 
@@ -83,6 +83,24 @@ The release command:
 
 After the tag push, downstream build/publish jobs can pick it up (e.g. cargo-dist, npm publish).
 
+### Benchmarks
+
+Run `homeboy bench` in CI and preserve the raw structured output for downstream review agents:
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v2
+  with:
+    extension: rust
+    component: homeboy
+    commands: bench
+    rig: main,pr
+    scenario: audit-self
+    runs: 3
+    iterations: 10
+```
+
+Bench runs write the exact `homeboy bench --output` payload to `homeboy-ci-results/bench.json`, upload it as the `homeboy-ci-results` artifact, and render a compact PR-summary section when PR comments are enabled.
+
 #### Continuous release outputs
 
 | Output | Description |
@@ -126,6 +144,11 @@ Use these outputs to gate downstream jobs:
 | `expected-commands` | No | *(falls back to `commands`)* | Full set of command types expected to run across the workflow (e.g. `audit,lint,test`). Set this on every invocation when a workflow splits audit/lint/test across separate steps, otherwise each invocation will close sibling invocations' issues during reconciliation. |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |
+| `rig` | No | | Bench rig pair/list passed to `homeboy bench --rig` |
+| `scenario` | No | | Bench scenario ID passed to `homeboy bench --scenario` |
+| `runs` | No | | Bench run count passed to `homeboy bench --runs` |
+| `iterations` | No | | Bench iteration count passed to `homeboy bench --iterations` |
+| `regression-threshold` | No | | Bench regression threshold passed to `homeboy bench --regression-threshold` |
 | `differential-gating` | No | `false` | On PRs, compare `audit`/`test` counts against the base SHA and fail only when the PR is worse. Opt-in; `lint` still gates on exit code. PR autofix is skipped while enabled. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
 | `node-version` | No | | Node.js version (sets up via `actions/setup-node`) |

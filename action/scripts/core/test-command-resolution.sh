@@ -74,6 +74,11 @@ assert_equals "audit,lint,test" "$(get_output "${quality_output}" "resolved-comm
 assert_equals "" "$(get_output "${quality_output}" "release-commands")" "normal quality commands have no release bucket"
 assert_equals "" "$(get_output "${quality_output}" "operations-commands")" "normal quality commands have no operations bucket"
 
+bench_output="$(run_resolve "bench")"
+assert_equals "bench" "$(get_output "${bench_output}" "resolved-commands")" "bench enters structured command bucket"
+assert_equals "" "$(get_output "${bench_output}" "release-commands")" "bench has no release bucket"
+assert_equals "" "$(get_output "${bench_output}" "operations-commands")" "bench has no operations bucket"
+
 cron_output="$(run_resolve "" "cron")"
 assert_equals "" "$(get_output "${cron_output}" "resolved-commands")" "cron default has no quality commands"
 assert_equals "release" "$(get_output "${cron_output}" "release-commands")" "cron default populates release bucket"

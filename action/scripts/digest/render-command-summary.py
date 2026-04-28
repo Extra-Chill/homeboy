@@ -75,6 +75,8 @@ def compact_summary(command: str, raw: dict[str, Any]) -> str:
         return compact_audit(data)
     if command == "refactor":
         return compact_refactor(data)
+    if command == "bench":
+        return compact_bench(data)
     return "structured command details available"
 
 
@@ -154,6 +156,19 @@ def compact_refactor(data: dict[str, Any]) -> str:
     return "no automated fixes found"
 
 
+def compact_bench(data: dict[str, Any]) -> str:
+    regressions = count_matching_keys(data, {"regression", "regressions"})
+    scenarios = collect_scenario_names(data)
+    primary = collect_bench_metric_rows(data)
+    if primary:
+        return "; ".join(primary[:2])
+    if regressions:
+        return f"{regressions} regression(s) reported"
+    if scenarios:
+        return f"{len(scenarios)} benchmark scenario(s) reported"
+    return "structured benchmark details available"
+
+
 # ── Markdown summaries (multi-line for PR comments) ───────────────────
 
 def markdown_summary(command: str, raw: dict[str, Any]) -> str:
@@ -176,8 +191,94 @@ def markdown_summary(command: str, raw: dict[str, Any]) -> str:
         markdown_audit(data, lines)
     elif command == "refactor":
         markdown_refactor(data, lines)
+    elif command == "bench":
+        markdown_bench(data, lines)
 
     return "\n".join(lines)
+
+
+def walk_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk_dicts(child)
+
+
+def count_matching_keys(value: Any, needles: set[str]) -> int:
+    count = 0
+    for item in walk_dicts(value):
+        for key, child in item.items():
+            if str(key).lower() in needles:
+                if isinstance(child, list):
+                    count += len(child)
+                elif isinstance(child, dict):
+                    count += len(child) or 1
+                elif child:
+                    count += 1
+    return count
+
+
+def collect_scenario_names(data: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    for item in walk_dicts(data):
+        for key in ("scenario", "scenario_id", "name", "id"):
+            raw = item.get(key)
+            if isinstance(raw, str) and raw and any(token in item for token in ("p50", "p95", "elapsed_ms", "metrics", "timings_ns")):
+                if raw not in names:
+                    names.append(raw)
+                break
+    return names
+
+
+def collect_bench_metric_rows(data: dict[str, Any]) -> list[str]:
+    rows: list[str] = []
+    seen: set[str] = set()
+    for item in walk_dicts(data):
+        label = str(item.get("scenario") or item.get("scenario_id") or item.get("name") or item.get("id") or "benchmark")
+        p50 = metric_value(item, "p50")
+        p95 = metric_value(item, "p95")
+        delta = metric_value(item, "delta_percent") or metric_value(item, "change_percent") or metric_value(item, "regression_percent")
+        elapsed = metric_value(item, "elapsed_ms")
+        parts: list[str] = []
+        if p50 is not None:
+            parts.append(f"p50 {format_metric(p50)}")
+        if p95 is not None:
+            parts.append(f"p95 {format_metric(p95)}")
+        if delta is not None:
+            parts.append(f"delta {format_metric(delta)}%")
+        elif elapsed is not None and not parts:
+            parts.append(f"elapsed {format_metric(elapsed)}ms")
+        if not parts:
+            continue
+        row = f"{label}: " + ", ".join(parts)
+        if row not in seen:
+            seen.add(row)
+            rows.append(row)
+    return rows
+
+
+def metric_value(item: dict[str, Any], key: str) -> float | int | None:
+    value = item.get(key)
+    if isinstance(value, (int, float)):
+        return value
+    metrics = item.get("metrics")
+    if isinstance(metrics, dict):
+        nested = metrics.get(key)
+        if isinstance(nested, (int, float)):
+            return nested
+        elapsed = metrics.get("elapsed_ms")
+        if isinstance(elapsed, dict):
+            nested = elapsed.get(key)
+            if isinstance(nested, (int, float)):
+                return nested
+    return None
+
+
+def format_metric(value: float | int) -> str:
+    return f"{value:.2f}" if isinstance(value, float) and not value.is_integer() else str(int(value))
 
 
 def summarize_test_failure(item: dict[str, Any], idx: int) -> str:
@@ -360,6 +461,25 @@ def markdown_refactor(data: dict[str, Any], lines: list[str]) -> None:
         notable = [str(w) for w in warnings if isinstance(w, str) and "merge order" not in w.lower()]
         if notable:
             append_details(lines, f"Warnings ({len(notable)})", notable[:10])
+
+
+def markdown_bench(data: dict[str, Any], lines: list[str]) -> None:
+    rows = collect_bench_metric_rows(data)
+    scenarios = collect_scenario_names(data)
+    regressions = count_matching_keys(data, {"regression", "regressions"})
+
+    if scenarios:
+        lines.append(f"- Benchmark scenarios: **{len(scenarios)}**")
+    if regressions:
+        lines.append(f"- Regression signals: **{regressions}**")
+    if rows:
+        lines.append("- Primary metrics:")
+        for row in rows[:6]:
+            lines.append(f"  - {row}")
+        if len(rows) > 6:
+            lines.append(f"  - ... and {len(rows) - 6} more")
+    if not lines:
+        lines.append("- Benchmark structured output is available in `homeboy-ci-results/bench.json`.")
 
 
 # ── CLI entry point ───────────────────────────────────────────────────

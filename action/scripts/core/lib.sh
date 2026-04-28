@@ -265,13 +265,13 @@ resolve_push_target() {
   fi
 }
 
-# Sort commands into canonical order: audit → lint → test → refactor.
-# Audit/lint/test are the core quality gates; real refactor commands run after
-# them when explicitly requested. Release and operations commands are handled
-# by dedicated steps and are filtered out here defensively.
+# Sort commands into canonical order: audit → lint → test → refactor → bench.
+# Audit/lint/test are the core quality gates; real refactor and bench commands
+# run after them when explicitly requested. Release and operations commands are
+# handled by dedicated steps and are filtered out here defensively.
 canonicalize_commands() {
   local commands="$1"
-  local audit="" lint="" test="" refactor="" others=()
+  local audit="" lint="" test="" refactor="" bench="" others=()
   local cmd base_cmd
 
   IFS=',' read -ra CMD_ARRAY <<< "${commands}"
@@ -283,6 +283,7 @@ canonicalize_commands() {
       lint)    lint="lint" ;;
       test)    test="test" ;;
       refactor) refactor="${cmd}" ;;
+      bench) bench="${cmd}" ;;
       release|fleet|deploy) ;;
       *)       others+=("${cmd}") ;;
     esac
@@ -293,6 +294,7 @@ canonicalize_commands() {
   [ -n "${lint}" ]  && result+=("${lint}")
   [ -n "${test}" ]  && result+=("${test}")
   [ -n "${refactor}" ] && result+=("${refactor}")
+  [ -n "${bench}" ] && result+=("${bench}")
   result+=("${others[@]+"${others[@]}"}")
 
   local IFS=','
@@ -330,6 +332,12 @@ build_run_command() {
 
   if [[ "${cmd}" == refactor* ]]; then
     full_cmd="homeboy ${global_flags}refactor ${component_id} ${cmd#refactor } --path ${workspace}"
+  elif [[ "${cmd}" == bench* ]]; then
+    local bench_args
+    bench_args="$(printf '%s' "${cmd#bench}" | xargs)"
+    full_cmd="homeboy ${global_flags}bench ${component_id}"
+    [ -n "${bench_args}" ] && full_cmd="${full_cmd} ${bench_args}"
+    full_cmd="${full_cmd} --path ${workspace}"
   else
     full_cmd="homeboy ${global_flags}${cmd} ${component_id} --path ${workspace}"
   fi
@@ -340,6 +348,24 @@ build_run_command() {
 
   if [ -n "${EXTRA_ARGS:-}" ]; then
     full_cmd="${full_cmd} ${EXTRA_ARGS}"
+  fi
+
+  if [[ "${cmd}" == bench* ]]; then
+    if [ -n "${BENCH_RIG:-}" ]; then
+      full_cmd="${full_cmd} --rig ${BENCH_RIG}"
+    fi
+    if [ -n "${BENCH_SCENARIO:-}" ]; then
+      full_cmd="${full_cmd} --scenario ${BENCH_SCENARIO}"
+    fi
+    if [ -n "${BENCH_RUNS:-}" ]; then
+      full_cmd="${full_cmd} --runs ${BENCH_RUNS}"
+    fi
+    if [ -n "${BENCH_ITERATIONS:-}" ]; then
+      full_cmd="${full_cmd} --iterations ${BENCH_ITERATIONS}"
+    fi
+    if [ -n "${BENCH_REGRESSION_THRESHOLD:-}" ]; then
+      full_cmd="${full_cmd} --regression-threshold ${BENCH_REGRESSION_THRESHOLD}"
+    fi
   fi
 
   printf '%s\n' "${full_cmd}"

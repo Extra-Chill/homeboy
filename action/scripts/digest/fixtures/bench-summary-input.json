@@ -1,0 +1,19 @@
+{
+  "success": true,
+  "data": {
+    "component": "data-machine",
+    "rigs": ["main", "pr"],
+    "scenarios": [
+      {
+        "scenario": "pipeline-scale",
+        "metrics": {
+          "elapsed_ms": {
+            "p50": 120.5,
+            "p95": 141.25,
+            "delta_percent": 4.2
+          }
+        }
+      }
+    ]
+  }
+}

@@ -23,6 +23,10 @@ GROUP_PREFIX="${RUN_GROUP_PREFIX:-homeboy}"
 HOMEBOY_OUTPUT_DIR=$(mktemp -d)
 echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "${GITHUB_ENV}"
 
+HOMEBOY_CI_RESULTS_DIR="${GITHUB_WORKSPACE:-$(pwd)}/homeboy-ci-results"
+mkdir -p "${HOMEBOY_CI_RESULTS_DIR}"
+echo "HOMEBOY_CI_RESULTS_DIR=${HOMEBOY_CI_RESULTS_DIR}" >> "${GITHUB_ENV}"
+
 HOMEBOY_ANNOTATIONS_DIR=$(mktemp -d)
 echo "HOMEBOY_ANNOTATIONS_DIR=${HOMEBOY_ANNOTATIONS_DIR}" >> "${GITHUB_ENV}"
 export HOMEBOY_ANNOTATIONS_DIR
@@ -42,7 +46,11 @@ for CMD in "${CMD_ARRAY[@]}"; do
   fi
 
   OUTPUT_STEM="$(command_output_stem "${CMD}")"
-  OUTPUT_JSON="${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.json"
+  if [ "$(printf '%s' "${CMD}" | awk '{print $1}')" = "bench" ]; then
+    OUTPUT_JSON="${HOMEBOY_CI_RESULTS_DIR}/bench.json"
+  else
+    OUTPUT_JSON="${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.json"
+  fi
   FULL_CMD="$(build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_JSON}")"
 
   echo ""
@@ -61,6 +69,8 @@ for CMD in "${CMD_ARRAY[@]}"; do
 
   if [ ! -s "${OUTPUT_JSON}" ]; then
     echo "::warning::homeboy ${CMD} did not write structured output to ${OUTPUT_JSON}"
+  elif [ "$(printf '%s' "${CMD}" | awk '{print $1}')" = "bench" ]; then
+    cp "${OUTPUT_JSON}" "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.json"
   fi
 
   if [ "${CMD_EXIT}" -eq 0 ]; then
