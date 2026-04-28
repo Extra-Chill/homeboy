@@ -67,6 +67,13 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub bench_workloads: HashMap<String, Vec<String>>,
 
+    /// Named bench scenario suites keyed by profile name.
+    ///
+    /// `homeboy bench --rig <id> --profile <name>` resolves the profile to
+    /// these scenario ids, then uses the normal scenario filtering path.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub bench_profiles: HashMap<String, Vec<String>>,
+
     /// Optional desktop launcher wrapper for this rig.
     ///
     /// v1 is macOS-only and generates a script-backed `.app` bundle that runs

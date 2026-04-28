@@ -85,8 +85,8 @@ pub struct BenchRunMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared_state: Option<String>,
     pub iterations: u64,
-    pub runs: u64,
-    pub concurrency: u32,
+    #[serde(flatten)]
+    pub execution: BenchRunExecution,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warmup_iterations: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -97,6 +97,13 @@ pub struct BenchRunMetadata {
     pub workloads: Vec<BenchWorkloadMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner: Option<BenchRunnerMetadata>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BenchRunExecution {
+    pub runs: u64,
+    pub concurrency: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

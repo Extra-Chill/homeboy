@@ -16,7 +16,8 @@ use crate::error::{Error, Result};
 use crate::extension::bench::aggregate_runs;
 use crate::extension::bench::baseline::{self, BenchBaselineComparison};
 use crate::extension::bench::parsing::{
-    self, BenchResults, BenchRunMetadata, BenchRunnerMetadata, BenchScenario, BenchWorkloadMetadata,
+    self, BenchResults, BenchRunExecution, BenchRunMetadata, BenchRunnerMetadata, BenchScenario,
+    BenchWorkloadMetadata,
 };
 use crate::extension::{
     resolve_execution_context, ExtensionCapability, ExtensionExecutionContext, ExtensionRunner,
@@ -36,7 +37,7 @@ pub struct BenchRunWorkflowArgs {
     pub settings_json: Vec<(String, serde_json::Value)>,
     pub iterations: u64,
     pub warmup_iterations: Option<u64>,
-    pub runs: u64,
+    pub execution: BenchRunExecution,
     pub baseline_flags: BaselineFlags,
     pub regression_threshold_percent: f64,
     pub json_summary: bool,
@@ -59,7 +60,6 @@ pub struct BenchRunWorkflowArgs {
     /// preserves single-instance behaviour. `> 1` requires `shared_state`
     /// to be set — N independent cold-boots without shared state would
     /// be N independent runs, not a multi-instance contention test.
-    pub concurrency: u32,
     /// Rig-declared out-of-tree workloads to run alongside in-tree discovery.
     /// Exported to dispatchers as `HOMEBOY_BENCH_EXTRA_WORKLOADS`.
     pub extra_workloads: Vec<PathBuf>,
@@ -131,7 +131,10 @@ pub fn run_bench_list_workflow(
             settings_json: args.settings_json,
             iterations: 0,
             warmup_iterations: None,
-            runs: 1,
+            execution: BenchRunExecution {
+                runs: 1,
+                concurrency: 1,
+            },
             baseline_flags: BaselineFlags {
                 baseline: false,
                 ignore_baseline: true,
@@ -143,7 +146,6 @@ pub fn run_bench_list_workflow(
             scenario_ids: Vec::new(),
             rig_id: None,
             shared_state: None,
-            concurrency: 1,
             extra_workloads: args.extra_workloads,
         },
         run_dir,
@@ -319,9 +321,9 @@ fn discover_bench_scenarios(
 }
 
 fn validate_bench_run_args(args: &BenchRunWorkflowArgs) -> Result<()> {
-    require_positive("concurrency", args.concurrency as u64)?;
-    require_positive("runs", args.runs)?;
-    if args.concurrency > 1 && args.shared_state.is_none() {
+    require_positive("concurrency", args.execution.concurrency as u64)?;
+    require_positive("runs", args.execution.runs)?;
+    if args.execution.concurrency > 1 && args.shared_state.is_none() {
         return Err(Error::validation_invalid_argument(
             "concurrency",
             "--concurrency > 1 requires --shared-state <DIR>; \
@@ -361,7 +363,7 @@ fn require_positive(name: &str, value: u64) -> Result<()> {
 /// `$HOMEBOY_BENCH_SHARED_STATE` so workloads can persist on-disk state
 /// across iterations.
 ///
-/// When `args.concurrency > 1`, N runner instances are spawned in
+/// When `args.execution.concurrency > 1`, N runner instances are spawned in
 /// parallel threads. Each gets a distinct `$HOMEBOY_BENCH_INSTANCE_ID`
 /// (`0..N-1`), `$HOMEBOY_BENCH_CONCURRENCY` (`N`), and a per-instance
 /// results file (`bench-results-i<n>.json` under the run dir). After all
@@ -404,9 +406,9 @@ pub fn run_main_bench_workflow(
     }
 
     let (mut parsed, runner_success, runner_exit_code, failure_stderr_tail) =
-        if execution_args.runs > 1 {
+        if execution_args.execution.runs > 1 {
             run_sequential_runs(&execution_context, component, &execution_args, run_dir)?
-        } else if execution_args.concurrency <= 1 {
+        } else if execution_args.execution.concurrency <= 1 {
             let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
             let runner_output = build_runner(
                 &execution_context,
@@ -575,8 +577,7 @@ fn stamp_run_metadata(
             .as_ref()
             .map(|path| path.to_string_lossy().to_string()),
         iterations: args.iterations,
-        runs: args.runs,
-        concurrency: args.concurrency,
+        execution: args.execution,
         warmup_iterations: bench_warmup_iterations(),
         selected_scenarios: args.scenario_ids.clone(),
         env_overrides: bench_env_overrides(),
@@ -731,8 +732,8 @@ fn run_sequential_runs(
     let mut first_failure_exit: Option<i32> = None;
     let mut first_failure_stderr_tail: Option<String> = None;
 
-    for _ in 0..args.runs {
-        let (parsed, success, exit_code, stderr_tail) = if args.concurrency <= 1 {
+    for _ in 0..args.execution.runs {
+        let (parsed, success, exit_code, stderr_tail) = if args.execution.concurrency <= 1 {
             run_single_dispatcher(execution_context, component, args, run_dir)?
         } else {
             run_concurrent_instances(execution_context, component, args, run_dir)?
@@ -902,7 +903,7 @@ fn run_concurrent_instances(
     args: &BenchRunWorkflowArgs,
     run_dir: &RunDir,
 ) -> Result<(Option<BenchResults>, bool, i32, Option<String>)> {
-    let concurrency = args.concurrency;
+    let concurrency = args.execution.concurrency;
     let execution_context = Arc::new(execution_context.clone());
     let component = Arc::new(component.clone());
     let args_arc = Arc::new(args.clone());
@@ -1099,7 +1100,10 @@ mod tests {
                 settings_json: Vec::new(),
                 iterations: 1,
                 warmup_iterations: None,
-                runs: 1,
+                execution: BenchRunExecution {
+                    runs: 1,
+                    concurrency: 0,
+                },
                 baseline_flags: BaselineFlags {
                     baseline: false,
                     ignore_baseline: true,
@@ -1111,7 +1115,6 @@ mod tests {
                 scenario_ids: Vec::new(),
                 rig_id: None,
                 shared_state: None,
-                concurrency: 0,
                 extra_workloads: Vec::new(),
             },
             &run_dir,
@@ -1150,7 +1153,11 @@ mod tests {
             settings: Vec::new(),
             settings_json: Vec::new(),
             iterations: 7,
-            runs: 3,
+            warmup_iterations: None,
+            execution: BenchRunExecution {
+                runs: 3,
+                concurrency: 2,
+            },
             baseline_flags: BaselineFlags {
                 baseline: false,
                 ignore_baseline: true,
@@ -1162,7 +1169,6 @@ mod tests {
             scenario_ids: vec!["boot".to_string()],
             rig_id: Some("studio".to_string()),
             shared_state: Some(component_dir.path().join("shared")),
-            concurrency: 2,
             extra_workloads: Vec::new(),
         };
         let mut results = BenchResults {
@@ -1206,8 +1212,8 @@ mod tests {
         );
         assert_eq!(metadata.started_at, "2026-04-28T00:00:00Z");
         assert_eq!(metadata.iterations, 7);
-        assert_eq!(metadata.runs, 3);
-        assert_eq!(metadata.concurrency, 2);
+        assert_eq!(metadata.execution.runs, 3);
+        assert_eq!(metadata.execution.concurrency, 2);
         assert_eq!(metadata.selected_scenarios, vec!["boot".to_string()]);
         assert_eq!(metadata.runner.as_ref().unwrap().extension, "rust");
         assert_eq!(metadata.workloads.len(), 1);

@@ -46,6 +46,7 @@ fn minimal_spec(id: &str) -> RigSpec {
         pipeline: HashMap::new(),
         bench: None,
         bench_workloads: HashMap::new(),
+        bench_profiles: HashMap::new(),
         app_launcher: None,
     }
 }
@@ -210,6 +211,7 @@ fn test_run_down_cleans_state_owned_shared_paths() {
             pipeline,
             bench: None,
             bench_workloads: HashMap::new(),
+            bench_profiles: HashMap::new(),
             app_launcher: None,
         };
 
@@ -263,6 +265,7 @@ fn test_run_status() {
             bench: None,
             app_launcher: None,
             bench_workloads: HashMap::new(),
+            bench_profiles: HashMap::new(),
         };
 
         let status = run_status(&rig).expect("run_status with service");
@@ -324,6 +327,7 @@ fn test_snapshot_state() {
         pipeline: HashMap::new(),
         bench: None,
         bench_workloads: HashMap::new(),
+        bench_profiles: HashMap::new(),
         app_launcher: None,
     };
 

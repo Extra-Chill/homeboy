@@ -178,6 +178,7 @@ mod tests {
                 pipeline: Default::default(),
                 bench: None,
                 bench_workloads: Default::default(),
+                bench_profiles: Default::default(),
                 app_launcher: None,
             },
             resources: RigResourcesSpec {
