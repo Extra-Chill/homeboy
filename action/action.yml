@@ -27,7 +27,7 @@ inputs:
 
   # ── Extension ──
   extension:
-    description: 'Extension ID override. Auto-inferred from homeboy.json extensions if not set.'
+    description: 'Single extension ID override. If empty, installs all extensions declared in homeboy.json.'
     required: false
     default: ''
   extension-source:
@@ -293,7 +293,9 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         EXTENSION_ID: ${{ steps.read-config.outputs.portable-extension }}
+        EXTENSION_INPUT: ${{ inputs.extension }}
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
+        COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
       run: bash ${{ github.action_path }}/scripts/setup/install-extension.sh
 
     - name: Capture tooling metadata

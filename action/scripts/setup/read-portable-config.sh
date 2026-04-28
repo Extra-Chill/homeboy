@@ -9,7 +9,7 @@
 #
 # Outputs:
 #   PORTABLE_ID         — component id
-#   PORTABLE_EXTENSION  — extension id (first key from extensions object)
+#   PORTABLE_EXTENSION  — explicit extension input, or first key from extensions object
 #   COMPONENT_DIR       — directory containing homeboy.json
 #
 # All values are written to GITHUB_ENV and GITHUB_OUTPUT for use by subsequent steps.
@@ -44,8 +44,9 @@ if [ -z "${PORTABLE_ID}" ]; then
 fi
 
 # ── Extension ──
-# If the action input specifies an extension, use that. Otherwise infer from
-# the first (usually only) key in the extensions object.
+# If the action input specifies an extension, use that single override. Otherwise
+# infer the first key from the extensions object for downstream runtime detection.
+# Installation itself uses Homeboy core to install every configured extension.
 
 EXTENSION_INPUT="${EXTENSION_INPUT:-}"
 if [ -n "${EXTENSION_INPUT}" ]; then
