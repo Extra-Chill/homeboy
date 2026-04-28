@@ -1,4 +1,4 @@
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -134,6 +134,14 @@ pub struct BenchRunArgs {
     #[arg(long, value_name = "RIG_ID[,RIG_ID...]", value_delimiter = ',')]
     rig: Vec<String>,
 
+    /// Order to use when running a multi-rig comparison. `input` preserves
+    /// the --rig list order and keeps the first rig as the comparison
+    /// reference. `reverse` flips the order so users can repeat the same
+    /// comparison with the opposite cold/warm position when rigs share
+    /// external daemon or cache state.
+    #[arg(long, value_enum, default_value_t = BenchRigOrder::Input)]
+    rig_order: BenchRigOrder,
+
     /// Only run matching benchmark scenario ids. Repeat to select multiple.
     #[arg(
         long = "scenario",
@@ -152,6 +160,12 @@ pub struct BenchRunArgs {
     /// auto-pairs, or to bench the candidate alone.
     #[arg(long)]
     ignore_default_baseline: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum BenchRigOrder {
+    Input,
+    Reverse,
 }
 
 /// Filter out homeboy-owned flags from trailing args before passing to
@@ -180,6 +194,7 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
         "--regression-threshold",
         "--scenario",
         "--profile",
+        "--rig-order",
         "--rig",
         "--setting",
         "--path",
@@ -306,7 +321,9 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
     let mut entries = Vec::with_capacity(run_args.rig.len());
     let mut effective_component_label: Option<String> = None;
 
-    for rig_id in &run_args.rig {
+    let ordered_rigs = ordered_rig_ids(run_args);
+
+    for rig_id in ordered_rigs {
         let (single_output, _exit) =
             matrix::run_single(run_args, &passthrough_args, Some(rig_id.clone()))?;
         if effective_component_label.is_none() {
@@ -330,6 +347,14 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
 
     let (output, exit) = aggregate_comparison(component, run_args.iterations, entries);
     Ok((BenchOutput::Comparison(output), exit))
+}
+
+fn ordered_rig_ids(args: &BenchRunArgs) -> Vec<String> {
+    let mut rig_ids = args.rig.clone();
+    if args.rig_order == BenchRigOrder::Reverse {
+        rig_ids.reverse();
+    }
+    rig_ids
 }
 
 fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {

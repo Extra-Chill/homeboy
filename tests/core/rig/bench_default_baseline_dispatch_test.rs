@@ -55,6 +55,7 @@ fn make_args(
             _json: HiddenJsonArgs::default(),
             json_summary: false,
             rig,
+            rig_order: super::BenchRigOrder::Input,
             scenario_ids: Vec::new(),
             profile: None,
             ignore_default_baseline,
