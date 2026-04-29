@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 MANIFEST="${EXTENSION_DIR}/nodejs.json"
 RUNNER="${SCRIPT_DIR}/trace-runner.sh"
+HELPER_FIXTURE="${SCRIPT_DIR}/fixtures/helper.trace.mjs"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-node-trace.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -50,6 +51,7 @@ for (const token of [
   'HOMEBOY_TRACE_SCENARIO',
   'HOMEBOY_TRACE_LIST_ONLY',
   'HOMEBOY_TRACE_ARTIFACT_DIR',
+  'HOMEBOY_TRACE_HELPER_DIR',
   'HOMEBOY_RUN_DIR',
 ]) {
   if (!runner.includes(token)) throw new Error(`runner missing env contract token ${token}`);
@@ -104,6 +106,30 @@ assert_json "$TRACE_RESULTS" '
 if (data.status !== "pass") throw new Error("named traces scenario did not pass");
 if (data.summary !== "custom result") throw new Error("runner overwrote scenario result envelope");
 if (data.artifacts[0].path !== "trace.txt") throw new Error("artifact path not preserved");
+'
+
+HELPER_PROJECT="$(make_project helper-scenario)"
+mkdir -p "$HELPER_PROJECT/traces"
+cp "$HELPER_FIXTURE" "$HELPER_PROJECT/traces/helper.trace.mjs"
+HELPER_RESULTS="$TMP_DIR/helper-results.json"
+HELPER_ARTIFACTS="$TMP_DIR/helper-artifacts"
+run_trace "$HELPER_PROJECT" "helper" "$HELPER_RESULTS" "$HELPER_ARTIFACTS" >/dev/null
+if [ ! -f "$HELPER_ARTIFACTS/process-tree.txt" ]; then
+    echo "expected process tree artifact to be written" >&2
+    exit 1
+fi
+if [ ! -f "$HELPER_ARTIFACTS/trace.jsonl" ]; then
+    echo "expected timeline jsonl artifact to be written" >&2
+    exit 1
+fi
+assert_json "$HELPER_RESULTS" '
+if (data.status !== "pass") throw new Error("helper scenario should pass");
+if (data.summary !== "helper scenario passed") throw new Error("helper summary missing");
+if (!data.timeline.find((event) => event.event === "process.launch")) throw new Error("process launch event missing");
+if (!data.timeline.find((event) => event.event === "process.tree.captured")) throw new Error("process tree event missing");
+if (!data.assertions.find((assertion) => assertion.id === "dummy-process-exited" && assertion.status === "pass")) throw new Error("process assertion missing");
+if (!data.artifacts.find((artifact) => artifact.path === "process-tree.txt")) throw new Error("process tree artifact missing from envelope");
+if (!data.artifacts.find((artifact) => artifact.path === "trace.jsonl")) throw new Error("timeline artifact missing from envelope");
 '
 
 SCRIPT_PROJECT="$(make_project scripts-scenario)"
