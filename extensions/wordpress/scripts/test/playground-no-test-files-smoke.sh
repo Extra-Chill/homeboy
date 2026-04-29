@@ -10,6 +10,9 @@ EXTENSION_PATH="${TMPDIR}/extension"
 PLUGIN_PATH="${TMPDIR}/component"
 mkdir -p "${EXTENSION_PATH}/node_modules/.bin" "${PLUGIN_PATH}/tests"
 
+RUNNER_SRC="$(cat "${SCRIPT_DIR}/playground-runner.php")"
+BOOTSTRAP_SRC="$(cat "${SCRIPT_DIR}/../lib/playground-bootstrap.php")"
+
 cat > "${EXTENSION_PATH}/node_modules/.bin/wp-playground-cli" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -76,4 +79,9 @@ assert_contains "$failure_output" "PHPUnit config exists, but no files matched t
 assert_not_contains "$failure_output" "UNCLASSIFIED PLAYGROUND FAILURE"
 assert_not_contains "$failure_output" "Skipping PHPUnit tests: no files matched"
 
-echo "Playground no-test-files smoke passed (9 assertions)"
+assert_contains "$RUNNER_SRC" "tests_add_filter('muplugins_loaded'"
+assert_contains "$RUNNER_SRC" "'activate' => false"
+assert_contains "$RUNNER_SRC" "pg_run_install_stage(['config_path' => \$config_path, 'tests_dir' => \$tests_dir]);"
+assert_contains "$BOOTSTRAP_SRC" "\$cfg['activate'] ?? true"
+
+echo "Playground no-test-files smoke passed (13 assertions)"

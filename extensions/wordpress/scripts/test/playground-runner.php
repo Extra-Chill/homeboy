@@ -98,8 +98,21 @@ if (is_array($bench_env)) {
     }
 }
 
+// Load the component during WordPress bootstrap, not after wp-settings.php has
+// finished. Plugins that register hooks for core bootstrap events (for example
+// wp_abilities_api_init) need to be present before those events fire.
+require_once "$tests_dir/includes/functions.php";
+tests_add_filter('muplugins_loaded', function () use ($plugin_path) {
+    pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
+    pg_run_load_component_stage(['plugin_path' => $plugin_path, 'activate' => false]);
+});
+
 // Stage: install — wp-phpunit install.php creates WP tables in-process.
 pg_run_install_stage(['config_path' => $config_path, 'tests_dir' => $tests_dir]);
+
+// Run activation hooks after wp-phpunit has created database tables. The plugin
+// file was already required during muplugins_loaded, so require_once is a no-op.
+pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 
 // ---------------------------------------------------------------------------
 // Stage: load_fixtures (test case classes, mock mailer, harness filters)
@@ -147,12 +160,6 @@ try {
     pg_stage_fail('load_fixtures', $e);
     exit(1);
 }
-
-// Stage: load_deps — load Plugin-Name-headed entry files for declared deps.
-pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
-
-// Stage: load_component — load the plugin or theme under test.
-pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 
 // ---------------------------------------------------------------------------
 // Stage: discover_tests

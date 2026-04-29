@@ -432,7 +432,9 @@ function pg_run_load_component_stage(array $cfg) {
                 if (strpos(file_get_contents($mf), 'Plugin Name:') !== false) {
                     pg_log("PLUGIN_DETECTED " . basename($mf));
                     require_once $mf;
-                    pg_activate_plugin_file($mf);
+                    if (($cfg['activate'] ?? true) !== false) {
+                        pg_activate_plugin_file($mf);
+                    }
                     $loaded = true;
                     break;
                 }
