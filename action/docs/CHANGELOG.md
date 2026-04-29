@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.1.2] - 2026-04-29
+
+### Fixed
+- fix(pr-comment): suppress failed-test text for passing runs
+- prioritize audit PR blockers
+
 ## [2.1.1] - 2026-04-28
 
 ### Fixed
