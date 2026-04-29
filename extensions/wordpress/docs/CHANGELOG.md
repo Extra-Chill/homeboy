@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.32.0] - 2026-04-29
+
+### Added
+- provide dead-guard known symbols
+
 ## [2.31.0] - 2026-04-29
 
 ### Added
