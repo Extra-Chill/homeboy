@@ -15,6 +15,33 @@ homeboy_resolve_context --component-alias PLUGIN_PATH
 PHP_BIN="${HOMEBOY_PHP_BIN:-php}"
 TEST_DIR="${PLUGIN_PATH}/tests"
 TARGET_SMOKE_FILE="${HOMEBOY_WORDPRESS_HOST_SMOKE_FILE:-}"
+TARGET_SMOKE_FILES="${HOMEBOY_WORDPRESS_HOST_SMOKE_FILES:-}"
+
+homeboy_wordpress_host_smoke_abs() {
+    local raw_path="$1"
+    local abs_path
+
+    if [ "${raw_path#/}" != "$raw_path" ]; then
+        abs_path="$raw_path"
+    else
+        abs_path="${PLUGIN_PATH}/${raw_path}"
+    fi
+
+    if [ ! -f "$abs_path" ]; then
+        echo "ERROR: requested host smoke file not found: ${raw_path}" >&2
+        return 2
+    fi
+
+    case "$abs_path" in
+        "${PLUGIN_PATH}"/tests/*-smoke.php)
+            printf '%s\n' "$abs_path"
+            ;;
+        *)
+            echo "ERROR: requested host smoke file must match tests/**/*-smoke.php: ${raw_path}" >&2
+            return 2
+            ;;
+    esac
+}
 
 echo "Running host PHP smoke tests..."
 echo "  Component: ${COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
@@ -26,25 +53,20 @@ if [ ! -d "$TEST_DIR" ]; then
     exit 0
 fi
 
-if [ -n "$TARGET_SMOKE_FILE" ]; then
-    if [ "${TARGET_SMOKE_FILE#/}" != "$TARGET_SMOKE_FILE" ]; then
-        target_abs="$TARGET_SMOKE_FILE"
-    else
-        target_abs="${PLUGIN_PATH}/${TARGET_SMOKE_FILE}"
-    fi
-    if [ ! -f "$target_abs" ]; then
-        echo "ERROR: requested host smoke file not found: ${TARGET_SMOKE_FILE}" >&2
+if [ -n "$TARGET_SMOKE_FILES" ]; then
+    smoke_files=()
+    while IFS= read -r smoke_file; do
+        [ -z "$smoke_file" ] && continue
+        if ! smoke_abs="$(homeboy_wordpress_host_smoke_abs "$smoke_file")"; then
+            exit 2
+        fi
+        smoke_files+=("$smoke_abs")
+    done <<< "$TARGET_SMOKE_FILES"
+elif [ -n "$TARGET_SMOKE_FILE" ]; then
+    if ! target_abs="$(homeboy_wordpress_host_smoke_abs "$TARGET_SMOKE_FILE")"; then
         exit 2
     fi
-    case "$target_abs" in
-        "${PLUGIN_PATH}"/tests/*-smoke.php)
-            smoke_files=("$target_abs")
-            ;;
-        *)
-            echo "ERROR: requested host smoke file must match tests/**/*-smoke.php: ${TARGET_SMOKE_FILE}" >&2
-            exit 2
-            ;;
-    esac
+    smoke_files=("$target_abs")
 else
     mapfile -t smoke_files < <(find "$TEST_DIR" -type f -name '*-smoke.php' | sort)
 fi

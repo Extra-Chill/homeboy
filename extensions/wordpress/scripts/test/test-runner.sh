@@ -80,6 +80,70 @@ if [ -z "$COMPONENT_SHAPE" ]; then
     fi
 fi
 
+homeboy_wordpress_rel_test_file() {
+    local raw_path="$1"
+    local abs_path
+
+    if [ -z "$raw_path" ]; then
+        return 1
+    fi
+
+    if [ "${raw_path#/}" != "$raw_path" ]; then
+        abs_path="$raw_path"
+    else
+        abs_path="${PLUGIN_PATH}/${raw_path}"
+    fi
+
+    if [ ! -f "$abs_path" ]; then
+        return 1
+    fi
+
+    case "$abs_path" in
+        "${PLUGIN_PATH}"/*)
+            printf '%s\n' "${abs_path#"${PLUGIN_PATH}/"}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+homeboy_wordpress_is_standalone_smoke() {
+    local rel_path="$1"
+    case "$rel_path" in
+        tests/*-smoke.php|tests/*/*-smoke.php|tests/*/*/*-smoke.php|tests/*/*/*/*-smoke.php)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
+    changed_smoke_files=()
+    changed_non_smoke_count=0
+
+    while IFS= read -r changed_file; do
+        [ -z "$changed_file" ] && continue
+
+        if ! changed_rel="$(homeboy_wordpress_rel_test_file "$changed_file")"; then
+            changed_non_smoke_count=$((changed_non_smoke_count + 1))
+            continue
+        fi
+
+        if homeboy_wordpress_is_standalone_smoke "$changed_rel"; then
+            changed_smoke_files+=("$changed_rel")
+        else
+            changed_non_smoke_count=$((changed_non_smoke_count + 1))
+        fi
+    done <<< "$HOMEBOY_CHANGED_TEST_FILES"
+
+    if [ "${#changed_smoke_files[@]}" -gt 0 ] && [ "$changed_non_smoke_count" -eq 0 ]; then
+        HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$(printf '%s\n' "${changed_smoke_files[@]}")" exec bash "$HOST_SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+    fi
+fi
+
 if [ -n "$TARGET_FILE" ]; then
     if [ "${TARGET_FILE#/}" != "$TARGET_FILE" ]; then
         target_abs="$TARGET_FILE"

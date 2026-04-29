@@ -63,6 +63,16 @@ assert_not_contains "${TMPDIR}/direct-single.out" "HOST_SMOKE_BEGIN:tests/alpha-
 assert_contains "${TMPDIR}/direct-single.out" "HOST_SMOKE_BEGIN:tests/nested/bravo-smoke.php"
 assert_contains "${TMPDIR}/direct-single.out" "HOST_SMOKE_SUMMARY:passed=1 failed=0"
 
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component-pass" \
+HOMEBOY_COMPONENT_PATH="$component_pass" \
+HOMEBOY_WORDPRESS_HOST_SMOKE_FILES=$'tests/nested/bravo-smoke.php\ntests/alpha-smoke.php' \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke.sh" > "${TMPDIR}/direct-selected-list.out"
+
+assert_contains "${TMPDIR}/direct-selected-list.out" "HOST_SMOKE_BEGIN:tests/nested/bravo-smoke.php"
+assert_contains "${TMPDIR}/direct-selected-list.out" "HOST_SMOKE_BEGIN:tests/alpha-smoke.php"
+assert_contains "${TMPDIR}/direct-selected-list.out" "HOST_SMOKE_SUMMARY:passed=2 failed=0"
+
 component_fail="${TMPDIR}/component-fail"
 make_component "$component_fail"
 cat > "$component_fail/tests/zzz-smoke.php" <<'PHP'
