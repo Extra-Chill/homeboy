@@ -172,6 +172,28 @@ for pat in reg_patterns:
 seen = set()
 registrations = [r for r in registrations if r not in seen and not seen.add(r)]
 
+# --- Runtime-dispatched Types ---
+# Extract types/classes registered with runtime dispatchers. Homeboy core
+# consumes this as generic metadata; WordPress-specific syntax stays here.
+runtime_dispatched_types = []
+bs_re = re.escape(chr(92))
+wp_cli_class_pattern = (
+    r'WP_CLI::add_command\s*\(\s*[\x27\x22][^\x27\x22]+[\x27\x22]\s*,\s*'
+    + bs_re
+    + r'?([A-Za-z_]\w*(?:'
+    + bs_re
+    + r'[A-Za-z_]\w*)*)::class'
+)
+for m in re.finditer(
+    wp_cli_class_pattern,
+    content,
+):
+    runtime_dispatched_types.append(m.group(1).lstrip(chr(92)))
+
+# Deduplicate
+seen = set()
+runtime_dispatched_types = [t for t in runtime_dispatched_types if t not in seen and not seen.add(t)]
+
 # --- Hook Callbacks (#118, #1149) ---
 # Extract functions/methods registered as WordPress hook/callback targets.
 # These are externally invoked by the WordPress runtime (hook system, REST
@@ -626,6 +648,7 @@ result = {
     'properties': properties,
     'hooks': hooks,
     'hook_callbacks': hook_callbacks,
+    'runtime_dispatched_types': runtime_dispatched_types,
     'unused_parameters': unused_parameters,
     'dead_code_markers': dead_code_markers,
     'internal_calls': internal_calls,

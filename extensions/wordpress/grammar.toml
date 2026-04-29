@@ -195,6 +195,15 @@ skip_strings = false
 [patterns.wp_cli_command.captures]
 name = 1
 
+[patterns.runtime_dispatched_type]
+regex = "WP_CLI::add_command\\s*\\(\\s*['\"][^'\"]+['\"]\\s*,\\s*\\\\?([A-Za-z_]\\w*(?:\\\\[A-Za-z_]\\w*)*)::class"
+context = "any"
+skip_comments = true
+skip_strings = false
+
+[patterns.runtime_dispatched_type.captures]
+name = 1
+
 [patterns.wp_register_ability]
 regex = "wp_register_ability\\s*\\(\\s*['\"]([^'\"]+)['\"]"
 context = "any"
