@@ -126,6 +126,7 @@ fi
 
 # Capture autofix summary: file count, fix commands, and finding categories
 AUTOFIX_FILE_COUNT=$(git diff --cached --name-only | wc -l | xargs)
+AUTOFIX_CHANGED_FILES="$(git diff --cached --name-only | sort)"
 
 AUTOFIX_FIX_TYPES=""
 for FIX_CMD in "${FIX_ARRAY[@]}"; do
@@ -139,12 +140,14 @@ done
 
 AUTOFIX_DETAILS=""
 AUTOFIX_TOTAL_FIXES=""
+AUTOFIX_REPORT=""
 if [ -d "${AUTOFIX_OUTPUT_DIR}" ]; then
   raw_details="$(extract_fix_details_from_output "${AUTOFIX_OUTPUT_DIR}")"
   if [ -n "${raw_details}" ]; then
     AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
     AUTOFIX_DETAILS="$(echo "${raw_details}" | tail -n +2)"
   fi
+  AUTOFIX_REPORT="$(extract_fix_report_from_output "${AUTOFIX_OUTPUT_DIR}")"
 fi
 
 COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_DETAILS}" "${AUTOFIX_TOTAL_FIXES}")"
@@ -179,3 +182,5 @@ echo "autofix-branch=${AUTOFIX_BRANCH}" >> "${GITHUB_OUTPUT}"
 echo "autofix-file-count=${AUTOFIX_FILE_COUNT}" >> "${GITHUB_OUTPUT}"
 echo "autofix-fix-types=${AUTOFIX_FIX_TYPES:-}" >> "${GITHUB_OUTPUT}"
 echo "autofix-finding-types=${AUTOFIX_FINDING_TYPES:-}" >> "${GITHUB_OUTPUT}"
+write_multiline_output "autofix-changed-files" "${AUTOFIX_CHANGED_FILES:-}"
+write_multiline_output "autofix-report" "${AUTOFIX_REPORT:-}"

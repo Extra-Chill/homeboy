@@ -193,6 +193,175 @@ extract_fix_details_from_output() {
   ' ${json_files} 2>/dev/null || true
 }
 
+# Extract machine-readable autofix rows from homeboy JSON output files.
+# Format: finding_type<TAB>count<TAB>comma-separated affected files.
+extract_fix_report_from_output() {
+  local output_dir="$1"
+
+  local json_files
+  json_files=$(find "${output_dir}" -name '*.json' -type f 2>/dev/null)
+  if [ -z "${json_files}" ]; then
+    return
+  fi
+
+  # shellcheck disable=SC2086
+  jq -rsr '
+    [.[] | .data // . ] | map(select(type == "object")) |
+
+    def category:
+      if type == "string" then .
+      elif type == "object" then (keys[0] // "unknown")
+      else "unknown"
+      end;
+
+    [.[].fixes // [] | .[] | .file as $file |
+      .insertions[]? | {cat: (.kind | category), file: $file}
+    ] as $insertions |
+    [.[].new_files // [] | .[] | {cat: .finding, file}] as $new_files |
+    [.[].proposals // [] | .[] | {cat: .rule_id, file}] as $proposals |
+    [.[].collected_edits // [] | .[] | {cat: .rule_id, file}] as $collected_edits |
+    [.[].decompose_plans // [] | .[] | {cat: .source_finding, file}] as $decompose |
+
+    ($insertions + $new_files + $proposals + $collected_edits + $decompose) |
+    group_by(.cat) |
+    map({
+      cat: .[0].cat,
+      count: length,
+      files: ([.[].file] | unique | sort)
+    }) |
+    sort_by(-.count, .cat) |
+    .[] |
+    [.cat, (.count | tostring), (.files | join(", "))] | @tsv
+  ' ${json_files} 2>/dev/null || true
+}
+
+write_multiline_output() {
+  local key="$1"
+  local value="${2:-}"
+  local marker="__HOMEBOY_${key}_$(date +%s%N)__"
+
+  {
+    printf '%s<<%s\n' "${key}" "${marker}"
+    printf '%s\n' "${value}"
+    printf '%s\n' "${marker}"
+  } >> "${GITHUB_OUTPUT}"
+}
+
+autofix_changed_files_list() {
+  printf '%s\n' "${AUTOFIX_CHANGED_FILES:-}" | sed '/^[[:space:]]*$/d' | sort -u
+}
+
+autofix_source_files_from_report() {
+  printf '%s\n' "${AUTOFIX_REPORT:-}" | awk -F '\t' 'NF >= 3 { print $3 }' |
+    tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | sort -u
+}
+
+autofix_other_files() {
+  local changed tmp_changed tmp_source
+  tmp_changed="$(mktemp)"
+  tmp_source="$(mktemp)"
+  autofix_changed_files_list > "${tmp_changed}"
+  autofix_source_files_from_report > "${tmp_source}"
+  changed="$(comm -23 "${tmp_changed}" "${tmp_source}" || true)"
+  rm -f "${tmp_changed}" "${tmp_source}"
+  printf '%s\n' "${changed}" | sed '/^[[:space:]]*$/d'
+}
+
+autofix_count_report_rows() {
+  printf '%s\n' "${AUTOFIX_REPORT:-}" | sed '/^[[:space:]]*$/d' | wc -l | xargs
+}
+
+autofix_total_report_fixes() {
+  printf '%s\n' "${AUTOFIX_REPORT:-}" | awk -F '\t' 'NF >= 2 { total += $2 } END { print total + 0 }'
+}
+
+autofix_markdown_file_list() {
+  local files="$1"
+  local rendered=""
+  local file
+  while IFS= read -r file; do
+    [ -n "${file}" ] || continue
+    if [ -n "${rendered}" ]; then
+      rendered+=" "
+    fi
+    rendered+="\`${file}\`"
+  done <<< "$(printf '%s\n' "${files}" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d')"
+  printf '%s\n' "${rendered}"
+}
+
+autofix_render_other_change() {
+  local file="$1"
+  case "${file}" in
+    homeboy.json)
+      printf '%s\n' '- `homeboy.json` audit baseline metadata was refreshed.'
+      ;;
+    *.json|*.yml|*.yaml|*.toml|*.lock)
+      printf '%s\n' "- \`${file}\` configuration or metadata was refreshed."
+      ;;
+    *)
+      printf '%s\n' "- \`${file}\` changed outside the reported source-fix set."
+      ;;
+  esac
+}
+
+build_autofix_pr_body() {
+  local run_url="$1"
+  local branch="$2"
+  local base_branch="$3"
+
+  local changed_count="${AUTOFIX_FILE_COUNT:-0}"
+  local total_fixes row_count
+  total_fixes="$(autofix_total_report_fixes)"
+  row_count="$(autofix_count_report_rows)"
+
+  printf '## Summary\n'
+  if [ "${total_fixes}" != "0" ]; then
+    local label="finding"
+    [ "${total_fixes}" = "1" ] || label="findings"
+    if [ "${row_count}" = "1" ]; then
+      local only_type
+      only_type="$(printf '%s\n' "${AUTOFIX_REPORT}" | awk -F '\t' 'NF >= 1 { print $1; exit }')"
+      printf -- '- Fixed **%s** `%s` %s.\n' "${total_fixes}" "${only_type}" "${label}"
+    else
+      printf -- '- Fixed **%s** source %s across **%s** finding types.\n' "${total_fixes}" "${label}" "${row_count}"
+    fi
+  else
+    printf -- '- No source fixes were reported by the autofix output.\n'
+  fi
+  printf -- '- Changed **%s** files.\n\n' "${changed_count}"
+
+  if [ "${total_fixes}" != "0" ]; then
+    printf '## Automated Fixes\n'
+    printf '| Finding type | Count | Files |\n'
+    printf '|---|---:|---|\n'
+    while IFS=$'\t' read -r cat count files; do
+      [ -n "${cat}" ] || continue
+      printf '| `%s` | %s | %s |\n' "${cat}" "${count}" "$(autofix_markdown_file_list "${files}")"
+    done <<< "${AUTOFIX_REPORT}"
+    printf '\n'
+  fi
+
+  local other_files
+  other_files="$(autofix_other_files)"
+  if [ -n "${other_files}" ]; then
+    printf '## Other Changes\n'
+    while IFS= read -r file; do
+      [ -n "${file}" ] || continue
+      autofix_render_other_change "${file}"
+    done <<< "${other_files}"
+    printf '\n'
+  fi
+
+  printf '## Verification\n'
+  printf -- '- Opened immediately after autofix without rerunning quality gates.\n'
+  printf -- '- Workflow run: %s\n\n' "${run_url}"
+
+  printf '## Context\n'
+  printf -- '- Branch: %s\n' "${branch}"
+  printf -- '- Base: %s\n' "${base_branch}"
+  printf -- '- Generated automatically by Homeboy Action.\n'
+}
+
 resolve_component_id() {
   if [ -n "${COMPONENT_NAME:-}" ]; then
     printf '%s\n' "${COMPONENT_NAME}"

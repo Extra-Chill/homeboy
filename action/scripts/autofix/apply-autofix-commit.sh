@@ -161,6 +161,7 @@ commit_autofix_changes() {
   AUTOFIX_CHANGED_FILES="$(git diff --cached --name-only | sort)"
   AUTOFIX_FIX_TYPES=""
   AUTOFIX_FINDING_TYPES=""
+  AUTOFIX_REPORT=""
 
   for FIX_CMD in "${FIX_ARRAY[@]}"; do
     FIX_CMD=$(echo "${FIX_CMD}" | xargs)
@@ -184,6 +185,7 @@ commit_autofix_changes() {
       AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
       AUTOFIX_DETAILS="$(echo "${raw_details}" | tail -n +2)"
     fi
+    AUTOFIX_REPORT="$(extract_fix_report_from_output "${details_dir}")"
   fi
 
   COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_DETAILS}" "${AUTOFIX_TOTAL_FIXES}")"
@@ -282,6 +284,8 @@ if push_autofix_commit; then
   echo "target-branch=${TARGET_BRANCH}" >> "${GITHUB_OUTPUT}"
   echo "autofix-file-count=${AUTOFIX_FILE_COUNT}" >> "${GITHUB_OUTPUT}"
   echo "autofix-fix-types=${AUTOFIX_FIX_TYPES}" >> "${GITHUB_OUTPUT}"
+  write_multiline_output "autofix-changed-files" "${AUTOFIX_CHANGED_FILES:-}"
+  write_multiline_output "autofix-report" "${AUTOFIX_REPORT:-}"
   exit 0
 fi
 
@@ -292,3 +296,5 @@ echo "target-repo=${TARGET_REPO}" >> "${GITHUB_OUTPUT}"
 echo "target-branch=${TARGET_BRANCH}" >> "${GITHUB_OUTPUT}"
 echo "autofix-file-count=${AUTOFIX_FILE_COUNT:-0}" >> "${GITHUB_OUTPUT}"
 echo "autofix-fix-types=${AUTOFIX_FIX_TYPES:-}" >> "${GITHUB_OUTPUT}"
+write_multiline_output "autofix-changed-files" "${AUTOFIX_CHANGED_FILES:-}"
+write_multiline_output "autofix-report" "${AUTOFIX_REPORT:-}"

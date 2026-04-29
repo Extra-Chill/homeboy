@@ -28,30 +28,7 @@ TITLE="chore(ci): autofix ${COMP_ID} from ${BASE_BRANCH}"
 BODY_FILE="$(mktemp)"
 trap 'rm -f "${BODY_FILE}"' EXIT
 
-AUTOFIX_DETAIL=""
-if [ -n "${AUTOFIX_FILE_COUNT:-}" ] && [ -n "${AUTOFIX_FIX_TYPES:-}" ]; then
-  AUTOFIX_DETAIL="- **${AUTOFIX_FILE_COUNT}** file(s) fixed via **${AUTOFIX_FIX_TYPES}**"
-elif [ -n "${AUTOFIX_FILE_COUNT:-}" ]; then
-  AUTOFIX_DETAIL="- **${AUTOFIX_FILE_COUNT}** file(s) fixed"
-fi
-
-FINDING_DETAIL=""
-if [ -n "${AUTOFIX_FINDING_TYPES:-}" ]; then
-  FINDING_DETAIL="- **Finding categories:** ${AUTOFIX_FINDING_TYPES}"
-fi
-
-cat > "${BODY_FILE}" <<EOF
-## Summary
-${AUTOFIX_DETAIL:+${AUTOFIX_DETAIL}
-}${FINDING_DETAIL:+${FINDING_DETAIL}
-}- Opened immediately after autofix without rerunning quality gates.
-- Generated automatically by Homeboy Action.
-
-## Context
-- Workflow run: ${RUN_URL}
-- Branch: ${AUTOFIX_BRANCH}
-- Base: ${BASE_BRANCH}
-EOF
+build_autofix_pr_body "${RUN_URL}" "${AUTOFIX_BRANCH}" "${BASE_BRANCH}" > "${BODY_FILE}"
 
 # Find an existing open PR for (base, head). `homeboy git pr find` emits typed
 # JSON with a stable shape regardless of `gh` version; jq extracts the first
