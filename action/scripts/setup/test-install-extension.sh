@@ -34,14 +34,25 @@ chmod +x "${TMP_DIR}/bin/homeboy"
 export PATH="${TMP_DIR}/bin:${PATH}"
 export EXTENSION_SOURCE="/extensions"
 export EXTENSION_ID="wordpress"
-export COMPONENT_DIR="packages/plugin"
+export COMPONENT_DIR="${TMP_DIR}/component"
 export HOMEBOY_CALL_LOG="${TMP_DIR}/calls.log"
+
+mkdir -p "${COMPONENT_DIR}"
+cat > "${COMPONENT_DIR}/homeboy.json" <<'JSON'
+{
+  "id": "demo",
+  "extensions": {
+    "wordpress": {},
+    "nodejs": {}
+  }
+}
+JSON
 
 EXTENSION_INPUT="" bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null
 assert_equals \
-  $'extension uninstall wordpress\nextension install-for-component --path packages/plugin --source /extensions' \
+  $'extension uninstall nodejs\nextension uninstall wordpress\nextension install-for-component --path '"${COMPONENT_DIR}"$' --source /extensions' \
   "$(cat "${HOMEBOY_CALL_LOG}")" \
-  "configured extensions refresh cached copy before install-for-component"
+  "all configured extensions refresh cached copy before install-for-component"
 
 : > "${HOMEBOY_CALL_LOG}"
 HOMEBOY_INSTALL_FOR_COMPONENT_HELP_STATUS="1" EXTENSION_INPUT="" bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null

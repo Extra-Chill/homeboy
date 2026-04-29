@@ -30,6 +30,11 @@ if [ -n "${EXTENSION_ID_EFFECTIVE}" ] && [ "${EXTENSION_ID_EFFECTIVE}" != "auto"
   EXT_DIR="${HOME}/.config/homeboy/extensions/${EXTENSION_ID_EFFECTIVE}"
   if [ -d "${EXT_DIR}/.git" ]; then
     EXTENSION_REVISION="$(git -C "${EXT_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+  elif [ -f "${EXT_DIR}/.source-revision" ]; then
+    EXTENSION_REVISION="$(tr -d '[:space:]' < "${EXT_DIR}/.source-revision")"
+    if [ -z "${EXTENSION_REVISION}" ]; then
+      EXTENSION_REVISION="unknown"
+    fi
   fi
 fi
 
