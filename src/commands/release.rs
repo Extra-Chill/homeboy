@@ -49,10 +49,6 @@ pub struct ReleaseArgs {
     #[arg(long)]
     bump: Option<String>,
 
-    /// Deprecated: use --bump major instead. Kept for backwards compatibility.
-    #[arg(long, hide = true)]
-    major: bool,
-
     /// Skip publish/package steps (version bump + tag + push only).
     /// Use when CI handles publishing after the tag is pushed.
     #[arg(long)]
@@ -89,9 +85,10 @@ pub enum ReleaseCommandOutput {
     Batch(BatchReleaseOutput),
 }
 
+#[cfg(test)]
 impl ReleaseArgs {
-    /// Construct ReleaseArgs programmatically (used by `version bump` delegation).
-    pub fn from_parts(
+    /// Construct ReleaseArgs programmatically for tests and internal callers.
+    fn from_parts(
         components: Vec<String>,
         project: Option<String>,
         outdated: bool,
@@ -100,7 +97,6 @@ impl ReleaseArgs {
         deploy: bool,
         recover: bool,
         skip_checks: bool,
-        major: bool,
         skip_publish: bool,
         bump: Option<String>,
     ) -> Self {
@@ -115,7 +111,6 @@ impl ReleaseArgs {
             recover,
             skip_checks,
             bump,
-            major,
             skip_publish,
             no_github_release: false,
             git_identity: None,
@@ -130,8 +125,6 @@ pub fn run(
     let positional = resolve_positional_args(&args)?;
     let component_ids = resolve_component_ids(&args, &positional.components)?;
 
-    // Resolve --bump and --major into a single bump_override.
-    // --major is a deprecated alias for --bump major.
     let bump_override = resolve_bump_override(&args, positional.bump);
 
     // Single component: use the original single-release flow
@@ -312,10 +305,10 @@ fn resolve_positional_args(args: &ReleaseArgs) -> homeboy::Result<PositionalRele
         });
     };
 
-    if args.bump.is_some() || args.major {
+    if args.bump.is_some() {
         return Err(homeboy::Error::validation_invalid_argument(
             "bump",
-            "Use either a positional bump type or --bump/--major, not both",
+            "Use either a positional bump type or --bump, not both",
             Some(bump),
             Some(vec![
                 "Example: homeboy release my-component patch".to_string()
@@ -334,14 +327,9 @@ fn is_bump_keyword(value: &str) -> bool {
     matches!(value, "major" | "minor" | "patch")
 }
 
-/// Resolve --bump and --major into a single bump override string.
-/// --major is a deprecated alias for --bump major.
 fn resolve_bump_override(args: &ReleaseArgs, positional_bump: Option<String>) -> Option<String> {
     if let Some(ref bump) = args.bump {
         Some(bump.clone())
-    } else if args.major {
-        eprintln!("Warning: --major is deprecated. Use --bump major instead.");
-        Some("major".to_string())
     } else {
         positional_bump
     }
@@ -358,7 +346,6 @@ mod tests {
             false,
             None,
             true,
-            false,
             false,
             false,
             false,

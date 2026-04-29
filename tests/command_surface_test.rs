@@ -30,6 +30,8 @@ fn includes_first_level_subcommands() {
     assert!(surface.contains_path(&["file", "upload"]));
     assert!(surface.contains_path(&["file", "copy"]));
     assert!(surface.contains_path(&["file", "sync"]));
+    assert!(surface.contains_path(&["version", "show"]));
+    assert!(!surface.contains_path(&["version", "bump"]));
 }
 
 #[test]

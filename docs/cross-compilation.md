@@ -32,7 +32,7 @@ Native binaries require platform-specific system libraries. For example, Rust cr
 Use homeboy for orchestration, GitHub Actions for cross-platform builds:
 
 ```
-homeboy version bump → triggers GitHub Actions → builds all platforms → uploads release
+homeboy release → triggers GitHub Actions → builds all platforms → uploads release
 homeboy extension run homebrew → publishes formula to tap
 ```
 

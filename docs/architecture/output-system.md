@@ -109,7 +109,7 @@ The `next_steps` array contains context-aware actionable guidance based on the c
 {
   "next_steps": [
     "8 components have uncommitted changes. Review with `homeboy changes <id>`.",
-    "11 components have unreleased commits. Bump with `homeboy version bump <id>`."
+    "11 components have unreleased commits. Release with `homeboy release <id>`."
   ]
 }
 ```

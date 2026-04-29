@@ -41,7 +41,7 @@ Configure the changelog path:
 homeboy component set <id> --changelog-target "CHANGELOG.md"
 ```
 
-This is required for `version bump` and `release`.
+This is required for `release`.
 
 Release can bootstrap a missing configured changelog target on the first release. Changelog setup is owned by component configuration; there is no manual changelog initialization command.
 
