@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.8] - 2026-04-29
+
+### Fixed
+- skip non-js scoped eslint files
+
 ## [2.30.7] - 2026-04-29
 
 ### Fixed
