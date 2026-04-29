@@ -3,8 +3,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-04-29T05:16:50Z",
-      "item_count": 721,
+      "created_at": "2026-04-29T17:14:04Z",
+      "item_count": 726,
       "known_fingerprints": [
         "Rust test discovery::tests/commands/supports_test.rs::UnwiredNestedRustTest",
         "Rust test discovery::tests/commands/test_scope_test.rs::UnwiredNestedRustTest",
@@ -140,6 +140,7 @@
         "intra-method-duplication::src/core/deploy/execution.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/deploy/execution.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/deploy/planning.rs::IntraMethodDuplicate",
+        "intra-method-duplication::src/core/deploy/planning.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/engine/cli_tool.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/engine/codebase_scan.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/engine/edit_op_apply.rs::IntraMethodDuplicate",
@@ -165,6 +166,7 @@
         "intra-method-duplication::src/core/server/client.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/server/connection.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/stack/sync.rs::IntraMethodDuplicate",
+        "intra-method-duplication::src/core/triage.rs::IntraMethodDuplicate",
         "near-duplication::src/core/extension/update_check.rs::NearDuplicate",
         "near-duplication::src/core/extension/update_check.rs::NearDuplicate",
         "near-duplication::src/core/extension/update_check.rs::NearDuplicate",
@@ -188,6 +190,8 @@
         "structural::src/core/config.rs::HighItemCount",
         "structural::src/core/defaults.rs::HighItemCount",
         "structural::src/core/engine/edit_op_apply.rs::GodFile",
+        "structural::src/core/extension/bench/report.rs::GodFile",
+        "structural::src/core/extension/bench/report.rs::HighItemCount",
         "structural::src/core/extension/bench/run.rs::HighItemCount",
         "structural::src/core/extension/execution.rs::HighItemCount",
         "structural::src/core/extension/grammar.rs::GodFile",
@@ -377,6 +381,7 @@
         "test_coverage::src/core/engine/undo/snapshot.rs::MissingTestMethod",
         "test_coverage::src/core/engine/validate_write.rs::MissingTestMethod",
         "test_coverage::src/core/extension/bench/parsing.rs::MissingTestMethod",
+        "test_coverage::src/core/extension/bench/report.rs::MissingTestMethod",
         "test_coverage::src/core/extension/exec_context.rs::MissingTestFile",
         "test_coverage::src/core/extension/execution.rs::MissingTestMethod",
         "test_coverage::src/core/extension/execution.rs::MissingTestMethod",
@@ -729,7 +734,7 @@
         "test_quality::tests/core/refactor/decompose_test.rs::VacuousTest"
       ],
       "metadata": {
-        "alignment_score": 0.925000011920929,
+        "alignment_score": 0.9230769276618958,
         "known_outliers": [
           "src/core/engine/undo/entry.rs",
           "src/core/engine/undo/snapshot.rs",
