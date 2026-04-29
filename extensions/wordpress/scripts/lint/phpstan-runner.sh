@@ -274,6 +274,19 @@ homeboy_phpstan_relpath() {
     printf '%s\n' "$path"
 }
 
+homeboy_phpstan_abspath() {
+    local path="$1"
+
+    case "$path" in
+        /*)
+            printf '%s\n' "$path"
+            ;;
+        *)
+            printf '%s\n' "${PLUGIN_PATH}/${path#./}"
+            ;;
+    esac
+}
+
 homeboy_phpstan_runtime_file() {
     local rel_path="$1"
 
@@ -289,21 +302,26 @@ homeboy_phpstan_runtime_file() {
 resolve_phpstan_targets() {
     local matched=()
     local target
+    local target_path
+    local target_rel
 
     if [ -n "${HOMEBOY_LINT_FILE:-}" ]; then
-        target="${PLUGIN_PATH}/${HOMEBOY_LINT_FILE}"
-        if [ -f "$target" ] && [[ "$target" == *.php ]] && homeboy_phpstan_runtime_file "$(homeboy_phpstan_relpath "$target")"; then
-            matched+=("$target")
+        target_path=$(homeboy_phpstan_abspath "$HOMEBOY_LINT_FILE")
+        target_rel=$(homeboy_phpstan_relpath "$target_path")
+        if [ -f "$target_path" ] && [[ "$target_path" == *.php ]] && homeboy_phpstan_runtime_file "$target_rel"; then
+            matched+=("$target_path")
         fi
     elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
         (
             cd "$PLUGIN_PATH"
             eval 'for f in '"${HOMEBOY_LINT_GLOB}"'; do [ -e "$f" ] && printf "%s\0" "$f"; done'
         ) | while IFS= read -r -d '' target; do
-            if [ -f "${PLUGIN_PATH}/${target}" ] && [[ "$target" == *.php ]] && homeboy_phpstan_runtime_file "$target"; then
-                printf '%s\0' "${PLUGIN_PATH}/${target}"
-            elif [ -d "${PLUGIN_PATH}/${target}" ]; then
-                find "${PLUGIN_PATH}/${target}" -type f -name '*.php' \
+            target_path=$(homeboy_phpstan_abspath "$target")
+            target_rel=$(homeboy_phpstan_relpath "$target_path")
+            if [ -f "$target_path" ] && [[ "$target_path" == *.php ]] && homeboy_phpstan_runtime_file "$target_rel"; then
+                printf '%s\0' "$target_path"
+            elif [ -d "$target_path" ]; then
+                find "$target_path" -type f -name '*.php' \
                     -not -path "*/vendor/*" \
                     -not -path "*/vendor_prefixed/*" \
                     -not -path "*/node_extensions/*" \

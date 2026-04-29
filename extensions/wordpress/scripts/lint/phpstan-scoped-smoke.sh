@@ -13,11 +13,12 @@ CALLS_FILE="${TMPDIR}/phpstan-calls.txt"
 DEPENDENCY_HELPER="${TMPDIR}/validation-dependencies.sh"
 CONFIG_CAPTURE="${TMPDIR}/phpstan-config-capture.neon"
 AUTOLOAD_CAPTURE="${TMPDIR}/phpstan-autoload-capture.php"
+OUTPUT_FILE="${TMPDIR}/phpstan-output.txt"
 
 mkdir -p "${EXTENSION_DIR}/vendor/bin" "${COMPONENT_DIR}/tests" "${COMPONENT_DIR}/assets" "${COMPONENT_DIR}/includes" "${COMPONENT_DIR}/vendor_prefixed"
 touch "${EXTENSION_DIR}/phpstan.neon.dist"
 touch "${COMPONENT_DIR}/main.php" "${COMPONENT_DIR}/tests/FooTest.php" "${COMPONENT_DIR}/assets/app.js"
-touch "${COMPONENT_DIR}/includes/interface-example.php" "${COMPONENT_DIR}/vendor_prefixed/autoload.php"
+touch "${COMPONENT_DIR}/includes/interface-example.php" "${COMPONENT_DIR}/includes/extra.php" "${COMPONENT_DIR}/vendor_prefixed/autoload.php"
 
 cat > "$DEPENDENCY_HELPER" <<'SH'
 homeboy_resolve_validation_dependency_paths() {
@@ -45,6 +46,7 @@ chmod +x "${EXTENSION_DIR}/vendor/bin/phpstan"
 
 run_phpstan() {
     : > "$ARGS_FILE"
+    : > "$OUTPUT_FILE"
     printf '0\n' > "$CALLS_FILE"
     HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
     HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
@@ -55,7 +57,7 @@ run_phpstan() {
     PHPSTAN_CONFIG_CAPTURE="$CONFIG_CAPTURE" \
     PHPSTAN_AUTOLOAD_CAPTURE="$AUTOLOAD_CAPTURE" \
     HOMEBOY_SUMMARY_MODE=1 \
-    "$RUNNER" >/dev/null
+    "$RUNNER" >"$OUTPUT_FILE"
 }
 
 assert_contains() {
@@ -122,10 +124,17 @@ assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/main.php" "scoped conte
 assert_file_not_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/tests" "scoped context excludes test declarations"
 assert_file_contains "$AUTOLOAD_CAPTURE" "${COMPONENT_DIR}/vendor_prefixed/autoload.php" "composite autoload loads prefixed vendor autoloader"
 
-HOMEBOY_LINT_GLOB='{main.php,assets/app.js,tests/FooTest.php}' run_phpstan
+HOMEBOY_LINT_GLOB='{main.php,assets/app.js,includes/extra.php}' run_phpstan
 assert_contains "${COMPONENT_DIR}/main.php" "glob scope includes matching PHP source file"
-assert_contains "${COMPONENT_DIR}/tests/FooTest.php" "glob scope includes matching PHP test file"
+assert_contains "${COMPONENT_DIR}/includes/extra.php" "glob scope includes matching PHP runtime file"
 assert_not_contains "assets/app.js" "glob scope ignores non-PHP files"
+assert_file_contains "$OUTPUT_FILE" "PHPStan scoped lint: analyzing 2 PHP file(s)" "relative glob scope reports analyzed PHP files"
+
+HOMEBOY_LINT_GLOB="{${COMPONENT_DIR}/main.php,${COMPONENT_DIR}/assets/app.js,${COMPONENT_DIR}/includes/extra.php}" run_phpstan
+assert_contains "${COMPONENT_DIR}/main.php" "absolute glob scope includes matching PHP source file"
+assert_contains "${COMPONENT_DIR}/includes/extra.php" "absolute glob scope includes matching PHP runtime file"
+assert_not_contains "assets/app.js" "absolute glob scope ignores non-PHP files"
+assert_file_contains "$OUTPUT_FILE" "PHPStan scoped lint: analyzing 2 PHP file(s)" "absolute glob scope reports analyzed PHP files"
 
 : > "$ARGS_FILE"
 printf '0\n' > "$CALLS_FILE"
