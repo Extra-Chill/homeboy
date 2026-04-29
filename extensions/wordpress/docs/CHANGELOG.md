@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.13] - 2026-04-29
+
+### Fixed
+- load playground test plugins during bootstrap
+
 ## [2.30.12] - 2026-04-29
 
 ### Changed
