@@ -146,6 +146,9 @@
   "bench": {
     "extension_script": "scripts/bench/bench-runner.sh"
   },
+  "trace": {
+    "extension_script": "scripts/trace/trace-runner.sh"
+  },
   "actions": [
     {
       "id": "release.package",

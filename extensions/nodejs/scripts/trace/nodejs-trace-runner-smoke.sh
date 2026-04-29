@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+MANIFEST="${EXTENSION_DIR}/nodejs.json"
+RUNNER="${SCRIPT_DIR}/trace-runner.sh"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-node-trace.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+assert_json() {
+    local file="$1"
+    local script="$2"
+    node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); ${script}" "$file"
+}
+
+make_project() {
+    local name="$1"
+    local project_dir="$TMP_DIR/$name"
+    mkdir -p "$project_dir"
+    printf '{"name":"%s","scripts":{}}\n' "$name" > "$project_dir/package.json"
+    printf '%s\n' "$project_dir"
+}
+
+run_trace() {
+    local project_dir="$1"
+    local scenario="$2"
+    local results_file="$3"
+    local artifact_dir="$4"
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+    HOMEBOY_COMPONENT_PATH="$project_dir" \
+    HOMEBOY_COMPONENT_ID="node-trace-smoke" \
+    HOMEBOY_TRACE_SCENARIO="$scenario" \
+    HOMEBOY_TRACE_RESULTS_FILE="$results_file" \
+    HOMEBOY_TRACE_ARTIFACT_DIR="$artifact_dir" \
+    HOMEBOY_RUN_DIR="$(dirname "$results_file")" \
+        bash "$RUNNER"
+}
+
+node - "$MANIFEST" "$RUNNER" <<'NODE'
+const fs = require('fs');
+const [manifestPath, runnerPath] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const runner = fs.readFileSync(runnerPath, 'utf8');
+if (manifest.trace?.extension_script !== 'scripts/trace/trace-runner.sh') {
+  throw new Error('trace runner path is not declared in nodejs.json');
+}
+for (const token of [
+  'HOMEBOY_TRACE_RESULTS_FILE',
+  'HOMEBOY_TRACE_SCENARIO',
+  'HOMEBOY_TRACE_LIST_ONLY',
+  'HOMEBOY_TRACE_ARTIFACT_DIR',
+  'HOMEBOY_RUN_DIR',
+]) {
+  if (!runner.includes(token)) throw new Error(`runner missing env contract token ${token}`);
+}
+NODE
+
+LIST_PROJECT="$(make_project list-mode)"
+mkdir -p "$LIST_PROJECT/traces" "$LIST_PROJECT/scripts/trace"
+printf 'console.log("first")\n' > "$LIST_PROJECT/traces/first.trace.mjs"
+printf 'console.log("second")\n' > "$LIST_PROJECT/scripts/trace/second.mjs"
+LIST_RESULTS="$TMP_DIR/list-results.json"
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$LIST_PROJECT" \
+HOMEBOY_COMPONENT_ID="node-trace-smoke" \
+HOMEBOY_TRACE_LIST_ONLY="1" \
+HOMEBOY_TRACE_RESULTS_FILE="$LIST_RESULTS" \
+    bash "$RUNNER" >/dev/null
+assert_json "$LIST_RESULTS" '
+if (data.status !== "pass") throw new Error("list envelope did not pass");
+const ids = data.scenarios.map((scenario) => scenario.id).sort();
+if (ids.join(",") !== "first,second") throw new Error(`unexpected scenarios: ${ids.join(",")}`);
+if (!data.scenarios.find((scenario) => scenario.id === "first" && scenario.source === "traces/first.trace.mjs")) throw new Error("missing traces/*.trace.mjs source");
+if (!data.scenarios.find((scenario) => scenario.id === "second" && scenario.source === "scripts/trace/second.mjs")) throw new Error("missing scripts/trace/*.mjs source");
+'
+
+TRACE_PROJECT="$(make_project traces-scenario)"
+mkdir -p "$TRACE_PROJECT/traces"
+cat > "$TRACE_PROJECT/traces/pass.trace.mjs" <<'EOF'
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+mkdirSync(process.env.HOMEBOY_TRACE_ARTIFACT_DIR, { recursive: true });
+writeFileSync(join(process.env.HOMEBOY_TRACE_ARTIFACT_DIR, 'trace.txt'), 'artifact');
+writeFileSync(process.env.HOMEBOY_TRACE_RESULTS_FILE, JSON.stringify({
+  component_id: process.env.HOMEBOY_COMPONENT_ID,
+  scenario_id: process.env.HOMEBOY_TRACE_SCENARIO,
+  status: 'pass',
+  summary: 'custom result',
+  timeline: [],
+  assertions: [],
+  artifacts: [{ label: 'trace', path: 'trace.txt' }],
+}, null, 2));
+EOF
+TRACE_RESULTS="$TMP_DIR/trace-results.json"
+TRACE_ARTIFACTS="$TMP_DIR/trace-artifacts"
+run_trace "$TRACE_PROJECT" "pass" "$TRACE_RESULTS" "$TRACE_ARTIFACTS" >/dev/null
+if [ ! -f "$TRACE_ARTIFACTS/trace.txt" ]; then
+    echo "expected scenario artifact to be written" >&2
+    exit 1
+fi
+assert_json "$TRACE_RESULTS" '
+if (data.status !== "pass") throw new Error("named traces scenario did not pass");
+if (data.summary !== "custom result") throw new Error("runner overwrote scenario result envelope");
+if (data.artifacts[0].path !== "trace.txt") throw new Error("artifact path not preserved");
+'
+
+SCRIPT_PROJECT="$(make_project scripts-scenario)"
+mkdir -p "$SCRIPT_PROJECT/scripts/trace"
+cat > "$SCRIPT_PROJECT/scripts/trace/fallback.mjs" <<'EOF'
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.HOMEBOY_TRACE_RESULTS_FILE, JSON.stringify({
+  component_id: process.env.HOMEBOY_COMPONENT_ID,
+  scenario_id: process.env.HOMEBOY_TRACE_SCENARIO,
+  status: 'pass',
+  summary: 'fallback result',
+  timeline: [],
+  assertions: [],
+  artifacts: [],
+}, null, 2));
+EOF
+SCRIPT_RESULTS="$TMP_DIR/script-results.json"
+run_trace "$SCRIPT_PROJECT" "fallback" "$SCRIPT_RESULTS" "$TMP_DIR/script-artifacts" >/dev/null
+assert_json "$SCRIPT_RESULTS" '
+if (data.status !== "pass") throw new Error("scripts/trace fallback did not pass");
+if (data.summary !== "fallback result") throw new Error("scripts/trace result missing");
+'
+
+NPM_PROJECT="$(make_project npm-scenario)"
+cat > "$NPM_PROJECT/package.json" <<'EOF'
+{"name":"npm-scenario","scripts":{"trace":"node trace-script.mjs"}}
+EOF
+cat > "$NPM_PROJECT/trace-script.mjs" <<'EOF'
+import { writeFileSync } from 'node:fs';
+const scenario = process.argv.at(-1);
+writeFileSync(process.env.HOMEBOY_TRACE_RESULTS_FILE, JSON.stringify({
+  component_id: process.env.HOMEBOY_COMPONENT_ID,
+  scenario_id: scenario,
+  status: 'pass',
+  summary: 'npm trace result',
+  timeline: [],
+  assertions: [],
+  artifacts: [],
+}, null, 2));
+EOF
+NPM_RESULTS="$TMP_DIR/npm-results.json"
+run_trace "$NPM_PROJECT" "npm-only" "$NPM_RESULTS" "$TMP_DIR/npm-artifacts" >/dev/null
+assert_json "$NPM_RESULTS" '
+if (data.status !== "pass") throw new Error("npm trace fallback did not pass");
+if (data.scenario_id !== "npm-only") throw new Error("npm trace did not receive scenario id");
+'
+
+MISSING_PROJECT="$(make_project missing-scenario)"
+MISSING_RESULTS="$TMP_DIR/missing-results.json"
+set +e
+MISSING_OUTPUT="$(run_trace "$MISSING_PROJECT" "missing" "$MISSING_RESULTS" "$TMP_DIR/missing-artifacts" 2>&1)"
+MISSING_EXIT=$?
+set -e
+if [ "$MISSING_EXIT" -eq 0 ]; then
+    echo "expected missing scenario to fail" >&2
+    exit 1
+fi
+if [[ "$MISSING_OUTPUT" != *"Trace scenario not found: missing"* ]]; then
+    echo "expected clear missing scenario error" >&2
+    echo "$MISSING_OUTPUT" >&2
+    exit 1
+fi
+assert_json "$MISSING_RESULTS" '
+if (data.status !== "error") throw new Error("missing scenario should write error envelope");
+if (!data.failure.includes("traces/missing.trace.mjs")) throw new Error("missing scenario failure lacks searched paths");
+'
+
+FAIL_PROJECT="$(make_project failing-scenario)"
+mkdir -p "$FAIL_PROJECT/traces"
+cat > "$FAIL_PROJECT/traces/fail.trace.mjs" <<'EOF'
+process.exit(7);
+EOF
+FAIL_RESULTS="$TMP_DIR/fail-results.json"
+set +e
+FAIL_OUTPUT="$(run_trace "$FAIL_PROJECT" "fail" "$FAIL_RESULTS" "$TMP_DIR/fail-artifacts" 2>&1)"
+FAIL_EXIT=$?
+set -e
+if [ "$FAIL_EXIT" -ne 7 ]; then
+    echo "expected failing scenario exit 7, got $FAIL_EXIT" >&2
+    echo "$FAIL_OUTPUT" >&2
+    exit 1
+fi
+assert_json "$FAIL_RESULTS" '
+if (data.status !== "error") throw new Error("non-zero scenario should write error envelope");
+if (!data.failure.includes("exited with code 7")) throw new Error("non-zero failure summary missing exit code");
+'
+
+echo "Node.js trace runner smoke passed."
