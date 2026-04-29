@@ -293,7 +293,6 @@ pub mod extension;
 pub mod file;
 pub mod fleet;
 pub mod git;
-pub mod init;
 pub mod issues;
 pub mod lint;
 pub mod logs;
@@ -348,7 +347,6 @@ pub fn run_json(
 
     match command {
         // All commands use global context
-        crate::cli_surface::Commands::Init(args) => dispatch!(args, global, init),
         crate::cli_surface::Commands::Status(args) => dispatch!(args, global, status),
         crate::cli_surface::Commands::Test(args) => dispatch!(args, global, test),
         crate::cli_surface::Commands::Bench(args) => dispatch!(args, global, bench),
@@ -385,10 +383,7 @@ pub fn run_json(
         crate::cli_surface::Commands::Undo(args) => dispatch!(args, global, undo),
         crate::cli_surface::Commands::Auth(args) => dispatch!(args, global, auth),
         crate::cli_surface::Commands::Api(args) => dispatch!(args, global, api),
-        crate::cli_surface::Commands::Upgrade(args)
-        | crate::cli_surface::Commands::Update(args) => {
-            dispatch!(args, global, upgrade)
-        }
+        crate::cli_surface::Commands::Upgrade(args) => dispatch!(args, global, upgrade),
 
         // Special case: List uses raw output mode
         crate::cli_surface::Commands::List => {

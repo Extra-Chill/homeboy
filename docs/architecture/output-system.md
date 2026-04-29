@@ -44,7 +44,7 @@ Notes:
 
 ## Full status report output
 
-The `homeboy status --full` command returns actionable intelligence about the current context. The legacy `homeboy init` command is a compatibility alias for the same report.
+The `homeboy status --full` command returns actionable intelligence about the current context.
 
 ### Status section
 

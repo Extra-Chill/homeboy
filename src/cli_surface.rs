@@ -2,9 +2,8 @@ use clap::{Command, CommandFactory, Parser, Subcommand};
 
 use crate::commands::{
     api, audit, auth, bench, build, changelog, changes, component, config, daemon, db, deploy,
-    deps, extension, file, fleet, git, init, issues, lint, logs, project, refactor, release,
-    report, review, rig, self_cmd, server, ssh, stack, status, test, triage, undo, upgrade,
-    version,
+    deps, extension, file, fleet, git, issues, lint, logs, project, refactor, release, report,
+    review, rig, self_cmd, server, ssh, stack, status, test, triage, undo, upgrade, version,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -65,9 +64,6 @@ pub enum Commands {
     /// Execute CLI-compatible extensions
     #[command(visible_alias = "extensions")]
     Extension(extension::ExtensionArgs),
-    /// Deprecated alias for `status --full`
-    #[command(hide = true)]
-    Init(init::InitArgs),
     /// Actionable component status overview
     Status(status::StatusArgs),
     /// Display CLI documentation
@@ -111,9 +107,6 @@ pub enum Commands {
     Api(api::ApiArgs),
     /// Upgrade Homeboy to the latest version
     Upgrade(upgrade::UpgradeArgs),
-    /// Alias for upgrade
-    #[command(hide = true)]
-    Update(upgrade::UpgradeArgs),
     /// List available commands (alias for --help)
     List,
 }

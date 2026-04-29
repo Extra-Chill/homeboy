@@ -4,7 +4,6 @@
 
 ```sh
 homeboy upgrade [OPTIONS]
-homeboy update [OPTIONS]  # alias
 ```
 
 ## Description

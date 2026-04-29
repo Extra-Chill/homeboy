@@ -12,6 +12,9 @@ fn includes_current_top_level_commands() {
     assert!(surface.contains_path(&["self"]));
     assert!(surface.contains_path(&["stack"]));
     assert!(surface.contains_path(&["report"]));
+    assert!(surface.contains_path(&["upgrade"]));
+    assert!(!surface.contains_path(&["init"]));
+    assert!(!surface.contains_path(&["update"]));
     assert!(!surface.contains_path(&["transfer"]));
 }
 

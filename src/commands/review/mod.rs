@@ -51,12 +51,6 @@ pub struct ReviewArgs {
     #[arg(long)]
     pub summary: bool,
 
-    /// Hidden compatibility flag — the JSON envelope is always emitted at the
-    /// CLI layer (`{success, data}`); this exists so callers that pass
-    /// `--json` to other homeboy commands can pass it here too.
-    #[arg(long, hide = true)]
-    pub json: bool,
-
     /// Output format. Default JSON envelope; `--report=pr-comment` emits a
     /// markdown PR-comment section instead, suitable for piping to
     /// `homeboy git pr comment --body-file`.
@@ -859,7 +853,6 @@ mod tests {
             changed_since: Some("trunk".to_string()),
             changed_only: false,
             summary: false,
-            json: false,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
@@ -878,7 +871,6 @@ mod tests {
             changed_since: None,
             changed_only: true,
             summary: false,
-            json: false,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
@@ -899,7 +891,6 @@ mod tests {
             changed_since: None,
             changed_only: false,
             summary: false,
-            json: false,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
