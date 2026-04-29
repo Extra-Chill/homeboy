@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.10] - 2026-04-29
+
+### Fixed
+- prepare Playground test schema
+
 ## [2.30.9] - 2026-04-29
 
 ### Fixed
