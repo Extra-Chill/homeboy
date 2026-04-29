@@ -460,21 +460,105 @@ foreach ($new_classes as $class_name) {
 }
 pg_stage_ok('load_tests');
 
-// ---------------------------------------------------------------------------
-// Stage: run_tests
-// ---------------------------------------------------------------------------
-pg_stage_begin('run_tests');
-pg_log("RUNNING " . count($test_files) . " TEST FILES");
-try {
-    $runner = new PHPUnit\TextUI\TestRunner();
-    $result = $runner->run($suite, [
+/**
+ * Parse the narrow PHPUnit CLI arguments Homeboy forwards into Playground.
+ *
+ * The host runner passes arguments after `/runner.php`, so `$argv` mirrors the
+ * user-facing `homeboy test <component> -- <args>` contract. Keep this parser
+ * intentionally small: unknown arguments are logged instead of silently changing
+ * the run shape, while the common targeting flags reach PHPUnit's TestRunner.
+ */
+function pg_parse_phpunit_args(array $argv) {
+    $arguments = [
         'colors' => 'never',
         'testdox' => true,
         'verbose' => false,
         // PHPUnit 9.6 reads $arguments['extensions'] unconditionally (line 1074
         // in TestRunner.php). Omit it and you get two warnings per run.
         'extensions' => [],
-    ]);
+    ];
+
+    $args = array_slice($argv, 1);
+    for ($i = 0; $i < count($args); $i++) {
+        $arg = $args[$i];
+        if ($arg === '--filter') {
+            if (isset($args[$i + 1])) {
+                $arguments['filter'] = $args[++$i];
+                pg_log('NOTICE:phpunit filter applied: ' . $arguments['filter']);
+            } else {
+                pg_log('NOTICE:phpunit --filter ignored because no value was provided');
+            }
+            continue;
+        }
+        if (strpos($arg, '--filter=') === 0) {
+            $arguments['filter'] = substr($arg, strlen('--filter='));
+            pg_log('NOTICE:phpunit filter applied: ' . $arguments['filter']);
+            continue;
+        }
+        if ($arg === '--list-tests') {
+            $arguments['listTests'] = true;
+            pg_log('NOTICE:phpunit list-tests enabled');
+            continue;
+        }
+        if ($arg === '--testdox') {
+            $arguments['testdox'] = true;
+            continue;
+        }
+        if ($arg === '--no-testdox') {
+            $arguments['testdox'] = false;
+            continue;
+        }
+        if ($arg === '--verbose' || $arg === '-v') {
+            $arguments['verbose'] = true;
+            continue;
+        }
+        if ($arg === '--colors=always') {
+            $arguments['colors'] = 'always';
+            continue;
+        }
+        if ($arg === '--colors=never') {
+            $arguments['colors'] = 'never';
+            continue;
+        }
+        pg_log('NOTICE:unsupported phpunit argument ignored by Playground runner: ' . $arg);
+    }
+
+    return $arguments;
+}
+
+/**
+ * Print PHPUnit-style test names from a TestSuite tree for --list-tests.
+ */
+function pg_print_test_list($test) {
+    if ($test instanceof PHPUnit\Framework\TestSuite) {
+        foreach ($test->tests() as $child) {
+            pg_print_test_list($child);
+        }
+        return;
+    }
+
+    if ($test instanceof PHPUnit\Framework\TestCase) {
+        echo get_class($test) . '::' . $test->getName() . PHP_EOL;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stage: run_tests
+// ---------------------------------------------------------------------------
+pg_stage_begin('run_tests');
+pg_log("RUNNING " . count($test_files) . " TEST FILES");
+try {
+    $phpunit_args = pg_parse_phpunit_args($argv ?? []);
+    if (!empty($phpunit_args['listTests'])) {
+        pg_print_test_list($suite);
+        pg_log('ALL TESTS PASSED');
+        pg_log('TESTS: ' . $suite->count() . ' FAILURES: 0 ERRORS: 0');
+        pg_stage_ok('run_tests');
+        exit(0);
+    }
+
+    $runner = new PHPUnit\TextUI\TestRunner();
+    $result = $runner->run($suite, $phpunit_args);
     pg_log($result->wasSuccessful() ? "ALL TESTS PASSED" : "SOME TESTS FAILED");
     pg_log("TESTS: " . $result->count() . " FAILURES: " . count($result->failures()) . " ERRORS: " . count($result->errors()));
     pg_stage_ok('run_tests');

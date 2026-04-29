@@ -277,7 +277,7 @@ set +e
     "--mount" "${WRAPPER_TMPFILE}:/runner.php" \
     --wp=6.9 \
     --verbosity=normal \
-    -- /runner.php \
+    -- /runner.php "$@" \
     2>&1 | homeboy_filter_playground_cleanup_noise | tee "$PHPUNIT_TMPFILE"
 playground_exit=${PIPESTATUS[0]}
 set -e
