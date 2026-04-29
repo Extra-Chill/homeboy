@@ -64,6 +64,7 @@ PHPSTAN_BASE_CONFIG="$PHPSTAN_CONFIG"
 COMPONENT_BASELINE="${PLUGIN_PATH}/phpstan-baseline.neon"
 COMPOSITE_AUTOLOAD=""
 DEPENDENCY_CONFIG=""
+SCOPED_CONTEXT_CONFIG=""
 
 homeboy_mktemp() {
     local template="$1"
@@ -207,6 +208,57 @@ cleanup_dependency_config() {
     DEPENDENCY_CONFIG=""
 }
 
+generate_scoped_context_config() {
+    local tmpfile
+    local context_file
+    local has_context_files=0
+    local has_scan_directories=0
+
+    tmpfile=$(homeboy_mktemp 'phpstan-scoped-context.XXXXXX.neon')
+
+    {
+        printf '%s\n' 'includes:'
+        printf '    - %s\n' "$PHPSTAN_BASE_CONFIG"
+        printf '%s\n' ''
+        printf '%s\n' 'parameters:'
+
+        while IFS= read -r -d '' context_file; do
+            if [ "$has_context_files" -eq 0 ]; then
+                printf '%s\n' '    scanFiles:'
+                has_context_files=1
+            fi
+            printf '        - %s\n' "$(printf '%s' "$context_file" | jq -Rsa .)"
+        done < <(find "$PLUGIN_PATH" -type f -name '*.php' \
+            -not -path "*/vendor/*" \
+            -not -path "*/vendor_prefixed/*" \
+            -not -path "*/node_extensions/*" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/build/*" \
+            -not -path "*/dist/*" \
+            -not -path "*/tests/*" \
+            -not -path "*/tools/*" \
+            -print0)
+
+        if [ -d "${PLUGIN_PATH}/vendor_prefixed" ]; then
+            printf '%s\n' '    scanDirectories:'
+            printf '        - %s\n' "$(printf '%s' "${PLUGIN_PATH}/vendor_prefixed" | jq -Rsa .)"
+            has_scan_directories=1
+        fi
+    } > "$tmpfile"
+
+    if [ "$has_context_files" -eq 1 ] || [ "$has_scan_directories" -eq 1 ]; then
+        printf '%s\n' "$tmpfile"
+    else
+        rm -f "$tmpfile"
+        printf '%s\n' ''
+    fi
+}
+
+cleanup_scoped_context_config() {
+    [ -n "$SCOPED_CONTEXT_CONFIG" ] && rm -f "$SCOPED_CONTEXT_CONFIG"
+    SCOPED_CONTEXT_CONFIG=""
+}
+
 DEPENDENCY_CONFIG=$(generate_dependency_config)
 if [ -n "$DEPENDENCY_CONFIG" ] && [ -f "$DEPENDENCY_CONFIG" ]; then
     PHPSTAN_BASE_CONFIG="$DEPENDENCY_CONFIG"
@@ -281,6 +333,11 @@ if [ -n "${HOMEBOY_LINT_FILE:-}" ] || [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
     if [ "${#PHPSTAN_TARGETS[@]}" -eq 0 ]; then
         echo "PHPStan scoped lint: no PHP files in requested scope, skipping static analysis"
         exit 0
+    fi
+
+    SCOPED_CONTEXT_CONFIG=$(generate_scoped_context_config)
+    if [ -n "$SCOPED_CONTEXT_CONFIG" ] && [ -f "$SCOPED_CONTEXT_CONFIG" ]; then
+        PHPSTAN_BASE_CONFIG="$SCOPED_CONTEXT_CONFIG"
     fi
 fi
 
@@ -459,7 +516,7 @@ cleanup_phpstan_config() {
     [ -n "$PHPSTAN_TMPCONFIG" ] && rm -f "$PHPSTAN_TMPCONFIG"
     PHPSTAN_TMPCONFIG=""
 }
-trap 'cleanup_phpstan_config; cleanup_composite_autoload; cleanup_dependency_config' EXIT
+trap 'cleanup_phpstan_config; cleanup_composite_autoload; cleanup_dependency_config; cleanup_scoped_context_config' EXIT
 
 # Generate a temp config when we need to override parallel processes or phpVersion.
 if [ -n "$PHPSTAN_MAX_PROCESSES" ] || [ -n "$PHPSTAN_PHP_VERSION" ]; then
