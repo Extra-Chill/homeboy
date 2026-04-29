@@ -350,27 +350,28 @@ def markdown_audit(data: dict[str, Any], lines: list[str]) -> None:
     conventions = data.get("conventions", []) if isinstance(data, dict) else []
 
     new_items = baseline.get("new_items", []) if isinstance(baseline, dict) else []
-    if isinstance(new_items, list) and new_items:
-        lines.append(f":x: **{len(new_items)} new finding(s) on this PR:**")
+    has_new_items = isinstance(new_items, list) and bool(new_items)
+    if has_new_items:
+        plural = "s" if len(new_items) != 1 else ""
+        lines.append(f":x: **{len(new_items)} PR blocker{plural}**")
         lines.append("")
         for idx, item in enumerate(new_items[:5], start=1):
             if isinstance(item, dict):
                 lines.append(f"{idx}. {format_new_audit_item(item)}")
         if len(new_items) > 5:
             lines.append(f"... and {len(new_items) - 5} more")
-        lines.append("")
-        lines.append("_Full audit state below._")
 
+    audit_context_lines: list[str] = []
     alignment = summary.get("alignment_score") if isinstance(summary, dict) else None
     if isinstance(alignment, (int, float)):
-        lines.append(f"- Alignment score: **{alignment:.3f}**")
+        audit_context_lines.append(f"Alignment score: {alignment:.3f}")
 
     outliers = summary.get("outliers_found") if isinstance(summary, dict) else None
     if isinstance(outliers, int):
-        lines.append(f"- Outliers in current run: **{outliers}**")
+        audit_context_lines.append(f"Outliers in current run: {outliers}")
 
     drift = baseline.get("drift_increased", False) if isinstance(baseline, dict) else False
-    lines.append(f"- Drift increased: **{'yes' if drift else 'no'}**")
+    audit_context_lines.append(f"Drift increased: {'yes' if drift else 'no'}")
 
     # Collect outlier items from conventions
     outlier_items: list[dict[str, Any]] = []
@@ -404,7 +405,7 @@ def markdown_audit(data: dict[str, Any], lines: list[str]) -> None:
         known_counts = {k: v for k, v in severity_counts.items() if k != "unknown"}
         if known_counts:
             sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(known_counts.items()))
-            lines.append(f"- Severity counts: **{sev_text}**")
+            audit_context_lines.append(f"Severity counts: {sev_text}")
 
     if top_findings:
         detail_lines: list[str] = []
@@ -416,12 +417,19 @@ def markdown_audit(data: dict[str, Any], lines: list[str]) -> None:
             if message:
                 detail += f" — {message}"
             detail_lines.append(detail)
-        if len(top_findings) <= 5:
+        if has_new_items:
+            audit_context_lines.append("")
+            audit_context_lines.append(f"Current/contextual findings ({len(top_findings)}):")
+            audit_context_lines.extend(detail_lines)
+        elif len(top_findings) <= 5:
             lines.append("- Actionable findings:")
             for line in detail_lines:
                 lines.append(f"  {line}")
         else:
             append_details(lines, f"Audit findings ({min(len(top_findings), 10)} shown)", detail_lines)
+
+    if has_new_items:
+        append_details(lines, "Audit context", audit_context_lines)
 
 
 def markdown_refactor(data: dict[str, Any], lines: list[str]) -> None:

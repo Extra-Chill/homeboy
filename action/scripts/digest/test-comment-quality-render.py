@@ -43,7 +43,9 @@ def main() -> int:
     assert_equal(audit, expected_audit, "audit markdown")
     assert_not_contains(audit, "Top actionable findings", "duplicated top findings heading")
     assert_not_contains(audit, "unknown:", "unknown severity count")
-    assert_contains(audit, ":x: **3 new finding(s) on this PR:**", "promoted delta block")
+    assert_contains(audit, ":x: **3 PR blockers**", "promoted delta block")
+    assert_contains(audit, "<details><summary>Audit context</summary>", "collapsed audit context")
+    assert_not_contains(audit, "- Alignment score:", "primary audit alignment noise")
 
     refactor = render("refactor --from all", "refactor-noop-input.json")
     expected_refactor = (FIXTURES / "refactor-noop-expected.md").read_text(encoding="utf-8").strip()
@@ -91,10 +93,12 @@ def main() -> int:
         results={"audit": "fail"},
     )
     assert_contains(full_digest, "**TL;DR:** :x: audit (3 new)", "failure digest TL;DR")
-    assert_contains(full_digest, ":x: **3 new finding(s) on this PR:**", "failure digest delta promotion")
-    assert_contains(full_digest, "<details><summary>Audit findings (6)</summary>", "deduped details block")
+    assert_contains(full_digest, ":x: **3 PR blockers**", "failure digest delta promotion")
+    assert_contains(full_digest, "<details><summary>Audit context</summary>", "collapsed audit context")
+    assert_contains(full_digest, "Current/contextual findings (6):", "contextual findings label")
     assert_not_contains(full_digest, "Top actionable findings", "failure digest duplicated top list")
     assert_not_contains(full_digest, "unknown:", "failure digest unknown severity")
+    assert_not_contains(full_digest, "- Alignment score:", "failure digest primary audit alignment noise")
 
     test_digest = render_markdown(
         lint_digest={},

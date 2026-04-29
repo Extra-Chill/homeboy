@@ -185,32 +185,33 @@ def render_markdown(
         lines.append("### Audit Failure Digest")
         new_findings = audit_digest.get("new_findings", []) or []
         new_findings_count = audit_digest.get("new_findings_count", 0)
+        has_new_findings = isinstance(new_findings_count, int) and new_findings_count > 0
         if isinstance(new_findings_count, int) and new_findings_count > 0:
-            lines.append(f":x: **{new_findings_count} new finding(s) on this PR:**")
+            plural = "s" if new_findings_count != 1 else ""
+            lines.append(f":x: **{new_findings_count} PR blocker{plural}**")
             lines.append("")
             for idx, finding in enumerate(new_findings[:5], start=1):
                 lines.append(f"{idx}. {_format_new_audit_finding(finding)}")
             if new_findings_count > 5:
                 lines.append(f"... and {new_findings_count - 5} more")
-            lines.append("")
-            lines.append("_Full audit state below._")
 
+        audit_context_lines: list[str] = []
         alignment_score = audit_digest.get("alignment_score")
         if isinstance(alignment_score, (int, float)):
-            lines.append(f"- Alignment score: **{alignment_score:.3f}**")
+            audit_context_lines.append(f"Alignment score: {alignment_score:.3f}")
         severity_counts = audit_digest.get("severity_counts", {}) or {}
         if severity_counts:
             known_counts = {k: v for k, v in severity_counts.items() if str(k).lower() != "unknown"}
             if known_counts:
                 sev_text = ", ".join(f"{k}: {v}" for k, v in sorted(known_counts.items()))
-                lines.append(f"- Severity counts: **{sev_text}**")
+                audit_context_lines.append(f"Severity counts: {sev_text}")
         outliers = audit_digest.get("outliers_found")
         if isinstance(outliers, int):
-            lines.append(f"- Outliers in current run: **{outliers}**")
+            audit_context_lines.append(f"Outliers in current run: {outliers}")
         parsed_outliers = audit_digest.get("parsed_outlier_items")
         if isinstance(parsed_outliers, int) and parsed_outliers > 0:
-            lines.append(f"- Parsed outlier entries: **{parsed_outliers}**")
-        lines.append(f"- Drift increased: **{'yes' if audit_digest.get('drift_increased') else 'no'}**")
+            audit_context_lines.append(f"Parsed outlier entries: {parsed_outliers}")
+        audit_context_lines.append(f"Drift increased: {'yes' if audit_digest.get('drift_increased') else 'no'}")
 
         top_findings = audit_digest.get("top_findings", []) or []
         if top_findings:
@@ -225,14 +226,23 @@ def render_markdown(
                 detail_lines.append(
                     f"_Truncated to {max_full_findings} findings to avoid oversized PR comments ({len(top_findings)} total parsed)._"
                 )
-            if len(top_findings) <= 5:
+            if has_new_findings:
+                audit_context_lines.append("")
+                audit_context_lines.append(f"Current/contextual findings ({len(top_findings)}):")
+                audit_context_lines.extend(detail_lines)
+            elif len(top_findings) <= 5:
                 lines.append("- Actionable findings:")
                 for line in detail_lines:
                     lines.append(f"  {line}")
             else:
                 _append_details_block(lines, f"Audit findings ({len(top_findings)})", detail_lines)
+        elif has_new_findings:
+            audit_context_lines.append("No structured current/contextual audit findings available.")
         else:
             lines.append("- No structured audit findings available.")
+
+        if has_new_findings:
+            _append_details_block(lines, "Audit context", audit_context_lines)
 
         raw_excerpt = [str(line) for line in (audit_digest.get("raw_excerpt", []) or [])]
         if raw_excerpt:
