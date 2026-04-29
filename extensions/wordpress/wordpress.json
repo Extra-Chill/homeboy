@@ -173,6 +173,77 @@
   },
   "audit": {
     "setup_references": "scripts/audit/setup-references.sh",
+    "detector_rules": {
+      "known_symbols": {
+        "header_versions": [
+          {
+            "file_marker": "Plugin Name:",
+            "version_header": "Requires at least:",
+            "symbols": [
+              { "name": "get_post_type_object", "kind": "function", "introduced": "3.0" },
+              { "name": "wp_json_encode", "kind": "function", "introduced": "4.4" },
+              { "name": "wp_generate_uuid4", "kind": "function", "introduced": "4.7" },
+              { "name": "register_rest_route", "kind": "function", "introduced": "4.4" },
+              { "name": "register_block_type", "kind": "function", "introduced": "5.0" },
+              { "name": "has_blocks", "kind": "function", "introduced": "5.0" },
+              { "name": "parse_blocks", "kind": "function", "introduced": "5.0" },
+              { "name": "wp_timezone_string", "kind": "function", "introduced": "5.1" },
+              { "name": "wp_timezone", "kind": "function", "introduced": "5.3" },
+              { "name": "wp_date", "kind": "function", "introduced": "5.3" },
+              { "name": "wp_get_environment_type", "kind": "function", "introduced": "5.5" },
+              { "name": "WP_REST_Server", "kind": "class", "introduced": "4.4" },
+              { "name": "WP_REST_Request", "kind": "class", "introduced": "4.4" },
+              { "name": "WP_REST_Response", "kind": "class", "introduced": "4.4" },
+              { "name": "WP_Block_Type_Registry", "kind": "class", "introduced": "5.0" },
+              { "name": "WP_Block", "kind": "class", "introduced": "5.1" },
+              { "name": "WP_HTML_Tag_Processor", "kind": "class", "introduced": "6.2" },
+              { "name": "WP_Ability", "kind": "class", "introduced": "6.9" },
+              { "name": "REST_REQUEST", "kind": "constant", "introduced": "4.4" }
+            ]
+          }
+        ],
+        "composer_packages": [
+          {
+            "package": "woocommerce/action-scheduler",
+            "symbols": [
+              { "name": "as_schedule_single_action", "kind": "function" },
+              { "name": "as_schedule_recurring_action", "kind": "function" },
+              { "name": "as_schedule_cron_action", "kind": "function" },
+              { "name": "as_enqueue_async_action", "kind": "function" },
+              { "name": "as_unschedule_action", "kind": "function" },
+              { "name": "as_unschedule_all_actions", "kind": "function" },
+              { "name": "as_next_scheduled_action", "kind": "function" },
+              { "name": "as_has_scheduled_action", "kind": "function" },
+              { "name": "as_get_scheduled_actions", "kind": "function" },
+              { "name": "ActionScheduler", "kind": "class" },
+              { "name": "ActionScheduler_Action", "kind": "class" },
+              { "name": "ActionScheduler_Store", "kind": "class" },
+              { "name": "ActionScheduler_Versions", "kind": "class" }
+            ]
+          }
+        ],
+        "bootstrap_paths": [
+          {
+            "path_contains": "action-scheduler/action-scheduler.php",
+            "symbols": [
+              { "name": "as_schedule_single_action", "kind": "function" },
+              { "name": "as_schedule_recurring_action", "kind": "function" },
+              { "name": "as_schedule_cron_action", "kind": "function" },
+              { "name": "as_enqueue_async_action", "kind": "function" },
+              { "name": "as_unschedule_action", "kind": "function" },
+              { "name": "as_unschedule_all_actions", "kind": "function" },
+              { "name": "as_next_scheduled_action", "kind": "function" },
+              { "name": "as_has_scheduled_action", "kind": "function" },
+              { "name": "as_get_scheduled_actions", "kind": "function" },
+              { "name": "ActionScheduler", "kind": "class" },
+              { "name": "ActionScheduler_Action", "kind": "class" },
+              { "name": "ActionScheduler_Store", "kind": "class" },
+              { "name": "ActionScheduler_Versions", "kind": "class" }
+            ]
+          }
+        ]
+      }
+    },
     "ignore_claim_patterns": [
       "/wp-json/**",
       "/*-auth/**",
