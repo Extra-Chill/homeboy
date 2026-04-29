@@ -30,8 +30,8 @@
  *   install          - wp-phpunit install.php (creates WP + tables)
  *   load_fixtures    - test case classes, mock mailer, harness filters
  *   load_deps        - dependency plugin bootstrap files (if any)
- *   load_component   - plugin/theme under test
- *   discover_tests   - glob test files
+ *   load_component   - plugin/theme under test + plugin activation hook
+ *   discover_tests   - glob test files, then apply changed-file scope
  *   load_tests       - require_once each test file
  *   run_tests        - PHPUnit execution
  *
@@ -189,6 +189,7 @@ try {
     );
 
     $test_files = pg_discover_tests($directories, $suffixes, $prefixes, $excludes);
+    $test_files = pg_filter_changed_test_files($test_files, '{{CHANGED_TEST_FILES_JSON}}', $plugin_path);
 
     if (!empty($changed_test_files)) {
         $test_files = pg_filter_changed_tests($test_files, $changed_test_files, $plugin_path, $suffixes, $prefixes);

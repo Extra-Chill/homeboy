@@ -381,6 +381,7 @@ function pg_run_load_deps_stage(array $cfg) {
                 foreach ($dep_files as $df) {
                     if (strpos(file_get_contents($df), 'Plugin Name:') !== false) {
                         require_once $df;
+                        pg_activate_plugin_file($df);
                         break;
                     }
                 }
@@ -431,6 +432,7 @@ function pg_run_load_component_stage(array $cfg) {
                 if (strpos(file_get_contents($mf), 'Plugin Name:') !== false) {
                     pg_log("PLUGIN_DETECTED " . basename($mf));
                     require_once $mf;
+                    pg_activate_plugin_file($mf);
                     $loaded = true;
                     break;
                 }
@@ -444,4 +446,94 @@ function pg_run_load_component_stage(array $cfg) {
         pg_stage_fail('load_component', $e);
         exit(1);
     }
+}
+
+/**
+ * Run activation hooks for a plugin entry file after loading it.
+ *
+ * The Playground backend boots WordPress from wp-phpunit and then requires the
+ * plugin file directly. Direct loading registers `register_activation_hook()`
+ * callbacks, but it does not fire them. Running the corresponding activation
+ * action gives plugins the same schema-preparation seam their normal PHPUnit
+ * bootstrap relies on without routing through wp-admin redirects.
+ */
+function pg_activate_plugin_file(string $plugin_file): void {
+    if (!function_exists('plugin_basename') || !function_exists('do_action')) {
+        pg_log("NOTICE:cannot activate plugin entry before WordPress plugin API is available: $plugin_file");
+        return;
+    }
+
+    $plugin_basename = plugin_basename($plugin_file);
+    pg_log("PLUGIN_ACTIVATE $plugin_basename");
+
+    do_action("activate_$plugin_basename", false);
+    do_action('activated_plugin', $plugin_basename, false);
+}
+
+/**
+ * Restrict discovered PHPUnit files to HOMEBOY_CHANGED_TEST_FILES.
+ *
+ * Homeboy core passes changed test files as component-relative paths. The
+ * Playground runner discovers tests in the VFS, so compare normalized
+ * component-relative paths and keep the broad discovery path as the fallback
+ * when no scoped list was supplied.
+ */
+function pg_filter_changed_test_files(array $test_files, string $changed_files_json, string $plugin_path): array {
+    $decoded = json_decode($changed_files_json, true);
+    if (!is_array($decoded) || empty($decoded)) {
+        return $test_files;
+    }
+
+    $wanted = [];
+    foreach ($decoded as $entry) {
+        if (!is_scalar($entry)) {
+            continue;
+        }
+        $normalized = pg_normalize_changed_test_file((string) $entry, $plugin_path);
+        if ($normalized !== '') {
+            $wanted[$normalized] = true;
+        }
+    }
+
+    if (empty($wanted)) {
+        pg_log('NOTICE:HOMEBOY_CHANGED_TEST_FILES did not contain usable test paths');
+        return [];
+    }
+
+    $filtered = [];
+    foreach ($test_files as $file) {
+        $relative = pg_component_relative_path((string) $file, $plugin_path);
+        if (isset($wanted[$relative])) {
+            $filtered[] = $file;
+        }
+    }
+
+    pg_log('SCOPED_TEST_FILES requested=' . count($wanted) . ' matched=' . count($filtered));
+    return $filtered;
+}
+
+function pg_normalize_changed_test_file(string $path, string $plugin_path): string {
+    $path = trim(str_replace('\\', '/', $path));
+    if ($path === '') {
+        return '';
+    }
+
+    return pg_component_relative_path($path, $plugin_path);
+}
+
+function pg_component_relative_path(string $path, string $plugin_path): string {
+    $path = trim(str_replace('\\', '/', $path));
+    $plugin_path = rtrim(str_replace('\\', '/', $plugin_path), '/');
+
+    if (strpos($path, $plugin_path . '/') === 0) {
+        $path = substr($path, strlen($plugin_path) + 1);
+    } elseif (strpos($path, '/tests/') !== false) {
+        $path = substr($path, strpos($path, '/tests/') + 1);
+    }
+
+    while (strpos($path, './') === 0) {
+        $path = substr($path, 2);
+    }
+
+    return ltrim($path, '/');
 }

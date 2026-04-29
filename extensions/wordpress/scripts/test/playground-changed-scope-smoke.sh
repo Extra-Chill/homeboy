@@ -2,7 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER="${SCRIPT_DIR}/playground-runner.php"
+RUNNER="${SCRIPT_DIR}/test-runner-playground.sh"
+TEMPLATE="${SCRIPT_DIR}/playground-runner.php"
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
 
 assert_contains() {
     local file="$1"
@@ -14,13 +17,83 @@ assert_contains() {
     fi
 }
 
+assert_contains "$TEMPLATE" "{{CHANGED_TEST_FILES_JSON}}"
+assert_contains "$TEMPLATE" "pg_filter_changed_tests"
+assert_contains "$TEMPLATE" "changed test scope skipped non-PHPUnit file"
+assert_contains "$RUNNER" "CHANGED_TEST_FILES_JSON"
 assert_contains "$RUNNER" "{{CHANGED_TEST_FILES_JSON}}"
-assert_contains "$RUNNER" "pg_filter_changed_tests"
-assert_contains "$RUNNER" "changed test scope skipped non-PHPUnit file"
-assert_contains "${SCRIPT_DIR}/test-runner-playground.sh" "CHANGED_TEST_FILES_JSON"
-assert_contains "${SCRIPT_DIR}/test-runner-playground.sh" "{{CHANGED_TEST_FILES_JSON}}"
 
-php -l "$RUNNER" >/dev/null
-bash -n "${SCRIPT_DIR}/test-runner-playground.sh"
+EXTENSION_PATH="${TMPDIR}/extension"
+PLUGIN_PATH="${TMPDIR}/component"
+mkdir -p "${EXTENSION_PATH}/node_modules/.bin" "${PLUGIN_PATH}/tests"
+
+cat > "${PLUGIN_PATH}/tests/OnlyTest.php" <<'PHP'
+<?php
+class OnlyTest extends WP_UnitTestCase {}
+PHP
+cat > "${PLUGIN_PATH}/tests/OtherTest.php" <<'PHP'
+<?php
+class OtherTest extends WP_UnitTestCase {}
+PHP
+
+cat > "${EXTENSION_PATH}/node_modules/.bin/wp-playground-cli" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+wrapper=""
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--mount" ]; then
+        mount_arg="$2"
+        if [[ "$mount_arg" == *":/runner.php" ]]; then
+            wrapper="${mount_arg%:/runner.php}"
+        fi
+        shift 2
+        continue
+    fi
+    shift
+done
+
+if [ -z "$wrapper" ] || [ ! -f "$wrapper" ]; then
+    echo "runner wrapper mount not found" >&2
+    exit 1
+fi
+
+if ! grep -Fq '["tests/OnlyTest.php"]' "$wrapper"; then
+    echo "changed-test JSON was not substituted into wrapper" >&2
+    exit 1
+fi
+if grep -Fq '{{CHANGED_TEST_FILES_JSON}}' "$wrapper"; then
+    echo "changed-test placeholder leaked into wrapper" >&2
+    exit 1
+fi
+
+cat > "${HOMEBOY_PLUGIN_PATH}/.pg-test-result.txt" <<'LOG'
+STAGE_BEGIN:discover_tests
+DISCOVERY: dirs=/wordpress/wp-content/plugins/example/tests suffixes=Test.php prefixes=test- excludes=0 found=2
+SCOPED_TEST_FILES requested=1 matched=1
+STAGE_OK:discover_tests
+STAGE_BEGIN:run_tests
+RUNNING 1 TEST FILES
+ALL TESTS PASSED
+TESTS: 1 FAILURES: 0 ERRORS: 0
+STAGE_OK:run_tests
+LOG
+SH
+chmod +x "${EXTENSION_PATH}/node_modules/.bin/wp-playground-cli"
+
+php -l "$TEMPLATE" >/dev/null
+bash -n "$RUNNER"
+
+output=$(HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+    HOMEBOY_COMPONENT_PATH="$PLUGIN_PATH" \
+    HOMEBOY_COMPONENT_ID="example" \
+    HOMEBOY_CHANGED_TEST_FILES='tests/OnlyTest.php' \
+    bash "$RUNNER" 2>&1)
+
+if [[ "$output" != *"Playground test run complete."* ]]; then
+    echo "Expected successful scoped Playground run" >&2
+    echo "$output" >&2
+    exit 1
+fi
 
 echo "Playground changed-scope smoke passed"

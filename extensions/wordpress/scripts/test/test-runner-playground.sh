@@ -156,6 +156,9 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     fi
 fi
 
+# Homeboy core sends changed test paths as newline-delimited component-relative
+# paths. Playground PHP cannot reliably read host env directly, so substitute a
+# JSON array into the runner template and let it filter VFS-discovered tests.
 CHANGED_TEST_FILES_JSON="[]"
 if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     CHANGED_TEST_FILES_JSON=$(printf '%s' "${HOMEBOY_CHANGED_TEST_FILES}" | php -r '
