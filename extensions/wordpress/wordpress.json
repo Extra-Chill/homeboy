@@ -121,6 +121,22 @@
     ]
   },
   "deploy": {
+    "protected_path_suffixes": [
+      "/plugins",
+      "/themes",
+      "/mu-plugins",
+      "/wp-content",
+      "/wp-content/uploads",
+      "/wp-content/plugins",
+      "/wp-content/themes",
+      "/wp-content/mu-plugins"
+    ],
+    "owner_hints": [
+      {
+        "path_contains": "wp-content/",
+        "suggested_owner": "www-data:www-data"
+      }
+    ],
     "remote_path_inference": [
       {
         "when_file_contains": { "file": "{{dir_name}}.php", "text": "Plugin Name:" },
