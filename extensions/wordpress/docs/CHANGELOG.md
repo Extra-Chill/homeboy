@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.7] - 2026-04-29
+
+### Fixed
+- handle absolute PHPStan scope paths
+- preserve PHPStan context for scoped lint
+
 ## [2.30.6] - 2026-04-28
 
 ### Fixed
