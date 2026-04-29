@@ -1,12 +1,22 @@
 # Homeboy
 
-Homeboy is a component-aware automation CLI for local development, CI, releases, dev rigs, stacks, benchmarks, dependency maintenance, triage, and ops. It runs the same workflows from your terminal or from GitHub Actions, and it can write stable JSON output so agents and scripts can consume results without scraping logs.
+Development automation infrastructure for software projects.
 
-Homeboy is Chris Huber's working automation tool. It is designed to make the repos he maintains easier to develop, review, release, deploy, and operate from one binary.
+## What It Does
 
-## Operating Modes
+Homeboy turns a repo, project, or fleet into a component-aware automation surface: local development, CI, releases, dev rigs, stacks, benchmarks, dependency maintenance, triage, and ops all run through one CLI.
 
-Homeboy is not just a CI robot. The same component model drives several workflows:
+- **Component-aware quality gates** — Audit, lint, test, review, and refactor code with the same commands locally and in CI.
+- **Release automation** — Plan versions, changelogs, tags, and publish steps from commit history.
+- **Local development rigs** — Materialize reproducible multi-component environments and combined-fixes branches.
+- **Performance benchmarks** — Run benchmark scenarios with baselines, ratchets, regression gates, and rig-scoped comparisons.
+- **Dependency and attention loops** — Surface dependency drift, failing checks, open issues, and structured review artifacts.
+- **Fleet operations** — Deploy components, inspect servers, query databases, read files, tail logs, and transfer artifacts.
+- **Agent-ready output** — Write stable JSON artifacts for automation and AI agents without scraping terminal logs.
+
+## Architecture
+
+One component model, several execution contexts:
 
 ```text
                          ┌─────────────────────────────┐
@@ -29,15 +39,17 @@ Homeboy is not just a CI robot. The same component model drives several workflow
 └────────────────┘              └────────────────┘              └────────────────┘
 ```
 
-## Product Pillars
+### Command Families
 
-- **Code quality and review** — `audit`, `lint`, `test`, `review`, and `refactor` find drift, run project checks, produce PR-ready summaries, and apply safe mechanical fixes.
-- **Release and changelog** — `release`, `version`, `changelog`, and `changes` derive version bumps and release notes from conventional commits instead of hand-edited version files.
-- **Local dev environments** — `rig` materializes reproducible multi-component setups, while `stack` manages combined-fixes branches built from a base branch plus declared PRs.
-- **Benchmarks** — `bench` runs extension-provided performance scenarios with baselines, ratchets, regression gates, and rig-scoped comparisons.
-- **Dependencies and attention** — `deps`, `triage`, `status`, `issues`, and `report` surface dependency drift, open work, findings, and structured review artifacts.
-- **Fleet and ops** — `deploy`, `ssh`, `file`, `db`, `logs`, and `transfer` manage servers and deployed projects from the same component/project/fleet model.
-- **Extensions and platforms** — extensions add platform-specific behavior such as `wp` for WordPress and `cargo` for Rust without changing the core command contract.
+| Family | Commands | Purpose |
+|--------|----------|---------|
+| **Quality** | `audit`, `lint`, `test`, `review`, `refactor` | Keep codebases healthy and reviewable. |
+| **Release** | `release`, `version`, `changelog`, `changes` | Turn commit history into versions, tags, and release notes. |
+| **Dev substrate** | `rig`, `stack` | Recreate local environments and maintain combined-fixes branches. |
+| **Performance** | `bench` | Track benchmark scenarios against baselines and environments. |
+| **Attention** | `deps`, `triage`, `status`, `issues`, `report` | Find dependency drift, failing work, and review artifacts. |
+| **Ops** | `deploy`, `ssh`, `file`, `db`, `logs`, `transfer` | Operate projects and fleets from the same component graph. |
+| **Platforms** | `wp`, `cargo`, `extension` | Route platform-specific behavior through extensions. |
 
 For exhaustive command docs, see [docs/commands/commands-index.md](docs/commands/commands-index.md) or run `homeboy docs list`.
 
@@ -156,19 +168,19 @@ homeboy release
 `homeboy rig` manages reproducible local environments: components, background services, symlinks, checks, git operations, builds, and patch steps. A rig can bring up a multi-repo setup, check its health, sync stacks, and tear it down.
 
 ```bash
-homeboy rig install https://github.com/chubes4/homeboy-rigs.git//packages/studio
-homeboy rig up studio
-homeboy rig check studio
-homeboy rig sync studio
-homeboy rig down studio
+homeboy rig install https://github.com/your-org/rigs.git//packages/app
+homeboy rig up app
+homeboy rig check app
+homeboy rig sync app
+homeboy rig down app
 ```
 
 `homeboy stack` manages combined-fixes branches built from a base branch plus declared PRs. It can inspect, apply, rebase, sync, diff, and push the target branch.
 
 ```bash
-homeboy stack status studio-combined
-homeboy stack sync studio-combined
-homeboy stack push studio-combined
+homeboy stack status app-combined
+homeboy stack sync app-combined
+homeboy stack push app-combined
 ```
 
 ### Benchmarks
@@ -178,7 +190,7 @@ homeboy stack push studio-combined
 ```bash
 homeboy bench my-project --baseline
 homeboy bench my-project --ratchet
-homeboy bench my-project --rig studio
+homeboy bench my-project --rig app
 ```
 
 ### Dependencies And Attention
