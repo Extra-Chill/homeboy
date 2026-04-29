@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.11] - 2026-04-29
+
+### Fixed
+- route standalone smoke files
+
 ## [2.30.10] - 2026-04-29
 
 ### Fixed
