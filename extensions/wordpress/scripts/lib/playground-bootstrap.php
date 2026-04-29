@@ -181,6 +181,113 @@ function pg_install_diagnostics_handlers() {
     });
 }
 
+/**
+ * Snapshot currently-registered callback IDs for a WordPress hook.
+ *
+ * Runners can load the component before wp-phpunit install so plugins attach
+ * callbacks before lazy core registries initialize. Some request-end callbacks
+ * registered by that early load are unsafe before activation creates plugin
+ * tables, so callers can snapshot a hook before early load and remove only the
+ * callbacks added by the component during install.
+ */
+function pg_snapshot_wordpress_hook_callbacks(string $hook_name): array {
+    global $wp_filter;
+
+    $snapshot = [];
+    if (!isset($wp_filter[$hook_name]) || !isset($wp_filter[$hook_name]->callbacks)) {
+        return $snapshot;
+    }
+
+    foreach ($wp_filter[$hook_name]->callbacks as $priority => $callbacks) {
+        foreach (array_keys($callbacks) as $callback_id) {
+            $snapshot[$priority . ':' . $callback_id] = true;
+        }
+    }
+
+    return $snapshot;
+}
+
+/**
+ * Remove callbacks added to a WordPress hook since a prior snapshot.
+ */
+function pg_remove_new_wordpress_hook_callbacks(string $hook_name, array $before): void {
+    global $wp_filter;
+
+    if (!isset($wp_filter[$hook_name]) || !isset($wp_filter[$hook_name]->callbacks)) {
+        return;
+    }
+
+    foreach ($wp_filter[$hook_name]->callbacks as $priority => $callbacks) {
+        foreach (array_keys($callbacks) as $callback_id) {
+            if (isset($before[$priority . ':' . $callback_id])) {
+                continue;
+            }
+
+            unset($wp_filter[$hook_name]->callbacks[$priority][$callback_id]);
+        }
+
+        if (empty($wp_filter[$hook_name]->callbacks[$priority])) {
+            unset($wp_filter[$hook_name]->callbacks[$priority]);
+        }
+    }
+}
+
+/**
+ * Extract and remove callbacks added to a WordPress hook since a snapshot.
+ *
+ * The returned callback records can be run later with
+ * pg_run_deferred_wordpress_hook_callbacks(). This is intentionally for normal
+ * lifecycle hooks whose callbacks are unsafe during wp-phpunit install, not for
+ * one-shot lazy registries such as the Abilities API hooks.
+ */
+function pg_defer_new_wordpress_hook_callbacks(string $hook_name, array $before): array {
+    global $wp_filter;
+
+    $deferred = [];
+    if (!isset($wp_filter[$hook_name]) || !isset($wp_filter[$hook_name]->callbacks)) {
+        return $deferred;
+    }
+
+    foreach ($wp_filter[$hook_name]->callbacks as $priority => $callbacks) {
+        foreach ($callbacks as $callback_id => $callback) {
+            if (isset($before[$priority . ':' . $callback_id])) {
+                continue;
+            }
+
+            $deferred[] = [
+                'priority' => (int) $priority,
+                'callback' => $callback,
+            ];
+            unset($wp_filter[$hook_name]->callbacks[$priority][$callback_id]);
+        }
+
+        if (empty($wp_filter[$hook_name]->callbacks[$priority])) {
+            unset($wp_filter[$hook_name]->callbacks[$priority]);
+        }
+    }
+
+    usort($deferred, static function (array $left, array $right): int {
+        return $left['priority'] <=> $right['priority'];
+    });
+
+    return $deferred;
+}
+
+/**
+ * Run callbacks extracted by pg_defer_new_wordpress_hook_callbacks().
+ */
+function pg_run_deferred_wordpress_hook_callbacks(array $deferred, array $args = []): void {
+    foreach ($deferred as $entry) {
+        $callback = $entry['callback'] ?? null;
+        if (!is_array($callback) || !isset($callback['function'])) {
+            continue;
+        }
+
+        $accepted_args = isset($callback['accepted_args']) ? (int) $callback['accepted_args'] : count($args);
+        call_user_func_array($callback['function'], array_slice($args, 0, $accepted_args));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stage executors
 // ---------------------------------------------------------------------------

@@ -101,14 +101,33 @@ if (is_array($bench_env)) {
 // Load the component during WordPress bootstrap, not after wp-settings.php has
 // finished. Plugins that register hooks for core bootstrap events (for example
 // wp_abilities_api_init) need to be present before those events fire.
+$pre_component_init_callbacks = pg_snapshot_wordpress_hook_callbacks('init');
+$pre_component_shutdown_callbacks = pg_snapshot_wordpress_hook_callbacks('shutdown');
+$deferred_install_init_callbacks = [];
 require_once "$tests_dir/includes/functions.php";
-tests_add_filter('muplugins_loaded', function () use ($plugin_path) {
+tests_add_filter('muplugins_loaded', function () use ($plugin_path, $pre_component_init_callbacks, &$deferred_install_init_callbacks) {
     pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
     pg_run_load_component_stage(['plugin_path' => $plugin_path, 'activate' => false]);
+
+    // Let plugins attach early-bootstrap callbacks before lazy core registries
+    // initialize, but defer component-added init callbacks until install.php has
+    // created the wptests_* tables. This preserves registration order without
+    // letting DB-touching runtime callbacks run against a half-installed site.
+    tests_add_filter('plugins_loaded', function () use ($pre_component_init_callbacks, &$deferred_install_init_callbacks) {
+        $deferred_install_init_callbacks = pg_defer_new_wordpress_hook_callbacks('init', $pre_component_init_callbacks);
+    }, PHP_INT_MAX);
 });
 
 // Stage: install — wp-phpunit install.php creates WP tables in-process.
 pg_run_install_stage(['config_path' => $config_path, 'tests_dir' => $tests_dir]);
+
+// The early component load above preserves core bootstrap ordering for lazy
+// registries, but request-end callbacks added during wp-phpunit install can do
+// runtime database work before activation has created plugin tables. Suppress
+// only callbacks the component added during that install bootstrap; activation
+// below remains the post-table seam for install-time side effects.
+pg_remove_new_wordpress_hook_callbacks('shutdown', $pre_component_shutdown_callbacks);
+pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks);
 
 // Run activation hooks after wp-phpunit has created database tables. The plugin
 // file was already required during muplugins_loaded, so require_once is a no-op.
