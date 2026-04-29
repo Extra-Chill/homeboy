@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.33.0] - 2026-04-29
+
+### Added
+- declare deploy safety policy
+
+### Fixed
+- emit runtime dispatch metadata
+
 ## [2.32.0] - 2026-04-29
 
 ### Added
