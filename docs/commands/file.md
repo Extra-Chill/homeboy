@@ -15,6 +15,12 @@ homeboy file <COMMAND>
 - `rename <project_id> <old_path> <new_path>`
 - `find <project_id> <path> [options]` (search for files by name)
 - `grep <project_id> <path> <pattern> [options]` (search file contents)
+- `download <project_id> <path> [local_path] [-r|--recursive]`
+- `upload <server> <local_path> <remote_path> [-c|--compress] [--dry-run]`
+- `copy <source> <destination> [-r|--recursive] [-c|--compress] [--dry-run] [--exclude <pattern>]`
+- `sync <source> <destination> [-c|--compress] [--dry-run] [--exclude <pattern>]`
+
+`copy` and `sync` targets use `local/path` or `server_id:/path` syntax. `sync` is recursive and non-deleting by default; it does not expose a delete mode.
 
 ### `find`
 
@@ -66,6 +72,22 @@ homeboy file grep mysite /var/www "error" -i
 homeboy file grep mysite /var/www "add_action" --name "*.php" --max-depth 3
 ```
 
+### `upload`, `copy`, and `sync`
+
+```sh
+homeboy file upload prod ./report.json /tmp/report.json --dry-run
+homeboy file copy ./dump.sql prod:/tmp/dump.sql --compress --dry-run
+homeboy file copy prod:/tmp/dump.sql ./dump.sql --dry-run
+homeboy file copy old:/var/www/uploads new:/var/www/uploads --recursive --exclude cache --dry-run
+homeboy file sync ./uploads prod:/var/www/uploads --exclude cache --dry-run
+```
+
+Notes:
+
+- `upload` is the ergonomic mirror of `download` for local-to-server uploads.
+- `copy` preserves the old local↔remote and remote↔remote transfer target syntax.
+- `sync` is directory-oriented and recursive, but does not delete files from the destination.
+
 ## JSON output
 
 > Note: all command output is wrapped in the global JSON envelope described in the [JSON output contract](../architecture/output-system.md). `homeboy file` returns one of several output types as the `data` payload.
@@ -84,6 +106,20 @@ Fields:
 - `bytes_written`: for `write` (number of bytes written after stripping one trailing `\n` if present)
 - `stdout`, `stderr`: included for error context when applicable
 - `exit_code`, `success`
+
+### Transfer output
+
+`upload`, `copy`, and `sync` return the shared transfer payload:
+
+- `source`
+- `destination`
+- `method`: `scp`, `cat-pipe`, or `tar-pipe`
+- `direction`: `push`, `pull`, or `server-to-server`
+- `recursive`
+- `compress`
+- `success`
+- `error`
+- `dry_run`
 
 List entries (`entries[]`):
 

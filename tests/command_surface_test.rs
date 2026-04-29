@@ -11,6 +11,7 @@ fn includes_current_top_level_commands() {
     assert!(surface.contains_path(&["self"]));
     assert!(surface.contains_path(&["stack"]));
     assert!(surface.contains_path(&["report"]));
+    assert!(!surface.contains_path(&["transfer"]));
 }
 
 #[test]
@@ -24,6 +25,10 @@ fn includes_first_level_subcommands() {
     assert!(surface.contains_path(&["self", "status"]));
     assert!(surface.contains_path(&["stack", "inspect"]));
     assert!(surface.contains_path(&["report", "failure-digest"]));
+    assert!(surface.contains_path(&["file", "download"]));
+    assert!(surface.contains_path(&["file", "upload"]));
+    assert!(surface.contains_path(&["file", "copy"]));
+    assert!(surface.contains_path(&["file", "sync"]));
 }
 
 #[test]

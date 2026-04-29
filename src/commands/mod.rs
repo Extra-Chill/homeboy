@@ -309,7 +309,6 @@ pub mod ssh;
 pub mod stack;
 pub mod status;
 pub mod test;
-pub mod transfer;
 pub mod triage;
 pub mod undo;
 pub mod upgrade;
@@ -363,7 +362,6 @@ pub fn run_json(
         crate::cli_surface::Commands::File(args) => dispatch!(args, global, file),
         crate::cli_surface::Commands::Fleet(args) => dispatch!(args, global, fleet),
         crate::cli_surface::Commands::Logs(args) => dispatch!(args, global, logs),
-        crate::cli_surface::Commands::Transfer(args) => dispatch!(args, global, transfer),
         crate::cli_surface::Commands::Triage(args) => dispatch!(args, global, triage),
         crate::cli_surface::Commands::Deploy(args) => dispatch!(args, global, deploy),
         crate::cli_surface::Commands::Component(args) => dispatch!(args, global, component),

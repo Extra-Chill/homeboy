@@ -33,7 +33,8 @@ pub struct TransferOutput {
 }
 
 /// A parsed transfer target: either local or remote.
-enum Target {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferTarget {
     Local(String),
     Remote { server_id: String, path: String },
 }
@@ -43,7 +44,7 @@ enum Target {
 /// If the target contains "server_id:/path", it's remote.
 /// If it starts with "/", "./", "../", "~", or is "." it's local.
 /// Otherwise try to parse as server_id:/path, falling back to local.
-fn parse_target(target: &str) -> Target {
+pub fn parse_target(target: &str) -> TransferTarget {
     // Explicit local paths
     if target.starts_with('/')
         || target.starts_with("./")
@@ -51,7 +52,7 @@ fn parse_target(target: &str) -> Target {
         || target.starts_with('~')
         || target == "."
     {
-        return Target::Local(target.to_string());
+        return TransferTarget::Local(target.to_string());
     }
 
     // Try server_id:/path split
@@ -62,7 +63,7 @@ fn parse_target(target: &str) -> Target {
         // Must have a non-empty path after the colon
         // and the server part must look like an ID (no slashes)
         if !path_part.is_empty() && !server_part.contains('/') && !server_part.is_empty() {
-            return Target::Remote {
+            return TransferTarget::Remote {
                 server_id: server_part.to_string(),
                 path: path_part.to_string(),
             };
@@ -70,7 +71,7 @@ fn parse_target(target: &str) -> Target {
     }
 
     // Default: treat as local path
-    Target::Local(target.to_string())
+    TransferTarget::Local(target.to_string())
 }
 
 /// Build scp-compatible SSH args for a server connection.
@@ -121,27 +122,30 @@ pub fn transfer(config: &TransferConfig) -> crate::Result<(TransferOutput, i32)>
     let dest = parse_target(&config.destination);
 
     match (&source, &dest) {
-        (Target::Local(_), Target::Local(_)) => Err(crate::Error::validation_invalid_argument(
-            "target",
-            "Both source and destination are local paths. At least one must be a remote server",
-            None,
-            Some(vec![
-                "Push to server: homeboy transfer ./file server:/path/to/file".to_string(),
-                "Pull from server: homeboy transfer server:/path/to/file ./local-copy".to_string(),
-            ]),
-        )),
-        (Target::Local(local_path), Target::Remote { server_id, path }) => {
+        (TransferTarget::Local(_), TransferTarget::Local(_)) => {
+            Err(crate::Error::validation_invalid_argument(
+                "target",
+                "Both source and destination are local paths. At least one must be a remote server",
+                None,
+                Some(vec![
+                    "Upload to server: homeboy file upload server ./file /path/to/file".to_string(),
+                    "Copy from server: homeboy file copy server:/path/to/file ./local-copy"
+                        .to_string(),
+                ]),
+            ))
+        }
+        (TransferTarget::Local(local_path), TransferTarget::Remote { server_id, path }) => {
             run_push(config, local_path, server_id, path)
         }
-        (Target::Remote { server_id, path }, Target::Local(local_path)) => {
+        (TransferTarget::Remote { server_id, path }, TransferTarget::Local(local_path)) => {
             run_pull(config, server_id, path, local_path)
         }
         (
-            Target::Remote {
+            TransferTarget::Remote {
                 server_id: src_id,
                 path: src_path,
             },
-            Target::Remote {
+            TransferTarget::Remote {
                 server_id: dst_id,
                 path: dst_path,
             },

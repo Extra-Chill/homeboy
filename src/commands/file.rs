@@ -2,6 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::project::files::{self, FileEntry, GrepMatch, LineChange};
+use homeboy::server::transfer::{self, TransferConfig, TransferOutput};
 
 use super::CmdResult;
 
@@ -104,8 +105,64 @@ enum FileCommand {
         #[arg(short, long)]
         recursive: bool,
     },
+    /// Upload a local file or directory to a remote server
+    Upload {
+        /// Server ID
+        server: String,
+        /// Local source path
+        local_path: String,
+        /// Remote destination path
+        remote_path: String,
+        /// Compress data during transfer
+        #[arg(short, long)]
+        compress: bool,
+        /// Show what would be uploaded without doing it
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Copy a file or path between local and remote targets
+    Copy(TransferArgs),
+    /// Sync a directory between local and remote targets without deleting extras
+    Sync(SyncArgs),
     /// Edit file with line-based or pattern-based operations
     Edit(EditArgs),
+}
+
+#[derive(Args)]
+struct TransferArgs {
+    /// Source: local path or server_id:/path
+    source: String,
+    /// Destination: local path or server_id:/path
+    destination: String,
+    /// Copy directories recursively
+    #[arg(short, long)]
+    recursive: bool,
+    /// Compress data during transfer
+    #[arg(short, long)]
+    compress: bool,
+    /// Show what would be copied without doing it
+    #[arg(long)]
+    dry_run: bool,
+    /// Exclude patterns for recursive server-to-server copies
+    #[arg(long)]
+    exclude: Vec<String>,
+}
+
+#[derive(Args)]
+struct SyncArgs {
+    /// Source: local path or server_id:/path
+    source: String,
+    /// Destination: local path or server_id:/path
+    destination: String,
+    /// Compress data during transfer
+    #[arg(short, long)]
+    compress: bool,
+    /// Show what would be synced without doing it
+    #[arg(long)]
+    dry_run: bool,
+    /// Exclude patterns for recursive server-to-server syncs
+    #[arg(long)]
+    exclude: Vec<String>,
 }
 
 #[derive(Args)]
@@ -246,6 +303,7 @@ pub enum FileCommandOutput {
     Grep(FileGrepOutput),
     Edit(FileEditOutput),
     Download(FileDownloadOutput),
+    Transfer(TransferOutput),
     Raw(String),
 }
 
@@ -346,11 +404,54 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
             };
             Ok((FileCommandOutput::Download(out), code))
         }
+        FileCommand::Upload {
+            server,
+            local_path,
+            remote_path,
+            compress,
+            dry_run,
+        } => {
+            let (out, code) = run_transfer(TransferConfig {
+                source: local_path,
+                destination: format!("{}:{}", server, remote_path),
+                recursive: false,
+                compress,
+                dry_run,
+                exclude: Vec::new(),
+            })?;
+            Ok((FileCommandOutput::Transfer(out), code))
+        }
+        FileCommand::Copy(args) => {
+            let (out, code) = run_transfer(TransferConfig {
+                source: args.source,
+                destination: args.destination,
+                recursive: args.recursive,
+                compress: args.compress,
+                dry_run: args.dry_run,
+                exclude: args.exclude,
+            })?;
+            Ok((FileCommandOutput::Transfer(out), code))
+        }
+        FileCommand::Sync(args) => {
+            let (out, code) = run_transfer(TransferConfig {
+                source: args.source,
+                destination: args.destination,
+                recursive: true,
+                compress: args.compress,
+                dry_run: args.dry_run,
+                exclude: args.exclude,
+            })?;
+            Ok((FileCommandOutput::Transfer(out), code))
+        }
         FileCommand::Edit(args) => {
             let (out, code) = edit(args)?;
             Ok((FileCommandOutput::Edit(out), code))
         }
     }
+}
+
+fn run_transfer(config: TransferConfig) -> CmdResult<TransferOutput> {
+    transfer::transfer(&config)
 }
 
 fn list(project_id: &str, path: &str) -> CmdResult<FileOutput> {
