@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.14] - 2026-04-29
+
+### Fixed
+- log playground install diagnostics
+- defer install-time plugin callbacks
+
 ## [2.30.13] - 2026-04-29
 
 ### Fixed
