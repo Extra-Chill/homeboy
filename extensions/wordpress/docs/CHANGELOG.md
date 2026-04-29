@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.30.9] - 2026-04-29
+
+### Fixed
+- forward PHPUnit args in Playground tests
+
 ## [2.30.8] - 2026-04-29
 
 ### Fixed
