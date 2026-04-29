@@ -1,7 +1,7 @@
 //! Rig spec types — the JSON schema on disk.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::component::ScopedExtensionConfig;
 
@@ -207,6 +207,14 @@ pub struct BenchSpec {
     /// the runner's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warmup_iterations: Option<u64>,
+
+    /// Optional matrix axes for cross-rig bench comparison reporting.
+    ///
+    /// Example: `{ "runtime": "sdk", "substrate": "bfb" }`. When
+    /// multiple rigs declare compatible axes, `homeboy bench --rig a,b,c,d`
+    /// can emit supplemental pairwise diffs grouped by the non-varying axes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub axes: BTreeMap<String, String>,
 }
 
 /// Component reference inside a rig spec. Decoupled from the global component

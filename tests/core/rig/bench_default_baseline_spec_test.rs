@@ -32,6 +32,25 @@ fn test_bench_spec_deserializes_both_fields() {
 }
 
 #[test]
+fn test_bench_spec_deserializes_axes() {
+    let spec = bench_from(
+        r#"{
+            "id": "studio-sdk-bfb",
+            "bench": {
+                "default_component": "studio",
+                "axes": {
+                    "runtime": "sdk",
+                    "substrate": "bfb"
+                }
+            }
+        }"#,
+    );
+
+    assert_eq!(spec.axes.get("runtime").map(String::as_str), Some("sdk"));
+    assert_eq!(spec.axes.get("substrate").map(String::as_str), Some("bfb"));
+}
+
+#[test]
 fn test_bench_spec_deserializes_component_matrix() {
     let spec = bench_from(
         r#"{
@@ -162,6 +181,7 @@ fn test_bench_spec_default_component_only_back_compat() {
     assert!(spec.components.is_empty());
     assert!(spec.default_baseline_rig.is_none());
     assert!(spec.warmup_iterations.is_none());
+    assert!(spec.axes.is_empty());
 }
 
 #[test]

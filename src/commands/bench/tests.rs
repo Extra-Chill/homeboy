@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_support::with_isolated_home;
 use clap::Parser;
+use homeboy::extension::bench::aggregate_comparison;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
