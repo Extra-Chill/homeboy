@@ -127,7 +127,7 @@ mkdir -p "${TMPDIR}/state-fallback"
 FAKE_STATE_DIR="${TMPDIR}/state-fallback" \
 FAKE_LATEST_TAG="v0.122.0" \
 FAKE_ASSETS_v0_122_0="" \
-FAKE_RELEASE_ROWS="v0.122.0${TAB}other-platform.tar.xz"$'\n'"v0.121.0${TAB}${ARCHIVE}"$'\n' \
+FAKE_RELEASE_ROWS="v0.122.0${TAB}other-platform.tar.xz"$'\n'"v0.121.0${TAB}other-platform.tar.xz${TAB}${ARCHIVE}"$'\n' \
 run_resolver "latest" "${GITHUB_OUTPUT_FILE}" "${LOG_FILE}"
 assert_equals "resolved-version=0.121.0" "$(cat "${GITHUB_OUTPUT_FILE}")" "latest falls back to previous release with asset"
 assert_contains "falling back to 0.121.0" "${LOG_FILE}" "fallback is visible in logs"

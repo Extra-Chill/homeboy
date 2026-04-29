@@ -52,13 +52,19 @@ wait_for_asset() {
 previous_release_with_asset() {
   local current_tag="$1"
   local archive="$2"
-  local tag asset
+  local tag assets asset
 
-  while IFS=$'\t' read -r tag asset; do
-    if [ "${tag}" != "${current_tag}" ] && [ "${asset}" = "${archive}" ]; then
-      printf '%s' "${tag}"
-      return 0
+  while IFS=$'\t' read -r tag assets; do
+    if [ "${tag}" = "${current_tag}" ]; then
+      continue
     fi
+
+    for asset in ${assets//$'\t'/ }; do
+      if [ "${asset}" = "${archive}" ]; then
+        printf '%s' "${tag}"
+        return 0
+      fi
+    done
   done < <(gh api "repos/${REPO}/releases?per_page=20" --jq '.[] | [.tag_name, (.assets[].name)] | @tsv' 2>/dev/null || true)
 
   return 1
