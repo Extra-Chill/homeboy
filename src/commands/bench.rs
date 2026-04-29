@@ -1,13 +1,14 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use homeboy::engine::execution_context::{self, ResolveOptions};
 use homeboy::engine::run_dir::RunDir;
 use homeboy::extension::bench as extension_bench;
 use homeboy::extension::bench::{
-    aggregate_comparison, BenchCommandOutput, BenchComparisonOutput, BenchComparisonSummaryOutput,
-    BenchListWorkflowArgs, BenchListWorkflowResult, RigBenchEntry,
+    aggregate_comparison_with_axes, BenchCommandOutput, BenchComparisonOutput,
+    BenchComparisonSummaryOutput, BenchListWorkflowArgs, BenchListWorkflowResult, RigBenchEntry,
     DEFAULT_REGRESSION_THRESHOLD_PERCENT,
 };
 use homeboy::extension::ExtensionCapability;
@@ -322,10 +323,14 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
 
     let mut entries = Vec::with_capacity(run_args.rig.len());
     let mut effective_component_label: Option<String> = None;
+    let mut axes_by_rig = BTreeMap::new();
 
     let ordered_rigs = ordered_rig_ids(run_args);
 
     for rig_id in ordered_rigs {
+        if let Some(axes) = rig_axes(&rig_id)? {
+            axes_by_rig.insert(rig_id.clone(), axes);
+        }
         let (single_output, _exit) =
             matrix::run_single(run_args, &passthrough_args, Some(rig_id.clone()))?;
         if effective_component_label.is_none() {
@@ -347,11 +352,24 @@ pub fn run(args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
         .or_else(|| run_args.comp.id().map(|s| s.to_string()))
         .unwrap_or_else(|| "<unknown>".to_string());
 
-    let (output, exit) = aggregate_comparison(component, run_args.iterations, entries);
+    let (output, exit) =
+        aggregate_comparison_with_axes(component, run_args.iterations, entries, &axes_by_rig);
     if run_args.json_summary {
         return Ok((BenchOutput::ComparisonSummary(output.into()), exit));
     }
     Ok((BenchOutput::Comparison(output), exit))
+}
+
+fn rig_axes(rig_id: &str) -> homeboy::Result<Option<BTreeMap<String, String>>> {
+    let spec = rig::load(rig_id)?;
+    let Some(bench) = spec.bench else {
+        return Ok(None);
+    };
+    if bench.axes.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(bench.axes))
+    }
 }
 
 fn ordered_rig_ids(args: &BenchRunArgs) -> Vec<String> {

@@ -109,6 +109,12 @@ pub struct BenchComparisonOutput {
     /// reference rig. Empty when only one rig produced parseable
     /// results.
     pub diff: BenchComparisonDiff,
+    /// Supplemental pairwise diffs for rig matrices that declare
+    /// `bench.axes`. The primary `diff` remains first-reference vs all
+    /// other rigs; these entries compare rigs that differ by exactly one
+    /// declared axis while all other axis values match.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub axis_diffs: Vec<BenchAxisComparison>,
     /// Per-scenario run summary table. Promotes the variance-aware data
     /// already present under each scenario's `runs_summary` into a direct
     /// cross-rig comparison shape.
@@ -136,6 +142,8 @@ pub struct BenchComparisonSummaryOutput {
     pub rigs: Vec<BenchComparisonRigSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub summary: Vec<BenchScenarioComparisonSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub axis_diffs: Vec<BenchAxisComparisonSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<BenchComparisonFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -198,8 +206,36 @@ impl From<BenchComparisonOutput> for BenchComparisonSummaryOutput {
                 })
                 .collect(),
             summary: output.summary,
+            axis_diffs: output
+                .axis_diffs
+                .into_iter()
+                .map(BenchAxisComparisonSummary::from)
+                .collect(),
             failures: output.failures,
             hints: output.hints,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct BenchAxisComparisonSummary {
+    pub axis: String,
+    pub fixed: BTreeMap<String, String>,
+    pub reference_rig: String,
+    pub reference_value: String,
+    pub current_rig: String,
+    pub current_value: String,
+}
+
+impl From<BenchAxisComparison> for BenchAxisComparisonSummary {
+    fn from(comparison: BenchAxisComparison) -> Self {
+        BenchAxisComparisonSummary {
+            axis: comparison.axis,
+            fixed: comparison.fixed,
+            reference_rig: comparison.reference_rig,
+            reference_value: comparison.reference_value,
+            current_rig: comparison.current_rig,
+            current_value: comparison.current_value,
         }
     }
 }
@@ -279,6 +315,17 @@ pub struct BenchComparisonDiff {
     pub by_scenario: BTreeMap<String, BTreeMap<String, BTreeMap<String, MetricDelta>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_groups: Option<BenchPhaseGroups>,
+}
+
+#[derive(Serialize)]
+pub struct BenchAxisComparison {
+    pub axis: String,
+    pub fixed: BTreeMap<String, String>,
+    pub reference_rig: String,
+    pub reference_value: String,
+    pub current_rig: String,
+    pub current_value: String,
+    pub diff: BenchComparisonDiff,
 }
 
 /// Render-order contract for phase-aware bench-output consumers.
@@ -643,6 +690,15 @@ pub fn aggregate_comparison(
     iterations: u64,
     entries: Vec<RigBenchEntry>,
 ) -> (BenchComparisonOutput, i32) {
+    aggregate_comparison_with_axes(component, iterations, entries, &BTreeMap::new())
+}
+
+pub fn aggregate_comparison_with_axes(
+    component: String,
+    iterations: u64,
+    entries: Vec<RigBenchEntry>,
+    axes_by_rig: &BTreeMap<String, BTreeMap<String, String>>,
+) -> (BenchComparisonOutput, i32) {
     let passed = entries.iter().all(|e| e.passed);
     let exit_code = entries
         .iter()
@@ -662,6 +718,7 @@ pub fn aggregate_comparison(
             BenchComparisonDiff::build((reference_id, ref_results), &others)
         }
     };
+    let axis_diffs = build_axis_diffs(&entries, axes_by_rig);
     let summary = BenchScenarioComparisonSummary::build(&entries);
 
     let failures: Vec<BenchComparisonFailure> = entries
@@ -706,12 +763,91 @@ pub fn aggregate_comparison(
             iterations,
             rigs: entries,
             diff,
+            axis_diffs,
             summary,
             failures,
             hints: Some(hints),
         },
         exit_code,
     )
+}
+
+fn build_axis_diffs(
+    entries: &[RigBenchEntry],
+    axes_by_rig: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Vec<BenchAxisComparison> {
+    if axes_by_rig.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut axes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for values in axes_by_rig.values() {
+        axes.extend(values.keys().cloned());
+    }
+
+    let mut comparisons = Vec::new();
+    for axis in axes {
+        let mut groups: BTreeMap<Vec<(String, String)>, Vec<&RigBenchEntry>> = BTreeMap::new();
+        for entry in entries.iter().filter(|entry| entry.results.is_some()) {
+            let Some(values) = axes_by_rig.get(&entry.rig_id) else {
+                continue;
+            };
+            if !values.contains_key(&axis) {
+                continue;
+            }
+            let fixed: Vec<(String, String)> = values
+                .iter()
+                .filter(|(key, _)| *key != &axis)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            groups.entry(fixed).or_default().push(entry);
+        }
+
+        for (fixed_pairs, group_entries) in groups {
+            let mut by_axis_value: BTreeMap<&str, &RigBenchEntry> = BTreeMap::new();
+            let mut ordered_values = Vec::new();
+            for entry in group_entries {
+                let value = axes_by_rig
+                    .get(&entry.rig_id)
+                    .and_then(|values| values.get(&axis))
+                    .map(String::as_str)
+                    .expect("axis value was checked above");
+                if !by_axis_value.contains_key(value) {
+                    ordered_values.push(value);
+                }
+                by_axis_value.insert(value, entry);
+            }
+
+            if ordered_values.len() != 2 || by_axis_value.len() != 2 {
+                continue;
+            }
+
+            let reference_value = ordered_values[0];
+            let current_value = ordered_values[1];
+            let reference = by_axis_value[reference_value];
+            let current = by_axis_value[current_value];
+            let (Some(reference_results), Some(current_results)) =
+                (reference.results.as_ref(), current.results.as_ref())
+            else {
+                continue;
+            };
+
+            comparisons.push(BenchAxisComparison {
+                axis: axis.clone(),
+                fixed: fixed_pairs.into_iter().collect(),
+                reference_rig: reference.rig_id.clone(),
+                reference_value: reference_value.to_string(),
+                current_rig: current.rig_id.clone(),
+                current_value: current_value.to_string(),
+                diff: BenchComparisonDiff::build(
+                    (&reference.rig_id, reference_results),
+                    &[(&current.rig_id, current_results)],
+                ),
+            });
+        }
+    }
+
+    comparisons
 }
 
 fn format_failure_hint(failure: &BenchComparisonFailure) -> String {
@@ -965,6 +1101,117 @@ mod tests {
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.iterations, 10);
         assert_eq!(exit, 0);
+    }
+
+    #[test]
+    fn no_axis_multi_rig_comparison_omits_axis_diffs() {
+        let r = results(vec![scenario("boot", &[("p95_ms", 100.0)])]);
+        let entries = vec![entry("a", true, Some(r.clone())), entry("b", true, Some(r))];
+        let (out, _) = aggregate_comparison("studio".into(), 10, entries);
+        let value = serde_json::to_value(out).expect("serialize comparison");
+
+        assert!(value.get("axis_diffs").is_none());
+    }
+
+    #[test]
+    fn axis_diffs_cover_two_by_two_rig_matrix() {
+        let entries = vec![
+            entry(
+                "studio-sdk-standard",
+                true,
+                Some(results(vec![scenario(
+                    "site-build",
+                    &[("p50_ms", 100.0), ("p95_ms", 120.0)],
+                )])),
+            ),
+            entry(
+                "studio-sdk-bfb",
+                true,
+                Some(results(vec![scenario(
+                    "site-build",
+                    &[("p50_ms", 80.0), ("p95_ms", 96.0)],
+                )])),
+            ),
+            entry(
+                "studio-pi-standard",
+                true,
+                Some(results(vec![scenario(
+                    "site-build",
+                    &[("p50_ms", 150.0), ("p95_ms", 180.0)],
+                )])),
+            ),
+            entry(
+                "studio-pi-bfb",
+                true,
+                Some(results(vec![scenario(
+                    "site-build",
+                    &[("p50_ms", 90.0), ("p95_ms", 108.0)],
+                )])),
+            ),
+        ];
+        let axes_by_rig: BTreeMap<String, BTreeMap<String, String>> = [
+            (
+                "studio-sdk-standard",
+                [("runtime", "sdk"), ("substrate", "standard")],
+            ),
+            ("studio-sdk-bfb", [("runtime", "sdk"), ("substrate", "bfb")]),
+            (
+                "studio-pi-standard",
+                [("runtime", "pi"), ("substrate", "standard")],
+            ),
+            ("studio-pi-bfb", [("runtime", "pi"), ("substrate", "bfb")]),
+        ]
+        .into_iter()
+        .map(|(rig, axes)| {
+            (
+                rig.to_string(),
+                axes.into_iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect(),
+            )
+        })
+        .collect();
+
+        let (out, _) = aggregate_comparison_with_axes("studio".into(), 10, entries, &axes_by_rig);
+
+        assert_eq!(out.axis_diffs.len(), 4);
+        let sdk_substrate = out
+            .axis_diffs
+            .iter()
+            .find(|comparison| {
+                comparison.axis == "substrate"
+                    && comparison.fixed.get("runtime").map(String::as_str) == Some("sdk")
+            })
+            .expect("runtime=sdk substrate comparison");
+        assert_eq!(sdk_substrate.reference_rig, "studio-sdk-standard");
+        assert_eq!(sdk_substrate.reference_value, "standard");
+        assert_eq!(sdk_substrate.current_rig, "studio-sdk-bfb");
+        assert_eq!(sdk_substrate.current_value, "bfb");
+        let sdk_p95 = sdk_substrate.diff.by_scenario["site-build"]["p95_ms"]
+            .get("studio-sdk-bfb")
+            .expect("sdk bfb p95 delta");
+        assert_eq!(sdk_p95.reference, 120.0);
+        assert_eq!(sdk_p95.current, 96.0);
+        assert!((sdk_p95.delta_percent - -20.0).abs() < 1e-9);
+
+        let bfb_runtime = out
+            .axis_diffs
+            .iter()
+            .find(|comparison| {
+                comparison.axis == "runtime"
+                    && comparison.fixed.get("substrate").map(String::as_str) == Some("bfb")
+            })
+            .expect("substrate=bfb runtime comparison");
+        assert_eq!(bfb_runtime.reference_rig, "studio-sdk-bfb");
+        assert_eq!(bfb_runtime.reference_value, "sdk");
+        assert_eq!(bfb_runtime.current_rig, "studio-pi-bfb");
+        assert_eq!(bfb_runtime.current_value, "pi");
+        let bfb_p50 = bfb_runtime.diff.by_scenario["site-build"]["p50_ms"]
+            .get("studio-pi-bfb")
+            .expect("bfb pi p50 delta");
+        assert_eq!(bfb_p50.reference, 80.0);
+        assert_eq!(bfb_p50.current, 90.0);
+        assert!((bfb_p50.delta_percent - 12.5).abs() < 1e-9);
     }
 
     #[test]
