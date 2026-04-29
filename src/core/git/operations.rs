@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-use crate::component;
 use crate::config::read_json_spec_to_string;
 use crate::error::{Error, Result};
 use crate::output::{BulkResult, BulkSummary, ItemOutcome};
@@ -300,11 +299,6 @@ pub struct CommitOptions {
     pub exclude: Option<Vec<String>>,
     /// Amend the previous commit instead of creating a new one
     pub amend: bool,
-}
-
-fn get_component_path(component_id: &str) -> Result<String> {
-    let comp = component::resolve_effective(Some(component_id), None, None)?;
-    Ok(comp.local_path)
 }
 
 pub fn execute_git_for_release(path: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
@@ -1152,21 +1146,20 @@ pub fn changes(
     since_tag: Option<&str>,
     include_diff: bool,
 ) -> Result<ChangesOutput> {
-    let id = component_id.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "componentId",
-            "Missing componentId",
-            None,
-            Some(vec![
-                "Provide a component ID: homeboy changes <component-id>".to_string(),
-                "List available components: homeboy component list".to_string(),
-            ]),
-        )
-    })?;
-    let path = get_component_path(id)?;
+    changes_at(component_id, since_tag, include_diff, None)
+}
+
+/// Like [`changes`] but with an explicit path override for git operations.
+pub fn changes_at(
+    component_id: Option<&str>,
+    since_tag: Option<&str>,
+    include_diff: bool,
+    path_override: Option<&str>,
+) -> Result<ChangesOutput> {
+    let (id, path) = resolve_target(component_id, path_override)?;
 
     // Load component for version checking and changelog info
-    let component = crate::component::resolve_effective(Some(id), None, None).ok();
+    let component = crate::component::resolve_effective(Some(&id), Some(&path), None).ok();
 
     // Determine baseline with version alignment awareness
     let baseline = match since_tag {
@@ -1215,7 +1208,7 @@ pub fn changes(
     };
 
     Ok(ChangesOutput {
-        component_id: id.to_string(),
+        component_id: id,
         path,
         success: true,
         latest_tag: baseline.latest_tag,
@@ -1464,6 +1457,35 @@ mod tests {
             .unwrap();
 
         (dir, path)
+    }
+
+    #[test]
+    fn changes_at_path_only_discovers_portable_component_id() {
+        use std::fs;
+        let (dir, path) = init_repo_with_initial_commit();
+        fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{"id":"portable-changes"}"#,
+        )
+        .unwrap();
+
+        let out = changes_at(None, None, false, Some(&path)).expect("changes_at with --path");
+
+        assert_eq!(out.component_id, "portable-changes");
+        assert_eq!(out.path, path);
+        assert!(out.success);
+    }
+
+    #[test]
+    fn changes_at_component_and_path_trusts_both_inputs() {
+        let (_dir, path) = init_repo_with_initial_commit();
+
+        let out = changes_at(Some("explicit-changes"), None, false, Some(&path))
+            .expect("changes_at with component and --path");
+
+        assert_eq!(out.component_id, "explicit-changes");
+        assert_eq!(out.path, path);
+        assert!(out.success);
     }
 
     #[test]

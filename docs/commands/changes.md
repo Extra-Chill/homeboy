@@ -3,7 +3,7 @@
 ## Synopsis
 
 ```sh
-homeboy changes [<component_id>] [--since <tag>] [--git-diffs]
+homeboy changes [<component_id>] [--path <path>] [--since <tag>] [--git-diffs]
 homeboy changes --json <spec> [--git-diffs]
 
 # Project mode
@@ -22,6 +22,17 @@ homeboy changes my-component # Explicit (always works)
 ```
 
 When multiple components exist or directory is unmanaged, explicit ID is required.
+
+## Worktree / Headless Usage
+
+Use `--path` to run against a specific checkout from any current directory:
+
+```sh
+homeboy changes --path /path/to/worktree
+homeboy changes my-component --path /path/to/worktree
+```
+
+With `--path` only, Homeboy derives the component ID from the checkout's portable `homeboy.json` when present, then falls back to the path basename. With both `<component_id>` and `--path`, Homeboy trusts both values and runs git operations in the supplied path.
 
 ## Description
 
@@ -47,6 +58,7 @@ Release workflow note:
   - Spec format: `{ "component_ids": ["id1", "id2"] }`
 - `--project <project_id>`: show changes for all components attached to a project
   - If you also pass positional `<component_ids...>`, Homeboy only returns changes for those components
+- `--path <path>`: run single-component changes against a specific checkout path
 - `--since <tag>`: tag name to compare against (single-component mode only)
 - `--git-diffs`: include commit-range diff content in output
 
