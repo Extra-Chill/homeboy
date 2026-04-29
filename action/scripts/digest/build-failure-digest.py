@@ -29,6 +29,7 @@ def derive_fixable_commands(
     commands_csv: str,
     autofix_commands_csv: str,
 ) -> set[str]:
+    _ = commands_csv
     if autofix_commands_csv.strip():
         out: set[str] = set()
         for raw in autofix_commands_csv.split(","):
@@ -36,13 +37,7 @@ def derive_fixable_commands(
             if token:
                 out.add(token)
         return out
-
-    defaults: set[str] = set()
-    for raw in commands_csv.split(","):
-        cmd = raw.strip().lower()
-        if cmd in {"lint", "test", "audit"}:
-            defaults.add(cmd)
-    return defaults
+    return set()
 
 
 def classify_autofixability(
@@ -51,6 +46,7 @@ def classify_autofixability(
     autofix_enabled: bool,
     autofix_attempted: bool,
     autofix_commands_csv: str,
+    audit_digest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     failed_commands = sorted(
         [str(cmd) for cmd, status in results.items() if isinstance(cmd, str) and status == "fail"]
@@ -74,10 +70,16 @@ def classify_autofixability(
         else:
             human_needed_failed.append(cmd)
 
-    if failed_commands and auto_fixable_failed and not human_needed_failed:
+    finding_fixability = []
+    if isinstance(audit_digest, dict):
+        raw_finding_fixability = audit_digest.get("finding_fixability", [])
+        if isinstance(raw_finding_fixability, list):
+            finding_fixability = raw_finding_fixability
+
+    if failed_commands and finding_fixability and autofix_enabled and not autofix_attempted:
         overall = "auto_fixable"
-    elif failed_commands and auto_fixable_failed and human_needed_failed:
-        overall = "mixed"
+    elif failed_commands and finding_fixability and (not autofix_enabled or autofix_attempted):
+        overall = "human_needed"
     elif failed_commands:
         overall = "human_needed"
     else:
@@ -92,6 +94,7 @@ def classify_autofixability(
         "auto_fixable_failed_commands": auto_fixable_failed,
         "potential_auto_fixable_failed_commands": potential_auto_fixable_failed,
         "human_needed_failed_commands": human_needed_failed,
+        "finding_fixability": finding_fixability,
         "overall": overall,
     }
 
@@ -241,6 +244,15 @@ def build_audit_digest_from_json(payload: dict[str, Any]) -> dict[str, Any]:
             "suggested_fix": str(item.get("suggested_fix") or item.get("suggestion") or ""),
         })
 
+    fixability = data.get("fixability") if isinstance(data, dict) else None
+    if not isinstance(fixability, dict) and isinstance(data.get("summary"), dict):
+        fixability = data["summary"].get("fixability")
+    finding_fixability = build_audit_finding_fixability(
+        fixability if isinstance(fixability, dict) else {},
+        top_findings,
+        data,
+    )
+
     return {
         "drift_increased": bool(baseline.get("drift_increased", False)),
         "new_findings_count": len(new_findings),
@@ -250,8 +262,42 @@ def build_audit_digest_from_json(payload: dict[str, Any]) -> dict[str, Any]:
         "parsed_outlier_items": len(outlier_items),
         "severity_counts": severity_counts,
         "top_findings": top_findings[:500],
+        "finding_fixability": finding_fixability,
         "raw_excerpt": [],
     }
+
+
+def build_audit_finding_fixability(
+    fixability: dict[str, Any],
+    findings: list[dict[str, str]],
+    data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    by_kind = fixability.get("by_kind") if isinstance(fixability, dict) else None
+    if not isinstance(by_kind, dict):
+        return []
+
+    component_id = str(data.get("component_id") or data.get("id") or "homeboy")
+    details: list[dict[str, Any]] = []
+    for kind, raw_breakdown in sorted(by_kind.items()):
+        if not isinstance(raw_breakdown, dict):
+            continue
+        automated = int(raw_breakdown.get("automated", 0) or 0)
+        if automated <= 0:
+            continue
+        kind_key = str(kind)
+        files = sorted({
+            str(finding.get("file") or "unknown")
+            for finding in findings
+            if str(finding.get("rule") or "") == kind_key and str(finding.get("file") or "")
+        })
+        details.append({
+            "type": kind_key,
+            "automated": automated,
+            "total": int(raw_breakdown.get("total", automated) or automated),
+            "files": files,
+            "command": f"homeboy refactor {component_id} --from audit --write --changed-since=<base>",
+        })
+    return details
 
 
 def resolve_failed_job_links(run_url: str) -> dict[str, str]:
@@ -411,6 +457,7 @@ def main() -> int:
         autofix_enabled,
         autofix_attempted,
         autofix_commands_csv,
+        audit_digest,
     )
 
     md_path = os.path.join(output_dir, "homeboy-failure-digest.md")

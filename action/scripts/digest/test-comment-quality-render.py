@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import importlib.util
 from pathlib import Path
 
 
@@ -13,6 +14,17 @@ RENDERER = ROOT / "scripts/digest/render-command-summary.py"
 sys.path.insert(0, str(ROOT / "scripts/digest"))
 
 from render import render_markdown  # noqa: E402
+
+BUILD_DIGEST_SPEC = importlib.util.spec_from_file_location(
+    "build_failure_digest",
+    ROOT / "scripts/digest/build-failure-digest.py",
+)
+if BUILD_DIGEST_SPEC is None or BUILD_DIGEST_SPEC.loader is None:
+    raise RuntimeError("could not load build-failure-digest.py")
+build_failure_digest = importlib.util.module_from_spec(BUILD_DIGEST_SPEC)
+BUILD_DIGEST_SPEC.loader.exec_module(build_failure_digest)
+build_audit_digest_from_json = build_failure_digest.build_audit_digest_from_json
+classify_autofixability = build_failure_digest.classify_autofixability
 
 
 def assert_equal(actual: str, expected: str, label: str) -> None:
@@ -91,7 +103,12 @@ def main() -> int:
                 for idx in range(6)
             ],
         },
-        autofixability={"overall": "human_needed", "autofix_enabled": False, "autofix_attempted": False},
+        autofixability={
+            "overall": "human_needed",
+            "autofix_enabled": False,
+            "autofix_attempted": False,
+            "failed_commands": ["audit"],
+        },
         run_url="https://github.com/Extra-Chill/homeboy/actions/runs/1",
         tooling={},
         job_links={},
@@ -104,6 +121,110 @@ def main() -> int:
     assert_not_contains(full_digest, "Top actionable findings", "failure digest duplicated top list")
     assert_not_contains(full_digest, "unknown:", "failure digest unknown severity")
     assert_not_contains(full_digest, "- Alignment score:", "failure digest primary audit alignment noise")
+    assert_contains(full_digest, "No finding-level automated fix details available in this run.", "unknown audit fixability note")
+    assert_contains(full_digest, "Automated fix: not available", "unknown audit unavailable fixability")
+    assert_not_contains(full_digest, "Failed commands with available automated fixes", "generic command-level fixability")
+
+    command_only_fixability = classify_autofixability(
+        {"audit": "fail"},
+        "audit",
+        True,
+        False,
+        "audit",
+        {"finding_fixability": []},
+    )
+    command_only_digest = render_markdown(
+        lint_digest={},
+        test_digest={},
+        audit_digest={},
+        autofixability=command_only_fixability,
+        run_url="https://github.com/Extra-Chill/homeboy/actions/runs/1",
+        tooling={},
+        job_links={},
+        results={"audit": "fail"},
+    )
+    assert_contains(command_only_digest, "Overall: **human_needed**", "command-only fixability overall")
+    assert_contains(command_only_digest, "No finding-level automated fix details available in this run.", "command-only unknown fixability note")
+    assert_not_contains(command_only_digest, "Auto-fixable failed commands", "command-only auto-fixable commands")
+    assert_not_contains(command_only_digest, "Failed commands with available automated fixes", "command-only generic fixability heading")
+
+    audit_payload_with_fixability = {
+        "success": False,
+        "data": {
+            "command": "audit",
+            "component_id": "homeboy",
+            "baseline_comparison": {"drift_increased": True, "new_items": []},
+            "summary": {"alignment_score": 0.9},
+            "findings": [
+                {
+                    "file": "docs/architecture/ci-results-contract.md",
+                    "kind": "broken_doc_reference",
+                    "description": "Broken file reference `scripts/missing.sh`",
+                    "severity": "warning",
+                }
+            ],
+            "fixability": {
+                "fixable_count": 1,
+                "automated_count": 1,
+                "manual_only_count": 0,
+                "by_kind": {
+                    "broken_doc_reference": {"total": 1, "automated": 1, "manual_only": 0}
+                },
+            },
+        },
+    }
+    audit_digest = build_audit_digest_from_json(audit_payload_with_fixability)
+    autofixability = classify_autofixability(
+        {"audit": "fail"},
+        "audit",
+        True,
+        False,
+        "",
+        audit_digest,
+    )
+    finding_fix_digest = render_markdown(
+        lint_digest={},
+        test_digest={},
+        audit_digest=audit_digest,
+        autofixability=autofixability,
+        run_url="https://github.com/Extra-Chill/homeboy/actions/runs/1",
+        tooling={},
+        job_links={},
+        results={"audit": "fail"},
+    )
+    assert_contains(finding_fix_digest, "Finding-level automated fixes:", "finding-level fixability heading")
+    assert_contains(finding_fix_digest, "Fix type: `broken_doc_reference`", "finding fix type")
+    assert_contains(finding_fix_digest, "Affected file: `docs/architecture/ci-results-contract.md`", "finding fix file")
+    assert_contains(
+        finding_fix_digest,
+        "Command: `homeboy refactor homeboy --from audit --write --changed-since=<base>`",
+        "finding fix command",
+    )
+    assert_not_contains(finding_fix_digest, "Failed commands with available automated fixes", "no generic fixability heading with concrete data")
+
+    autofix_disabled_digest = render_markdown(
+        lint_digest={},
+        test_digest={},
+        audit_digest=audit_digest,
+        autofixability=classify_autofixability(
+            {"audit": "fail"},
+            "audit",
+            False,
+            False,
+            "",
+            audit_digest,
+        ),
+        run_url="https://github.com/Extra-Chill/homeboy/actions/runs/1",
+        tooling={},
+        job_links={},
+        results={"audit": "fail"},
+    )
+    assert_contains(
+        autofix_disabled_digest,
+        "Automated fixes are **disabled for this step**; finding-level fix details are shown for review only.",
+        "disabled autofix finding-level note",
+    )
+    assert_not_contains(autofix_disabled_digest, "Commands with available fix support", "disabled generic command fixability")
 
     test_digest = render_markdown(
         lint_digest={},

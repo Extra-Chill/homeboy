@@ -25,6 +25,37 @@ def _format_new_audit_finding(finding: dict[str, Any]) -> str:
     return line
 
 
+def _append_finding_fixability(lines: list[str], autofixability: dict[str, Any]) -> None:
+    details = autofixability.get("finding_fixability", []) or []
+    if not details:
+        failed_commands = autofixability.get("failed_commands", []) or []
+        if "audit" in [str(cmd).strip().lower() for cmd in failed_commands]:
+            lines.append("- No finding-level automated fix details available in this run.")
+            lines.append("- Automated fix: not available")
+        return
+
+    lines.append("- Finding-level automated fixes:")
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        fix_type = str(detail.get("type") or "unknown")
+        command = str(detail.get("command") or "").strip()
+        files = [str(file) for file in (detail.get("files", []) or []) if str(file)]
+        lines.append("  - Automated fix available:")
+        lines.append(f"    - Fix type: `{fix_type}`")
+        if files:
+            if len(files) == 1:
+                lines.append(f"    - Affected file: `{files[0]}`")
+            else:
+                lines.append("    - Affected files:")
+                for file in files[:10]:
+                    lines.append(f"      - `{file}`")
+                if len(files) > 10:
+                    lines.append(f"      - ... and {len(files) - 10} more")
+        if command:
+            lines.append(f"    - Command: `{command}`")
+
+
 def _status_summary(results: dict[str, Any], audit_digest: dict[str, Any]) -> str:
     parts: list[str] = []
     ordered_commands = [cmd for cmd in ["lint", "test", "audit", "refactor"] if cmd in results]
@@ -271,20 +302,12 @@ def render_markdown(
         f"- Autofix attempted this run: **{'yes' if autofixability.get('autofix_attempted') else 'no'}**"
     )
 
-    fixable = autofixability.get("auto_fixable_failed_commands", []) or []
-    potential_fixable_failed = (
-        autofixability.get("potential_auto_fixable_failed_commands", []) or []
-    )
     human = autofixability.get("human_needed_failed_commands", []) or []
-    if fixable:
-        lines.append("- Auto-fixable failed commands:")
-        for cmd in fixable:
-            lines.append(f"  - `{cmd}`")
     if human:
         lines.append("- Human-needed failed commands:")
         for cmd in human:
             lines.append(f"  - `{cmd}`")
-    if not fixable and not human:
+    if not human:
         failed_commands = autofixability.get("failed_commands", []) or []
         if failed_commands:
             lines.append("- Failed commands:")
@@ -293,22 +316,13 @@ def render_markdown(
         else:
             lines.append("- No failed commands to classify.")
 
-    if potential_fixable_failed:
-        lines.append("- Failed commands with available automated fixes:")
-        for cmd in potential_fixable_failed:
-            lines.append(f"  - `{cmd}`")
+    _append_finding_fixability(lines, autofixability)
 
     if not autofixability.get("autofix_enabled"):
-        potential_candidates = autofixability.get("potential_fixable_candidates", []) or []
-        if potential_candidates:
-            lines.append(
-                "- Automated fixes are **disabled for this step**. Commands with available fix support in this run: "
-                + ", ".join(f"`{cmd}`" for cmd in potential_candidates)
-            )
+        if autofixability.get("finding_fixability"):
+            lines.append("- Automated fixes are **disabled for this step**; finding-level fix details are shown for review only.")
         else:
-            lines.append(
-                "- Automated fixes are **disabled for this step** and no fix-capable commands were detected."
-            )
+            lines.append("- Automated fixes are **disabled for this step** and no finding-level automated fix details were detected.")
     lines.append("")
 
     lines.append("### Machine-readable artifacts")
