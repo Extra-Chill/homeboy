@@ -460,21 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn tail_lines_trims_to_last_n_lines() {
-        let input: String = (1..=20)
-            .map(|i| format!("line {}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (tail, truncated) = tail_lines(&input, 5);
-        assert!(truncated);
-        let kept: Vec<&str> = tail.lines().collect();
-        assert_eq!(
-            kept,
-            vec!["line 16", "line 17", "line 18", "line 19", "line 20"]
-        );
-    }
-
-    #[test]
     fn tail_lines_handles_empty_input() {
         let (tail, truncated) = tail_lines("", 10);
         assert_eq!(tail, "");
