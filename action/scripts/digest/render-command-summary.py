@@ -293,6 +293,18 @@ def summarize_test_failure(item: dict[str, Any], idx: int) -> str:
     return " — ".join(parts)
 
 
+def is_successful_test_run(data: dict[str, Any]) -> bool:
+    status = str(data.get("status") or "").strip().lower()
+    exit_code = data.get("exit_code")
+    passed = data.get("passed")
+
+    if passed is True:
+        return exit_code in {0, "0", None}
+    if status in {"pass", "passed", "success", "succeeded"}:
+        return exit_code in {0, "0", None}
+    return False
+
+
 def markdown_lint(data: dict[str, Any], lines: list[str]) -> None:
     if data.get("summary"):
         lines.append(f"- Lint summary: **{data['summary']}**")
@@ -315,6 +327,8 @@ def markdown_test(data: dict[str, Any], lines: list[str]) -> None:
 
     if failed_count > 0:
         lines.append(f"- Failed tests: **{failed_count}**")
+    elif is_successful_test_run(data):
+        return
     else:
         lines.append("- Test command failed, but structured output reported **0 failed test cases**.")
         status = str(data.get("status") or "").strip()

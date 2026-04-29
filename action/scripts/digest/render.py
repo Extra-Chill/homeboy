@@ -67,6 +67,14 @@ def _summarize_test_failure(test: dict[str, Any], idx: int) -> str:
     return " — ".join(parts)
 
 
+def _is_successful_test_run(test_digest: dict[str, Any]) -> bool:
+    status = str(test_digest.get("status") or "").strip().lower()
+    exit_code = test_digest.get("exit_code")
+    if status in {"pass", "passed", "success", "succeeded"}:
+        return exit_code in {0, "0", None}
+    return False
+
+
 def _resolve_job_link(job_links: dict[str, str], run_url: str, *candidates: str) -> str:
     for candidate in candidates:
         if candidate in job_links:
@@ -145,6 +153,8 @@ def render_markdown(
         failed_count = int(test_digest.get("failed_tests_count", 0) or 0)
         if failed_count > 0:
             lines.append(f"- Failed tests: **{failed_count}**")
+        elif str(results.get("test", "")).strip().lower() == "pass" and _is_successful_test_run(test_digest):
+            pass
         else:
             lines.append("- Test command failed, but structured output reported **0 failed test cases**.")
             status = str(test_digest.get("status") or "").strip()

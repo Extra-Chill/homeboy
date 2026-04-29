@@ -63,6 +63,11 @@ def main() -> int:
     assert_contains(tooling_failure, "runner/tooling failure", "test failure classification")
     assert_not_contains(tooling_failure, "Failed tests: **0**", "misleading zero failed tests line")
 
+    passing_tests = render("test", "test-passing-zero-failures-input.json")
+    assert_equal(passing_tests, "", "passing zero-failure test markdown")
+    assert_not_contains(passing_tests, "Test command failed", "passing test command failure explanation")
+    assert_not_contains(passing_tests, "runner/tooling failure", "passing test failure classification")
+
     bench = render("bench", "bench-summary-input.json")
     assert_contains(bench, "Benchmark scenarios: **1**", "bench scenario count")
     assert_contains(bench, "pipeline-scale: p50 120.50, p95 141.25", "bench primary metrics")
@@ -121,6 +126,25 @@ def main() -> int:
     assert_contains(test_digest, "runner/tooling failure", "digest test failure classification")
     assert_contains(test_digest, "<details><summary>Raw test failure excerpt</summary>", "digest raw log excerpt")
     assert_not_contains(test_digest, "Failed tests: **0**", "digest misleading zero failed tests line")
+
+    passing_digest = render_markdown(
+        lint_digest={},
+        test_digest={
+            "failed_tests_count": 0,
+            "top_failed_tests": [],
+            "raw_excerpt": [],
+            "status": "passed",
+            "exit_code": 0,
+        },
+        audit_digest={},
+        autofixability={"overall": "none", "autofix_enabled": False, "autofix_attempted": False},
+        run_url="https://github.com/Extra-Chill/homeboy/actions/runs/1",
+        tooling={},
+        job_links={},
+        results={"test": "pass"},
+    )
+    assert_not_contains(passing_digest, "Test command failed", "passing digest command failure explanation")
+    assert_not_contains(passing_digest, "runner/tooling failure", "passing digest failure classification")
 
     print("comment quality rendering checks passed")
     return 0
