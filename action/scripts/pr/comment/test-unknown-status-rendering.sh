@@ -30,12 +30,6 @@ assert_not_contains() {
   printf 'PASS: %s\n' "${label}"
 }
 
-render_for_results() {
-  export RESULTS="$1"
-  build_section_body
-  printf '%s\n' "${SECTION_BODY}"
-}
-
 export GITHUB_ACTION_PATH="${ROOT}"
 export COMMANDS="audit"
 export COMP_ID="data-machine"
@@ -49,18 +43,17 @@ export DIGEST_FILE=""
 source "${ROOT}/scripts/core/lib.sh"
 source "${ROOT}/scripts/pr/comment/sections.sh"
 
-body="$(render_for_results '{not-json')"
-assert_contains "${body}" ":warning: **audit**" "malformed results render as warning"
-assert_contains "${body}" "Could not parse a pass/fail result for audit" "malformed results explain parse problem"
-assert_not_contains "${body}" ":x: **audit**" "malformed results do not render as command failure"
+body="$(RESULTS='{not-json' build_section_body; printf '%s\n' "${SECTION_BODY}")"
+assert_contains "${body}" "core PR-comment rendering currently supports the default" "single-command runs use unsupported review warning"
+assert_not_contains "${body}" ":warning: **audit**" "single-command runs do not render legacy warning block"
+assert_not_contains "${body}" "Could not parse a pass/fail result for audit" "single-command runs do not render legacy parse warning"
 
-body="$(render_for_results '{"audit":"mystery"}')"
-assert_contains "${body}" ":warning: **audit**" "unknown status renders as warning"
-assert_contains "${body}" "Could not parse a pass/fail result for audit" "unknown status explains parse problem"
-assert_not_contains "${body}" ":x: **audit**" "unknown status does not render as command failure"
+body="$(RESULTS='{"audit":"mystery"}' build_section_body; printf '%s\n' "${SECTION_BODY}")"
+assert_contains "${body}" "core PR-comment rendering currently supports the default" "unknown single-command status uses unsupported review warning"
+assert_not_contains "${body}" ":warning: **audit**" "unknown status does not render legacy warning block"
 
-body="$(render_for_results '{"audit":"fail"}')"
-assert_contains "${body}" ":x: **audit**" "explicit failure remains failure"
-assert_not_contains "${body}" "Could not parse a pass/fail result for audit" "explicit failure has no parse warning"
+body="$(RESULTS='{"audit":"fail"}' build_section_body; printf '%s\n' "${SECTION_BODY}")"
+assert_contains "${body}" "core PR-comment rendering currently supports the default" "explicit single-command failure uses unsupported review warning"
+assert_not_contains "${body}" ":x: **audit**" "explicit failure does not render legacy command failure"
 
-printf 'All unknown status rendering checks passed.\n'
+printf 'All unsupported single-command rendering checks passed.\n'

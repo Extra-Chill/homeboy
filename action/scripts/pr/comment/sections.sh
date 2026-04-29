@@ -5,58 +5,6 @@ set -euo pipefail
 source "${GITHUB_ACTION_PATH}/scripts/scope/context.sh"
 source "${GITHUB_ACTION_PATH}/scripts/pr/comment/lib.sh"
 
-append_autofix_section() {
-  if ! is_refactor_owning_section; then
-    return 0
-  fi
-
-  if [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_COMMITTED:-}" = "true" ]; then
-    local autofix_summary=":wrench: **Autofix applied**"
-    if [ -n "${AUTOFIX_FILE_COUNT:-}" ] && [ -n "${AUTOFIX_FIX_TYPES:-}" ]; then
-      autofix_summary+=" — ${AUTOFIX_FILE_COUNT} file(s) fixed via ${AUTOFIX_FIX_TYPES}"
-    elif [ -n "${AUTOFIX_FILE_COUNT:-}" ]; then
-      autofix_summary+=" — ${AUTOFIX_FILE_COUNT} file(s) fixed"
-    fi
-    SECTION_BODY+="> ${autofix_summary}"$'\n\n'
-  elif [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_ATTEMPTED:-false}" = "true" ] && [ "${AUTOFIX_STATUS:-}" = "push-failed" ]; then
-    SECTION_BODY+="> :warning: Autofix generated changes but could not push them back to **${AUTOFIX_TARGET_REPO:-${REPO}}:${AUTOFIX_TARGET_BRANCH:-unknown}**"$'\n\n'
-  elif [ "${AUTOFIX_ENABLED}" = "true" ] && [ "${AUTOFIX_STATUS:-}" = "skipped-head-bot-author" ]; then
-    SECTION_BODY+="> :information_source: Autofix skipped — PR head is already a **homeboy-ci[bot]** commit, so PR autofix only runs after human commits"$'\n\n'
-  fi
-}
-
-append_binary_source_section() {
-  if [ "${BINARY_SOURCE}" = "fallback" ]; then
-    SECTION_BODY+="> :warning: **Source build failed** — results from fallback release binary"$'\n\n'
-  fi
-}
-
-append_digest_section() {
-  HAS_DIGEST="false"
-  if [ -n "${DIGEST_FILE}" ] && [ -f "${DIGEST_FILE}" ]; then
-    HAS_DIGEST="true"
-    SECTION_BODY+="$(cat "${DIGEST_FILE}")"$'\n\n'
-  fi
-}
-
-append_scope_section() {
-  if is_scoped; then
-    SECTION_BODY+="> :zap: Scope: **changed files only**"$'\n\n'
-  elif [ "$(scope_context)" = "pr" ] && [ "${SCOPE_MODE:-full}" = "full" ]; then
-    SECTION_BODY+="> :information_source: Scope resolved to **full**"$'\n\n'
-  fi
-}
-
-append_test_scope_section() {
-  if [[ ",${COMMANDS}," == *",test,"* ]] || [[ "${COMMANDS}" == "test" ]]; then
-    if [ "$(scope_context)" = "pr" ] && [ "${SCOPE_MODE:-full}" = "full" ]; then
-      SECTION_BODY+="> :information_source: PR test scope: **full**"$'\n\n'
-    elif [ "${TEST_SCOPE_EFFECTIVE:-}" = "changed" ]; then
-      SECTION_BODY+="> :zap: PR test scope: **changed** (files affected by this PR)"$'\n\n'
-    fi
-  fi
-}
-
 commands_use_review_report() {
   local normalized
   normalized="$(canonicalize_commands "${COMMANDS}")"
@@ -64,27 +12,65 @@ commands_use_review_report() {
   [ "${normalized}" = "audit,lint,test" ] && [ -z "${EXTRA_ARGS:-}" ]
 }
 
-append_review_report_section() {
-  if ! commands_use_review_report; then
-    return 1
+add_review_banner() {
+  local key="$1"
+  local value="$2"
+
+  [ -n "${value}" ] || return 0
+  REVIEW_CMD+=(--banner "${key}=${value}")
+}
+
+append_review_banner_args() {
+  if [ "${AUTOFIX_ENABLED:-false}" = "true" ] && [ "${AUTOFIX_COMMITTED:-}" = "true" ]; then
+    local autofix_summary="applied"
+    if [ -n "${AUTOFIX_FILE_COUNT:-}" ] && [ -n "${AUTOFIX_FIX_TYPES:-}" ]; then
+      autofix_summary+=" — ${AUTOFIX_FILE_COUNT} file(s) fixed via ${AUTOFIX_FIX_TYPES}"
+    elif [ -n "${AUTOFIX_FILE_COUNT:-}" ]; then
+      autofix_summary+=" — ${AUTOFIX_FILE_COUNT} file(s) fixed"
+    fi
+    add_review_banner "autofix" "${autofix_summary}"
+  elif [ "${AUTOFIX_ENABLED:-false}" = "true" ] && [ "${AUTOFIX_ATTEMPTED:-false}" = "true" ] && [ "${AUTOFIX_STATUS:-}" = "push-failed" ]; then
+    add_review_banner "autofix" "generated changes but could not push them back to ${AUTOFIX_TARGET_REPO:-${REPO}}:${AUTOFIX_TARGET_BRANCH:-unknown}"
+  elif [ "${AUTOFIX_ENABLED:-false}" = "true" ] && [ "${AUTOFIX_STATUS:-}" = "skipped-head-bot-author" ]; then
+    add_review_banner "autofix" "skipped — PR head is already a homeboy-ci[bot] commit, so PR autofix only runs after human commits"
   fi
 
-  local review_cmd review_md review_exit
-  review_cmd="$(build_review_report_command "${COMP_ID}" "${WORKSPACE}")"
+  if [ "${BINARY_SOURCE:-source}" = "fallback" ]; then
+    add_review_banner "binary-source" "fallback release binary (source build failed)"
+  fi
+}
+
+append_review_report_section() {
+  if ! commands_use_review_report; then
+    SECTION_BODY+="> :warning: Homeboy core PR-comment rendering currently supports the default \`audit,lint,test\` review report only. Check the action logs for \`${COMMANDS}\`."$'\n\n'
+    return 0
+  fi
+
+  local review_md review_exit scope_flags
+  local -a REVIEW_CMD
+  REVIEW_CMD=(homeboy review "${COMP_ID}" --path "${WORKSPACE}" --report=pr-comment)
+
+  scope_flags="$(scope_flags_for "review")"
+  if [ -n "${scope_flags}" ]; then
+    # shellcheck disable=SC2206
+    REVIEW_CMD+=(${scope_flags})
+  fi
+
+  append_review_banner_args
 
   set +e
-  review_md="$(eval "${review_cmd}" 2>/dev/null)"
+  review_md="$("${REVIEW_CMD[@]}" 2>/dev/null)"
   review_exit=$?
   set -e
 
   if [ -z "${review_md}" ]; then
-    echo "::warning::homeboy review did not render a PR-comment report; falling back to command summaries."
-    return 1
+    SECTION_BODY+="> :warning: \`homeboy review --report=pr-comment\` produced no output. Check the action logs for details."$'\n\n'
+    return 0
   fi
 
   if [[ "${review_md}" != *"finding(s) across"* ]]; then
-    echo "::warning::homeboy review output was not a PR-comment report; falling back to command summaries."
-    return 1
+    SECTION_BODY+="> :warning: \`homeboy review --report=pr-comment\` returned an unexpected report shape. Check the action logs for details."$'\n\n'
+    return 0
   fi
 
   SECTION_BODY+="${review_md}"$'\n\n'
@@ -99,49 +85,9 @@ append_review_report_section() {
   return 0
 }
 
-append_command_sections() {
-  IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS}"
-
-  for CMD in "${CMD_ARRAY[@]}"; do
-    CMD=$(echo "${CMD}" | xargs)
-    SUMMARY_JSON="$(summary_json_for_command "${CMD}")"
-    STATUS="$(command_status "${CMD}")"
-    ICON="$(command_icon "${STATUS}")"
-    SCOPE_NOTE="$(scope_note_for "${CMD}")"
-
-    SECTION_BODY+=":${ICON}: **${CMD}**${SCOPE_NOTE}"$'\n'
-
-    if digest_covers_command "${CMD}"; then
-      :
-    elif [ -n "${SUMMARY_JSON}" ] && [ -f "${SUMMARY_JSON}" ]; then
-      SUMMARY_MD="$(render_structured_summary "${CMD}" "${SUMMARY_JSON}")"
-      if [ -n "${SUMMARY_MD}" ]; then
-        SECTION_BODY+="${SUMMARY_MD}"$'\n'
-      fi
-    elif [ "${STATUS}" = "fail" ] && [ "${HAS_DIGEST}" != "true" ]; then
-      SECTION_BODY+="- No structured ${CMD} summary artifact was generated."$'\n'
-    fi
-
-    STATUS_NOTE="$(command_status_note "${CMD}" "${STATUS}")"
-    if [ -n "${STATUS_NOTE}" ]; then
-      SECTION_BODY+="${STATUS_NOTE}"$'\n'
-    fi
-
-    SECTION_BODY+=$'\n'
-  done
-}
-
 build_section_body() {
   SECTION_BODY="### ${SECTION_TITLE}"$'\n\n'
-  append_autofix_section
-  append_binary_source_section
-  if append_review_report_section; then
-    return 0
-  fi
-  append_digest_section
-  append_scope_section
-  append_test_scope_section
-  append_command_sections
+  append_review_report_section
 }
 
 # Build the shared `tooling` section body written at the bottom of every

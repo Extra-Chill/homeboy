@@ -2,12 +2,6 @@
 
 set -euo pipefail
 
-render_structured_summary() {
-  local command="$1"
-  local json_file="$2"
-  python3 "${GITHUB_ACTION_PATH}/scripts/digest/render-command-summary.py" "${command}" "${json_file}" markdown 2>/dev/null || true
-}
-
 derive_comment_key() {
   if [ -n "${COMMENT_KEY_INPUT:-}" ]; then
     printf '%s\n' "${COMMENT_KEY_INPUT}"
@@ -90,50 +84,6 @@ summary_json_for_command() {
 command_status() {
   local command="$1"
   echo "${RESULTS}" | jq -r --arg cmd "${command}" 'if .[$cmd] == "pass" or .[$cmd] == "fail" then .[$cmd] else "unknown" end' 2>/dev/null || echo "unknown"
-}
-
-command_icon() {
-  local status="$1"
-  case "${status}" in
-    pass)
-      printf '%s\n' "white_check_mark"
-      ;;
-    fail)
-      printf '%s\n' "x"
-      ;;
-    *)
-      printf '%s\n' "warning"
-      ;;
-  esac
-}
-
-command_status_note() {
-  local command="$1"
-  local status="$2"
-
-  if [ "${status}" = "unknown" ]; then
-    printf '%s\n' "- Could not parse a pass/fail result for ${command}; check the action logs or result artifact."
-  fi
-}
-
-digest_covers_command() {
-  local command="$1"
-
-  if [ "${HAS_DIGEST:-false}" != "true" ]; then
-    return 1
-  fi
-
-  case "${command}" in
-    audit|lint|test)
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-
-  local status
-  status="$(command_status "${command}")"
-  [ "${status}" = "fail" ]
 }
 
 is_refactor_owning_section() {

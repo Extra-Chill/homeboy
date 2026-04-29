@@ -14,11 +14,12 @@
 #   - idempotency (identical body → noop, no PATCH)
 #   - header preservation across merges
 #
-# This script only handles presentation (body rendering via sections.sh) and
-# two primitive calls: one for this job's section, one for the shared
-# "tooling" section (re-rendered every run so versions stay fresh).
+# This script delegates this job's section body to
+# `homeboy review --report=pr-comment`, then makes two primitive calls: one for
+# this job's section, one for the shared "tooling" section (re-rendered every
+# run so versions stay fresh).
 #
-# Migration tracked in: Extra-Chill/homeboy-action#141.
+# Renderer migration tracked in: Extra-Chill/homeboy-action#144.
 
 set -euo pipefail
 
