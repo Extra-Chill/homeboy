@@ -6,7 +6,7 @@ Homeboy ships four pillars from one binary:
 
 - **Code Factory** — `audit` / `lint` / `test` / `refactor` / `release` with the autofix loop.
 - **Fleet & Ops** — `deploy`, `ssh`, `file`, `db`, `logs`, `transfer`, `server`, `project`, `component`, `fleet`.
-- **Dev Rig** — `rig`, `rig-spec`, and `stack` for reproducible, code-defined local dev environments and combined-fixes branches.
+- **Dev Rig** — `rig` and `stack` for reproducible, code-defined local dev environments and combined-fixes branches.
 - **Bench** — performance benchmarks with baseline ratchet, sibling of `lint` / `test` / `build`.
 
 ## How It Works
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: rust
           commands: audit,lint,test
@@ -90,7 +90,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: rust
           component: my-project
@@ -136,8 +136,9 @@ Code-defined, reproducible local dev environments. A rig is a JSON spec at `~/.c
 - **Service supervision** — `http-static` and `command` service kinds run detached, while `external` services let rigs adopt and stop processes they did not spawn.
 - **Pipeline steps** — `service`, `command`, `symlink`, `shared-path`, `check`, `git`, `build`, and `patch`. Typed primitives reuse Homeboy's existing build/git plumbing instead of shelling out blindly.
 - **Git ops** — `status`, `pull`, `push`, `fetch`, `checkout`, `current-branch`, `rebase`, and `cherry-pick`.
-- **Stack specs** — `stack` materializes combined-fixes branches from a base ref plus a declared PR list, with status/sync helpers for dropping merged PRs.
-- **Verbs** — `rig up` materializes the env, `rig check` reports health without fail-fast, `rig down` tears it down, `rig status` reports running services and last run timestamps.
+- **Stack specs** — `stack` materializes combined-fixes branches from a base ref plus a declared PR list, with `status`, `diff`, `rebase`, `sync`, and `push` helpers for keeping the branch current.
+- **Package lifecycle** — `rig install` and `rig update` install git-backed rig packages, including package subpaths, so shared rigs can live in a central repo.
+- **Verbs** — `rig up` materializes the env, `rig check` reports health without fail-fast, `rig down` tears it down, `rig sync` refreshes declared stacks, and `rig status` reports running services and last run timestamps.
 - **Variable expansion** — `${components.<id>.path}`, `${env.<NAME>}`, and `~` work across `cwd`, `command`, `link`, `target`, and check fields.
 
 The use case: cross-repo setups that today live as wiki runbooks (Studio + Playground combined-fixes, WordPress core + Gutenberg dev, sandbox + tunnel, etc).
@@ -200,9 +201,12 @@ Deploy components to servers, manage SSH connections, run remote commands, tail 
 | `changes` | Show commits and diffs since last version tag. |
 | `build` | Build a component using its configured build command. |
 | `validate` | Run extension parse/compile validation without a full test suite. |
+| `deps` | Manage component dependency updates. |
 | `git` | Component-aware git operations. |
 | `issues` | Reconcile audit findings against an issue tracker. |
+| `report` | Render structured Homeboy output artifacts. |
 | `status` | Repo state overview: uncommitted, needs-bump, ready, docs-only. |
+| `triage` | Read-only attention report across components, projects, fleets, and rigs. |
 
 ### Fleet & Ops
 
@@ -224,8 +228,9 @@ Deploy components to servers, manage SSH connections, run remote commands, tail 
 | Command | What it does |
 |---------|-------------|
 | `rig` | Bring up / tear down / health-check reproducible local dev environments. |
-| `rig-spec` | Inspect and validate the JSON spec format used by `rig`. |
 | `stack` | Manage combined-fixes branches from base refs plus cherry-picked PRs. |
+
+Rig specs are documented as schema/reference topics under `homeboy docs`; they are not a top-level CLI command.
 
 ### Bench
 
@@ -237,16 +242,16 @@ Deploy components to servers, manage SSH connections, run remote commands, tail 
 
 | Command | What it does |
 |---------|-------------|
-| `init` | Deprecated alias for `status --full`. |
 | `auth` | Authenticate with a project's API; credentials stored in OS keychain. |
 | `api` | Direct authenticated calls against a project's API. |
-| `audit-rules` | Inspect and manage audit rules and confidence gating. |
-| `extension` | Install, list, and update extensions. |
-| `list` | List registered components, projects, servers, fleets. |
 | `config` | Read and write Homeboy configuration. |
+| `daemon` | Run the local-only HTTP API daemon. |
+| `docs` | Browse embedded documentation. All docs ship in the binary. |
+| `extension` | Install, list, and update extensions. |
+| `list` | Alias for top-level help. |
+| `self` | Inspect the active Homeboy binary and install signals. |
 | `undo` | Roll back the last Homeboy write operation when an undo snapshot exists. |
 | `upgrade` | Self-upgrade the homeboy binary. |
-| `docs` | Browse embedded documentation. All docs ship in the binary. |
 
 Extensions add platform-specific commands at runtime (e.g., `homeboy wp` for WordPress, `homeboy cargo` for Rust).
 

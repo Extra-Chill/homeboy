@@ -170,7 +170,7 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           source: '.'
           extension: rust
@@ -191,7 +191,7 @@ jobs:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           source: '.'
           extension: rust
@@ -216,7 +216,7 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v1
+      - uses: Extra-Chill/homeboy-action@v2
         with:
           source: '.'
           extension: rust
