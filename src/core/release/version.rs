@@ -229,7 +229,7 @@ pub(crate) fn validate_and_finalize_changelog(
                     format!("Changelog file not found: {}", changelog_path.display()),
                     None,
                     Some(vec![format!(
-                        "Create a new changelog:\n  homeboy changelog init {} --configure",
+                        "Configure the component's changelog target, then re-run release:\n  homeboy component set {} --changelog-target \"CHANGELOG.md\"",
                         component.id
                     )]),
                 ));

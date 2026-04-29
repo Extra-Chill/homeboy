@@ -46,14 +46,14 @@ pub fn resolve_changelog_path(component: &Component) -> Result<PathBuf> {
     let target = validation::require_with_hints(
         component.changelog_target.as_ref(),
         "component.changelog_target",
-        "No changelog configured for this component. To add one, run:",
+        "No changelog configured for this component. Configure the component's changelog_target:",
         vec![
             format!(
-                "Create new changelog:\n  homeboy changelog init {} --configure",
+                "Use the conventional root changelog:\n  homeboy component set {} --changelog-target \"CHANGELOG.md\"",
                 component.id
             ),
             format!(
-                "Use existing file:\n  homeboy component set {} --changelog-target \"CHANGELOG.md\"",
+                "Use a docs changelog:\n  homeboy component set {} --changelog-target \"docs/CHANGELOG.md\"",
                 component.id
             ),
         ],

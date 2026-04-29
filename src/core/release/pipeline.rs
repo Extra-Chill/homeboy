@@ -424,8 +424,8 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     // If `changelog_target` is configured but the file doesn't exist on disk,
     // synthesize a minimal changelog so downstream stages have something to
     // read and finalize. Without this, three stages below all fail with
-    // "File not found" for the same root cause and none of their hints
-    // mention `homeboy changelog init`. See #1172.
+    // "File not found" for the same root cause instead of teaching the
+    // component-owned `changelog_target` setup path. See #1172.
     //
     // Skipped in dry-run to avoid mutating the working tree during a preview.
     if !options.dry_run {

@@ -33,26 +33,6 @@ Options:
 
 This prints raw markdown to stdout.
 
-### `init`
-
-```sh
-homeboy changelog init <component_id>
-homeboy changelog init <component_id> --path "docs/CHANGELOG.md"
-homeboy changelog init <component_id> --configure
-```
-
-Creates a new changelog file with the Keep a Changelog format (`## [X.Y.Z] - YYYY-MM-DD`).
-
-Options:
-
-- `--path <path>`: Custom path for changelog file (relative to component). Default: `CHANGELOG.md`
-- `--configure`: Also update component config to add `changelog_target`
-
-Requirements:
-
-- Component must have `version_targets` configured (to determine initial version)
-- Errors if changelog file already exists at target path
-
 ## Prerequisites
 
 Configure the changelog path:
@@ -62,6 +42,8 @@ homeboy component set <id> --changelog-target "CHANGELOG.md"
 ```
 
 This is required for `version bump` and `release`.
+
+Release can bootstrap a missing configured changelog target on the first release. Changelog setup is owned by component configuration; there is no manual changelog initialization command.
 
 ## Changelog Resolution
 
@@ -89,7 +71,7 @@ Notes:
 
 `homeboy changelog` returns a tagged union:
 
-- `command`: `show` (default) | `init`
+- `command`: `show` (default)
 
 ### JSON output (default / show)
 
@@ -103,24 +85,9 @@ This section applies only when JSON output is used.
 }
 ```
 
-### JSON output (init)
-
-```json
-{
-  "command": "init",
-  "component_id": "<component_id>",
-  "changelog_path": "<absolute/path/to/CHANGELOG.md>",
-  "initial_version": "0.3.2",
-  "next_section_label": "Unreleased",
-  "created": true,
-  "configured": false
-}
-```
-
 ## Errors
 
 - `show`: errors if embedded docs do not contain `changelog`, or if the component's changelog path cannot be resolved (when a component ID is provided)
-- `init`: errors if changelog already exists, if component not found, or if no version targets configured
 
 ## Related
 
