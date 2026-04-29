@@ -18,6 +18,9 @@
  *   STAGE_FATAL:<stage>:<msg>    - uncatchable fatal (from shutdown handler)
  *   NOTICE:<msg>                 - PHP warning/notice that escaped silencing
  *   PLUGIN_DETECTED <basename>   - loaded plugin entry file
+ *   PLUGIN_LOAD_CONTEXT <...>    - load stage/hook/installing/activation context
+ *   PLUGIN_ACTIVATE_BEGIN <...>  - post-install activation hook dispatch begins
+ *   PLUGIN_ACTIVATE_OK <...>     - post-install activation hook dispatch ended
  *   THEME_DETECTED               - loaded theme (style.css + functions.php)
  *   NO_TEST_FILES                - discovery found no candidates
  *   RUNNING <n> TEST FILES       - starting PHPUnit
@@ -38,6 +41,12 @@
  * The bash runner's job: if playground_exit != 0 AND no STAGE_FAIL/FATAL/
  * SOME TESTS FAILED line exists, surface the raw stdout/stderr — something
  * crashed before we could even write to the result file.
+ *
+ * Plugin lifecycle contract: plugin files are loaded during WordPress bootstrap
+ * with activation disabled, while wp_installing() may still be true and test DB
+ * tables may not be ready. Runtime callbacks must guard install-time table
+ * access. Activation hooks are dispatched later by the runner after the
+ * wp-phpunit install stage has created the test tables.
  */
 
 // Report everything. Warnings/notices inside WP bootstrap have historically

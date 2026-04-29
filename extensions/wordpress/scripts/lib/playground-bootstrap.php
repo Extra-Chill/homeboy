@@ -66,6 +66,22 @@ function pg_log($msg) {
 }
 
 /**
+ * Return compact bootstrap context for diagnostics emitted from inside WP hooks.
+ */
+function pg_diagnostic_context(): string {
+    global $current_stage;
+
+    $hook = function_exists('current_filter') ? current_filter() : null;
+    if (!is_string($hook) || $hook === '') {
+        $hook = 'none';
+    }
+
+    $installing = function_exists('wp_installing') && wp_installing() ? 'true' : 'false';
+
+    return 'stage=' . ($current_stage ?: 'unknown') . ' hook=' . $hook . ' wp_installing=' . $installing;
+}
+
+/**
  * Module-scope stage timing storage.
  *
  * Stores `hrtime(true)` start times in `_starts_ns` keyed by stage name,
@@ -168,7 +184,7 @@ function pg_install_diagnostics_handlers() {
             E_USER_DEPRECATED => 'USER_DEPRECATED',
             E_STRICT => 'STRICT',
         ][$severity] ?? "E_$severity";
-        pg_log("NOTICE:$label: $message at $file:$line");
+        pg_log("NOTICE:$label: $message at $file:$line context=" . pg_diagnostic_context());
         return false;
     });
 
@@ -538,6 +554,11 @@ function pg_run_load_component_stage(array $cfg) {
                 }
                 if (strpos(file_get_contents($mf), 'Plugin Name:') !== false) {
                     pg_log("PLUGIN_DETECTED " . basename($mf));
+                    pg_log(
+                        'PLUGIN_LOAD_CONTEXT ' . basename($mf)
+                        . ' activate=' . ((($cfg['activate'] ?? true) !== false) ? 'true' : 'false')
+                        . ' ' . pg_diagnostic_context()
+                    );
                     require_once $mf;
                     if (($cfg['activate'] ?? true) !== false) {
                         pg_activate_plugin_file($mf);
@@ -574,9 +595,12 @@ function pg_activate_plugin_file(string $plugin_file): void {
 
     $plugin_basename = plugin_basename($plugin_file);
     pg_log("PLUGIN_ACTIVATE $plugin_basename");
+    pg_log("PLUGIN_ACTIVATE_BEGIN $plugin_basename " . pg_diagnostic_context());
 
     do_action("activate_$plugin_basename", false);
     do_action('activated_plugin', $plugin_basename, false);
+
+    pg_log("PLUGIN_ACTIVATE_OK $plugin_basename " . pg_diagnostic_context());
 }
 
 /**

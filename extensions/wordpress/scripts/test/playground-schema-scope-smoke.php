@@ -8,6 +8,8 @@ $current_stage = 'preboot';
 $assertions = 0;
 $actions = array();
 $options = array();
+$current_hook = null;
+$wp_installing = true;
 
 function assert_true_smoke( $condition, $message ) {
     global $assertions;
@@ -23,10 +25,21 @@ function add_action( $hook, $callback ) {
 }
 
 function do_action( $hook, ...$args ) {
-    global $actions;
+    global $actions, $current_hook;
+    $previous_hook = $current_hook;
+    $current_hook = $hook;
     foreach ( $actions[ $hook ] ?? array() as $callback ) {
         call_user_func_array( $callback, $args );
     }
+    $current_hook = $previous_hook;
+}
+
+function current_filter() {
+    return $GLOBALS['current_hook'];
+}
+
+function wp_installing() {
+    return $GLOBALS['wp_installing'];
 }
 
 function plugin_basename( $file ) {
@@ -57,7 +70,34 @@ $wpdb = new Smoke_WPDB();
 require_once dirname( __DIR__ ) . '/lib/playground-bootstrap.php';
 
 $fixture_path = dirname( __DIR__, 2 ) . '/tests/fixtures/playground-schema-scope';
+pg_run_load_component_stage( array( 'plugin_path' => $fixture_path, 'activate' => false ) );
+
+$install_load_log = file_get_contents( $result_file );
+assert_true_smoke(
+    strpos( $install_load_log, 'PLUGIN_LOAD_CONTEXT playground-schema-scope.php activate=false stage=load_component hook=none wp_installing=true' ) !== false,
+    'Install-time plugin load context was not logged.'
+);
+assert_true_smoke(
+    strpos( $install_load_log, 'PLUGIN_ACTIVATE_BEGIN' ) === false,
+    'Activation diagnostics should not be logged when activation is disabled during install-time load.'
+);
+
+$GLOBALS['wp_installing'] = false;
 pg_run_load_component_stage( array( 'plugin_path' => $fixture_path ) );
+
+$activation_log = file_get_contents( $result_file );
+assert_true_smoke(
+    strpos( $activation_log, 'PLUGIN_LOAD_CONTEXT playground-schema-scope.php activate=true stage=load_component hook=none wp_installing=false' ) !== false,
+    'Post-install plugin load context was not logged.'
+);
+assert_true_smoke(
+    strpos( $activation_log, 'PLUGIN_ACTIVATE_BEGIN playground-schema-scope/playground-schema-scope.php stage=load_component hook=none wp_installing=false' ) !== false,
+    'Post-install activation begin context was not logged.'
+);
+assert_true_smoke(
+    strpos( $activation_log, 'PLUGIN_ACTIVATE_OK playground-schema-scope/playground-schema-scope.php stage=load_component hook=none wp_installing=false' ) !== false,
+    'Post-install activation completion context was not logged.'
+);
 
 assert_true_smoke(
     isset( $GLOBALS['options']['homeboy_playground_schema_scope_activated'] ),
