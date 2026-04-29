@@ -16,8 +16,6 @@ if [ -z "$OUTPUT_FILE" ] || [ ! -f "$OUTPUT_FILE" ]; then
     exit 0
 fi
 
-OUTPUT=$(cat "$OUTPUT_FILE")
-
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
 if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; then
     # shellcheck source=/dev/null
@@ -25,9 +23,9 @@ if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; t
 fi
 
 # Aggregate all "test result:" lines
-TOTAL_PASSED=$( { echo "$OUTPUT" | grep -Eo '[0-9]+ passed' || true; } | awk '{s+=$1} END {print s+0}' )
-TOTAL_FAILED=$( { echo "$OUTPUT" | grep -Eo '[0-9]+ failed' || true; } | awk '{s+=$1} END {print s+0}' )
-TOTAL_IGNORED=$( { echo "$OUTPUT" | grep -Eo '[0-9]+ ignored' || true; } | awk '{s+=$1} END {print s+0}' )
+TOTAL_PASSED=$(awk '{ for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/ && $(i + 1) ~ /^passed;?$/) s += $i } END { print s + 0 }' "$OUTPUT_FILE")
+TOTAL_FAILED=$(awk '{ for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/ && $(i + 1) ~ /^failed;?$/) s += $i } END { print s + 0 }' "$OUTPUT_FILE")
+TOTAL_IGNORED=$(awk '{ for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/ && $(i + 1) ~ /^ignored;?$/) s += $i } END { print s + 0 }' "$OUTPUT_FILE")
 
 TOTAL=$((TOTAL_PASSED + TOTAL_FAILED + TOTAL_IGNORED))
 
