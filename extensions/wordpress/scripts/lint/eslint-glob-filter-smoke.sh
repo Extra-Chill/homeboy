@@ -63,7 +63,7 @@ HOMEBOY_LINT_GLOB="{${component_dir}/inc/Thing.php,${component_dir}/assets/app.j
 ESLINT_LOG="$eslint_log" \
     bash "${EXTENSION_PATH}/scripts/lint/eslint-runner.sh" > "${TMPDIR}/mixed.out"
 
-assert_contains "${TMPDIR}/mixed.out" "Linting 1 JS files matching"
+assert_contains "${TMPDIR}/mixed.out" "Linting 1 JS/TS files matching"
 assert_contains "$eslint_log" "${component_dir}/assets/app.js"
 assert_not_contains "$eslint_log" "${component_dir}/inc/Thing.php"
 
