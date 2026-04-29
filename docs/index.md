@@ -58,10 +58,11 @@ Guides for contributing to Homeboy:
 
 ## Documentation Management
 
-Homeboy provides tooling for AI-assisted documentation generation and maintenance:
+Homeboy provides embedded docs and AI-assisted documentation mapping:
 
 - `homeboy docs <topic>` - Display embedded documentation topics
 - `homeboy docs map <component>` - Generate machine-optimized codebase map for AI context
+- `homeboy docs list` - List embedded documentation topics
 - `homeboy docs documentation/index` - Documentation philosophy and principles
 - `homeboy docs documentation/alignment` - Instructions for maintaining existing docs
 - `homeboy docs documentation/generation` - Instructions for generating new docs

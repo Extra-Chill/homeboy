@@ -13,6 +13,7 @@ homeboy docs map [OPTIONS] <component-id>
 This command renders embedded documentation topics and provides a codebase-map helper for AI-assisted documentation work.
 
 **Topic display** renders documentation from:
+
 1. Embedded core docs in the CLI binary
 2. Installed extension docs under `<config dir>/homeboy/extensions/<extension_id>/docs/`
 
@@ -49,6 +50,7 @@ homeboy docs map my-plugin --source-dirs src,lib
 ```
 
 **Arguments:**
+
 - `<component-id>`: Component to analyze (required)
 
 **Options:**
@@ -66,11 +68,11 @@ homeboy docs map my-plugin --source-dirs src,lib
 
 **Auto-detection:** Without `--source-dirs`, the map command looks for conventional directories (`src`, `lib`, `inc`, `app`, `components`, `extensions`, `crates`). Falls back to extension-based file detection if none found.
 
-**Markdown output (--write):** Generates module pages, class hierarchy, hooks summary. Large modules (>30 classes) are split into sub-pages by class name prefix.
+**Markdown output (`--write`):** Generates module pages, class hierarchy, and hooks summary. Large modules (>30 classes) are split into sub-pages by class name prefix.
 
 ## Topic Display
 
-### Default (render topic)
+### Default Topic Rendering
 
 `homeboy docs <topic>` prints the resolved markdown content to stdout.
 
@@ -109,6 +111,8 @@ If a component does not exist for `map`, the command fails with a component not 
 
 ## Related
 
+- [audit](audit.md) — code-level convention auditing, including documentation-reference findings when enabled by the audit implementation
+- [commands index](commands-index.md)
 - [audit](audit.md) — code-level convention auditing, including documentation-reference findings when enabled by the audit implementation
 - [changelog](changelog.md)
 - [JSON output contract](../architecture/output-system.md)

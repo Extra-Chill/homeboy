@@ -43,10 +43,6 @@ For each stale reference:
 - Preserve historical changelog entries unless they are presented as current workflow
 
 ### 4. Verify Code Examples
-For tasks with `status: "needs_verification"`:
-- Read the referenced code
-- Verify the example matches current implementation
-- Update if the API has changed
 
 ### 5. Verify Changes
 ```sh

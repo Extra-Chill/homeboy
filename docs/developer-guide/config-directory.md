@@ -294,7 +294,7 @@ If configuration file is invalid:
 
 ## Related
 
-- [Init command](../commands/init.md) - Deprecated alias for the full status report
+- [Status command](../commands/status.md) - Inspect current Homeboy context and component state
 - [Config command](../commands/config.md) - Manage global configuration
 - [Project command](../commands/project.md) - Manage project configurations
 - [Server command](../commands/server.md) - Manage server configurations
