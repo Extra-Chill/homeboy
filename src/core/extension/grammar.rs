@@ -26,6 +26,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use crate::engine::local_files;
 use crate::error::{Error, Result};
@@ -702,9 +703,9 @@ pub fn extract(content: &str, grammar: &Grammar) -> Vec<Symbol> {
     let mut symbols = Vec::new();
 
     for (concept_name, pattern) in &grammar.patterns {
-        let re = match Regex::new(&pattern.regex) {
-            Ok(r) => r,
-            Err(_) => continue, // Skip invalid patterns
+        let re = match cached_regex(&pattern.regex) {
+            Some(r) => r,
+            None => continue, // Skip invalid patterns
         };
 
         for ctx_line in &lines {
@@ -764,6 +765,41 @@ pub fn extract(content: &str, grammar: &Grammar) -> Vec<Symbol> {
     // Sort by line number for stable output
     symbols.sort_by_key(|s| s.line);
     symbols
+}
+
+static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<Regex>>>> = OnceLock::new();
+
+fn cached_regex(pattern: &str) -> Option<Regex> {
+    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(cached) = cache
+        .lock()
+        .expect("regex cache lock")
+        .get(pattern)
+        .cloned()
+    {
+        return cached;
+    }
+
+    let compiled = Regex::new(pattern).ok();
+    let mut guard = cache.lock().expect("regex cache lock");
+    guard
+        .entry(pattern.to_string())
+        .or_insert_with(|| compiled.clone())
+        .clone()
+}
+
+#[cfg(test)]
+fn regex_cache_has_for_tests(pattern: &str) -> bool {
+    REGEX_CACHE
+        .get()
+        .map(|cache| {
+            cache
+                .lock()
+                .expect("regex cache lock")
+                .contains_key(pattern)
+        })
+        .unwrap_or(false)
 }
 
 /// Extract symbols of a specific concept only.
@@ -1184,6 +1220,19 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], "std::path::Path");
         assert_eq!(paths[1], "crate::error::Result");
+    }
+
+    #[test]
+    fn extract_caches_compiled_regex_patterns() {
+        let content = "pub fn cached_regex_probe() {}\n";
+        let grammar = rust_grammar();
+        let function_pattern = grammar.patterns.get("function").unwrap().regex.clone();
+
+        let first = extract(content, &grammar);
+        let second = extract(content, &grammar);
+
+        assert_eq!(first.len(), second.len());
+        assert!(regex_cache_has_for_tests(&function_pattern));
     }
 
     #[test]
