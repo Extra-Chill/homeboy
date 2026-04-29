@@ -279,7 +279,7 @@ fn run_comparison_workflow(
     let exit_code = if args.changed_since.is_some() {
         if !result.findings.is_empty() {
             eprintln!(
-                "[audit] {} finding(s) in changed files — no baseline to compare against, treating as pre-existing",
+                "[audit] No baseline found for changed-since audit; showing {} contextual finding(s) in touched scope without blocking",
                 result.findings.len()
             );
         }
@@ -316,8 +316,27 @@ fn build_comparison_output(
 ) -> crate::Result<AuditRunWorkflowResult> {
     let comparison = baseline::compare(&result, &existing_baseline);
     let exit_code = if comparison.drift_increased { 1 } else { 0 };
+    let changed_since_summary = args
+        .changed_since
+        .as_ref()
+        .map(|_| report::build_changed_since_summary(&result, &comparison));
 
-    if comparison.drift_increased {
+    if let Some(summary) = changed_since_summary {
+        if summary.introduced_findings > 0 {
+            eprintln!(
+                "[audit] DRIFT INCREASED: {} introduced finding(s) since baseline ({} contextual finding(s) already known in touched scope)",
+                summary.introduced_findings,
+                summary.contextual_findings
+            );
+        } else if summary.contextual_findings > 0 {
+            eprintln!(
+                "[audit] No introduced findings; {} contextual finding(s) already known in touched scope",
+                summary.contextual_findings
+            );
+        } else {
+            eprintln!("[audit] No introduced findings in touched scope");
+        }
+    } else if comparison.drift_increased {
         eprintln!(
             "[audit] DRIFT INCREASED: {} new finding(s) since baseline",
             comparison.new_items.len()
@@ -334,6 +353,7 @@ fn build_comparison_output(
     if args.json_summary {
         let mut summary = report::build_audit_summary(&result, exit_code);
         summary.fixability = compute_fixability_if_requested(&result, args);
+        summary.changed_since = changed_since_summary;
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Summary(summary),
             exit_code,
@@ -346,6 +366,7 @@ fn build_comparison_output(
                 passed: exit_code == 0,
                 result,
                 baseline_comparison: comparison,
+                changed_since: changed_since_summary,
                 summary: None,
                 fixability,
             },

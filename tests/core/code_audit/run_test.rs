@@ -3,8 +3,8 @@
 //! Wired into `src/core/code_audit/run.rs` via `#[cfg(test)] #[path = ...] mod run_test`.
 
 use super::{
-    apply_finding_filters, compute_fixability_if_requested, scope_convention_outliers_to_findings,
-    AuditRunWorkflowArgs,
+    apply_finding_filters, build_comparison_output, compute_fixability_if_requested,
+    scope_convention_outliers_to_findings, AuditRunWorkflowArgs,
 };
 use crate::code_audit::checks::CheckStatus;
 use crate::code_audit::conventions::{Deviation, Outlier};
@@ -94,6 +94,12 @@ fn make_args(include_fixability: bool) -> AuditRunWorkflowArgs {
         json_summary: false,
         include_fixability,
     }
+}
+
+fn make_changed_since_args() -> AuditRunWorkflowArgs {
+    let mut args = make_args(false);
+    args.changed_since = Some("origin/main".to_string());
+    args
 }
 
 #[test]
@@ -214,6 +220,94 @@ fn scoped_convention_outliers_follow_scoped_findings() {
         AuditFinding::MissingMethod
     );
     assert_eq!(result.summary.outliers_found, 1);
+}
+
+#[test]
+fn changed_since_comparison_marks_existing_touched_findings_as_contextual() {
+    let existing_finding = make_finding(AuditFinding::GodFile, "src/large.rs");
+    let mut result = make_result(vec![existing_finding]);
+    result.findings[0].convention = "structural".to_string();
+
+    let baseline = crate::code_audit::baseline::AuditBaseline {
+        created_at: "2026-04-28T00:00:00Z".to_string(),
+        context_id: "test".to_string(),
+        item_count: 1,
+        known_fingerprints: vec!["structural::src/large.rs::GodFile".to_string()],
+        metadata: crate::code_audit::baseline::AuditBaselineMetadata {
+            outliers_count: 1,
+            alignment_score: None,
+            known_outliers: vec!["src/large.rs".to_string()],
+        },
+    };
+
+    let workflow = build_comparison_output(result, baseline, &make_changed_since_args())
+        .expect("comparison output builds");
+
+    assert_eq!(workflow.exit_code, 0);
+    match workflow.output {
+        crate::code_audit::report::AuditCommandOutput::Compared {
+            passed,
+            changed_since,
+            baseline_comparison,
+            ..
+        } => {
+            assert!(passed);
+            assert!(baseline_comparison.new_items.is_empty());
+            assert_eq!(
+                changed_since,
+                Some(crate::code_audit::report::AuditChangedSinceSummary {
+                    introduced_findings: 0,
+                    contextual_findings: 1,
+                })
+            );
+        }
+        _ => panic!("expected compared output"),
+    }
+}
+
+#[test]
+fn changed_since_comparison_counts_new_findings_as_introduced() {
+    let mut existing_finding = make_finding(AuditFinding::GodFile, "src/large.rs");
+    existing_finding.convention = "structural".to_string();
+    let mut introduced_finding = make_finding(AuditFinding::UnreferencedExport, "src/large.rs");
+    introduced_finding.convention = "dead_code".to_string();
+    let result = make_result(vec![existing_finding, introduced_finding]);
+
+    let baseline = crate::code_audit::baseline::AuditBaseline {
+        created_at: "2026-04-28T00:00:00Z".to_string(),
+        context_id: "test".to_string(),
+        item_count: 1,
+        known_fingerprints: vec!["structural::src/large.rs::GodFile".to_string()],
+        metadata: crate::code_audit::baseline::AuditBaselineMetadata {
+            outliers_count: 1,
+            alignment_score: None,
+            known_outliers: vec!["src/large.rs".to_string()],
+        },
+    };
+
+    let workflow = build_comparison_output(result, baseline, &make_changed_since_args())
+        .expect("comparison output builds");
+
+    assert_eq!(workflow.exit_code, 1);
+    match workflow.output {
+        crate::code_audit::report::AuditCommandOutput::Compared {
+            passed,
+            changed_since,
+            baseline_comparison,
+            ..
+        } => {
+            assert!(!passed);
+            assert_eq!(baseline_comparison.new_items.len(), 1);
+            assert_eq!(
+                changed_since,
+                Some(crate::code_audit::report::AuditChangedSinceSummary {
+                    introduced_findings: 1,
+                    contextual_findings: 1,
+                })
+            );
+        }
+        _ => panic!("expected compared output"),
+    }
 }
 
 #[test]
