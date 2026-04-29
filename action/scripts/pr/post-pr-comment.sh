@@ -56,6 +56,11 @@ HEADER="## Homeboy Results — \`${COMP_ID}\`"
 # stays at the bottom of the comment.
 SECTION_ORDER="lint,build,test,audit,bench,tooling"
 
+if ! comment_has_actionable_content; then
+  echo "Skipping PR comment — run passed with no actionable content"
+  exit 0
+fi
+
 build_section_body
 
 SECTION_FILE="$(mktemp)"
