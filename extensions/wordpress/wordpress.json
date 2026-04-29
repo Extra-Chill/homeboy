@@ -354,6 +354,9 @@
   "bench": {
     "extension_script": "scripts/bench/bench-runner.sh"
   },
+  "trace": {
+    "extension_script": "scripts/trace/trace-runner.sh"
+  },
   "testing": {
     "backend": "playground",
     "description": "Plugin/theme PHPUnit runs inside WordPress Playground by default. Pure PHP smoke suites can opt into the host-smoke backend."
