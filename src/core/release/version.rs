@@ -206,8 +206,8 @@ fn pre_validate_version_targets(
 /// entries are generated and finalized into a versioned section in a single disk write —
 /// no intermediate `## Unreleased` section is ever persisted.
 ///
-/// When `generated_entries` is None (standalone `homeboy version bump`), falls back to
-/// finalizing an existing `## Unreleased` section.
+/// When `generated_entries` is None, falls back to finalizing an existing
+/// `## Unreleased` section for internal recovery paths.
 pub(crate) fn validate_and_finalize_changelog(
     component: &Component,
     current_version: &str,
