@@ -48,7 +48,7 @@ One component model, several execution contexts:
 | **Dev substrate** | `rig`, `stack` | Recreate local environments and maintain combined-fixes branches. |
 | **Performance** | `bench` | Track benchmark scenarios against baselines and environments. |
 | **Attention** | `deps`, `triage`, `status`, `issues`, `report` | Find dependency drift, failing work, and review artifacts. |
-| **Ops** | `deploy`, `ssh`, `file`, `db`, `logs`, `transfer` | Operate projects and fleets from the same component graph. |
+| **Ops** | `deploy`, `ssh`, `file`, `db`, `logs` | Operate projects and fleets from the same component graph. |
 | **Platforms** | `wp`, `cargo`, `extension` | Route platform-specific behavior through extensions. |
 
 For exhaustive command docs, see [docs/commands/commands-index.md](docs/commands/commands-index.md) or run `homeboy docs list`.
@@ -231,7 +231,7 @@ homeboy ssh production
 homeboy logs production
 homeboy db query production "select 1"
 homeboy file read production /path/to/file
-homeboy transfer production staging /path/to/file
+homeboy file copy production:/path/to/file staging:/path/to/file
 ```
 
 ## Command Surface Map
@@ -245,7 +245,7 @@ This is a map, not a generated reference. Use `homeboy <command> --help` or [doc
 | Local dev environments | `rig`, `stack` |
 | Benchmarks | `bench` |
 | Dependencies / attention | `deps`, `triage`, `status`, `issues`, `report` |
-| Fleet / ops | `deploy`, `ssh`, `file`, `db`, `logs`, `transfer`, `server`, `project`, `component`, `fleet` |
+| Fleet / ops | `deploy`, `ssh`, `file`, `db`, `logs`, `server`, `project`, `component`, `fleet` |
 | Extensions / platform verbs | `extension`, `wp`, `cargo` |
 | Meta | `config`, `docs`, `daemon`, `self`, `undo`, `auth`, `api`, `upgrade`, `list` |
 

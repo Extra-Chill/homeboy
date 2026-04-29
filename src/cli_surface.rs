@@ -3,8 +3,8 @@ use clap::{Command, CommandFactory, Parser, Subcommand};
 use crate::commands::{
     api, audit, auth, bench, build, changelog, changes, component, config, daemon, db, deploy,
     deps, extension, file, fleet, git, init, issues, lint, logs, project, refactor, release,
-    report, review, rig, self_cmd, server, ssh, stack, status, test, transfer, triage, undo,
-    upgrade, validate, version,
+    report, review, rig, self_cmd, server, ssh, stack, status, test, triage, undo, upgrade,
+    validate, version,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -51,8 +51,6 @@ pub enum Commands {
     Fleet(fleet::FleetArgs),
     /// Remote log viewing
     Logs(logs::LogsArgs),
-    /// Transfer files between servers
-    Transfer(transfer::TransferArgs),
     /// Read-only attention report for components, projects, fleets, and rigs
     Triage(triage::TriageArgs),
     /// Deploy components to remote server

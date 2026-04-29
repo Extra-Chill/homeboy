@@ -13,7 +13,7 @@
 - [deploy](deploy.md)
 - [docs](docs.md) — topic display, audit, map, generate
 - [extension](extension.md)
-- [file](file.md)
+- [file](file.md) — remote file operations, downloads, uploads, copies, and syncs
 - [fleet](fleet.md)
 - [git](git.md)
 - [init](init.md) — deprecated alias for `status --full`
@@ -30,7 +30,6 @@
 - [stack](stack.md) — combined-fixes branches from base refs plus cherry-picked PRs
 - status — actionable component overview (`--uncommitted`, `--needs-bump`, `--ready`, `--docs-only`, `--all`, `--full`)
 - [test](test.md)
-- transfer — transfer files between servers (`<source> <destination>`, supports `-r`, `-c`, `--dry-run`, `--exclude`)
 - [upgrade](upgrade.md)
 - [version](version.md)
 
