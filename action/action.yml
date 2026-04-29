@@ -195,7 +195,10 @@ outputs:
     value: ${{ steps.release.outputs.release-tag }}
   release-bump-type:
     description: 'The bump type used (patch, minor, major)'
-    value: ${{ steps.release.outputs.bump-type }}
+    value: ${{ steps.release.outputs.release-bump-type }}
+  skipped-reason:
+    description: 'Why release was skipped when released is false'
+    value: ${{ steps.release.outputs.skipped-reason }}
 
 runs:
   using: 'composite'

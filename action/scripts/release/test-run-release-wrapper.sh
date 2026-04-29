@@ -51,7 +51,6 @@ setup_fixture() {
   WORKSPACE="${TEST_DIR}/workspace"
   OUTPUT_FILE="${TEST_DIR}/github-output"
   HOMEBOY_ARGS_FILE="${TEST_DIR}/homeboy-args"
-  GIT_ARGS_FILE="${TEST_DIR}/git-args"
   mkdir -p "${BIN_DIR}" "${WORKSPACE}"
 
   cat > "${WORKSPACE}/homeboy.json" <<'JSON'
@@ -70,9 +69,6 @@ case "$1 $2" in
     ;;
   "pull --ff-only")
     exit 0
-    ;;
-  "config --local")
-    printf '%s\n' "$*" >> "${GIT_ARGS_FILE}"
     ;;
   *)
     echo "unexpected git args: $*" >&2
@@ -143,7 +139,6 @@ run_wrapper() {
   GITHUB_WORKSPACE="${WORKSPACE}" \
   GITHUB_REPOSITORY="Extra-Chill/homeboy-action" \
   HOMEBOY_ARGS_FILE="${HOMEBOY_ARGS_FILE}" \
-  GIT_ARGS_FILE="${GIT_ARGS_FILE}" \
   HOMEBOY_MOCK_SCENARIO="${HOMEBOY_MOCK_SCENARIO}" \
   RELEASE_DRY_RUN="${RELEASE_DRY_RUN:-false}" \
   GH_TOKEN="${GH_TOKEN:-}" \
@@ -164,8 +159,8 @@ assert_not_contains '--dry-run' "${ARGS}" "normal release uses one non-dry-run h
 assert_output_line 'released=true' "${OUTPUT_FILE}" "released output is true"
 assert_output_line 'release-version=2.1.0' "${OUTPUT_FILE}" "release version output is translated"
 assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "release tag output is translated"
-assert_output_line 'bump-type=minor' "${OUTPUT_FILE}" "bump type output is translated"
-assert_contains 'http.https://github.com/.extraheader' "$(cat "${GIT_ARGS_FILE}")" "release configures token-backed git push auth"
+assert_output_line 'release-bump-type=minor' "${OUTPUT_FILE}" "release bump type output is translated"
+assert_output_line 'bump-type=minor' "${OUTPUT_FILE}" "legacy step bump type output is preserved"
 
 setup_fixture
 HOMEBOY_MOCK_SCENARIO="skipped"
@@ -173,7 +168,7 @@ GH_TOKEN="secret123"
 run_wrapper
 assert_output_line 'released=false' "${OUTPUT_FILE}" "skipped release output is false"
 assert_output_line 'skipped-reason=no-releasable-commits' "${OUTPUT_FILE}" "skipped reason comes from homeboy"
-assert_output_line 'bump-type=patch' "${OUTPUT_FILE}" "skipped release preserves bump type when present"
+assert_output_line 'release-bump-type=patch' "${OUTPUT_FILE}" "skipped release preserves bump type when present"
 
 setup_fixture
 HOMEBOY_MOCK_SCENARIO="released"
@@ -182,16 +177,10 @@ GH_TOKEN="secret123"
 run_wrapper
 ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
 assert_contains '--dry-run' "${ARGS}" "dry-run mode passes through to homeboy"
-if [ -s "${GIT_ARGS_FILE}" ]; then
-  printf 'FAIL: dry-run should not configure git push auth\nactual:\n'
-  cat "${GIT_ARGS_FILE}"
-  exit 1
-fi
-printf 'PASS: dry-run does not configure git push auth\n'
 assert_output_line 'released=false' "${OUTPUT_FILE}" "dry-run output is not released"
 assert_output_line 'release-version=2.1.0' "${OUTPUT_FILE}" "dry-run preserves planned version"
 assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "dry-run preserves planned tag"
-assert_output_line 'bump-type=minor' "${OUTPUT_FILE}" "dry-run preserves planned bump"
+assert_output_line 'release-bump-type=minor' "${OUTPUT_FILE}" "dry-run preserves planned bump"
 assert_output_line 'skipped-reason=dry-run' "${OUTPUT_FILE}" "dry-run reason is action glue"
 
 printf 'All run-release wrapper checks passed.\n'

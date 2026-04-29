@@ -15,7 +15,7 @@
 #   released:        true|false
 #   release-version: the version (e.g. 0.63.0)
 #   release-tag:     the git tag (e.g. v0.63.0)
-#   bump-type:       patch|minor|major
+#   release-bump-type: patch|minor|major
 #   skipped-reason:  why release was skipped (if released=false)
 
 set -euo pipefail
@@ -77,20 +77,13 @@ write_release_outputs() {
   write_output "released" "${released}"
   [ -n "${version}" ] && write_output "release-version" "${version}"
   [ -n "${tag}" ] && write_output "release-tag" "${tag}"
-  [ -n "${bump_type}" ] && write_output "bump-type" "${bump_type}"
+  if [ -n "${bump_type}" ]; then
+    write_output "release-bump-type" "${bump_type}"
+    write_output "bump-type" "${bump_type}"
+  fi
   [ -n "${skipped_reason}" ] && write_output "skipped-reason" "${skipped_reason}"
 
   return 0
-}
-
-configure_release_git_auth() {
-  if [ "${DRY_RUN}" = "true" ] || [ -z "${GH_TOKEN:-}" ]; then
-    return 0
-  fi
-
-  local encoded_token
-  encoded_token="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
-  git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic ${encoded_token}"
 }
 
 COMP_ID="$(resolve_component_id)"
@@ -119,7 +112,6 @@ fi
 # PRs may merge while the pipeline is in flight. Pull before invoking Homeboy so
 # core releases from the actual branch head.
 git pull --ff-only origin "${RELEASE_BRANCH}" 2>/dev/null || true
-configure_release_git_auth
 
 RELEASE_OUTPUT_FILE="$(mktemp)"
 RELEASE_ARGS=(
