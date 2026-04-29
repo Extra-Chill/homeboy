@@ -86,11 +86,11 @@ elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
     done
 
     if [ ${#JS_FILES[@]} -eq 0 ]; then
-        echo "No JS files match pattern: ${HOMEBOY_LINT_GLOB}"
+        echo "No JS/TS files match pattern: ${HOMEBOY_LINT_GLOB}"
         exit 0
     fi
 
-    echo "Linting ${#JS_FILES[@]} JS files matching: ${HOMEBOY_LINT_GLOB}"
+    echo "Linting ${#JS_FILES[@]} JS/TS files matching: ${HOMEBOY_LINT_GLOB}"
     LINT_FILES=("${JS_FILES[@]}")
     cd - > /dev/null
 else
