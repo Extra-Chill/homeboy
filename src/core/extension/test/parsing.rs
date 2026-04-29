@@ -121,12 +121,18 @@ pub fn parse_test_results_file(path: &std::path::Path) -> Option<TestCounts> {
         .get("failed")
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
+    let errors = data
+        .get("errors")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
     let skipped = data
         .get("skipped")
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
 
-    Some(TestCounts::new(total, passed, failed, skipped))
+    // `TestCounts` has no separate errors field; fold runner errors into
+    // `failed` so status/baseline decisions do not treat errors as passing.
+    Some(TestCounts::new(total, passed, failed + errors, skipped))
 }
 
 pub fn parse_test_results_text(text: &str) -> Option<TestCounts> {
@@ -141,8 +147,11 @@ pub fn parse_test_results_text_with_spec(text: &str, spec: &ParseSpec) -> Option
     }
     let passed = parsed.get("passed").copied().unwrap_or(0.0).max(0.0) as u64;
     let failed = parsed.get("failed").copied().unwrap_or(0.0).max(0.0) as u64;
+    let errors = parsed.get("errors").copied().unwrap_or(0.0).max(0.0) as u64;
     let skipped = parsed.get("skipped").copied().unwrap_or(0.0).max(0.0) as u64;
-    Some(TestCounts::new(total, passed, failed, skipped))
+    // `TestCounts` has no separate errors field; fold runner errors into
+    // `failed` so status/baseline decisions do not treat errors as passing.
+    Some(TestCounts::new(total, passed, failed + errors, skipped))
 }
 
 fn default_test_result_parse_spec() -> ParseSpec {
@@ -290,6 +299,19 @@ mod tests {
         assert_eq!(counts.total, 12);
         assert_eq!(counts.passed, 7);
         assert_eq!(counts.failed, 2);
+        assert_eq!(counts.skipped, 3);
+    }
+
+    #[test]
+    fn default_parse_spec_folds_errors_into_failed_count() {
+        let counts = parse_test_results_text(
+            "Tests: 12, Assertions: 20, Failures: 2, Errors: 1, Skipped: 3",
+        )
+        .expect("default PHPUnit-ish fallback should parse errors");
+
+        assert_eq!(counts.total, 12);
+        assert_eq!(counts.passed, 6);
+        assert_eq!(counts.failed, 3);
         assert_eq!(counts.skipped, 3);
     }
 }

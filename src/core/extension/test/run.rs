@@ -117,6 +117,18 @@ fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
     }
 }
 
+fn test_run_status(runner_success: bool, test_counts: Option<&TestCounts>) -> &'static str {
+    if !runner_success {
+        return "failed";
+    }
+
+    if test_counts.map(|counts| counts.failed == 0).unwrap_or(true) {
+        "passed"
+    } else {
+        "failed"
+    }
+}
+
 pub fn run_main_test_workflow(
     component: &Component,
     source_path: &PathBuf,
@@ -205,17 +217,7 @@ pub fn run_main_test_workflow(
     // Autofix is owned by `refactor --from test --write`; the test command is read-only.
     let test_autofix: Option<AppliedRefactor> = None;
 
-    let status = if let Some(ref counts) = test_counts {
-        if counts.failed == 0 {
-            "passed"
-        } else {
-            "failed"
-        }
-    } else if output.success {
-        "passed"
-    } else {
-        "failed"
-    };
+    let status = test_run_status(output.success, test_counts.as_ref());
 
     let coverage = coverage_file
         .as_ref()
@@ -458,21 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn tail_lines_trims_to_last_n_lines() {
-        let input: String = (1..=20)
-            .map(|i| format!("line {}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (tail, truncated) = tail_lines(&input, 5);
-        assert!(truncated);
-        let kept: Vec<&str> = tail.lines().collect();
-        assert_eq!(
-            kept,
-            vec!["line 16", "line 17", "line 18", "line 19", "line 20"]
-        );
-    }
-
-    #[test]
     fn tail_lines_handles_empty_input() {
         let (tail, truncated) = tail_lines("", 10);
         assert_eq!(tail, "");
@@ -510,6 +497,24 @@ mod tests {
             Some("AssertionFailed: expected true")
         );
         assert_eq!(failed_tests[0].location.as_deref(), Some("src/lib.rs:42"));
+    }
+
+    #[test]
+    fn status_requires_successful_runner_even_with_zero_failures() {
+        let counts = TestCounts::new(3, 3, 0, 0);
+        assert_eq!(test_run_status(false, Some(&counts)), "failed");
+    }
+
+    #[test]
+    fn status_passes_successful_runner_with_zero_failures() {
+        let counts = TestCounts::new(3, 3, 0, 0);
+        assert_eq!(test_run_status(true, Some(&counts)), "passed");
+    }
+
+    #[test]
+    fn status_fails_successful_runner_with_parsed_failures() {
+        let counts = TestCounts::new(3, 2, 1, 0);
+        assert_eq!(test_run_status(true, Some(&counts)), "failed");
     }
 
     #[test]

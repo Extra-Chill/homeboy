@@ -189,6 +189,11 @@ fn test_phase_report(exit_code: i32, counts: Option<&TestCounts>) -> PhaseReport
             }
         } else if exit_code >= 2 {
             format!("test harness infrastructure failure (exit {})", exit_code)
+        } else if counts.map(|counts| counts.failed == 0).unwrap_or(false) {
+            format!(
+                "test runner failed after reporting zero test failures (exit {})",
+                exit_code
+            )
         } else if let Some(counts) = counts {
             format!(
                 "test phase reported {} failure(s) out of {} test(s)",
@@ -204,12 +209,23 @@ fn test_phase_report(exit_code: i32, counts: Option<&TestCounts>) -> PhaseReport
 }
 
 fn test_phase_failure(exit_code: i32, counts: Option<&TestCounts>) -> PhaseFailure {
-    let category = phase_failure_category_from_exit_code(exit_code);
+    let category = if exit_code != 0 && counts.map(|counts| counts.failed == 0).unwrap_or(false) {
+        PhaseFailureCategory::Infrastructure
+    } else {
+        phase_failure_category_from_exit_code(exit_code)
+    };
     PhaseFailure {
         phase: VerificationPhase::Test,
         summary: match category {
             PhaseFailureCategory::Infrastructure => {
-                format!("test harness infrastructure failure (exit {})", exit_code)
+                if counts.map(|counts| counts.failed == 0).unwrap_or(false) {
+                    format!(
+                        "test runner failed after reporting zero test failures (exit {})",
+                        exit_code
+                    )
+                } else {
+                    format!("test harness infrastructure failure (exit {})", exit_code)
+                }
             }
             PhaseFailureCategory::Findings => {
                 if let Some(counts) = counts {
@@ -234,6 +250,24 @@ mod tests {
             exit_code: 1,
             test_counts: Some(TestCounts::new(3, 1, 2, 0)),
             failed_tests,
+            coverage: None,
+            baseline_comparison: None,
+            analysis: None,
+            autofix: None,
+            hints: None,
+            test_scope: None,
+            summary: None,
+            raw_output: None,
+        }
+    }
+
+    fn workflow_result_with_counts(exit_code: i32, counts: TestCounts) -> TestRunWorkflowResult {
+        TestRunWorkflowResult {
+            status: if exit_code == 0 { "passed" } else { "failed" }.to_string(),
+            component: "homeboy".to_string(),
+            exit_code,
+            test_counts: Some(counts),
+            failed_tests: None,
             coverage: None,
             baseline_comparison: None,
             analysis: None,
@@ -284,5 +318,39 @@ mod tests {
         assert_eq!(failed["name"], "tests::fails");
         assert!(failed.get("detail").is_none());
         assert!(failed.get("location").is_none());
+    }
+
+    #[test]
+    fn runner_failure_with_zero_parsed_failures_stays_failed() {
+        let (output, exit_code) =
+            from_main_workflow(workflow_result_with_counts(1, TestCounts::new(3, 3, 0, 0)));
+
+        let json = serde_json::to_value(output).expect("serialize test command output");
+        assert_eq!(exit_code, 1);
+        assert_eq!(json["passed"], false);
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["exit_code"], 1);
+        assert_eq!(
+            json["phase"]["summary"],
+            "test runner failed after reporting zero test failures (exit 1)"
+        );
+        assert_eq!(json["failure"]["category"], "infrastructure");
+        assert_eq!(
+            json["failure"]["summary"],
+            "test runner failed after reporting zero test failures (exit 1)"
+        );
+    }
+
+    #[test]
+    fn successful_runner_with_zero_failures_still_passes() {
+        let (output, exit_code) =
+            from_main_workflow(workflow_result_with_counts(0, TestCounts::new(3, 3, 0, 0)));
+
+        let json = serde_json::to_value(output).expect("serialize test command output");
+        assert_eq!(exit_code, 0);
+        assert_eq!(json["passed"], true);
+        assert_eq!(json["status"], "passed");
+        assert_eq!(json["exit_code"], 0);
+        assert!(json.get("failure").is_none());
     }
 }
