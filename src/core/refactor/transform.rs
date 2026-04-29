@@ -1,8 +1,7 @@
 //! Pattern-based code transforms — regex find/replace across a codebase.
 //!
-//! Applies named transform sets (collections of find/replace rules) to files
-//! matching glob patterns. Rules are defined in `homeboy.json` under the
-//! `transforms` key, or passed ad-hoc via CLI flags.
+//! Applies find/replace rules to files matching glob patterns. Rules are passed
+//! ad-hoc via CLI flags or constructed by callers that need a `TransformSet`.
 //!
 //! Phase 1: line-context regex transforms (no AST, no extension scripts).
 
@@ -20,7 +19,7 @@ use crate::error::{Error, Result};
 // Rule model
 // ============================================================================
 
-/// A named collection of transform rules.
+/// A collection of transform rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransformSet {
     /// Human-readable description of this transform set.
@@ -118,8 +117,8 @@ pub struct TransformMatch {
 
 /// Unescape backslash sequences in a replacement template.
 ///
-/// Users writing regex-replace rules in `homeboy.json` (or on the CLI) think of
-/// the `replace` value the way they think of sed, shell, or `String.replace` —
+/// Users writing regex-replace rules think of the `replace` value the way they
+/// think of sed, shell, or `String.replace` —
 /// `\\` means one literal backslash, `\n` means a newline, `\t` means a tab.
 /// The regex crate's native replacement syntax, on the other hand, passes
 /// backslashes through verbatim and only recognizes `$1`/`${name}`/`$$`. That
@@ -167,61 +166,6 @@ pub(crate) fn unescape_replacement_template(template: &str) -> String {
         }
     }
     out
-}
-
-// ============================================================================
-// Rule loading
-// ============================================================================
-
-const HOMEBOY_JSON: &str = "homeboy.json";
-const TRANSFORMS_KEY: &str = "transforms";
-
-/// Load a named transform set from `homeboy.json` in the given root directory.
-pub fn load_transform_set(root: &Path, name: &str) -> Result<TransformSet> {
-    let json_path = root.join(HOMEBOY_JSON);
-    if !json_path.exists() {
-        return Err(Error::internal_io(
-            format!("No homeboy.json found at {}", json_path.display()),
-            Some("transform.load".to_string()),
-        ));
-    }
-
-    let content = local_files::read_file(&json_path, "read homeboy.json")?;
-    let data: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-        Error::internal_io(
-            format!("Failed to parse homeboy.json: {}", e),
-            Some("transform.load".to_string()),
-        )
-    })?;
-
-    let transforms = data.get(TRANSFORMS_KEY).ok_or_else(|| {
-        Error::config_missing_key(
-            TRANSFORMS_KEY.to_string(),
-            Some(json_path.to_string_lossy().to_string()),
-        )
-    })?;
-
-    let set_value = transforms.get(name).ok_or_else(|| {
-        // List available transforms for a helpful error
-        let available: Vec<&str> = transforms
-            .as_object()
-            .map(|o| o.keys().map(|k| k.as_str()).collect::<Vec<_>>())
-            .unwrap_or_default();
-        Error::internal_io(
-            format!(
-                "Transform set '{}' not found. Available: {:?}",
-                name, available
-            ),
-            Some("transform.load".to_string()),
-        )
-    })?;
-
-    serde_json::from_value(set_value.clone()).map_err(|e| {
-        Error::internal_io(
-            format!("Failed to parse transform set '{}': {}", name, e),
-            Some("transform.load".to_string()),
-        )
-    })
 }
 
 /// Create a transform set from ad-hoc CLI arguments.
@@ -856,7 +800,6 @@ fn replace_with_case_transforms(regex: &Regex, replace: &str, text: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     // --- Replacement unescape tests (regression for #1277) ---
 
@@ -1183,61 +1126,15 @@ mod tests {
     // --- Integration: apply_transforms with temp dir ---
 
     #[test]
-    fn load_transform_set_from_json() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+    fn ad_hoc_transform_builds_single_rule_set() {
+        let set = ad_hoc_transform("old", "new", "**/*.php", "file");
 
-        let homeboy_json = serde_json::json!({
-            "transforms": {
-                "my_migration": {
-                    "description": "Test migration",
-                    "rules": [
-                        {
-                            "id": "rule1",
-                            "find": "old",
-                            "replace": "new",
-                            "files": "**/*.php"
-                        }
-                    ]
-                }
-            }
-        });
-
-        fs::write(
-            root.join("homeboy.json"),
-            serde_json::to_string_pretty(&homeboy_json).unwrap(),
-        )
-        .unwrap();
-
-        let set = load_transform_set(root, "my_migration").unwrap();
-        assert_eq!(set.description, "Test migration");
+        assert_eq!(set.description, "Ad-hoc transform");
         assert_eq!(set.rules.len(), 1);
-        assert_eq!(set.rules[0].id, "rule1");
-    }
-
-    #[test]
-    fn load_transform_set_not_found_lists_available() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-
-        let homeboy_json = serde_json::json!({
-            "transforms": {
-                "exists": {
-                    "description": "",
-                    "rules": []
-                }
-            }
-        });
-
-        fs::write(
-            root.join("homeboy.json"),
-            serde_json::to_string_pretty(&homeboy_json).unwrap(),
-        )
-        .unwrap();
-
-        let err = load_transform_set(root, "not_here").unwrap_err();
-        let msg = format!("{:?}", err.details);
-        assert!(msg.contains("not_here"));
-        assert!(msg.contains("exists"));
+        assert_eq!(set.rules[0].id, "ad-hoc");
+        assert_eq!(set.rules[0].find, "old");
+        assert_eq!(set.rules[0].replace, "new");
+        assert_eq!(set.rules[0].files, "**/*.php");
+        assert_eq!(set.rules[0].context, "file");
     }
 }

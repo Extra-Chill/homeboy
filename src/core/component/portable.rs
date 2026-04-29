@@ -115,8 +115,8 @@ pub fn portable_json(component: &Component) -> Result<Value> {
 ///
 /// Uses a read-modify-write pattern: reads the existing JSON first, merges the
 /// component's known fields on top, and writes the result. This preserves fields
-/// like `baselines`, `transforms`, `audit_rules` that the Component struct doesn't
-/// model but other subsystems (baseline, refactor transform, audit) read/write directly.
+/// like `baselines`, `audit_rules`, and custom local metadata that the Component
+/// struct doesn't model but other subsystems or users read/write directly.
 ///
 /// If no existing file exists, writes from scratch (no fields to preserve).
 pub fn write_portable_config(dir: &Path, component: &Component) -> Result<()> {
@@ -257,7 +257,6 @@ mod tests {
             "id": "test-comp",
             "remote_path": "wp-content/plugins/test",
             "baselines": { "audit": { "item_count": 42 } },
-            "transforms": { "rename-foo": { "rules": [] } },
             "custom_field": "preserve-me"
         });
         fs::write(
@@ -287,13 +286,6 @@ mod tests {
                 .and_then(|v| v.as_i64()),
             Some(42),
             "baselines should be preserved"
-        );
-        assert!(
-            result
-                .get("transforms")
-                .and_then(|v| v.get("rename-foo"))
-                .is_some(),
-            "transforms should be preserved"
         );
         assert_eq!(
             result.get("custom_field").and_then(|v| v.as_str()),

@@ -176,13 +176,9 @@ enum RefactorCommand {
         write_mode: WriteModeArgs,
     },
 
-    /// Apply pattern-based find/replace transforms across a codebase
+    /// Apply an ad-hoc pattern-based find/replace transform across a codebase
     ///
-    /// Rules are defined in homeboy.json under the "transforms" key,
-    /// or passed ad-hoc via --find/--replace/--files flags.
-    ///
-    /// Named:  `refactor transform wp69_migration --component data-machine`
-    /// Ad-hoc: `refactor transform --find "old" --replace "new" --files "**/*.php" --component C`
+    /// Example: `refactor transform --find "old" --replace "new" --files "**/*.php" --component C`
     ///
     /// Replacement templates support capture group refs ($1, $2, ${name}),
     /// case transforms ($1:lower, $1:upper, $1:kebab, $1:snake, $1:pascal, $1:camel),
@@ -190,27 +186,23 @@ enum RefactorCommand {
     ///
     /// Backslash escapes collapse before regex replacement: `\\` → one literal
     /// backslash, `\n` → newline, `\t` → tab, `\r` → CR, `\"` / `\'` → the quote.
-    /// Write `\\WP_Foo` in JSON to emit `\WP_Foo` on disk (useful for PHP
-    /// fully-qualified class names). Unknown `\X` sequences pass through as-is.
+    /// Write `\\WP_Foo` to emit `\WP_Foo` on disk (useful for PHP fully-qualified
+    /// class names). Unknown `\X` sequences pass through as-is.
     Transform {
-        /// Transform set name (from homeboy.json transforms key)
-        #[arg(value_name = "NAME")]
-        name: Option<String>,
-
-        /// Regex pattern to find (ad-hoc mode)
+        /// Regex pattern to find
         #[arg(long, value_name = "REGEX")]
-        find: Option<String>,
+        find: String,
 
-        /// Replacement template (ad-hoc mode).
+        /// Replacement template.
         /// Supports $1, $2 capture group refs, ${name} named groups,
         /// $1:lower/:upper/:kebab/:snake/:pascal/:camel case transforms,
         /// and $$ for a literal dollar sign.
         /// Backslash escapes are collapsed: \\ → one literal backslash,
         /// \n/\t/\r/\0 → the control character, \" / \' → the quote.
         #[arg(long, value_name = "TEMPLATE")]
-        replace: Option<String>,
+        replace: String,
 
-        /// Glob pattern for files to apply to (ad-hoc mode, default: **/*)
+        /// Glob pattern for files to apply to (default: **/*)
         #[arg(long, value_name = "GLOB", default_value = "**/*")]
         files: String,
 
@@ -218,10 +210,6 @@ enum RefactorCommand {
         /// enables multi-line regex with (?s) dotall flag for patterns spanning newlines)
         #[arg(long, value_name = "CONTEXT", default_value = "line")]
         context: String,
-
-        /// Only apply a specific rule ID within a named transform set
-        #[arg(long, value_name = "RULE_ID")]
-        rule: Option<String>,
 
         #[command(flatten)]
         target: RefactorTargetArgs,
@@ -368,24 +356,13 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
         ),
 
         Some(RefactorCommand::Transform {
-            name,
             find,
             replace,
             files,
             context,
-            rule,
             target,
             write_mode,
-        }) => run_transform(
-            name.as_deref(),
-            find.as_deref(),
-            replace.as_deref(),
-            &files,
-            &context,
-            rule.as_deref(),
-            &target,
-            write_mode.write,
-        ),
+        }) => run_transform(&find, &replace, &files, &context, &target, write_mode.write),
 
         Some(RefactorCommand::Decompose {
             file,
@@ -1319,72 +1296,32 @@ fn run_propagate_single(
 // Transform
 // ============================================================================
 
-#[allow(clippy::too_many_arguments)]
 fn run_transform(
-    name: Option<&str>,
-    find: Option<&str>,
-    replace: Option<&str>,
+    find: &str,
+    replace: &str,
     files: &str,
     context: &str,
-    rule_filter: Option<&str>,
     target: &RefactorTargetArgs,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
     let targets = target.resolve_targets()?;
     run_across_targets("transform", targets, |component_id, path| {
-        run_transform_single(
-            name,
-            find,
-            replace,
-            files,
-            context,
-            rule_filter,
-            component_id,
-            path,
-            write,
-        )
+        run_transform_single(find, replace, files, context, component_id, path, write)
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_transform_single(
-    name: Option<&str>,
-    find: Option<&str>,
-    replace: Option<&str>,
+    find: &str,
+    replace: &str,
     files: &str,
     context: &str,
-    rule_filter: Option<&str>,
     component_id: Option<&str>,
     path: Option<&str>,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
     let root = refactor::move_items::resolve_root(component_id, path)?;
-
-    // Resolve transform set: ad-hoc or named
-    let (set_name, set) = if let (Some(f), Some(r)) = (find, replace) {
-        // Ad-hoc mode
-        if name.is_some() {
-            return Err(homeboy::Error::validation_invalid_argument(
-                "name",
-                "Cannot use both a named transform and --find/--replace",
-                None,
-                None,
-            ));
-        }
-        (
-            "ad-hoc".to_string(),
-            refactor::ad_hoc_transform(f, r, files, context),
-        )
-    } else if let Some(n) = name {
-        // Named mode — load from homeboy.json
-        let set = refactor::load_transform_set(&root, n)?;
-        (n.to_string(), set)
-    } else {
-        return Err(homeboy::Error::validation_missing_argument(vec![
-            "name".to_string(),
-            "--find/--replace".to_string(),
-        ]));
-    };
+    let set_name = "ad-hoc";
+    let set = refactor::ad_hoc_transform(find, replace, files, context);
 
     // Report what we're about to do
     homeboy::log_status!(
@@ -1401,8 +1338,7 @@ fn run_transform_single(
 
     if write {
         // Dry-run to discover affected files for the undo snapshot
-        if let Ok(preview) = refactor::apply_transforms(&root, &set_name, &set, false, rule_filter)
-        {
+        if let Ok(preview) = refactor::apply_transforms(&root, set_name, &set, false, None) {
             let affected_files: std::collections::HashSet<String> = preview
                 .rules
                 .iter()
@@ -1417,7 +1353,7 @@ fn run_transform_single(
     }
 
     // Apply transforms
-    let result = refactor::apply_transforms(&root, &set_name, &set, write, rule_filter)?;
+    let result = refactor::apply_transforms(&root, set_name, &set, write, None)?;
 
     // Report results to stderr
     for rule_result in &result.rules {
