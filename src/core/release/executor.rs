@@ -61,6 +61,25 @@ fn step_failed(
     }
 }
 
+/// Build a skipped step result carrying an explanatory warning.
+fn step_skipped(
+    id: &str,
+    step_type: &str,
+    data: Option<serde_json::Value>,
+    warning: impl Into<String>,
+) -> ReleaseStepResult {
+    ReleaseStepResult {
+        id: id.to_string(),
+        step_type: step_type.to_string(),
+        status: ReleaseStepStatus::Skipped,
+        missing: Vec::new(),
+        warnings: vec![warning.into()],
+        hints: Vec::new(),
+        data,
+        error: None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core steps
 // ---------------------------------------------------------------------------
@@ -353,7 +372,88 @@ pub(crate) fn run_publish(
         "response": extension_data,
     });
 
-    Ok(step_success(&step_id, &step_id, Some(data), Vec::new()))
+    Ok(publish_step_result(
+        &step_id,
+        target,
+        &extension.id,
+        Some(data),
+        &response,
+    ))
+}
+
+fn publish_step_result(
+    step_id: &str,
+    target: &str,
+    extension_id: &str,
+    data: Option<serde_json::Value>,
+    response: &serde_json::Value,
+) -> ReleaseStepResult {
+    if response
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+    {
+        return step_success(step_id, step_id, data, Vec::new());
+    }
+
+    if is_missing_cargo_token_publish_response(target, extension_id, response) {
+        return step_skipped(
+            step_id,
+            step_id,
+            data,
+            "Skipped Rust publish: no Cargo registry token is configured",
+        );
+    }
+
+    step_failed(
+        step_id,
+        step_id,
+        data,
+        Some(publish_failure_message(target, response)),
+        Vec::new(),
+    )
+}
+
+fn is_missing_cargo_token_publish_response(
+    target: &str,
+    extension_id: &str,
+    response: &serde_json::Value,
+) -> bool {
+    if target != "rust" && extension_id != "rust" {
+        return false;
+    }
+
+    let output = publish_response_output(response).to_ascii_lowercase();
+    output.contains("no token found")
+        && (output.contains("cargo login") || output.contains("cargo_registry_token"))
+}
+
+fn publish_response_output(response: &serde_json::Value) -> String {
+    let stdout = response
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let stderr = response
+        .get("stderr")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    format!("{}\n{}", stdout, stderr)
+}
+
+fn publish_failure_message(target: &str, response: &serde_json::Value) -> String {
+    let exit_code = response
+        .get("exit_code")
+        .or_else(|| response.get("exitCode"))
+        .and_then(|v| v.as_i64());
+    let output = publish_response_output(response);
+    let detail = output.trim();
+
+    match (exit_code, detail.is_empty()) {
+        (Some(code), false) => format!("Publish to {} failed (exit {}): {}", target, code, detail),
+        (Some(code), true) => format!("Publish to {} failed (exit {})", target, code),
+        (None, false) => format!("Publish to {} failed: {}", target, detail),
+        (None, true) => format!("Publish to {} failed", target),
+    }
 }
 
 /// Delete the packaging staging dir (`target/distrib`). Skipped when the
@@ -797,7 +897,8 @@ fn sanitize_tag_for_filename(tag: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fallback_gh_command, sanitize_tag_for_filename};
+    use super::{fallback_gh_command, publish_step_result, sanitize_tag_for_filename};
+    use crate::release::ReleaseStepStatus;
 
     #[test]
     fn sanitize_tag_for_filename_preserves_safe_chars() {
@@ -820,5 +921,51 @@ mod tests {
         assert!(cmd.contains("gh release create v1.2.3"));
         assert!(cmd.contains("--title v1.2.3"));
         assert!(cmd.contains("--notes-file"));
+    }
+
+    #[test]
+    fn publish_step_skips_rust_when_cargo_token_is_missing() {
+        let response = serde_json::json!({
+            "success": false,
+            "exitCode": 101,
+            "stdout": "",
+            "stderr": "error: no token found, please run cargo login\nor use environment variable CARGO_REGISTRY_TOKEN",
+        });
+        let data = serde_json::json!({ "response": response.clone() });
+
+        let result = publish_step_result("publish.rust", "rust", "rust", Some(data), &response);
+
+        assert_eq!(result.status, ReleaseStepStatus::Skipped);
+        assert!(result.error.is_none());
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("no Cargo registry token"));
+    }
+
+    #[test]
+    fn publish_step_fails_rust_when_error_is_not_missing_token() {
+        let response = serde_json::json!({
+            "success": false,
+            "exitCode": 101,
+            "stdout": "",
+            "stderr": "error: failed to upload package: 500 server error",
+        });
+
+        let result = publish_step_result("publish.rust", "rust", "rust", None, &response);
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert!(result.error.unwrap().contains("500 server error"));
+    }
+
+    #[test]
+    fn publish_step_fails_non_rust_missing_token_text() {
+        let response = serde_json::json!({
+            "success": false,
+            "exitCode": 1,
+            "stderr": "error: no token found, please run cargo login",
+        });
+
+        let result = publish_step_result("publish.npm", "npm", "npm", None, &response);
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
     }
 }
