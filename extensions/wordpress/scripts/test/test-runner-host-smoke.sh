@@ -14,6 +14,7 @@ homeboy_resolve_context --component-alias PLUGIN_PATH
 
 PHP_BIN="${HOMEBOY_PHP_BIN:-php}"
 TEST_DIR="${PLUGIN_PATH}/tests"
+TARGET_SMOKE_FILE="${HOMEBOY_WORDPRESS_HOST_SMOKE_FILE:-}"
 
 echo "Running host PHP smoke tests..."
 echo "  Component: ${COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
@@ -25,7 +26,28 @@ if [ ! -d "$TEST_DIR" ]; then
     exit 0
 fi
 
-mapfile -t smoke_files < <(find "$TEST_DIR" -type f -name '*-smoke.php' | sort)
+if [ -n "$TARGET_SMOKE_FILE" ]; then
+    if [ "${TARGET_SMOKE_FILE#/}" != "$TARGET_SMOKE_FILE" ]; then
+        target_abs="$TARGET_SMOKE_FILE"
+    else
+        target_abs="${PLUGIN_PATH}/${TARGET_SMOKE_FILE}"
+    fi
+    if [ ! -f "$target_abs" ]; then
+        echo "ERROR: requested host smoke file not found: ${TARGET_SMOKE_FILE}" >&2
+        exit 2
+    fi
+    case "$target_abs" in
+        "${PLUGIN_PATH}"/tests/*-smoke.php)
+            smoke_files=("$target_abs")
+            ;;
+        *)
+            echo "ERROR: requested host smoke file must match tests/**/*-smoke.php: ${TARGET_SMOKE_FILE}" >&2
+            exit 2
+            ;;
+    esac
+else
+    mapfile -t smoke_files < <(find "$TEST_DIR" -type f -name '*-smoke.php' | sort)
+fi
 
 if [ "${#smoke_files[@]}" -eq 0 ]; then
     echo ""

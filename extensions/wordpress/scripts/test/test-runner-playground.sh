@@ -79,6 +79,27 @@ else
 fi
 
 SETTINGS_JSON="${HOMEBOY_SETTINGS_JSON:-}"
+SELECTED_TEST_FILE="${HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE:-}"
+PASSTHROUGH_ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --file)
+            shift
+            if [ "$#" -eq 0 ] || [ -z "${1:-}" ]; then
+                echo "ERROR: --file requires a path" >&2
+                exit 2
+            fi
+            SELECTED_TEST_FILE="$1"
+            ;;
+        --file=*)
+            SELECTED_TEST_FILE="${1#--file=}"
+            ;;
+        *)
+            PASSTHROUGH_ARGS+=("$1")
+            ;;
+    esac
+    shift
+done
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: [playground] Extension path: $EXTENSION_PATH"
@@ -167,6 +188,29 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     ' 2>/dev/null || printf '[]')
 fi
 
+SELECTED_TEST_FILE_REL=""
+if [ -n "$SELECTED_TEST_FILE" ]; then
+    if [ "${SELECTED_TEST_FILE#/}" != "$SELECTED_TEST_FILE" ]; then
+        selected_abs="$SELECTED_TEST_FILE"
+    else
+        selected_abs="${PLUGIN_PATH}/${SELECTED_TEST_FILE}"
+    fi
+    if [ ! -f "$selected_abs" ]; then
+        echo "ERROR: requested PHPUnit test file not found: ${SELECTED_TEST_FILE}" >&2
+        exit 2
+    fi
+    case "$selected_abs" in
+        "${PLUGIN_PATH}"/tests/*.php)
+            SELECTED_TEST_FILE_REL="${selected_abs#"${PLUGIN_PATH}/"}"
+            ;;
+        *)
+            echo "ERROR: requested PHPUnit test file must live under tests/: ${SELECTED_TEST_FILE}" >&2
+            exit 2
+            ;;
+    esac
+fi
+SELECTED_TEST_FILE_B64=$(printf '%s' "$SELECTED_TEST_FILE_REL" | base64 | tr -d '\n')
+
 # PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
 # mount the component-under-test. When homeboy core tells us the canonical
 # component id (HOMEBOY_COMPONENT_ID), use it — basename($PLUGIN_PATH)
@@ -253,6 +297,7 @@ WP_CONFIG_DEFINES_DELIM=$(printf '\1')
 sed \
     -e "s|{{PLUGIN_SLUG}}|${PLUGIN_SLUG}|g" \
     -e "s|{{PLAYGROUND_DEP_MOUNTS}}|${PLAYGROUND_DEP_MOUNTS}|g" \
+    -e "s|{{PHPUNIT_TEST_FILE_B64}}|${SELECTED_TEST_FILE_B64}|g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{CHANGED_TEST_FILES_JSON}}${WP_CONFIG_DEFINES_DELIM}${CHANGED_TEST_FILES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \

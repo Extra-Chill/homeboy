@@ -61,9 +61,9 @@ pg_install_diagnostics_handlers();
 
 $tests_dir = '/homeboy-extension/vendor/wp-phpunit/wp-phpunit';
 $plugin_path = '/wordpress/wp-content/plugins/{{PLUGIN_SLUG}}';
-$changed_test_files = json_decode('{{CHANGED_TEST_FILES_JSON}}', true);
-if (!is_array($changed_test_files)) {
-    $changed_test_files = [];
+$selected_test_file = base64_decode('{{PHPUNIT_TEST_FILE_B64}}', true);
+if (!is_string($selected_test_file)) {
+    $selected_test_file = '';
 }
 
 // Stage: boot — render wp-tests-config.php + load composer autoload.
@@ -191,9 +191,15 @@ try {
     $test_files = pg_discover_tests($directories, $suffixes, $prefixes, $excludes);
     $test_files = pg_filter_changed_test_files($test_files, '{{CHANGED_TEST_FILES_JSON}}', $plugin_path);
 
-    if (!empty($changed_test_files)) {
-        $test_files = pg_filter_changed_tests($test_files, $changed_test_files, $plugin_path, $suffixes, $prefixes);
-        pg_log("NOTICE:changed test scope applied; selected=" . count($test_files));
+    if ($selected_test_file !== '') {
+        $selected_abs = $plugin_path . '/' . ltrim($selected_test_file, '/');
+        if (!in_array($selected_abs, $test_files, true)) {
+            pg_log("NO_TEST_FILES");
+            pg_log("NOTICE:requested PHPUnit test file not discovered: $selected_test_file");
+            pg_stage_ok('discover_tests');
+            exit(1);
+        }
+        $test_files = [$selected_abs];
     }
 
     pg_log("DISCOVERY: dirs=" . implode(',', $directories)
@@ -387,50 +393,6 @@ function pg_discover_tests(array $directories, array $suffixes, array $prefixes,
     // Stable ordering so re-runs show the same failure order.
     sort($found);
     return array_values(array_unique($found));
-}
-
-/**
- * Filter discovered PHPUnit files to Homeboy's changed-test scope.
- *
- * Homeboy may include standalone smoke scripts in HOMEBOY_CHANGED_TEST_FILES;
- * those are intentionally ignored here because the Playground runner only
- * executes PHPUnit test cases. The host-smoke backend owns smoke execution.
- */
-function pg_filter_changed_tests(array $discovered, array $changed_files, $plugin_path, array $suffixes, array $prefixes) {
-    $allowed = [];
-    foreach ($changed_files as $rel) {
-        $rel = trim(str_replace('\\', '/', (string) $rel));
-        if ($rel === '' || strpos($rel, '..') !== false) {
-            continue;
-        }
-
-        $base = basename($rel);
-        $matches_phpunit = false;
-        foreach ($suffixes as $suffix) {
-            if ($suffix !== '' && substr($base, -strlen($suffix)) === $suffix) {
-                $matches_phpunit = true;
-                break;
-            }
-        }
-        if (!$matches_phpunit) {
-            foreach ($prefixes as $prefix) {
-                if ($prefix !== '' && strpos($base, $prefix) === 0) {
-                    $matches_phpunit = true;
-                    break;
-                }
-            }
-        }
-        if (!$matches_phpunit) {
-            pg_log("NOTICE:changed test scope skipped non-PHPUnit file: $rel");
-            continue;
-        }
-
-        $allowed[rtrim($plugin_path, '/') . '/' . ltrim($rel, '/')] = true;
-    }
-
-    return array_values(array_filter($discovered, function ($path) use ($allowed) {
-        return isset($allowed[$path]);
-    }));
 }
 
 // ---------------------------------------------------------------------------
