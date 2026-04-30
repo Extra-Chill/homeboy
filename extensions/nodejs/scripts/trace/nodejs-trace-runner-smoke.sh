@@ -135,7 +135,18 @@ if (data.status !== "pass") throw new Error("helper scenario should pass");
 if (data.summary !== "helper scenario passed") throw new Error("helper summary missing");
 if (!data.timeline.find((event) => event.event === "process.launch")) throw new Error("process launch event missing");
 if (!data.timeline.find((event) => event.event === "process.tree.captured")) throw new Error("process tree event missing");
+if (!data.timeline.find((event) => event.event === "json.parse_error")) throw new Error("json parse error event missing");
+if (!data.timeline.find((event) => event.event === "json.port_known" && event.data.port === 9876)) throw new Error("json port event missing");
+if (!data.timeline.find((event) => event.event === "http.first_response" && event.data.status === 502)) throw new Error("http first response event missing");
+if (!data.timeline.find((event) => event.event === "http.ready" && event.data.status === 200)) throw new Error("http ready event missing");
+if (!data.timeline.find((event) => event.event === "process.seen")) throw new Error("process seen event missing");
+if (!data.timeline.find((event) => event.event === "log.port_known" && event.data.port === 1234)) throw new Error("log parse event missing");
+if (!data.timeline.find((event) => event.event === "console.bridge" && event.data.event === "bridge-ok")) throw new Error("console bridge event missing");
 if (!data.assertions.find((assertion) => assertion.id === "dummy-process-exited" && assertion.status === "pass")) throw new Error("process assertion missing");
+if (!data.assertions.find((assertion) => assertion.id === "json-poll-port-known" && assertion.status === "pass")) throw new Error("json poll assertion missing");
+if (!data.assertions.find((assertion) => assertion.id === "http-poll-ready" && assertion.status === "pass")) throw new Error("http poll assertion missing");
+if (!data.assertions.find((assertion) => assertion.id === "process-poll-seen" && assertion.status === "pass")) throw new Error("process poll assertion missing");
+if (!data.assertions.find((assertion) => assertion.id === "observation-window-resolved" && assertion.status === "pass")) throw new Error("observation window assertion missing");
 if (!data.artifacts.find((artifact) => artifact.path === "process-tree.txt")) throw new Error("process tree artifact missing from envelope");
 if (!data.artifacts.find((artifact) => artifact.path === "trace.jsonl")) throw new Error("timeline artifact missing from envelope");
 '
