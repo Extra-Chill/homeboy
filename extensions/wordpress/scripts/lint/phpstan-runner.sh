@@ -264,7 +264,7 @@ if [ -n "$DEPENDENCY_CONFIG" ] && [ -f "$DEPENDENCY_CONFIG" ]; then
     PHPSTAN_BASE_CONFIG="$DEPENDENCY_CONFIG"
 fi
 
-PHPSTAN_TARGETS=("$PLUGIN_PATH")
+PHPSTAN_TARGETS=()
 PHPSTAN_SCOPED=0
 
 homeboy_phpstan_relpath() {
@@ -291,7 +291,7 @@ homeboy_phpstan_runtime_file() {
     local rel_path="$1"
 
     case "$rel_path" in
-        scoper.inc.php|tools/*|tests/smoke-*.php|tests/*UnitTest.php|tests/*Test.php|vendor_prefixed/*|vendor/*)
+        scoper.inc.php|tools/*|tests/*|vendor_prefixed/*|vendor/*)
             return 1
             ;;
     esac
@@ -341,6 +341,25 @@ resolve_phpstan_targets() {
     fi
 }
 
+resolve_phpstan_full_targets() {
+    local target_path
+    local target_rel
+
+    while IFS= read -r -d '' target_path; do
+        target_rel=$(homeboy_phpstan_relpath "$target_path")
+        if homeboy_phpstan_runtime_file "$target_rel"; then
+            printf '%s\0' "$target_path"
+        fi
+    done < <(find "$PLUGIN_PATH" -type f -name '*.php' \
+        -not -path "*/vendor/*" \
+        -not -path "*/vendor_prefixed/*" \
+        -not -path "*/node_extensions/*" \
+        -not -path "*/node_modules/*" \
+        -not -path "*/build/*" \
+        -not -path "*/dist/*" \
+        -print0)
+}
+
 if [ -n "${HOMEBOY_LINT_FILE:-}" ] || [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
     PHPSTAN_SCOPED=1
     PHPSTAN_TARGETS=()
@@ -357,23 +376,14 @@ if [ -n "${HOMEBOY_LINT_FILE:-}" ] || [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
     if [ -n "$SCOPED_CONTEXT_CONFIG" ] && [ -f "$SCOPED_CONTEXT_CONFIG" ]; then
         PHPSTAN_BASE_CONFIG="$SCOPED_CONTEXT_CONFIG"
     fi
+else
+    while IFS= read -r -d '' phpstan_target; do
+        PHPSTAN_TARGETS+=("$phpstan_target")
+    done < <(resolve_phpstan_full_targets)
 fi
 
 # Check if the selected PHPStan target set has PHP files.
-if [ "$PHPSTAN_SCOPED" -eq 1 ]; then
-    php_file_count="${#PHPSTAN_TARGETS[@]}"
-else
-    php_file_count=$(find "$PLUGIN_PATH" -type f -name "*.php" \
-        -not -path "*/vendor/*" \
-        -not -path "*/vendor_prefixed/*" \
-        -not -path "*/node_extensions/*" \
-        -not -path "*/build/*" \
-        -not -path "*/dist/*" \
-        -not -path "*/tools/*" \
-        -not -name "scoper.inc.php" \
-        -not -path "*/tests/*" \
-        2>/dev/null | wc -l | tr -d ' ')
-fi
+php_file_count="${#PHPSTAN_TARGETS[@]}"
 
 if [ "$php_file_count" -eq 0 ]; then
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then

@@ -182,4 +182,60 @@ HOMEBOY_LINT_FILE="includes/class-example-adapter.php" \
 assert_contains "$TMP_DIR/phpstan-scoped.out" "PHPStan scoped lint: analyzing 1 PHP file(s) from requested scope"
 assert_contains "$TMP_DIR/phpstan-scoped.out" "PHPStan fake passed"
 
+cat > "$FAKE_EXTENSION/vendor/bin/phpstan" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+targets=()
+for arg in "$@"; do
+    case "$arg" in
+        --*) ;;
+        analyse) ;;
+        *) targets+=("$arg") ;;
+    esac
+done
+
+if [ "${#targets[@]}" -lt 1 ]; then
+    echo "expected full-component PHPStan targets" >&2
+    exit 1
+fi
+
+for target in "${targets[@]}"; do
+    case "$target" in
+        *scoper.inc.php|*/tools/*|*/tests/*|*/vendor_prefixed/*|*/vendor/*)
+            printf 'non-runtime target reached PHPStan: %s\n' "$target" >&2
+            exit 1
+            ;;
+    esac
+done
+
+for expected in "$EXPECTED_PLUGIN_FILE" "$EXPECTED_INTERFACE" "$EXPECTED_RUNTIME_CLASS"; do
+    found=0
+    for target in "${targets[@]}"; do
+        if [ "$target" = "$expected" ]; then
+            found=1
+            break
+        fi
+    done
+    if [ "$found" -ne 1 ]; then
+        printf 'expected runtime target missing: %s\n' "$expected" >&2
+        printf 'targets: %s\n' "${targets[*]}" >&2
+        exit 1
+    fi
+done
+
+printf 'PHPStan full fake passed with %s target(s)\n' "${#targets[@]}"
+BASH
+chmod +x "$FAKE_EXTENSION/vendor/bin/phpstan"
+
+EXPECTED_PLUGIN_FILE="$COMPONENT_DIR/example-plugin.php" \
+EXPECTED_INTERFACE="$COMPONENT_DIR/includes/interface-example-adapter.php" \
+EXPECTED_RUNTIME_CLASS="$COMPONENT_DIR/includes/class-example-adapter.php" \
+HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
+HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
+HOMEBOY_COMPONENT_ID="example-plugin" \
+    bash "$PHPSTAN_RUNNER" > "$TMP_DIR/phpstan-full.out" 2>&1
+
+assert_contains "$TMP_DIR/phpstan-full.out" "PHPStan full fake passed"
+
 echo "wordpress lint context smoke passed"

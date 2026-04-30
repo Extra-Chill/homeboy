@@ -174,7 +174,7 @@ homeboy_wordpress_runtime_lint_file() {
     local rel_path="$1"
 
     case "$rel_path" in
-        scoper.inc.php|tools/*|tests/smoke-*.php|tests/*UnitTest.php|tests/*Test.php|vendor_prefixed/*|vendor/*)
+        scoper.inc.php|tools/*|tests/*|vendor_prefixed/*|vendor/*)
             return 1
             ;;
     esac
