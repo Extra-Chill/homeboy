@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.35.0] - 2026-04-30
+
+### Added
+- own requested audit detectors
+
 ## [2.34.2] - 2026-04-30
 
 ### Fixed
