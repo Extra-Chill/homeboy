@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.36.0] - 2026-04-30
+
+### Added
+- declare manifest routing metadata
+
 ## [2.35.0] - 2026-04-30
 
 ### Added
