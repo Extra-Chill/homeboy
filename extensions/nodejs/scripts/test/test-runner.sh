@@ -21,6 +21,7 @@ set -euo pipefail
 #   HOMEBOY_EXTENSION_PATH       — path to this extension
 #   HOMEBOY_COMPONENT_PATH       — path to the Node.js project
 #   HOMEBOY_TEST_RESULTS_FILE    — where to write TestResults envelope
+#   HOMEBOY_TEST_FAILURES_FILE   — where to write parsed failure details
 #   HOMEBOY_NODE_TEST_COMMAND    — override the test command entirely
 #   HOMEBOY_CHANGED_TEST_FILES   — newline-separated test files selected by core
 #   HOMEBOY_DEBUG                — verbose
@@ -110,6 +111,55 @@ PASSED=0
 FAILED=0
 SKIPPED=0
 PARTIAL_LABEL=""
+FAILED_TEST_NAME=""
+FAILED_TEST_FILE=""
+FAILED_ERROR_TYPE=""
+FAILED_MESSAGE=""
+
+extract_failed_nx_task() {
+    echo "$OUTPUT" | awk '
+        /^Failed tasks:[[:space:]]*$/ { in_failed_tasks = 1; next }
+        in_failed_tasks && /^[[:space:]]*-[[:space:]]+/ {
+            sub(/^[[:space:]]*-[[:space:]]+/, "")
+            print
+            exit
+        }
+        in_failed_tasks && NF == 0 { next }
+        in_failed_tasks { exit }
+    '
+}
+
+extract_vitest_failure_line() {
+    echo "$OUTPUT" | grep -E "^[[:space:]]*FAIL[[:space:]]+.*[[:space:]]>[[:space:]]" | head -1 || true
+}
+
+write_node_failure_json() {
+    [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] || return 0
+    [ -n "$FAILED_TEST_NAME" ] || return 0
+
+    node - "$HOMEBOY_TEST_FAILURES_FILE" "$FAILED_TEST_NAME" "$FAILED_TEST_FILE" "$FAILED_ERROR_TYPE" "$FAILED_MESSAGE" "$TOTAL" "$PASSED" <<'JS'
+const fs = require('node:fs');
+
+const [file, testName, testFile, errorType, message, total, passed] = process.argv.slice(2);
+const parsedTotal = Number.parseInt(total || '0', 10) || 0;
+const parsedPassed = Number.parseInt(passed || '0', 10) || 0;
+
+fs.writeFileSync(file, JSON.stringify({
+  total: parsedTotal,
+  passed: parsedPassed,
+  failures: [
+    {
+      test_name: testName,
+      test_file: testFile,
+      error_type: errorType,
+      message,
+      source_file: testFile,
+      source_line: 0
+    }
+  ]
+}, null, 2));
+JS
+}
 
 # Vitest summary lines look like:
 #   Test Files  3 passed (3)
@@ -121,6 +171,35 @@ if [ $PARSED -eq 0 ] && echo "$OUTPUT" | grep -qE "^[[:space:]]*Tests[[:space:]]
     SKIPPED=$(echo "$LINE" | grep -oE "[0-9]+ skipped" | grep -oE "[0-9]+" | head -1 || echo 0)
     TOTAL=$(echo "$LINE" | grep -oE "\([0-9]+\)" | tr -d '()' | tail -1 || echo 0)
     [ -z "$TOTAL" ] && TOTAL=$((PASSED + FAILED + SKIPPED))
+    PARSED=1
+fi
+
+# Nx wraps the underlying runner output and prints the failed target separately:
+#   FAIL src/test/version-detect.spec.ts > Suite > test name
+#   Error: Test timed out in 30000ms.
+#   Failed tasks:
+#   - playground-wordpress:test:vite
+# When Vitest times out before writing its final summary, preserve the test
+# failure instead of falling back to an opaque `unknown-runner` infrastructure
+# failure.
+if [ $PARSED -eq 0 ] && echo "$OUTPUT" | grep -qE "^[[:space:]]*FAIL[[:space:]]+.*[[:space:]]>[[:space:]]" && echo "$OUTPUT" | grep -q "Test timed out in"; then
+    VITEST_FAILURE_LINE="$(extract_vitest_failure_line)"
+    NX_FAILED_TASK="$(extract_failed_nx_task)"
+
+    FAILED_TEST_FILE="$(echo "$VITEST_FAILURE_LINE" | sed -E 's/^[[:space:]]*FAIL[[:space:]]+([^[:space:]]+).*$/\1/')"
+    FAILED_TEST_NAME="$(echo "$VITEST_FAILURE_LINE" | sed -E 's/^[[:space:]]*FAIL[[:space:]]+[^>]+>[[:space:]]*//')"
+    FAILED_ERROR_TYPE="vitest_timeout"
+    FAILED_MESSAGE="$(echo "$OUTPUT" | grep -E "Test timed out in [0-9]+ms" | head -1 | sed -E 's/^[[:space:]]*Error:[[:space:]]*//')"
+
+    if [ -n "$NX_FAILED_TASK" ]; then
+        FAILED_MESSAGE="${FAILED_MESSAGE} (Nx task: ${NX_FAILED_TASK})"
+    fi
+
+    TOTAL=1
+    PASSED=0
+    FAILED=1
+    SKIPPED=0
+    PARTIAL_LABEL="vitest-timeout"
     PARSED=1
 fi
 
@@ -172,6 +251,8 @@ fi
 if type homeboy_write_test_results >/dev/null 2>&1; then
     homeboy_write_test_results "$TOTAL" "$PASSED" "$FAILED" "$SKIPPED" "$PARTIAL_LABEL"
 fi
+
+write_node_failure_json
 
 if [ $TEST_EXIT -ne 0 ]; then
     FAILED_STEP="Tests failed (exit $TEST_EXIT)"
