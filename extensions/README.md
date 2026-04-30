@@ -42,13 +42,33 @@ homeboy extension show wordpress
 
 ### Install from a local clone
 
-If you prefer to clone the repo first:
+Local path installs are for active extension development:
 
 ```bash
 git clone https://github.com/Extra-Chill/homeboy-extensions.git
 homeboy extension install ./homeboy-extensions/wordpress
 homeboy extension install ./homeboy-extensions/rust
 ```
+
+### Install modes and updates
+
+For normal use, install from the GitHub monorepo URL with `--id <extension>`. Homeboy manages the cloned/extracted install and can update that installed copy:
+
+```bash
+homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id wordpress
+```
+
+Local path installs are linked installs. The active extension code is whatever the installed symlink target points at, so updating the primary `homeboy-extensions` checkout does not update an extension linked to another checkout or feature worktree. Avoid linking installed extensions to short-lived worktrees unless you are intentionally testing that branch.
+
+Inspect the current state before debugging extension behavior:
+
+```bash
+homeboy extension list
+homeboy extension show wordpress
+readlink ~/.config/homeboy/extensions/wordpress
+```
+
+To reset a stale linked install, uninstall and reinstall from the GitHub URL, or relink intentionally to the checkout you want active.
 
 ## Usage
 
