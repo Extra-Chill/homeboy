@@ -28,12 +28,14 @@ run_trace() {
     local scenario="$2"
     local results_file="$3"
     local artifact_dir="$4"
+    local extra_workloads="${5:-}"
     HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
     HOMEBOY_COMPONENT_PATH="$project_dir" \
     HOMEBOY_COMPONENT_ID="node-trace-smoke" \
     HOMEBOY_TRACE_SCENARIO="$scenario" \
     HOMEBOY_TRACE_RESULTS_FILE="$results_file" \
     HOMEBOY_TRACE_ARTIFACT_DIR="$artifact_dir" \
+    HOMEBOY_TRACE_EXTRA_WORKLOADS="$extra_workloads" \
     HOMEBOY_RUN_DIR="$(dirname "$results_file")" \
         bash "$RUNNER"
 }
@@ -51,6 +53,7 @@ for (const token of [
   'HOMEBOY_TRACE_SCENARIO',
   'HOMEBOY_TRACE_LIST_ONLY',
   'HOMEBOY_TRACE_ARTIFACT_DIR',
+  'HOMEBOY_TRACE_EXTRA_WORKLOADS',
   'HOMEBOY_TRACE_HELPER_DIR',
   'HOMEBOY_RUN_DIR',
 ]) {
@@ -62,19 +65,24 @@ LIST_PROJECT="$(make_project list-mode)"
 mkdir -p "$LIST_PROJECT/traces" "$LIST_PROJECT/scripts/trace"
 printf 'console.log("first")\n' > "$LIST_PROJECT/traces/first.trace.mjs"
 printf 'console.log("second")\n' > "$LIST_PROJECT/scripts/trace/second.mjs"
+EXTRA_TRACE_FILE="$TMP_DIR/extras/third.trace.mjs"
+mkdir -p "$(dirname "$EXTRA_TRACE_FILE")"
+printf 'console.log("third")\n' > "$EXTRA_TRACE_FILE"
 LIST_RESULTS="$TMP_DIR/list-results.json"
 HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
 HOMEBOY_COMPONENT_PATH="$LIST_PROJECT" \
 HOMEBOY_COMPONENT_ID="node-trace-smoke" \
 HOMEBOY_TRACE_LIST_ONLY="1" \
 HOMEBOY_TRACE_RESULTS_FILE="$LIST_RESULTS" \
+HOMEBOY_TRACE_EXTRA_WORKLOADS="$EXTRA_TRACE_FILE" \
     bash "$RUNNER" >/dev/null
 assert_json "$LIST_RESULTS" '
 if (data.status !== "pass") throw new Error("list envelope did not pass");
 const ids = data.scenarios.map((scenario) => scenario.id).sort();
-if (ids.join(",") !== "first,second") throw new Error(`unexpected scenarios: ${ids.join(",")}`);
+if (ids.join(",") !== "first,second,third") throw new Error(`unexpected scenarios: ${ids.join(",")}`);
 if (!data.scenarios.find((scenario) => scenario.id === "first" && scenario.source === "traces/first.trace.mjs")) throw new Error("missing traces/*.trace.mjs source");
 if (!data.scenarios.find((scenario) => scenario.id === "second" && scenario.source === "scripts/trace/second.mjs")) throw new Error("missing scripts/trace/*.mjs source");
+if (!data.scenarios.find((scenario) => scenario.id === "third" && scenario.source.startsWith("extra:"))) throw new Error("missing extra workload source");
 '
 
 TRACE_PROJECT="$(make_project traces-scenario)"
@@ -151,6 +159,53 @@ run_trace "$SCRIPT_PROJECT" "fallback" "$SCRIPT_RESULTS" "$TMP_DIR/script-artifa
 assert_json "$SCRIPT_RESULTS" '
 if (data.status !== "pass") throw new Error("scripts/trace fallback did not pass");
 if (data.summary !== "fallback result") throw new Error("scripts/trace result missing");
+'
+
+EXTRA_PROJECT="$(make_project extra-scenario)"
+EXTRA_WORKLOAD="$TMP_DIR/extra-workloads/rig-only.mjs"
+mkdir -p "$(dirname "$EXTRA_WORKLOAD")"
+cat > "$EXTRA_WORKLOAD" <<'EOF'
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.HOMEBOY_TRACE_RESULTS_FILE, JSON.stringify({
+  component_id: process.env.HOMEBOY_COMPONENT_ID,
+  scenario_id: process.env.HOMEBOY_TRACE_SCENARIO,
+  status: 'pass',
+  summary: 'extra workload result',
+  timeline: [],
+  assertions: [],
+  artifacts: [],
+}, null, 2));
+EOF
+EXTRA_RESULTS="$TMP_DIR/extra-results.json"
+run_trace "$EXTRA_PROJECT" "rig-only" "$EXTRA_RESULTS" "$TMP_DIR/extra-artifacts" "$EXTRA_WORKLOAD" >/dev/null
+assert_json "$EXTRA_RESULTS" '
+if (data.status !== "pass") throw new Error("extra workload scenario did not pass");
+if (data.summary !== "extra workload result") throw new Error("extra workload result missing");
+'
+
+PRECEDENCE_PROJECT="$(make_project precedence-scenario)"
+mkdir -p "$PRECEDENCE_PROJECT/traces"
+cat > "$PRECEDENCE_PROJECT/traces/dupe.trace.mjs" <<'EOF'
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.HOMEBOY_TRACE_RESULTS_FILE, JSON.stringify({
+  component_id: process.env.HOMEBOY_COMPONENT_ID,
+  scenario_id: process.env.HOMEBOY_TRACE_SCENARIO,
+  status: 'pass',
+  summary: 'local project result',
+  timeline: [],
+  assertions: [],
+  artifacts: [],
+}, null, 2));
+EOF
+EXTRA_DUPE="$TMP_DIR/extra-workloads/dupe.trace.mjs"
+cat > "$EXTRA_DUPE" <<'EOF'
+throw new Error('extra workload should not run when a local scenario has the same id');
+EOF
+PRECEDENCE_RESULTS="$TMP_DIR/precedence-results.json"
+run_trace "$PRECEDENCE_PROJECT" "dupe" "$PRECEDENCE_RESULTS" "$TMP_DIR/precedence-artifacts" "$EXTRA_DUPE" >/dev/null
+assert_json "$PRECEDENCE_RESULTS" '
+if (data.status !== "pass") throw new Error("duplicate-id local scenario did not pass");
+if (data.summary !== "local project result") throw new Error("local project scenario did not win over extra workload");
 '
 
 NPM_PROJECT="$(make_project npm-scenario)"

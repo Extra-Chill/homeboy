@@ -14,6 +14,7 @@ set -euo pipefail
 #   HOMEBOY_TRACE_SCENARIO        — scenario id to run
 #   HOMEBOY_TRACE_LIST_ONLY       — when 1, emit scenario inventory only
 #   HOMEBOY_TRACE_ARTIFACT_DIR    — artifact directory for scenario output
+#   HOMEBOY_TRACE_EXTRA_WORKLOADS — path-delimited rig-owned trace workload files
 #   HOMEBOY_RUN_DIR               — run-scoped working directory
 #   HOMEBOY_DEBUG                 — verbose output
 
@@ -112,7 +113,8 @@ NODE
 
 discover_trace_scenarios() {
     local -A seen=()
-    local file scenario_id source
+    local -a workload_files=()
+    local file scenario_id source extra_workloads workload
 
     if [ -d "${PROJECT_PATH}/traces" ]; then
         while IFS= read -r file; do
@@ -135,6 +137,46 @@ discover_trace_scenarios() {
             fi
         done < <(find "${PROJECT_PATH}/scripts/trace" -maxdepth 1 -type f -name '*.mjs' 2>/dev/null | sort)
     fi
+
+    extra_workloads="${HOMEBOY_TRACE_EXTRA_WORKLOADS:-}"
+    if [ -n "$extra_workloads" ]; then
+        IFS=':' read -r -a workload_files <<< "$extra_workloads"
+        for workload in "${workload_files[@]}"; do
+            [ -n "$workload" ] || continue
+            file="$(resolve_extra_trace_file "$workload")"
+            [ -f "$file" ] || continue
+            if ! scenario_id="$(trace_scenario_id "$file")"; then
+                continue
+            fi
+            source="extra:${file}"
+            if [ -z "${seen[$scenario_id]:-}" ]; then
+                seen[$scenario_id]=1
+                printf '%s\t%s\n' "$scenario_id" "$source"
+            fi
+        done
+    fi
+}
+
+trace_scenario_id() {
+    local file="$1"
+    local name
+    name="$(basename "$file")"
+
+    case "$name" in
+        *.trace.mjs) printf '%s\n' "${name%.trace.mjs}" ;;
+        *.mjs) printf '%s\n' "${name%.mjs}" ;;
+        *) return 1 ;;
+    esac
+}
+
+resolve_extra_trace_file() {
+    local file="$1"
+
+    if [[ "$file" = /* ]]; then
+        printf '%s\n' "$file"
+    else
+        printf '%s\n' "${PROJECT_PATH}/${file}"
+    fi
 }
 
 resolve_trace_scenario() {
@@ -150,6 +192,26 @@ resolve_trace_scenario() {
     if [ -f "$script_file" ]; then
         printf 'node\t%s\t%s\n' "$script_file" "scripts/trace/${scenario_id}.mjs"
         return 0
+    fi
+
+    local extra_workloads="${HOMEBOY_TRACE_EXTRA_WORKLOADS:-}"
+    local workload file extra_id
+    local -a workload_files=()
+
+    if [ -n "$extra_workloads" ]; then
+        IFS=':' read -r -a workload_files <<< "$extra_workloads"
+        for workload in "${workload_files[@]}"; do
+            [ -n "$workload" ] || continue
+            file="$(resolve_extra_trace_file "$workload")"
+            [ -f "$file" ] || continue
+            if ! extra_id="$(trace_scenario_id "$file")"; then
+                continue
+            fi
+            if [ "$extra_id" = "$scenario_id" ]; then
+                printf 'node\t%s\t%s\n' "$file" "extra:${file}"
+                return 0
+            fi
+        done
     fi
 
     if homeboy_has_npm_script "trace"; then
