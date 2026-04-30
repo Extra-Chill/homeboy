@@ -258,7 +258,53 @@
             ]
           }
         ]
-      }
+      },
+      "requested_detectors": [
+        {
+          "id": "wordpress-json-like-exact-match",
+          "type": "regex",
+          "kind": "json_like_exact_match",
+          "severity": "warning",
+          "convention": "requested_detectors",
+          "language": "php",
+          "file_extensions": ["php"],
+          "exclude_path_contains": ["/vendor/", "vendor/", "/node_modules/", "node_modules/"],
+          "pattern": "(?is)\\b(?P<column>metadata|engine_data|config|payload)\\b\\s+LIKE\\s+[^;\\n]*(?:\\\\?['\\\"]|%)(?:\\\\?\\\")(?P<field>[A-Za-z_][A-Za-z0-9_\\-]*)(?:\\\\?\\\")\\s*:",
+          "description": "SQL LIKE exact-match against JSON blob `{column}` at line {line} for key `{field}`",
+          "suggestion": "Avoid semantic matching inside `{column}` with LIKE. Decode candidate rows or promote `{field}` to a first-class indexed column before exact matching."
+        },
+        {
+          "id": "wordpress-constant-backed-slug-literal",
+          "type": "derived_literal",
+          "kind": "constant_backed_slug_literal",
+          "severity": "info",
+          "convention": "requested_detectors",
+          "language": "php",
+          "file_extensions": ["php"],
+          "exclude_path_contains": ["/vendor/", "vendor/", "/node_modules/", "node_modules/"],
+          "source_pattern": "(?s)\\b(?:final\\s+|abstract\\s+)?class\\s+(?P<class>[A-Za-z_][A-Za-z0-9_]*)\\b.*?\\b(?:(?:public|protected|private)\\s+)?const\\s+(?P<const>[A-Z][A-Z0-9_]*)\\s*=\\s*['\\\"](?P<value>[a-z][a-z0-9]*(?:[-_/:][a-z0-9]+)+)['\\\"]",
+          "value_capture": "value",
+          "label": "{class}::{const}",
+          "literal_pattern": "['\\\"]{value}['\\\"]",
+          "description": "Raw slug literal `{value}` at line {line} duplicates constant {label}",
+          "suggestion": "Use {label} instead of repeating the literal slug so the constant remains the source of truth."
+        },
+        {
+          "id": "wordpress-option-scope-drift",
+          "type": "comment_regex",
+          "kind": "option_scope_drift",
+          "severity": "warning",
+          "convention": "requested_detectors",
+          "language": "php",
+          "file_extensions": ["php"],
+          "exclude_path_contains": ["/vendor/", "vendor/", "/node_modules/", "node_modules/"],
+          "comment_pattern": "(?i)\\b(network option|site option|multisite|shared across subsites|shared across sites)\\b",
+          "comment_exclude_pattern": "(?i)\\b(not a network option|single-site option)\\b",
+          "pattern": "\\b(?P<call>get_option|update_option|delete_option)\\s*\\(",
+          "description": "Option scope drift at line {line}: docs mention network/site-option storage but implementation calls `{call}`",
+          "suggestion": "Use the matching site-option call or update the storage contract so multisite behaviour is explicit."
+        }
+      ]
     },
     "ignore_claim_patterns": [
       "/wp-json/**",
