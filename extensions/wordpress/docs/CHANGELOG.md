@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.34.0] - 2026-04-30
+
+### Added
+- emit browser bench target metadata
+
 ## [2.33.0] - 2026-04-29
 
 ### Added
