@@ -38,6 +38,7 @@ FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 BENCH_HELPER_SH="${HOMEBOY_RUNTIME_BENCH_HELPER_SH:-${HOME}/.homeboy/runtime/bench-helper.sh}"
 BENCH_HELPER_PHP_HOST="${HOMEBOY_RUNTIME_BENCH_HELPER_PHP:-${HOME}/.homeboy/runtime/bench-helper.php}"
 BENCH_HELPER_PHP_GUEST="/homeboy-runtime/bench-helper.php"
+BENCH_BROWSER_TARGET_HELPER="${SCRIPT_DIR}/browser-target.sh"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 PLAYGROUND_PATHS_HELPER="${SCRIPT_DIR}/../lib/playground-paths.sh"
@@ -73,6 +74,8 @@ if [ ! -f "$BENCH_HELPER_PHP_HOST" ]; then
     echo "ERROR: Homeboy PHP bench helper not found at ${BENCH_HELPER_PHP_HOST}" >&2
     exit 2
 fi
+# shellcheck source=browser-target.sh
+source "$BENCH_BROWSER_TARGET_HELPER"
 
 # PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
 # mount the component-under-test. The historical default was
@@ -339,6 +342,11 @@ else
     if [ -z "$PLAYGROUND_WORDPRESS_INSTALL_MODE" ]; then
         PLAYGROUND_WORDPRESS_INSTALL_MODE="download-and-install"
     fi
+fi
+
+if ! homeboy_wordpress_emit_browser_target "${HOMEBOY_SETTINGS_JSON:-{}}" "$SHARED_STATE_HOST" "$COMPONENT_ID" "$PLUGIN_SLUG" "$BENCH_SITE_MODE"; then
+    FAILED_STEP="Browser bench target setup"
+    exit 1
 fi
 
 BLUEPRINT_TMPFILE=""

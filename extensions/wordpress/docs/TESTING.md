@@ -251,6 +251,91 @@ load_component → discover_tests → load_tests → run_tests`. The bash runner
 parses these markers to classify failures; see `test-runner-playground.sh`
 for the full classification table.
 
+## Browser bench target handoff
+
+Browser benchmarks are a two-extension handoff, not a second WordPress bench
+runner. The WordPress extension prepares/describes the WordPress target; the
+Node extension browser helper owns Playwright, browser metrics, screenshots, and
+browser artifacts.
+
+When a component enables `bench_browser_target`, the WordPress bench runner writes
+this file:
+
+```text
+${HOMEBOY_BENCH_SHARED_STATE}/browser-target.json
+```
+
+Minimum component setting:
+
+```json
+{
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "bench_browser_target": { "enabled": true }
+      }
+    }
+  }
+}
+```
+
+The v1 file shape is:
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "wordpress",
+  "lifecycle": {
+    "server": "external",
+    "keepAlive": "caller"
+  },
+  "baseUrl": "http://127.0.0.1:8888/",
+  "adminUrl": "http://127.0.0.1:8888/wp-admin/",
+  "login": {
+    "method": "credentials",
+    "username": "admin",
+    "password": "..."
+  },
+  "metadata": {
+    "wpVersion": "6.9",
+    "componentId": "my-plugin",
+    "pluginSlug": "my-plugin",
+    "benchSiteMode": "installed"
+  },
+  "artifactPolicy": {
+    "publishRaw": false,
+    "secretFields": ["login.password", "login.url"]
+  }
+}
+```
+
+Use `baseUrl` / `adminUrl` when an installed or persisted site is already served
+by the caller. If `baseUrl` is omitted, the target file is **metadata only**:
+the current Playground PHP runner runs `wp-playground-cli php` and exits after
+workloads complete, so it does not keep a browser-usable HTTP server alive for a
+later Playwright phase.
+
+Credentials may be supplied directly or via an environment variable indirection:
+
+```json
+{
+  "bench_browser_target": {
+    "enabled": true,
+    "baseUrl": "http://127.0.0.1:8888/",
+    "login": {
+      "method": "credentials",
+      "username": "admin",
+      "password_env": "WP_BROWSER_PASSWORD"
+    }
+  }
+}
+```
+
+The raw `browser-target.json` file is a handoff artifact, not a report artifact.
+It can contain credentials or auto-login URLs; runners must not print it to logs
+or publish it with benchmark results without redacting the fields listed in
+`artifactPolicy.secretFields`.
+
 ## Known gaps
 
 - **WP version is pinned.** Currently `--wp=6.9`. Mismatched pins produce

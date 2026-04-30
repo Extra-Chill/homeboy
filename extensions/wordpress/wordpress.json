@@ -499,6 +499,13 @@
       "description": "WordPress bench boot shape. 'fresh' preserves the historical wp-phpunit install stage. 'installed' requires HOMEBOY_BENCH_SHARED_STATE, mounts its wordpress/ subdirectory at /wordpress before Playground install, prepares that persisted site on the first run, skips wp-phpunit install.php, and boots the site with wp-load.php for warm installed-site runs."
     },
     {
+      "id": "bench_browser_target",
+      "label": "Bench browser target handoff",
+      "type": "object",
+      "default": {},
+      "description": "Optional browser bench target descriptor. Set {\"enabled\": true} to write HOMEBOY_BENCH_SHARED_STATE/browser-target.json. Include baseUrl/adminUrl for an already-running site; otherwise the file is metadata-only because the Playground PHP bench runner exits after workloads complete. Login supports method plus username/password or password_env; raw target files are handoff artifacts and must not be published in reports."
+    },
+    {
       "id": "playground_wordpress_install_mode",
       "label": "Playground WordPress install mode",
       "type": "string",
