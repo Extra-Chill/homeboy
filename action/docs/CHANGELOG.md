@@ -2,6 +2,17 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.1.3] - 2026-04-29
+
+### Changed
+- delegate release auth to checkout
+- refactor(pr-comment): delegate rendering to homeboy review
+
+### Fixed
+- report detailed PR fix summaries
+- fix(pr-comment): skip green no-op comments
+- render finding-level fixability
+
 ## [2.1.2] - 2026-04-29
 
 ### Fixed
