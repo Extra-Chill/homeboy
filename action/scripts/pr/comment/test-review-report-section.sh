@@ -77,7 +77,41 @@ assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--banner binary-source=fa
 export EXTRA_ARGS="--format json"
 build_section_body
 
-assert_contains "${SECTION_BODY}" "core PR-comment rendering currently supports the default" "custom args render unsupported warning"
+assert_contains "${SECTION_BODY}" ":x: **audit** — failed" "custom args render split audit status"
+assert_contains "${SECTION_BODY}" ":white_check_mark: **lint** — passed" "custom args render split lint status"
+assert_contains "${SECTION_BODY}" ":white_check_mark: **test** — passed" "custom args render split test status"
 assert_not_contains "${SECTION_BODY}" ":x: **audit** _(changed files only)_" "custom args do not fall back to legacy command blocks"
+assert_not_contains "${SECTION_BODY}" "core PR-comment rendering currently supports the default" "custom args do not use unsupported warning"
+
+split_output_dir="$(mktemp -d)"
+cat > "${split_output_dir}/lint.json" <<'JSON'
+{
+  "success": false,
+  "data": {
+    "hints": ["Some issues may require manual fixes"],
+    "lint_findings": [
+      {"category":"phpstan","message":"A"},
+      {"category":"phpstan","message":"B"},
+      {"category":"phpcs","message":"C"}
+    ]
+  }
+}
+JSON
+
+export COMMANDS="lint"
+export RESULTS='{"lint":"fail"}'
+export SECTION_TITLE="Lint"
+export OUTPUT_DIR="${split_output_dir}"
+unset EXTRA_ARGS
+build_section_body
+
+assert_contains "${SECTION_BODY}" "### Lint" "split command section title preserved"
+assert_contains "${SECTION_BODY}" ":x: **lint** — failed" "split command failure rendered"
+assert_contains "${SECTION_BODY}" '`phpstan` — 2 finding(s)' "split command phpstan bucket rendered"
+assert_contains "${SECTION_BODY}" '`phpcs` — 1 finding(s)' "split command phpcs bucket rendered"
+assert_contains "${SECTION_BODY}" "_Total: 3 finding(s)_" "split command total rendered"
+assert_contains "${SECTION_BODY}" "Some issues may require manual fixes" "split command hints rendered"
+assert_contains "${SECTION_BODY}" "Deep dive: homeboy lint data-machine --changed-since origin/main" "split command deep dive rendered"
+assert_not_contains "${SECTION_BODY}" "core PR-comment rendering currently supports the default" "split command does not use unsupported warning"
 
 printf 'All review report section checks passed.\n'

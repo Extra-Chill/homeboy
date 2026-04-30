@@ -42,7 +42,7 @@ append_review_banner_args() {
 
 append_review_report_section() {
   if ! commands_use_review_report; then
-    SECTION_BODY+="> :warning: Homeboy core PR-comment rendering currently supports the default \`audit,lint,test\` review report only. Check the action logs for \`${COMMANDS}\`."$'\n\n'
+    append_split_command_sections
     return 0
   fi
 
@@ -83,6 +83,166 @@ append_review_report_section() {
   fi
 
   return 0
+}
+
+status_icon() {
+  case "$1" in
+    pass|passed) printf '%s\n' ':white_check_mark:' ;;
+    fail|failed) printf '%s\n' ':x:' ;;
+    skipped) printf '%s\n' ':fast_forward:' ;;
+    *) printf '%s\n' ':warning:' ;;
+  esac
+}
+
+status_label() {
+  case "$1" in
+    pass|passed) printf '%s\n' 'passed' ;;
+    fail|failed) printf '%s\n' 'failed' ;;
+    skipped) printf '%s\n' 'skipped' ;;
+    *) printf '%s\n' 'unknown' ;;
+  esac
+}
+
+scope_suffix_for_command() {
+  local command="$1"
+  local scope_flags
+  scope_flags="$(scope_flags_for "${command}")"
+
+  if [ -n "${scope_flags}" ]; then
+    printf ' %s\n' "${scope_flags}"
+  else
+    printf '\n'
+  fi
+}
+
+append_json_hints() {
+  local json_file="$1"
+  local hints
+
+  hints="$(jq -r '(.data.hints // .hints // [])[]?' "${json_file}" 2>/dev/null || true)"
+  [ -n "${hints}" ] || return 0
+
+  while IFS= read -r hint; do
+    [ -n "${hint}" ] || continue
+    SECTION_BODY+="> :information_source: ${hint}"$'\n'
+  done <<< "${hints}"
+}
+
+append_lint_details() {
+  local json_file="$1"
+  local details total
+
+  details="$(jq -r '
+    (.data.lint_findings // .lint_findings // [])
+    | group_by(.category // "lint")
+    | sort_by(-length)
+    | .[:10][]?
+    | "- `" + (.[0].category // "lint") + "` — " + (length|tostring) + " finding(s)"
+  ' "${json_file}" 2>/dev/null || true)"
+  total="$(jq -r '(.data.lint_findings // .lint_findings // []) | length' "${json_file}" 2>/dev/null || printf '0')"
+
+  if [ -n "${details}" ]; then
+    SECTION_BODY+="${details}"$'\n'
+  fi
+  if [ "${total}" != "0" ] && [ "${total}" != "null" ]; then
+    SECTION_BODY+="- _Total: ${total} finding(s)_"$'\n'
+  fi
+}
+
+append_audit_details() {
+  local json_file="$1"
+  local details total
+
+  details="$(jq -r '
+    (.data.baseline_comparison.new_items // .data.findings // .findings // [])
+    | group_by(.context_label // .convention // .kind // "audit")
+    | sort_by(-length)
+    | .[:10][]?
+    | "- **" + (.[0].context_label // .[0].convention // .[0].kind // "audit") + "** — " + (length|tostring) + " finding(s)"
+  ' "${json_file}" 2>/dev/null || true)"
+  total="$(jq -r '
+    if (.data.baseline_comparison.new_items? // null) != null then .data.baseline_comparison.new_items | length
+    elif (.data.findings? // null) != null then .data.findings | length
+    elif (.findings? // null) != null then .findings | length
+    else 0 end
+  ' "${json_file}" 2>/dev/null || printf '0')"
+
+  if [ -n "${details}" ]; then
+    SECTION_BODY+="${details}"$'\n'
+  fi
+  if [ "${total}" != "0" ] && [ "${total}" != "null" ]; then
+    SECTION_BODY+="- _Total: ${total} finding(s)_"$'\n'
+  fi
+}
+
+append_test_details() {
+  local json_file="$1"
+  local details counts failed passed skipped total
+
+  failed="$(jq -r '(.data.test_counts.failed // .test_counts.failed // 0)' "${json_file}" 2>/dev/null || printf '0')"
+  passed="$(jq -r '(.data.test_counts.passed // .test_counts.passed // 0)' "${json_file}" 2>/dev/null || printf '0')"
+  skipped="$(jq -r '(.data.test_counts.skipped // .test_counts.skipped // 0)' "${json_file}" 2>/dev/null || printf '0')"
+  total="$(jq -r '(.data.test_counts.total // .test_counts.total // 0)' "${json_file}" 2>/dev/null || printf '0')"
+
+  if [ "${total}" != "0" ] && [ "${total}" != "null" ]; then
+    if [ "${failed}" != "0" ] && [ "${failed}" != "null" ]; then
+      SECTION_BODY+="- **${failed} failed** out of ${total} total"$'\n'
+    elif [ "${passed}" != "0" ] && [ "${passed}" != "null" ]; then
+      SECTION_BODY+="- ${passed} passed"$'\n'
+    fi
+    if [ "${skipped}" != "0" ] && [ "${skipped}" != "null" ]; then
+      SECTION_BODY+="- ${skipped} skipped"$'\n'
+    fi
+  fi
+
+  details="$(jq -r '(.data.failed_tests // .failed_tests // [])[:10][]? | "- `" + (.name // .test // .case // "test") + "`"' "${json_file}" 2>/dev/null || true)"
+  if [ -n "${details}" ]; then
+    SECTION_BODY+="${details}"$'\n'
+  fi
+}
+
+append_command_details() {
+  local command="$1"
+  local json_file="$2"
+
+  case "${command}" in
+    audit) append_audit_details "${json_file}" ;;
+    lint) append_lint_details "${json_file}" ;;
+    test) append_test_details "${json_file}" ;;
+  esac
+}
+
+append_split_command_section() {
+  local command="$1"
+  local status json_file scope_suffix icon label
+
+  status="$(command_status "${command}")"
+  icon="$(status_icon "${status}")"
+  label="$(status_label "${status}")"
+  json_file="$(summary_json_for_command "${command}")"
+  scope_suffix="$(scope_suffix_for_command "${command}")"
+
+  SECTION_BODY+="${icon} **${command}** — ${label}"$'\n'
+
+  if [ -n "${json_file}" ] && [ -f "${json_file}" ]; then
+    append_command_details "${command}" "${json_file}"
+    append_json_hints "${json_file}"
+  else
+    SECTION_BODY+="> :warning: Structured output for \`${command}\` was not found. Check the action logs for details."$'\n'
+  fi
+
+  SECTION_BODY+="> Deep dive: homeboy ${command} ${COMP_ID}${scope_suffix}"$'\n\n'
+}
+
+append_split_command_sections() {
+  local selected command
+
+  IFS=',' read -ra selected <<< "${COMMANDS:-}"
+  for command in "${selected[@]}"; do
+    command="$(echo "${command}" | xargs)"
+    [ -n "${command}" ] || continue
+    append_split_command_section "${command}"
+  done
 }
 
 build_section_body() {

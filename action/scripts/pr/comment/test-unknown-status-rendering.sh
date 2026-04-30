@@ -39,21 +39,22 @@ export AUTOFIX_ENABLED="false"
 export BINARY_SOURCE="source"
 export SCOPE_MODE="full"
 export DIGEST_FILE=""
+export OUTPUT_DIR=""
 
 source "${ROOT}/scripts/core/lib.sh"
 source "${ROOT}/scripts/pr/comment/sections.sh"
 
 body="$(RESULTS='{not-json' build_section_body; printf '%s\n' "${SECTION_BODY}")"
-assert_contains "${body}" "core PR-comment rendering currently supports the default" "single-command runs use unsupported review warning"
-assert_not_contains "${body}" ":warning: **audit**" "single-command runs do not render legacy warning block"
+assert_contains "${body}" ":warning: **audit** — unknown" "invalid results render unknown status"
+assert_contains "${body}" "Structured output for \`audit\` was not found" "missing audit json warning rendered"
 assert_not_contains "${body}" "Could not parse a pass/fail result for audit" "single-command runs do not render legacy parse warning"
 
 body="$(RESULTS='{"audit":"mystery"}' build_section_body; printf '%s\n' "${SECTION_BODY}")"
-assert_contains "${body}" "core PR-comment rendering currently supports the default" "unknown single-command status uses unsupported review warning"
-assert_not_contains "${body}" ":warning: **audit**" "unknown status does not render legacy warning block"
+assert_contains "${body}" ":warning: **audit** — unknown" "unknown single-command status renders unknown"
+assert_contains "${body}" "Structured output for \`audit\` was not found" "unknown status missing json warning rendered"
 
 body="$(RESULTS='{"audit":"fail"}' build_section_body; printf '%s\n' "${SECTION_BODY}")"
-assert_contains "${body}" "core PR-comment rendering currently supports the default" "explicit single-command failure uses unsupported review warning"
-assert_not_contains "${body}" ":x: **audit**" "explicit failure does not render legacy command failure"
+assert_contains "${body}" ":x: **audit** — failed" "explicit single-command failure renders failure"
+assert_contains "${body}" "Structured output for \`audit\` was not found" "failed status missing json warning rendered"
 
 printf 'All unsupported single-command rendering checks passed.\n'
