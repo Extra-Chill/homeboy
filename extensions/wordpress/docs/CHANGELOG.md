@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.37.0] - 2026-04-30
+
+### Added
+- add fingerprint metadata to grammars
+
 ## [2.36.0] - 2026-04-30
 
 ### Added
