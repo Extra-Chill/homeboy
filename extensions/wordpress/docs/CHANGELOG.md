@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.34.1] - 2026-04-30
+
+### Fixed
+- exclude non-runtime files from full PHPStan lint
+
 ## [2.34.0] - 2026-04-30
 
 ### Added
