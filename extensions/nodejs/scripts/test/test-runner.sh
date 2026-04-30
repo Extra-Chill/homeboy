@@ -22,6 +22,7 @@ set -euo pipefail
 #   HOMEBOY_COMPONENT_PATH       — path to the Node.js project
 #   HOMEBOY_TEST_RESULTS_FILE    — where to write TestResults envelope
 #   HOMEBOY_NODE_TEST_COMMAND    — override the test command entirely
+#   HOMEBOY_CHANGED_TEST_FILES   — newline-separated test files selected by core
 #   HOMEBOY_DEBUG                — verbose
 
 if ((BASH_VERSINFO[0] < 4)); then
@@ -70,9 +71,20 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: test command: $TEST_CMD" >&2
 fi
 
+RUNNER_ARGS=("$@")
+if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
+    while IFS= read -r selected_test_file; do
+        [ -n "$selected_test_file" ] || continue
+        RUNNER_ARGS+=("$selected_test_file")
+    done <<< "$HOMEBOY_CHANGED_TEST_FILES"
+fi
+
 echo "Running Node.js tests..."
 echo "  Component: ${COMPONENT_ID} (${PROJECT_PATH})"
 echo "  Command:   ${TEST_CMD}"
+if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
+    echo "  Scope:     ${#RUNNER_ARGS[@]} selected test file(s)"
+fi
 echo ""
 
 cd "$PROJECT_PATH"
@@ -80,7 +92,7 @@ cd "$PROJECT_PATH"
 OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-node-test.XXXXXX")
 set +e
 # shellcheck disable=SC2086 # word-splitting is intentional here
-$TEST_CMD "$@" 2>&1 | tee "$OUTPUT_FILE"
+$TEST_CMD "${RUNNER_ARGS[@]}" 2>&1 | tee "$OUTPUT_FILE"
 TEST_EXIT=${PIPESTATUS[0]}
 set -e
 
