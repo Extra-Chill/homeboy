@@ -473,7 +473,17 @@
     ]
   },
   "lint": {
-    "extension_script": "scripts/lint/lint-runner.sh"
+    "extension_script": "scripts/lint/lint-runner.sh",
+    "changed_file_routes": [
+      {
+        "extensions": ["php"],
+        "step": "phpcs,phpstan"
+      },
+      {
+        "extensions": ["js", "jsx", "ts", "tsx"],
+        "step": "eslint"
+      }
+    ]
   },
   "test": {
     "drift": {

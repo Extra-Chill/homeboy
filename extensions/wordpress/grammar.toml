@@ -9,6 +9,7 @@
 [language]
 id = "php"
 extensions = ["php"]
+import_parser = "php"
 
 [comments]
 line = ["//", "#"]
