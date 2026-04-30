@@ -25,6 +25,43 @@ multiline = []
 open = '{'
 close = '}'
 
+[fingerprint]
+keywords = [
+  'abstract', 'and', 'array', 'as', 'break', 'callable', 'case', 'catch', 'class', 'clone',
+  'const', 'continue', 'declare', 'default', 'do', 'echo', 'else', 'elseif', 'empty',
+  'enddeclare', 'endfor', 'endforeach', 'endif', 'endswitch', 'endwhile', 'eval', 'exit',
+  'extends', 'final', 'finally', 'fn', 'for', 'foreach', 'function', 'global', 'goto', 'if',
+  'implements', 'include', 'include_once', 'instanceof', 'insteadof', 'interface', 'isset',
+  'list', 'match', 'namespace', 'new', 'or', 'print', 'private', 'protected', 'public',
+  'readonly', 'require', 'require_once', 'return', 'static', 'switch', 'throw', 'trait', 'try',
+  'unset', 'use', 'var', 'while', 'xor', 'yield', 'null', 'true', 'false', 'self', 'parent',
+  'int', 'float', 'string', 'bool', 'void', 'mixed', 'object', 'iterable', 'never',
+]
+skip_calls = [
+  'if', 'while', 'for', 'foreach', 'switch', 'match', 'catch', 'return', 'echo', 'print',
+  'isset', 'unset', 'empty', 'list', 'array', 'function', 'class', 'interface', 'trait', 'new',
+  'require', 'require_once', 'include', 'include_once', 'define', 'defined', 'die', 'exit',
+  'eval', 'compact', 'extract', 'var_dump', 'print_r', 'var_export',
+]
+contract_method_names = [
+  'execute', 'checkPermission', 'check_permission', '__construct', '__destruct', '__get', '__set',
+  '__isset', '__unset', '__call', '__callStatic', '__toString', '__invoke', '__clone', '__sleep',
+  '__wakeup', '__serialize', '__unserialize', '__set_state', '__debugInfo',
+]
+contract_type_hints = [
+  'WP_REST_Request', 'WP_REST_Response', 'WP_REST_Server', 'WP_Post', 'WP_User', 'WP_Term',
+  'WP_Comment', 'WP_Site', 'WP_Network', 'WP_Query', 'WP_Block', 'WP_Block_Type', 'WP_Error',
+  'WP_Http_Response', 'WP_HTTP_Requests_Response', 'WP_CLI_Command', 'WP_List_Table',
+]
+registration_concepts = [
+  'register_post_type', 'register_taxonomy', 'register_rest_route', 'register_block_type',
+  'add_action', 'add_filter', 'add_shortcode', 'wp_cli_command', 'wp_register_ability',
+]
+
+[fingerprint.hook_concepts]
+do_action = 'action'
+apply_filters = 'filter'
+
 # ===========================================================================
 # Patterns — each key is a concept name used by features
 # ===========================================================================

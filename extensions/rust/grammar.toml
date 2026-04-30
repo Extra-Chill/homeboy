@@ -24,6 +24,36 @@ multiline = []
 open = '{'
 close = '}'
 
+[fingerprint]
+keywords = [
+  'as', 'async', 'await', 'break', 'const', 'continue', 'crate', 'dyn', 'else', 'enum', 'extern',
+  'false', 'fn', 'for', 'if', 'impl', 'in', 'let', 'loop', 'match', 'mod', 'move', 'mut', 'pub',
+  'ref', 'return', 'self', 'Self', 'static', 'struct', 'super', 'trait', 'true', 'type',
+  'unsafe', 'use', 'where', 'while', 'yield',
+  'Some', 'None', 'Ok', 'Err', 'Result', 'Option', 'Vec', 'String', 'Box', 'Arc', 'Rc', 'HashMap',
+  'HashSet', 'bool', 'u8', 'u16', 'u32', 'u64', 'u128', 'usize', 'i8', 'i16', 'i32', 'i64',
+  'i128', 'isize', 'f32', 'f64', 'str', 'char',
+]
+skip_calls = [
+  'if', 'while', 'for', 'match', 'loop', 'return', 'Some', 'None', 'Ok', 'Err', 'Box', 'Vec',
+  'Arc', 'Rc', 'String', 'println', 'eprintln', 'format', 'write', 'writeln', 'panic', 'assert',
+  'assert_eq', 'assert_ne', 'todo', 'unimplemented', 'unreachable', 'dbg', 'cfg', 'include',
+  'include_str', 'concat', 'env', 'compile_error', 'stringify', 'vec', 'hashmap', 'bail',
+  'ensure', 'anyhow', 'matches', 'debug_assert', 'debug_assert_eq', 'allow', 'deny', 'warn',
+  'derive', 'serde', 'test', 'inline', 'must_use', 'doc', 'feature', 'pub', 'crate', 'super',
+]
+registration_concepts = ['macro_invocation']
+registration_skip_names = [
+  'println', 'eprintln', 'format', 'vec', 'assert', 'assert_eq', 'assert_ne', 'panic', 'todo',
+  'unimplemented', 'cfg', 'derive', 'include', 'include_str', 'include_bytes', 'concat',
+  'stringify', 'env', 'option_env', 'compile_error', 'write', 'writeln', 'matches', 'dbg',
+  'debug_assert', 'debug_assert_eq', 'debug_assert_ne', 'unreachable', 'cfg_if', 'lazy_static',
+  'thread_local', 'once_cell', 'macro_rules', 'serde_json', 'if_chain', 'bail', 'anyhow',
+  'ensure', 'Ok', 'Err', 'Some', 'None', 'Box', 'Arc', 'Rc', 'RefCell', 'Mutex', 'map',
+  'hashmap', 'btreemap', 'hashset',
+]
+registration_skip_prefixes = ['test']
+
 # ===========================================================================
 # Patterns — each key is a concept name used by features
 # ===========================================================================
