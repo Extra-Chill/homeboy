@@ -117,8 +117,41 @@ if [ ! -f "$PLAYGROUND_CLI" ]; then
     exit 1
 fi
 
+component_has_composer_test_script() {
+    [ -f "${PLUGIN_PATH}/composer.json" ] || return 1
+
+    php -r '
+        $composer = json_decode(file_get_contents($argv[1]), true);
+        exit(is_array($composer) && isset($composer["scripts"]["test"]) ? 0 : 1);
+    ' "${PLUGIN_PATH}/composer.json" 2>/dev/null
+}
+
+run_composer_test_script() {
+    echo ""
+    echo "Running Composer test script..."
+    echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
+    echo "  Backend: composer-script"
+
+    if ! command -v composer >/dev/null 2>&1; then
+        echo "ERROR: composer.json declares scripts.test, but composer is not available on PATH." >&2
+        FAILED_STEP="Composer test script setup"
+        return 1
+    fi
+
+    if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
+        ( cd "${PLUGIN_PATH}" && composer test -- "${PASSTHROUGH_ARGS[@]}" )
+    else
+        ( cd "${PLUGIN_PATH}" && composer test )
+    fi
+}
+
 TEST_DIR="${PLUGIN_PATH}/tests"
 if [ ! -d "$TEST_DIR" ]; then
+    if component_has_composer_test_script; then
+        run_composer_test_script
+        exit $?
+    fi
+
     echo ""
     echo "⚠ Warning: No tests directory found at ${TEST_DIR}"
     echo "  Skipping PHPUnit tests."
@@ -446,6 +479,12 @@ fi
 # discovery cannot become a false green.
 if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
     dump_diagnostics "NO PHPUNIT TEST FILES DISCOVERED"
+    if component_has_composer_test_script; then
+        rm -f "$RESULT_FILE"
+        run_composer_test_script
+        exit $?
+    fi
+
     if [ -f "${PLUGIN_PATH}/phpunit.xml" ] || [ -f "${PLUGIN_PATH}/phpunit.xml.dist" ]; then
         echo ""
         echo "PHPUnit config exists, but no files matched the WordPress runner discovery contract."
