@@ -24,6 +24,46 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "HOMEBOY_PHPSTAN_LEVEL=${HOMEBOY_PHPSTAN_LEVEL:-NOT_SET}"
 fi
 
+wordpress_lint_role_for_path() {
+    local rel_path="$1"
+
+    case "$rel_path" in
+        scoper.inc.php|scoper.php|*.scoper.inc.php)
+            printf '%s\n' 'scoper_config'
+            ;;
+        tools/*|bin/*)
+            printf '%s\n' 'tooling'
+            ;;
+        tests/*-smoke.php|tests/smoke-*.php|*/smoke-*.php|*/*-smoke.php)
+            printf '%s\n' 'smoke_harness'
+            ;;
+        tests/*Test.php|tests/*TestCase.php|*/tests/*Test.php|*/tests/*TestCase.php)
+            printf '%s\n' 'phpunit_test'
+            ;;
+        *)
+            printf '%s\n' 'production'
+            ;;
+    esac
+}
+
+run_scoped_syntax_check() {
+    local rel_path="$1"
+    local target="${PLUGIN_PATH}/${rel_path}"
+
+    if [ ! -f "$target" ] || [[ "$target" != *.php ]]; then
+        return 0
+    fi
+
+    if php -l "$target" > /dev/null 2>&1; then
+        echo "PHPStan skipped for ${HOMEBOY_WORDPRESS_LINT_ROLE}; PHP syntax check passed"
+        return 0
+    fi
+
+    echo "PHPStan skipped for ${HOMEBOY_WORDPRESS_LINT_ROLE}, but PHP syntax check failed: ${rel_path}"
+    php -l "$target" 2>&1 | grep -v "^$" | sed 's/^/  /'
+    return 1
+}
+
 # Critical PHPStan error identifiers that indicate guaranteed runtime fatals.
 # These must NEVER be skipped, even with --skip-checks or HOMEBOY_SKIP_PHPSTAN=1.
 # Skipping these allows code that will crash on first request to reach production.
@@ -57,6 +97,21 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Extension path: $EXTENSION_PATH"
     echo "DEBUG: Plugin path: $PLUGIN_PATH"
 fi
+
+WORDPRESS_LINT_ROLE="${HOMEBOY_WORDPRESS_LINT_ROLE:-production}"
+if [ "$WORDPRESS_LINT_ROLE" = "production" ] && [ -n "${HOMEBOY_LINT_FILE:-}" ]; then
+    WORDPRESS_LINT_ROLE=$(wordpress_lint_role_for_path "$HOMEBOY_LINT_FILE")
+fi
+export HOMEBOY_WORDPRESS_LINT_ROLE="$WORDPRESS_LINT_ROLE"
+
+case "$WORDPRESS_LINT_ROLE" in
+    scoper_config|smoke_harness|phpunit_test)
+        if [ -n "${HOMEBOY_LINT_FILE:-}" ]; then
+            run_scoped_syntax_check "$HOMEBOY_LINT_FILE"
+            exit $?
+        fi
+        ;;
+esac
 
 PHPSTAN_BIN="${EXTENSION_PATH}/vendor/bin/phpstan"
 PHPSTAN_CONFIG="${EXTENSION_PATH}/phpstan.neon.dist"
