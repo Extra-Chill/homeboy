@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.37.1] - 2026-05-01
+
+### Fixed
+- run composer tests when PHPUnit discovery is empty
+
 ## [2.37.0] - 2026-04-30
 
 ### Added
