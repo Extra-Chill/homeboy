@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.39.0] - 2026-05-01
+
+### Added
+- normalize test failure sidecar
+
 ## [2.38.0] - 2026-05-01
 
 ### Added
