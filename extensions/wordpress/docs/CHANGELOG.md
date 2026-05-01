@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.38.0] - 2026-05-01
+
+### Added
+- enrich lint findings sidecar
+
 ## [2.37.1] - 2026-05-01
 
 ### Fixed
