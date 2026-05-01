@@ -171,6 +171,63 @@ json_output=$("$ESLINT_BIN" "${eslint_base_args[@]}" --format json "${LINT_FILES
 json_exit=$?
 set -e
 
+# Write ESLint lint findings sidecar for homeboy baseline and drill-down.
+# The top-level lint runner passes a temp file here, then merges it with PHPCS
+# and PHPStan findings. Direct ESLint runs may write HOMEBOY_LINT_FINDINGS_FILE.
+ESLINT_FINDINGS_FILE="${_HOMEBOY_ESLINT_FINDINGS_FILE:-${HOMEBOY_LINT_FINDINGS_FILE:-}}"
+if [ -n "$ESLINT_FINDINGS_FILE" ] && [ -n "$json_output" ] && command -v node &> /dev/null; then
+    node -e '
+        const fs = require("fs");
+        const path = require("path");
+
+        const data = JSON.parse(process.argv[1]);
+        const componentPath = process.argv[2] || "";
+        const outputFile = process.argv[3];
+        const readExcerpt = (filePath, line) => {
+            if (!filePath || !line) return null;
+            try {
+                return fs.readFileSync(filePath, "utf8").split(/\r?\n/)[line - 1] ?? null;
+            } catch (_) {
+                return null;
+            }
+        };
+        const relPath = (filePath) => {
+            if (componentPath && filePath.startsWith(componentPath)) {
+                return filePath.slice(componentPath.length).replace(/^\/+/, "");
+            }
+            return filePath;
+        };
+        const findings = [];
+        for (const file of data) {
+            const filePath = file.filePath || "";
+            const fileRelPath = relPath(filePath);
+            for (const msg of file.messages || []) {
+                const rule = msg.ruleId || "unknown";
+                const code = `eslint.${rule}`;
+                const line = msg.line || 0;
+                const column = msg.column ?? null;
+                const id = `${fileRelPath}::${code}::${line}`;
+                const message = `${msg.message || "Unknown"} (${code})`;
+                findings.push({
+                    id,
+                    file: fileRelPath,
+                    line,
+                    column,
+                    severity: msg.severity === 1 ? "warning" : "error",
+                    source: "eslint",
+                    code,
+                    category: "eslint",
+                    message,
+                    fixable: Boolean(msg.fix),
+                    fingerprint: require("crypto").createHash("sha1").update(id).digest("hex"),
+                    excerpt: readExcerpt(filePath, line),
+                });
+            }
+        }
+        fs.writeFileSync(outputFile, JSON.stringify(findings) + "\n");
+    ' "$json_output" "$PLUGIN_PATH" "$ESLINT_FINDINGS_FILE" 2>/dev/null || true
+fi
+
 # Parse JSON and print summary header (only if issues exist)
 if [ -n "$json_output" ] && command -v node &> /dev/null; then
     summary=$(node -e '

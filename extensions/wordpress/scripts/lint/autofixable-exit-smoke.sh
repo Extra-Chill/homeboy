@@ -37,9 +37,7 @@ done
 
 for arg in "$@"; do
     if [ "$arg" = "--report=json" ]; then
-        cat <<'JSON'
-{"totals":{"errors":0,"warnings":1,"fixable":1},"files":{"/tmp/component/plugin.php":{"errors":0,"warnings":1,"messages":[{"message":"Equals sign not aligned with surrounding assignments","source":"Generic.Formatting.MultipleStatementAlignment.NotSameWarning","severity":5,"fixable":true,"type":"WARNING","line":8,"column":7}]}}}
-JSON
+        printf '{"totals":{"errors":0,"warnings":1,"fixable":1},"files":{"%s":{"errors":0,"warnings":1,"messages":[{"message":"Equals sign not aligned with surrounding assignments","source":"Generic.Formatting.MultipleStatementAlignment.NotSameWarning","severity":5,"fixable":true,"type":"WARNING","line":8,"column":7}]}}}\n' "${COMPONENT_PATH}/plugin.php"
         exit 1
     fi
 done
@@ -101,6 +99,29 @@ run_lint() {
         [ -f "$FINDINGS_FILE" ] && sed 's/^/  /' "$FINDINGS_FILE" >&2
         exit 1
     fi
+
+    python3 - "$FINDINGS_FILE" <<'PY'
+import json
+import sys
+
+findings = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(findings) == 1, findings
+finding = findings[0]
+expected = {
+    "file": "plugin.php",
+    "line": 8,
+    "column": 7,
+    "severity": "warning",
+    "source": "phpcs",
+    "code": "Generic.Formatting.MultipleStatementAlignment.NotSameWarning",
+    "category": "formatting",
+    "fixable": True,
+}
+for key, value in expected.items():
+    assert finding.get(key) == value, (key, finding)
+assert finding.get("fingerprint"), finding
+assert finding.get("excerpt") == "$beta = 2;", finding
+PY
 }
 
 run_lint 1
