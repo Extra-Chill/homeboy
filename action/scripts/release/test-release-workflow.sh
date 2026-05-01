@@ -48,6 +48,7 @@ assert_not_contains 'path: .release-last-failed' "${WORKFLOW}" "release failure 
 assert_not_contains '< .release-last-failed' "${WORKFLOW}" "release failure marker is not read from checkout"
 assert_not_contains '--no-github-release' "${RUN_RELEASE}" "run-release lets Homeboy core create GitHub Releases"
 assert_contains '--git-identity bot' "${RUN_RELEASE}" "run-release delegates bot identity to Homeboy core"
+assert_contains 'GIT_ASKPASS' "${RUN_RELEASE}" "run-release provides token auth to Homeboy git pushes"
 assert_not_contains 'git config user.name' "${RUN_RELEASE}" "run-release does not configure git identity directly"
 assert_not_contains 'git config --local' "${RUN_RELEASE}" "run-release does not configure git auth directly"
 assert_not_contains 'remote set-url origin' "${RUN_RELEASE}" "run-release does not rewrite origin to an authenticated URL"

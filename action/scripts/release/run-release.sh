@@ -46,6 +46,27 @@ write_output() {
   echo "${key}=${value}" >> "${GITHUB_OUTPUT}"
 }
 
+configure_git_push_auth() {
+  if [ -z "${GH_TOKEN:-}" ]; then
+    return 0
+  fi
+
+  GIT_ASKPASS_SCRIPT="$(mktemp)"
+  chmod 700 "${GIT_ASKPASS_SCRIPT}"
+  cat > "${GIT_ASKPASS_SCRIPT}" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  *Username*) printf '%s\n' 'x-access-token' ;;
+  *Password*) printf '%s\n' "${GH_TOKEN}" ;;
+  *) printf '\n' ;;
+esac
+SH
+
+  export GIT_ASKPASS="${GIT_ASKPASS_SCRIPT}"
+  export GIT_TERMINAL_PROMPT=0
+  trap 'rm -f "${GIT_ASKPASS_SCRIPT:-}"' EXIT
+}
+
 resolve_component_id() {
   if [ -n "${COMPONENT_NAME:-}" ]; then
     echo "${COMPONENT_NAME}"
@@ -87,6 +108,8 @@ write_release_outputs() {
 }
 
 COMP_ID="$(resolve_component_id)"
+
+configure_git_push_auth
 
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
