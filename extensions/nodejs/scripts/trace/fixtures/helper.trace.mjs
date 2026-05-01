@@ -9,6 +9,7 @@ const { createTraceRecorder } = await import(pathToFileURL(`${helperDir}/timelin
 const { launchProcess, waitForExit, captureProcessTree } = await import(pathToFileURL(`${helperDir}/process.mjs`).href);
 const { observeVisibleWindows } = await import(pathToFileURL(`${helperDir}/desktop.mjs`).href);
 const {
+    createHttpStatusHistory,
     installConsoleBridge,
     parseLogLines,
     pollHttp,
@@ -53,7 +54,7 @@ recorder.recordAssertion('json-poll-port-known', jsonResult.status === 'matched'
 let requestCount = 0;
 const server = createServer((_, res) => {
     requestCount += 1;
-    res.statusCode = requestCount === 1 ? 502 : 200;
+    res.statusCode = requestCount <= 2 ? 502 : requestCount === 3 ? 503 : 200;
     res.end('ok');
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -66,10 +67,20 @@ try {
         timeoutMs: 1000,
         onEvent,
     });
+    const expectedHistory = JSON.stringify([{ status: 502, count: 2 }, { status: 503, count: 1 }, { status: 200, count: 1 }]);
+    const actualHistory = JSON.stringify(httpResult.status_history.map(({ status, count }) => ({ status, count })));
     recorder.recordAssertion('http-poll-ready', httpResult.status === 'ready' && httpResult.http_status === 200 ? 'pass' : 'fail', `http poll returned ${httpResult.status}`);
+    recorder.recordAssertion('http-status-history', actualHistory === expectedHistory && httpResult.last_non_ready_status === 503 ? 'pass' : 'fail', `http status history was ${actualHistory}`);
 } finally {
     await new Promise((resolve) => server.close(resolve));
 }
+
+const manualHistory = createHttpStatusHistory();
+manualHistory.record(502);
+manualHistory.record(502);
+manualHistory.record(200);
+const manualSummary = manualHistory.summary({ lastNonReadyStatus: 502 });
+recorder.recordAssertion('http-status-history-helper', manualSummary.repeated_status_count === 1 && manualSummary.last_non_ready_status === 502 ? 'pass' : 'fail', 'manual HTTP status history summarized repeated statuses');
 
 const sleeper = launchProcess('node', {
     args: ['-e', 'setTimeout(() => process.exit(0), 300)'],

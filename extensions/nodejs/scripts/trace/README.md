@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 
 const helperDir = process.env.HOMEBOY_TRACE_HELPER_DIR;
 const { createTraceRecorder } = await import(pathToFileURL(`${helperDir}/timeline.mjs`).href);
-const { pollHttp, pollJsonFile, pollProcess, parseLogLines } = await import(pathToFileURL(`${helperDir}/probes.mjs`).href);
+const { createHttpStatusHistory, pollHttp, pollJsonFile, pollProcess, parseLogLines } = await import(pathToFileURL(`${helperDir}/probes.mjs`).href);
 
 const recorder = createTraceRecorder();
 const onEvent = recorder.recordEvent.bind(recorder);
@@ -33,7 +33,8 @@ await recorder.writeTraceResults({ summary: 'Trace completed' });
 
 ## Probe Helpers
 
-- `pollHttp(url, options)` emits `http.first_response`, `http.status`, `http.ready`, and `http.timeout` events.
+- `pollHttp(url, options)` emits `http.first_response`, transition-only `http.status`, compact `http.status_summary`, `http.ready`, and `http.timeout` events. The ready/timeout result includes `status_history`, `repeated_status_count`, and `last_non_ready_status`.
+- `createHttpStatusHistory()` records status transitions and repeated-status counts for workloads that need to probe HTTP-style readiness manually.
 - `pollJsonFile(filePath, options)` tolerates missing files and mid-write JSON parse failures, then emits configured events once their predicates match.
 - `pollProcess(pattern, options)` matches process command lines by string or regex and emits `process.seen`, `process.gone`, or `process.timeout`.
 - `parseLogLines(text, patterns, onEvent)` turns text lines into timeline events using regex patterns.

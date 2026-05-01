@@ -8,6 +8,7 @@ window lifecycle scenarios. Scenarios can import them from
 const helperDir = process.env.HOMEBOY_TRACE_HELPER_DIR;
 const { createTraceRecorder } = await import(`${helperDir}/timeline.mjs`);
 const { launchProcess, captureProcessTree, waitForExit } = await import(`${helperDir}/process.mjs`);
+const { pollHttp } = await import(`${helperDir}/probes.mjs`);
 ```
 
 ## Stable Helpers
@@ -21,6 +22,11 @@ const { launchProcess, captureProcessTree, waitForExit } = await import(`${helpe
   returns paths relative to that directory for trace envelopes.
 - `process.sh` provides shell equivalents for simple scenarios:
   `trace_launch`, `trace_process_tree`, `trace_tail_log`, and automatic cleanup.
+- `probes.mjs` provides generic readiness and observation helpers. `pollHttp()`
+  records first response, status transitions, compact repeated-status history,
+  ready, and timeout evidence without emitting one event per poll. Use
+  `createHttpStatusHistory()` when a workload has to drive its own HTTP-style
+  probing loop.
 
 ## Platform-Specific Helpers
 

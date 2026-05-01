@@ -34,22 +34,30 @@ export async function pollHttp(url, options = {}) {
     const requestTimeoutMs = options.requestTimeoutMs ?? 5000;
     const readyStatus = normalizeReadyStatus(options.readyStatus ?? [200, 399]);
     const deadline = Date.now() + timeoutMs;
+    const startedAt = Date.now();
+    const statusHistory = [];
     let first = true;
     let lastStatus;
+    let lastNonReadyStatus;
     let lastError;
 
     while (Date.now() <= deadline) {
         const response = await httpStatus(url, requestTimeoutMs);
 
         if (response.ok) {
+            const elapsedMs = Date.now() - startedAt;
             const data = { url, status: response.status };
+            recordHttpStatus(statusHistory, response.status, elapsedMs);
             if (first) await emit(options.onEvent, source, 'http.first_response', data);
             if (first || response.status !== lastStatus) await emit(options.onEvent, source, 'http.status', data);
             lastStatus = response.status;
             if (isReadyStatus(response.status, readyStatus)) {
-                await emit(options.onEvent, source, 'http.ready', data);
-                return { status: 'ready', http_status: response.status };
+                const summary = httpStatusSummary(url, statusHistory, lastNonReadyStatus, lastError);
+                await emit(options.onEvent, source, 'http.status_summary', summary);
+                await emit(options.onEvent, source, 'http.ready', { ...data, ...summary });
+                return { status: 'ready', http_status: response.status, ...summary };
             }
+            lastNonReadyStatus = response.status;
         } else {
             lastError = response.error;
             if (first) await emit(options.onEvent, source, 'http.first_error', { url, error: response.error });
@@ -59,8 +67,26 @@ export async function pollHttp(url, options = {}) {
         await sleep(intervalMs);
     }
 
-    await emit(options.onEvent, source, 'http.timeout', { url, last_status: lastStatus ?? null, last_error: lastError ?? null });
-    return { status: 'timeout', http_status: lastStatus ?? null, error: lastError ?? null };
+    const summary = httpStatusSummary(url, statusHistory, lastNonReadyStatus, lastError);
+    await emit(options.onEvent, source, 'http.status_summary', summary);
+    await emit(options.onEvent, source, 'http.timeout', { url, last_status: lastStatus ?? null, last_error: lastError ?? null, ...summary });
+    return { status: 'timeout', http_status: lastStatus ?? null, error: lastError ?? null, ...summary };
+}
+
+export function createHttpStatusHistory() {
+    const history = [];
+    return {
+        record(status, elapsedMs = undefined) {
+            recordHttpStatus(history, status, elapsedMs);
+            return this.summary();
+        },
+        summary(options = {}) {
+            return httpStatusSummary(options.url, history, options.lastNonReadyStatus, options.lastError);
+        },
+        entries() {
+            return history.map((entry) => ({ ...entry }));
+        },
+    };
 }
 
 export async function pollJsonFile(filePath, options = {}) {
@@ -214,6 +240,37 @@ function httpStatus(url, timeoutMs) {
         req.on('error', (err) => resolve({ ok: false, error: err.message }));
         req.end();
     });
+}
+
+function recordHttpStatus(history, status, elapsedMs = undefined) {
+    const normalizedStatus = Number(status);
+    const last = history.at(-1);
+    if (last && last.status === normalizedStatus) {
+        last.count += 1;
+        if (elapsedMs !== undefined) last.last_seen_ms = elapsedMs;
+        return last;
+    }
+
+    const entry = { status: normalizedStatus, count: 1 };
+    if (elapsedMs !== undefined) {
+        entry.first_seen_ms = elapsedMs;
+        entry.last_seen_ms = elapsedMs;
+    }
+    history.push(entry);
+    return entry;
+}
+
+function httpStatusSummary(url, history, lastNonReadyStatus = undefined, lastError = undefined) {
+    const statusHistory = history.map((entry) => ({ ...entry }));
+    const summary = {
+        status_history: statusHistory,
+        status_transition_count: Math.max(0, statusHistory.length - 1),
+        repeated_status_count: statusHistory.reduce((total, entry) => total + Math.max(0, entry.count - 1), 0),
+        last_non_ready_status: lastNonReadyStatus ?? null,
+    };
+    if (url) summary.url = url;
+    if (lastError) summary.last_error = lastError;
+    return summary;
 }
 
 async function readJsonIfAvailable(filePath) {
