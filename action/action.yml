@@ -76,6 +76,10 @@ inputs:
     description: 'On PRs, compare audit/test failure counts against the base SHA and fail only when the PR is worse. Opt-in; lint remains normal exit-code gating. PR autofix is skipped while enabled.'
     required: false
     default: 'false'
+  observation-window:
+    description: 'Duration window to export Homeboy observations after command execution (e.g. "24h", "7d", "30m"). Export is best-effort and non-fatal.'
+    required: false
+    default: '24h'
 
   # ── Environment setup ──
   auto-setup:
@@ -419,6 +423,21 @@ runs:
       with:
         name: homeboy-ci-results
         path: homeboy-ci-results/*.json
+        if-no-files-found: ignore
+
+    - name: Export Homeboy observations
+      if: always() && steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != ''
+      shell: bash
+      env:
+        HOMEBOY_OBSERVATION_WINDOW: ${{ inputs.observation-window }}
+      run: bash ${{ github.action_path }}/scripts/core/export-observations.sh
+
+    - name: Upload Homeboy observations
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: homeboy-observations
+        path: homeboy-observations/**
         if-no-files-found: ignore
 
     - name: Run baseline Homeboy commands

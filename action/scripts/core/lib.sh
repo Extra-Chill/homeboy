@@ -554,6 +554,13 @@ build_review_report_command() {
   printf '%s\n' "${full_cmd}"
 }
 
+build_observation_export_command() {
+  local since_window="$1"
+  local output_dir="$2"
+
+  printf 'homeboy runs export --since %s --output %s\n' "${since_window}" "${output_dir}"
+}
+
 command_output_stem() {
   local cmd="$1"
   local stem

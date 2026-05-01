@@ -159,6 +159,11 @@ assert_equals \
   "$(build_review_report_command "${COMPONENT}" "${WORKSPACE}")" \
   "review report keeps workspace path"
 
+assert_equals \
+  "homeboy runs export --since 24h --output /tmp/workspace/homeboy-observations" \
+  "$(build_observation_export_command "24h" "/tmp/workspace/homeboy-observations")" \
+  "observation export uses separate output directory"
+
 PR_HEAD_REPO="some-contributor/homeboy-action"
 GITHUB_REPOSITORY="Extra-Chill/homeboy-action"
 GITHUB_HEAD_REF="feat/fork-pr"
