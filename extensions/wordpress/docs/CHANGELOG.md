@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.39.2] - 2026-05-01
+
+### Fixed
+- add wordpress-stubs to scanFiles so host-smoke shims cannot shadow real WP signatures
+- resolve transitive validation dependencies
+
 ## [2.39.1] - 2026-05-01
 
 ### Fixed
