@@ -32,6 +32,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 COMPONENT_DIR="$TMP_DIR/example-plugin"
 FAKE_EXTENSION="$TMP_DIR/fake-wordpress-extension"
 ESLINT_ARGS_FILE="$TMP_DIR/eslint-args.txt"
+FINDINGS_FILE="$TMP_DIR/eslint-findings.json"
 
 mkdir -p "$COMPONENT_DIR/inc" "$COMPONENT_DIR/assets" "$COMPONENT_DIR/docs" "$FAKE_EXTENSION/node_modules/.bin"
 
@@ -70,6 +71,12 @@ cat > "$FAKE_EXTENSION/node_modules/.bin/eslint" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$ESLINT_ARGS_FILE"
 for arg in "$@"; do
+    if [ "$arg" = "--format" ]; then
+        printf '[{"filePath":"%s/assets/bad.js","errorCount":1,"warningCount":0,"fixableErrorCount":1,"fixableWarningCount":0,"messages":[{"ruleId":"no-undef","severity":2,"message":"bad is not defined","line":1,"column":7,"fix":{"range":[0,3],"text":"good"}}]}]\n' "$ESLINT_COMPONENT_DIR"
+        exit 1
+    fi
+done
+for arg in "$@"; do
     case "$arg" in
         */assets/bad.js|assets/bad.js)
             echo "simulated eslint failure" >&2
@@ -84,6 +91,7 @@ HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
+ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
 HOMEBOY_LINT_FILE='docs/example.md' \
     bash "$RUNNER" > "$TMP_DIR/single-md.out" 2>&1
 
@@ -97,6 +105,7 @@ HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
+ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
 HOMEBOY_LINT_GLOB='{example-plugin.php,inc/runtime.php}' \
     bash "$RUNNER" > "$TMP_DIR/php-only.out" 2>&1
 
@@ -111,6 +120,7 @@ HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
+ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
 HOMEBOY_LINT_GLOB='{example-plugin.php,assets/admin.js,inc/runtime.php,assets/view.ts}' \
     bash "$RUNNER" > "$TMP_DIR/mixed.out" 2>&1
 
@@ -126,6 +136,7 @@ HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
+ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
 HOMEBOY_LINT_FILE='assets/admin.js' \
     bash "$RUNNER" > "$TMP_DIR/js-success.out" 2>&1
 
@@ -142,6 +153,8 @@ HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
+ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
+HOMEBOY_LINT_FINDINGS_FILE="$FINDINGS_FILE" \
 HOMEBOY_LINT_FILE='assets/bad.js' \
     bash "$RUNNER" > "$TMP_DIR/js-failure.out" 2>&1
 failure_status=$?
@@ -156,5 +169,28 @@ fi
 assert_contains "$TMP_DIR/js-failure.out" "Linting single file: assets/bad.js"
 assert_contains "$TMP_DIR/js-failure.out" "ESLint linting failed"
 assert_contains "$ESLINT_ARGS_FILE" "assets/bad.js"
+
+python3 - "$FINDINGS_FILE" <<'PY'
+import json
+import sys
+
+findings = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(findings) == 1, findings
+finding = findings[0]
+expected = {
+    "file": "assets/bad.js",
+    "line": 1,
+    "column": 7,
+    "severity": "error",
+    "source": "eslint",
+    "code": "eslint.no-undef",
+    "category": "eslint",
+    "fixable": True,
+    "excerpt": "const bad = true;",
+}
+for key, value in expected.items():
+    assert finding.get(key) == value, (key, finding)
+assert finding.get("fingerprint"), finding
+PY
 
 echo "wordpress eslint scope smoke passed"

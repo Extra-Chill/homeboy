@@ -43,3 +43,26 @@ Each dependency entry may be either:
 
 - a registered Homeboy component ID
 - an absolute path to another local plugin checkout
+
+## Lint findings sidecar
+
+When `HOMEBOY_LINT_FINDINGS_FILE` is set, the WordPress lint runner writes a
+JSON array of lint finding records for Homeboy baseline and observation storage.
+PHPCS, ESLint, and PHPStan findings are merged into the same sidecar.
+
+The sidecar contract is version 1. Records preserve the original minimal fields
+(`id`, `message`, `category`, and `fixable` when known) and include normalized
+fields where each tool reports them:
+
+- `id` — stable finding identity using `file::code::line`.
+- `file` — component-relative path when the file is inside the component.
+- `line` / `column` — 1-based location when reported by the linter.
+- `severity` — normalized `error` or `warning`.
+- `source` — linter name, such as `phpcs`, `eslint`, or `phpstan`.
+- `code` — tool-specific rule, sniff, or identifier.
+- `category` — broad grouping used by Homeboy reports.
+- `message` — human-readable linter message, including the tool code.
+- `fixable` — whether the linter reports an automatic fix for the finding.
+- `fingerprint` — stable SHA-1 hash of the finding `id`.
+- `excerpt` — source line text when the file is readable locally; otherwise
+  `null`.

@@ -849,6 +849,14 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
             }
             $componentPath = $argv[1] ?? "";
             $findings = [];
+            $readExcerpt = static function ($path, $line) {
+                if (!$path || !$line || !is_readable($path)) {
+                    return null;
+                }
+
+                $lines = @file($path, FILE_IGNORE_NEW_LINES);
+                return $lines[$line - 1] ?? null;
+            };
             foreach ($json["files"] as $filePath => $data) {
                 $relPath = $filePath;
                 if ($componentPath && strpos($filePath, $componentPath) === 0) {
@@ -857,11 +865,22 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                 foreach ($data["messages"] ?? [] as $msg) {
                     $identifier = $msg["identifier"] ?? "unknown";
                     $line = $msg["line"] ?? 0;
-                    $message = $msg["message"] ?? "Unknown";
+                    $code = "phpstan." . $identifier;
+                    $id = $relPath . "::" . $code . "::" . $line;
+                    $message = ($msg["message"] ?? "Unknown") . " (" . $code . ")";
                     $findings[] = [
-                        "id" => $relPath . "::phpstan." . $identifier . "::" . $line,
-                        "message" => $message . " (phpstan." . $identifier . ")",
+                        "id" => $id,
+                        "file" => $relPath,
+                        "line" => $line,
+                        "column" => null,
+                        "severity" => "error",
+                        "source" => "phpstan",
+                        "code" => $code,
                         "category" => "phpstan",
+                        "message" => $message,
+                        "fixable" => false,
+                        "fingerprint" => sha1($id),
+                        "excerpt" => $readExcerpt($filePath, $line),
                     ];
                 }
             }

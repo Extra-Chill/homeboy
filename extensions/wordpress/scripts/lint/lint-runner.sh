@@ -762,33 +762,61 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
                 "PHPCompatibility" => "compatibility",
             ];
             $findings = [];
+            $readExcerpt = static function ($path, $line) {
+                if (!$path || !$line || !is_readable($path)) {
+                    return null;
+                }
+
+                $lines = @file($path, FILE_IGNORE_NEW_LINES);
+                return $lines[$line - 1] ?? null;
+            };
             foreach ($json["files"] as $filePath => $data) {
                 $relPath = $filePath;
                 if ($componentPath && strpos($filePath, $componentPath) === 0) {
                     $relPath = ltrim(substr($filePath, strlen($componentPath)), "/");
                 }
                 foreach ($data["messages"] ?? [] as $msg) {
-                    $source = $msg["source"] ?? "unknown";
+                    $code = $msg["source"] ?? "unknown";
                     $line = $msg["line"] ?? 0;
+                    $column = $msg["column"] ?? null;
+                    $id = $relPath . "::" . $code . "::" . $line;
+                    $message = ($msg["message"] ?? "Unknown") . " (" . $code . ")";
                     // Derive category from source namespace
                     $category = "other";
                     foreach ($categoryMap as $prefix => $cat) {
-                        if (strpos($source, $prefix) === 0) {
+                        if (strpos($code, $prefix) === 0) {
                             $category = $cat;
                             break;
                         }
                     }
                     $findings[] = [
-                        "id" => $relPath . "::" . $source . "::" . $line,
-                        "message" => ($msg["message"] ?? "Unknown") . " (" . $source . ")",
+                        "id" => $id,
+                        "file" => $relPath,
+                        "line" => $line,
+                        "column" => $column,
+                        "severity" => strtolower($msg["type"] ?? "error"),
+                        "source" => "phpcs",
+                        "code" => $code,
                         "category" => $category,
+                        "message" => $message,
                         "fixable" => (bool) ($msg["fixable"] ?? false),
+                        "fingerprint" => sha1($id),
+                        "excerpt" => $readExcerpt($filePath, $line),
                     ];
                 }
             }
             file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");
         ' "$PLUGIN_PATH" "${HOMEBOY_LINT_FINDINGS_FILE}" 2>/dev/null || true
     fi
+fi
+
+# Create temp files for per-tool findings before ESLint/PHPStan run. PHPCS writes
+# directly to HOMEBOY_LINT_FINDINGS_FILE; the other tools are merged later.
+_ESLINT_FINDINGS_TMPFILE=""
+_PHPSTAN_FINDINGS_TMPFILE=""
+if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
+    _ESLINT_FINDINGS_TMPFILE=$(homeboy_mktemp 'eslint-findings.XXXXXX')
+    _PHPSTAN_FINDINGS_TMPFILE=$(homeboy_mktemp 'phpstan-findings.XXXXXX')
 fi
 
 # Summary mode: show summary header + top violations, skip full report
@@ -850,7 +878,8 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     elif [ -f "$ESLINT_RUNNER" ]; then
         echo ""
         set +e
-        bash "$ESLINT_RUNNER"
+        _HOMEBOY_ESLINT_FINDINGS_FILE="${_ESLINT_FINDINGS_TMPFILE:-}" \
+            bash "$ESLINT_RUNNER"
         ESLINT_EXIT=$?
         set -e
 
@@ -890,20 +919,18 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         return 0
     }
 
-    # Create temp file for PHPStan findings if baseline sidecar is active
-    _PHPSTAN_FINDINGS_TMPFILE=""
-    if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
-        _PHPSTAN_FINDINGS_TMPFILE=$(homeboy_mktemp 'phpstan-findings.XXXXXX')
-    fi
-
     # Run PHPStan after PHPCS/ESLint so the caller gets the full lint signal
     # before the aggregate exit code is computed.
     PHPSTAN_PASSED=1
     run_phpstan_summary || PHPSTAN_PASSED=0
 
-    # Merge PHPCS + PHPStan findings into the final baseline sidecar.
-    # PHPCS writes directly to HOMEBOY_LINT_FINDINGS_FILE; PHPStan writes
-    # to the temp file. Merge both so the identity-based ratchet sees all errors.
+    # Merge PHPCS + ESLint + PHPStan findings into the final baseline sidecar.
+    # PHPCS writes directly to HOMEBOY_LINT_FINDINGS_FILE; other tools write
+    # to temp files. Merge all so the identity-based ratchet sees all errors.
+    if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ] && [ -n "$_ESLINT_FINDINGS_TMPFILE" ] && [ -f "$_ESLINT_FINDINGS_TMPFILE" ]; then
+        merge_findings_into_sidecar "$_ESLINT_FINDINGS_TMPFILE"
+        rm -f "$_ESLINT_FINDINGS_TMPFILE"
+    fi
     if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ] && [ -n "$_PHPSTAN_FINDINGS_TMPFILE" ] && [ -f "$_PHPSTAN_FINDINGS_TMPFILE" ]; then
         merge_findings_into_sidecar "$_PHPSTAN_FINDINGS_TMPFILE"
         rm -f "$_PHPSTAN_FINDINGS_TMPFILE"
@@ -943,7 +970,8 @@ if ! should_run_step "eslint"; then
 elif [ -f "$ESLINT_RUNNER" ]; then
     echo ""
     set +e
-    bash "$ESLINT_RUNNER"
+    _HOMEBOY_ESLINT_FINDINGS_FILE="${_ESLINT_FINDINGS_TMPFILE:-}" \
+        bash "$ESLINT_RUNNER"
     ESLINT_EXIT=$?
     set -e
 
@@ -984,18 +1012,16 @@ run_phpstan() {
     return 0
 }
 
-# Create temp file for PHPStan findings if baseline sidecar is active
-_PHPSTAN_FINDINGS_TMPFILE=""
-if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
-    _PHPSTAN_FINDINGS_TMPFILE=$(homeboy_mktemp 'phpstan-findings.XXXXXX')
-fi
-
 # Run PHPStan after PHPCS/ESLint so the caller gets the full lint signal
 # before the aggregate exit code is computed.
 PHPSTAN_PASSED=1
 run_phpstan || PHPSTAN_PASSED=0
 
-# Merge PHPCS + PHPStan findings into the final baseline sidecar
+# Merge PHPCS + ESLint + PHPStan findings into the final baseline sidecar
+if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ] && [ -n "$_ESLINT_FINDINGS_TMPFILE" ] && [ -f "$_ESLINT_FINDINGS_TMPFILE" ]; then
+    merge_findings_into_sidecar "$_ESLINT_FINDINGS_TMPFILE"
+    rm -f "$_ESLINT_FINDINGS_TMPFILE"
+fi
 if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ] && [ -n "$_PHPSTAN_FINDINGS_TMPFILE" ] && [ -f "$_PHPSTAN_FINDINGS_TMPFILE" ]; then
     merge_findings_into_sidecar "$_PHPSTAN_FINDINGS_TMPFILE"
     rm -f "$_PHPSTAN_FINDINGS_TMPFILE"
