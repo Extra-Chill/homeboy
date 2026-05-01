@@ -2,6 +2,15 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.0] - 2026-05-01
+
+### Added
+- upload observation bundles
+
+### Fixed
+- authenticate Homeboy git pushes
+- fix(pr-comment): render split quality sections
+
 ## [2.1.3] - 2026-04-29
 
 ### Changed
