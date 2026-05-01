@@ -19,7 +19,6 @@ function homeboy_issue_375_filter_callback( $value, WP_Post $post ) {
 }
 
 function homeboy_issue_375_action_callback( WP_Post $post, array $context ): void {
-	new WP_Post();
 	new WP_Post( (object) array( 'ID' => 123 ) );
 
 	WP_CLI::log( 'Inspecting ' . $post->post_type );
@@ -34,6 +33,36 @@ function homeboy_issue_375_action_callback( WP_Post $post, array $context ): voi
 	current_user_can( 'edit_post', $post->ID );
 	wp_json_encode( array( 'post_type' => $post->post_type ) );
 	get_post();
+}
+
+// Regression guard for issue #393 — host-smoke files in the same component
+// must not shadow real WP signatures. Calling get_post_types() with the
+// canonical 2-arg shape `(array, string)` should pass PHPStan even when a
+// `function_exists`-guarded shim with a narrower arity sits beside it.
+function homeboy_issue_393_caller(): array {
+	$post_types = get_post_types(
+		array(
+			'public'              => true,
+			'exclude_from_search' => false,
+		),
+		'names'
+	);
+	return array_values( $post_types );
+}
+PHP
+
+# Fake host-smoke stub that historically shadowed wordpress-stubs.php through
+# `bootstrapFiles:` precedence and produced false `arguments.count` errors.
+# The runtime config now pulls wordpress-stubs into `scanFiles:` so the real
+# 3-arg WP signature wins regardless of this redefinition. See issue #393.
+mkdir -p "${COMPONENT_DIR}/tests"
+cat > "${COMPONENT_DIR}/tests/issue-393-host-smoke.php" <<'PHP'
+<?php
+
+if ( ! function_exists( 'get_post_types' ) ) {
+	function get_post_types( $args = array() ) {
+		return array();
+	}
 }
 PHP
 

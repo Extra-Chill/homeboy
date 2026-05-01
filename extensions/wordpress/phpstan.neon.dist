@@ -31,7 +31,34 @@ parameters:
         -
             identifier: missingType.generics
 
+    # Pull `wordpress-stubs.php` into the project symbol graph as a `scanFiles:`
+    # entry, in addition to szepeviktor's `bootstrapFiles:` registration.
+    # Both mechanisms ship the same WP function/class signatures, but PHPStan
+    # resolves them with very different precedence:
+    #
+    #   - `bootstrapFiles:` declarations lose to project-source declarations.
+    #     A `function get_post_types($args = array()) {}` shim defined inside
+    #     `if ( ! function_exists('get_post_types') )` in a host-smoke test
+    #     file shadows the canonical 3-arg WP signature, producing false
+    #     `arguments.count` errors on real plugin code.
+    #
+    #   - `scanFiles:` declarations are scanned alongside project source and
+    #     win during signature resolution, so the real WP arity always
+    #     governs analysis regardless of what test scaffolding redefines.
+    #
+    # Host-smoke files redefining WP functions inside `function_exists` guards
+    # is idiomatic for isolated PHP test runs (the runner's own
+    # `homeboy_wordpress_runtime_lint_file()` already classifies `tests/*` as
+    # non-runtime). Pulling the WP stubs into the project symbol graph here
+    # keeps both patterns compatible without forcing plugins to refactor
+    # their tests or disable WP API analysis. See homeboy-extensions#393.
+    #
+    # `stubFiles:` was tried first but did not win against project-source
+    # declarations in the presence of szepeviktor's `bootstrapFiles:` entry
+    # for the same file — `scanFiles:` is the path that actually fixes the
+    # symbol-resolution shadowing.
     scanFiles:
+        - vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
         - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
         - vendor/php-stubs/wp-cli-stubs/wp-cli-commands-stubs.php
         - vendor/php-stubs/wp-cli-stubs/wp-cli-i18n-stubs.php
