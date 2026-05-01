@@ -239,12 +239,29 @@ homeboy_resolve_validation_dependency_paths() {
 
     [ -z "$all_deps" ] && return 0
 
-    # Deduplicate (settings deps come after header deps, so they win on path resolution)
-    # Track resolved paths to avoid duplicates
+    # Deduplicate resolved paths and dependency tokens while walking transitive
+    # Requires Plugins headers. WordPress enforces those transitive requirements
+    # at runtime, so PHPStan needs the same dependency graph when scanning a
+    # dependency's implementation classes.
     local -A seen_paths=()
+    local -A seen_dependencies=()
+    local -a dependency_queue=()
+    local dependency_index=0
 
     while IFS= read -r dependency; do
+        [ -n "$dependency" ] && dependency_queue+=("$dependency")
+    done <<< "$all_deps"
+
+    while [ "$dependency_index" -lt "${#dependency_queue[@]}" ]; do
+        dependency="${dependency_queue[$dependency_index]}"
+        dependency_index=$((dependency_index + 1))
+
         [ -z "$dependency" ] && continue
+
+        if [ -n "${seen_dependencies[$dependency]+x}" ]; then
+            continue
+        fi
+        seen_dependencies["$dependency"]=1
 
         local resolved
         resolved=$(homeboy_resolve_validation_dependency_path "$dependency" || true)
@@ -265,7 +282,14 @@ homeboy_resolve_validation_dependency_paths() {
         seen_paths["$resolved"]=1
 
         printf '%s\n' "$resolved"
-    done <<< "$all_deps"
+
+        while IFS= read -r transitive_dependency; do
+            [ -z "$transitive_dependency" ] && continue
+            if [ -z "${seen_dependencies[$transitive_dependency]+x}" ]; then
+                dependency_queue+=("$transitive_dependency")
+            fi
+        done < <(homeboy_get_requires_plugins_from_header "$resolved" || true)
+    done
 }
 
 homeboy_export_validation_dependency_paths() {
