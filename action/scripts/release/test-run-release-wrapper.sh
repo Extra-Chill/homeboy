@@ -51,6 +51,7 @@ setup_fixture() {
   WORKSPACE="${TEST_DIR}/workspace"
   OUTPUT_FILE="${TEST_DIR}/github-output"
   HOMEBOY_ARGS_FILE="${TEST_DIR}/homeboy-args"
+  HOMEBOY_AUTH_FILE="${TEST_DIR}/homeboy-auth"
   mkdir -p "${BIN_DIR}" "${WORKSPACE}"
 
   cat > "${WORKSPACE}/homeboy.json" <<'JSON'
@@ -96,6 +97,18 @@ shift
 
 printf '%s\n' "$*" > "${HOMEBOY_ARGS_FILE}"
 
+if [ -n "${GH_TOKEN:-}" ]; then
+  if [ -z "${GIT_ASKPASS:-}" ] || [ ! -x "${GIT_ASKPASS}" ]; then
+    echo "missing executable GIT_ASKPASS" >&2
+    exit 2
+  fi
+  {
+    "${GIT_ASKPASS}" 'Username for https://github.com'
+    "${GIT_ASKPASS}" 'Password for https://x-access-token@github.com'
+    printf '%s\n' "${GIT_TERMINAL_PROMPT:-}"
+  } > "${HOMEBOY_AUTH_FILE}"
+fi
+
 case "${HOMEBOY_MOCK_SCENARIO}" in
   released)
     cat > "${output_file}" <<'JSON'
@@ -139,6 +152,7 @@ run_wrapper() {
   GITHUB_WORKSPACE="${WORKSPACE}" \
   GITHUB_REPOSITORY="Extra-Chill/homeboy-action" \
   HOMEBOY_ARGS_FILE="${HOMEBOY_ARGS_FILE}" \
+  HOMEBOY_AUTH_FILE="${HOMEBOY_AUTH_FILE}" \
   HOMEBOY_MOCK_SCENARIO="${HOMEBOY_MOCK_SCENARIO}" \
   RELEASE_DRY_RUN="${RELEASE_DRY_RUN:-false}" \
   GH_TOKEN="${GH_TOKEN:-}" \
@@ -156,6 +170,9 @@ assert_contains '--skip-checks' "${ARGS}" "release skips duplicate checks"
 assert_contains '--skip-publish' "${ARGS}" "release leaves publishing to tag workflow"
 assert_contains '--git-identity bot' "${ARGS}" "release delegates bot identity to homeboy"
 assert_not_contains '--dry-run' "${ARGS}" "normal release uses one non-dry-run homeboy invocation"
+assert_output_line 'x-access-token' "${HOMEBOY_AUTH_FILE}" "release exposes GitHub token username through askpass"
+assert_output_line 'secret123' "${HOMEBOY_AUTH_FILE}" "release exposes GitHub token password through askpass"
+assert_output_line '0' "${HOMEBOY_AUTH_FILE}" "release disables interactive git prompts"
 assert_output_line 'released=true' "${OUTPUT_FILE}" "released output is true"
 assert_output_line 'release-version=2.1.0' "${OUTPUT_FILE}" "release version output is translated"
 assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "release tag output is translated"
