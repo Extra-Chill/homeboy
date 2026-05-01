@@ -10,11 +10,12 @@
   "self_checks": {
     "lint": [
       "jq empty wordpress.json",
-      "bash -n scripts/test/test-runner.sh scripts/test/test-runner-playground.sh scripts/test/test-runner-host-smoke.sh scripts/lib/playground-process-cleanup.sh scripts/test/host-smoke-runner-smoke.sh scripts/test/test-runner-file-routing-smoke.sh scripts/test/playground-process-cleanup-smoke.sh scripts/trace/trace-runner.sh scripts/trace/trace-runner-smoke.sh"
+      "bash -n scripts/test/test-runner.sh scripts/test/test-runner-playground.sh scripts/test/test-runner-host-smoke.sh scripts/lib/playground-process-cleanup.sh scripts/test/host-smoke-runner-smoke.sh scripts/test/test-runner-file-routing-smoke.sh scripts/test/parse-test-failures-sidecar-smoke.sh scripts/test/playground-process-cleanup-smoke.sh scripts/trace/trace-runner.sh scripts/trace/trace-runner-smoke.sh"
     ],
     "test": [
       "bash scripts/test/host-smoke-runner-smoke.sh",
       "bash scripts/test/test-runner-file-routing-smoke.sh",
+      "bash scripts/test/parse-test-failures-sidecar-smoke.sh",
       "bash scripts/test/playground-process-cleanup-smoke.sh",
       "bash scripts/test/playground-cleanup-noise-smoke.sh",
       "bash scripts/test/playground-no-test-files-smoke.sh",

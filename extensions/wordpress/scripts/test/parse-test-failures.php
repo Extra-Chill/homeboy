@@ -7,13 +7,17 @@
  * 'header' and 'body_lines' keys. This file converts them into TestFailure
  * structures matching homeboy's TestAnalysisInput schema.
  *
- * Output fields per failure:
- * - test_name: fully qualified test method name
+ * Output fields per failure preserve the legacy Homeboy analysis keys and add
+ * normalized sidecar keys consumed by cross-runner tooling:
+ * - test_name/test_id: fully qualified test method name
  * - test_file: test file path (from stack trace)
- * - error_type: exception/error class name
+ * - error_type/failure_type: exception/error class name
  * - message: error message
- * - source_file: deepest non-test frame source file
- * - source_line: source line number
+ * - source_file/source_line: deepest non-test frame source location
+ * - suite: test framework/suite label
+ * - file/line: normalized primary failure location
+ * - fingerprint: stable hash for grouping equivalent failures
+ * - stdout_excerpt/stderr_excerpt: bounded captured output excerpts
  *
  * Usage: php parse-test-failures.php <phpunit_output_file> [component_path]
  */
@@ -152,14 +156,54 @@ foreach ( $blocks as $block ) {
 		}
 	}
 
+	$file           = $source_file ?: $test_file;
+	$line           = $source_line ?: 0;
+	$stdout_excerpt = make_output_excerpt( array_merge( [ $header ], $body ) );
+	$fingerprint    = make_failure_fingerprint( $test_name, $file, $line, $error_type, $message );
+
 	$failures[] = [
-		'test_name'   => $test_name,
-		'test_file'   => $test_file,
-		'error_type'  => $error_type,
-		'message'     => $message,
-		'source_file' => $source_file,
-		'source_line' => $source_line,
+		'test_name'      => $test_name,
+		'test_file'      => $test_file,
+		'error_type'     => $error_type,
+		'message'        => $message,
+		'source_file'    => $source_file,
+		'source_line'    => $source_line,
+		'test_id'        => $test_name,
+		'suite'          => 'phpunit',
+		'file'           => $file,
+		'line'           => $line,
+		'failure_type'   => $error_type,
+		'fingerprint'    => $fingerprint,
+		'stdout_excerpt' => $stdout_excerpt,
+		'stderr_excerpt' => '',
 	];
+}
+
+/**
+ * Create a stable grouping key from the normalized failure identity.
+ */
+function make_failure_fingerprint( string $test_name, string $file, int $line, string $error_type, string $message ): string {
+	$first_message_line = strtok( $message, "\n" );
+	if ( $first_message_line === false ) {
+		$first_message_line = '';
+	}
+
+	return hash( 'sha256', implode( "\0", [ $test_name, $file, (string) $line, $error_type, $first_message_line ] ) );
+}
+
+/**
+ * Keep failure excerpts compact enough for sidecar consumers and PR comments.
+ *
+ * @param array $lines Raw output lines for one failure block.
+ */
+function make_output_excerpt( array $lines ): string {
+	$excerpt = trim( implode( "\n", array_slice( $lines, 0, 40 ) ) );
+
+	if ( strlen( $excerpt ) > 4000 ) {
+		$excerpt = substr( $excerpt, 0, 3997 ) . '...';
+	}
+
+	return $excerpt;
 }
 
 // ============================================================================

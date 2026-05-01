@@ -136,13 +136,17 @@ set -e
 
 printf '%s\n' "$PHPUNIT_OUTPUT"
 
+PHPUNIT_OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wordpress-core-phpunit.XXXXXX")
+printf '%s\n' "$PHPUNIT_OUTPUT" > "$PHPUNIT_OUTPUT_FILE"
+trap 'rm -f "$PHPUNIT_OUTPUT_FILE"' EXIT
+
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/test/parse-test-results.sh"
 PARSE_FAILURES="${EXTENSION_PATH}/scripts/test/parse-test-failures.sh"
 if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
-    printf '%s\n' "$PHPUNIT_OUTPUT" | bash "$PARSE_RESULTS" || true
+    bash "$PARSE_RESULTS" "$PHPUNIT_OUTPUT_FILE" || true
 fi
 if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] && [ -f "$PARSE_FAILURES" ]; then
-    printf '%s\n' "$PHPUNIT_OUTPUT" | bash "$PARSE_FAILURES" "$CORE_PATH" || true
+    bash "$PARSE_FAILURES" "$PHPUNIT_OUTPUT_FILE" "$CORE_PATH" || true
 fi
 
 exit "$PHPUNIT_EXIT"

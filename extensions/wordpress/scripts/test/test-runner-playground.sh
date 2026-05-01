@@ -374,23 +374,23 @@ fi
 
 # Also capture PHPUnit stdout from the tee'd output
 PHPUNIT_STDOUT=$(cat "$PHPUNIT_TMPFILE")
-rm -f "$PHPUNIT_TMPFILE"
 
 # Parse test results for homeboy core (best-effort, non-blocking)
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/test/parse-test-results.sh"
 PARSE_FAILURES="${EXTENSION_PATH}/scripts/test/parse-test-failures.sh"
 if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
     if [ -n "$PHPUNIT_STDOUT" ]; then
-        echo "$PHPUNIT_STDOUT" | bash "$PARSE_RESULTS" || true
+        bash "$PARSE_RESULTS" "$PHPUNIT_TMPFILE" || true
     elif [ -n "$PHPUNIT_OUTPUT" ]; then
-        echo "$PHPUNIT_OUTPUT" | bash "$PARSE_RESULTS" || true
+        bash "$PARSE_RESULTS" "$RESULT_FILE" || true
     fi
 fi
 if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] && [ -f "$PARSE_FAILURES" ]; then
     if [ -n "$PHPUNIT_STDOUT" ]; then
-        echo "$PHPUNIT_STDOUT" | bash "$PARSE_FAILURES" "${PLUGIN_PATH:-}" || true
+        bash "$PARSE_FAILURES" "$PHPUNIT_TMPFILE" "${PLUGIN_PATH:-}" || true
     fi
 fi
+rm -f "$PHPUNIT_TMPFILE"
 
 # ----------------------------------------------------------------------------
 # Failure classification
