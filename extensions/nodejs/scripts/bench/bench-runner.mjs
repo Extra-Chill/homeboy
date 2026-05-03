@@ -14,10 +14,10 @@
 //
 // Discovers `bench/**/*.bench.{ts,mjs,js}` under the project root.
 // Each workload file must export a default async function. The function may
-// return `{ metrics: Record<string, number>, artifacts: Record<string, object> }`
-// to report workload-owned custom metrics and artifacts. Metrics are averaged
-// across measured iterations and merged beside the dispatcher-owned timing
-// metrics; artifacts are preserved under the scenario in the results envelope.
+// return `{ metrics, artifacts, metadata }` to report workload-owned custom
+// metrics, artifacts, and scenario labels. Metrics are averaged across measured
+// iterations and merged beside the dispatcher-owned timing metrics; artifacts
+// and metadata are preserved under the scenario in the results envelope.
 //
 //     // bench/cold-boot.bench.ts
 //     export default async function () {
@@ -94,14 +94,14 @@ function parseWarmupIterations(value) {
 
 function validateWorkloadResult(value, iterationLabel) {
     if (value === undefined) {
-        return { metrics: {}, artifacts: {} };
+        return { metrics: {}, artifacts: {}, metadata: {} };
     }
 
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
         throw new Error(`${iterationLabel} returned invalid result shape (expected undefined or an object)`);
     }
 
-    const { metrics, artifacts } = value;
+    const { metrics, artifacts, metadata } = value;
 
     if (metrics !== undefined && (!metrics || typeof metrics !== 'object' || Array.isArray(metrics))) {
         throw new Error(`${iterationLabel} returned invalid metrics shape (expected an object)`);
@@ -121,7 +121,24 @@ function validateWorkloadResult(value, iterationLabel) {
     return {
         metrics: validatedMetrics,
         artifacts: validateWorkloadArtifacts(artifacts, iterationLabel),
+        metadata: validateWorkloadMetadata(metadata, iterationLabel),
     };
+}
+
+function validateWorkloadMetadata(metadata, iterationLabel) {
+    if (metadata === undefined) {
+        return {};
+    }
+
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+        throw new Error(`${iterationLabel} returned invalid metadata shape (expected an object)`);
+    }
+
+    try {
+        return JSON.parse(JSON.stringify(metadata));
+    } catch (err) {
+        throw new Error(`${iterationLabel} returned metadata that is not JSON-serializable: ${err.message}`);
+    }
 }
 
 function validateWorkloadArtifacts(artifacts, iterationLabel) {
@@ -185,6 +202,10 @@ function aggregateArtifacts(iterationArtifacts) {
     return Object.assign({}, ...iterationArtifacts);
 }
 
+function aggregateMetadata(iterationMetadata) {
+    return Object.assign({}, ...iterationMetadata);
+}
+
 async function discoverWorkloads(dir) {
     const found = [];
     async function walk(d) {
@@ -233,6 +254,7 @@ async function runWorkload(file) {
     const timings = [];
     const customMetrics = [];
     const customArtifacts = [];
+    const customMetadata = [];
     let peakRss = 0;
     for (let i = 0; i < ITERATIONS; i++) {
         const start = performance.now();
@@ -240,6 +262,7 @@ async function runWorkload(file) {
             const workloadResult = validateWorkloadResult(await fn(), `iteration ${i + 1}/${ITERATIONS}`);
             customMetrics.push(workloadResult.metrics);
             customArtifacts.push(workloadResult.artifacts);
+            customMetadata.push(workloadResult.metadata);
         } catch (err) {
             return { error: `iteration ${i + 1}/${ITERATIONS} threw: ${err.message}` };
         }
@@ -254,6 +277,7 @@ async function runWorkload(file) {
         peakRss,
         customMetrics: aggregateCustomMetrics(customMetrics),
         customArtifacts: aggregateArtifacts(customArtifacts),
+        customMetadata: aggregateMetadata(customMetadata),
     };
 }
 
@@ -331,6 +355,9 @@ async function main() {
         };
         if (Object.keys(result.customArtifacts).length > 0) {
             scenario.artifacts = result.customArtifacts;
+        }
+        if (Object.keys(result.customMetadata).length > 0) {
+            scenario.metadata = result.customMetadata;
         }
         scenarios.push(scenario);
 
