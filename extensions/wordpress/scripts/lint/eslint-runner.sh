@@ -40,9 +40,7 @@ js_file_count=$(find "$PLUGIN_PATH" -type f \( -name "*.js" -o -name "*.jsx" -o 
     2>/dev/null | wc -l | tr -d ' ')
 
 if [ "$js_file_count" -eq 0 ]; then
-    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: No JavaScript files found, skipping ESLint"
-    fi
+    echo "No JavaScript files found, skipping ESLint."
     exit 0
 fi
 
