@@ -1,9 +1,17 @@
 {
   "name": "Node.js",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "icon": "server.rack",
   "description": "Node.js project type — discovery, audit grammar, and npm release lifecycle",
   "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json"],
+    "capabilities": ["format", "validate"]
+  },
+  "scripts": {
+    "validate": "scripts/validate.sh",
+    "format": "scripts/format.sh"
+  },
   "platform": {
     "discovery": {
       "find_command": "find /home -name 'package.json' -type f 2>/dev/null | xargs grep -l '\"name\"' 2>/dev/null",

@@ -1,16 +1,17 @@
 {
   "name": "Rust",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "icon": "gearshape.2.fill",
   "description": "Cargo CLI integration for Rust components",
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["rs"],
-    "capabilities": ["fingerprint", "refactor"]
+    "capabilities": ["fingerprint", "refactor", "format", "validate"]
   },
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.sh",
+    "validate": "scripts/validate.sh",
     "format": "scripts/format.sh"
   },
   "lint": {

@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "2.39.2",
+  "version": "2.40.0",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -12,7 +12,8 @@
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.py",
     "crossref": "scripts/test/crossref.php",
-    "validate": "scripts/validation/validate-syntax.sh"
+    "validate": "scripts/validation/validate-syntax.sh",
+    "format": "scripts/format.sh"
   },
   "component_env": {
     "detect_script": "scripts/env/detect.sh"
