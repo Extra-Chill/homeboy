@@ -30,8 +30,12 @@ homeboy_resolve_context --component-alias PLUGIN_PATH
 js_file_count=$(find "$PLUGIN_PATH" -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \) \
     -not -path "*/node_extensions/*" \
     -not -path "*/vendor/*" \
-    -not -path "*/build/*" \
+    -not -path "*/vendor_prefixed/*" \
+    -not -path "*/vendor-prefixed/*" \
+    -not -path "*/vendor_scoped/*" \
+    -not -path "*/vendor-scoped/*" \
     -not -path "*/dist/*" \
+    -not -path "*/build/*" \
     -not -name "*.min.js" \
     2>/dev/null | wc -l | tr -d ' ')
 

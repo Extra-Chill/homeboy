@@ -1153,8 +1153,7 @@ function find_call_sites_in_codebase($func_name, $scan_root, $current_filepath) 
             $file     = $m[1];
             $line_num = (int) $m[2];
 
-            // Skip vendor/node_modules/build.
-            if (preg_match('/(vendor|node_modules|build)\//', $file)) {
+            if (fixer_path_is_excluded($file)) {
                 continue;
             }
 

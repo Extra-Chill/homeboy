@@ -209,7 +209,7 @@ homeboy_wordpress_runtime_lint_file() {
     local lint_role
 
     case "$rel_path" in
-        vendor_prefixed/*|vendor/*)
+        vendor/*|vendor_prefixed/*|vendor-prefixed/*|vendor_scoped/*|vendor-scoped/*|node_modules/*|dist/*|build/*)
             return 1
             ;;
     esac
@@ -607,7 +607,16 @@ print(json.dumps(results))
                     syntax_errors=$((syntax_errors + 1))
                     syntax_error_files+=("$php_file")
                 fi
-            done < <(find "$lint_target" -name '*.php' -not -path '*/vendor/*' -not -path '*/node_modules/*' -print0)
+            done < <(find "$lint_target" -name '*.php' \
+                -not -path '*/vendor/*' \
+                -not -path '*/vendor_prefixed/*' \
+                -not -path '*/vendor-prefixed/*' \
+                -not -path '*/vendor_scoped/*' \
+                -not -path '*/vendor-scoped/*' \
+                -not -path '*/node_modules/*' \
+                -not -path '*/dist/*' \
+                -not -path '*/build/*' \
+                -print0)
         elif [ -f "$lint_target" ]; then
             if ! php -l "$lint_target" > /dev/null 2>&1; then
                 syntax_errors=$((syntax_errors + 1))
@@ -649,7 +658,7 @@ fixable_count=0
 
 # Build base phpcs arguments
 phpcs_base_args=(--standard="$PHPCS_CONFIG")
-phpcs_base_args+=(--ignore='*/vendor/*,*/vendor_prefixed/*,*/node_modules/*,*/build/*,*/dist/*,*/tools/*,*/scoper.inc.php')
+phpcs_base_args+=(--ignore='*/vendor/*,*/vendor_prefixed/*,*/vendor-prefixed/*,*/vendor_scoped/*,*/vendor-scoped/*,*/node_modules/*,*/dist/*,*/build/*,*/tools/*,*/scoper.inc.php')
 
 if [ "$WORDPRESS_LINT_ROLE" = "scoper_config" ]; then
     phpcs_base_args+=(--sniffs=Generic.PHP.Syntax)

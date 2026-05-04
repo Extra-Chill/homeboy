@@ -763,7 +763,7 @@ function verify_no_stale_named_args($path, $manifest) {
     foreach ($search_patterns as $old_arg => $info) {
         // Search for "old_arg:" pattern (named argument syntax)
         $cmd = sprintf(
-            'grep -rn --include="*.php" "%s\s*:" %s 2>/dev/null | grep -v vendor/ | grep -v node_modules/',
+            'grep -rn --include="*.php" "%s\s*:" %s 2>/dev/null',
             preg_quote($old_arg, '/'),
             escapeshellarg($path)
         );
@@ -777,6 +777,10 @@ function verify_no_stale_named_args($path, $manifest) {
             // Quick heuristic: check if this looks like a named argument context
             // (inside a function call, preceded by ( or ,)
             if (preg_match('/\b' . preg_quote($old_arg, '/') . '\s*:/', $line)) {
+                if (preg_match('/^(.+?):\d+:/', $line, $m) && fixer_path_is_excluded($m[1])) {
+                    continue;
+                }
+
                 // Exclude function declarations, array keys, ternary, switch cases, goto labels
                 if (preg_match('/function\s/', $line)) {
                     continue;

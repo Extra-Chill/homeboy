@@ -10,7 +10,7 @@
   "self_checks": {
     "lint": [
       "jq empty wordpress.json",
-      "bash -n scripts/test/test-runner.sh scripts/test/test-runner-playground.sh scripts/test/test-runner-host-smoke.sh scripts/lib/playground-process-cleanup.sh scripts/test/host-smoke-runner-smoke.sh scripts/test/test-runner-file-routing-smoke.sh scripts/test/parse-test-failures-sidecar-smoke.sh scripts/test/playground-process-cleanup-smoke.sh scripts/trace/trace-runner.sh scripts/trace/trace-runner-smoke.sh scripts/lint/wordpress-lint-role-smoke.sh"
+      "bash -n scripts/test/test-runner.sh scripts/test/test-runner-playground.sh scripts/test/test-runner-host-smoke.sh scripts/lib/playground-process-cleanup.sh scripts/test/host-smoke-runner-smoke.sh scripts/test/test-runner-file-routing-smoke.sh scripts/test/parse-test-failures-sidecar-smoke.sh scripts/test/playground-process-cleanup-smoke.sh scripts/trace/trace-runner.sh scripts/trace/trace-runner-smoke.sh scripts/lint/wordpress-lint-role-smoke.sh scripts/lint/vendor-prefixed-exclusion-smoke.sh"
     ],
     "test": [
       "bash scripts/test/host-smoke-runner-smoke.sh",
@@ -20,7 +20,8 @@
       "bash scripts/test/playground-cleanup-noise-smoke.sh",
       "bash scripts/test/playground-no-test-files-smoke.sh",
       "bash scripts/trace/trace-runner-smoke.sh",
-      "bash scripts/lint/wordpress-lint-role-smoke.sh"
+      "bash scripts/lint/wordpress-lint-role-smoke.sh",
+      "bash scripts/lint/vendor-prefixed-exclusion-smoke.sh"
     ]
   }
 }

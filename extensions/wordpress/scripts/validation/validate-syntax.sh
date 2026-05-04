@@ -3,7 +3,7 @@
 # Post-write PHP syntax validation for homeboy's validate_write gate.
 #
 # Runs `php -l` on all PHP source files in the project root, excluding
-# vendor/, node_modules/, and common non-source directories.
+# vendor/, prefixed vendor dirs, node_modules/, and common non-source directories.
 #
 # Called by homeboy after `audit --fix --write` or `refactor` applies changes.
 # Runs from the project root (CWD = component source path).
@@ -27,7 +27,13 @@ while IFS= read -r -d '' php_file; do
 done < <(find "$ROOT" \
     -name '*.php' \
     -not -path '*/vendor/*' \
+    -not -path '*/vendor_prefixed/*' \
+    -not -path '*/vendor-prefixed/*' \
+    -not -path '*/vendor_scoped/*' \
+    -not -path '*/vendor-scoped/*' \
     -not -path '*/node_modules/*' \
+    -not -path '*/dist/*' \
+    -not -path '*/build/*' \
     -not -path '*/.git/*' \
     -print0)
 
