@@ -122,6 +122,50 @@ code must not add new findings — existing findings are grandfathered in,
 and new ones fail the run. Delete the baseline to ratchet toward full
 cleanup.
 
+### Sanctioned lint suppressions
+
+Prefer fixing real findings over suppressing them. When a finding is caused by
+a deliberately loose WordPress/runtime boundary, use a narrow, grep-friendly
+suppression on the line immediately before the finding. Include the tool rule
+identifier and a short runtime-contract justification.
+
+For defensive guards on untyped public APIs, keep the guard when the method is
+intentionally callable by external consumers that may pass a falsey value even
+though this component's own call graph does not. Use the PHPStan identifier so
+the suppression remains narrow:
+
+```php
+// @phpstan-ignore-next-line booleanNot.alwaysFalse -- Defensive public API guard for untyped external callers.
+if ( ! $element ) {
+    return null;
+}
+```
+
+For display-only redirect-result reads, suppress only the nonce recommendation
+on the sanitized read. This is appropriate for admin notices or other display
+branches that do not mutate state and whose corresponding action already
+verified its nonce before redirecting:
+
+```php
+// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Display-only redirect-result read for admin notice.
+$result = isset( $_GET['example_result'] ) ? sanitize_text_field( wp_unslash( $_GET['example_result'] ) ) : '';
+```
+
+For minimum-PHP runtime guards, keep the guard in plugin bootstrap code. The
+analyzer runs against a configured PHP target, but WordPress can still load the
+plugin on older hosts before the plugin has a chance to bail safely:
+
+```php
+// @phpstan-ignore-next-line if.alwaysFalse -- Runtime guard is required for installs below the analysis PHP target.
+if ( version_compare( PHP_VERSION, EXAMPLE_MIN_PHP, '<' ) ) {
+    return;
+}
+```
+
+Do not use broad PHPCS disables, broad PHPStan baselines, or identifier-less
+`@phpstan-ignore-next-line` comments for these cases. The goal is to preserve
+the useful lint signal everywhere except the single intentional boundary.
+
 ### Level override
 
 `HOMEBOY_PHPSTAN_LEVEL=8 homeboy test <component>` bumps one-off without
