@@ -22,7 +22,7 @@ def require(condition, message):
         raise SystemExit(message)
 
 utility_suffixes = set(rules.get("utility_suffixes", []))
-for suffix in ["Contract", "Interface", "Store", "Lock", "Result", "Value", "Package"]:
+for suffix in ["Authenticator", "Contract", "Credential", "Interface", "Store", "Lock", "Policy", "Result", "Secret", "Service", "Token", "Value", "Package"]:
     require(suffix in utility_suffixes, f"missing PHP role utility suffix: {suffix}")
 
 exception_globs = set(rules.get("convention_exception_globs", []))
@@ -35,6 +35,12 @@ for pattern in [
     "**/class-*-registry.php",
     "**/class-*-adopter.php",
     "**/class-*-resolver.php",
+    "**/class-*-authenticator.php",
+    "**/class-*-service.php",
+    "**/class-*-policy.php",
+    "**/class-*-config.php",
+    "**/class-*-token.php",
+    "**/class-*-credential.php",
     "**/class-*-result.php",
     "**/class-*-diff.php",
     "**/class-*-factory.php",
@@ -60,7 +66,10 @@ required_tags = {
     "wordpress:php-role:result",
     "wordpress:php-role:artifact",
     "wordpress:php-role:adapter",
+    "wordpress:php-role:service",
     "wordpress:php-role:factory",
+    "wordpress:php-role:configuration",
+    "wordpress:php-role:credential",
     "wordpress:php-role:lock",
     "wordpress:php-role:null-impl",
 }
@@ -125,6 +134,35 @@ require(matches_any("src/Packages/class-demo-package-artifacts-registry.php", gl
 require(matches_any("src/Packages/register-demo-package-artifacts.php", globs_for("wordpress:php-role:procedural-helper")),
         "procedural helper fixture must be tagged as procedural-helper role")
 
+# Auth fixture: normal DTOs stay in the value-object convention; credential/token
+# objects and request-edge authenticators get separate role tags so neither
+# inherits full DTO serialization methods from the other.
+auth_value_paths = [
+    "src/Auth/class-demo-access-grant.php",
+]
+for path in auth_value_paths:
+    for tag in required_tags:
+        require(not matches_any(path, globs_for(tag)),
+                f"auth value-object fixture {path} must remain untagged (matched {tag})")
+
+require(matches_any("src/Auth/class-demo-token-authenticator.php", globs_for("wordpress:php-role:service")),
+        "authenticator fixture must be tagged as service role")
+require(not matches_any("src/Auth/class-demo-token-authenticator.php", globs_for("wordpress:php-role:contract")),
+        "authenticator fixture must not be tagged as contract role")
+require(matches_any("src/Auth/class-demo-token.php", globs_for("wordpress:php-role:credential")),
+        "token fixture must be tagged as credential role")
+require(not matches_any("src/Auth/class-demo-token.php", globs_for("wordpress:php-role:service")),
+        "token fixture must not be tagged as service role")
+
+# Context fixture: resolver interfaces remain contract role files; policy/config
+# vocabulary classes are configuration role files, not resolver contracts.
+require(matches_any("src/Context/class-demo-context-conflict-resolver.php", globs_for("wordpress:php-role:contract")),
+        "context resolver fixture must be tagged as contract role")
+require(matches_any("src/Context/class-demo-context-injection-policy.php", globs_for("wordpress:php-role:configuration")),
+        "context injection policy fixture must be tagged as configuration role")
+require(not matches_any("src/Context/class-demo-context-injection-policy.php", globs_for("wordpress:php-role:contract")),
+        "context injection policy fixture must not be tagged as contract role")
+
 # v0.157.0 best-effort fallback: every off-role file must also be in convention_exception_globs.
 for path in [
     "src/Identity/class-demo-identity-store.php",
@@ -134,6 +172,10 @@ for path in [
     "src/Packages/class-demo-package-adoption-diff.php",
     "src/Packages/class-demo-package-artifacts-registry.php",
     "src/Packages/register-demo-package-artifacts.php",
+    "src/Auth/class-demo-token.php",
+    "src/Auth/class-demo-token-authenticator.php",
+    "src/Context/class-demo-context-conflict-resolver.php",
+    "src/Context/class-demo-context-injection-policy.php",
 ]:
     require(matches_any(path, exception_globs),
             f"off-role file {path} must also be exempt for v0.157.0 fallback")
@@ -167,6 +209,11 @@ for relative in [
     "src/Packages/class-demo-package-adoption-diff.php",
     "src/Packages/class-demo-package-artifacts-registry.php",
     "src/Packages/register-demo-package-artifacts.php",
+    "src/Auth/class-demo-access-grant.php",
+    "src/Auth/class-demo-token.php",
+    "src/Auth/class-demo-token-authenticator.php",
+    "src/Context/class-demo-context-conflict-resolver.php",
+    "src/Context/class-demo-context-injection-policy.php",
 ]:
     require((fixture_dir / relative).exists(), f"missing audit detector fixture: {relative}")
 

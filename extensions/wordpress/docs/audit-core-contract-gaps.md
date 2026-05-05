@@ -38,7 +38,7 @@ Homeboy core supports `audit.detector_rules.convention_tag_globs` on `main`. Thi
 }
 ```
 
-Core does not interpret the tag string. It uses tag membership as part of the convention group key, so files with different tags inside the same directory land in different convention groups. That keeps store contracts, registries, adopter interfaces, result/diff objects, factories, and value objects out of one shared method/signature convention.
+Core does not interpret the tag string. It uses tag membership as part of the convention group key, so files with different tags inside the same directory land in different convention groups. That keeps store contracts, registries, adopter interfaces, service/authenticator classes, credential/token objects, policy/configuration vocabularies, result/diff objects, factories, and value objects out of one shared method/signature convention.
 
 Extensions own the role taxonomy. Tags are namespaced (`wordpress:php-role:*`) so multiple extensions in the same component never collide.
 
