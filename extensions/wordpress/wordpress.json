@@ -248,7 +248,127 @@
         "**/*_bootstrap.php",
         "**/functions.php",
         "**/*-functions.php",
-        "**/*_functions.php"
+        "**/*_functions.php",
+        "**/class-*-store.php",
+        "**/class-*-stores.php",
+        "**/class-*-registry.php",
+        "**/class-*-registries.php",
+        "**/class-*-repository.php",
+        "**/class-*-repositories.php",
+        "**/class-*-adopter.php",
+        "**/class-*-adapter.php",
+        "**/class-*-bridge.php",
+        "**/class-*-resolver.php",
+        "**/class-*-handler.php",
+        "**/class-*-validator.php",
+        "**/class-*-persister.php",
+        "**/class-*-runner.php",
+        "**/class-*-executor.php",
+        "**/class-*-dispatcher.php",
+        "**/class-*-router.php",
+        "**/class-*-factory.php",
+        "**/class-*-builder.php",
+        "**/class-*-hydrator.php",
+        "**/class-*-result.php",
+        "**/class-*-results.php",
+        "**/class-*-diff.php",
+        "**/class-*-report.php",
+        "**/class-*-response.php",
+        "**/class-*-outcome.php",
+        "**/class-*-decision.php",
+        "**/class-*-policy.php",
+        "**/class-*-policy-filter.php",
+        "**/class-*-policy-provider.php",
+        "**/class-*-policy-resolver.php",
+        "**/class-*-lock.php",
+        "**/class-*-locks.php",
+        "**/class-null-*.php",
+        "**/class-*-null-*.php"
+      ],
+      "convention_tag_globs": [
+        {
+          "tag": "wordpress:php-role:procedural-helper",
+          "globs": [
+            "**/register-*.php",
+            "**/*-register.php",
+            "**/bootstrap.php",
+            "**/*-bootstrap.php",
+            "**/*_bootstrap.php",
+            "**/functions.php",
+            "**/*-functions.php",
+            "**/*_functions.php"
+          ]
+        },
+        {
+          "tag": "wordpress:php-role:contract",
+          "globs": [
+            "**/class-*-store.php",
+            "**/class-*-stores.php",
+            "**/class-*-repository.php",
+            "**/class-*-repositories.php",
+            "**/class-*-adopter.php",
+            "**/class-*-resolver.php",
+            "**/class-*-handler.php",
+            "**/class-*-validator.php",
+            "**/class-*-persister.php",
+            "**/class-*-runner.php",
+            "**/class-*-executor.php",
+            "**/class-*-dispatcher.php",
+            "**/class-*-router.php",
+            "**/class-*-policy.php",
+            "**/class-*-policy-filter.php",
+            "**/class-*-policy-provider.php",
+            "**/class-*-policy-resolver.php"
+          ]
+        },
+        {
+          "tag": "wordpress:php-role:registry",
+          "globs": [
+            "**/class-*-registry.php",
+            "**/class-*-registries.php"
+          ]
+        },
+        {
+          "tag": "wordpress:php-role:adapter",
+          "globs": [
+            "**/class-*-adapter.php",
+            "**/class-*-bridge.php"
+          ]
+        },
+        {
+          "tag": "wordpress:php-role:factory",
+          "globs": [
+            "**/class-*-factory.php",
+            "**/class-*-builder.php",
+            "**/class-*-hydrator.php"
+          ]
+        },
+        {
+          "tag": "wordpress:php-role:result",
+          "globs": [
+            "**/class-*-result.php",
+            "**/class-*-results.php",
+            "**/class-*-diff.php",
+            "**/class-*-report.php",
+            "**/class-*-response.php",
+            "**/class-*-outcome.php",
+            "**/class-*-decision.php"
+          ]
+        },
+        {
+          "tag": "wordpress:php-role:lock",
+          "globs": [
+            "**/class-*-lock.php",
+            "**/class-*-locks.php"
+          ]
+        },
+        {
+          "tag": "wordpress:php-role:null-impl",
+          "globs": [
+            "**/class-null-*.php",
+            "**/class-*-null-*.php"
+          ]
+        }
       ],
       "known_symbols": {
         "header_versions": [
@@ -257,15 +377,10 @@
             "version_header": "Requires at least:",
             "symbols": [
               { "name": "get_post_type_object", "kind": "function", "introduced": "3.0" },
-              { "name": "wp_json_encode", "kind": "function", "introduced": "4.4" },
-              { "name": "wp_generate_uuid4", "kind": "function", "introduced": "4.7" },
               { "name": "register_rest_route", "kind": "function", "introduced": "4.4" },
               { "name": "register_block_type", "kind": "function", "introduced": "5.0" },
               { "name": "has_blocks", "kind": "function", "introduced": "5.0" },
               { "name": "parse_blocks", "kind": "function", "introduced": "5.0" },
-              { "name": "wp_timezone_string", "kind": "function", "introduced": "5.1" },
-              { "name": "wp_timezone", "kind": "function", "introduced": "5.3" },
-              { "name": "wp_date", "kind": "function", "introduced": "5.3" },
               { "name": "wp_get_environment_type", "kind": "function", "introduced": "5.5" },
               { "name": "WP_REST_Server", "kind": "class", "introduced": "4.4" },
               { "name": "WP_REST_Request", "kind": "class", "introduced": "4.4" },
