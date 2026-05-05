@@ -168,7 +168,7 @@ Use these outputs to gate downstream jobs:
 | `scope` | No | `changed` | Execution scope: `changed` for PRs or `full` for entire codebase |
 | `lint-changed-only` | No | `true` | Deprecated: use `scope` instead |
 | `test-scope` | No | `changed` | Deprecated: use `scope` instead |
-| `auto-issue` | No | *(auto)* | Auto-file issue on non-PR failures. Empty means enabled for non-PR events and disabled for PRs; set `false` to suppress issue filing. |
+| `auto-issue` | No | *(auto)* | Reconcile categorized audit, lint, and test issues on non-PR runs. Empty means enabled for non-PR events and disabled for PRs; set `false` to suppress issue maintenance. |
 | `comment-key` | No | *(auto)* | Shared PR comment key so multiple jobs aggregate into one sticky comment |
 | `comment-section-key` | No | *(auto)* | Section key within the shared PR comment |
 | `comment-section-title` | No | *(auto)* | Visible heading for this section in the shared PR comment |
@@ -527,6 +527,7 @@ Recommended policy:
 |-------------|-------------|
 | High-confidence, low-count findings | Allow auto-issue filing. These make good task-queue entries. |
 | Test failures with clear clusters | Allow auto-issue filing from the main lane. Keep PR feedback in comments. |
+| Generic CI command failures | Do not file issues. Keep these in CI output unless they produce categorized audit, lint, or test findings. |
 | High-count trend metrics | Keep in job summaries or dashboards. Do not turn every item into a task issue. |
 | Known noisy or research-only audit rules | Suppress from auto-issue filing with Homeboy audit config; keep them visible in full audit output. |
 
