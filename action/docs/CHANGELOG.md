@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.4] - 2026-05-05
+
+### Fixed
+- stop filing generic CI failure issues
+
 ## [2.2.3] - 2026-05-05
 
 ### Fixed
