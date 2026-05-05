@@ -1,22 +1,21 @@
 <?php
 /**
- * Package value object — declarative manifest. Sibling of the artifact value
- * objects below; together they form a small constructor convention that the
- * detector should NOT pollute with adopter/registry/result roles.
+ * Package value object — declarative manifest. Sibling of
+ * `class-demo-package-artifact-type.php` (slug/type + args ctor shape); together
+ * they form a small value-object family the detector should not pollute with
+ * artifact declarations, adopter contracts, registries, or result/diff objects.
  */
 
 final class Demo_Package {
 	public function __construct(
 		public readonly string $slug,
-		public readonly array $definition,
-		public readonly array $artifacts
+		public readonly array $args = array()
 	) {}
 
 	public function to_array(): array {
 		return array(
-			'slug'       => $this->slug,
-			'definition' => $this->definition,
-			'artifacts'  => $this->artifacts,
+			'slug' => $this->slug,
+			'args' => $this->args,
 		);
 	}
 }

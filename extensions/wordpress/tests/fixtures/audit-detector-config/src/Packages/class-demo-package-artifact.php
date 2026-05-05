@@ -1,21 +1,17 @@
 <?php
 /**
- * Artifact value object inside a package. Same constructor shape family as the
- * package manifest above.
+ * Artifact declaration object — distinct constructor shape from the package
+ * manifest family. Adopters pass a single declaration array describing one
+ * artifact; lumping this constructor into the manifest convention would
+ * pollute it with an unrelated role.
  */
 
 final class Demo_Package_Artifact {
 	public function __construct(
-		public readonly string $slug,
-		public readonly array $definition,
-		public readonly array $artifacts
+		public readonly array $declaration
 	) {}
 
 	public function to_array(): array {
-		return array(
-			'slug'       => $this->slug,
-			'definition' => $this->definition,
-			'artifacts'  => $this->artifacts,
-		);
+		return $this->declaration;
 	}
 }

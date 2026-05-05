@@ -276,6 +276,8 @@
         "**/class-*-response.php",
         "**/class-*-outcome.php",
         "**/class-*-decision.php",
+        "**/class-*-artifact.php",
+        "**/class-*-artifacts.php",
         "**/class-*-policy.php",
         "**/class-*-policy-filter.php",
         "**/class-*-policy-provider.php",
@@ -353,6 +355,13 @@
             "**/class-*-response.php",
             "**/class-*-outcome.php",
             "**/class-*-decision.php"
+          ]
+        },
+        {
+          "tag": "wordpress:php-role:artifact",
+          "globs": [
+            "**/class-*-artifact.php",
+            "**/class-*-artifacts.php"
           ]
         },
         {

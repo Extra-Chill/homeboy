@@ -1,21 +1,20 @@
 <?php
 /**
- * Artifact type marker — value-object family alongside the package and
- * artifact siblings.
+ * Artifact type marker — sibling of `class-demo-package.php` in the value-object
+ * family. Matches the manifest's (slug/type, args) constructor shape so the
+ * shared convention is detectable.
  */
 
 final class Demo_Package_Artifact_Type {
 	public function __construct(
-		public readonly string $slug,
-		public readonly array $definition,
-		public readonly array $artifacts
+		public readonly string $type,
+		public readonly array $args = array()
 	) {}
 
 	public function to_array(): array {
 		return array(
-			'slug'       => $this->slug,
-			'definition' => $this->definition,
-			'artifacts'  => $this->artifacts,
+			'type' => $this->type,
+			'args' => $this->args,
 		);
 	}
 }

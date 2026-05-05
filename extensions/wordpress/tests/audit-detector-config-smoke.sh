@@ -40,6 +40,8 @@ for pattern in [
     "**/class-*-factory.php",
     "**/class-*-adapter.php",
     "**/class-*-lock.php",
+    "**/class-*-artifact.php",
+    "**/class-*-artifacts.php",
 ]:
     require(pattern in exception_globs, f"missing PHP role exception glob: {pattern}")
 
@@ -56,6 +58,7 @@ required_tags = {
     "wordpress:php-role:contract",
     "wordpress:php-role:registry",
     "wordpress:php-role:result",
+    "wordpress:php-role:artifact",
     "wordpress:php-role:adapter",
     "wordpress:php-role:factory",
     "wordpress:php-role:lock",
@@ -92,10 +95,13 @@ require(not matches_any(identity_scope, globs_for("wordpress:php-role:contract")
 require(not matches_any(identity_materialized, globs_for("wordpress:php-role:contract")),
         "materialized identity value object must not be tagged as contract role")
 
-# Packages fixture: split into value/contract/result/registry/procedural roles.
+# Packages fixture: split into value/contract/result/artifact/registry/procedural roles.
+# Manifest + artifact-type are sibling value objects (slug/type + args ctor shape) and
+# stay untagged so they discover a shared convention. Artifact declaration objects are
+# their own role — different ctor shape (single declaration array) — and must be tagged
+# so core does not pollute the manifest convention with artifact-declaration constructors.
 packages_value_paths = [
     "src/Packages/class-demo-package.php",
-    "src/Packages/class-demo-package-artifact.php",
     "src/Packages/class-demo-package-artifact-type.php",
 ]
 for path in packages_value_paths:
@@ -105,6 +111,11 @@ for path in packages_value_paths:
 
 require(matches_any("src/Packages/class-demo-package-adopter.php", globs_for("wordpress:php-role:contract")),
         "adopter interface fixture must be tagged as contract role")
+require(matches_any("src/Packages/class-demo-package-artifact.php", globs_for("wordpress:php-role:artifact")),
+        "artifact declaration fixture must be tagged as artifact role")
+# Boundary check: `*-artifact-type.php` must NOT match the artifact role glob.
+require(not matches_any("src/Packages/class-demo-package-artifact-type.php", globs_for("wordpress:php-role:artifact")),
+        "artifact-type registration fixture must not be tagged as artifact role")
 require(matches_any("src/Packages/class-demo-package-adoption-result.php", globs_for("wordpress:php-role:result")),
         "adoption result fixture must be tagged as result role")
 require(matches_any("src/Packages/class-demo-package-adoption-diff.php", globs_for("wordpress:php-role:result")),
@@ -118,6 +129,7 @@ require(matches_any("src/Packages/register-demo-package-artifacts.php", globs_fo
 for path in [
     "src/Identity/class-demo-identity-store.php",
     "src/Packages/class-demo-package-adopter.php",
+    "src/Packages/class-demo-package-artifact.php",
     "src/Packages/class-demo-package-adoption-result.php",
     "src/Packages/class-demo-package-adoption-diff.php",
     "src/Packages/class-demo-package-artifacts-registry.php",
