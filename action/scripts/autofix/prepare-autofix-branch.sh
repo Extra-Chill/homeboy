@@ -74,9 +74,22 @@ push_direct_baseline_update() {
     return 0
   fi
 
-  echo "::warning::Direct audit baseline push to ${base_branch} failed; falling back to autofix PR"
+  echo "::warning::Direct audit baseline push to ${base_branch} failed; excluding baseline from autofix PR"
   git reset --soft HEAD~1
   return 1
+}
+
+restore_audit_baseline_file() {
+  local baseline_file
+
+  baseline_file="$(baseline_file_path "${WORKSPACE}")"
+  if git diff --quiet -- "${baseline_file}" && git diff --cached --quiet -- "${baseline_file}"; then
+    return 0
+  fi
+
+  echo "Excluding ${baseline_file} from autofix PR changes"
+  git restore --staged --worktree -- "${baseline_file}" 2>/dev/null || \
+    git checkout -- "${baseline_file}"
 }
 
 if [ -n "${AUTOFIX_COMMANDS:-}" ]; then
@@ -168,8 +181,11 @@ if git diff --quiet && git diff --cached --quiet; then
     git branch -D "${AUTOFIX_BRANCH}"
     exit 0
   fi
+
+  restore_audit_baseline_file
 else
   echo "Skipping direct audit baseline update because autofix changed source files"
+  restore_audit_baseline_file
 fi
 
 if git diff --quiet && git diff --cached --quiet; then
@@ -181,6 +197,7 @@ if git diff --quiet && git diff --cached --quiet; then
 fi
 
 git add -A
+git restore --staged -- "$(baseline_file_path "${WORKSPACE}")" 2>/dev/null || true
 if git diff --cached --quiet; then
   echo "No staged changes after non-PR autofix"
   git checkout -
