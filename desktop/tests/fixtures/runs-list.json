@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "data": {
+    "command": "runs.list",
+    "runs": [
+      {
+        "id": "run-bench-001",
+        "kind": "bench",
+        "status": "pass",
+        "started_at": "2026-05-04T12:00:00Z",
+        "finished_at": "2026-05-04T12:00:08Z",
+        "component_id": "homeboy-desktop",
+        "rig_id": "desktop-smoke",
+        "git_sha": "abc123def456",
+        "command": "homeboy bench homeboy-desktop",
+        "cwd": "/Users/chubes/Developer/homeboy-desktop",
+        "status_note": null
+      },
+      {
+        "id": "run-lint-002",
+        "kind": "lint",
+        "status": "stale",
+        "started_at": "2026-05-04T11:30:00Z",
+        "finished_at": "2026-05-04T11:45:00Z",
+        "component_id": "homeboy-desktop",
+        "rig_id": null,
+        "git_sha": "def456abc123",
+        "command": "homeboy lint homeboy-desktop",
+        "cwd": "/Users/chubes/Developer/homeboy-desktop",
+        "status_note": "owner_process_not_running"
+      }
+    ]
+  }
+}

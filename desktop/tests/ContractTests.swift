@@ -19,6 +19,7 @@ let aggregateFiles = [
     "WorkspaceStatusConfigContractTests.swift",
     "FileLogDBContractTests.swift",
     "RigBenchReleaseUndoContractTests.swift",
+    "RunHistoryContractTests.swift",
     "StackGitAPIAuthContractTests.swift",
     "QualityAuditReviewTriageContractTests.swift",
     "ContractTestRunner.swift",

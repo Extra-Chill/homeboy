@@ -1,0 +1,46 @@
+{
+  "success": true,
+  "data": {
+    "command": "runs.show",
+    "run": {
+      "id": "run-bench-001",
+      "kind": "bench",
+      "status": "pass",
+      "started_at": "2026-05-04T12:00:00Z",
+      "finished_at": "2026-05-04T12:00:08Z",
+      "component_id": "homeboy-desktop",
+      "rig_id": "desktop-smoke",
+      "git_sha": "abc123def456",
+      "command": "homeboy bench homeboy-desktop",
+      "cwd": "/Users/chubes/Developer/homeboy-desktop",
+      "status_note": null,
+      "homeboy_version": "0.31.0",
+      "metadata": {
+        "selected_scenarios": ["cold-launch"],
+        "scenario_metrics": [
+          {
+            "scenario_id": "cold-launch",
+            "metrics": {
+              "total_elapsed_ms": 1200.5,
+              "p95_ms": 14.25
+            }
+          }
+        ]
+      },
+      "artifacts": [
+        {
+          "id": "artifact-001",
+          "run_id": "run-bench-001",
+          "kind": "bench_results",
+          "type": "file",
+          "path": "/tmp/homeboy/bench-results.json",
+          "url": null,
+          "sha256": "0123456789abcdef",
+          "size_bytes": 2048,
+          "mime": "application/json",
+          "created_at": "2026-05-04T12:00:08Z"
+        }
+      ]
+    }
+  }
+}

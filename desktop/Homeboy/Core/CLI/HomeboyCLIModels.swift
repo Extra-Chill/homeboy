@@ -468,6 +468,115 @@ struct BenchScenarioDelta: Decodable, Identifiable {
     let improvement: Bool
 }
 
+// MARK: - Run History CLI Output Models
+
+struct RunsListOutput: Decodable {
+    let command: String
+    let runs: [RunSummary]
+}
+
+struct RunsShowOutput: Decodable {
+    let command: String
+    let run: RunDetail
+}
+
+struct RunsArtifactsOutput: Decodable {
+    let command: String
+    let runId: String
+    let artifacts: [RunArtifact]
+}
+
+struct RunsFindingsOutput: Decodable {
+    let command: String
+    let runId: String
+    let findings: [RunFinding]
+}
+
+struct RunSummary: Decodable, Identifiable {
+    let id: String
+    let kind: String
+    let status: String
+    let startedAt: String
+    let finishedAt: String?
+    let componentId: String?
+    let rigId: String?
+    let gitSha: String?
+    let command: String?
+    let cwd: String?
+    let statusNote: String?
+}
+
+struct RunDetail: Decodable, Identifiable {
+    let id: String
+    let kind: String
+    let status: String
+    let startedAt: String
+    let finishedAt: String?
+    let componentId: String?
+    let rigId: String?
+    let gitSha: String?
+    let command: String?
+    let cwd: String?
+    let statusNote: String?
+    let homeboyVersion: String?
+    let metadata: JSONValue
+    let artifacts: [RunArtifact]
+}
+
+struct RunArtifact: Decodable, Identifiable {
+    let id: String
+    let runId: String
+    let kind: String
+    let artifactType: String
+    let path: String
+    let url: String?
+    let sha256: String?
+    let sizeBytes: Int64?
+    let mime: String?
+    let createdAt: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id, runId, kind, path, url, sha256, sizeBytes, mime, createdAt
+        case artifactType = "type"
+    }
+}
+
+struct RunFinding: Decodable, Identifiable {
+    let id: String
+    let runId: String
+    let tool: String
+    let rule: String?
+    let file: String?
+    let line: Int64?
+    let severity: String?
+    let fingerprint: String?
+    let message: String
+    let fixable: Bool?
+    let metadataJson: JSONValue
+    let createdAt: String
+}
+
+struct RunsCompareOutput: Decodable {
+    let command: String
+    let kind: String
+    let componentId: String?
+    let rigId: String?
+    let scenarioId: String?
+    let metrics: [String]
+    let rows: [RunsCompareRow]
+}
+
+struct RunsCompareRow: Decodable, Identifiable {
+    let run: RunSummary
+    let artifactCount: Int
+    let scenarioId: String?
+    let metrics: [String: Double?]
+
+    var id: String {
+        [run.id, scenarioId].compactMap { $0 }.joined(separator: ":")
+    }
+}
+
 /// Extension configuration scoped to a component (for CLI output parsing)
 /// Settings use [String: String] for simplicity - CLI returns settings as strings
 struct ScopedExtensionConfigCLI: Decodable {
@@ -599,4 +708,3 @@ struct ConfigGapDetail: Decodable, Identifiable {
     
     var id: String { "\(componentId).\(field)" }
 }
-

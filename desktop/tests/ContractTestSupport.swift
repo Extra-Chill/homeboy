@@ -484,6 +484,111 @@ struct BenchScenarioDeltaTest: Decodable {
     let improvement: Bool
 }
 
+// MARK: - Run History Output Types (mirror HomeboyCLI.swift)
+
+struct RunsListOutputTest: Decodable {
+    let command: String
+    let runs: [RunSummaryTest]
+}
+
+struct RunsShowOutputTest: Decodable {
+    let command: String
+    let run: RunDetailTest
+}
+
+struct RunsArtifactsOutputTest: Decodable {
+    let command: String
+    let runId: String
+    let artifacts: [RunArtifactTest]
+}
+
+struct RunsFindingsOutputTest: Decodable {
+    let command: String
+    let runId: String
+    let findings: [RunFindingTest]
+}
+
+struct RunSummaryTest: Decodable {
+    let id: String
+    let kind: String
+    let status: String
+    let startedAt: String
+    let finishedAt: String?
+    let componentId: String?
+    let rigId: String?
+    let gitSha: String?
+    let command: String?
+    let cwd: String?
+    let statusNote: String?
+}
+
+struct RunDetailTest: Decodable {
+    let id: String
+    let kind: String
+    let status: String
+    let startedAt: String
+    let finishedAt: String?
+    let componentId: String?
+    let rigId: String?
+    let gitSha: String?
+    let command: String?
+    let cwd: String?
+    let statusNote: String?
+    let homeboyVersion: String?
+    let metadata: JSONValueTest
+    let artifacts: [RunArtifactTest]
+}
+
+struct RunArtifactTest: Decodable {
+    let id: String
+    let runId: String
+    let kind: String
+    let artifactType: String
+    let path: String
+    let url: String?
+    let sha256: String?
+    let sizeBytes: Int64?
+    let mime: String?
+    let createdAt: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id, runId, kind, path, url, sha256, sizeBytes, mime, createdAt
+        case artifactType = "type"
+    }
+}
+
+struct RunFindingTest: Decodable {
+    let id: String
+    let runId: String
+    let tool: String
+    let rule: String?
+    let file: String?
+    let line: Int64?
+    let severity: String?
+    let fingerprint: String?
+    let message: String
+    let fixable: Bool?
+    let metadataJson: JSONValueTest
+    let createdAt: String
+}
+
+struct RunsCompareOutputTest: Decodable {
+    let command: String
+    let kind: String
+    let componentId: String?
+    let rigId: String?
+    let scenarioId: String?
+    let metrics: [String]
+    let rows: [RunsCompareRowTest]
+}
+
+struct RunsCompareRowTest: Decodable {
+    let run: RunSummaryTest
+    let artifactCount: Int
+    let scenarioId: String?
+    let metrics: [String: Double?]
+}
+
 // MARK: - Release / Build Output Types (mirror HomeboyCLI.swift)
 
 struct ChangesOutputTest: Decodable {

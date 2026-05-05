@@ -16,6 +16,7 @@ func runTests(testDir: String) throws {
     try runWorkspaceStatusConfigContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runFileLogDBContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runRigBenchReleaseUndoContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
+    try runHistoryContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runStackGitAPIAuthContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runQualityAuditReviewTriageContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
 

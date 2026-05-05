@@ -1,0 +1,33 @@
+{
+  "success": true,
+  "data": {
+    "command": "runs.artifacts",
+    "run_id": "run-bench-001",
+    "artifacts": [
+      {
+        "id": "artifact-001",
+        "run_id": "run-bench-001",
+        "kind": "bench_results",
+        "type": "file",
+        "path": "/tmp/homeboy/bench-results.json",
+        "url": null,
+        "sha256": "0123456789abcdef",
+        "size_bytes": 2048,
+        "mime": "application/json",
+        "created_at": "2026-05-04T12:00:08Z"
+      },
+      {
+        "id": "artifact-002",
+        "run_id": "run-bench-001",
+        "kind": "frontend_url",
+        "type": "url",
+        "path": "https://example.test/report",
+        "url": "https://example.test/report",
+        "sha256": null,
+        "size_bytes": null,
+        "mime": null,
+        "created_at": "2026-05-04T12:00:09Z"
+      }
+    ]
+  }
+}

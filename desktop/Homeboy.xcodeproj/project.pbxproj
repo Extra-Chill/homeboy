@@ -29,6 +29,7 @@
 		278021F9D228BBDA95267232 /* HomeboyCLI+FileDatabaseCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD05 /* HomeboyCLI+FileDatabaseCommands.swift */; };
 		278021F9D228BBDA95267233 /* HomeboyCLI+QualityCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD06 /* HomeboyCLI+QualityCommands.swift */; };
 		278021F9D228BBDA95267234 /* HomeboyCLI+RigBenchReleaseCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD07 /* HomeboyCLI+RigBenchReleaseCommands.swift */; };
+		278021F9D228BBDA95267238 /* HomeboyCLI+RunCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD0B /* HomeboyCLI+RunCommands.swift */; };
 		278021F9D228BBDA95267235 /* HomeboyCLI+StackCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD08 /* HomeboyCLI+StackCommands.swift */; };
 		278021F9D228BBDA95267236 /* HomeboyCLI+WorkspaceCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD09 /* HomeboyCLI+WorkspaceCommands.swift */; };
 		278021F9D228BBDA95267237 /* HomeboyCLIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD0A /* HomeboyCLIModels.swift */; };
@@ -212,6 +213,7 @@
 		D870E69E9C29278BC862CD05 /* HomeboyCLI+FileDatabaseCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+FileDatabaseCommands.swift"; sourceTree = "<group>"; };
 		D870E69E9C29278BC862CD06 /* HomeboyCLI+QualityCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+QualityCommands.swift"; sourceTree = "<group>"; };
 		D870E69E9C29278BC862CD07 /* HomeboyCLI+RigBenchReleaseCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+RigBenchReleaseCommands.swift"; sourceTree = "<group>"; };
+		D870E69E9C29278BC862CD0B /* HomeboyCLI+RunCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+RunCommands.swift"; sourceTree = "<group>"; };
 		D870E69E9C29278BC862CD08 /* HomeboyCLI+StackCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+StackCommands.swift"; sourceTree = "<group>"; };
 		D870E69E9C29278BC862CD09 /* HomeboyCLI+WorkspaceCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+WorkspaceCommands.swift"; sourceTree = "<group>"; };
 		D870E69E9C29278BC862CD0A /* HomeboyCLIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyCLIModels.swift; sourceTree = "<group>"; };
@@ -411,6 +413,7 @@
 				D870E69E9C29278BC862CD05 /* HomeboyCLI+FileDatabaseCommands.swift */,
 				D870E69E9C29278BC862CD06 /* HomeboyCLI+QualityCommands.swift */,
 				D870E69E9C29278BC862CD07 /* HomeboyCLI+RigBenchReleaseCommands.swift */,
+				D870E69E9C29278BC862CD0B /* HomeboyCLI+RunCommands.swift */,
 				D870E69E9C29278BC862CD08 /* HomeboyCLI+StackCommands.swift */,
 				D870E69E9C29278BC862CD09 /* HomeboyCLI+WorkspaceCommands.swift */,
 				D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */,
@@ -754,6 +757,7 @@
 				278021F9D228BBDA95267232 /* HomeboyCLI+FileDatabaseCommands.swift in Sources */,
 				278021F9D228BBDA95267233 /* HomeboyCLI+QualityCommands.swift in Sources */,
 				278021F9D228BBDA95267234 /* HomeboyCLI+RigBenchReleaseCommands.swift in Sources */,
+				278021F9D228BBDA95267238 /* HomeboyCLI+RunCommands.swift in Sources */,
 				278021F9D228BBDA95267235 /* HomeboyCLI+StackCommands.swift in Sources */,
 				278021F9D228BBDA95267236 /* HomeboyCLI+WorkspaceCommands.swift in Sources */,
 				278021F9D228BBDA95267237 /* HomeboyCLIModels.swift in Sources */,
