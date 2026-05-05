@@ -25,6 +25,60 @@ fi
 COMP_ID="$(resolve_component_id)"
 WORKSPACE="$(resolve_workspace)"
 
+configure_autofix_bot_identity() {
+  git config user.name "${AUTOFIX_BOT_NAME}"
+  git config user.email "${AUTOFIX_BOT_EMAIL}"
+}
+
+commit_with_autofix_bot() {
+  local message="$1"
+
+  GIT_AUTHOR_NAME="${AUTOFIX_BOT_NAME}" \
+  GIT_AUTHOR_EMAIL="${AUTOFIX_BOT_EMAIL}" \
+  GIT_COMMITTER_NAME="${AUTOFIX_BOT_NAME}" \
+  GIT_COMMITTER_EMAIL="${AUTOFIX_BOT_EMAIL}" \
+    git commit -m "${message}"
+}
+
+push_refspec() {
+  local refspec="$1"
+
+  if [ -n "${APP_TOKEN:-}" ]; then
+    git -c "http.https://github.com/.extraheader=" \
+      push "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+      "${refspec}"
+  else
+    git push origin "${refspec}"
+  fi
+}
+
+push_direct_baseline_update() {
+  local base_branch="$1"
+
+  if ! changes_are_only_audit_baseline "${WORKSPACE}"; then
+    return 1
+  fi
+
+  git add "$(baseline_file_path "${WORKSPACE}")"
+  if git diff --cached --quiet; then
+    return 1
+  fi
+
+  configure_autofix_bot_identity
+  commit_with_autofix_bot "chore(ci): update audit baseline"
+
+  echo "Pushing audit baseline update directly to ${base_branch}"
+  if push_refspec "HEAD:refs/heads/${base_branch}"; then
+    echo "baseline-committed=true" >> "${GITHUB_OUTPUT}"
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    return 0
+  fi
+
+  echo "::warning::Direct audit baseline push to ${base_branch} failed; falling back to autofix PR"
+  git reset --soft HEAD~1
+  return 1
+}
+
 if [ -n "${AUTOFIX_COMMANDS:-}" ]; then
   IFS=',' read -ra FIX_ARRAY <<< "${AUTOFIX_COMMANDS}"
 else
@@ -95,16 +149,27 @@ if [ -n "${json_files}" ]; then
   fi
 fi
 
-# Update baseline so it stays current when this commit merges to main.
-# Full (unscoped) audit ensures the baseline reflects the entire codebase,
-# not just changed files. Tolerate failure — baseline update is best-effort.
-echo "Updating audit baseline..."
-set +e
-homeboy audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
-BASELINE_EXIT=$?
-set -e
-if [ "${BASELINE_EXIT}" -ne 0 ]; then
-  echo "Baseline update exited non-zero (${BASELINE_EXIT}), continuing"
+# If autofix made no source changes, ratchet baseline drift directly on the
+# base branch. Source autofixes stay on the autofix PR path; their baseline
+# effects are handled by the next main run after the PR merges.
+if git diff --quiet && git diff --cached --quiet; then
+  echo "Updating audit baseline..."
+  set +e
+  homeboy audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
+  BASELINE_EXIT=$?
+  set -e
+  if [ "${BASELINE_EXIT}" -ne 0 ]; then
+    echo "Baseline update exited non-zero (${BASELINE_EXIT}), continuing"
+  fi
+
+  if push_direct_baseline_update "${BASE_BRANCH}"; then
+    rm -rf "${AUTOFIX_OUTPUT_DIR}"
+    git checkout -
+    git branch -D "${AUTOFIX_BRANCH}"
+    exit 0
+  fi
+else
+  echo "Skipping direct audit baseline update because autofix changed source files"
 fi
 
 if git diff --quiet && git diff --cached --quiet; then
@@ -153,15 +218,8 @@ fi
 COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_DETAILS}" "${AUTOFIX_TOTAL_FIXES}")"
 rm -rf "${AUTOFIX_OUTPUT_DIR}"
 
-BOT_NAME="homeboy-ci[bot]"
-BOT_EMAIL="266378653+homeboy-ci[bot]@users.noreply.github.com"
-git config user.name "${BOT_NAME}"
-git config user.email "${BOT_EMAIL}"
-GIT_AUTHOR_NAME="${BOT_NAME}" \
-GIT_AUTHOR_EMAIL="${BOT_EMAIL}" \
-GIT_COMMITTER_NAME="${BOT_NAME}" \
-GIT_COMMITTER_EMAIL="${BOT_EMAIL}" \
-  git commit -m "${COMMIT_MSG}"
+configure_autofix_bot_identity
+commit_with_autofix_bot "${COMMIT_MSG}"
 
 # Use GitHub App token for push if available — pushes from a GitHub App
 # trigger workflow re-runs, while GITHUB_TOKEN pushes do not.

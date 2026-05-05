@@ -304,6 +304,28 @@ autofix_render_other_change() {
   esac
 }
 
+baseline_file_path() {
+  local workspace="${1:-$(resolve_workspace)}"
+  local prefix
+
+  prefix="$(git -C "${workspace}" rev-parse --show-prefix 2>/dev/null || true)"
+  printf '%shomeboy.json\n' "${prefix}"
+}
+
+git_changed_files() {
+  git diff --name-only HEAD -- | sed '/^[[:space:]]*$/d' | sort -u
+}
+
+changes_are_only_audit_baseline() {
+  local workspace="${1:-$(resolve_workspace)}"
+  local baseline_file changed
+
+  baseline_file="$(baseline_file_path "${workspace}")"
+  changed="$(git_changed_files)"
+
+  [ -n "${changed}" ] && [ "${changed}" = "${baseline_file}" ]
+}
+
 build_autofix_pr_body() {
   local run_url="$1"
   local branch="$2"
