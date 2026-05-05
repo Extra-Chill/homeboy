@@ -14,6 +14,7 @@ enum NavigationItem: Hashable {
 enum CoreTool: String, CaseIterable, Identifiable {
     case deployer = "Deployer"
     case bench = "Bench"
+    case runHistory = "Run History"
     case release = "Release"
     case rigs = "Rigs"
     case stackManager = "Stacks"
@@ -31,6 +32,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
         switch self {
         case .deployer: return "arrow.up.to.line"
         case .bench: return "speedometer"
+        case .runHistory: return "clock.arrow.circlepath"
         case .release: return "tag"
         case .rigs: return "shippingbox.and.arrow.backward"
         case .stackManager: return "square.stack.3d.up"
@@ -79,6 +81,8 @@ struct ContentView: View {
                 .opacity(selectedItem == .coreTool(.deployer) ? 1 : 0)
             BenchView()
                 .opacity(selectedItem == .coreTool(.bench) ? 1 : 0)
+            RunHistoryView()
+                .opacity(selectedItem == .coreTool(.runHistory) ? 1 : 0)
             ReleaseWorkflowView()
                 .opacity(selectedItem == .coreTool(.release) ? 1 : 0)
             RigsView()
