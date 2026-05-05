@@ -287,6 +287,15 @@ install_frontend_dependencies() {
     if [ ! -d "node_modules" ]; then
         print_status "${scope_label}Installing npm dependencies..."
         need_install=1
+    elif [ -f "package-lock.json" ] && [ ! -f "node_modules/.package-lock.json" ]; then
+        print_warning "${scope_label}node_modules exists but npm install state cannot be verified. Reinstalling dependencies..."
+        need_install=1
+    elif [ -f "package-lock.json" ] && [ "package-lock.json" -nt "node_modules/.package-lock.json" ]; then
+        print_warning "${scope_label}package-lock.json is newer than node_modules. Reinstalling dependencies..."
+        need_install=1
+    elif [ -f "package-lock.json" ] && ! npm ls --depth=0 --silent >/dev/null 2>&1; then
+        print_warning "${scope_label}node_modules contains missing or invalid packages. Reinstalling dependencies..."
+        need_install=1
     elif [ -n "$expected_bin" ] && [ ! -x "node_modules/.bin/$expected_bin" ]; then
         print_warning "${scope_label}node_modules exists but '$expected_bin' is missing. Reinstalling dependencies..."
         need_install=1
