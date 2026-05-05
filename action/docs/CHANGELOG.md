@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.1] - 2026-05-05
+
+### Fixed
+- commit baseline-only drift directly
+
 ## [2.2.0] - 2026-05-01
 
 ### Added
