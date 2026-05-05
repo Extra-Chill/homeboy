@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "2.40.0",
+  "version": "2.40.1",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -191,6 +191,65 @@
   "audit": {
     "setup_references": "scripts/audit/setup-references.sh",
     "detector_rules": {
+      "lifecycle_path_globs": [
+        "**/tests/**/*.php",
+        "**/test/**/*.php",
+        "**/fixtures/**/*.php",
+        "**/fixture/**/*.php",
+        "**/smoke/**/*.php",
+        "**/*-smoke.php",
+        "**/*_smoke.php",
+        "**/*-fallback.php",
+        "**/*_fallback.php",
+        "**/*-shim.php",
+        "**/*_shim.php",
+        "**/*-stub.php",
+        "**/*_stub.php"
+      ],
+      "utility_suffixes": [
+        "Adapter",
+        "Builder",
+        "Collection",
+        "Contract",
+        "Contracts",
+        "DTO",
+        "Data",
+        "Error",
+        "Exception",
+        "Factory",
+        "Fallback",
+        "Helper",
+        "Helpers",
+        "Hydrator",
+        "Interface",
+        "Lock",
+        "Package",
+        "Payload",
+        "Provider",
+        "Registry",
+        "Repository",
+        "Request",
+        "Resolver",
+        "Response",
+        "Result",
+        "Serializer",
+        "Shim",
+        "Store",
+        "Stub",
+        "Transformer",
+        "Value",
+        "Validator"
+      ],
+      "convention_exception_globs": [
+        "**/register-*.php",
+        "**/*-register.php",
+        "**/bootstrap.php",
+        "**/*-bootstrap.php",
+        "**/*_bootstrap.php",
+        "**/functions.php",
+        "**/*-functions.php",
+        "**/*_functions.php"
+      ],
       "known_symbols": {
         "header_versions": [
           {
@@ -286,7 +345,7 @@
           "source_pattern": "(?s)\\b(?:final\\s+|abstract\\s+)?class\\s+(?P<class>[A-Za-z_][A-Za-z0-9_]*)\\b.*?\\b(?:(?:public|protected|private)\\s+)?const\\s+(?P<const>[A-Z][A-Z0-9_]*)\\s*=\\s*['\\\"](?P<value>[a-z][a-z0-9]*(?:[-_/:][a-z0-9]+)+)['\\\"]",
           "value_capture": "value",
           "label": "{class}::{const}",
-          "literal_pattern": "['\\\"]{value}['\\\"]",
+          "literal_pattern": "(?m)(?:[=!]==?\\s*['\\\"]{value}['\\\"]|['\\\"]{value}['\\\"]\\s*[=!]==?)",
           "description": "Raw slug literal `{value}` at line {line} duplicates constant {label}",
           "suggestion": "Use {label} instead of repeating the literal slug so the constant remains the source of truth."
         },
