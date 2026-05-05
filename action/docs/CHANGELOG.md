@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.3] - 2026-05-05
+
+### Fixed
+- align reconcile CLI invocation
+
 ## [2.2.2] - 2026-05-05
 
 ### Fixed
