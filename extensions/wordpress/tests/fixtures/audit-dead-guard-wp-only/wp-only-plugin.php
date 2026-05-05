@@ -16,4 +16,5 @@
  *   dead_guard detector should still flag the guards as redundant.
  */
 
-require_once __DIR__ . '/src/Runtime/class-rest-bootstrap.php';
+require_once __DIR__ . '/src/Runtime/class-rest-controller.php';
+require_once __DIR__ . '/src/Runtime/class-rest-helper.php';
