@@ -532,7 +532,7 @@ Recommended policy:
 
 The main lane is the right place to maintain issue state because it runs against the full repository and can update, close, or suppress stale findings consistently. PR lanes should focus on author feedback and should not maintain long-lived audit issues from partial data.
 
-When a rule is useful as a health metric but not safe as an actionable task list, configure it as dashboard-only or suppress it from issue reconciliation in Homeboy's audit config. Homeboy Action passes `--suppress-from-config` to `homeboy issues reconcile`, so repository-level audit policy is honored during auto-issue maintenance.
+When a rule is useful as a health metric but not safe as an actionable task list, keep it in job summaries or dashboards rather than turning every item into a tracker task. Homeboy Action delegates issue policy to `homeboy issues reconcile`, so auto-issue maintenance follows the current Homeboy CLI contract.
 
 ### PR Comment Identity
 

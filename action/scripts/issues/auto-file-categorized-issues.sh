@@ -499,7 +499,6 @@ reconcile_command() {
     --findings "${input_file}" \
     --path "${RECONCILE_PATH}" \
     --apply \
-    --suppress-from-config \
     > "${result_file}" 2>&1; then
     echo "::warning::homeboy issues reconcile failed for ${cmd_type} — see log above"
     cat "${result_file}"
