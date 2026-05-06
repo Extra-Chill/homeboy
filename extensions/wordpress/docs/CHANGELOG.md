@@ -2,6 +2,29 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.41.0] - 2026-05-06
+
+### Added
+- defer plugin activation until after wp-phpunit install (#431)
+- declare lockfile_paths for autofix drift resolution
+- configurable Playground bench workloads
+- add post-write validate and format scripts
+
+### Fixed
+- declare WP-CLI command output recognizers
+- forward playground phpunit args
+- tighten option-scope-drift detector for single-site plugins
+- anchor constant-backed slug detector to real class declarations (#425)
+- load bench deps before plugins_loaded fires (#426)
+- refresh stale frontend dependencies
+- split auth and policy audit roles
+- split artifact audit role
+- rename wp-only fixture so role-tag splitting keeps it scanned
+- split audit roles + curate dead-guard known symbols
+- tune audit detector context
+- skip eslint when no js files
+- exclude prefixed vendor dirs from lint
+
 ## [2.39.2] - 2026-05-01
 
 ### Fixed
