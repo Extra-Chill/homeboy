@@ -312,18 +312,55 @@ baseline_file_path() {
   printf '%shomeboy.json\n' "${prefix}"
 }
 
+# Files whose changes on `main` are merge-aftermath drift, never authored
+# changes:
+#   - homeboy.json: audit baseline metadata refresh after a merge.
+#   - Cargo.lock:   lockfile bump after a release version commit.
+# Both are review-worthless. When autofix sees ONLY these as workspace drift,
+# we commit them directly to the base branch instead of opening a PR. When
+# autofix produces real source fixes, we strip drift files from the PR so
+# they don't pile onto a reviewable change.
+#
+# Emits one path per line, repo-relative, only for files that actually exist.
+drift_file_paths() {
+  local workspace="${1:-$(resolve_workspace)}"
+  local prefix
+
+  prefix="$(git -C "${workspace}" rev-parse --show-prefix 2>/dev/null || true)"
+  local repo_root
+  repo_root="$(git -C "${workspace}" rev-parse --show-toplevel 2>/dev/null || true)"
+
+  printf '%shomeboy.json\n' "${prefix}"
+
+  # Cargo.lock is a release-owned file at the repo root. Only emit it when
+  # the repo actually has one (Rust components only).
+  if [ -n "${repo_root}" ] && [ -f "${repo_root}/Cargo.lock" ]; then
+    printf 'Cargo.lock\n'
+  fi
+}
+
 git_changed_files() {
   git diff --name-only HEAD -- | sed '/^[[:space:]]*$/d' | sort -u
 }
 
-changes_are_only_audit_baseline() {
+changes_are_only_drift() {
   local workspace="${1:-$(resolve_workspace)}"
-  local baseline_file changed
+  local changed drift_files diff_extra
 
-  baseline_file="$(baseline_file_path "${workspace}")"
   changed="$(git_changed_files)"
+  [ -n "${changed}" ] || return 1
 
-  [ -n "${changed}" ] && [ "${changed}" = "${baseline_file}" ]
+  drift_files="$(drift_file_paths "${workspace}" | sort -u)"
+
+  # Every changed file must be in the drift set. `comm -23` lists lines in
+  # changed-but-not-drift; non-empty means there's a non-drift change.
+  diff_extra="$(comm -23 <(printf '%s\n' "${changed}") <(printf '%s\n' "${drift_files}"))"
+  [ -z "${diff_extra}" ]
+}
+
+# Backwards-compat alias used by tests written against the old name.
+changes_are_only_audit_baseline() {
+  changes_are_only_drift "$@"
 }
 
 build_autofix_pr_body() {

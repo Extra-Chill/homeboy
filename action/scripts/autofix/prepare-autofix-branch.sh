@@ -52,44 +52,71 @@ push_refspec() {
   fi
 }
 
-push_direct_baseline_update() {
+drift_commit_message() {
+  local files="$1"
+
+  # Single-file commits get a tight subject; multi-file uses a generic one
+  # since drift mixes different bookkeeping concerns (baseline + lockfile).
+  case "$(printf '%s\n' "${files}" | sed '/^$/d' | wc -l | xargs)" in
+    1)
+      case "${files}" in
+        *Cargo.lock*) printf 'chore(ci): refresh Cargo.lock\n' ;;
+        *homeboy.json*) printf 'chore(ci): update audit baseline\n' ;;
+        *) printf 'chore(ci): refresh post-merge drift\n' ;;
+      esac
+      ;;
+    *)
+      printf 'chore(ci): refresh post-merge drift\n'
+      ;;
+  esac
+}
+
+push_direct_drift_update() {
   local base_branch="$1"
 
-  if ! changes_are_only_audit_baseline "${WORKSPACE}"; then
+  if ! changes_are_only_drift "${WORKSPACE}"; then
     return 1
   fi
 
-  git add "$(baseline_file_path "${WORKSPACE}")"
+  local staged_files=""
+  while IFS= read -r drift_file; do
+    [ -n "${drift_file}" ] || continue
+    if [ -e "${drift_file}" ] || git ls-files --error-unmatch -- "${drift_file}" >/dev/null 2>&1; then
+      git add -- "${drift_file}"
+      staged_files+="${drift_file}"$'\n'
+    fi
+  done < <(drift_file_paths "${WORKSPACE}")
+
   if git diff --cached --quiet; then
     return 1
   fi
 
   configure_autofix_bot_identity
-  commit_with_autofix_bot "chore(ci): update audit baseline"
+  commit_with_autofix_bot "$(drift_commit_message "${staged_files}")"
 
-  echo "Pushing audit baseline update directly to ${base_branch}"
+  echo "Pushing post-merge drift update directly to ${base_branch}"
   if push_refspec "HEAD:refs/heads/${base_branch}"; then
     echo "baseline-committed=true" >> "${GITHUB_OUTPUT}"
     echo "committed=false" >> "${GITHUB_OUTPUT}"
     return 0
   fi
 
-  echo "::warning::Direct audit baseline push to ${base_branch} failed; excluding baseline from autofix PR"
+  echo "::warning::Direct drift push to ${base_branch} failed; excluding drift files from autofix PR"
   git reset --soft HEAD~1
   return 1
 }
 
-restore_audit_baseline_file() {
-  local baseline_file
+restore_drift_files() {
+  while IFS= read -r drift_file; do
+    [ -n "${drift_file}" ] || continue
+    if git diff --quiet -- "${drift_file}" && git diff --cached --quiet -- "${drift_file}"; then
+      continue
+    fi
 
-  baseline_file="$(baseline_file_path "${WORKSPACE}")"
-  if git diff --quiet -- "${baseline_file}" && git diff --cached --quiet -- "${baseline_file}"; then
-    return 0
-  fi
-
-  echo "Excluding ${baseline_file} from autofix PR changes"
-  git restore --staged --worktree -- "${baseline_file}" 2>/dev/null || \
-    git checkout -- "${baseline_file}"
+    echo "Excluding ${drift_file} from autofix PR changes"
+    git restore --staged --worktree -- "${drift_file}" 2>/dev/null || \
+      git checkout -- "${drift_file}" 2>/dev/null || true
+  done < <(drift_file_paths "${WORKSPACE}")
 }
 
 if [ -n "${AUTOFIX_COMMANDS:-}" ]; then
@@ -162,10 +189,14 @@ if [ -n "${json_files}" ]; then
   fi
 fi
 
-# If autofix made no source changes, ratchet baseline drift directly on the
-# base branch. Source autofixes stay on the autofix PR path; their baseline
-# effects are handled by the next main run after the PR merges.
-if git diff --quiet && git diff --cached --quiet; then
+# If autofix produced no source changes, push merge-aftermath drift (audit
+# baseline + Cargo.lock) directly to the base branch. The drift gate is
+# `changes_are_only_drift`, not "zero changes" — Cargo.lock can be dirty
+# from a release-version-bump on main that the autofix's cargo build
+# resolved into the lockfile, and we still want the direct-push path.
+# Source autofixes stay on the autofix PR path; their drift effects are
+# handled by the next main run after the PR merges.
+if changes_are_only_drift "${WORKSPACE}" || (git diff --quiet && git diff --cached --quiet); then
   echo "Updating audit baseline..."
   set +e
   homeboy audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
@@ -175,17 +206,17 @@ if git diff --quiet && git diff --cached --quiet; then
     echo "Baseline update exited non-zero (${BASELINE_EXIT}), continuing"
   fi
 
-  if push_direct_baseline_update "${BASE_BRANCH}"; then
+  if push_direct_drift_update "${BASE_BRANCH}"; then
     rm -rf "${AUTOFIX_OUTPUT_DIR}"
     git checkout -
     git branch -D "${AUTOFIX_BRANCH}"
     exit 0
   fi
 
-  restore_audit_baseline_file
+  restore_drift_files
 else
-  echo "Skipping direct audit baseline update because autofix changed source files"
-  restore_audit_baseline_file
+  echo "Skipping direct drift update because autofix changed source files"
+  restore_drift_files
 fi
 
 if git diff --quiet && git diff --cached --quiet; then
@@ -197,7 +228,15 @@ if git diff --quiet && git diff --cached --quiet; then
 fi
 
 git add -A
-git restore --staged -- "$(baseline_file_path "${WORKSPACE}")" 2>/dev/null || true
+# Strip drift files (audit baseline, Cargo.lock) from the staged set. They
+# get committed directly to main on the next baseline-only run, never as
+# part of a reviewable autofix PR. Without this, `git add -A` re-stages
+# any drift that survived restore_drift_files (e.g. files homeboy
+# regenerated mid-flow).
+while IFS= read -r drift_file; do
+  [ -n "${drift_file}" ] || continue
+  git restore --staged -- "${drift_file}" 2>/dev/null || true
+done < <(drift_file_paths "${WORKSPACE}")
 if git diff --cached --quiet; then
   echo "No staged changes after non-PR autofix"
   git checkout -
