@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.7] - 2026-05-06
+
+### Changed
+- bump github actions for node 24
+
 ## [2.2.6] - 2026-05-06
 
 ### Fixed
