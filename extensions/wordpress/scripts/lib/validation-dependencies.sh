@@ -81,6 +81,38 @@ homeboy_get_requires_plugins_from_header() {
     done
 }
 
+# Resolve the wp-content/plugins/<slug> path segment for a plugin checkout.
+# Normal checkouts keep using their directory basename. Worktree-style
+# directories may carry a branch suffix (for example data-machine@fix/foo), so
+# use the root plugin entry file when it matches the pre-suffix basename.
+homeboy_get_validation_dependency_slug() {
+    local plugin_path="${1:-}"
+
+    [ -z "$plugin_path" ] || [ ! -d "$plugin_path" ] && return 1
+
+    local dir_slug
+    dir_slug="$(basename "$plugin_path")"
+
+    local canonical_dir_slug="${dir_slug%%@*}"
+    if [ "$canonical_dir_slug" = "$dir_slug" ]; then
+        printf '%s\n' "$dir_slug"
+        return 0
+    fi
+
+    local main_file
+    main_file=$(find "$plugin_path" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
+    if [ -n "$main_file" ]; then
+        local main_slug
+        main_slug="$(basename "$main_file" .php)"
+        if [ "$main_slug" = "$canonical_dir_slug" ]; then
+            printf '%s\n' "$main_slug"
+            return 0
+        fi
+    fi
+
+    printf '%s\n' "$dir_slug"
+}
+
 # Infer GitHub org from a git repo's remote.
 # Parses "origin" remote URL to extract the org/owner.
 # Arg: optional directory to read from (defaults to cwd).
@@ -215,25 +247,27 @@ homeboy_resolve_validation_dependency_paths() {
     # Collect all dependency identifiers from both sources
     local all_deps=""
 
-    # Source 1: Requires Plugins header (auto-discovered)
-    local header_deps
-    header_deps=$(homeboy_get_requires_plugins_from_header "$plugin_path" || true)
-    if [ -n "$header_deps" ]; then
-        all_deps="$header_deps"
-    fi
-
-    # Source 2: Settings JSON (manual overrides)
+    # Source 1: Settings JSON (manual overrides). Explicit configured paths
+    # take priority over auto-discovered header slugs so alternate checkouts can
+    # replace the canonical local component path.
     local settings_raw
     settings_raw=$(homeboy_get_validation_dependencies_raw)
     if [ -n "$settings_raw" ]; then
         local settings_deps
         settings_deps=$(homeboy_normalize_validation_dependencies "$settings_raw")
         if [ -n "$settings_deps" ]; then
-            if [ -n "$all_deps" ]; then
-                all_deps="${all_deps}"$'\n'"${settings_deps}"
-            else
-                all_deps="$settings_deps"
-            fi
+            all_deps="$settings_deps"
+        fi
+    fi
+
+    # Source 2: Requires Plugins header (auto-discovered)
+    local header_deps
+    header_deps=$(homeboy_get_requires_plugins_from_header "$plugin_path" || true)
+    if [ -n "$header_deps" ]; then
+        if [ -n "$all_deps" ]; then
+            all_deps="${all_deps}"$'\n'"${header_deps}"
+        else
+            all_deps="$header_deps"
         fi
     fi
 
@@ -245,6 +279,7 @@ homeboy_resolve_validation_dependency_paths() {
     # dependency's implementation classes.
     local -A seen_paths=()
     local -A seen_dependencies=()
+    local -A seen_slugs=()
     local -a dependency_queue=()
     local dependency_index=0
 
@@ -274,6 +309,18 @@ homeboy_resolve_validation_dependency_paths() {
         if [ -n "$plugin_path" ] && [ "$resolved" = "$plugin_path" ]; then
             continue
         fi
+
+        local resolved_slug
+        resolved_slug=$(homeboy_get_validation_dependency_slug "$resolved" || basename "$resolved")
+
+        # Deduplicate equivalent dependency checkouts by the WordPress plugin
+        # slug Playground will mount/load, not just by host path. This prevents
+        # a worktree path like data-machine@fix/foo and a canonical data-machine
+        # checkout from loading as two copies of the same plugin.
+        if [ -n "${seen_slugs[$resolved_slug]+x}" ]; then
+            continue
+        fi
+        seen_slugs["$resolved_slug"]=1
 
         # Deduplicate by resolved path
         if [ -n "${seen_paths[$resolved]+x}" ]; then

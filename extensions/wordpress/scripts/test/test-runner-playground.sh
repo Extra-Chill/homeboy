@@ -285,7 +285,7 @@ MOUNT_ARGS+=("--mount" "${PLUGIN_PATH}:/wordpress/wp-content/plugins/${PLUGIN_SL
 if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
         [ -z "$dep_path" ] && continue
-        dep_slug="$(basename "$dep_path")"
+        dep_slug="$(homeboy_get_validation_dependency_slug "$dep_path" || basename "$dep_path")"
         MOUNT_ARGS+=("--mount" "${dep_path}:/wordpress/wp-content/plugins/${dep_slug}")
     done <<< "$DEPENDENCY_PATHS"
 fi
@@ -328,7 +328,7 @@ PLAYGROUND_DEP_MOUNTS=""
 if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
         [ -z "$dep_path" ] && continue
-        dep_slug="$(basename "$dep_path")"
+        dep_slug="$(homeboy_get_validation_dependency_slug "$dep_path" || basename "$dep_path")"
         if [ -n "$PLAYGROUND_DEP_MOUNTS" ]; then
             PLAYGROUND_DEP_MOUNTS+="\\n"
         fi
