@@ -578,6 +578,27 @@ has_lint_command() {
   printf '%s\n' "false"
 }
 
+settings_json_flags() {
+  local raw="${HOMEBOY_SETTINGS_JSON:-}"
+  if [ -z "${raw}" ] || [ "${raw}" = "{}" ]; then
+    return 0
+  fi
+
+  if ! printf '%s' "${raw}" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "::warning::HOMEBOY_SETTINGS_JSON must be a JSON object; ignoring settings override"
+    return 0
+  fi
+
+  local key
+  local value
+  local flag_value
+  while IFS=$'\t' read -r key value; do
+    [ -n "${key}" ] || continue
+    flag_value="${key}=${value}"
+    printf ' --setting-json %q' "${flag_value}"
+  done < <(printf '%s' "${raw}" | jq -r 'to_entries[] | [.key, (.value | tojson)] | @tsv')
+}
+
 build_run_command() {
   local cmd="$1"
   local component_id="$2"
@@ -628,6 +649,7 @@ build_run_command() {
     if [ -n "${BENCH_REGRESSION_THRESHOLD:-}" ]; then
       full_cmd="${full_cmd} --regression-threshold ${BENCH_REGRESSION_THRESHOLD}"
     fi
+    full_cmd="${full_cmd}$(settings_json_flags)"
   fi
 
   printf '%s\n' "${full_cmd}"

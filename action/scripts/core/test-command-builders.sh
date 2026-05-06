@@ -18,6 +18,38 @@ assert_equals() {
   printf 'PASS: %s\n' "${label}"
 }
 
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local label="$3"
+
+  case "${haystack}" in
+    *"${needle}"*)
+      printf 'PASS: %s\n' "${label}"
+      ;;
+    *)
+      printf 'FAIL: %s\nexpected to contain: %s\nactual:              %s\n' "${label}" "${needle}" "${haystack}"
+      exit 1
+      ;;
+  esac
+}
+
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local label="$3"
+
+  case "${haystack}" in
+    *"${needle}"*)
+      printf 'FAIL: %s\nexpected not to contain: %s\nactual:                  %s\n' "${label}" "${needle}" "${haystack}"
+      exit 1
+      ;;
+    *)
+      printf 'PASS: %s\n' "${label}"
+      ;;
+  esac
+}
+
 WORKSPACE="/tmp/workspace"
 COMPONENT="data-machine"
 OUTPUT_JSON="/tmp/workspace/out.json"
@@ -104,6 +136,13 @@ assert_equals \
   "$(build_run_command "bench" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
   "bench includes first-class benchmark flags"
 unset BENCH_RIG BENCH_SCENARIO BENCH_RUNS BENCH_ITERATIONS BENCH_REGRESSION_THRESHOLD
+
+HOMEBOY_SETTINGS_JSON='{"playground_workloads":[{"id":"ssi-import","run":[{"type":"wp-cli","command":"wp static-site-importer import-theme static-sites/demo/index.html --format=json","parse":"json"}]}],"playground_blueprint":{"preferredVersions":{"php":"8.3","wp":"latest"}}}'
+bench_settings_cmd="$(build_run_command "bench" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")"
+assert_contains "${bench_settings_cmd}" "--setting-json playground_workloads=" "bench forwards playground workloads as typed settings"
+assert_contains "${bench_settings_cmd}" "--setting-json playground_blueprint=" "bench forwards playground blueprint as typed settings"
+assert_not_contains "${bench_settings_cmd}" "HOMEBOY_SETTINGS_JSON" "bench does not pass raw settings env name as argument"
+unset HOMEBOY_SETTINGS_JSON
 EXTRA_ARGS="--format json"
 
 assert_equals \
