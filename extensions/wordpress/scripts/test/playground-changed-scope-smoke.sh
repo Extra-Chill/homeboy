@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="${SCRIPT_DIR}/test-runner-playground.sh"
 TEMPLATE="${SCRIPT_DIR}/playground-runner.php"
+BOOTSTRAP="${SCRIPT_DIR}/../lib/playground-bootstrap.php"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -18,8 +19,9 @@ assert_contains() {
 }
 
 assert_contains "$TEMPLATE" "{{CHANGED_TEST_FILES_JSON}}"
-assert_contains "$TEMPLATE" "pg_filter_changed_tests"
-assert_contains "$TEMPLATE" "changed test scope skipped non-PHPUnit file"
+assert_contains "$TEMPLATE" "pg_filter_changed_test_files"
+assert_contains "$BOOTSTRAP" "function pg_filter_changed_test_files"
+assert_contains "$BOOTSTRAP" "SCOPED_TEST_FILES requested="
 assert_contains "$RUNNER" "CHANGED_TEST_FILES_JSON"
 assert_contains "$RUNNER" "{{CHANGED_TEST_FILES_JSON}}"
 

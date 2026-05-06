@@ -83,6 +83,15 @@ SELECTED_TEST_FILE="${HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE:-}"
 PASSTHROUGH_ARGS=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --filter)
+            PASSTHROUGH_ARGS+=("$1")
+            shift
+            if [ "$#" -eq 0 ] || [ -z "${1:-}" ]; then
+                echo "ERROR: --filter requires a value" >&2
+                exit 2
+            fi
+            PASSTHROUGH_ARGS+=("$1")
+            ;;
         --file)
             shift
             if [ "$#" -eq 0 ] || [ -z "${1:-}" ]; then
@@ -95,6 +104,20 @@ while [ "$#" -gt 0 ]; do
             SELECTED_TEST_FILE="${1#--file=}"
             ;;
         *)
+            if [ -z "$SELECTED_TEST_FILE" ]; then
+                if [ "${1#/}" != "$1" ]; then
+                    candidate_test_file="$1"
+                else
+                    candidate_test_file="${PLUGIN_PATH}/${1}"
+                fi
+
+                if [ -f "$candidate_test_file" ]; then
+                    SELECTED_TEST_FILE="$1"
+                    shift
+                    continue
+                fi
+            fi
+
             PASSTHROUGH_ARGS+=("$1")
             ;;
     esac
@@ -358,7 +381,7 @@ set +e
     "--mount" "${WRAPPER_TMPFILE}:/runner.php" \
     --wp=6.9 \
     --verbosity=normal \
-    -- /runner.php "$@" \
+    -- /runner.php "${PASSTHROUGH_ARGS[@]}" \
     2>&1 | homeboy_filter_playground_cleanup_noise | tee "$PHPUNIT_TMPFILE"
 playground_exit=${PIPESTATUS[0]}
 set -e

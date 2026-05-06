@@ -30,7 +30,8 @@ assert_not_contains() {
     fi
 }
 
-assert_contains "$RUNNER_SH" '-- /runner.php "$@"' "Playground runner forwards PHPUnit passthrough args"
+assert_contains "$RUNNER_SH" 'PASSTHROUGH_ARGS=()' "Playground runner captures PHPUnit passthrough args"
+assert_contains "$RUNNER_SH" '-- /runner.php "${PASSTHROUGH_ARGS[@]}"' "Playground runner forwards parsed PHPUnit passthrough args"
 
 assert_contains "$RUNNER_PHP" 'function pg_is_component_phpunit_directory($raw_path)' "Component directory filter exists"
 assert_contains "$RUNNER_PHP" "return \$normalized === 'tests' || strpos(\$normalized, 'tests/') === 0;" "Only plugin tests/ entries are accepted"
