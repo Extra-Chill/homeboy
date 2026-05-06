@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.8] - 2026-05-06
+
+### Fixed
+- forward typed settings json
+
 ## [2.2.7] - 2026-05-06
 
 ### Changed
