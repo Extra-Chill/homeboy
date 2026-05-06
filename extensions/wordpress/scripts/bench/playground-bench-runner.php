@@ -225,7 +225,7 @@ if ($installed_site_mode) {
     // end DB work runs before activation creates plugin tables). Activation is
     // the canonical seam for install-time side effects.
     pg_remove_new_wordpress_hook_callbacks('shutdown', $pre_component_shutdown_callbacks);
-    pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks);
+    pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks, [], 'init');
 
     // Fire activation hooks now that wp-phpunit has created the wptests_*
     // tables. Activation order: deps first, then the component-under-test

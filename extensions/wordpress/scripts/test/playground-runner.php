@@ -146,7 +146,7 @@ pg_run_install_stage(['config_path' => $config_path, 'tests_dir' => $tests_dir])
 // only callbacks the component added during that install bootstrap; activation
 // below remains the post-table seam for install-time side effects.
 pg_remove_new_wordpress_hook_callbacks('shutdown', $pre_component_shutdown_callbacks);
-pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks);
+pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks, [], 'init');
 
 // Fire activation hooks now that wp-phpunit has created database tables.
 // Pre-#431 activation fired inline during muplugins_loaded — before the test

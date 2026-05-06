@@ -291,16 +291,38 @@ function pg_defer_new_wordpress_hook_callbacks(string $hook_name, array $before)
 
 /**
  * Run callbacks extracted by pg_defer_new_wordpress_hook_callbacks().
+ *
+ * When a hook name is supplied, the callbacks run with that hook on
+ * $wp_current_filter. This preserves WordPress lifecycle context for APIs that
+ * validate doing_action() while still letting the runner defer DB-touching work
+ * until after wp-phpunit has created tables.
  */
-function pg_run_deferred_wordpress_hook_callbacks(array $deferred, array $args = []): void {
-    foreach ($deferred as $entry) {
-        $callback = $entry['callback'] ?? null;
-        if (!is_array($callback) || !isset($callback['function'])) {
-            continue;
-        }
+function pg_run_deferred_wordpress_hook_callbacks(array $deferred, array $args = [], ?string $hook_name = null): void {
+    global $wp_current_filter;
 
-        $accepted_args = isset($callback['accepted_args']) ? (int) $callback['accepted_args'] : count($args);
-        call_user_func_array($callback['function'], array_slice($args, 0, $accepted_args));
+    $pushed_hook = false;
+    if (is_string($hook_name) && $hook_name !== '') {
+        if (!is_array($wp_current_filter)) {
+            $wp_current_filter = [];
+        }
+        $wp_current_filter[] = $hook_name;
+        $pushed_hook = true;
+    }
+
+    try {
+        foreach ($deferred as $entry) {
+            $callback = $entry['callback'] ?? null;
+            if (!is_array($callback) || !isset($callback['function'])) {
+                continue;
+            }
+
+            $accepted_args = isset($callback['accepted_args']) ? (int) $callback['accepted_args'] : count($args);
+            call_user_func_array($callback['function'], array_slice($args, 0, $accepted_args));
+        }
+    } finally {
+        if ($pushed_hook) {
+            array_pop($wp_current_filter);
+        }
     }
 }
 
