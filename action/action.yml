@@ -261,7 +261,7 @@ runs:
 
     - name: Cache cargo (source build)
       if: inputs.binary-path == '' && inputs.source != ''
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry
@@ -290,7 +290,7 @@ runs:
     - name: Cache Homeboy
       id: cache-homeboy
       if: inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true')
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: |
           /usr/local/bin/homeboy
@@ -359,7 +359,7 @@ runs:
 
     - name: Setup Node.js
       if: steps.detect-env.outputs.portable-node != ''
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v6
       with:
         node-version: ${{ steps.detect-env.outputs.portable-node }}
 
@@ -419,7 +419,7 @@ runs:
 
     - name: Upload Homeboy CI results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: homeboy-ci-results
         path: homeboy-ci-results/*.json
