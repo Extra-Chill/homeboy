@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.4.0] - 2026-05-06
+
+### Added
+- declare lockfile_paths for autofix drift resolution
+- add post-write validate and format scripts
+
 ## [1.2.0] - 2026-04-27
 
 ### Added
