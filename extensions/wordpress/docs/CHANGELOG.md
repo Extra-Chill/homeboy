@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.41.1] - 2026-05-06
+
+### Fixed
+- dedupe playground dependency mounts
+
 ## [2.41.0] - 2026-05-06
 
 ### Added
