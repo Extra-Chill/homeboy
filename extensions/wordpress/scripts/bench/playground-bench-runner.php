@@ -93,6 +93,10 @@ if (!defined('HOMEBOY_BENCH_LIST_ONLY')) {
 require_once '/homeboy-extension/scripts/lib/playground-bootstrap.php';
 require_once '{{BENCH_HELPER_PHP}}';
 
+if (!defined('WP_CLI')) {
+    define('WP_CLI', true);
+}
+
 pg_install_diagnostics_handlers();
 
 // Stages 1-4: shared boot path, identical to test runner.
@@ -189,11 +193,21 @@ if ($installed_site_mode) {
     // closure semantics make this the cleanest way to thread state out of
     // the wp-phpunit harness callback.
     $loaded_dep_files = [];
+    $loaded_blueprint_plugin_files = [];
     $loaded_component_file = null;
 
     require_once "$tests_dir/includes/functions.php";
-    tests_add_filter('muplugins_loaded', function () use ($plugin_path, $dep_mounts, $pre_component_init_callbacks, &$deferred_install_init_callbacks, &$loaded_dep_files, &$loaded_component_file) {
+    tests_add_filter('muplugins_loaded', function () use ($plugin_path, $dep_mounts, $pre_component_init_callbacks, &$deferred_install_init_callbacks, &$loaded_dep_files, &$loaded_blueprint_plugin_files, &$loaded_component_file) {
+        pg_bench_prepare_wp_cli_runtime();
         $loaded_dep_files = pg_run_load_deps_stage(['dep_mounts' => $dep_mounts]);
+        $exclude_roots = [$plugin_path];
+        foreach (explode("\n", $dep_mounts) as $dep_mount) {
+            $dep_mount = trim($dep_mount);
+            if ($dep_mount !== '') {
+                $exclude_roots[] = $dep_mount;
+            }
+        }
+        $loaded_blueprint_plugin_files = pg_bench_load_blueprint_plugins_stage($exclude_roots, '{{PLAYGROUND_BLUEPRINT_PLUGIN_SLUGS}}');
         $loaded_component_file = pg_run_load_component_stage(['plugin_path' => $plugin_path, 'activate' => false]);
 
         // Defer component-added init callbacks until install.php has created
@@ -220,7 +234,7 @@ if ($installed_site_mode) {
     // activation callback fataled. The split here keeps file load inside the
     // canonical WordPress lifecycle (preserved from #426/#427) while moving
     // the activation dispatch past the install boundary.
-    $activation_files = $loaded_dep_files;
+    $activation_files = array_merge($loaded_dep_files, $loaded_blueprint_plugin_files);
     if ($loaded_component_file !== null) {
         $activation_files[] = $loaded_component_file;
     }
@@ -409,10 +423,111 @@ function pg_bench_run_php_step(array $step, string $plugin_path) {
     return eval((string) $step['code']);
 }
 
+function pg_bench_prepare_wp_cli_runtime(): void {
+    if (!class_exists('WP_CLI')) {
+        return;
+    }
+
+    $wp_cli_root = dirname(dirname((new ReflectionClass('WP_CLI'))->getFileName()));
+    if (!defined('WP_CLI_ROOT')) {
+        define('WP_CLI_ROOT', $wp_cli_root);
+    }
+    if (!defined('WP_CLI_VERSION') && is_readable(WP_CLI_ROOT . '/VERSION')) {
+        define('WP_CLI_VERSION', trim(file_get_contents(WP_CLI_ROOT . '/VERSION')));
+    }
+    if (!defined('WP_CLI_START_MICROTIME')) {
+        define('WP_CLI_START_MICROTIME', microtime(true));
+    }
+    if (!defined('WP_CLI_VENDOR_DIR')) {
+        if (file_exists(WP_CLI_ROOT . '/vendor/autoload.php')) {
+            define('WP_CLI_VENDOR_DIR', WP_CLI_ROOT . '/vendor');
+        } elseif (file_exists(dirname(dirname(WP_CLI_ROOT)) . '/autoload.php')) {
+            define('WP_CLI_VENDOR_DIR', dirname(dirname(WP_CLI_ROOT)));
+        } elseif (file_exists(dirname(WP_CLI_ROOT) . '/vendor/autoload.php')) {
+            define('WP_CLI_VENDOR_DIR', dirname(WP_CLI_ROOT) . '/vendor');
+        } else {
+            define('WP_CLI_VENDOR_DIR', WP_CLI_ROOT . '/vendor');
+        }
+    }
+    if (!function_exists('WP_CLI\\Utils\\parse_str_to_argv') && is_readable(WP_CLI_ROOT . '/php/utils.php')) {
+        require_once WP_CLI_ROOT . '/php/utils.php';
+    }
+    if (!function_exists('WP_CLI\\Dispatcher\\get_path') && is_readable(WP_CLI_ROOT . '/php/dispatcher.php')) {
+        require_once WP_CLI_ROOT . '/php/dispatcher.php';
+    }
+
+    $runner = WP_CLI::get_runner();
+    $runner_reflection = new ReflectionObject($runner);
+    if ($runner_reflection->hasProperty('config')) {
+        $config_property = $runner_reflection->getProperty('config');
+        $config_property->setAccessible(true);
+        $config = $config_property->getValue($runner);
+        if (!is_array($config)) {
+            $config = [];
+        }
+        $config += [
+            'disabled_commands' => [],
+            'debug' => false,
+            'color' => false,
+            'quiet' => false,
+            'require' => [],
+            'ssh' => false,
+            'http' => false,
+            'skip-plugins' => false,
+            'skip-themes' => false,
+        ];
+        $config_property->setValue($runner, $config);
+    }
+}
+
+function pg_bench_load_blueprint_plugins_stage(array $exclude_roots, string $allowed_slugs_raw): array {
+    pg_stage_begin('load_blueprint_plugins');
+    try {
+        pg_bench_prepare_wp_cli_runtime();
+
+        $plugin_root = '/wordpress/wp-content/plugins';
+        $loaded = [];
+        $excluded = array_fill_keys(array_map(static fn($path) => rtrim((string) $path, '/'), $exclude_roots), true);
+        $allowed_slugs = array_values(array_filter(array_map('trim', explode("\n", $allowed_slugs_raw))));
+        if (empty($allowed_slugs)) {
+            pg_log('BLUEPRINT_PLUGIN_LOAD_SKIPPED no configured installPlugin targetFolderName values');
+            pg_stage_ok('load_blueprint_plugins');
+            return [];
+        }
+
+        foreach ($allowed_slugs as $plugin_slug) {
+            $candidate = rtrim($plugin_root . '/' . trim($plugin_slug, '/'), '/');
+            if (isset($excluded[$candidate])) {
+                continue;
+            }
+            if (!is_dir($candidate)) {
+                pg_log('NOTICE:blueprint plugin directory not found: ' . $candidate);
+                continue;
+            }
+            foreach ((glob($candidate . '/*.php') ?: []) as $plugin_file) {
+                if (strpos(file_get_contents($plugin_file), 'Plugin Name:') === false) {
+                    continue;
+                }
+                require_once $plugin_file;
+                $loaded[] = $plugin_file;
+                pg_log('BLUEPRINT_PLUGIN_LOADED ' . basename($candidate) . '/' . basename($plugin_file));
+                break;
+            }
+        }
+
+        pg_stage_ok('load_blueprint_plugins');
+        return $loaded;
+    } catch (Throwable $e) {
+        pg_stage_fail('load_blueprint_plugins', $e);
+        exit(1);
+    }
+}
+
 function pg_bench_run_wp_cli_step(array $step) {
     if (!class_exists('WP_CLI') || !method_exists('WP_CLI', 'runcommand')) {
         throw new RuntimeException('wp-cli workload steps require WP_CLI::runcommand() to be available inside the Playground PHP process');
     }
+    pg_bench_prepare_wp_cli_runtime();
 
     if (!is_scalar($step['command'])) {
         throw new RuntimeException('wp-cli step command must be a string');

@@ -397,6 +397,17 @@ if [ -n "$DEPENDENCY_PATHS" ]; then
     done <<< "$DEPENDENCY_PATHS"
 fi
 
+PLAYGROUND_BLUEPRINT_PLUGIN_SLUGS=""
+if printf '%s' "$PLAYGROUND_BLUEPRINT_JSON" | jq -e 'type == "object" and length > 0' >/dev/null 2>&1; then
+    while IFS= read -r plugin_slug; do
+        [ -n "$plugin_slug" ] || continue
+        if [ -n "$PLAYGROUND_BLUEPRINT_PLUGIN_SLUGS" ]; then
+            PLAYGROUND_BLUEPRINT_PLUGIN_SLUGS+="\\n"
+        fi
+        PLAYGROUND_BLUEPRINT_PLUGIN_SLUGS+="$plugin_slug"
+    done < <(printf '%s' "$PLAYGROUND_BLUEPRINT_JSON" | jq -r '.steps[]? | select(.step == "installPlugin") | .options.targetFolderName // empty' 2>/dev/null || true)
+fi
+
 # Two host-visible files written through the plugin mount:
 # - .pg-bench-results.json: the BenchResults envelope (the deliverable).
 # - .pg-bench-result.txt:   pg_log / pg_stage_* structured stage log,
@@ -436,6 +447,7 @@ sed \
     -e "s|{{COMPONENT_ID}}|${COMPONENT_ID}|g" \
     -e "s|{{ITERATIONS}}|${ITERATIONS}|g" \
     -e "s|{{PLAYGROUND_DEP_MOUNTS}}|${PLAYGROUND_DEP_MOUNTS}|g" \
+    -e "s|{{PLAYGROUND_BLUEPRINT_PLUGIN_SLUGS}}|${PLAYGROUND_BLUEPRINT_PLUGIN_SLUGS}|g" \
     -e "s|{{SHARED_STATE_PATH}}|${SHARED_STATE_GUEST}|g" \
     -e "s|{{INSTANCE_ID}}|${INSTANCE_ID}|g" \
     -e "s|{{CONCURRENCY}}|${CONCURRENCY}|g" \
