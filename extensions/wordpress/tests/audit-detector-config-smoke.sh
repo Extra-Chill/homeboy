@@ -55,6 +55,35 @@ lifecycle_globs = set(rules.get("lifecycle_path_globs", []))
 for pattern in ["**/*-smoke.php", "**/*-fallback.php", "**/*-shim.php", "**/*-stub.php"]:
     require(pattern in lifecycle_globs, f"missing contextual dead-guard path glob: {pattern}")
 
+# WP-CLI command-output policy recognizers live in the WordPress extension, not
+# homeboy core. Core consumes these as opaque substring rules.
+framework_command_recognizers = rules.get("framework_command_recognizers", [])
+recognizers_by_id = {entry["id"]: entry for entry in framework_command_recognizers}
+for recognizer_id in [
+    "wp-cli-direct-registration",
+    "wp-cli-direct-subclass",
+    "wp-cli-indirect-subclass",
+]:
+    require(recognizer_id in recognizers_by_id,
+            f"missing WP-CLI command recognizer: {recognizer_id}")
+
+direct_registration = recognizers_by_id["wp-cli-direct-registration"]
+require("WP_CLI::add_command" in direct_registration.get("requires_all", []),
+        "direct registration recognizer must require WP_CLI::add_command")
+
+direct_subclass = recognizers_by_id["wp-cli-direct-subclass"]
+require("extends \\WP_CLI_Command" in direct_subclass.get("requires_any", []),
+        "direct subclass recognizer must accept fully-qualified WP_CLI_Command")
+
+indirect_subclass = recognizers_by_id["wp-cli-indirect-subclass"]
+any_groups = indirect_subclass.get("requires_any_groups", [])
+require(len(any_groups) == 2,
+        "indirect subclass recognizer must require both an import group and an output-method group")
+require(any("use WP_CLI;" in group for group in any_groups),
+        "indirect subclass recognizer must require a WP_CLI import marker")
+require(any("WP_CLI::success" in group and "WP_CLI::error" in group for group in any_groups),
+        "indirect subclass recognizer must require a WP_CLI output-method marker")
+
 # Forward-compat (core main): convention_tag_globs splits unrelated PHP roles.
 tag_globs = rules.get("convention_tag_globs", [])
 require(tag_globs, "convention_tag_globs must be configured to split PHP roles in mixed directories")

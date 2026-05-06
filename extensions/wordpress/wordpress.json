@@ -537,6 +537,35 @@
           "description": "Option scope drift at line {line}: docs mention network/site-option storage but implementation calls `{call}`",
           "suggestion": "Use the matching site-option call or update the storage contract so multisite behaviour is explicit."
         }
+      ],
+      "framework_command_recognizers": [
+        {
+          "id": "wp-cli-direct-registration",
+          "requires_all": ["WP_CLI::add_command"]
+        },
+        {
+          "id": "wp-cli-direct-subclass",
+          "requires_any": ["extends WP_CLI_Command", "extends \\WP_CLI_Command"]
+        },
+        {
+          "id": "wp-cli-indirect-subclass",
+          "requires_any_groups": [
+            [
+              "use WP_CLI;",
+              "use \\WP_CLI;",
+              "use WP_CLI ",
+              "use \\WP_CLI "
+            ],
+            [
+              "WP_CLI::success",
+              "WP_CLI::error",
+              "WP_CLI::log",
+              "WP_CLI::warning",
+              "WP_CLI::print_value",
+              "WP_CLI\\Utils\\format_items"
+            ]
+          ]
+        }
       ]
     },
     "ignore_claim_patterns": [
