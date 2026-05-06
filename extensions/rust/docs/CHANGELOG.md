@@ -2,6 +2,16 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.16.0] - 2026-05-06
+
+### Added
+- feat(rust/audit): declare trivial/plumbing call lists for duplication detector
+- declare lockfile_paths for autofix drift resolution
+- add post-write validate and format scripts
+
+### Fixed
+- fix(rust/audit): nest duplication detector config under detector_rules
+
 ## [1.14.0] - 2026-04-30
 
 ### Added
