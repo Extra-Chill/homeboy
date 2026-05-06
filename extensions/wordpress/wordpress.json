@@ -531,8 +531,8 @@
           "language": "php",
           "file_extensions": ["php"],
           "exclude_path_contains": ["/vendor/", "vendor/", "/node_modules/", "node_modules/"],
-          "comment_pattern": "(?i)\\b(network option|site option|multisite|shared across subsites|shared across sites)\\b",
-          "comment_exclude_pattern": "(?i)\\b(not a network option|single-site option)\\b",
+          "comment_pattern": "(?i)\\b(?:should\\s+use\\s+(?:get_site_option|update_site_option|delete_site_option|site\\s+option)|must\\s+use\\s+(?:get_site_option|update_site_option|delete_site_option|site\\s+option)|stored\\s+as\\s+a\\s+(?:network|site)\\s+option|network[\\s-]?wide\\s+(?:option|setting|storage)|network[\\s-]?scoped\\s+(?:option|setting|storage|value)|shared\\s+across\\s+(?:subsites|sites|the\\s+network)|multisite[\\s-]?aware\\s+(?:option|storage)|multisite\\s+option\\s+storage)\\b",
+          "comment_exclude_pattern": "(?i)(?:\\bnot\\s+a\\s+network\\s+option\\b|\\bsingle-site\\s+(?:option|only|plugin|storage)\\b|\\bdo(?:es)?\\s+not\\s+support\\s+multisite\\b|\\bno\\s+multisite\\s+support\\b|\\bmultisite\\s*:\\s*false\\b|@option-scope[\\s:]+single-site\\b)",
           "pattern": "\\b(?P<call>get_option|update_option|delete_option)\\s*\\(",
           "description": "Option scope drift at line {line}: docs mention network/site-option storage but implementation calls `{call}`",
           "suggestion": "Use the matching site-option call or update the storage contract so multisite behaviour is explicit."

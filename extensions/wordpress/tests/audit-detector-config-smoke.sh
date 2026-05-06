@@ -180,6 +180,96 @@ for path in [
     require(matches_any(path, exception_globs),
             f"off-role file {path} must also be exempt for v0.157.0 fallback")
 
+# Option scope drift detector — must require explicit drift vocabulary in a
+# comment block (claims of network/site-option storage), recognize file-level
+# opt-out markers, and ignore incidental mentions of "multisite"/"network".
+# Regression coverage for Extra-Chill/homeboy-extensions#424.
+option_scope_rule = next(
+    rule for rule in rules["requested_detectors"] if rule["id"] == "wordpress-option-scope-drift"
+)
+include_regex = re.compile(option_scope_rule["comment_pattern"])
+exclude_regex = re.compile(option_scope_rule["comment_exclude_pattern"])
+call_regex = re.compile(option_scope_rule["pattern"])
+
+drift_fixture = (fixture_dir / "src/Options/class-demo-network-drift.php").read_text(encoding="utf-8")
+single_site_fixture = (fixture_dir / "src/Options/class-demo-single-site-noise.php").read_text(encoding="utf-8")
+opt_out_fixture = (fixture_dir / "src/Options/class-demo-opt-out-marker.php").read_text(encoding="utf-8")
+
+# True-positive fixture: drift docblock vocabulary triggers include, no
+# opt-out, and three option call sites are flagged.
+require(include_regex.search(drift_fixture),
+        "drift fixture must trigger option-scope include pattern")
+require(not exclude_regex.search(drift_fixture),
+        "drift fixture must not trigger option-scope exclude pattern")
+drift_calls = call_regex.findall(drift_fixture)
+require(len(drift_calls) == 3,
+        f"drift fixture should expose 3 option call sites, got {len(drift_calls)}")
+
+# False-positive fixture: incidental "multisite"/"network" mentions must NOT
+# trigger the include pattern — this is the over-fire that issue #424 fixed.
+require(not include_regex.search(single_site_fixture),
+        "single-site noise fixture must not trigger option-scope include pattern (regression for #424)")
+# Sanity: the file does mention the loose vocabulary, just not the tight one.
+require(re.search(r"(?i)\bmultisite\b", single_site_fixture),
+        "single-site fixture must contain bare 'multisite' to exercise the previous over-fire shape")
+require(re.search(r"(?i)\bnetwork\s+request\b", single_site_fixture),
+        "single-site fixture must contain a non-storage 'network' mention")
+
+# Opt-out fixture: even when drift vocabulary appears, the file-level
+# `@option-scope single-site` marker suppresses the detector for the whole
+# file.
+require(include_regex.search(opt_out_fixture),
+        "opt-out fixture should contain drift vocabulary to exercise the suppress path")
+require(exclude_regex.search(opt_out_fixture),
+        "opt-out fixture must trigger the file-level @option-scope single-site exclude marker")
+
+# Exclude pattern must recognize each documented opt-out phrase.
+for phrase in [
+    "@option-scope single-site",
+    "@option-scope: single-site",
+    "single-site option",
+    "single-site only",
+    "single-site plugin",
+    "not a network option",
+    "does not support multisite",
+    "do not support multisite",
+    "no multisite support",
+    "multisite: false",
+]:
+    require(exclude_regex.search(phrase),
+            f"option-scope exclude pattern must recognize opt-out phrase: {phrase!r}")
+
+# Include pattern must NOT match incidental vocabulary that issue #424
+# called out as the false-positive shape.
+for phrase in [
+    "network request",
+    "multisite-aware logger",
+    "multisite",
+    "network",
+    "network option",  # bare phrase no longer enough on its own
+    "site option",     # bare phrase no longer enough on its own
+]:
+    require(not include_regex.search(phrase),
+            f"option-scope include pattern must not fire on incidental phrase: {phrase!r}")
+
+# Include pattern MUST match explicit drift vocabulary.
+for phrase in [
+    "stored as a network option",
+    "stored as a site option",
+    "should use update_site_option",
+    "should use site option API",
+    "must use get_site_option",
+    "network-wide setting",
+    "network wide storage",
+    "network-scoped option",
+    "shared across subsites",
+    "shared across the network",
+    "multisite-aware option",
+    "multisite option storage",
+]:
+    require(include_regex.search(phrase),
+            f"option-scope include pattern must recognize drift phrase: {phrase!r}")
+
 literal_rule = next(
     rule for rule in rules["requested_detectors"] if rule["id"] == "wordpress-constant-backed-slug-literal"
 )
@@ -262,6 +352,9 @@ for relative in [
     "src/Auth/class-demo-token-authenticator.php",
     "src/Context/class-demo-context-conflict-resolver.php",
     "src/Context/class-demo-context-injection-policy.php",
+    "src/Options/class-demo-network-drift.php",
+    "src/Options/class-demo-single-site-noise.php",
+    "src/Options/class-demo-opt-out-marker.php",
 ]:
     require((fixture_dir / relative).exists(), f"missing audit detector fixture: {relative}")
 
