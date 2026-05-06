@@ -6,7 +6,8 @@
 # scenario is emitted with the expected shape:
 #   - scenarios[0].id == "__bootstrap" (ordering: must be first)
 #   - scenarios[0].iterations == 1
-#   - scenarios[0].metrics has boot_ms, install_ms, load_deps_ms, load_component_ms
+#   - scenarios[0].metrics has boot_ms, install_ms, load_deps_ms,
+#     load_component_ms, activation_ms (homeboy-extensions#431)
 #   - all four metric values are positive floats (> 0)
 #   - subsequent fixture scenarios still appear correctly
 #
@@ -99,8 +100,11 @@ if [ "$first_iters" != "1" ]; then
 fi
 echo "✓ scenarios[0].iterations == 1"
 
-# --- Assertion 3: all four bootstrap metric keys present + positive floats ---
-for metric in boot_ms install_ms load_deps_ms load_component_ms; do
+# --- Assertion 3: all bootstrap metric keys present + positive floats ---
+# activation_ms was added in homeboy-extensions#431 — the post-install activation
+# stage runs once per bench process (regardless of plugin count), so its timing
+# is always present in the __bootstrap synthetic scenario.
+for metric in boot_ms install_ms load_deps_ms load_component_ms activation_ms; do
     val=$(jq -r ".scenarios[0].metrics.${metric} // \"missing\"" "$RESULTS_TMPFILE")
     if [ "$val" = "missing" ] || [ "$val" = "null" ]; then
         echo "ERROR: scenarios[0].metrics.${metric} missing" >&2

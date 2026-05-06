@@ -160,8 +160,18 @@ $tests_dir = '/homeboy-extension/vendor/wp-phpunit/wp-phpunit';
 $dep_mounts = '{{PLAYGROUND_DEP_MOUNTS}}';
 if ($installed_site_mode) {
     pg_run_load_wordpress_stage();
-    pg_run_load_deps_stage(['dep_mounts' => $dep_mounts]);
-    pg_run_load_component_stage(['plugin_path' => $plugin_path]);
+    $dep_files = pg_run_load_deps_stage(['dep_mounts' => $dep_mounts]);
+    $component_file = pg_run_load_component_stage(['plugin_path' => $plugin_path]);
+
+    // Installed-site mode boots a persisted WordPress whose plugin tables
+    // already exist, so activation can run immediately — no install boundary
+    // to wait on. Activate deps first, then the component (mirrors WordPress's
+    // own dep-before-dependent ordering).
+    $activation_files = $dep_files;
+    if ($component_file !== null) {
+        $activation_files[] = $component_file;
+    }
+    pg_run_activation_stage(['plugin_files' => $activation_files]);
 } else {
     // Component-added init callbacks may touch the DB (a plugin's `init` hook
     // doing schema reads, option reads, etc.). wp-phpunit's install path runs
@@ -173,10 +183,18 @@ if ($installed_site_mode) {
     $pre_component_shutdown_callbacks = pg_snapshot_wordpress_hook_callbacks('shutdown');
     $deferred_install_init_callbacks = [];
 
+    // Capture plugin entry files from the muplugins_loaded callback so the
+    // post-install activation stage can replay them in dep-then-component
+    // order. The closure mutates the outer-scope arrays via reference; PHP's
+    // closure semantics make this the cleanest way to thread state out of
+    // the wp-phpunit harness callback.
+    $loaded_dep_files = [];
+    $loaded_component_file = null;
+
     require_once "$tests_dir/includes/functions.php";
-    tests_add_filter('muplugins_loaded', function () use ($plugin_path, $dep_mounts, $pre_component_init_callbacks, &$deferred_install_init_callbacks) {
-        pg_run_load_deps_stage(['dep_mounts' => $dep_mounts]);
-        pg_run_load_component_stage(['plugin_path' => $plugin_path, 'activate' => false]);
+    tests_add_filter('muplugins_loaded', function () use ($plugin_path, $dep_mounts, $pre_component_init_callbacks, &$deferred_install_init_callbacks, &$loaded_dep_files, &$loaded_component_file) {
+        $loaded_dep_files = pg_run_load_deps_stage(['dep_mounts' => $dep_mounts]);
+        $loaded_component_file = pg_run_load_component_stage(['plugin_path' => $plugin_path, 'activate' => false]);
 
         // Defer component-added init callbacks until install.php has created
         // the wptests_* tables. Registrations made on plugins_loaded or
@@ -195,12 +213,18 @@ if ($installed_site_mode) {
     pg_remove_new_wordpress_hook_callbacks('shutdown', $pre_component_shutdown_callbacks);
     pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks);
 
-    // The component file was already required during muplugins_loaded — this
-    // call is a no-op require_once that fires the activation hook now that
-    // wp-phpunit has created the wptests_* tables. Activation order is
-    // preserved: deps activate inside load_deps (their pg_activate_plugin_file
-    // calls), the component activates here.
-    pg_run_load_component_stage(['plugin_path' => $plugin_path]);
+    // Fire activation hooks now that wp-phpunit has created the wptests_*
+    // tables. Activation order: deps first, then the component-under-test
+    // (homeboy-extensions#431). Pre-#431 activation fired inline during
+    // muplugins_loaded — before the test tables existed — so any DB-touching
+    // activation callback fataled. The split here keeps file load inside the
+    // canonical WordPress lifecycle (preserved from #426/#427) while moving
+    // the activation dispatch past the install boundary.
+    $activation_files = $loaded_dep_files;
+    if ($loaded_component_file !== null) {
+        $activation_files[] = $loaded_component_file;
+    }
+    pg_run_activation_stage(['plugin_files' => $activation_files]);
 }
 
 /**
@@ -850,7 +874,7 @@ try {
     // id makes the synthetic nature obvious in reports.
     $bootstrap_durations = pg_stage_durations_ms();
     $bootstrap_metrics = [];
-    foreach (['boot', 'install', 'load_wordpress', 'load_deps', 'load_component'] as $stage) {
+    foreach (['boot', 'install', 'load_wordpress', 'load_deps', 'load_component', 'activation'] as $stage) {
         if (isset($bootstrap_durations[$stage])) {
             $bootstrap_metrics["{$stage}_ms"] = $bootstrap_durations[$stage];
         }

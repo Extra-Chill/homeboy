@@ -70,7 +70,7 @@ $wpdb = new Smoke_WPDB();
 require_once dirname( __DIR__ ) . '/lib/playground-bootstrap.php';
 
 $fixture_path = dirname( __DIR__, 2 ) . '/tests/fixtures/playground-schema-scope';
-pg_run_load_component_stage( array( 'plugin_path' => $fixture_path, 'activate' => false ) );
+$component_file = pg_run_load_component_stage( array( 'plugin_path' => $fixture_path, 'activate' => false ) );
 
 $install_load_log = file_get_contents( $result_file );
 assert_true_smoke(
@@ -81,22 +81,51 @@ assert_true_smoke(
     strpos( $install_load_log, 'PLUGIN_ACTIVATE_BEGIN' ) === false,
     'Activation diagnostics should not be logged when activation is disabled during install-time load.'
 );
-
-$GLOBALS['wp_installing'] = false;
-pg_run_load_component_stage( array( 'plugin_path' => $fixture_path ) );
-
-$activation_log = file_get_contents( $result_file );
 assert_true_smoke(
-    strpos( $activation_log, 'PLUGIN_LOAD_CONTEXT playground-schema-scope.php activate=true stage=load_component hook=none wp_installing=false' ) !== false,
+    is_string( $component_file ) && basename( $component_file ) === 'playground-schema-scope.php',
+    'pg_run_load_component_stage should return the discovered plugin entry file path.'
+);
+
+// homeboy-extensions#431 split: load_component only requires the file. Activation
+// is dispatched separately through pg_run_activation_stage() AFTER install creates
+// the test tables. Re-call load_component to confirm `'activate' => true` no longer
+// fires activation inline (post-#431 the key is a no-op kept for back-compat), then
+// drive activation through the new stage.
+$GLOBALS['wp_installing'] = false;
+$component_file_post_install = pg_run_load_component_stage( array( 'plugin_path' => $fixture_path ) );
+assert_true_smoke(
+    is_string( $component_file_post_install ) && basename( $component_file_post_install ) === 'playground-schema-scope.php',
+    'pg_run_load_component_stage should return the entry file path on the post-install call as well.'
+);
+
+$post_load_log = file_get_contents( $result_file );
+assert_true_smoke(
+    strpos( $post_load_log, 'PLUGIN_LOAD_CONTEXT playground-schema-scope.php activate=true stage=load_component hook=none wp_installing=false' ) !== false,
     'Post-install plugin load context was not logged.'
 );
 assert_true_smoke(
-    strpos( $activation_log, 'PLUGIN_ACTIVATE_BEGIN playground-schema-scope/playground-schema-scope.php stage=load_component hook=none wp_installing=false' ) !== false,
-    'Post-install activation begin context was not logged.'
+    substr_count( $post_load_log, 'PLUGIN_ACTIVATE_BEGIN' ) === 0,
+    'pg_run_load_component_stage must not fire activation hooks inline post-#431; that is pg_run_activation_stage()\'s job.'
+);
+
+pg_run_activation_stage( array( 'plugin_files' => array( $component_file_post_install ) ) );
+
+$activation_log = file_get_contents( $result_file );
+assert_true_smoke(
+    strpos( $activation_log, 'PLUGIN_ACTIVATE_BEGIN playground-schema-scope/playground-schema-scope.php stage=activation hook=none wp_installing=false' ) !== false,
+    'Post-install activation begin context was not logged from pg_run_activation_stage().'
 );
 assert_true_smoke(
-    strpos( $activation_log, 'PLUGIN_ACTIVATE_OK playground-schema-scope/playground-schema-scope.php stage=load_component hook=none wp_installing=false' ) !== false,
-    'Post-install activation completion context was not logged.'
+    strpos( $activation_log, 'PLUGIN_ACTIVATE_OK playground-schema-scope/playground-schema-scope.php stage=activation hook=none wp_installing=false' ) !== false,
+    'Post-install activation completion context was not logged from pg_run_activation_stage().'
+);
+assert_true_smoke(
+    strpos( $activation_log, 'STAGE_OK:activation' ) !== false,
+    'pg_run_activation_stage() did not emit STAGE_OK:activation on success.'
+);
+assert_true_smoke(
+    substr_count( $activation_log, 'PLUGIN_ACTIVATE_BEGIN' ) === 1,
+    'Activation should fire exactly once per plugin file passed to pg_run_activation_stage().'
 );
 
 assert_true_smoke(

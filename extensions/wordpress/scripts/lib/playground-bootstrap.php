@@ -486,13 +486,27 @@ function pg_run_load_wordpress_stage(array $cfg = []) {
  * runner template at {{PLAYGROUND_DEP_MOUNTS}}. This stage parses that list
  * and loads each dependency's main plugin file.
  *
+ * This stage ONLY requires the entry files. Activation hooks are fired later
+ * by `pg_run_activation_stage()` after wp-phpunit's install path has created
+ * the test tables (homeboy-extensions#431). Firing `activate_<plugin>` here
+ * — which is now reachable via the muplugins_loaded callback in the runner
+ * templates (post-#427) — would dispatch DB-touching activation callbacks
+ * before the wptests_* tables exist and fatal in any plugin whose activation
+ * touches the database.
+ *
  * Required $cfg keys:
  *   - dep_mounts: newline-separated string of dependency mount paths
  *     inside the Playground VFS. Empty string is fine — no-op.
+ *
+ * @return string[] Ordered list of dependency plugin entry files that were
+ *   require_once'd, suitable for passing to `pg_run_activation_stage()` as
+ *   `plugin_files`. Order matches dep_mounts iteration order so dependency
+ *   activation hooks fire in the same order WordPress would normally use.
  */
-function pg_run_load_deps_stage(array $cfg) {
+function pg_run_load_deps_stage(array $cfg): array {
     pg_stage_begin('load_deps');
     try {
+        $loaded = [];
         $dep_paths = $cfg['dep_mounts'] ?? '';
         if (!empty($dep_paths)) {
             foreach (explode("\n", $dep_paths) as $dep_mount) {
@@ -504,13 +518,14 @@ function pg_run_load_deps_stage(array $cfg) {
                 foreach ($dep_files as $df) {
                     if (strpos(file_get_contents($df), 'Plugin Name:') !== false) {
                         require_once $df;
-                        pg_activate_plugin_file($df);
+                        $loaded[] = $df;
                         break;
                     }
                 }
             }
         }
         pg_stage_ok('load_deps');
+        return $loaded;
     } catch (Throwable $e) {
         pg_stage_fail('load_deps', $e);
         exit(1);
@@ -526,14 +541,34 @@ function pg_run_load_deps_stage(array $cfg) {
  * already loaded by wp-settings.php earlier in the request lifecycle and
  * including it again would re-run its side effects.
  *
+ * This stage ONLY requires the entry file. Activation hooks are fired later
+ * by `pg_run_activation_stage()` after wp-phpunit's install path has created
+ * the test tables (homeboy-extensions#431). The legacy `'activate'` key is
+ * accepted for backwards compatibility but no longer affects behavior — the
+ * canonical split is now load → install → activation, in that order, with
+ * activation always coming through `pg_run_activation_stage()`.
+ *
  * Required $cfg keys:
  *   - plugin_path: absolute path inside the Playground VFS, typically
  *     '/wordpress/wp-content/plugins/<slug>'.
+ *
+ * Optional $cfg keys:
+ *   - activate: legacy hint, retained for backwards compatibility with smoke
+ *     fixtures and external callers. The value is reflected in the
+ *     PLUGIN_LOAD_CONTEXT log line (so existing log parsers keep working) but
+ *     activation is never dispatched from this stage. Pass the discovered
+ *     plugin file to `pg_run_activation_stage()` to fire activation hooks.
+ *
+ * @return string|null Absolute path to the plugin entry file that was
+ *   require_once'd, or null when the component was a theme or no entry
+ *   file was discovered. Pass non-null returns to `pg_run_activation_stage()`
+ *   along with any dep entry files from `pg_run_load_deps_stage()`.
  */
-function pg_run_load_component_stage(array $cfg) {
+function pg_run_load_component_stage(array $cfg): ?string {
     pg_stage_begin('load_component');
     try {
         $plugin_path = $cfg['plugin_path'];
+        $loaded_file = null;
         $style_css = "$plugin_path/style.css";
         if (file_exists($style_css) && strpos(file_get_contents($style_css), 'Theme Name:') !== false) {
             pg_log("THEME_DETECTED");
@@ -542,7 +577,6 @@ function pg_run_load_component_stage(array $cfg) {
                 require_once $fn_php;
             }
         } else {
-            $loaded = false;
             $main_files = glob("$plugin_path/*.php") ?: [];
             foreach ($main_files as $mf) {
                 // db.php is a WordPress drop-in, not a plugin entry file. It's
@@ -560,20 +594,61 @@ function pg_run_load_component_stage(array $cfg) {
                         . ' ' . pg_diagnostic_context()
                     );
                     require_once $mf;
-                    if (($cfg['activate'] ?? true) !== false) {
-                        pg_activate_plugin_file($mf);
-                    }
-                    $loaded = true;
+                    $loaded_file = $mf;
                     break;
                 }
             }
-            if (!$loaded) {
+            if ($loaded_file === null) {
                 pg_log("NOTICE:no plugin entry file with 'Plugin Name:' header found in $plugin_path");
             }
         }
         pg_stage_ok('load_component');
+        return $loaded_file;
     } catch (Throwable $e) {
         pg_stage_fail('load_component', $e);
+        exit(1);
+    }
+}
+
+/**
+ * Run the `activation` stage: fire `activate_<plugin>` hooks for every
+ * plugin entry file the upstream load stages collected.
+ *
+ * Decoupling activation from file load lets wp-phpunit's install.php run
+ * BEFORE any DB-touching activation callback executes. Pre-#431, both
+ * `pg_run_load_deps_stage()` and `pg_run_load_component_stage()` fired
+ * activation inline — which since #427 happens during muplugins_loaded,
+ * before wp-phpunit creates the wptests_* tables. Activation callbacks
+ * doing `add_option`, `get_users`, schema migrations, etc. fataled with
+ * "no such table: wptests_*". Now those callbacks see the same DB shape
+ * a real WordPress activation does.
+ *
+ * Activation order is the order callers pass `plugin_files` in; both runner
+ * templates pass deps first, then the component-under-test, mirroring
+ * WordPress's normal "deps before dependents" ordering. Each entry is
+ * activated exactly once per stage call; callers are responsible for not
+ * passing the same file twice.
+ *
+ * Required $cfg keys:
+ *   - plugin_files: ordered list of absolute plugin entry file paths to
+ *     activate. Empty list is fine — the stage logs and exits cleanly.
+ */
+function pg_run_activation_stage(array $cfg): void {
+    pg_stage_begin('activation');
+    try {
+        $plugin_files = $cfg['plugin_files'] ?? [];
+        if (!is_array($plugin_files)) {
+            $plugin_files = [];
+        }
+        foreach ($plugin_files as $plugin_file) {
+            if (!is_string($plugin_file) || $plugin_file === '') {
+                continue;
+            }
+            pg_activate_plugin_file($plugin_file);
+        }
+        pg_stage_ok('activation');
+    } catch (Throwable $e) {
+        pg_stage_fail('activation', $e);
         exit(1);
     }
 }
