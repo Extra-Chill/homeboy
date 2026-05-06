@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.6] - 2026-05-06
+
+### Fixed
+- consume drift_files from homeboy core instead of hardcoding
+
 ## [2.2.5] - 2026-05-06
 
 ### Fixed
