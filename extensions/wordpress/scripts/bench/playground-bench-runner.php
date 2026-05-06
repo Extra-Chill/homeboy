@@ -32,12 +32,18 @@
  * try to redeclare. Returning a callable scopes each workload's body
  * lexically, so two workloads coexist cleanly in one process.
  *
+ * Config-declared workloads from the `playground_workloads` extension setting
+ * run through the same loop after the same Playground bootstrap. Each entry is
+ * one scenario with `run` steps. PHP steps execute inside this PHP-WASM process;
+ * WP-CLI steps use `WP_CLI::runcommand(..., ['launch' => false])` when WP-CLI
+ * is available in-process.
+ *
  * The runner times wall-clock around the callable, captures peak memory
  * after, and aggregates per-iteration measurements into p50/p95/p99/mean/
  * min/max for the BenchResults envelope. Workloads may also return
  * `['metrics' => ['rows' => 10], 'metadata' => ['phase' => 'warm']]`;
  * numeric custom metrics are aggregated with the same percentile machinery
- * and the latest metadata payload is attached to the scenario.
+ * and the latest metadata/artifacts payloads are attached to the scenario.
  *
  * OUTPUT CONTRACT
  *
@@ -180,6 +186,297 @@ function pg_bench_normalize_workload_filter(string $raw): array {
     return $normalized;
 }
 
+/** Decode config-declared Playground workloads. */
+function pg_bench_configured_workloads(string $raw): array {
+    if ($raw === '' || $raw === 'null') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        throw new RuntimeException('playground_workloads must be a JSON array');
+    }
+    if ($decoded === null) {
+        return [];
+    }
+    if (!is_array($decoded) || !pg_bench_is_list($decoded)) {
+        throw new RuntimeException('playground_workloads must be a JSON array');
+    }
+
+    $workloads = [];
+    foreach ($decoded as $index => $workload) {
+        if (!is_array($workload)) {
+            throw new RuntimeException("playground_workloads[$index] must be an object");
+        }
+
+        $raw_id = $workload['id'] ?? $workload['label'] ?? ('configured-' . ($index + 1));
+        if (!is_scalar($raw_id)) {
+            throw new RuntimeException("playground_workloads[$index].id must be a string");
+        }
+        $id = homeboy_bench_scenario_id((string) $raw_id);
+        if ($id === '') {
+            throw new RuntimeException("playground_workloads[$index].id normalized to an empty scenario id");
+        }
+
+        $steps = $workload['run'] ?? null;
+        if (!is_array($steps) || empty($steps) || !pg_bench_is_list($steps)) {
+            throw new RuntimeException("playground_workloads[$index].run must be a non-empty array");
+        }
+
+        foreach ($steps as $step_index => $step) {
+            if (!is_array($step)) {
+                throw new RuntimeException("playground_workloads[$index].run[$step_index] must be an object");
+            }
+            $type = $step['type'] ?? '';
+            if (!in_array($type, ['php', 'wp-cli', 'ability'], true)) {
+                throw new RuntimeException("playground_workloads[$index].run[$step_index].type must be 'php', 'wp-cli', or 'ability'");
+            }
+            if ($type === 'php' && !isset($step['code']) && !isset($step['file'])) {
+                throw new RuntimeException("playground_workloads[$index].run[$step_index] php step requires code or file");
+            }
+            if ($type === 'wp-cli' && !isset($step['command'])) {
+                throw new RuntimeException("playground_workloads[$index].run[$step_index] wp-cli step requires command");
+            }
+            if ($type === 'ability' && !isset($step['ability'])) {
+                throw new RuntimeException("playground_workloads[$index].run[$step_index] ability step requires `ability`");
+            }
+        }
+
+        $workload['id'] = $id;
+        $workload['run'] = $steps;
+        $workloads[] = $workload;
+    }
+
+    return $workloads;
+}
+
+function pg_bench_is_list(array $value): bool {
+    return $value === [] || array_keys($value) === range(0, count($value) - 1);
+}
+
+function pg_bench_json_object($value, string $label): array {
+    if ($value === null) {
+        return [];
+    }
+    if ($value === []) {
+        return [];
+    }
+    if (!is_array($value) || pg_bench_is_list($value)) {
+        throw new RuntimeException("$label must be an object");
+    }
+
+    return $value;
+}
+
+function pg_bench_merge_workload_payload($payload, array &$metrics, array &$artifacts, array &$metadata): void {
+    if (!is_array($payload)) {
+        return;
+    }
+
+    foreach (pg_bench_json_object($payload['metrics'] ?? [], 'metrics') as $metric => $value) {
+        if (is_string($metric) && $metric !== '' && is_numeric($value) && is_finite((float) $value)) {
+            $metrics[$metric] = (float) $value;
+        }
+    }
+
+    foreach (pg_bench_json_object($payload['artifacts'] ?? [], 'artifacts') as $name => $artifact) {
+        if (!is_string($name) || $name === '') {
+            continue;
+        }
+        if (is_string($artifact) && $artifact !== '') {
+            $artifacts[$name] = ['path' => $artifact];
+            continue;
+        }
+        if (!is_array($artifact)) {
+            continue;
+        }
+        $path = $artifact['path'] ?? null;
+        if (!is_string($path) || $path === '') {
+            continue;
+        }
+        $normalized = ['path' => $path];
+        foreach (['kind', 'label', 'type', 'url'] as $field) {
+            if (isset($artifact[$field]) && is_string($artifact[$field])) {
+                $normalized[$field] = $artifact[$field];
+            }
+        }
+        $artifacts[$name] = $normalized;
+    }
+
+    $metadata = array_replace($metadata, pg_bench_json_object($payload['metadata'] ?? [], 'metadata'));
+}
+
+function pg_bench_run_php_step(array $step, string $plugin_path) {
+    if (isset($step['file'])) {
+        if (!is_scalar($step['file'])) {
+            throw new RuntimeException('php step file must be a string');
+        }
+        $file = (string) $step['file'];
+        if ($file === '') {
+            throw new RuntimeException('php step file must not be empty');
+        }
+        if ($file[0] !== '/') {
+            $file = $plugin_path . '/' . ltrim($file, '/');
+        }
+        if (!is_file($file)) {
+            throw new RuntimeException("php step file not found: $file");
+        }
+        $result = require $file;
+        return is_callable($result) ? $result() : $result;
+    }
+
+    if (!is_scalar($step['code'] ?? null)) {
+        throw new RuntimeException('php step code must be a string');
+    }
+
+    return eval((string) $step['code']);
+}
+
+function pg_bench_run_wp_cli_step(array $step) {
+    if (!class_exists('WP_CLI') || !method_exists('WP_CLI', 'runcommand')) {
+        throw new RuntimeException('wp-cli workload steps require WP_CLI::runcommand() to be available inside the Playground PHP process');
+    }
+
+    if (!is_scalar($step['command'])) {
+        throw new RuntimeException('wp-cli step command must be a string');
+    }
+    $command = trim((string) $step['command']);
+    if (strpos($command, 'wp ') === 0) {
+        $command = substr($command, 3);
+    }
+    if ($command === '') {
+        throw new RuntimeException('wp-cli step command must not be empty');
+    }
+
+    $parse = isset($step['parse']) && is_scalar($step['parse']) ? (string) $step['parse'] : false;
+    $result = WP_CLI::runcommand($command, [
+        'launch' => false,
+        'exit_error' => false,
+        'return' => 'all',
+        'parse' => false,
+    ]);
+    if (is_object($result) && isset($result->return_code) && (int) $result->return_code !== 0) {
+        throw new RuntimeException("wp-cli step failed with exit code {$result->return_code}: {$result->stderr}");
+    }
+    $stdout = is_object($result) && isset($result->stdout) ? (string) $result->stdout : '';
+    if ($parse === 'json' && $stdout !== '') {
+        $decoded = json_decode($stdout, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new RuntimeException('wp-cli step stdout was not valid JSON: ' . json_last_error_msg());
+        }
+        return is_array($decoded) ? $decoded : ['metadata' => ['stdout' => $decoded]];
+    }
+
+    return ['metadata' => ['stdout' => $stdout]];
+}
+
+function pg_bench_run_ability_step(array $step) {
+    if (!function_exists('wp_get_ability')) {
+        throw new RuntimeException('ability workload steps require the WordPress Abilities API (wp_get_ability) to be loaded inside the Playground PHP process');
+    }
+
+    if (!isset($step['ability']) || !is_scalar($step['ability'])) {
+        throw new RuntimeException('ability step requires a string `ability` name');
+    }
+    $name = trim((string) $step['ability']);
+    if ($name === '') {
+        throw new RuntimeException('ability step `ability` must not be empty');
+    }
+
+    // The Abilities API requires registrations to happen on the canonical
+    // init actions. wp-phpunit's install path boots wp-settings.php under
+    // WP_INSTALLING, which short-circuits the lazy registry init. Fire both
+    // actions once, idempotently, before resolving so plugin-declared
+    // categories and abilities land in the registry. Categories must register
+    // before abilities (core enforces the dependency).
+    if (function_exists('did_action') && function_exists('do_action')) {
+        if (!did_action('wp_abilities_api_categories_init')) {
+            do_action('wp_abilities_api_categories_init');
+        }
+        if (!did_action('wp_abilities_api_init')) {
+            do_action('wp_abilities_api_init');
+        }
+    }
+
+    $ability = wp_get_ability($name);
+    if (!$ability) {
+        throw new RuntimeException("ability not registered: $name");
+    }
+
+    $input = $step['input'] ?? [];
+    if ($input !== null && !is_array($input)) {
+        throw new RuntimeException('ability step `input` must be an object');
+    }
+
+    if (isset($step['user'])) {
+        if (!function_exists('get_user_by') || !function_exists('wp_set_current_user')) {
+            throw new RuntimeException('ability step `user` requires WordPress user functions to be loaded');
+        }
+        $candidate = $step['user'];
+        $user = false;
+        if (is_numeric($candidate)) {
+            $user = get_user_by('id', (int) $candidate);
+        } elseif (is_string($candidate) && $candidate !== '') {
+            $user = get_user_by('login', $candidate) ?: get_user_by('email', $candidate) ?: get_user_by('slug', $candidate);
+        }
+        if (!$user) {
+            throw new RuntimeException('ability step user not found: ' . var_export($candidate, true));
+        }
+        wp_set_current_user($user->ID);
+    }
+
+    if (method_exists($ability, 'execute')) {
+        $result = $ability->execute($input ?? []);
+    } elseif (is_callable($ability)) {
+        $result = $ability($input ?? []);
+    } else {
+        throw new RuntimeException("ability $name is not executable");
+    }
+
+    if (function_exists('is_wp_error') && is_wp_error($result)) {
+        $message = method_exists($result, 'get_error_message') ? $result->get_error_message() : 'wp_error';
+        throw new RuntimeException("ability $name returned WP_Error: $message");
+    }
+
+    if (is_array($result) && (isset($result['metrics']) || isset($result['artifacts']) || isset($result['metadata']))) {
+        return $result;
+    }
+
+    return ['metadata' => ['return' => $result]];
+}
+
+function pg_bench_run_configured_workload(array $workload, string $plugin_path): array {
+    $metrics = [];
+    $artifacts = [];
+    $metadata = [];
+
+    pg_bench_merge_workload_payload($workload, $metrics, $artifacts, $metadata);
+
+    foreach ($workload['run'] as $step) {
+        $type = $step['type'];
+        switch ($type) {
+            case 'php':
+                $result = pg_bench_run_php_step($step, $plugin_path);
+                break;
+            case 'wp-cli':
+                $result = pg_bench_run_wp_cli_step($step);
+                break;
+            case 'ability':
+                $result = pg_bench_run_ability_step($step);
+                break;
+            default:
+                throw new RuntimeException("unsupported step type: $type");
+        }
+        pg_bench_merge_workload_payload($result, $metrics, $artifacts, $metadata);
+    }
+
+    return [
+        'metrics' => $metrics,
+        'artifacts' => $artifacts,
+        'metadata' => $metadata,
+    ];
+}
+
 // ---------------------------------------------------------------------------
 // Stage: discover_workloads — find every tests/bench/*.php file.
 //
@@ -190,8 +487,7 @@ function pg_bench_normalize_workload_filter(string $raw): array {
 // you have a benchmark."
 // ---------------------------------------------------------------------------
 pg_stage_begin('discover_workloads');
-$workload_files = [];
-$workload_sources = [];
+$workloads = [];
 try {
     $bench_dir = "$plugin_path/tests/bench";
     if (is_dir($bench_dir)) {
@@ -202,8 +498,12 @@ try {
         foreach ($iterator as $file) {
             if ($file->isFile() && $file->getExtension() === 'php') {
                 $path = $file->getPathname();
-                $workload_files[] = $path;
-                $workload_sources[$path] = 'in_tree';
+                $workloads[] = [
+                    'kind' => 'file',
+                    'id' => homeboy_bench_scenario_id(basename($path)),
+                    'file' => $path,
+                    'source' => 'in_tree',
+                ];
             }
         }
     }
@@ -218,27 +518,45 @@ try {
             pg_log("NOTICE: skipping invalid rig bench workload: " . var_export($path, true));
             continue;
         }
-        $workload_files[] = $path;
-        $workload_sources[$path] = 'rig';
+        $workloads[] = [
+            'kind' => 'file',
+            'id' => homeboy_bench_scenario_id(basename($path)),
+            'file' => $path,
+            'source' => 'rig',
+        ];
     }
 
-    sort($workload_files);
+    foreach (pg_bench_configured_workloads('{{PLAYGROUND_WORKLOADS_JSON}}') as $configured_workload) {
+        $workloads[] = [
+            'kind' => 'configured',
+            'id' => $configured_workload['id'],
+            'label' => isset($configured_workload['label']) && is_scalar($configured_workload['label']) ? (string) $configured_workload['label'] : null,
+            'workload' => $configured_workload,
+            'source' => 'config',
+        ];
+    }
+
+    usort($workloads, static function (array $left, array $right): int {
+        $left_key = $left['kind'] === 'file' ? $left['file'] : ('~' . $left['id']);
+        $right_key = $right['kind'] === 'file' ? $right['file'] : ('~' . $right['id']);
+        return strcmp($left_key, $right_key);
+    });
 
     $requested_workloads = pg_bench_normalize_workload_filter('{{BENCH_WORKLOADS_JSON}}');
     if (!empty($requested_workloads)) {
         $requested_lookup = array_fill_keys($requested_workloads, true);
         $available_workloads = [];
-        $filtered_workload_files = [];
+        $filtered_workloads = [];
 
-        foreach ($workload_files as $workload_file) {
-            $scenario_id = homeboy_bench_scenario_id(basename($workload_file));
+        foreach ($workloads as $workload) {
+            $scenario_id = $workload['id'];
             $available_workloads[] = $scenario_id;
             if (isset($requested_lookup[$scenario_id])) {
-                $filtered_workload_files[] = $workload_file;
+                $filtered_workloads[] = $workload;
             }
         }
 
-        if (empty($filtered_workload_files)) {
+        if (empty($filtered_workloads)) {
             throw new RuntimeException(sprintf(
                 'bench_workloads matched no workloads. Requested: %s. Available: %s',
                 implode(', ', $requested_workloads),
@@ -246,14 +564,14 @@ try {
             ));
         }
 
-        $workload_files = $filtered_workload_files;
-        pg_log('WORKLOAD_FILTER: requested=' . implode(',', $requested_workloads) . ' matched=' . count($workload_files));
+        $workloads = $filtered_workloads;
+        pg_log('WORKLOAD_FILTER: requested=' . implode(',', $requested_workloads) . ' matched=' . count($workloads));
     }
 
-    if (empty($workload_files)) {
+    if (empty($workloads)) {
         pg_log("NO_WORKLOAD_FILES");
     }
-    pg_log("DISCOVERY: dir=$bench_dir in_tree=" . count(array_filter($workload_sources, fn($source) => $source === 'in_tree')) . " rig=" . count(array_filter($workload_sources, fn($source) => $source === 'rig')));
+    pg_log("DISCOVERY: dir=$bench_dir in_tree=" . count(array_filter($workloads, fn($workload) => $workload['source'] === 'in_tree')) . " rig=" . count(array_filter($workloads, fn($workload) => $workload['source'] === 'rig')) . " config=" . count(array_filter($workloads, fn($workload) => $workload['source'] === 'config')));
     pg_stage_ok('discover_workloads');
 } catch (Throwable $e) {
     pg_stage_fail('discover_workloads', $e);
@@ -288,13 +606,17 @@ function pg_bench_aggregate_metric(array $samples, string $prefix, string $suffi
 }
 
 /** Record custom metrics/metadata from a workload return payload. */
-function pg_bench_record_workload_result($result, array &$custom_metric_samples, &$latest_metadata): void {
+function pg_bench_record_workload_result($result, array &$custom_metric_samples, &$latest_metadata, &$latest_artifacts): void {
     if (!is_array($result)) {
         return;
     }
 
     if (array_key_exists('metadata', $result)) {
         $latest_metadata = $result['metadata'];
+    }
+
+    if (array_key_exists('artifacts', $result)) {
+        $latest_artifacts = $result['artifacts'];
     }
 
     if (!isset($result['metrics']) || !is_array($result['metrics'])) {
@@ -325,23 +647,27 @@ if ($iterations_per_workload < 1) {
 }
 
 if (HOMEBOY_BENCH_LIST_ONLY) {
-    foreach ($workload_files as $workload_file) {
-        $basename = basename($workload_file);
-        $scenario_id = homeboy_bench_scenario_id($basename);
-        $source = $workload_sources[$workload_file] ?? 'in_tree';
-        $relative_file = $source === 'in_tree'
-            ? substr($workload_file, strlen($plugin_path) + 1)
-            : $workload_file;
+    foreach ($workloads as $workload) {
+        $source = $workload['source'];
+        $relative_file = $workload['kind'] === 'file'
+            ? ($source === 'in_tree' ? substr($workload['file'], strlen($plugin_path) + 1) : $workload['file'])
+            : null;
 
-        $scenarios[] = [
-            'id' => $scenario_id,
-            'file' => $relative_file,
+        $scenario = [
+            'id' => $workload['id'],
             'source' => $source,
             'iterations' => 0,
             'default_iterations' => $iterations_per_workload,
             'tags' => [],
             'metrics' => new stdClass(),
         ];
+        if ($relative_file !== null) {
+            $scenario['file'] = $relative_file;
+        }
+        if (isset($workload['label']) && $workload['label'] !== null) {
+            $scenario['metadata'] = ['label' => $workload['label']];
+        }
+        $scenarios[] = $scenario;
     }
 
     homeboy_write_bench_results("$plugin_path/.pg-bench-results{{RESULT_SUFFIX}}.json", '{{COMPONENT_ID}}', 0, $scenarios);
@@ -350,33 +676,36 @@ if (HOMEBOY_BENCH_LIST_ONLY) {
 }
 
 try {
-    foreach ($workload_files as $workload_file) {
-        $basename = basename($workload_file);
-        $scenario_id = homeboy_bench_scenario_id($basename);
+    foreach ($workloads as $workload) {
+        $scenario_id = $workload['id'];
         // Path relative to the plugin root for the BenchResults envelope.
-        $source = $workload_sources[$workload_file] ?? 'in_tree';
-        $relative_file = $source === 'in_tree'
-            ? substr($workload_file, strlen($plugin_path) + 1)
-            : $workload_file;
+        $source = $workload['source'];
+        $relative_file = $workload['kind'] === 'file'
+            ? ($source === 'in_tree' ? substr($workload['file'], strlen($plugin_path) + 1) : $workload['file'])
+            : null;
 
-        pg_log("WORKLOAD_BEGIN: $scenario_id ($basename)");
+        pg_log("WORKLOAD_BEGIN: $scenario_id (" . ($relative_file ?? 'configured') . ")");
 
-        // Each workload returns a callable. `require` (not `require_once`)
-        // here so re-runs in the same process re-evaluate the file — that
-        // keeps the workload author's expectations simple: "every iteration
-        // starts where the file's top-level body left off." For Phase 1
-        // we pay the parse cost per workload (not per iteration); good
-        // enough until measurements show otherwise.
-        $callable = require $workload_file;
-        if (!is_callable($callable)) {
-            pg_log("WORKLOAD_SKIP: $scenario_id (file did not return a callable)");
-            continue;
+        if ($workload['kind'] === 'file') {
+            // Each workload returns a callable. `require` (not `require_once`)
+            // here so re-runs in the same process re-evaluate the file.
+            $callable = require $workload['file'];
+            if (!is_callable($callable)) {
+                pg_log("WORKLOAD_SKIP: $scenario_id (file did not return a callable)");
+                continue;
+            }
+        } else {
+            $callable = static function () use ($workload, $plugin_path): array {
+                return pg_bench_run_configured_workload($workload['workload'], $plugin_path);
+            };
         }
 
         $timings_ms = [];
         $custom_metric_samples = [];
         $latest_metadata = null;
+        $latest_artifacts = null;
         $has_metadata = false;
+        $has_artifacts = false;
         $peak_memory = 0;
 
         // Reset PHP's peak-memory counter so the workload's footprint is
@@ -399,7 +728,10 @@ try {
                 if (is_array($workload_result) && array_key_exists('metadata', $workload_result)) {
                     $has_metadata = true;
                 }
-                pg_bench_record_workload_result($workload_result, $custom_metric_samples, $latest_metadata);
+                if (is_array($workload_result) && array_key_exists('artifacts', $workload_result)) {
+                    $has_artifacts = true;
+                }
+                pg_bench_record_workload_result($workload_result, $custom_metric_samples, $latest_metadata, $latest_artifacts);
             }
         }
 
@@ -414,15 +746,20 @@ try {
 
         $scenario = [
             'id' => $scenario_id,
-            'file' => $relative_file,
             'source' => $source,
             'iterations' => $iterations_per_workload,
             'metrics' => $metrics,
             'memory' => ['peak_bytes' => $peak_memory],
         ];
+        if ($relative_file !== null) {
+            $scenario['file'] = $relative_file;
+        }
 
-        if ($has_metadata) {
+        if ($has_metadata && is_array($latest_metadata) && !empty($latest_metadata)) {
             $scenario['metadata'] = $latest_metadata;
+        }
+        if ($has_artifacts && is_array($latest_artifacts) && !empty($latest_artifacts)) {
+            $scenario['artifacts'] = $latest_artifacts;
         }
 
         $scenarios[] = $scenario;

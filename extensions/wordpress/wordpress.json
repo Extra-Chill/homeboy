@@ -781,6 +781,13 @@
       "description": "Blueprint JSON passed to wp-playground-cli --blueprint before bench workloads run. Use this for cold-boot scenarios that need plugins, themes, site options, or seeded content installed during Playground bootstrap. Empty object means stock WordPress."
     },
     {
+      "id": "playground_workloads",
+      "label": "Playground workloads",
+      "type": "array",
+      "default": [],
+      "description": "Config-declared WordPress Playground bench workloads run after the shared bootstrap, playground_blueprint, dependency mounts, and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file} or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata. Step returns use the same {metrics, artifacts, metadata} shape as Node.js bench workloads."
+    },
+    {
       "id": "bench_site_mode",
       "label": "Bench site mode",
       "type": "string",

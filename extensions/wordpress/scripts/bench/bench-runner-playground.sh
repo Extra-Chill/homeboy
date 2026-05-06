@@ -120,8 +120,15 @@ elif [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}"
     fi
 fi
 
+PLAYGROUND_WORKLOADS_PROVIDED=0
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    if printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -e 'has("playground_workloads") and (.playground_workloads != null) and (.playground_workloads != [])' >/dev/null 2>&1; then
+        PLAYGROUND_WORKLOADS_PROVIDED=1
+    fi
+fi
+
 BENCH_DIR="${PLUGIN_PATH}/tests/bench"
-if [ ! -d "$BENCH_DIR" ] && [ -z "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ] && [ "$BENCH_WORKLOADS_FILTER_PROVIDED" != "1" ]; then
+if [ ! -d "$BENCH_DIR" ] && [ -z "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ] && [ "$BENCH_WORKLOADS_FILTER_PROVIDED" != "1" ] && [ "$PLAYGROUND_WORKLOADS_PROVIDED" != "1" ]; then
     echo ""
     echo "⚠ No tests/bench directory found at ${BENCH_DIR}"
     echo "  Skipping bench run — nothing to measure."
@@ -202,6 +209,18 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c 'if has("bench_workloads") then .bench_workloads else null end' 2>/dev/null || echo "null")
     if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
         BENCH_WORKLOADS_JSON="$extracted"
+    fi
+fi
+
+# Extract `playground_workloads` from the merged settings JSON. These are
+# config-declared workloads that run after the shared Playground bootstrap,
+# blueprint application, dependency mounts, and component load. They emit the
+# same BenchResults scenario shape as PHP files under tests/bench/.
+PLAYGROUND_WORKLOADS_JSON="[]"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.playground_workloads // []' 2>/dev/null || echo "[]")
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        PLAYGROUND_WORKLOADS_JSON="$extracted"
     fi
 fi
 if [ "$BENCH_WORKLOADS_JSON" = "null" ] && [ -n "${HOMEBOY_BENCH_WORKLOADS:-}" ]; then
@@ -427,6 +446,7 @@ sed \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_WORKLOADS_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{PLAYGROUND_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${PLAYGROUND_WORKLOADS_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{EXTRA_WORKLOADS_LIST}}${WP_CONFIG_DEFINES_DELIM}${EXTRA_WORKLOADS_LIST}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
@@ -443,6 +463,9 @@ if [ -n "$SHARED_STATE_GUEST" ]; then
 fi
 if [ -n "$BLUEPRINT_TMPFILE" ]; then
     echo "  Playground blueprint: enabled"
+fi
+if [ "$PLAYGROUND_WORKLOADS_PROVIDED" = "1" ]; then
+    echo "  Configured Playground workloads: enabled"
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
