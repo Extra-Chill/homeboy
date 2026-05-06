@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.5] - 2026-05-06
+
+### Fixed
+- direct-push Cargo.lock alongside audit baseline
+
 ## [2.2.4] - 2026-05-05
 
 ### Fixed
