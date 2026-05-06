@@ -142,13 +142,66 @@ if (is_array($bench_env)) {
     }
 }
 
+// Load dependencies and the component during canonical WordPress bootstrap,
+// not after wp-settings.php has already fired plugins_loaded. Plugins that
+// register on plugins_loaded / init / wp_abilities_api_init (e.g. the entire
+// Abilities API surface) silently no-op if their entry file is required after
+// those hooks have already run. Hook into wp-phpunit's tests_add_filter so the
+// dep + component files are loaded inside muplugins_loaded — fired by
+// wp-settings.php before plugins_loaded — exactly mirroring the test runner's
+// shape (homeboy-extensions#426).
+//
+// `installed_site_mode` boots the persisted site via wp-load.php and skips
+// wp-phpunit install entirely; that path's own active_plugins option is
+// authoritative there, so we keep the historical post-load_wordpress dep load
+// for that mode. Only the canonical fresh-install path is moved here — which
+// is exactly the path the issue identifies as broken.
+$tests_dir = '/homeboy-extension/vendor/wp-phpunit/wp-phpunit';
+$dep_mounts = '{{PLAYGROUND_DEP_MOUNTS}}';
 if ($installed_site_mode) {
     pg_run_load_wordpress_stage();
+    pg_run_load_deps_stage(['dep_mounts' => $dep_mounts]);
+    pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 } else {
-    pg_run_install_stage(['config_path' => $config_path]);
+    // Component-added init callbacks may touch the DB (a plugin's `init` hook
+    // doing schema reads, option reads, etc.). wp-phpunit's install path runs
+    // wp-settings.php under wp_installing() and tables aren't ready until
+    // install.php finishes its work. Snapshot init/shutdown so we can defer
+    // component-added init callbacks past the install boundary, matching the
+    // test runner's shape exactly.
+    $pre_component_init_callbacks = pg_snapshot_wordpress_hook_callbacks('init');
+    $pre_component_shutdown_callbacks = pg_snapshot_wordpress_hook_callbacks('shutdown');
+    $deferred_install_init_callbacks = [];
+
+    require_once "$tests_dir/includes/functions.php";
+    tests_add_filter('muplugins_loaded', function () use ($plugin_path, $dep_mounts, $pre_component_init_callbacks, &$deferred_install_init_callbacks) {
+        pg_run_load_deps_stage(['dep_mounts' => $dep_mounts]);
+        pg_run_load_component_stage(['plugin_path' => $plugin_path, 'activate' => false]);
+
+        // Defer component-added init callbacks until install.php has created
+        // the wptests_* tables. Registrations made on plugins_loaded or
+        // earlier still fire normally — only DB-touching init runtime work
+        // is delayed.
+        tests_add_filter('plugins_loaded', function () use ($pre_component_init_callbacks, &$deferred_install_init_callbacks) {
+            $deferred_install_init_callbacks = pg_defer_new_wordpress_hook_callbacks('init', $pre_component_init_callbacks);
+        }, PHP_INT_MAX);
+    });
+
+    pg_run_install_stage(['config_path' => $config_path, 'tests_dir' => $tests_dir]);
+
+    // Suppress shutdown callbacks the component added during install (request-
+    // end DB work runs before activation creates plugin tables). Activation is
+    // the canonical seam for install-time side effects.
+    pg_remove_new_wordpress_hook_callbacks('shutdown', $pre_component_shutdown_callbacks);
+    pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks);
+
+    // The component file was already required during muplugins_loaded — this
+    // call is a no-op require_once that fires the activation hook now that
+    // wp-phpunit has created the wptests_* tables. Activation order is
+    // preserved: deps activate inside load_deps (their pg_activate_plugin_file
+    // calls), the component activates here.
+    pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 }
-pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
-pg_run_load_component_stage(['plugin_path' => $plugin_path]);
 
 /**
  * Normalize the optional bench_workloads setting into scenario IDs.
