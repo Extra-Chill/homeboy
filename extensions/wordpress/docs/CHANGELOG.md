@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.41.4] - 2026-05-06
+
+### Fixed
+- replay deferred init callbacks in hook context
+
 ## [2.41.3] - 2026-05-06
 
 ### Fixed
