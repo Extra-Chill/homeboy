@@ -193,6 +193,54 @@ require(not any(match.strip() == "'tool_call'" for match in matches), "detector 
 require("'tool_call' =>" in fixture, "fixture should include array/protocol key literal")
 require("do_action( 'tool_call'" in fixture, "fixture should include event-name literal")
 
+# Issue #425 — source_pattern must not match `class` in docblock prose.
+# Pre-fix, `(?s).*?` between `class <name>` and `const` would let
+# `class has no knowledge` from the docblock match as the class name and
+# walk forward to the next const, producing a bogus `has::GROUP` finding.
+# The fix anchors `class` to start of line (so docblock continuation
+# lines beginning with `*` cannot satisfy it) and requires an opening
+# brace before `const` so the match has to live inside a real class body.
+source_pattern = literal_rule["source_pattern"]
+source_regex = re.compile(source_pattern)
+recurring_fixture = (fixture_dir / "src/Runtime/class-demo-recurring-scheduler.php").read_text(encoding="utf-8")
+require(
+    "This class has no knowledge" in recurring_fixture,
+    "recurring-scheduler fixture must contain the docblock prose that triggered the parser glitch",
+)
+source_matches = list(source_regex.finditer(recurring_fixture))
+require(
+    len(source_matches) == 1,
+    f"source_pattern must produce exactly one match on the recurring-scheduler fixture, got {len(source_matches)}",
+)
+match = source_matches[0]
+require(
+    match.group("class") == "Demo_Recurring_Scheduler",
+    f"source_pattern must capture the real class name, got class={match.group('class')!r}",
+)
+require(
+    match.group("const") == "GROUP",
+    f"source_pattern must capture the real const name, got const={match.group('const')!r}",
+)
+require(
+    match.group("value") == "demo-recurring",
+    f"source_pattern must capture the real const value, got value={match.group('value')!r}",
+)
+
+# Negative case: a class declared only inside a comment body must not match.
+comment_only = "\n".join([
+    "<?php",
+    "/**",
+    " * Some module that explains: class FakeStub has a const FOO = 'foo-bar' baked in.",
+    " * But there's no real class definition here.",
+    " */",
+    "$x = 1;",
+    "",
+])
+require(
+    not list(source_regex.finditer(comment_only)),
+    "source_pattern must not match a class declared only inside a comment block",
+)
+
 for relative in [
     "src/Registry/register-agents.php",
     "src/Contracts/class-demo-message-store.php",

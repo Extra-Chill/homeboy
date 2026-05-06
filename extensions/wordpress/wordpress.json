@@ -515,7 +515,7 @@
           "language": "php",
           "file_extensions": ["php"],
           "exclude_path_contains": ["/vendor/", "vendor/", "/node_modules/", "node_modules/"],
-          "source_pattern": "(?s)\\b(?:final\\s+|abstract\\s+)?class\\s+(?P<class>[A-Za-z_][A-Za-z0-9_]*)\\b.*?\\b(?:(?:public|protected|private)\\s+)?const\\s+(?P<const>[A-Z][A-Z0-9_]*)\\s*=\\s*['\\\"](?P<value>[a-z][a-z0-9]*(?:[-_/:][a-z0-9]+)+)['\\\"]",
+          "source_pattern": "(?ms)^[ \\t]*(?:final\\s+|abstract\\s+)?class\\s+(?P<class>[A-Za-z_][A-Za-z0-9_]*)\\b[^{}\\n]*\\{.*?\\b(?:(?:public|protected|private)\\s+)?const\\s+(?P<const>[A-Z][A-Z0-9_]*)\\s*=\\s*['\\\"](?P<value>[a-z][a-z0-9]*(?:[-_/:][a-z0-9]+)+)['\\\"]",
           "value_capture": "value",
           "label": "{class}::{const}",
           "literal_pattern": "(?m)(?:[=!]==?\\s*['\\\"]{value}['\\\"]|['\\\"]{value}['\\\"]\\s*[=!]==?)",
