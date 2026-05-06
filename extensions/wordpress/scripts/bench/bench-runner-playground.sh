@@ -271,6 +271,14 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     fi
 fi
 
+PLAYGROUND_WORDPRESS_VERSION="6.9"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground_wordpress_version // empty' 2>/dev/null || true)
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        PLAYGROUND_WORDPRESS_VERSION="$extracted"
+    fi
+fi
+
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
 
 # ---------------------------------------------------------------------------
@@ -484,6 +492,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "  Wrapper: $WRAPPER_TMPFILE"
     echo "  Mount-before-install args: ${MOUNT_BEFORE_INSTALL_ARGS[*]}"
     echo "  Mount args: ${MOUNT_ARGS[*]}"
+    echo "  WordPress version: ${PLAYGROUND_WORDPRESS_VERSION}"
     echo "  WordPress install mode: ${PLAYGROUND_WORDPRESS_INSTALL_MODE}"
 fi
 
@@ -496,7 +505,7 @@ set +e
     "--mount" "${WRAPPER_TMPFILE}:/runner.php" \
     "${BLUEPRINT_ARGS[@]}" \
     "--wordpress-install-mode=${PLAYGROUND_WORDPRESS_INSTALL_MODE}" \
-    --wp=6.9 \
+    "--wp=${PLAYGROUND_WORDPRESS_VERSION}" \
     --verbosity=normal \
     -- /runner.php \
     2>&1 | tee "$BENCH_TMPFILE"

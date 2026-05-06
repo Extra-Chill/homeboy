@@ -152,7 +152,9 @@ during build).
   means it must delegate to Playground's bundled SQLite for the initial
   schema.
 
-- **WP version pinning.** The `--wp=6.9` flag in the Playground runner must
+- **WP version pinning.** The Playground runner defaults to `--wp=6.9`, and the
+  `playground_wordpress_version` setting can pass a different `--wp=<version>`.
+  The selected WordPress version must
   match the `wp-phpunit` package version. Don't forget to update both when
   bumping WordPress. A mismatch often manifests as missing `WP_UnitTestCase`
   factory methods, not as a database error — the drop-in will load fine but

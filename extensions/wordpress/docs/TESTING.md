@@ -382,7 +382,8 @@ or publish it with benchmark results without redacting the fields listed in
 
 ## Known gaps
 
-- **WP version is pinned.** Currently `--wp=6.9`. Mismatched pins produce
+- **WP version defaults to 6.9.** Override `playground_wordpress_version` to pass
+  a different `--wp=<version>` to Playground. Mismatched versions produce
   missing-class errors.
 - **Partial phpunit.xml consumption.** The runner reads `<testsuite>` and
   `<exclude>` entries from `phpunit.xml.dist` only; other elements are

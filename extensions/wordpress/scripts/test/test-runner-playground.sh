@@ -31,7 +31,8 @@ set -euo pipefail
 # 3. Runs the filled template via `wp-playground-cli php`
 #
 # KNOWN GAPS (Phase 1):
-#   - WP version is pinned to match wp-phpunit package (6.9.x).
+#   - WP version defaults to match the wp-phpunit package (6.9.x), and can be
+#     overridden with the playground_wordpress_version setting.
 #   - db.php drop-in support needs per-case testing (Playground's built-in
 #     SQLite integration may conflict with custom drop-ins like MDI).
 #
@@ -233,6 +234,14 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     fi
 fi
 
+PLAYGROUND_WORDPRESS_VERSION="6.9"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground_wordpress_version // empty' 2>/dev/null || true)
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        PLAYGROUND_WORDPRESS_VERSION="$extracted"
+    fi
+fi
+
 # Homeboy core sends changed test paths as newline-delimited component-relative
 # paths. Playground PHP cannot reliably read host env directly, so substitute a
 # JSON array into the runner template and let it filter VFS-discovered tests.
@@ -366,6 +375,7 @@ echo "  Backend: playground (PHP-WASM + SQLite)"
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "  Wrapper: $WRAPPER_TMPFILE"
     echo "  Mount args: ${MOUNT_ARGS[*]}"
+    echo "  WordPress version: ${PLAYGROUND_WORDPRESS_VERSION}"
 fi
 
 PHPUNIT_TMPFILE=$(mktemp)
@@ -379,7 +389,7 @@ set +e
 "$PLAYGROUND_CLI" php \
     "${MOUNT_ARGS[@]}" \
     "--mount" "${WRAPPER_TMPFILE}:/runner.php" \
-    --wp=6.9 \
+    "--wp=${PLAYGROUND_WORDPRESS_VERSION}" \
     --verbosity=normal \
     -- /runner.php "${PASSTHROUGH_ARGS[@]}" \
     2>&1 | homeboy_filter_playground_cleanup_noise | tee "$PHPUNIT_TMPFILE"

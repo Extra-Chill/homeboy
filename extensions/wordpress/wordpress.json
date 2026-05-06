@@ -837,6 +837,13 @@
       "description": "Optional browser bench target descriptor. Set {\"enabled\": true} to write HOMEBOY_BENCH_SHARED_STATE/browser-target.json. Include baseUrl/adminUrl for an already-running site; otherwise the file is metadata-only because the Playground PHP bench runner exits after workloads complete. Login supports method plus username/password or password_env; raw target files are handoff artifacts and must not be published in reports."
     },
     {
+      "id": "playground_wordpress_version",
+      "label": "Playground WordPress version",
+      "type": "string",
+      "default": "",
+      "description": "Optional WordPress core version passed to wp-playground-cli as --wp=<version> for Playground test and bench runners. Leave empty for the runner default, currently 6.9. Use this when a component needs classes or behavior from a newer WordPress core build."
+    },
+    {
       "id": "playground_wordpress_install_mode",
       "label": "Playground WordPress install mode",
       "type": "string",
