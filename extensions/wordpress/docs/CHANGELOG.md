@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.41.3] - 2026-05-06
+
+### Fixed
+- configure playground core version
+
 ## [2.41.2] - 2026-05-06
 
 ### Fixed
