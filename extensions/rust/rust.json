@@ -90,7 +90,8 @@
   "build": {
     "cleanup_paths": [
       "target"
-    ]
+    ],
+    "lockfile_paths": ["Cargo.lock"]
   },
   "cli": {
     "tool": "cargo",

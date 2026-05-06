@@ -143,6 +143,11 @@
     "cleanup_paths": [
       "node_modules",
       "dist"
+    ],
+    "lockfile_paths": [
+      "package-lock.json",
+      "yarn.lock",
+      "pnpm-lock.yaml"
     ]
   },
   "lint": {

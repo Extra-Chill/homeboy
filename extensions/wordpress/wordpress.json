@@ -703,6 +703,12 @@
       "node_extensions",
       "vendor",
       "build"
+    ],
+    "lockfile_paths": [
+      "composer.lock",
+      "package-lock.json",
+      "yarn.lock",
+      "pnpm-lock.yaml"
     ]
   },
   "lint": {

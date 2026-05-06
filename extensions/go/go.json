@@ -23,7 +23,8 @@
     "cleanup_paths": [
       "bin",
       "dist"
-    ]
+    ],
+    "lockfile_paths": ["go.sum"]
   },
   "lint": {
     "extension_script": "scripts/lint-runner.sh"
