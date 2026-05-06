@@ -313,30 +313,64 @@ baseline_file_path() {
 }
 
 # Files whose changes on `main` are merge-aftermath drift, never authored
-# changes:
-#   - homeboy.json: audit baseline metadata refresh after a merge.
-#   - Cargo.lock:   lockfile bump after a release version commit.
-# Both are review-worthless. When autofix sees ONLY these as workspace drift,
-# we commit them directly to the base branch instead of opening a PR. When
-# autofix produces real source fixes, we strip drift files from the PR so
-# they don't pile onto a reviewable change.
+# changes — the audit baseline (`homeboy.json`) plus extension-declared
+# lockfiles (`Cargo.lock`, `composer.lock`, etc.) and any component-declared
+# extras. All review-worthless. When autofix sees ONLY drift in the working
+# tree, we commit it directly to the base branch instead of opening a PR.
+# When autofix produces real source fixes, we strip drift files so they
+# don't pile onto a reviewable change.
 #
-# Emits one path per line, repo-relative, only for files that actually exist.
+# The drift list comes from homeboy core via `homeboy component show`,
+# which composes:
+#   1. `homeboy.json` (always — the audit baseline file).
+#   2. `build.lockfile_paths` from each enabled extension manifest.
+#   3. `extra_drift_files` from the component's homeboy.json.
+#
+# Homeboy returns workspace-relative paths. We prefix with the component's
+# git-root-relative directory so the resulting paths match `git diff
+# --name-only` output (which is always repo-root-relative).
+#
+# Emits one path per line, repo-root-relative. Existence is the caller's
+# responsibility — `drift_file_paths` includes paths that may not exist on
+# disk (e.g. a wordpress component without a yarn.lock); push/restore
+# helpers existence-check before staging.
+#
+# Falls back to a `homeboy.json`-only list when `homeboy component show`
+# is unavailable or doesn't expose `drift_files` (older homeboy versions),
+# preserving the pre-#209 behavior.
 drift_file_paths() {
   local workspace="${1:-$(resolve_workspace)}"
   local prefix
-
   prefix="$(git -C "${workspace}" rev-parse --show-prefix 2>/dev/null || true)"
-  local repo_root
-  repo_root="$(git -C "${workspace}" rev-parse --show-toplevel 2>/dev/null || true)"
 
-  printf '%shomeboy.json\n' "${prefix}"
+  local raw_paths=""
 
-  # Cargo.lock is a release-owned file at the repo root. Only emit it when
-  # the repo actually has one (Rust components only).
-  if [ -n "${repo_root}" ] && [ -f "${repo_root}/Cargo.lock" ]; then
-    printf 'Cargo.lock\n'
+  if command -v homeboy >/dev/null 2>&1; then
+    local show_output
+    show_output="$(homeboy component show --path "${workspace}" 2>/dev/null || true)"
+    if [ -n "${show_output}" ]; then
+      raw_paths="$(printf '%s' "${show_output}" | jq -r '.data.entity.drift_files // empty | .[]?' 2>/dev/null || true)"
+    fi
   fi
+
+  if [ -z "${raw_paths}" ]; then
+    # Older homeboy or no homeboy on PATH — emit just the audit baseline.
+    printf '%shomeboy.json\n' "${prefix}"
+    return 0
+  fi
+
+  while IFS= read -r path; do
+    [ -n "${path}" ] || continue
+    case "${path}" in
+      /*)
+        # Defensive: skip absolute paths the resolver shouldn't have emitted.
+        continue
+        ;;
+      *)
+        printf '%s%s\n' "${prefix}" "${path}"
+        ;;
+    esac
+  done <<< "${raw_paths}"
 }
 
 git_changed_files() {
