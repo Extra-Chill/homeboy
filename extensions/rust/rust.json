@@ -85,6 +85,10 @@
         "heading": "## Manifests",
         "template": "### `{name}`\n\n{description}\n\n{fields}"
       }
+    },
+    "duplication_detector": {
+      "trivial_calls": ["var", "cfg", "not", "matches"],
+      "plumbing_calls": ["internal_io", "internal_unexpected", "internal_invariant"]
     }
   },
   "build": {
