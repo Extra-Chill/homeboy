@@ -187,3 +187,56 @@ fields where each tool reports them:
 - `fingerprint` — stable SHA-1 hash of the finding `id`.
 - `excerpt` — source line text when the file is readable locally; otherwise
   `null`.
+
+## Request Profiler Helper
+
+The WordPress extension exports a Node helper for bench and trace workloads that
+need server-side WordPress request timing. It installs a temporary MU-plugin into
+a target WordPress site, preserves JSONL profile entries on disk, parses those
+entries after the workload runs, and removes the profiler when requested.
+
+```js
+const {
+  installWordPressRequestProfiler,
+  collectWordPressRequestProfiles,
+  uninstallWordPressRequestProfiler,
+} = require('homeboy-extension-wordpress/request-profiler');
+
+const sitePath = '/path/to/wordpress';
+
+installWordPressRequestProfiler(sitePath);
+
+// Run one or more browser, curl, WP-CLI, bench, or trace requests here.
+
+const entries = collectWordPressRequestProfiles(sitePath);
+uninstallWordPressRequestProfiler(sitePath);
+
+console.log(entries.filter((entry) => entry.event === 'http.request.start'));
+```
+
+By default the helper writes `wp-content/homeboy-profile.jsonl` and installs
+`wp-content/mu-plugins/homeboy-request-profiler.php`. The JSONL file is left in
+place during cleanup so benchmark and trace runners can preserve it as an
+artifact. Pass `{ removeArtifact: true }` to `uninstallWordPressRequestProfiler`
+when the raw profile should also be deleted.
+
+Captured entries include:
+
+- request start timing and request metadata
+- WordPress lifecycle hook marks such as `muplugins_loaded`, `plugins_loaded`,
+  `init`, `admin_init`, `current_screen`, `admin_enqueue_scripts`, and `shutdown`
+- priority-band start/end marks around `admin_init`, `current_screen`, and
+  `admin_enqueue_scripts`
+- outbound HTTP request starts from `pre_http_request`, including hashed IDs,
+  URLs, and methods
+
+The default hooks can be overridden when a workload needs a smaller or more
+specific profile:
+
+```js
+installWordPressRequestProfiler(sitePath, {
+  artifactRelativePath: 'wp-content/uploads/homeboy/admin-profile.jsonl',
+  hooks: ['init', 'admin_init', 'shutdown'],
+  priorityBandHooks: ['admin_init'],
+});
+```

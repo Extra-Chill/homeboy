@@ -2,8 +2,14 @@
   "name": "homeboy-extension-wordpress",
   "version": "1.0.0",
   "private": true,
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./request-profiler": "./lib/request-profiler.js"
+  },
   "scripts": {
-    "lint:js": "eslint --ext .js,.jsx,.ts,.tsx"
+    "lint:js": "eslint --ext .js,.jsx,.ts,.tsx",
+    "test:request-profiler": "node tests/request-profiler-smoke.js"
   },
   "devDependencies": {
     "@wp-playground/cli": "^3.1.20",
