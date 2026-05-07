@@ -470,6 +470,7 @@ function pg_bench_prepare_wp_cli_runtime(): void {
             'debug' => false,
             'color' => false,
             'quiet' => false,
+            'prompt' => false,
             'require' => [],
             'ssh' => false,
             'http' => false,
