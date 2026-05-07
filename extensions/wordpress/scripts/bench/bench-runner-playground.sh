@@ -450,6 +450,29 @@ WRAPPER_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/pg-bench-runner.XXXXXX")
 # need escaping. The other placeholders use `|` (their values never contain
 # a pipe in practice — slugs, integers, and POSIX paths only).
 WP_CONFIG_DEFINES_DELIM=$(printf '\1')
+
+# Escape sed `s` replacement metacharacters in JSON values before
+# substituting them into the PHP runner template. GNU sed processes the
+# replacement string by treating `&` as a backreference to the matched
+# pattern and `\X` as an escape sequence — so an unescaped `&` in JSON
+# (e.g. an ampersand inside a string) gets replaced with the placeholder
+# itself, and `\"` collapses to `"`, silently corrupting the JSON. The
+# decode in playground-bench-runner.php then fails and ALL declared
+# bench_env / wp_config_defines entries drop on the floor.
+#
+# Only `\` and `&` need escaping here: the SOH delimiter cannot appear in
+# JSON content, and the only `\X` sequences sed treats specially are
+# `\&`, `\\`, the delimiter, and `\1`-`\9` — which all share the `\`
+# escape, so escaping `\` covers them.
+sed_escape_replacement() {
+    printf '%s' "$1" | sed -e 's/[\&]/\\&/g'
+}
+WP_CONFIG_DEFINES_JSON_ESC=$(sed_escape_replacement "$WP_CONFIG_DEFINES_JSON")
+BENCH_ENV_JSON_ESC=$(sed_escape_replacement "$BENCH_ENV_JSON")
+BENCH_WORKLOADS_JSON_ESC=$(sed_escape_replacement "$BENCH_WORKLOADS_JSON")
+PLAYGROUND_WORKLOADS_JSON_ESC=$(sed_escape_replacement "$PLAYGROUND_WORKLOADS_JSON")
+EXTRA_WORKLOADS_LIST_ESC=$(sed_escape_replacement "$EXTRA_WORKLOADS_LIST")
+
 sed \
     -e "s|{{PLUGIN_SLUG}}|${PLUGIN_SLUG}|g" \
     -e "s|{{COMPONENT_ID}}|${COMPONENT_ID}|g" \
@@ -463,11 +486,11 @@ sed \
     -e "s|{{RESULT_SUFFIX}}|${RESULT_SUFFIX}|g" \
     -e "s|{{BENCH_HELPER_PHP}}|${BENCH_HELPER_PHP_GUEST}|g" \
     -e "s|{{BENCH_SITE_MODE}}|${BENCH_SITE_MODE}|g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_WORKLOADS_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{PLAYGROUND_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${PLAYGROUND_WORKLOADS_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{EXTRA_WORKLOADS_LIST}}${WP_CONFIG_DEFINES_DELIM}${EXTRA_WORKLOADS_LIST}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_WORKLOADS_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{PLAYGROUND_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${PLAYGROUND_WORKLOADS_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{EXTRA_WORKLOADS_LIST}}${WP_CONFIG_DEFINES_DELIM}${EXTRA_WORKLOADS_LIST_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
 echo "Running performance benchmarks via WordPress Playground..."

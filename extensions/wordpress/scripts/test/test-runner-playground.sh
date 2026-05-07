@@ -359,13 +359,34 @@ WRAPPER_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/pg-runner.XXXXXX")
 # ASCII SOH delimiter for the JSON substitution — values may contain `|`
 # safely without shell escaping.
 WP_CONFIG_DEFINES_DELIM=$(printf '\1')
+
+# Escape sed `s` replacement metacharacters in JSON values before
+# substituting them into the PHP runner template. GNU sed processes the
+# replacement string by treating `&` as a backreference to the matched
+# pattern and `\X` as an escape sequence — so an unescaped `&` in JSON
+# (e.g. an ampersand inside a string) gets replaced with the placeholder
+# itself, and `\"` collapses to `"`, silently corrupting the JSON. The
+# decode in playground-runner.php then fails and ALL declared bench_env /
+# wp_config_defines entries drop on the floor.
+#
+# Only `\` and `&` need escaping here: the SOH delimiter cannot appear in
+# JSON content, and the only `\X` sequences sed treats specially are
+# `\&`, `\\`, the delimiter, and `\1`-`\9` — which all share the `\`
+# escape, so escaping `\` covers them.
+sed_escape_replacement() {
+    printf '%s' "$1" | sed -e 's/[\&]/\\&/g'
+}
+WP_CONFIG_DEFINES_JSON_ESC=$(sed_escape_replacement "$WP_CONFIG_DEFINES_JSON")
+BENCH_ENV_JSON_ESC=$(sed_escape_replacement "$BENCH_ENV_JSON")
+CHANGED_TEST_FILES_JSON_ESC=$(sed_escape_replacement "$CHANGED_TEST_FILES_JSON")
+
 sed \
     -e "s|{{PLUGIN_SLUG}}|${PLUGIN_SLUG}|g" \
     -e "s|{{PLAYGROUND_DEP_MOUNTS}}|${PLAYGROUND_DEP_MOUNTS}|g" \
     -e "s|{{PHPUNIT_TEST_FILE_B64}}|${SELECTED_TEST_FILE_B64}|g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{CHANGED_TEST_FILES_JSON}}${WP_CONFIG_DEFINES_DELIM}${CHANGED_TEST_FILES_JSON}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{CHANGED_TEST_FILES_JSON}}${WP_CONFIG_DEFINES_DELIM}${CHANGED_TEST_FILES_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
 echo "Running PHPUnit tests via WordPress Playground..."

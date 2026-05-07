@@ -20,11 +20,17 @@
 return function (): array {
     $shared = defined('HOMEBOY_BENCH_SHARED_STATE') ? HOMEBOY_BENCH_SHARED_STATE : '';
 
+    // BENCH_ENV_FIXTURE_METAS optionally carries a JSON value with `\` and
+    // `&` embedded — chars that GNU sed mangles in `s` replacement strings
+    // unless the dispatcher escapes them before substituting BENCH_ENV_JSON
+    // into the runner template (homeboy-extensions sed-escape fix). The
+    // smoke script grep-asserts these survive the Playground boundary.
     $values = [
         'BENCH_ENV_FIXTURE_STR_getenv' => var_export(getenv('BENCH_ENV_FIXTURE_STR'), true),
         'BENCH_ENV_FIXTURE_NUM_getenv' => var_export(getenv('BENCH_ENV_FIXTURE_NUM'), true),
         'BENCH_ENV_FIXTURE_STR_in_env' => array_key_exists('BENCH_ENV_FIXTURE_STR', $_ENV) ? 'yes' : 'no',
         'BENCH_ENV_FIXTURE_STR_env_value' => $_ENV['BENCH_ENV_FIXTURE_STR'] ?? '<missing>',
+        'BENCH_ENV_FIXTURE_METAS_getenv' => var_export(getenv('BENCH_ENV_FIXTURE_METAS'), true),
     ];
 
     if ($shared !== '') {

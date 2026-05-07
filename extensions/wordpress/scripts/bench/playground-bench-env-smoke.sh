@@ -55,11 +55,20 @@ ITERATIONS=2
 # Synthesize the merged settings JSON the dispatcher would receive from
 # homeboy core. Real components declare this under
 # extensions.wordpress.settings.bench_env in their homeboy.json.
+#
+# BENCH_ENV_FIXTURE_METAS is the regression value for the sed-replacement
+# escape bug: it contains `\` (via the JSON-escaped `\"` sequences) and a
+# literal `&`, both of which GNU sed mangles in `s` replacement strings
+# unless the runner escapes them before substituting BENCH_ENV_JSON into
+# the PHP template. Without the fix, json_decode() of BENCH_ENV_JSON
+# returns null and ALL bench_env keys silently drop — including unrelated
+# bystanders like BENCH_ENV_FIXTURE_STR.
 SETTINGS_JSON=$(cat <<'JSON'
 {
   "bench_env": {
     "BENCH_ENV_FIXTURE_STR": "hello",
-    "BENCH_ENV_FIXTURE_NUM": "42"
+    "BENCH_ENV_FIXTURE_NUM": "42",
+    "BENCH_ENV_FIXTURE_METAS": "{\"text\":\"a & b\",\"path\":\"C:\\\\tmp\"}"
   }
 }
 JSON
@@ -118,7 +127,32 @@ if ! grep -q "\"BENCH_ENV_FIXTURE_STR_env_value\":\"hello\"" "$READ_BACK_LOG"; t
     exit 1
 fi
 
+# BENCH_ENV_FIXTURE_METAS carries the sed-replacement-escape regression
+# payload (see settings JSON above). The workload var_export()s the
+# getenv() result, so we expect:
+#   "BENCH_ENV_FIXTURE_METAS_getenv":"'{\"text\":\"a & b\",\"path\":\"C:\\\\tmp\"}'"
+# which after JSON-encoding (json_encode in the workload) and grep-quoting
+# becomes a long literal — keep the assertion small and split into the
+# two corruption signatures: the literal `&` survives and a `\"` survives.
+if ! grep -q '"BENCH_ENV_FIXTURE_METAS_getenv":"' "$READ_BACK_LOG"; then
+    echo "ERROR: BENCH_ENV_FIXTURE_METAS_getenv missing from read-back log" >&2
+    exit 1
+fi
+if ! grep -q 'a & b' "$READ_BACK_LOG"; then
+    echo "ERROR: literal '&' did not round-trip in BENCH_ENV_FIXTURE_METAS." >&2
+    echo "       Likely cause: BENCH_ENV_JSON sed substitution treated '&' as a" >&2
+    echo "       backreference and corrupted the JSON before json_decode()." >&2
+    exit 1
+fi
+if ! grep -q '\\"text\\"' "$READ_BACK_LOG"; then
+    echo "ERROR: '\\\"' did not round-trip in BENCH_ENV_FIXTURE_METAS." >&2
+    echo "       Likely cause: BENCH_ENV_JSON sed substitution dropped backslashes" >&2
+    echo "       in the replacement string, corrupting the JSON before json_decode()." >&2
+    exit 1
+fi
+
 echo "============================================"
 echo "✓ bench_env smoke test PASSED"
-echo "  All declared env vars round-trip through getenv() and \$_ENV."
+echo "  All declared env vars round-trip through getenv() and \$_ENV,"
+echo "  including values containing '\\\\' and '&'."
 echo "============================================"
