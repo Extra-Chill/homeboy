@@ -551,20 +551,31 @@ rm -f "$BENCH_TMPFILE"
 
 dump_diagnostics() {
     local label="$1"
-    echo ""
-    echo "============================================"
-    echo "$label"
-    echo "============================================"
-    if [ -n "$BENCH_LOG" ]; then
+    # Write to stderr so the diagnostics survive homeboy core's CI bench
+    # progress mode, which calls the runner with `passthrough(false)` and
+    # `stderr_passthrough(false)` and only persists stderr in the failure
+    # envelope's `stderr_tail`. Echoing to stdout buried every Playground
+    # boot/workload failure inside the suppressed stdout buffer, which made
+    # `bench.json` show `failure.stderr_tail: ""` for every CI failure mode
+    # downstream of the Playground CLI invocation. Stderr is captured AND
+    # streamed to the GitHub Actions log, which is exactly what consumers
+    # of the bench JSON envelope expect for failure triage.
+    {
         echo ""
-        echo "--- Structured log ($RESULT_LOG) ---"
-        echo "$BENCH_LOG"
-    fi
-    if [ -n "$BENCH_STDOUT" ]; then
-        echo ""
-        echo "--- Playground stdout/stderr ---"
-        echo "$BENCH_STDOUT"
-    fi
+        echo "============================================"
+        echo "$label"
+        echo "============================================"
+        if [ -n "$BENCH_LOG" ]; then
+            echo ""
+            echo "--- Structured log ($RESULT_LOG) ---"
+            echo "$BENCH_LOG"
+        fi
+        if [ -n "$BENCH_STDOUT" ]; then
+            echo ""
+            echo "--- Playground stdout/stderr ---"
+            echo "$BENCH_STDOUT"
+        fi
+    } >&2
 }
 
 # Case 1: bootstrap failure captured in the structured log.
