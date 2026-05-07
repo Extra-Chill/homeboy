@@ -16,7 +16,7 @@
     "test:timing-correlator": "node tests/timing-correlator-smoke.js"
   },
   "devDependencies": {
-    "@wp-playground/cli": "^3.1.20",
+    "@wp-playground/cli": "3.1.20",
     "@wordpress/eslint-plugin": "^24.2.0",
     "eslint": "^8.57.0"
   },
