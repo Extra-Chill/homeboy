@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.9] - 2026-05-07
+
+### Changed
+- Add PR comment suppression input
+
 ## [2.2.8] - 2026-05-06
 
 ### Fixed
