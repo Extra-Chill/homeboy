@@ -66,3 +66,43 @@ function fixer_path_is_excluded($path) {
 
     return false;
 }
+
+/**
+ * Detect pure-PHP test harness files that don't bootstrap WordPress.
+ *
+ * Smoke tests (`tests/*-smoke.php`, `tests/smoke-*.php`) and PHPUnit test classes
+ * (`tests/*Test.php`, `tests/*TestCase.php`) frequently do filesystem I/O without
+ * a WP runtime. Auto-fixers that rewrite to WordPress runtime APIs (e.g.
+ * $wp_filesystem) MUST skip these files — the rewritten code would throw at
+ * runtime because $wp_filesystem is undefined.
+ *
+ * Mirrors the role detection in scripts/lint/lint-runner.sh
+ * (wordpress_lint_role_for_path: smoke_harness, phpunit_test).
+ *
+ * @param string $path Absolute or relative path to a PHP file.
+ * @return bool True if the file is a pure-PHP test harness.
+ */
+function fixer_path_is_test_harness($path) {
+    $path = str_replace('\\', '/', $path);
+    $basename = basename($path);
+
+    // PHPUnit test classes: tests/*Test.php, tests/*TestCase.php (any depth).
+    if (preg_match('#(^|/)tests/.*(Test|TestCase)\.php$#', $path)) {
+        return true;
+    }
+
+    // Smoke harnesses: tests/*-smoke.php, tests/smoke-*.php (any depth).
+    if (preg_match('#(^|/)tests/#', $path)) {
+        if (preg_match('/(^|-)smoke\.php$/', $basename) || preg_match('/^smoke-/', $basename)) {
+            return true;
+        }
+    }
+
+    // *-smoke.php anywhere — matches the lint role pattern */smoke-*.php and
+    // */*-smoke.php from wordpress_lint_role_for_path.
+    if (preg_match('/-smoke\.php$/', $basename) || preg_match('/^smoke-/', $basename)) {
+        return true;
+    }
+
+    return false;
+}

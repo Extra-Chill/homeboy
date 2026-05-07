@@ -64,6 +64,14 @@ function process_file( $filepath ) {
 		return 0;
 	}
 
+	// Skip pure-PHP test harness files (smoke tests, PHPUnit test classes).
+	// These don't bootstrap WordPress, so $wp_filesystem is undefined and the
+	// rewritten code would throw "Call to a member function get_contents() on
+	// null" at runtime. See homeboy-extensions#458.
+	if ( fixer_path_is_test_harness( $filepath ) ) {
+		return 0;
+	}
+
 	$lines      = explode( "\n", $source );
 	$fixes      = 0;
 	$changed    = false;
