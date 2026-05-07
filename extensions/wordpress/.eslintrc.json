@@ -32,6 +32,7 @@
     "@wordpress/i18n-translator-comments": "warn",
     "@wordpress/no-unsafe-wp-apis": "warn",
     "import/no-extraneous-dependencies": "off",
-    "no-console": "warn"
+    "no-console": "warn",
+    "eqeqeq": ["error", "always", { "null": "ignore" }]
   }
 }
