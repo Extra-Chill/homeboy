@@ -581,8 +581,65 @@ echo "  Issues updated: ${TOTAL_ISSUES_UPDATED}"
 echo "  Issues closed:  ${TOTAL_ISSUES_CLOSED}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# Exit 1 if no commands were successfully processed — lets generic fallback handle it
-if [ "${COMMANDS_PROCESSED}" -eq 0 ]; then
-  echo "No commands produced valid structured output for categorized issues"
+if [ "${COMMANDS_PROCESSED}" -gt 0 ]; then
+  exit 0
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Empty-input handling (issue #214)
+#
+# COMMANDS_PROCESSED == 0 has two distinct shapes:
+#
+#   1. "Nothing happened here" — RESULTS is empty/`{}` AND COMMANDS is empty.
+#      The wrapper invocation didn't run any categorizable command (e.g. a
+#      release-only step where audit/lint/test ran in sibling jobs). There is
+#      genuinely nothing to categorize, so this is a no-op success path.
+#
+#   2. "A command ran but failed before producing structured output" — RESULTS
+#      records one of EXPECTED_COMMANDS as "fail" with no JSON to categorize.
+#      The categorizer can't file findings without structured output, but it
+#      must propagate the failure so the workflow doesn't ship a broken release.
+#
+# Anything else (commands ran, all passed, no findings) is a clean success path:
+# the codebase had nothing to categorize on this run.
+# ─────────────────────────────────────────────────────────────────────────────
+
+RESULTS_JSON="${RESULTS:-}"
+COMMANDS_LIST="${COMMANDS:-}"
+EXPECTED_LIST="${EXPECTED_COMMANDS:-}"
+
+# Detect commands that actually failed in this invocation's RESULTS.
+FAILED_COMMANDS=""
+if [ -n "${RESULTS_JSON}" ] && [ "${RESULTS_JSON}" != "{}" ]; then
+  if printf '%s\n' "${RESULTS_JSON}" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    FAILED_COMMANDS=$(printf '%s\n' "${RESULTS_JSON}" \
+      | jq -r 'to_entries | map(select(.value == "fail")) | .[].key' 2>/dev/null \
+      | paste -sd ',' -)
+  else
+    echo "::warning::RESULTS is not a valid JSON object — treating as 'no commands ran'"
+  fi
+fi
+
+if [ -n "${FAILED_COMMANDS}" ]; then
+  echo "::error::Commands failed without producing structured output for categorization: ${FAILED_COMMANDS}"
+  echo "Cannot file categorized issues without structured JSON. The underlying command failure should be addressed before re-running."
   exit 1
 fi
+
+# No failed commands. Empty input is a legitimate success path:
+#   - release-only invocations route through RELEASE_COMMANDS, not COMMANDS
+#   - clean codebases produce zero findings to categorize
+#   - sibling jobs may own audit/lint/test (EXPECTED_COMMANDS lists them but
+#     they didn't run in this invocation)
+if [ -z "${RESULTS_JSON}" ] || [ "${RESULTS_JSON}" = "{}" ]; then
+  if [ -z "${COMMANDS_LIST}" ]; then
+    echo "Nothing to categorize: no categorizable commands ran in this invocation (RESULTS is empty, COMMANDS is empty)."
+    if [ -n "${EXPECTED_LIST}" ]; then
+      echo "Expected commands ${EXPECTED_LIST} are tracked by sibling jobs; this invocation has no findings to file."
+    fi
+    exit 0
+  fi
+fi
+
+echo "Nothing to categorize: all categorizable commands either passed cleanly or produced no structured output to reconcile."
+exit 0
