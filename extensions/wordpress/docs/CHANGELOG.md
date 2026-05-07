@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.8] - 2026-05-07
+
+### Fixed
+- surface WP-CLI failure output
+
 ## [2.44.7] - 2026-05-07
 
 ### Fixed
