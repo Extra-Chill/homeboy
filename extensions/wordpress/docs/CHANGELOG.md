@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.4] - 2026-05-07
+
+### Fixed
+- skip wp_filesystem rewrite in test files and fix Elvis-operator expansion
+
 ## [2.44.3] - 2026-05-07
 
 ### Fixed
