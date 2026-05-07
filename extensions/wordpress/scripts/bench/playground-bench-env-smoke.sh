@@ -11,7 +11,7 @@
 #
 # Manual integration test, not part of CI. Run after changes to:
 #   - playground-bench-runner.php (the putenv() loop)
-#   - bench-runner-playground.sh (the BENCH_ENV_JSON extraction + sed)
+#   - bench-runner-playground.sh (the BENCH_ENV_JSON extraction + template transport)
 #   - playground-runner.php (test-runner mirror)
 #   - test-runner-playground.sh (test-runner mirror)
 #
@@ -56,13 +56,11 @@ ITERATIONS=2
 # homeboy core. Real components declare this under
 # extensions.wordpress.settings.bench_env in their homeboy.json.
 #
-# BENCH_ENV_FIXTURE_METAS is the regression value for the sed-replacement
-# escape bug: it contains `\` (via the JSON-escaped `\"` sequences) and a
-# literal `&`, both of which GNU sed mangles in `s` replacement strings
-# unless the runner escapes them before substituting BENCH_ENV_JSON into
-# the PHP template. Without the fix, json_decode() of BENCH_ENV_JSON
-# returns null and ALL bench_env keys silently drop — including unrelated
-# bystanders like BENCH_ENV_FIXTURE_STR.
+# BENCH_ENV_FIXTURE_METAS is the regression value for JSON template transport:
+# it contains nested JSON with `\`, `\"`, and `&`. The runner must preserve it
+# exactly while substituting the payload into the PHP template; otherwise
+# json_decode() returns null and ALL bench_env keys silently drop — including
+# unrelated bystanders like BENCH_ENV_FIXTURE_STR.
 SETTINGS_JSON=$(cat <<'JSON'
 {
   "bench_env": {
@@ -140,14 +138,14 @@ if ! grep -q '"BENCH_ENV_FIXTURE_METAS_getenv":"' "$READ_BACK_LOG"; then
 fi
 if ! grep -q 'a & b' "$READ_BACK_LOG"; then
     echo "ERROR: literal '&' did not round-trip in BENCH_ENV_FIXTURE_METAS." >&2
-    echo "       Likely cause: BENCH_ENV_JSON sed substitution treated '&' as a" >&2
-    echo "       backreference and corrupted the JSON before json_decode()." >&2
+    echo "       Likely cause: BENCH_ENV_JSON template transport corrupted" >&2
+    echo "       the JSON before json_decode()." >&2
     exit 1
 fi
 if ! grep -q '\\"text\\"' "$READ_BACK_LOG"; then
     echo "ERROR: '\\\"' did not round-trip in BENCH_ENV_FIXTURE_METAS." >&2
-    echo "       Likely cause: BENCH_ENV_JSON sed substitution dropped backslashes" >&2
-    echo "       in the replacement string, corrupting the JSON before json_decode()." >&2
+    echo "       Likely cause: BENCH_ENV_JSON template transport dropped" >&2
+    echo "       backslashes before json_decode()." >&2
     exit 1
 fi
 

@@ -83,7 +83,10 @@ if (!is_string($selected_test_file)) {
 // Component-declared wp-config defines flow through the
 // {{WP_CONFIG_DEFINES_JSON}} placeholder. Empty object is the no-op
 // default for components that don't need the seam.
-$wp_config_defines_raw = '{{WP_CONFIG_DEFINES_JSON}}';
+$wp_config_defines_raw = base64_decode('{{WP_CONFIG_DEFINES_JSON_B64}}', true);
+if (!is_string($wp_config_defines_raw)) {
+    $wp_config_defines_raw = '{}';
+}
 $wp_config_defines = json_decode($wp_config_defines_raw, true);
 if (!is_array($wp_config_defines)) {
     $wp_config_defines = [];
@@ -96,7 +99,10 @@ $config_path = pg_run_boot_stage(['extra_defines' => $wp_config_defines]);
 // dispatcher extracts `bench_env` from HOMEBOY_SETTINGS_JSON and we
 // putenv() each entry here before test fixtures load. Empty object is
 // the no-op case.
-$bench_env_raw = '{{BENCH_ENV_JSON}}';
+$bench_env_raw = base64_decode('{{BENCH_ENV_JSON_B64}}', true);
+if (!is_string($bench_env_raw)) {
+    $bench_env_raw = '{}';
+}
 $bench_env = json_decode($bench_env_raw, true);
 if (is_array($bench_env)) {
     foreach ($bench_env as $name => $value) {
@@ -243,7 +249,11 @@ try {
     );
 
     $test_files = pg_discover_tests($directories, $suffixes, $prefixes, $excludes);
-    $test_files = pg_filter_changed_test_files($test_files, '{{CHANGED_TEST_FILES_JSON}}', $plugin_path);
+    $changed_test_files_raw = base64_decode('{{CHANGED_TEST_FILES_JSON_B64}}', true);
+    if (!is_string($changed_test_files_raw)) {
+        $changed_test_files_raw = '[]';
+    }
+    $test_files = pg_filter_changed_test_files($test_files, $changed_test_files_raw, $plugin_path);
 
     if ($selected_test_file !== '') {
         $selected_abs = $plugin_path . '/' . ltrim($selected_test_file, '/');

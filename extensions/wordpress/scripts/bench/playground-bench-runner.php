@@ -106,7 +106,10 @@ pg_install_diagnostics_handlers();
 // dispatcher reads the `wp_config_defines` setting from the merged
 // settings JSON and passes it through; an empty object ("{}") is the
 // no-op case. Decode here and hand to pg_run_boot_stage().
-$wp_config_defines_raw = '{{WP_CONFIG_DEFINES_JSON}}';
+$wp_config_defines_raw = base64_decode('{{WP_CONFIG_DEFINES_JSON_B64}}', true);
+if (!is_string($wp_config_defines_raw)) {
+    $wp_config_defines_raw = '{}';
+}
 $wp_config_defines = json_decode($wp_config_defines_raw, true);
 if (!is_array($wp_config_defines)) {
     $wp_config_defines = [];
@@ -128,7 +131,10 @@ $config_path = pg_run_boot_stage([
 //
 // Empty object is the no-op case — components that don't declare
 // bench_env see no behavioural change.
-$bench_env_raw = '{{BENCH_ENV_JSON}}';
+$bench_env_raw = base64_decode('{{BENCH_ENV_JSON_B64}}', true);
+if (!is_string($bench_env_raw)) {
+    $bench_env_raw = '{}';
+}
 $bench_env = json_decode($bench_env_raw, true);
 if (is_array($bench_env)) {
     foreach ($bench_env as $name => $value) {
@@ -781,7 +787,11 @@ try {
         ];
     }
 
-    foreach (pg_bench_configured_workloads('{{PLAYGROUND_WORKLOADS_JSON}}') as $configured_workload) {
+    $playground_workloads_raw = base64_decode('{{PLAYGROUND_WORKLOADS_JSON_B64}}', true);
+    if (!is_string($playground_workloads_raw)) {
+        $playground_workloads_raw = '[]';
+    }
+    foreach (pg_bench_configured_workloads($playground_workloads_raw) as $configured_workload) {
         $workloads[] = [
             'kind' => 'configured',
             'id' => $configured_workload['id'],
@@ -797,7 +807,11 @@ try {
         return strcmp($left_key, $right_key);
     });
 
-    $requested_workloads = pg_bench_normalize_workload_filter('{{BENCH_WORKLOADS_JSON}}');
+    $bench_workloads_raw = base64_decode('{{BENCH_WORKLOADS_JSON_B64}}', true);
+    if (!is_string($bench_workloads_raw)) {
+        $bench_workloads_raw = 'null';
+    }
+    $requested_workloads = pg_bench_normalize_workload_filter($bench_workloads_raw);
     if (!empty($requested_workloads)) {
         $requested_lookup = array_fill_keys($requested_workloads, true);
         $available_workloads = [];
