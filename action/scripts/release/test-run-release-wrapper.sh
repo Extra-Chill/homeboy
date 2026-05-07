@@ -52,6 +52,7 @@ setup_fixture() {
   OUTPUT_FILE="${TEST_DIR}/github-output"
   HOMEBOY_ARGS_FILE="${TEST_DIR}/homeboy-args"
   HOMEBOY_AUTH_FILE="${TEST_DIR}/homeboy-auth"
+  MOCK_GIT_LOG="${TEST_DIR}/git-log"
   mkdir -p "${BIN_DIR}" "${WORKSPACE}"
 
   cat > "${WORKSPACE}/homeboy.json" <<'JSON'
@@ -61,15 +62,19 @@ JSON
   cat > "${BIN_DIR}/git" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+# Track every git invocation so the test can assert what the wrapper does
+# (and just as importantly, what it no longer does — see homeboy core PR
+# #2368, which moved tip-sync into `homeboy release` and removed the
+# wrapper's redundant `git pull --ff-only`).
+if [ -n "${MOCK_GIT_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "${MOCK_GIT_LOG}"
+fi
 case "$1 $2" in
   "rev-parse --abbrev-ref")
     echo "${MOCK_BRANCH:-main}"
     ;;
   "symbolic-ref --short")
     echo "origin/${MOCK_DEFAULT_BRANCH:-main}"
-    ;;
-  "pull --ff-only")
-    exit 0
     ;;
   *)
     echo "unexpected git args: $*" >&2
@@ -154,9 +159,20 @@ run_wrapper() {
   HOMEBOY_ARGS_FILE="${HOMEBOY_ARGS_FILE}" \
   HOMEBOY_AUTH_FILE="${HOMEBOY_AUTH_FILE}" \
   HOMEBOY_MOCK_SCENARIO="${HOMEBOY_MOCK_SCENARIO}" \
+  MOCK_GIT_LOG="${MOCK_GIT_LOG}" \
   RELEASE_DRY_RUN="${RELEASE_DRY_RUN:-false}" \
   GH_TOKEN="${GH_TOKEN:-}" \
   bash "${RUN_RELEASE}"
+}
+
+assert_no_git_pull() {
+  local label="$1"
+  if grep -q '^pull ' "${MOCK_GIT_LOG}"; then
+    printf 'FAIL: %s\nwrapper invoked git pull (now owned by homeboy core):\n' "${label}"
+    cat "${MOCK_GIT_LOG}"
+    exit 1
+  fi
+  printf 'PASS: %s\n' "${label}"
 }
 
 setup_fixture
@@ -178,6 +194,7 @@ assert_output_line 'release-version=2.1.0' "${OUTPUT_FILE}" "release version out
 assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "release tag output is translated"
 assert_output_line 'release-bump-type=minor' "${OUTPUT_FILE}" "release bump type output is translated"
 assert_output_line 'bump-type=minor' "${OUTPUT_FILE}" "legacy step bump type output is preserved"
+assert_no_git_pull "wrapper does not run its own git pull (core owns tip-sync)"
 
 setup_fixture
 HOMEBOY_MOCK_SCENARIO="skipped"

@@ -4,8 +4,13 @@ set -euo pipefail
 
 echo "Building homeboy from source at ${SOURCE_PATH}..."
 
+# --locked: never rewrite Cargo.lock during a CI build. Without this, a fresh
+# upstream release between commit time and build time can update the lockfile
+# and leave the working tree dirty — which makes the downstream `homeboy
+# release` working-tree check refuse to release. Reproducible builds want the
+# committed lockfile honored verbatim anyway.
 BUILD_EXIT=0
-cargo build --release --manifest-path "${SOURCE_PATH}/Cargo.toml" 2>&1 || BUILD_EXIT=$?
+cargo build --release --locked --manifest-path "${SOURCE_PATH}/Cargo.toml" 2>&1 || BUILD_EXIT=$?
 
 if [ "${BUILD_EXIT}" -eq 0 ]; then
   BINARY=$(find "${SOURCE_PATH}/target/release" -maxdepth 1 -name "homeboy" -type f | head -1)

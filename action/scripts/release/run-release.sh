@@ -131,10 +131,13 @@ if [ "${CURRENT_BRANCH}" != "${DEFAULT_BRANCH}" ]; then
   exit 1
 fi
 
-# The quality gate runs in separate jobs that may push autofix commits or new
-# PRs may merge while the pipeline is in flight. Pull before invoking Homeboy so
-# core releases from the actual branch head.
-git pull --ff-only origin "${RELEASE_BRANCH}" 2>/dev/null || true
+# Tip-sync handled in core: `homeboy release` runs `validate_remote_sync`
+# which fetches and fast-forwards from origin before the working-tree check,
+# and `get_uncommitted_changes` runs `git update-index --refresh` so any
+# stale stat info (from prior cargo build / extension setup steps) does not
+# surface as a false-positive dirty tree. The wrapper used to do its own
+# `git pull --ff-only` here as a workaround, which was the original symptom
+# of the upstream gap fixed in homeboy core. See homeboy PR #2368.
 
 RELEASE_OUTPUT_FILE="$(mktemp)"
 RELEASE_ARGS=(
