@@ -144,6 +144,10 @@ inputs:
     description: 'Section title within the shared PR comment.'
     required: false
     default: ''
+  pr-comment:
+    description: 'Post the default Homeboy PR comment. Set false when the workflow publishes a domain-specific report.'
+    required: false
+    default: 'true'
 
   # ── SSH (for fleet/deploy) ──
   ssh-key:
@@ -581,7 +585,7 @@ runs:
       run: bash ${{ github.action_path }}/scripts/core/enforce-final-status.sh
 
     - name: Post PR comment
-      if: always() && github.event_name == 'pull_request' && steps.check-pr-state.outputs.active != 'false'
+      if: always() && github.event_name == 'pull_request' && steps.check-pr-state.outputs.active != 'false' && inputs.pr-comment != 'false'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token }}

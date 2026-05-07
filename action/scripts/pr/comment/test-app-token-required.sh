@@ -43,6 +43,7 @@ post_script="$(cat "${ROOT}/scripts/pr/post-pr-comment.sh")"
 
 assert_contains "${action_yml}" 'GH_TOKEN: ${{ inputs.app-token }}' "PR comment uses app token"
 assert_not_contains "${action_yml}" 'GH_TOKEN: ${{ inputs.app-token || github.token }}' "PR comment does not fall back to github token"
+assert_contains "${action_yml}" "inputs.pr-comment != 'false'" "PR comment can be disabled explicitly"
 assert_contains "${post_script}" 'Refusing to post as github-actions[bot]' "missing token warning explains bot identity"
 
 printf 'PR comment app-token checks passed.\n'
