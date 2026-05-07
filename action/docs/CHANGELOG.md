@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.11] - 2026-05-07
+
+### Fixed
+- drop redundant tip-sync workarounds, defer to homeboy core
+
 ## [2.2.10] - 2026-05-07
 
 ### Fixed
