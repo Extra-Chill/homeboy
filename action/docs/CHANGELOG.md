@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.2.10] - 2026-05-07
+
+### Fixed
+- treat empty categorizer input as success when nothing failed
+
 ## [2.2.9] - 2026-05-07
 
 ### Changed
