@@ -193,6 +193,7 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
         BENCH_ENV_JSON="$extracted"
     fi
 fi
+BENCH_ENV_JSON_B64=$(printf '%s' "$BENCH_ENV_JSON" | base64 | tr -d '\n')
 
 # Extract `bench_workloads` from the merged settings JSON. Components can
 # restrict a bench run to specific workload IDs under
@@ -465,10 +466,9 @@ WP_CONFIG_DEFINES_DELIM=$(printf '\1')
 # `\&`, `\\`, the delimiter, and `\1`-`\9` — which all share the `\`
 # escape, so escaping `\` covers them.
 sed_escape_replacement() {
-    printf '%s' "$1" | sed -e 's/[\&]/\\&/g'
+    printf '%s' "$1" | sed -e 's/[\\&]/\\&/g'
 }
 WP_CONFIG_DEFINES_JSON_ESC=$(sed_escape_replacement "$WP_CONFIG_DEFINES_JSON")
-BENCH_ENV_JSON_ESC=$(sed_escape_replacement "$BENCH_ENV_JSON")
 BENCH_WORKLOADS_JSON_ESC=$(sed_escape_replacement "$BENCH_WORKLOADS_JSON")
 PLAYGROUND_WORKLOADS_JSON_ESC=$(sed_escape_replacement "$PLAYGROUND_WORKLOADS_JSON")
 EXTRA_WORKLOADS_LIST_ESC=$(sed_escape_replacement "$EXTRA_WORKLOADS_LIST")
@@ -487,7 +487,7 @@ sed \
     -e "s|{{BENCH_HELPER_PHP}}|${BENCH_HELPER_PHP_GUEST}|g" \
     -e "s|{{BENCH_SITE_MODE}}|${BENCH_SITE_MODE}|g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON_B64}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON_B64}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_WORKLOADS_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{PLAYGROUND_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${PLAYGROUND_WORKLOADS_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{EXTRA_WORKLOADS_LIST}}${WP_CONFIG_DEFINES_DELIM}${EXTRA_WORKLOADS_LIST_ESC}${WP_CONFIG_DEFINES_DELIM}g" \

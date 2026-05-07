@@ -128,7 +128,10 @@ $config_path = pg_run_boot_stage([
 //
 // Empty object is the no-op case — components that don't declare
 // bench_env see no behavioural change.
-$bench_env_raw = '{{BENCH_ENV_JSON}}';
+$bench_env_raw = base64_decode('{{BENCH_ENV_JSON_B64}}', true);
+if (!is_string($bench_env_raw)) {
+    $bench_env_raw = '{}';
+}
 $bench_env = json_decode($bench_env_raw, true);
 if (is_array($bench_env)) {
     foreach ($bench_env as $name => $value) {
