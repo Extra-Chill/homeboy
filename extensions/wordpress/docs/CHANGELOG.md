@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.42.0] - 2026-05-07
+
+### Added
+- add WordPress request profiler helper
+
 ## [2.41.4] - 2026-05-06
 
 ### Fixed
