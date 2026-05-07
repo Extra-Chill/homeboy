@@ -548,10 +548,14 @@ function pg_bench_run_wp_cli_step(array $step) {
         'return' => 'all',
         'parse' => false,
     ]);
-    if (is_object($result) && isset($result->return_code) && (int) $result->return_code !== 0) {
-        throw new RuntimeException("wp-cli step failed with exit code {$result->return_code}: {$result->stderr}");
-    }
     $stdout = is_object($result) && isset($result->stdout) ? (string) $result->stdout : '';
+    $stderr = is_object($result) && isset($result->stderr) ? (string) $result->stderr : '';
+    if (is_object($result) && isset($result->return_code) && (int) $result->return_code !== 0) {
+        throw new RuntimeException(
+            "wp-cli step failed with exit code {$result->return_code}: "
+            . pg_bench_format_wp_cli_failure($stdout, $stderr)
+        );
+    }
     if ($parse === 'json' && $stdout !== '') {
         $decoded = json_decode($stdout, true);
         if (json_last_error() !== JSON_ERROR_NONE) {
@@ -561,6 +565,64 @@ function pg_bench_run_wp_cli_step(array $step) {
     }
 
     return ['metadata' => ['stdout' => $stdout]];
+}
+
+function pg_bench_format_wp_cli_failure(string $stdout, string $stderr): string {
+    $parts = [];
+    $stderr = trim($stderr);
+    if ($stderr !== '') {
+        $parts[] = 'stderr=' . pg_bench_excerpt($stderr);
+    }
+
+    $stdout = trim($stdout);
+    if ($stdout !== '') {
+        $decoded = json_decode($stdout, true);
+        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            $summary = pg_bench_summarize_wp_cli_json_failure($decoded);
+            if ($summary !== '') {
+                $parts[] = 'json=' . $summary;
+            }
+        }
+        $parts[] = 'stdout=' . pg_bench_excerpt($stdout);
+    }
+
+    return $parts ? implode('; ', $parts) : 'no stdout/stderr captured';
+}
+
+function pg_bench_summarize_wp_cli_json_failure(array $payload): string {
+    $summary = [];
+
+    if (isset($payload['quality']) && is_array($payload['quality'])) {
+        $quality = $payload['quality'];
+        if (array_key_exists('pass', $quality)) {
+            $summary[] = 'quality.pass=' . ($quality['pass'] ? 'true' : 'false');
+        }
+        if (!empty($quality['failure_reasons']) && is_array($quality['failure_reasons'])) {
+            $summary[] = 'failure_reasons=' . implode(',', array_map('strval', $quality['failure_reasons']));
+        }
+        foreach (['fallback_count', 'invalid_block_count', 'content_loss_count'] as $key) {
+            if (isset($quality[$key]) && is_scalar($quality[$key])) {
+                $summary[] = $key . '=' . (string) $quality[$key];
+            }
+        }
+    }
+
+    if (isset($payload['theme_slug']) && is_scalar($payload['theme_slug'])) {
+        $summary[] = 'theme_slug=' . (string) $payload['theme_slug'];
+    }
+
+    return implode(', ', $summary);
+}
+
+function pg_bench_excerpt(string $value, int $limit = 1200): string {
+    $value = preg_replace('/\s+/', ' ', trim($value));
+    if (!is_string($value)) {
+        return '';
+    }
+    if (strlen($value) <= $limit) {
+        return $value;
+    }
+    return substr($value, 0, $limit) . '...';
 }
 
 function pg_bench_run_ability_step(array $step) {
