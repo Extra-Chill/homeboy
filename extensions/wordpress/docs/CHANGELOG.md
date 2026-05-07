@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.3] - 2026-05-07
+
+### Fixed
+- pin Playground CLI dependency
+
 ## [2.44.2] - 2026-05-07
 
 ### Fixed
