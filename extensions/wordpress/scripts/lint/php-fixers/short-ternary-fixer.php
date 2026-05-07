@@ -134,6 +134,15 @@ function expand_short_ternary($emitted, $tokens, $colon_idx, $count) {
         $ws_before_qmark = ' ';
     }
 
+    // Skip expansion when the left expression contains a function or method call.
+    // Naively duplicating `f($x) ?: 'd'` into `f($x) ? f($x) : 'd'` double-invokes
+    // the call, which is a behavior regression (extra I/O, side effects, cost).
+    // Variables, property chains, and array access (`$a`, `$a->b`, `$a[$k]`) are
+    // safe to duplicate — they have no `(`. Calls do. See homeboy-extensions#458.
+    if (false !== strpos($left_expr, '(')) {
+        return null;
+    }
+
     // Build expanded ternary: prefix + left_expr + ? left_expr : + rest
     $expanded = $prefix . $left_expr . $ws_before_qmark . '? ' . $left_expr . ' :' . $ws_after_colon;
 
