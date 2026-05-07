@@ -128,7 +128,11 @@ Supported step types:
   command surface.
 - `wp-cli` with `command`: runs through `WP_CLI::runcommand()` when WP-CLI is
   available in the Playground PHP process. The command may include or omit the
-  leading `wp` token.
+  leading `wp` token. The full bundled WP-CLI command surface is available —
+  `wp plugin install --activate`, `wp theme install`, `wp option update`,
+  `wp post create`, `wp eval`, etc. — the same set of built-in commands a
+  user gets from the standalone `wp` phar. Use this when a workload needs to
+  prepare WordPress.org plugin or theme dependencies before subsequent steps.
 
 Workloads and steps may return `{ "metrics", "artifacts", "metadata" }`.
 Numeric metrics are aggregated across measured iterations with the same

@@ -331,6 +331,76 @@ function pg_run_deferred_wordpress_hook_callbacks(array $deferred, array $args =
 // ---------------------------------------------------------------------------
 
 /**
+ * Pre-load WP-CLI's namespaced function files before composer autoload-files run.
+ *
+ * `wp-cli/wp-cli`'s composer autoload is `psr-0` for the `WP_CLI\` namespace
+ * plus a small classmap for `WP_CLI` and `WP_CLI_Command`. The namespaced
+ * function files (`php/utils.php`, `php/dispatcher.php`) are NOT autoloaded
+ * because PSR-0/PSR-4 only resolve classes, not standalone function files.
+ *
+ * That's normally fine — the standard `wp` phar boot path runs
+ * `WP_CLI\bootstrap()` which manually requires those files via the
+ * `LoadUtilityFunctions` and `LoadDispatcher` bootstrap steps.
+ *
+ * It breaks here because the bundled WP-CLI command packages
+ * (`wp-cli/extension-command` for `wp plugin`, `wp-cli/entity-command` for
+ * `wp post`/`wp option`, etc.) register their commands eagerly via composer
+ * autoload `files` entries. Each entry calls `WP_CLI::add_command()` which
+ * walks the dispatcher and ultimately calls `WP_CLI\Utils\load_command()`
+ * inside `RootCommand::find_subcommand()`. If `php/utils.php` hasn't been
+ * required yet, that namespaced function doesn't exist and composer's
+ * autoload-files phase fatals with:
+ *
+ *   Call to undefined function WP_CLI\Utils\load_command()
+ *
+ * Pre-requiring the two function-namespace files before `vendor/autoload.php`
+ * runs makes the bundled command packages' eager registration succeed, so
+ * configured workload `wp-cli` steps can use `wp plugin install --activate`,
+ * `wp theme install`, `wp option update`, etc — the full bundled command
+ * surface a `wp` user gets from the standalone phar (homeboy-extensions#454).
+ *
+ * Idempotent: each file is gated by a `function_exists` check on a function
+ * the file declares, so calling this twice (or before plugins that
+ * pre-loaded WP-CLI utilities themselves) is safe.
+ */
+function pg_preload_wp_cli_namespaced_functions(): void {
+    $wp_cli_root = '/homeboy-extension/vendor/wp-cli/wp-cli';
+
+    // WP_CLI_ROOT is referenced inside php/utils.php (load_command() resolves
+    // command files relative to it). Define it before requiring utils.php so
+    // the bundled command packages' eager registration during composer
+    // autoload-files can dispatch through the runner without fataling on the
+    // missing constant.
+    if (!defined('WP_CLI_ROOT')) {
+        define('WP_CLI_ROOT', $wp_cli_root);
+    }
+    if (!defined('WP_CLI_VENDOR_DIR')) {
+        define('WP_CLI_VENDOR_DIR', '/homeboy-extension/vendor');
+    }
+    if (!defined('WP_CLI_VERSION') && is_readable($wp_cli_root . '/VERSION')) {
+        define('WP_CLI_VERSION', trim(file_get_contents($wp_cli_root . '/VERSION')));
+    }
+    if (!defined('WP_CLI_START_MICROTIME')) {
+        define('WP_CLI_START_MICROTIME', microtime(true));
+    }
+
+    if (!function_exists('WP_CLI\\Utils\\parse_str_to_argv') && is_readable($wp_cli_root . '/php/utils.php')) {
+        require_once $wp_cli_root . '/php/utils.php';
+    }
+    if (!function_exists('WP_CLI\\Dispatcher\\get_path') && is_readable($wp_cli_root . '/php/dispatcher.php')) {
+        require_once $wp_cli_root . '/php/dispatcher.php';
+    }
+    // utils-wp.php declares additional WP-aware functions in the WP_CLI\Utils
+    // namespace (`get_upgrader`, `wp_clean_update_cache`, etc.) used by
+    // `wp-cli/extension-command` for plugin/theme install + update commands.
+    // Without this, `wp plugin install` fatals on `get_upgrader()` after the
+    // dispatcher already accepted the command.
+    if (!function_exists('WP_CLI\\Utils\\get_upgrader') && is_readable($wp_cli_root . '/php/utils-wp.php')) {
+        require_once $wp_cli_root . '/php/utils-wp.php';
+    }
+}
+
+/**
  * Run the `boot` stage: render wp-tests-config.php and load composer autoload.
  *
  * Required $cfg keys: (none)
@@ -386,6 +456,7 @@ function pg_run_boot_stage(array $cfg = []): ?string {
                 }
             }
 
+            pg_preload_wp_cli_namespaced_functions();
             require_once '/homeboy-extension/vendor/autoload.php';
             pg_stage_ok('boot');
             return null;
@@ -431,6 +502,7 @@ CONFIG;
 
         file_put_contents($config_path, $config);
 
+        pg_preload_wp_cli_namespaced_functions();
         require_once '/homeboy-extension/vendor/autoload.php';
         pg_stage_ok('boot');
         return $config_path;
