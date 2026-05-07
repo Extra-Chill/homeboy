@@ -5,10 +5,12 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./playground-readiness": "./lib/playground-readiness.js",
     "./request-profiler": "./lib/request-profiler.js"
   },
   "scripts": {
     "lint:js": "eslint --ext .js,.jsx,.ts,.tsx",
+    "test:playground-readiness": "node tests/playground-readiness-smoke.js",
     "test:request-profiler": "node tests/request-profiler-smoke.js"
   },
   "devDependencies": {

@@ -380,6 +380,107 @@ It can contain credentials or auto-login URLs; runners must not print it to logs
 or publish it with benchmark results without redacting the fields listed in
 `artifactPolicy.secretFields`.
 
+## Playground HTTP readiness
+
+`lib/playground-readiness.js` exports a Node helper for callers that boot a
+`wp-playground-cli` HTTP server (or any WordPress origin) and need to wait
+until it is actually serving traffic before driving Playwright, REST calls,
+or load tests.
+
+The helper is CommonJS, has no external dependencies, and lives alongside
+`lib/request-profiler.js` because the readiness paths and Playground quirks
+are WordPress-domain knowledge.
+
+### `waitForWordPressReady(baseUrl, options)`
+
+Polls a single readiness path until it returns a ready status, then resolves
+with `{ status: 'ready', url, http_status, status_history, redirect_history,
+elapsedMs }`. Resolves with `{ status: 'process_exited', ... }` if the
+optional `playgroundProcess` exits before ready. Throws on timeout with a
+populated `.diagnostics` property.
+
+Options:
+
+| Option | Default | Purpose |
+|---|---|---|
+| `path` | `/wp-json/` | Path to poll. Defaults to `/wp-json/` because `wp-playground-cli` returns `302 Location: /` on `/`, which hangs Node's `fetch()` in a self-redirect loop. The helper uses `http.request()` directly and never follows redirects. |
+| `readyStatus` | `200` | Single status or array of statuses considered ready. Strict by default; 3xx is not treated as ready. |
+| `intervalMs` | `1000` | Delay between poll attempts. |
+| `requestTimeoutMs` | `5000` | Per-request abort. |
+| `timeoutMs` | `120000` | Total budget before throwing. |
+| `playgroundProcess` | `null` | Optional `ChildProcess`-like with `.exitCode` / `.signalCode`. If it exits before ready, the helper resolves with `process_exited` instead of throwing. |
+| `playgroundOutput` | `null` | Optional `() => string` returning captured stdout/stderr. The last 4000 chars are attached to the timeout artifact for debugging. |
+| `onEvent` | `null` | Optional `(source, event, data) => void`. Emits `http.first_response`, `http.status`, `http.redirect`, `http.ready`, `http.timeout`, `process.exited`. |
+
+### `probeWordPressDiagnostics(baseUrl, options)`
+
+One-shot diagnostic probe over a fixed set of WordPress paths. Returns
+`{ origin, paths: [{ path, url, status, contentType, redirectLocation,
+bodyPreview, elapsedMs, error?, tcp? }, ...] }`. Used internally to
+populate the timeout artifact, but exposed for callers that want a
+standalone snapshot. Defaults to probing
+`['/', '/wp-login.php', '/wp-json/', '/wp-admin/']`. Manual redirect
+handling — never follows `Location`.
+
+### Why the default path is `/wp-json/`, not `/`
+
+The `wp-playground-cli` HTTP server responds to `/` with `302 Location:
+/`, a self-redirect. Node's built-in `fetch()` treats `Location` as
+follow-by-default, so a naive `fetch(baseUrl)` against a Playground
+server hangs until the abort signal fires. Polling `/wp-json/` instead
+returns a clean `200 application/json` once WordPress has finished
+booting, with no redirect involved. The helper also uses
+`http.request()` rather than `fetch()` so even the `/` poll path stays
+single-attempt.
+
+### Timeout artifact shape
+
+```json
+{
+  "url": "http://127.0.0.1:9400/wp-json/",
+  "timeoutMs": 120000,
+  "attempts": 17,
+  "lastError": null,
+  "recentAttempts": [
+    { "at_ms": 1010, "status": 503 },
+    { "at_ms": 2020, "status": 503 }
+  ],
+  "redirect_history": [],
+  "status_history": [{ "status": 503, "count": 17 }],
+  "routes": {
+    "origin": "http://127.0.0.1:9400",
+    "paths": [
+      { "path": "/", "url": "http://127.0.0.1:9400/", "status": 302, "redirectLocation": "/", "bodyPreview": "...", "elapsedMs": 12 }
+    ]
+  },
+  "tcp": { "open": true },
+  "playground": { "pid": 12345, "exitCode": null, "signalCode": null },
+  "playgroundOutputTail": "...last 4000 chars of captured stdout/stderr..."
+}
+```
+
+### Usage
+
+```js
+const { waitForWordPressReady } = require('homeboy-extension-wordpress/playground-readiness');
+
+const child = spawnPlaygroundCli({ port: 9400 });
+const captured = [];
+child.stdout.on('data', (chunk) => captured.push(chunk));
+child.stderr.on('data', (chunk) => captured.push(chunk));
+
+const result = await waitForWordPressReady('http://127.0.0.1:9400', {
+  playgroundProcess: child,
+  playgroundOutput: () => Buffer.concat(captured).toString('utf8'),
+  timeoutMs: 60000,
+});
+
+if (result.status === 'process_exited') {
+  throw new Error(`Playground exited before ready: code=${result.playground.exitCode}`);
+}
+// result.status === 'ready' — drive Playwright/REST against result.url
+```
+
 ## Known gaps
 
 - **WP version defaults to 6.9.** Override `playground_wordpress_version` to pass

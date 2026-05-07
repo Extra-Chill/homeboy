@@ -335,6 +335,7 @@ wordpress/
 │   ├── TESTING.md            # Canonical test/lint/bench reference
 │   ├── PLAYGROUND_DROPIN.md  # db.php coexistence mechanism
 │   └── commands/
+├── lib/                      # Node helpers: request profiler, Playground HTTP readiness
 ├── scripts/
 │   ├── audit/                # Detector setup + WP test smells
 │   ├── bench/                # Playground bench runner + workload smokes
