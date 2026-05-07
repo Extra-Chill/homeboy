@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.7] - 2026-05-07
+
+### Fixed
+- seed WP-CLI prompt config
+
 ## [2.44.6] - 2026-05-07
 
 ### Fixed
