@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.43.1] - 2026-05-07
+
+### Fixed
+- allow Playground login self-redirect readiness
+
 ## [2.43.0] - 2026-05-07
 
 ### Added
