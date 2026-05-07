@@ -394,8 +394,8 @@ are WordPress-domain knowledge.
 ### `waitForWordPressReady(baseUrl, options)`
 
 Polls a single readiness path until it returns a ready status, then resolves
-with `{ status: 'ready', url, http_status, status_history, redirect_history,
-elapsedMs }`. Resolves with `{ status: 'process_exited', ... }` if the
+with `{ status: 'ready', url, http_status, ready_reason, status_history,
+redirect_history, elapsedMs }`. Resolves with `{ status: 'process_exited', ... }` if the
 optional `playgroundProcess` exits before ready. Throws on timeout with a
 populated `.diagnostics` property.
 
@@ -405,6 +405,7 @@ Options:
 |---|---|---|
 | `path` | `/wp-json/` | Path to poll. Defaults to `/wp-json/` because `wp-playground-cli` returns `302 Location: /` on `/`, which hangs Node's `fetch()` in a self-redirect loop. The helper uses `http.request()` directly and never follows redirects. |
 | `readyStatus` | `200` | Single status or array of statuses considered ready. Strict by default; 3xx is not treated as ready. |
+| `readyOnSelfRedirect` | `false` | Treat a same-origin, same-path redirect as ready. Use this only for browser-driving flows such as `wp-playground-cli server --login`, where the CLI wrapper may return `302 Location: <same-path>` for every raw HTTP probe while Playwright browser navigation can still load the site. Keep this off for REST/load-test callers that require a real `200`. |
 | `intervalMs` | `1000` | Delay between poll attempts. |
 | `requestTimeoutMs` | `5000` | Per-request abort. |
 | `timeoutMs` | `120000` | Total budget before throwing. |
@@ -432,6 +433,13 @@ returns a clean `200 application/json` once WordPress has finished
 booting, with no redirect involved. The helper also uses
 `http.request()` rather than `fetch()` so even the `/` poll path stays
 single-attempt.
+
+When `wp-playground-cli server --login` is used, the CLI login wrapper may
+also return a same-path redirect for `/wp-json/` and other raw HTTP probes.
+Browser-based flows can pass `readyOnSelfRedirect: true` to treat that shape
+as server readiness before driving Playwright. The option is explicit so REST
+and load-test flows do not mistake a login wrapper redirect for a usable API
+response.
 
 ### Timeout artifact shape
 

@@ -40,6 +40,19 @@ function isReadyStatus(status, readySet) {
 	return readySet.has(Number(status));
 }
 
+function isSelfRedirect(url, location) {
+	if (typeof location !== 'string' || location === '') {
+		return false;
+	}
+	try {
+		const current = new URL(url);
+		const target = new URL(location, current);
+		return target.origin === current.origin && target.pathname === current.pathname && target.search === current.search;
+	} catch (_) {
+		return false;
+	}
+}
+
 function recordHttpStatus(history, status) {
 	const normalized = Number(status);
 	const last = history.at(-1);
@@ -169,6 +182,7 @@ async function waitForWordPressReady(baseUrl, options = {}) {
 	const intervalMs = Number.isFinite(options.intervalMs) ? options.intervalMs : DEFAULT_INTERVAL_MS;
 	const requestTimeoutMs = Number.isFinite(options.requestTimeoutMs) ? options.requestTimeoutMs : DEFAULT_REQUEST_TIMEOUT_MS;
 	const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
+	const readyOnSelfRedirect = options.readyOnSelfRedirect === true;
 	const onEvent = options.onEvent;
 	const child = options.playgroundProcess || null;
 	const playgroundOutput = typeof options.playgroundOutput === 'function' ? options.playgroundOutput : null;
@@ -222,17 +236,21 @@ async function waitForWordPressReady(baseUrl, options = {}) {
 			lastStatus = status;
 
 			const location = probe.headers && probe.headers.location;
+			const selfRedirect = isSelfRedirect(url, location);
 			if (status >= 300 && status < 400 && typeof location === 'string' && location !== '') {
-				redirectHistory.push({ from: url, status, location });
+				redirectHistory.push({ from: url, status, location, self: selfRedirect });
 				attemptRecord.redirect_location = location;
-				await emit(onEvent, 'http', 'http.redirect', { url, status, location });
+				attemptRecord.redirect_self = selfRedirect;
+				await emit(onEvent, 'http', 'http.redirect', { url, status, location, self: selfRedirect });
 			}
 
-			if (isReadyStatus(status, readySet)) {
+			if (isReadyStatus(status, readySet) || (readyOnSelfRedirect && selfRedirect)) {
 				const elapsedMs = Date.now() - startedAt;
+				const readyReason = isReadyStatus(status, readySet) ? 'status' : 'self_redirect';
 				await emit(onEvent, 'http', 'http.ready', {
 					url,
 					status,
+					ready_reason: readyReason,
 					elapsedMs,
 					status_history: statusHistory,
 					redirect_history: redirectHistory,
@@ -241,6 +259,7 @@ async function waitForWordPressReady(baseUrl, options = {}) {
 					status: 'ready',
 					url,
 					http_status: status,
+					ready_reason: readyReason,
 					status_history: statusHistory,
 					redirect_history: redirectHistory,
 					elapsedMs,

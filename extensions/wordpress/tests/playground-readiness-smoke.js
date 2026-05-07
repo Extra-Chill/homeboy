@@ -96,6 +96,59 @@ async function scenarioAlways503() {
 	}
 }
 
+async function scenarioSelfRedirectReadyOptIn() {
+	const { server, baseUrl } = await startServer((req, res) => {
+		res.writeHead(302, { Location: req.url, 'Content-Type': 'text/plain' });
+		res.end('playground login redirect');
+	});
+	try {
+		const strictTimeout = await waitForWordPressReady(baseUrl, {
+			intervalMs: 50,
+			requestTimeoutMs: 500,
+			timeoutMs: 250,
+		}).then(
+			() => false,
+			(err) => /Timed out waiting for/.test(err.message)
+		);
+		assert.equal(strictTimeout, true, 'same-path redirects must not be ready unless the caller opts in');
+
+		const result = await waitForWordPressReady(baseUrl, {
+			intervalMs: 50,
+			requestTimeoutMs: 500,
+			timeoutMs: 1000,
+			readyOnSelfRedirect: true,
+		});
+		assert.equal(result.status, 'ready');
+		assert.equal(result.http_status, 302);
+		assert.equal(result.ready_reason, 'self_redirect');
+		assert.equal(result.redirect_history.length, 1);
+		assert.equal(result.redirect_history[0].self, true);
+	} finally {
+		await closeServer(server);
+	}
+}
+
+async function scenarioDifferentRedirectStillNotReady() {
+	const { server, baseUrl } = await startServer((req, res) => {
+		res.writeHead(302, { Location: '/wp-login.php', 'Content-Type': 'text/plain' });
+		res.end('not same path');
+	});
+	try {
+		const timedOut = await waitForWordPressReady(baseUrl, {
+			intervalMs: 50,
+			requestTimeoutMs: 500,
+			timeoutMs: 250,
+			readyOnSelfRedirect: true,
+		}).then(
+			() => false,
+			(err) => /Timed out waiting for/.test(err.message)
+		);
+		assert.equal(timedOut, true, 'redirects to a different path are not readiness');
+	} finally {
+		await closeServer(server);
+	}
+}
+
 async function scenarioProcessExitsMidPoll() {
 	// Server returns 503 forever so readiness never succeeds.
 	const { server, baseUrl } = await startServer((req, res) => {
@@ -198,6 +251,8 @@ async function scenarioDiagnosticsStandalone() {
 (async () => {
 	await scenarioSelfRedirectButWpJsonReady();
 	await scenarioAlways503();
+	await scenarioSelfRedirectReadyOptIn();
+	await scenarioDifferentRedirectStillNotReady();
 	await scenarioProcessExitsMidPoll();
 	await scenarioDiagnosticsStandalone();
 	console.log('Playground readiness smoke passed.');
