@@ -1,82 +1,88 @@
 # Homeboy WordPress Extension
 
-Universal test and lint infrastructure for WordPress plugins and themes. Zero configuration required.
+Homeboy extension that gives WordPress plugins and themes a complete
+`test → lint → build → bench → trace → audit` pipeline with zero in-component
+configuration. PHPUnit runs inside [WordPress Playground][playground]
+(PHP-WASM + embedded SQLite) by default, so there is no host PHP, MySQL, or
+local WordPress install to manage.
 
-## Features
+[playground]: https://www.npmjs.com/package/@wp-playground/cli
 
-- **PHPUnit** with full WordPress bootstrap (SQLite or MySQL)
-- **PHPCS** with WordPress coding standards
-- **ESLint** with WordPress JavaScript standards
-- **Automatic text domain detection** from plugin/theme headers
-- **Test discovery** - just add test files to `tests/`
+## What this extension provides
 
-## Quick Start
+It registers the `wordpress` component kind with Homeboy core and wires up
+extension scripts for these verbs:
+
+| Homeboy verb | What it does | Entry script |
+|---|---|---|
+| `test` | PHPUnit inside Playground (default) or host-PHP smoke scripts | `scripts/test/test-runner.sh` |
+| `lint` | PHPCS + PHPStan (PHP) and ESLint (JS/TS) | `scripts/lint/lint-runner.sh` |
+| `build` | Production ZIP with composer `--no-dev`, asset build, syntax check | `scripts/build/build.sh` |
+| `bench` | Benchmark workloads inside Playground; optional browser handoff | `scripts/bench/bench-runner.sh` |
+| `trace` | Project-owned scenario traces | `scripts/trace/trace-runner.sh` |
+| `audit` | Detector rules over PHP for lifecycle / role tagging | `scripts/audit/setup-references.sh` + rules in `wordpress.json` |
+| `fingerprint` | File-shape fingerprinting for change detection | `scripts/fingerprint.sh` |
+| `refactor` | Auto-fix pass (PHPCBF + custom fixers) | `scripts/refactor.py` |
+| `crossref` | Cross-reference analysis across sources/tests | `scripts/test/crossref.php` |
+| `validate` | PHP syntax / PSR-4 / dependency validation | `scripts/validation/validate-syntax.sh` |
+| `format` | Post-write formatting | `scripts/format.sh` |
+
+It also declares a WordPress platform integration in `wordpress.json`:
+WP-CLI database query templates, default pinned files (`wp-config.php`,
+`.htaccess`, `robots.txt`), debug log paths, table groupings, and a discovery
+command that scans for `wp-config.php` to find sites.
+
+## Quick start
 
 ```bash
-# Test a plugin
-homeboy test extrachill-users
+# Run PHPUnit + lint for a single component
+homeboy test <component-id>
 
-# Lint a plugin
-homeboy lint extrachill-blog
+# Lint only (PHPCS + PHPStan + ESLint where applicable)
+homeboy lint <component-id>
 
-# Fix lint issues
-homeboy lint extrachill-blog --fix
+# Apply lint auto-fixes (PHPCBF + custom fixers)
+homeboy refactor <component-id>
 
-# Build for production
-homeboy build extrachill-shop
+# Production ZIP at <component>/build/<component-id>.zip
+homeboy build <component-id>
+
+# Benchmark configured workloads
+homeboy bench <component-id>
+
+# Run a scenario trace
+homeboy trace <component-id> --scenario <name>
+
+# Audit detector pass
+homeboy audit <component-id>
 ```
 
-## How It Works
+`<component-id>` matches the id Homeboy core uses for the component. Most
+verbs also accept a project id to fan out across all of its components.
 
-### Test Discovery
+## Test runner
 
-The extension automatically discovers tests when a `tests/` directory exists with PHP files:
+The default backend boots WordPress inside Playground, mounts the
+component under `/wordpress/wp-content/plugins/<slug>` (or themes path for
+themes), and runs PHPUnit in-process. No `bootstrap.php` or `phpunit.xml`
+in the component is required — and **shipping one is rejected** with a
+clear error. The extension owns bootstrap.
 
-```
-your-plugin/
-├── your-plugin.php
-├── inc/
-│   └── ...
-└── tests/
-    ├── test-feature-one.php    ← Discovered automatically
-    └── test-feature-two.php    ← Discovered automatically
-```
+A component needs:
 
-No `bootstrap.php` or `phpunit.xml` needed in your plugin - the extension provides everything.
+- `tests/` directory with PHPUnit tests (default discovery: `*Test.php`
+  suffix or `test-*` prefix, recursive).
+- A plugin header (`Plugin Name:`) or theme `style.css` with `Theme Name:`
+  — the runner detects which is which.
 
-### Linting
+The Playground runner emits a structured log at
+`<component>/.pg-test-result.txt` with `STAGE_BEGIN` / `STAGE_OK` /
+`STAGE_FAIL` / `STAGE_FATAL` / `NOTICE` markers across stages
+`boot → install → load_fixtures → load_deps → load_component → discover_tests
+→ load_tests → run_tests`. The bash runner parses these to classify
+failures.
 
-**PHP (PHPCS)**:
-- WordPress Coding Standards
-- Auto-detects text domain from `Text Domain:` header
-- Advisory: warns on issues, continues to tests
-
-**JavaScript (ESLint)**:
-- WordPress JavaScript Standards
-- Auto-detects text domain from plugin header
-- Skips if no JS/JSX/TS/TSX files found
-- Advisory: warns on issues, continues to tests
-
-### Build Process
-
-```
-homeboy build <component>
-    │
-    ├─ Run tests (while dev deps available)
-    │   ├─ PHPCS linting → Advisory
-    │   ├─ ESLint linting → Advisory
-    │   └─ PHPUnit tests → Blocks on failure
-    │
-    ├─ Install production dependencies
-    ├─ Build frontend assets (if package.json exists)
-    ├─ Copy files (respects .buildignore)
-    ├─ PHP syntax validation → Blocks on failure
-    └─ Create ZIP, restore dev deps
-```
-
-## Writing Tests
-
-Create test files in `tests/` that extend `WP_UnitTestCase`:
+### Writing tests
 
 ```php
 <?php
@@ -84,18 +90,9 @@ Create test files in `tests/` that extend `WP_UnitTestCase`:
 
 class Test_My_Feature extends WP_UnitTestCase {
 
-    public function test_something() {
-        $this->assertTrue( true );
-    }
-
-    public function test_user_creation() {
-        $user_id = $this->factory->user->create();
-        $this->assertIsInt( $user_id );
-    }
-
     public function test_post_creation() {
-        $post_id = $this->factory->post->create([
-            'post_title' => 'Test Post',
+        $post_id = self::factory()->post->create([
+            'post_title'  => 'Test Post',
             'post_status' => 'publish',
         ]);
         $this->assertEquals( 'Test Post', get_the_title( $post_id ) );
@@ -103,134 +100,300 @@ class Test_My_Feature extends WP_UnitTestCase {
 }
 ```
 
-### Available Test Factories
+Available factories from the WordPress test framework: `user`, `post`,
+`comment`, `term`, `category`, `tag`, `attachment`.
 
-The WordPress test framework provides factories for creating test data:
+### Host-smoke backend
 
-- `$this->factory->user` - Create users
-- `$this->factory->post` - Create posts
-- `$this->factory->comment` - Create comments
-- `$this->factory->term` - Create taxonomy terms
-- `$this->factory->category` - Create categories
-- `$this->factory->tag` - Create tags
-- `$this->factory->attachment` - Create attachments
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `HOMEBOY_SKIP_LINT` | Skip PHPCS and ESLint | `0` |
-| `HOMEBOY_SKIP_TESTS` | Skip PHPUnit tests | `0` |
-| `HOMEBOY_DEBUG` | Show debug output | `0` |
-
-### Test Backend
-
-The extension supports two test execution backends:
-
-| Backend | Description | Default |
-|---------|-------------|---------|
-| `playground` | PHPUnit inside WordPress Playground (PHP-WASM + SQLite) | Yes |
-| `host-smoke` / `host` | Standalone `tests/**/*-smoke.php` scripts under host PHP | No |
+Pure PHP smoke suites that don't need WordPress can opt out of Playground:
 
 ```bash
-# Switch a component to Playground backend
-homeboy component set my-plugin test_backend playground
-
-# Run standalone host PHP smoke scripts instead
-homeboy component set my-plugin test_backend host-smoke
+homeboy component set <component-id> test_backend host-smoke
 ```
 
-The Playground backend is the default. It boots a WordPress Playground
-instance, mounts the plugin, and runs PHPUnit inside PHP-WASM. No host PHP or
-MySQL is required.
+The host-smoke backend discovers `tests/**/*-smoke.php`, runs each script
+in its own host `php` process, emits `HOST_SMOKE_*` markers, and fails
+fast with the failing script name. It does not bootstrap WordPress.
 
-The host-smoke backend is for pure PHP smoke suites that do not need WordPress.
-It discovers `tests/**/*-smoke.php`, runs each file in its own host PHP process,
-and fails fast with the failing script name.
+### Runtime dependencies
 
-**Limitations (Phase 1):**
-- WordPress version is pinned to match the wp-phpunit package (currently 6.9.x).
-- Custom `db.php` drop-ins may conflict with Playground's built-in SQLite integration.
+If a plugin depends on other local plugins at runtime, declare them via
+`validation_dependencies`. They are mounted alongside the plugin under
+test and loaded during the `load_deps` bootstrap stage:
 
-### Database Options
+```json
+{
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "validation_dependencies": "data-machine, other-plugin"
+      }
+    }
+  }
+}
+```
 
-The extension supports MySQL or SQLite for tests. The default is **`auto`**: the
-test runner tries to connect to MySQL first (using explicit settings, then a
-`wp-config.php` discovered in the component's parent tree, then `root@127.0.0.1`
-with no password) and falls back to SQLite if none of those succeed.
+### `db.php` drop-ins
+
+Plugins that ship a `db.php` drop-in are supported automatically. The
+runner mounts `<plugin>/db.php` to `/wordpress/wp-content/db.php`;
+Playground's built-in SQLite mu-plugin detects it and steps aside. See
+[`docs/PLAYGROUND_DROPIN.md`](docs/PLAYGROUND_DROPIN.md) for the
+coexistence mechanism.
+
+For everything else about testing — debug markers, level overrides,
+phpunit.xml consumption, known gaps — see
+[`docs/TESTING.md`](docs/TESTING.md).
+
+## Lint runner
+
+Lint runs before PHPUnit, and a lint failure aborts the test run with
+exit code 1. Files are routed by extension:
+
+| Extensions | Steps |
+|---|---|
+| `.php` | `phpcs`, `phpstan` |
+| `.js` `.jsx` `.ts` `.tsx` | `eslint` |
+
+### PHPCS
+
+`phpcs.xml.dist` applies WordPress Coding Standards with PSR-4
+adjustments. Text domain is auto-detected from the plugin header. When
+PHPCS reports auto-fixable findings, the runner surfaces a CTA showing
+the exact `homeboy refactor` command to clean them up.
+
+### PHPStan
+
+`phpstan.neon.dist` runs at **level 7** with WordPress + WP-CLI +
+WooCommerce stubs. Level 7 unlocks argument-type flow analysis (catches
+`false` / `null` leaking into strict-typed callees). `missingType.*`
+identifiers are suppressed by default to keep the signal-to-noise ratio
+high. Tests are analyzed alongside source.
+
+Components with pre-existing findings can capture a baseline:
 
 ```bash
-# Auto (default): MySQL if reachable, otherwise SQLite
-homeboy test my-plugin
-
-# Force SQLite — useful on machines without a MySQL server
-homeboy test my-plugin --setting database_type=sqlite
-
-# Force MySQL — fails loudly if MySQL isn't reachable
-homeboy test my-plugin --setting database_type=mysql
+path/to/extension/vendor/bin/phpstan analyse \
+    --configuration=path/to/extension/phpstan.neon.dist \
+    --level=7 --memory-limit=2G \
+    --generate-baseline=phpstan-baseline.neon \
+    .
 ```
 
-Configure MySQL credentials with `homeboy component set <id> mysql_host ...`
-(also `mysql_user`, `mysql_password`, `mysql_database`). To make SQLite the
-default for a specific component, set it once:
+Commit `phpstan-baseline.neon` at the component root. The runner detects
+it and pulls it in via `includes:`. New code must not add new findings;
+delete the baseline to ratchet toward full cleanup.
+
+Knobs:
+
+- `HOMEBOY_PHPSTAN_LEVEL=8 homeboy test <component>` — bump one-off.
+- `HOMEBOY_SKIP_PHPSTAN=1` — critical-only check that still blocks
+  `function.notFound` / `class.notFound` (guaranteed runtime fatals).
+
+### Custom sniff: multi-line comment style (opt-in)
+
+`HomeboyWordPress.Commenting.MultiLineInlineComment` enforces
+[WP Inline Documentation Standards §5.2][wp-docs-5.2] — flags 2+ adjacent
+`//` lines that should be a `/* ... */` block, and `/**` blocks used for
+prose instead of declarations. Auto-fixable. Registered but off by default.
+Opt in by promoting the rule severity in your project ruleset, or run on
+demand:
 
 ```bash
-homeboy component set my-plugin database_type sqlite
+vendor/bin/phpcs --sniffs=HomeboyWordPress.Commenting.MultiLineInlineComment src/
 ```
 
-## Migration from Local Infrastructure
+[wp-docs-5.2]: https://developer.wordpress.org/coding-standards/inline-documentation-standards/php/#5-2-multi-line-comments
 
-If your plugin has local test infrastructure, the extension will warn and ignore it:
+### ESLint
 
-```
-⚠ Warning: Local bootstrap.php found and will be IGNORED
-  Location: /path/to/plugin/tests/bootstrap.php
-  Homeboy WordPress extension provides complete test infrastructure.
-  Consider removing: /path/to/plugin/tests/bootstrap.php
-```
+WordPress ESLint config. Skipped automatically when no JS/JSX/TS/TSX
+files exist in the component. Components must not ship local
+`.eslintrc` — the extension owns the standards.
 
-Files that can be safely removed after migration:
-- `tests/bootstrap.php`
-- `phpunit.xml` or `phpunit.xml.dist`
-- Local PHPCS/ESLint configs (if using extension standards)
+### Sanctioned suppressions
 
-## Extension Structure
+Prefer fixing real findings. When a finding is caused by a deliberately
+loose WordPress/runtime boundary, use a narrow suppression on the line
+immediately before the finding with a runtime-contract justification.
+See [`docs/TESTING.md`](docs/TESTING.md#sanctioned-lint-suppressions) for
+canonical examples (defensive public API guards, redirect-result reads,
+minimum-PHP runtime guards).
 
-```
-wordpress/
-├── scripts/
-│   ├── test/
-│   │   ├── test-runner.sh              # Main test router
-│   │   ├── test-runner-host-smoke.sh   # Host PHP smoke-script backend
-│   │   ├── test-runner-playground.sh   # Playground backend runner
-│   │   ├── generate-config.sh          # WordPress config generation
-│   │   ├── parse-test-results.sh       # Result parsing for homeboy core
-│   │   └── parse-test-failures.sh      # Failure parsing for homeboy core
-│   ├── build.sh            # Production build script
-│   ├── lint.sh             # Standalone linting
-│   └── generate-config.sh  # WordPress config generation
-├── tests/
-│   └── bootstrap.php       # Universal WordPress bootstrap
-├── phpunit.xml.dist        # PHPUnit configuration
-├── phpcs.xml.dist          # PHPCS configuration
-├── .eslintrc.json          # ESLint configuration
-├── composer.json           # PHP dependencies
-└── package.json            # Node dependencies (ESLint + @wp-playground/cli)
+## Build runner
+
+```text
+homeboy build <component>
+    │
+    ├─ Detect plugin/theme from headers (Plugin Name | Theme Name)
+    ├─ Extract version
+    ├─ Stage into .homeboy-build/  (avoids @wordpress/scripts build/ collision)
+    ├─ Install production deps   (composer --no-dev, npm ci if applicable)
+    ├─ Build frontend assets     (@wordpress/scripts when present)
+    ├─ Copy files                (rsync, respects .buildignore)
+    ├─ Validate build structure  (php -l, PSR-4)
+    ├─ ZIP → build/<component-id>.zip
+    └─ Restore dev dependencies
 ```
 
-## Blocking vs Advisory
+Pre-build validation runs `scripts/build/validate-build.sh`. PHP syntax
+errors and PSR-4 violations block the build; lint findings do not.
+
+## Bench runner
+
+All bench execution runs inside Playground, reusing the same shared
+bootstrap stages as the test runner (`scripts/lib/playground-bootstrap.php`).
+That shared boot path is the point: bench numbers only compare across
+runs if every run measured against the same `boot` and `install` code.
+
+Workloads are declared per component via the `playground_workloads`
+setting (see below). Each workload has steps (`{type: 'php', code|file}`
+or `{type: 'wp-cli', command}`) and returns `{metrics, artifacts,
+metadata}`.
+
+The browser bench target is a two-extension handoff: the WordPress
+extension prepares/describes the WordPress target by writing
+`${HOMEBOY_BENCH_SHARED_STATE}/browser-target.json`; a Node-side browser
+helper owns Playwright, browser metrics, screenshots, and browser
+artifacts. The raw target file is a handoff artifact and may contain
+credentials — runners must not publish it without redacting fields
+listed in `artifactPolicy.secretFields`. Full schema in
+[`docs/TESTING.md`](docs/TESTING.md#browser-bench-target-handoff).
+
+## Trace runner
+
+Project-owned scenarios live under one of:
+
+- `traces/<scenario>.trace.php`
+- `tests/traces/<scenario>.trace.php`
+- `scripts/trace/<scenario>.sh`
+
+Run with `homeboy trace <component-id> --scenario <name>`.
+
+## Audit runner
+
+`audit` applies the detector rule sets declared under the `audit` block
+of `wordpress.json` — lifecycle path globs, utility-suffix conventions,
+convention-exception globs, and convention tag globs (e.g. tagging
+`bootstrap.php` / `register-*.php` / `*-functions.php` as
+`wordpress:php-role:procedural-helper`). The extension's own smoke
+scripts under `tests/audit-*-smoke.sh` cover regressions in the rule set.
+
+## Component settings
+
+Configure per-component in the component's homeboy/component config under
+`extensions.wordpress.settings`. All settings have safe defaults.
+
+| Setting | Type | Default | Purpose |
+|---|---|---|---|
+| `test_backend` | string | `playground` | `playground` (default) or `host-smoke` / `host` for standalone smoke scripts |
+| `validation_dependencies` | string | `""` | Comma / newline / JSON list of local components to mount during PHPStan, autoload validation, and PHPUnit |
+| `user` | string | `""` | WP-CLI user (email/login/ID); appended as `--user` when set |
+| `wp_config_defines` | object | `{}` | `CONSTANT_NAME => value` map appended to Playground `wp-tests-config.php`; PHP type preserved via `var_export` |
+| `bench_env` | object | `{}` | `NAME => value` env vars forwarded into Playground PHP-WASM (workloads/fixtures read via `getenv()`) |
+| `playground_blueprint` | object | `{}` | Blueprint JSON passed to `wp-playground-cli --blueprint` for cold-boot scenarios |
+| `playground_workloads` | array | `[]` | Declared bench workloads run after bootstrap, blueprint, deps, and component load |
+| `bench_site_mode` | string | `fresh` | `fresh` runs `wp-phpunit` install; `installed` mounts a persisted site under `HOMEBOY_BENCH_SHARED_STATE` |
+| `bench_browser_target` | object | `{}` | Browser bench target descriptor (see Bench runner above) |
+| `playground_wordpress_install_mode` | string | `""` | Pass-through for `wp-playground-cli --wordpress-install-mode` |
+
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `HOMEBOY_DEBUG=1` | Verbose runner diagnostics |
+| `HOMEBOY_SKIP_LINT=1` | Skip PHPCS / ESLint (does not skip PHPStan) |
+| `HOMEBOY_SKIP_TESTS=1` | Skip PHPUnit |
+| `HOMEBOY_SKIP_PHPSTAN=1` | Critical-only PHPStan (still blocks runtime-fatal identifiers) |
+| `HOMEBOY_PHPSTAN_LEVEL=N` | One-off PHPStan level override |
+| `HOMEBOY_FIX_ONLY=1` | Lint runner fix-only mode (set automatically by `homeboy refactor`) |
+| `HOMEBOY_SUMMARY_MODE=1` | Compact summary output |
+| `HOMEBOY_STEP=phpcs` / `HOMEBOY_SKIP=eslint` | Filter lint steps |
+
+## Blocking vs advisory
 
 | Check | Behavior |
-|-------|----------|
-| PHPCS (PHP linting) | Advisory - warns, continues |
-| ESLint (JS linting) | Advisory - warns, continues |
-| PHPUnit (tests) | **Blocks** - fails build on error |
-| PHP syntax (`php -l`) | **Blocks** - fails build on error |
+|---|---|
+| PHPCS | **Blocks** the test run (lint-before-tests gate) |
+| PHPStan (level 7) | **Blocks** |
+| ESLint | **Blocks** when JS/TS files are present |
+| PHPUnit (Playground or host-smoke) | **Blocks** |
+| `php -l` syntax check (build) | **Blocks** |
+| PSR-4 validation (build) | **Blocks** |
+| Audit detector findings | Advisory by default (depends on rule severity) |
+
+## Repository layout
+
+```text
+wordpress/
+├── HomeboyWordPress/         # Custom PHPCS sniff(s) + ruleset
+│   ├── Sniffs/
+│   ├── Tests/
+│   └── ruleset.xml
+├── docs/
+│   ├── CHANGELOG.md
+│   ├── TESTING.md            # Canonical test/lint/bench reference
+│   ├── PLAYGROUND_DROPIN.md  # db.php coexistence mechanism
+│   └── commands/
+├── scripts/
+│   ├── audit/                # Detector setup + WP test smells
+│   ├── bench/                # Playground bench runner + workload smokes
+│   ├── build/                # build.sh, validate-build.sh, validate-psr4.sh
+│   ├── env/detect.sh         # component_env detector
+│   ├── lib/                  # Shared helpers (playground bootstrap, etc.)
+│   ├── lint/                 # lint-runner.sh, eslint-runner.sh, phpstan-runner.sh
+│   ├── test/                 # test-runner*.sh, playground-runner.php, parsers, smokes
+│   ├── trace/                # trace-runner.sh
+│   ├── validation/           # syntax / PSR-4 / dependency validators
+│   ├── fingerprint.sh
+│   ├── format.sh
+│   └── refactor.py
+├── stubs/
+│   └── wordpress-api-overrides.stub.php
+├── tests/                    # Extension's own smoke tests (NOT plugin tests)
+├── composer.json             # PHP toolchain (PHPUnit 9, PHPCS, PHPStan 2, wp-phpunit, etc.)
+├── package.json              # Node toolchain (@wp-playground/cli, @wordpress/eslint-plugin, eslint)
+├── homeboy.json              # Self-checks (lint + smoke matrix)
+├── phpcs.xml.dist
+├── phpstan.neon.dist
+├── phpunit.xml.dist
+└── wordpress.json            # Extension manifest: verbs, settings, platform integration
+```
 
 ## Requirements
 
-- PHP 8.1+
-- Node.js 18+ (for ESLint)
-- Composer (for PHP dependencies)
+- **bash 4.0+** (macOS users: `brew install bash`; system bash 3.2 is rejected at runtime)
+- **PHP** — host PHP only required for the `host-smoke` backend, lint, build, and audit verbs. PHPUnit itself runs inside Playground (PHP-WASM)
+- **Node.js 18.12+** (Playground CLI + ESLint)
+- **Composer** (PHP toolchain install)
+
+PHP toolchain pins (from `composer.json`): PHPUnit `^9.0`,
+yoast/phpunit-polyfills `^3.0`, squizlabs/php_codesniffer `^3.10`,
+wp-coding-standards/wpcs `^3.1`, phpstan/phpstan `^2.0`,
+szepeviktor/phpstan-wordpress `^2.0`, wp-phpunit/wp-phpunit `^6.8`.
+
+## Migration from local infrastructure
+
+If a component carries its own bootstrap or PHPUnit config, the runner
+warns and ignores it:
+
+```text
+⚠ Warning: Local bootstrap.php found and will be IGNORED
+  Location: /path/to/plugin/tests/bootstrap.php
+  Homeboy WordPress extension provides complete test infrastructure.
+```
+
+Files safe to remove after migration:
+
+- `tests/bootstrap.php`
+- `phpunit.xml` / `phpunit.xml.dist`
+- Local `phpcs.xml`, `phpstan.neon`, `.eslintrc*` (the extension owns these)
+
+The one exception is `phpstan-baseline.neon` — components may keep one
+at the root to grandfather pre-existing findings (see PHPStan above).
+
+## Further reading
+
+- [`docs/TESTING.md`](docs/TESTING.md) — canonical test/lint/bench reference, debug markers, sanctioned suppressions, browser-target schema, known gaps
+- [`docs/PLAYGROUND_DROPIN.md`](docs/PLAYGROUND_DROPIN.md) — `db.php` coexistence with Playground SQLite
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — release history
