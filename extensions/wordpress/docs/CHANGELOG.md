@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.2] - 2026-05-07
+
+### Fixed
+- give workload wp-cli steps the bundled WP-CLI command surface
+
 ## [2.44.1] - 2026-05-07
 
 ### Fixed
