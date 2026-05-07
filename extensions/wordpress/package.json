@@ -6,12 +6,14 @@
   "exports": {
     ".": "./index.js",
     "./playground-readiness": "./lib/playground-readiness.js",
-    "./request-profiler": "./lib/request-profiler.js"
+    "./request-profiler": "./lib/request-profiler.js",
+    "./timing-correlator": "./lib/timing-correlator.js"
   },
   "scripts": {
     "lint:js": "eslint --ext .js,.jsx,.ts,.tsx",
     "test:playground-readiness": "node tests/playground-readiness-smoke.js",
-    "test:request-profiler": "node tests/request-profiler-smoke.js"
+    "test:request-profiler": "node tests/request-profiler-smoke.js",
+    "test:timing-correlator": "node tests/timing-correlator-smoke.js"
   },
   "devDependencies": {
     "@wp-playground/cli": "^3.1.20",

@@ -11,7 +11,7 @@
     "lint": [
       "jq empty wordpress.json",
       "bash -n scripts/test/test-runner.sh scripts/test/test-runner-playground.sh scripts/test/test-runner-host-smoke.sh scripts/lib/playground-process-cleanup.sh scripts/test/host-smoke-runner-smoke.sh scripts/test/test-runner-file-routing-smoke.sh scripts/test/parse-test-failures-sidecar-smoke.sh scripts/test/playground-process-cleanup-smoke.sh scripts/trace/trace-runner.sh scripts/trace/trace-runner-smoke.sh scripts/lint/wordpress-lint-role-smoke.sh scripts/lint/vendor-prefixed-exclusion-smoke.sh scripts/lint/eslint-no-files-smoke.sh tests/audit-detector-config-smoke.sh tests/audit-dead-guard-fallback-smoke.sh",
-      "node --check index.js lib/request-profiler.js lib/playground-readiness.js tests/request-profiler-smoke.js tests/playground-readiness-smoke.js"
+      "node --check index.js lib/request-profiler.js lib/playground-readiness.js lib/timing-correlator.js tests/request-profiler-smoke.js tests/playground-readiness-smoke.js tests/timing-correlator-smoke.js"
     ],
     "test": [
       "bash scripts/test/host-smoke-runner-smoke.sh",
@@ -27,7 +27,8 @@
       "bash tests/audit-detector-config-smoke.sh",
       "bash tests/audit-dead-guard-fallback-smoke.sh",
       "node tests/request-profiler-smoke.js",
-      "node tests/playground-readiness-smoke.js"
+      "node tests/playground-readiness-smoke.js",
+      "node tests/timing-correlator-smoke.js"
     ]
   }
 }
