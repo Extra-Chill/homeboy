@@ -496,26 +496,10 @@ function pg_run_boot_stage(array $cfg = []): ?string {
         }
 
         $config_path = '/tmp/wp-tests-config.php';
-        $config = <<<'CONFIG'
-<?php
-$table_prefix = 'wptests_';
-define('DB_NAME', ':memory:');
-define('DB_USER', 'root');
-define('DB_PASSWORD', '');
-define('DB_HOST', 'localhost');
-define('DB_CHARSET', 'utf8');
-define('WP_TESTS_DOMAIN', 'example.org');
-define('WP_TESTS_EMAIL', 'admin@example.org');
-define('WP_TESTS_TITLE', 'Test Blog');
-define('WP_PHP_BINARY', 'php');
-define('ABSPATH', '/wordpress/');
-define('FS_CHMOD_FILE', 0644);
-define('FS_CHMOD_DIR', 0755);
-define('FS_METHOD', 'direct');
-CONFIG;
+        $config = "<?php\n";
 
         if (!empty($extra_defines) && is_array($extra_defines)) {
-            $config .= "\n\n// Component-declared wp_config_defines.\n";
+            $config .= "\n// Component-declared wp_config_defines.\n";
             foreach ($extra_defines as $name => $value) {
                 if (!is_string($name) || !preg_match('/^[A-Z_][A-Z0-9_]*$/i', $name)) {
                     pg_log("NOTICE: skipping invalid wp_config_defines key: " . var_export($name, true));
@@ -532,6 +516,23 @@ CONFIG;
                 );
             }
         }
+
+        $config .= <<<'CONFIG'
+$table_prefix = 'wptests_';
+define('DB_NAME', ':memory:');
+define('DB_USER', 'root');
+define('DB_PASSWORD', '');
+define('DB_HOST', 'localhost');
+define('DB_CHARSET', 'utf8');
+define('WP_TESTS_DOMAIN', 'example.org');
+define('WP_TESTS_EMAIL', 'admin@example.org');
+define('WP_TESTS_TITLE', 'Test Blog');
+define('WP_PHP_BINARY', 'php');
+define('ABSPATH', '/wordpress/');
+define('FS_CHMOD_FILE', 0644);
+define('FS_CHMOD_DIR', 0755);
+define('FS_METHOD', 'direct');
+CONFIG;
 
         file_put_contents($config_path, $config);
 
