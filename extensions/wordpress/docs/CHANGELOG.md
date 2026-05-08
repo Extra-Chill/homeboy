@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.16] - 2026-05-08
+
+### Fixed
+- load transitive dependencies first
+
 ## [2.44.15] - 2026-05-08
 
 ### Fixed
