@@ -281,6 +281,25 @@ fi
 
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
 
+# Warmup iterations are useful for pure performance workloads because they
+# discard autoload / OPcache cold-start cost. Configured Playground workloads
+# can also drive side-effectful integration flows, so let callers opt out.
+BENCH_WARMUP_ITERATIONS="${HOMEBOY_BENCH_WARMUP_ITERATIONS:-}"
+if [ -z "$BENCH_WARMUP_ITERATIONS" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.bench_warmup_iterations // empty' 2>/dev/null || true)
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        BENCH_WARMUP_ITERATIONS="$extracted"
+    fi
+fi
+if [ -z "$BENCH_WARMUP_ITERATIONS" ]; then
+    BENCH_WARMUP_ITERATIONS="1"
+fi
+if ! [[ "$BENCH_WARMUP_ITERATIONS" =~ ^[0-9]+$ ]]; then
+    echo "Error: bench_warmup_iterations must be a non-negative integer (got '$BENCH_WARMUP_ITERATIONS')" >&2
+    FAILED_STEP="Bench warmup setup"
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Build VFS mount args (mirrors test-runner-playground.sh shape)
 # ---------------------------------------------------------------------------
@@ -470,6 +489,7 @@ sed \
     -e "s|{{PLUGIN_SLUG}}|${PLUGIN_SLUG}|g" \
     -e "s|{{COMPONENT_ID}}|${COMPONENT_ID}|g" \
     -e "s|{{ITERATIONS}}|${ITERATIONS}|g" \
+    -e "s|{{WARMUP_ITERATIONS}}|${BENCH_WARMUP_ITERATIONS}|g" \
     -e "s|{{PLAYGROUND_DEP_MOUNTS}}|${PLAYGROUND_DEP_MOUNTS}|g" \
     -e "s|{{PLAYGROUND_BLUEPRINT_PLUGIN_SLUGS}}|${PLAYGROUND_BLUEPRINT_PLUGIN_SLUGS}|g" \
     -e "s|{{SHARED_STATE_PATH}}|${SHARED_STATE_GUEST}|g" \
@@ -489,6 +509,7 @@ sed \
 echo "Running performance benchmarks via WordPress Playground..."
 echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
 echo "  Iterations: ${ITERATIONS}"
+echo "  Warmup iterations: ${BENCH_WARMUP_ITERATIONS}"
 echo "  Backend: playground (PHP-WASM + SQLite)"
 echo "  Site mode: ${BENCH_SITE_MODE}"
 if [ "$LIST_ONLY" = "1" ]; then

@@ -927,10 +927,13 @@ function pg_bench_record_workload_result($result, array &$custom_metric_samples,
 pg_stage_begin('run_workloads');
 $scenarios = [];
 $iterations_per_workload = (int) '{{ITERATIONS}}';
-$warmup_iterations = 1; // Discard first iteration (autoload + OPcache warmup).
+$warmup_iterations = (int) '{{WARMUP_ITERATIONS}}';
 
 if ($iterations_per_workload < 1) {
     $iterations_per_workload = 1;
+}
+if ($warmup_iterations < 0) {
+    $warmup_iterations = 0;
 }
 
 if (HOMEBOY_BENCH_LIST_ONLY) {
