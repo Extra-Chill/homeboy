@@ -39,7 +39,7 @@ fi
 RESULTS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/bench-configured-workloads-smoke.XXXXXX")
 
 cleanup() {
-    rm -f "$RESULTS_TMPFILE" "${FIXTURE_DIR}/workloads/report.json"
+    rm -f "$RESULTS_TMPFILE" "${FIXTURE_DIR}/workloads/report.json" "${FIXTURE_DIR}/workloads/count.txt"
 }
 trap cleanup EXIT
 
@@ -66,7 +66,8 @@ SETTINGS_JSON=$(cat <<'JSON'
         "source": "settings"
       }
     }
-  ]
+  ],
+  "bench_warmup_iterations": 0
 }
 JSON
 )
@@ -76,6 +77,7 @@ echo "Playground bench configured workloads smoke test"
 echo "============================================"
 echo "Fixture:    $FIXTURE_DIR"
 echo "Iterations: 2 (per configured workload)"
+echo "Warmup:    0"
 echo ""
 
 HOMEBOY_BENCH_RESULTS_FILE="$RESULTS_TMPFILE" \
@@ -136,6 +138,13 @@ if [ "$artifact_path" != "workloads/report.json" ] || [ "$artifact_label" != "Ge
     exit 1
 fi
 echo "✓ configured workload artifacts emitted"
+
+run_count=$(jq -r '.run_count // "missing"' "${FIXTURE_DIR}/workloads/report.json")
+if [ "$run_count" != "2" ]; then
+    echo "ERROR: expected configured workload to run exactly 2 times with zero warmup, got $run_count" >&2
+    exit 1
+fi
+echo "✓ configured workload warmup can be disabled"
 
 echo ""
 echo "============================================"
