@@ -108,6 +108,16 @@
   },
   "actions": [
     {
+      "id": "release.prepare",
+      "label": "Prepare release files",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/prepare-release.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
       "id": "release.package",
       "label": "Package release artifacts",
       "type": "command",
