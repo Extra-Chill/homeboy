@@ -360,7 +360,7 @@ homeboy_merge_validation_dependency_paths() {
         seen_slugs["$candidate_slug"]=1
         seen_paths["$candidate"]=1
         printf '%s\n' "$candidate"
-    done <<< "${existing_paths}${existing_paths:+$'\n'}${resolved_paths}"
+    done < <(printf '%s\n%s\n' "$existing_paths" "$resolved_paths")
 }
 
 homeboy_export_validation_dependency_paths() {
