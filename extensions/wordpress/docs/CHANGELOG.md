@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.15] - 2026-05-08
+
+### Fixed
+- replay ability init after deferred bootstrap
+- skip resolved dependency slugs
+
 ## [2.44.14] - 2026-05-08
 
 ### Fixed
