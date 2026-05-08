@@ -339,10 +339,35 @@ homeboy_resolve_validation_dependency_paths() {
     done
 }
 
+homeboy_merge_validation_dependency_paths() {
+    local existing_paths="${1:-}"
+    local resolved_paths="${2:-}"
+
+    local -A seen_paths=()
+    local -A seen_slugs=()
+    local candidate
+    local candidate_slug
+
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        [ -d "$candidate" ] || continue
+
+        candidate_slug=$(homeboy_get_validation_dependency_slug "$candidate" || basename "$candidate")
+        if [ -n "${seen_slugs[$candidate_slug]+x}" ] || [ -n "${seen_paths[$candidate]+x}" ]; then
+            continue
+        fi
+
+        seen_slugs["$candidate_slug"]=1
+        seen_paths["$candidate"]=1
+        printf '%s\n' "$candidate"
+    done <<< "${existing_paths}${existing_paths:+$'\n'}${resolved_paths}"
+}
+
 homeboy_export_validation_dependency_paths() {
     local plugin_path="${1:-}"
+    local existing_paths="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
     local resolved_paths
     resolved_paths=$(homeboy_resolve_validation_dependency_paths "$plugin_path" || true)
 
-    export HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$resolved_paths"
+    export HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$(homeboy_merge_validation_dependency_paths "$existing_paths" "$resolved_paths")"
 }

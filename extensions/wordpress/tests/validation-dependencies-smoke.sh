@@ -8,10 +8,11 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 COMPONENT_DIR="${TMPDIR}/intelligence"
 DATA_MACHINE_DIR="${TMPDIR}/data-machine"
+CLONED_DATA_MACHINE_DIR="${TMPDIR}/cache/data-machine"
 AGENTS_API_DIR="${TMPDIR}/agents-api"
 BIN_DIR="${TMPDIR}/bin"
 
-mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$BIN_DIR"
+mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$BIN_DIR"
 
 cat > "${COMPONENT_DIR}/intelligence.php" <<'PHP'
 <?php
@@ -26,6 +27,13 @@ cat > "${DATA_MACHINE_DIR}/data-machine.php" <<'PHP'
 /**
  * Plugin Name: Data Machine
  * Requires Plugins: agents-api
+ */
+PHP
+
+cat > "${CLONED_DATA_MACHINE_DIR}/data-machine.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Data Machine
  */
 PHP
 
@@ -68,6 +76,19 @@ fi
 if ! grep -F -- "$AGENTS_API_DIR" <<< "$resolved" >/dev/null; then
     echo "FAIL: transitive Requires Plugins dependency was not resolved" >&2
     printf '%s\n' "$resolved" >&2
+    exit 1
+fi
+
+merged=$(homeboy_merge_validation_dependency_paths "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR")
+if ! grep -F -- "$DATA_MACHINE_DIR" <<< "$merged" >/dev/null; then
+    echo "FAIL: existing prepared dependency path was not preserved" >&2
+    printf '%s\n' "$merged" >&2
+    exit 1
+fi
+
+if grep -F -- "$CLONED_DATA_MACHINE_DIR" <<< "$merged" >/dev/null; then
+    echo "FAIL: cloned dependency path was not deduplicated by plugin slug" >&2
+    printf '%s\n' "$merged" >&2
     exit 1
 fi
 
