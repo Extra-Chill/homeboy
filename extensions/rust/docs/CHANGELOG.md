@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.16.1] - 2026-05-08
+
+### Fixed
+- sync lockfile before release commit
+
 ## [1.16.0] - 2026-05-06
 
 ### Added
