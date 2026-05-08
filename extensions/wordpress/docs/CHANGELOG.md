@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.18] - 2026-05-08
+
+### Fixed
+- allow disabling bench warmup
+
 ## [2.44.17] - 2026-05-08
 
 ### Fixed
