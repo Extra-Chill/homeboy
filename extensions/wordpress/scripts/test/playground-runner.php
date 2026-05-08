@@ -119,8 +119,10 @@ if (is_array($bench_env)) {
 // Load the component during WordPress bootstrap, not after wp-settings.php has
 // finished. Plugins that register hooks for core bootstrap events (for example
 // wp_abilities_api_init) need to be present before those events fire.
+$pre_component_plugins_loaded_callbacks = pg_snapshot_wordpress_hook_callbacks('plugins_loaded');
 $pre_component_init_callbacks = pg_snapshot_wordpress_hook_callbacks('init');
 $pre_component_shutdown_callbacks = pg_snapshot_wordpress_hook_callbacks('shutdown');
+$deferred_install_plugins_loaded_callbacks = [];
 $deferred_install_init_callbacks = [];
 
 // Capture plugin entry files from the muplugins_loaded callback so the
@@ -130,17 +132,17 @@ $loaded_dep_files = [];
 $loaded_component_file = null;
 
 require_once "$tests_dir/includes/functions.php";
-tests_add_filter('muplugins_loaded', function () use ($plugin_path, $pre_component_init_callbacks, &$deferred_install_init_callbacks, &$loaded_dep_files, &$loaded_component_file) {
+tests_add_filter('muplugins_loaded', function () use ($plugin_path, $pre_component_plugins_loaded_callbacks, $pre_component_init_callbacks, &$deferred_install_plugins_loaded_callbacks, &$deferred_install_init_callbacks, &$loaded_dep_files, &$loaded_component_file) {
     $loaded_dep_files = pg_run_load_deps_stage(['dep_mounts' => '{{PLAYGROUND_DEP_MOUNTS}}']);
     $loaded_component_file = pg_run_load_component_stage(['plugin_path' => $plugin_path, 'activate' => false]);
 
     // Let plugins attach early-bootstrap callbacks before lazy core registries
-    // initialize, but defer component-added init callbacks until install.php has
-    // created the wptests_* tables. This preserves registration order without
-    // letting DB-touching runtime callbacks run against a half-installed site.
-    tests_add_filter('plugins_loaded', function () use ($pre_component_init_callbacks, &$deferred_install_init_callbacks) {
-        $deferred_install_init_callbacks = pg_defer_new_wordpress_hook_callbacks('init', $pre_component_init_callbacks);
-    }, PHP_INT_MAX);
+    // initialize, but defer component-added runtime callbacks until install.php
+    // has created the wptests_* tables and activation has prepared plugin-owned
+    // state. Defer immediately: waiting for PHP_INT_MAX on plugins_loaded is
+    // too late because lower-priority callbacks have already run.
+    $deferred_install_plugins_loaded_callbacks = pg_defer_new_wordpress_hook_callbacks('plugins_loaded', $pre_component_plugins_loaded_callbacks);
+    $deferred_install_init_callbacks = pg_defer_new_wordpress_hook_callbacks('init', $pre_component_init_callbacks);
 });
 
 // Stage: install — wp-phpunit install.php creates WP tables in-process.
@@ -166,8 +168,18 @@ if ($loaded_component_file !== null) {
 }
 pg_run_activation_stage(['plugin_files' => $activation_files]);
 
-// Replay plugin-added init callbacks after activation. In a normal request,
-// init-time runtime work observes schemas/options prepared by activation.
+// Replay plugin-added runtime callbacks after activation. In a normal
+// activated-plugin request, these callbacks observe schemas/options prepared by
+// activation.
+$pre_replayed_plugins_loaded_init_callbacks = pg_snapshot_wordpress_hook_callbacks('init');
+pg_run_deferred_wordpress_hook_callbacks($deferred_install_plugins_loaded_callbacks, [], 'plugins_loaded');
+$deferred_install_init_callbacks = array_merge(
+    $deferred_install_init_callbacks,
+    pg_defer_new_wordpress_hook_callbacks('init', $pre_replayed_plugins_loaded_init_callbacks)
+);
+usort($deferred_install_init_callbacks, static function (array $left, array $right): int {
+    return ($left['priority'] ?? 10) <=> ($right['priority'] ?? 10);
+});
 pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks, [], 'init');
 
 // ---------------------------------------------------------------------------

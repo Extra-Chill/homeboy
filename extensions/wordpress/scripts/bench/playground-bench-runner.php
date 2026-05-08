@@ -183,14 +183,17 @@ if ($installed_site_mode) {
     }
     pg_run_activation_stage(['plugin_files' => $activation_files]);
 } else {
-    // Component-added init callbacks may touch the DB (a plugin's `init` hook
-    // doing schema reads, option reads, etc.). wp-phpunit's install path runs
-    // wp-settings.php under wp_installing() and tables aren't ready until
-    // install.php finishes its work. Snapshot init/shutdown so we can defer
-    // component-added init callbacks past the install boundary, matching the
+    // Component-added bootstrap callbacks may touch the DB (a plugin's
+    // `plugins_loaded`/`init` hook doing schema reads, option reads, cron
+    // scheduling, etc.). wp-phpunit's install path runs wp-settings.php under
+    // wp_installing() and tables aren't ready until install.php finishes its
+    // work. Snapshot plugins_loaded/init/shutdown so we can defer
+    // component-added runtime callbacks past the install boundary, matching the
     // test runner's shape exactly.
+    $pre_component_plugins_loaded_callbacks = pg_snapshot_wordpress_hook_callbacks('plugins_loaded');
     $pre_component_init_callbacks = pg_snapshot_wordpress_hook_callbacks('init');
     $pre_component_shutdown_callbacks = pg_snapshot_wordpress_hook_callbacks('shutdown');
+    $deferred_install_plugins_loaded_callbacks = [];
     $deferred_install_init_callbacks = [];
 
     // Capture plugin entry files from the muplugins_loaded callback so the
@@ -203,7 +206,7 @@ if ($installed_site_mode) {
     $loaded_component_file = null;
 
     require_once "$tests_dir/includes/functions.php";
-    tests_add_filter('muplugins_loaded', function () use ($plugin_path, $dep_mounts, $pre_component_init_callbacks, &$deferred_install_init_callbacks, &$loaded_dep_files, &$loaded_blueprint_plugin_files, &$loaded_component_file) {
+    tests_add_filter('muplugins_loaded', function () use ($plugin_path, $dep_mounts, $pre_component_plugins_loaded_callbacks, $pre_component_init_callbacks, &$deferred_install_plugins_loaded_callbacks, &$deferred_install_init_callbacks, &$loaded_dep_files, &$loaded_blueprint_plugin_files, &$loaded_component_file) {
         pg_bench_prepare_wp_cli_runtime();
         $loaded_dep_files = pg_run_load_deps_stage(['dep_mounts' => $dep_mounts]);
         $exclude_roots = [$plugin_path];
@@ -216,13 +219,11 @@ if ($installed_site_mode) {
         $loaded_blueprint_plugin_files = pg_bench_load_blueprint_plugins_stage($exclude_roots, '{{PLAYGROUND_BLUEPRINT_PLUGIN_SLUGS}}');
         $loaded_component_file = pg_run_load_component_stage(['plugin_path' => $plugin_path, 'activate' => false]);
 
-        // Defer component-added init callbacks until install.php has created
-        // the wptests_* tables. Registrations made on plugins_loaded or
-        // earlier still fire normally — only DB-touching init runtime work
-        // is delayed.
-        tests_add_filter('plugins_loaded', function () use ($pre_component_init_callbacks, &$deferred_install_init_callbacks) {
-            $deferred_install_init_callbacks = pg_defer_new_wordpress_hook_callbacks('init', $pre_component_init_callbacks);
-        }, PHP_INT_MAX);
+        // Defer component-added runtime callbacks immediately. Waiting until a
+        // PHP_INT_MAX plugins_loaded callback is too late because lower-priority
+        // callbacks have already run in the current WP_Hook dispatch.
+        $deferred_install_plugins_loaded_callbacks = pg_defer_new_wordpress_hook_callbacks('plugins_loaded', $pre_component_plugins_loaded_callbacks);
+        $deferred_install_init_callbacks = pg_defer_new_wordpress_hook_callbacks('init', $pre_component_init_callbacks);
     });
 
     pg_run_install_stage(['config_path' => $config_path, 'tests_dir' => $tests_dir]);
@@ -245,8 +246,18 @@ if ($installed_site_mode) {
     }
     pg_run_activation_stage(['plugin_files' => $activation_files]);
 
-    // Replay plugin-added init callbacks after activation. In a normal request,
-    // init-time runtime work observes schemas/options prepared by activation.
+    // Replay plugin-added runtime callbacks after activation. In a normal
+    // activated-plugin request, these callbacks observe schemas/options
+    // prepared by activation.
+    $pre_replayed_plugins_loaded_init_callbacks = pg_snapshot_wordpress_hook_callbacks('init');
+    pg_run_deferred_wordpress_hook_callbacks($deferred_install_plugins_loaded_callbacks, [], 'plugins_loaded');
+    $deferred_install_init_callbacks = array_merge(
+        $deferred_install_init_callbacks,
+        pg_defer_new_wordpress_hook_callbacks('init', $pre_replayed_plugins_loaded_init_callbacks)
+    );
+    usort($deferred_install_init_callbacks, static function (array $left, array $right): int {
+        return ($left['priority'] ?? 10) <=> ($right['priority'] ?? 10);
+    });
     pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks, [], 'init');
 }
 
