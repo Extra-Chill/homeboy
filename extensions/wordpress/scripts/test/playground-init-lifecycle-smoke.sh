@@ -103,7 +103,19 @@ if [ "$activation_metric" != "1" ]; then
     cat "$RESULTS_TMPFILE" >&2
     exit 1
 fi
-echo "✓ bench runner replayed deferred init callbacks after activation in init context"
+plugins_loaded_context_metric=$(jq -r '.scenarios[] | select(.id == "assert-init-lifecycle") | .metrics.deferred_plugins_loaded_context_ok_mean // "missing"' "$RESULTS_TMPFILE")
+if [ "$plugins_loaded_context_metric" != "1" ]; then
+    echo "ERROR: bench workload did not verify deferred plugins_loaded lifecycle context (got $plugins_loaded_context_metric)" >&2
+    cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+plugins_loaded_activation_metric=$(jq -r '.scenarios[] | select(.id == "assert-init-lifecycle") | .metrics.deferred_plugins_loaded_after_activation_ok_mean // "missing"' "$RESULTS_TMPFILE")
+if [ "$plugins_loaded_activation_metric" != "1" ]; then
+    echo "ERROR: bench workload did not verify deferred plugins_loaded ran after activation (got $plugins_loaded_activation_metric)" >&2
+    cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+echo "✓ bench runner replayed deferred plugins_loaded/init callbacks after activation in hook context"
 
 echo ""
 echo "============================================"
