@@ -193,7 +193,6 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
         BENCH_ENV_JSON="$extracted"
     fi
 fi
-BENCH_ENV_JSON_B64=$(printf '%s' "$BENCH_ENV_JSON" | base64 | tr -d '\n')
 
 # Extract `bench_workloads` from the merged settings JSON. Components can
 # restrict a bench run to specific workload IDs under
@@ -446,31 +445,25 @@ if [ ! -f "$TEMPLATE" ]; then
 fi
 
 WRAPPER_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/pg-bench-runner.XXXXXX")
-# Use ASCII SOH (\x01) as the sed delimiter for the JSON substitution so
-# embedded `|` / `/` / `,` in user-supplied wp_config_defines values don't
-# need escaping. The other placeholders use `|` (their values never contain
-# a pipe in practice — slugs, integers, and POSIX paths only).
+# Use ASCII SOH (\x01) as the sed delimiter for JSON-ish substitutions so
+# embedded `|` / `/` / `,` don't need escaping. JSON payloads are base64-encoded
+# before template insertion because PHP single-quoted strings collapse `\\`
+# sequences, corrupting nested JSON string values such as bench_env payloads.
 WP_CONFIG_DEFINES_DELIM=$(printf '\1')
 
-# Escape sed `s` replacement metacharacters in JSON values before
-# substituting them into the PHP runner template. GNU sed processes the
-# replacement string by treating `&` as a backreference to the matched
-# pattern and `\X` as an escape sequence — so an unescaped `&` in JSON
-# (e.g. an ampersand inside a string) gets replaced with the placeholder
-# itself, and `\"` collapses to `"`, silently corrupting the JSON. The
-# decode in playground-bench-runner.php then fails and ALL declared
-# bench_env / wp_config_defines entries drop on the floor.
-#
-# Only `\` and `&` need escaping here: the SOH delimiter cannot appear in
-# JSON content, and the only `\X` sequences sed treats specially are
-# `\&`, `\\`, the delimiter, and `\1`-`\9` — which all share the `\`
-# escape, so escaping `\` covers them.
+# Escape sed `s` replacement metacharacters for non-JSON payloads. JSON
+# payloads are base64-encoded above so they survive both sed replacement and
+# PHP string parsing without a second escaping scheme.
 sed_escape_replacement() {
     printf '%s' "$1" | sed -e 's/[\\&]/\\&/g'
 }
-WP_CONFIG_DEFINES_JSON_ESC=$(sed_escape_replacement "$WP_CONFIG_DEFINES_JSON")
-BENCH_WORKLOADS_JSON_ESC=$(sed_escape_replacement "$BENCH_WORKLOADS_JSON")
-PLAYGROUND_WORKLOADS_JSON_ESC=$(sed_escape_replacement "$PLAYGROUND_WORKLOADS_JSON")
+json_to_base64() {
+    printf '%s' "$1" | base64 | tr -d '\n'
+}
+WP_CONFIG_DEFINES_JSON_B64=$(json_to_base64 "$WP_CONFIG_DEFINES_JSON")
+BENCH_ENV_JSON_B64=$(json_to_base64 "$BENCH_ENV_JSON")
+BENCH_WORKLOADS_JSON_B64=$(json_to_base64 "$BENCH_WORKLOADS_JSON")
+PLAYGROUND_WORKLOADS_JSON_B64=$(json_to_base64 "$PLAYGROUND_WORKLOADS_JSON")
 EXTRA_WORKLOADS_LIST_ESC=$(sed_escape_replacement "$EXTRA_WORKLOADS_LIST")
 
 sed \
@@ -486,10 +479,10 @@ sed \
     -e "s|{{RESULT_SUFFIX}}|${RESULT_SUFFIX}|g" \
     -e "s|{{BENCH_HELPER_PHP}}|${BENCH_HELPER_PHP_GUEST}|g" \
     -e "s|{{BENCH_SITE_MODE}}|${BENCH_SITE_MODE}|g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON_B64}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON_B64}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON_B64}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON_B64}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${BENCH_WORKLOADS_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{PLAYGROUND_WORKLOADS_JSON}}${WP_CONFIG_DEFINES_DELIM}${PLAYGROUND_WORKLOADS_JSON_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_WORKLOADS_JSON_B64}}${WP_CONFIG_DEFINES_DELIM}${BENCH_WORKLOADS_JSON_B64}${WP_CONFIG_DEFINES_DELIM}g" \
+    -e "s${WP_CONFIG_DEFINES_DELIM}{{PLAYGROUND_WORKLOADS_JSON_B64}}${WP_CONFIG_DEFINES_DELIM}${PLAYGROUND_WORKLOADS_JSON_B64}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{EXTRA_WORKLOADS_LIST}}${WP_CONFIG_DEFINES_DELIM}${EXTRA_WORKLOADS_LIST_ESC}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
 
