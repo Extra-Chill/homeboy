@@ -223,6 +223,27 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
         PLAYGROUND_WORKLOADS_JSON="$extracted"
     fi
 fi
+
+# Extract `playground_file_mounts` from the merged settings JSON. Components can
+# mount files from themselves or validation dependencies into arbitrary absolute
+# Playground paths, e.g. mounting a dependency-owned db.php drop-in:
+#
+#   {
+#     "playground_file_mounts": [
+#       {
+#         "from_dependency": "markdown-database-integration",
+#         "from": "db.php",
+#         "to": "/wordpress/wp-content/db.php"
+#       }
+#     ]
+#   }
+PLAYGROUND_FILE_MOUNTS_JSON="[]"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.playground_file_mounts // []' 2>/dev/null || echo "[]")
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        PLAYGROUND_FILE_MOUNTS_JSON="$extracted"
+    fi
+fi
 if [ "$BENCH_WORKLOADS_JSON" = "null" ] && [ -n "${HOMEBOY_BENCH_WORKLOADS:-}" ]; then
     BENCH_WORKLOADS_JSON=$(jq -Rn --arg value "$HOMEBOY_BENCH_WORKLOADS" '$value')
 fi
@@ -318,6 +339,58 @@ fi
 PLUGIN_DB_PHP="${PLUGIN_PATH}/db.php"
 if [ -f "$PLUGIN_DB_PHP" ]; then
     MOUNT_ARGS+=("--mount" "${PLUGIN_DB_PHP}:/wordpress/wp-content/db.php")
+fi
+
+if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+    while IFS= read -r mount_json; do
+        [ -n "$mount_json" ] || continue
+        mount_from=$(printf '%s' "$mount_json" | jq -r '.from // empty')
+        mount_to=$(printf '%s' "$mount_json" | jq -r '.to // empty')
+        mount_dependency=$(printf '%s' "$mount_json" | jq -r '.from_dependency // empty')
+        if [ -z "$mount_from" ] || [ -z "$mount_to" ]; then
+            echo "Error: playground_file_mounts entries require 'from' and 'to'" >&2
+            FAILED_STEP="Playground file mount setup"
+            exit 1
+        fi
+        if [[ "$mount_from" = /* ]] || [[ "$mount_from" == *..* ]]; then
+            echo "Error: playground_file_mounts 'from' must be a relative path without '..' (got '$mount_from')" >&2
+            FAILED_STEP="Playground file mount setup"
+            exit 1
+        fi
+        if [[ "$mount_to" != /* ]]; then
+            echo "Error: playground_file_mounts 'to' must be an absolute Playground path (got '$mount_to')" >&2
+            FAILED_STEP="Playground file mount setup"
+            exit 1
+        fi
+
+        mount_root="$PLUGIN_PATH"
+        if [ -n "$mount_dependency" ]; then
+            mount_root=""
+            if [ -n "$DEPENDENCY_PATHS" ]; then
+                while IFS= read -r dep_path; do
+                    [ -z "$dep_path" ] && continue
+                    dep_slug="$(homeboy_get_validation_dependency_slug "$dep_path" || basename "$dep_path")"
+                    if [ "$dep_slug" = "$mount_dependency" ] || [ "$(basename "$dep_path")" = "$mount_dependency" ]; then
+                        mount_root="$dep_path"
+                        break
+                    fi
+                done <<< "$DEPENDENCY_PATHS"
+            fi
+            if [ -z "$mount_root" ]; then
+                echo "Error: playground_file_mounts dependency not found: $mount_dependency" >&2
+                FAILED_STEP="Playground file mount setup"
+                exit 1
+            fi
+        fi
+
+        mount_host="${mount_root}/${mount_from}"
+        if [ ! -f "$mount_host" ]; then
+            echo "Error: playground_file_mounts source file not found: $mount_host" >&2
+            FAILED_STEP="Playground file mount setup"
+            exit 1
+        fi
+        MOUNT_ARGS+=("--mount" "${mount_host}:${mount_to}")
+    done < <(printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -c '.[]')
 fi
 
 EXTENSION_MOUNT_PATH="$(homeboy_playground_resolve_mount_path "$EXTENSION_PATH")"
