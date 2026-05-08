@@ -152,7 +152,6 @@ pg_run_install_stage(['config_path' => $config_path, 'tests_dir' => $tests_dir])
 // only callbacks the component added during that install bootstrap; activation
 // below remains the post-table seam for install-time side effects.
 pg_remove_new_wordpress_hook_callbacks('shutdown', $pre_component_shutdown_callbacks);
-pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks, [], 'init');
 
 // Fire activation hooks now that wp-phpunit has created database tables.
 // Pre-#431 activation fired inline during muplugins_loaded — before the test
@@ -166,6 +165,10 @@ if ($loaded_component_file !== null) {
     $activation_files[] = $loaded_component_file;
 }
 pg_run_activation_stage(['plugin_files' => $activation_files]);
+
+// Replay plugin-added init callbacks after activation. In a normal request,
+// init-time runtime work observes schemas/options prepared by activation.
+pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks, [], 'init');
 
 // ---------------------------------------------------------------------------
 // Stage: load_fixtures (test case classes, mock mailer, harness filters)

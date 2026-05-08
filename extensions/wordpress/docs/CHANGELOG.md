@@ -2,6 +2,16 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.10] - 2026-05-08
+
+### Fixed
+- run deferred init after activation
+
+## [2.44.9] - 2026-05-07
+
+### Fixed
+- preserve bench env JSON replacements
+
 ## [2.44.8] - 2026-05-07
 
 ### Fixed

@@ -455,7 +455,7 @@ WP_CONFIG_DEFINES_DELIM=$(printf '\1')
 # payloads are base64-encoded above so they survive both sed replacement and
 # PHP string parsing without a second escaping scheme.
 sed_escape_replacement() {
-    printf '%s' "$1" | sed -e 's/[\&]/\\&/g'
+    printf '%s' "$1" | sed -e 's/[\\&]/\\&/g'
 }
 json_to_base64() {
     printf '%s' "$1" | base64 | tr -d '\n'

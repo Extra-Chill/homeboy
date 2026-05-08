@@ -97,7 +97,13 @@ if [ "$metric" != "1" ]; then
     cat "$RESULTS_TMPFILE" >&2
     exit 1
 fi
-echo "✓ bench runner replayed deferred init callbacks in init context"
+activation_metric=$(jq -r '.scenarios[] | select(.id == "assert-init-lifecycle") | .metrics.deferred_init_after_activation_ok_mean // "missing"' "$RESULTS_TMPFILE")
+if [ "$activation_metric" != "1" ]; then
+    echo "ERROR: bench workload did not verify deferred init ran after activation (got $activation_metric)" >&2
+    cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+echo "✓ bench runner replayed deferred init callbacks after activation in init context"
 
 echo ""
 echo "============================================"
