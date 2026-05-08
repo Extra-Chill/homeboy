@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.13] - 2026-05-08
+
+### Fixed
+- preserve prepared validation deps
+
 ## [2.44.12] - 2026-05-08
 
 ### Fixed
