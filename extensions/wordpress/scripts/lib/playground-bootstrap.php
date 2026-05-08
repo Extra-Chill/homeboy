@@ -643,6 +643,13 @@ function pg_run_load_deps_stage(array $cfg): array {
                 }
                 $dep_files = glob("$dep_mount/*.php") ?: [];
                 foreach ($dep_files as $df) {
+                    // db.php is a WordPress drop-in, not a plugin entry file.
+                    // Dependencies can ship one too, and re-loading it after
+                    // wp-settings.php has already loaded the active drop-in
+                    // re-runs database side effects.
+                    if (basename($df) === 'db.php') {
+                        continue;
+                    }
                     if (strpos(file_get_contents($df), 'Plugin Name:') !== false) {
                         require_once $df;
                         $loaded[] = $df;
