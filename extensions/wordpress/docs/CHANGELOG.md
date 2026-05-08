@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.11] - 2026-05-08
+
+### Fixed
+- preserve playground JSON template payloads
+
 ## [2.44.10] - 2026-05-08
 
 ### Fixed
