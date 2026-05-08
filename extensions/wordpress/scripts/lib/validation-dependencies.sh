@@ -238,6 +238,86 @@ homeboy_resolve_validation_dependency_path() {
     return 1
 }
 
+# Recursive resolver used by homeboy_resolve_validation_dependency_paths(). Bash
+# uses dynamic scoping for `local` variables, so this helper intentionally reads
+# the caller-owned plugin_path / seen_* maps while keeping the walk logic named
+# and testable instead of nesting a function inside the resolver.
+_homeboy_walk_validation_dependency() {
+    local dependency="${1:-}"
+
+    [ -z "$dependency" ] && return 0
+
+    if [ -n "${seen_dependencies[$dependency]+x}" ]; then
+        return 0
+    fi
+    seen_dependencies["$dependency"]=1
+
+    if [[ "$dependency" != */* ]] && [ -n "${seen_slugs[$dependency]+x}" ]; then
+        return 0
+    fi
+
+    local resolved
+    resolved=$(homeboy_resolve_validation_dependency_path "$dependency" || true)
+
+    if [ -z "$resolved" ]; then
+        echo "Warning: Could not resolve WordPress validation dependency '$dependency'" >&2
+        return 0
+    fi
+
+    if [ -n "$plugin_path" ] && [ "$resolved" = "$plugin_path" ]; then
+        return 0
+    fi
+
+    local resolved_slug
+    resolved_slug=$(homeboy_get_validation_dependency_slug "$resolved" || basename "$resolved")
+
+    # Deduplicate equivalent dependency checkouts by the WordPress plugin slug
+    # Playground will mount/load, not just by host path. This prevents a
+    # worktree path like data-machine@fix/foo and a canonical data-machine
+    # checkout from loading as two copies of the same plugin.
+    if [ -n "${seen_slugs[$resolved_slug]+x}" ]; then
+        return 0
+    fi
+
+    if [ -n "${seen_paths[$resolved]+x}" ]; then
+        return 0
+    fi
+
+    local transitive_dependency
+    while IFS= read -r transitive_dependency; do
+        [ -z "$transitive_dependency" ] && continue
+        _homeboy_walk_validation_dependency "$transitive_dependency"
+    done < <(homeboy_get_requires_plugins_from_header "$resolved" || true)
+
+    if [ -n "${seen_slugs[$resolved_slug]+x}" ] || [ -n "${seen_paths[$resolved]+x}" ]; then
+        return 0
+    fi
+
+    seen_slugs["$resolved_slug"]=1
+    seen_paths["$resolved"]=1
+
+    printf '%s\n' "$resolved"
+}
+
+# Emit one dependency path for homeboy_merge_validation_dependency_paths(). Like
+# _homeboy_walk_validation_dependency(), this uses the caller's dynamic scope for
+# seen_* maps so merge order stays local to each merge call.
+_homeboy_emit_merged_validation_dependency_path() {
+    local candidate="${1:-}"
+    [ -n "$candidate" ] || return 0
+    [ -d "$candidate" ] || return 0
+
+    local candidate_slug
+    candidate_slug=$(homeboy_get_validation_dependency_slug "$candidate" || basename "$candidate")
+    if [ -n "${seen_slugs[$candidate_slug]+x}" ] || [ -n "${seen_paths[$candidate]+x}" ]; then
+        return 0
+    fi
+
+    seen_slugs["$candidate_slug"]=1
+    seen_paths["$candidate"]=1
+    printf '%s\n' "$candidate"
+}
+
 homeboy_resolve_validation_dependency_paths() {
     local plugin_path="${1:-}"
 
@@ -283,66 +363,8 @@ homeboy_resolve_validation_dependency_paths() {
     local -A seen_slugs=()
     local dependency
 
-    homeboy_walk_validation_dependency() {
-        local dependency="${1:-}"
-
-        [ -z "$dependency" ] && return 0
-
-        if [ -n "${seen_dependencies[$dependency]+x}" ]; then
-            return 0
-        fi
-        seen_dependencies["$dependency"]=1
-
-        if [[ "$dependency" != */* ]] && [ -n "${seen_slugs[$dependency]+x}" ]; then
-            return 0
-        fi
-
-        local resolved
-        resolved=$(homeboy_resolve_validation_dependency_path "$dependency" || true)
-
-        if [ -z "$resolved" ]; then
-            echo "Warning: Could not resolve WordPress validation dependency '$dependency'" >&2
-            return 0
-        fi
-
-        if [ -n "$plugin_path" ] && [ "$resolved" = "$plugin_path" ]; then
-            return 0
-        fi
-
-        local resolved_slug
-        resolved_slug=$(homeboy_get_validation_dependency_slug "$resolved" || basename "$resolved")
-
-        # Deduplicate equivalent dependency checkouts by the WordPress plugin
-        # slug Playground will mount/load, not just by host path. This prevents
-        # a worktree path like data-machine@fix/foo and a canonical data-machine
-        # checkout from loading as two copies of the same plugin.
-        if [ -n "${seen_slugs[$resolved_slug]+x}" ]; then
-            return 0
-        fi
-
-        # Deduplicate by resolved path
-        if [ -n "${seen_paths[$resolved]+x}" ]; then
-            return 0
-        fi
-
-        local transitive_dependency
-        while IFS= read -r transitive_dependency; do
-            [ -z "$transitive_dependency" ] && continue
-            homeboy_walk_validation_dependency "$transitive_dependency"
-        done < <(homeboy_get_requires_plugins_from_header "$resolved" || true)
-
-        if [ -n "${seen_slugs[$resolved_slug]+x}" ] || [ -n "${seen_paths[$resolved]+x}" ]; then
-            return 0
-        fi
-
-        seen_slugs["$resolved_slug"]=1
-        seen_paths["$resolved"]=1
-
-        printf '%s\n' "$resolved"
-    }
-
     while IFS= read -r dependency; do
-        homeboy_walk_validation_dependency "$dependency"
+        _homeboy_walk_validation_dependency "$dependency"
     done <<< "$all_deps"
 }
 
@@ -370,36 +392,20 @@ homeboy_merge_validation_dependency_paths() {
         existing_order+=("$candidate_slug")
     done <<< "$existing_paths"
 
-    homeboy_emit_merged_validation_dependency_path() {
-        local candidate="${1:-}"
-        [ -n "$candidate" ] || return 0
-        [ -d "$candidate" ] || return 0
-
-        local candidate_slug
-        candidate_slug=$(homeboy_get_validation_dependency_slug "$candidate" || basename "$candidate")
-        if [ -n "${seen_slugs[$candidate_slug]+x}" ] || [ -n "${seen_paths[$candidate]+x}" ]; then
-            return 0
-        fi
-
-        seen_slugs["$candidate_slug"]=1
-        seen_paths["$candidate"]=1
-        printf '%s\n' "$candidate"
-    }
-
     while IFS= read -r candidate; do
         [ -n "$candidate" ] || continue
         [ -d "$candidate" ] || continue
 
         candidate_slug=$(homeboy_get_validation_dependency_slug "$candidate" || basename "$candidate")
         if [ -n "${existing_by_slug[$candidate_slug]+x}" ]; then
-            homeboy_emit_merged_validation_dependency_path "${existing_by_slug[$candidate_slug]}"
+            _homeboy_emit_merged_validation_dependency_path "${existing_by_slug[$candidate_slug]}"
         else
-            homeboy_emit_merged_validation_dependency_path "$candidate"
+            _homeboy_emit_merged_validation_dependency_path "$candidate"
         fi
     done <<< "$resolved_paths"
 
     for candidate_slug in "${existing_order[@]}"; do
-        homeboy_emit_merged_validation_dependency_path "${existing_by_slug[$candidate_slug]}"
+        _homeboy_emit_merged_validation_dependency_path "${existing_by_slug[$candidate_slug]}"
     done
 }
 
