@@ -275,31 +275,26 @@ homeboy_resolve_validation_dependency_paths() {
 
     # Deduplicate resolved paths and dependency tokens while walking transitive
     # Requires Plugins headers. WordPress enforces those transitive requirements
-    # at runtime, so PHPStan needs the same dependency graph when scanning a
-    # dependency's implementation classes.
+    # at runtime, so validation needs the same dependency graph when scanning or
+    # loading a dependency's implementation classes. Emit transitive dependencies
+    # before dependents so Playground loads plugins in WordPress dependency order.
     local -A seen_paths=()
     local -A seen_dependencies=()
     local -A seen_slugs=()
-    local -a dependency_queue=()
-    local dependency_index=0
+    local dependency
 
-    while IFS= read -r dependency; do
-        [ -n "$dependency" ] && dependency_queue+=("$dependency")
-    done <<< "$all_deps"
+    homeboy_walk_validation_dependency() {
+        local dependency="${1:-}"
 
-    while [ "$dependency_index" -lt "${#dependency_queue[@]}" ]; do
-        dependency="${dependency_queue[$dependency_index]}"
-        dependency_index=$((dependency_index + 1))
-
-        [ -z "$dependency" ] && continue
+        [ -z "$dependency" ] && return 0
 
         if [ -n "${seen_dependencies[$dependency]+x}" ]; then
-            continue
+            return 0
         fi
         seen_dependencies["$dependency"]=1
 
         if [[ "$dependency" != */* ]] && [ -n "${seen_slugs[$dependency]+x}" ]; then
-            continue
+            return 0
         fi
 
         local resolved
@@ -307,11 +302,11 @@ homeboy_resolve_validation_dependency_paths() {
 
         if [ -z "$resolved" ]; then
             echo "Warning: Could not resolve WordPress validation dependency '$dependency'" >&2
-            continue
+            return 0
         fi
 
         if [ -n "$plugin_path" ] && [ "$resolved" = "$plugin_path" ]; then
-            continue
+            return 0
         fi
 
         local resolved_slug
@@ -322,25 +317,33 @@ homeboy_resolve_validation_dependency_paths() {
         # a worktree path like data-machine@fix/foo and a canonical data-machine
         # checkout from loading as two copies of the same plugin.
         if [ -n "${seen_slugs[$resolved_slug]+x}" ]; then
-            continue
+            return 0
         fi
-        seen_slugs["$resolved_slug"]=1
 
         # Deduplicate by resolved path
         if [ -n "${seen_paths[$resolved]+x}" ]; then
-            continue
+            return 0
         fi
+
+        local transitive_dependency
+        while IFS= read -r transitive_dependency; do
+            [ -z "$transitive_dependency" ] && continue
+            homeboy_walk_validation_dependency "$transitive_dependency"
+        done < <(homeboy_get_requires_plugins_from_header "$resolved" || true)
+
+        if [ -n "${seen_slugs[$resolved_slug]+x}" ] || [ -n "${seen_paths[$resolved]+x}" ]; then
+            return 0
+        fi
+
+        seen_slugs["$resolved_slug"]=1
         seen_paths["$resolved"]=1
 
         printf '%s\n' "$resolved"
+    }
 
-        while IFS= read -r transitive_dependency; do
-            [ -z "$transitive_dependency" ] && continue
-            if [ -z "${seen_dependencies[$transitive_dependency]+x}" ]; then
-                dependency_queue+=("$transitive_dependency")
-            fi
-        done < <(homeboy_get_requires_plugins_from_header "$resolved" || true)
-    done
+    while IFS= read -r dependency; do
+        homeboy_walk_validation_dependency "$dependency"
+    done <<< "$all_deps"
 }
 
 homeboy_merge_validation_dependency_paths() {
