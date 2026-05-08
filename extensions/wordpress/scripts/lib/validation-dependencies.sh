@@ -298,6 +298,10 @@ homeboy_resolve_validation_dependency_paths() {
         fi
         seen_dependencies["$dependency"]=1
 
+        if [[ "$dependency" != */* ]] && [ -n "${seen_slugs[$dependency]+x}" ]; then
+            continue
+        fi
+
         local resolved
         resolved=$(homeboy_resolve_validation_dependency_path "$dependency" || true)
 

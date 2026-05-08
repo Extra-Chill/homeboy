@@ -13,6 +13,7 @@ WORKTREE_DEP_DIR="${TMPROOT}/data-machine@fix-run-flow-paused-manual"
 RUNTIME_DIR="${TMPROOT}/runtime"
 BIN_DIR="${TMPROOT}/bin"
 RESULTS_TMPFILE="${TMPROOT}/bench-results.json"
+RESOLVED_SLUG_MARKER="${TMPROOT}/resolved-header-slug"
 
 mkdir -p \
     "${EXTENSION_PATH}/node_modules/.bin" \
@@ -61,6 +62,7 @@ cat > "${BIN_DIR}/homeboy" <<SH
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "\${1:-}" = "component" ] && [ "\${2:-}" = "show" ] && [ "\${3:-}" = "data-machine" ]; then
+    touch "$RESOLVED_SLUG_MARKER"
     printf '{"data":{"entity":{"local_path":"%s"}}}\n' "$CANONICAL_DEP_DIR"
     exit 0
 fi
@@ -153,6 +155,11 @@ HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
 
 if [ ! -s "$RESULTS_TMPFILE" ]; then
     echo "expected bench results file to be written" >&2
+    exit 1
+fi
+
+if [ -e "$RESOLVED_SLUG_MARKER" ]; then
+    echo "header slug was resolved even though settings already supplied the dependency path" >&2
     exit 1
 fi
 
