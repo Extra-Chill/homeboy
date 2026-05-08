@@ -122,4 +122,20 @@ if grep -F -- "$CLONED_DATA_MACHINE_DIR" <<< "$merged_prepared" >/dev/null; then
     exit 1
 fi
 
+topological_resolved="${AGENTS_API_DIR}"$'\n'"${DATA_MACHINE_DIR}"
+merged_topological=$(homeboy_merge_validation_dependency_paths "$prepared_paths" "$topological_resolved")
+agents_api_merged_line=$(grep -nF -- "$AGENTS_API_DIR" <<< "$merged_topological" | cut -d: -f1 | head -1)
+data_machine_merged_line=$(grep -nF -- "$DATA_MACHINE_DIR" <<< "$merged_topological" | cut -d: -f1 | head -1)
+if [ "$agents_api_merged_line" -ge "$data_machine_merged_line" ]; then
+    echo "FAIL: merge should preserve resolved transitive dependency order" >&2
+    printf '%s\n' "$merged_topological" >&2
+    exit 1
+fi
+
+if ! grep -F -- "$OPENAI_PROVIDER_DIR" <<< "$merged_topological" >/dev/null; then
+    echo "FAIL: merge should append unrelated prepared dependency paths" >&2
+    printf '%s\n' "$merged_topological" >&2
+    exit 1
+fi
+
 echo "Validation dependency smoke passed"
