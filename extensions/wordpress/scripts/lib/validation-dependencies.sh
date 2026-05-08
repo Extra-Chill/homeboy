@@ -352,6 +352,8 @@ homeboy_merge_validation_dependency_paths() {
 
     local -A seen_paths=()
     local -A seen_slugs=()
+    local -A existing_by_slug=()
+    local -a existing_order=()
     local candidate
     local candidate_slug
 
@@ -360,14 +362,45 @@ homeboy_merge_validation_dependency_paths() {
         [ -d "$candidate" ] || continue
 
         candidate_slug=$(homeboy_get_validation_dependency_slug "$candidate" || basename "$candidate")
-        if [ -n "${seen_slugs[$candidate_slug]+x}" ] || [ -n "${seen_paths[$candidate]+x}" ]; then
+        if [ -n "${existing_by_slug[$candidate_slug]+x}" ]; then
             continue
+        fi
+
+        existing_by_slug["$candidate_slug"]="$candidate"
+        existing_order+=("$candidate_slug")
+    done <<< "$existing_paths"
+
+    homeboy_emit_merged_validation_dependency_path() {
+        local candidate="${1:-}"
+        [ -n "$candidate" ] || return 0
+        [ -d "$candidate" ] || return 0
+
+        local candidate_slug
+        candidate_slug=$(homeboy_get_validation_dependency_slug "$candidate" || basename "$candidate")
+        if [ -n "${seen_slugs[$candidate_slug]+x}" ] || [ -n "${seen_paths[$candidate]+x}" ]; then
+            return 0
         fi
 
         seen_slugs["$candidate_slug"]=1
         seen_paths["$candidate"]=1
         printf '%s\n' "$candidate"
-    done < <(printf '%s\n%s\n' "$existing_paths" "$resolved_paths")
+    }
+
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        [ -d "$candidate" ] || continue
+
+        candidate_slug=$(homeboy_get_validation_dependency_slug "$candidate" || basename "$candidate")
+        if [ -n "${existing_by_slug[$candidate_slug]+x}" ]; then
+            homeboy_emit_merged_validation_dependency_path "${existing_by_slug[$candidate_slug]}"
+        else
+            homeboy_emit_merged_validation_dependency_path "$candidate"
+        fi
+    done <<< "$resolved_paths"
+
+    for candidate_slug in "${existing_order[@]}"; do
+        homeboy_emit_merged_validation_dependency_path "${existing_by_slug[$candidate_slug]}"
+    done
 }
 
 homeboy_export_validation_dependency_paths() {
