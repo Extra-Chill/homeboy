@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.46.0] - 2026-05-08
+
+### Added
+- validate Playground blueprints
+
 ## [2.45.0] - 2026-05-08
 
 ### Added
