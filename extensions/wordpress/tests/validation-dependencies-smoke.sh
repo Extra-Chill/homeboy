@@ -87,6 +87,14 @@ if ! grep -F -- "$AGENTS_API_DIR" <<< "$resolved" >/dev/null; then
     exit 1
 fi
 
+agents_api_line=$(grep -nF -- "$AGENTS_API_DIR" <<< "$resolved" | cut -d: -f1 | head -1)
+data_machine_line=$(grep -nF -- "$DATA_MACHINE_DIR" <<< "$resolved" | cut -d: -f1 | head -1)
+if [ "$agents_api_line" -ge "$data_machine_line" ]; then
+    echo "FAIL: transitive dependency should be emitted before dependent plugin" >&2
+    printf '%s\n' "$resolved" >&2
+    exit 1
+fi
+
 merged=$(homeboy_merge_validation_dependency_paths "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR")
 if ! grep -F -- "$DATA_MACHINE_DIR" <<< "$merged" >/dev/null; then
     echo "FAIL: existing prepared dependency path was not preserved" >&2
