@@ -326,6 +326,39 @@ function pg_run_deferred_wordpress_hook_callbacks(array $deferred, array $args =
     }
 }
 
+/**
+ * Reopen a one-shot WordPress action so callbacks replayed after install can
+ * still attach to lazy registries that may have initialized during install.
+ */
+function pg_reopen_wordpress_action(string $hook_name): bool {
+    global $wp_actions;
+
+    if (!function_exists('did_action') || did_action($hook_name) === 0) {
+        return false;
+    }
+
+    if (!is_array($wp_actions)) {
+        $wp_actions = [];
+    }
+
+    $wp_actions[$hook_name] = 0;
+    pg_log("NOTICE:reopened WordPress action after install: {$hook_name}");
+
+    return true;
+}
+
+/**
+ * Fire a reopened one-shot WordPress action after deferred plugin callbacks
+ * have been replayed.
+ */
+function pg_fire_reopened_wordpress_action(string $hook_name, bool $reopened): void {
+    if (!$reopened || !function_exists('do_action')) {
+        return;
+    }
+
+    do_action($hook_name);
+}
+
 // ---------------------------------------------------------------------------
 // Stage executors
 // ---------------------------------------------------------------------------

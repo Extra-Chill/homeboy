@@ -172,6 +172,8 @@ pg_run_activation_stage(['plugin_files' => $activation_files]);
 // activated-plugin request, these callbacks observe schemas/options prepared by
 // activation.
 $pre_replayed_plugins_loaded_init_callbacks = pg_snapshot_wordpress_hook_callbacks('init');
+$reopened_ability_categories_init = pg_reopen_wordpress_action('wp_abilities_api_categories_init');
+$reopened_ability_init = pg_reopen_wordpress_action('wp_abilities_api_init');
 pg_run_deferred_wordpress_hook_callbacks($deferred_install_plugins_loaded_callbacks, [], 'plugins_loaded');
 $deferred_install_init_callbacks = array_merge(
     $deferred_install_init_callbacks,
@@ -181,6 +183,8 @@ usort($deferred_install_init_callbacks, static function (array $left, array $rig
     return ($left['priority'] ?? 10) <=> ($right['priority'] ?? 10);
 });
 pg_run_deferred_wordpress_hook_callbacks($deferred_install_init_callbacks, [], 'init');
+pg_fire_reopened_wordpress_action('wp_abilities_api_categories_init', $reopened_ability_categories_init);
+pg_fire_reopened_wordpress_action('wp_abilities_api_init', $reopened_ability_init);
 
 // ---------------------------------------------------------------------------
 // Stage: load_fixtures (test case classes, mock mailer, harness filters)
