@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.21] - 2026-05-08
+
+### Fixed
+- render playground config defines first
+
 ## [2.44.20] - 2026-05-08
 
 ### Fixed
