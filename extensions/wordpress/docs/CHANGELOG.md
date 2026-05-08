@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.12] - 2026-05-08
+
+### Fixed
+- defer plugin runtime callbacks during install
+
 ## [2.44.11] - 2026-05-08
 
 ### Fixed
