@@ -293,9 +293,24 @@ Configure per-component in the component's homeboy/component config under
 | `bench_env` | object | `{}` | `NAME => value` env vars forwarded into Playground PHP-WASM (workloads/fixtures read via `getenv()`) |
 | `playground_blueprint` | object | `{}` | Blueprint JSON passed to `wp-playground-cli --blueprint` for cold-boot scenarios |
 | `playground_workloads` | array | `[]` | Declared bench workloads run after bootstrap, blueprint, deps, and component load |
+| `playground_file_mounts` | array | `[]` | Files from the component or validation dependencies mounted into explicit Playground paths |
 | `bench_site_mode` | string | `fresh` | `fresh` runs `wp-phpunit` install; `installed` mounts a persisted site under `HOMEBOY_BENCH_SHARED_STATE` |
 | `bench_browser_target` | object | `{}` | Browser bench target descriptor (see Bench runner above) |
 | `playground_wordpress_install_mode` | string | `""` | Pass-through for `wp-playground-cli --wordpress-install-mode` |
+
+## Blueprint Validation
+
+Use `scripts/validation/validate-playground-blueprint.sh` to validate the same
+Blueprint file or URL users open in WordPress Playground:
+
+```bash
+wordpress/scripts/validation/validate-playground-blueprint.sh \
+  https://raw.githubusercontent.com/example/repo/main/blueprint.json
+```
+
+The script runs `wp-playground-cli run-blueprint` with debug verbosity and
+prints captured stdout/stderr on failure, including step-level Blueprint errors
+and PHP fatals surfaced by Playground.
 
 ## Environment variables
 
