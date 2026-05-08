@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.44.19] - 2026-05-08
+
+### Changed
+- name dependency resolver helpers
+
 ## [2.44.18] - 2026-05-08
 
 ### Fixed
