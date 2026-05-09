@@ -43,7 +43,10 @@ jq -n \
         flow_slug: "example-flow",
         provider: "example-provider",
         model: "example-model",
-        prompt: "Dry-run the generic Data Machine agent workload."
+        prompt: "Dry-run the generic Data Machine agent workload.",
+        workload_run_before: [
+            { type: "php", file: "workloads/datamachine-agent-bootstrap.php" }
+        ]
     }' > "$CONFIG_TMPFILE"
 
 HOMEBOY_DATAMACHINE_AGENT_RESULTS_FILE="$RESULTS_TMPFILE" \
@@ -56,7 +59,7 @@ if ! jq -e "$scenario" "$RESULTS_TMPFILE" >/dev/null; then
     exit 1
 fi
 
-for metric in config_present_mean dry_run_mean; do
+for metric in bootstrap_ran_mean config_present_mean dry_run_mean; do
     value=$(jq -r "$scenario | .metrics.${metric} // \"missing\"" "$RESULTS_TMPFILE")
     if [ "$value" != "1" ]; then
         echo "ERROR: ${metric} expected 1, got ${value}" >&2
@@ -67,8 +70,14 @@ done
 
 provider=$(jq -r "$scenario | .metadata.provider // \"missing\"" "$RESULTS_TMPFILE")
 model=$(jq -r "$scenario | .metadata.model // \"missing\"" "$RESULTS_TMPFILE")
+bootstrap_value=$(jq -r "$scenario | .metadata.bootstrap_value // \"missing\"" "$RESULTS_TMPFILE")
 if [ "$provider" != "example-provider" ] || [ "$model" != "example-model" ]; then
     echo "ERROR: provider/model metadata missing (provider=$provider model=$model)" >&2
+    cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+if [ "$bootstrap_value" != "ran" ]; then
+    echo "ERROR: bootstrap metadata missing (bootstrap_value=$bootstrap_value)" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
 fi

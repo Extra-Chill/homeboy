@@ -54,6 +54,8 @@ SETTINGS_JSON=$(jq -nc \
     --argjson config "$CONFIG_JSON" \
     --argjson warmup "$BENCH_WARMUP_ITERATIONS" \
     '{
+        workload_run_before: ($config.workload_run_before // $config.bootstrap_run // []),
+        workload_run_after: ($config.workload_run_after // []),
         validation_dependencies: ($config.validation_dependencies // $config.dependencies // []),
         playground_wordpress_version: $wordpressVersion,
         wp_config_defines: ($config.wp_config_defines // {}),
@@ -66,9 +68,9 @@ SETTINGS_JSON=$(jq -nc \
             {
                 id: $workloadId,
                 label: $workloadLabel,
-                run: [
+                run: (($config.workload_run_before // $config.bootstrap_run // []) + [
                     { type: "php", file: $workloadPath }
-                ]
+                ] + ($config.workload_run_after // []))
             }
         ]
     }')
