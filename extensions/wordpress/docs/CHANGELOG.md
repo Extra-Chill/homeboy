@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.49.0] - 2026-05-09
+
+### Added
+- add Data Machine runner tool recorders
+
 ## [2.48.0] - 2026-05-09
 
 ### Added
