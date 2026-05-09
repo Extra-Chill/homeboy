@@ -44,6 +44,326 @@ if ( ! function_exists( 'homeboy_datamachine_agent_scalar' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_path_value' ) ) {
+    function homeboy_datamachine_agent_path_value( array $sources, string $path ) {
+        $parts = array_filter( explode( '.', $path ), static fn( $part ) => '' !== $part );
+        if ( empty( $parts ) ) {
+            return null;
+        }
+
+        $value = $sources;
+        foreach ( $parts as $part ) {
+            if ( ! is_array( $value ) || ! array_key_exists( $part, $value ) ) {
+                return null;
+            }
+            $value = $value[ $part ];
+        }
+
+        return $value;
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_first_url' ) ) {
+    function homeboy_datamachine_agent_first_url( $value ): string {
+        if ( is_string( $value ) ) {
+            return preg_match( '#https://github\.com/[^\s)]+#', $value, $matches ) ? $matches[0] : '';
+        }
+        if ( ! is_array( $value ) ) {
+            return '';
+        }
+        foreach ( array( 'html_url', 'issue_url', 'url' ) as $key ) {
+            if ( ! empty( $value[ $key ] ) && is_string( $value[ $key ] ) && str_starts_with( $value[ $key ], 'https://github.com/' ) ) {
+                return $value[ $key ];
+            }
+        }
+        foreach ( $value as $child ) {
+            $url = homeboy_datamachine_agent_first_url( $child );
+            if ( '' !== $url ) {
+                return $url;
+            }
+        }
+        return '';
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_ability_schema' ) ) {
+    function homeboy_datamachine_agent_ability_schema( string $ability_name ): array {
+        $ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( $ability_name ) : null;
+        if ( $ability && method_exists( $ability, 'get_input_schema' ) ) {
+            $schema = (array) $ability->get_input_schema();
+            if ( ! empty( $schema['properties'] ) && is_array( $schema['properties'] ) ) {
+                return $schema;
+            }
+        }
+
+        return array(
+            'type'       => 'object',
+            'properties' => array(),
+        );
+    }
+}
+
+if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
+    class Homeboy_Datamachine_Agent_Tool_Recorder {
+        private static array $tool_results = array();
+
+        public function handle_tool_call( array $parameters, array $tool_def = array() ): array {
+            $response = isset( $tool_def['homeboy_original_tool'] ) && is_array( $tool_def['homeboy_original_tool'] )
+                ? $this->call_original_tool( $parameters, $tool_def['homeboy_original_tool'] )
+                : $this->call_ability_tool( $parameters, $tool_def );
+
+            $this->record( $parameters, $tool_def, $response );
+            return $response;
+        }
+
+        private function call_original_tool( array $parameters, array $original_tool ): array {
+            $class  = (string) ( $original_tool['class'] ?? '' );
+            $method = (string) ( $original_tool['method'] ?? 'handle_tool_call' );
+            if ( '' === $class || ! class_exists( $class ) || ! method_exists( $class, $method ) ) {
+                return $this->error( $class, 'Original tool callback is unavailable.' );
+            }
+
+            $tool = new $class();
+            $result = $tool->{$method}( $parameters, $original_tool );
+            return is_array( $result ) ? $result : array( 'success' => true, 'data' => $result );
+        }
+
+        private function call_ability_tool( array $parameters, array $tool_def ): array {
+            $ability_name = (string) ( $tool_def['ability'] ?? '' );
+            $tool_name    = (string) ( $tool_def['tool_name'] ?? $ability_name );
+            if ( '' === $ability_name || ! function_exists( 'wp_get_ability' ) ) {
+                return $this->error( $tool_name, 'Missing ability contract.' );
+            }
+
+            $ability = wp_get_ability( $ability_name );
+            if ( ! $ability ) {
+                return $this->error( $tool_name, $ability_name . ' is not registered.' );
+            }
+
+            $result = $ability->execute( $parameters );
+            if ( function_exists( 'is_wp_error' ) && is_wp_error( $result ) ) {
+                return $this->error( $tool_name, $result->get_error_message() );
+            }
+
+            $response              = is_array( $result ) ? $result : array( 'success' => true, 'data' => $result );
+            $response['tool_name'] = $tool_name;
+            return $response;
+        }
+
+        private function record( array $parameters, array $tool_def, array $response ): void {
+            $record = is_array( $tool_def['homeboy_record'] ?? null ) ? $tool_def['homeboy_record'] : array();
+            $engine_key = (string) ( $record['engine_key'] ?? '' );
+            $job_id     = (int) ( $parameters['job_id'] ?? 0 );
+            if ( '' === $engine_key || $job_id <= 0 || ! function_exists( 'datamachine_merge_engine_data' ) ) {
+                return;
+            }
+
+            $sources = array(
+                'parameters' => $parameters,
+                'response'   => $response,
+                'data'       => is_array( $response['data'] ?? null ) ? $response['data'] : array(),
+            );
+
+            $payload = array();
+            if ( ! empty( $record['tool_results_key'] ) ) {
+                self::$tool_results[] = array(
+                    'tool_name' => (string) ( $tool_def['tool_name'] ?? '' ),
+                    'success'   => ! empty( $response['success'] ),
+                    'repo'      => (string) ( $parameters['repo'] ?? '' ),
+                    'url'       => homeboy_datamachine_agent_first_url( $response ),
+                    'error'     => (string) ( $response['error'] ?? '' ),
+                    'message'   => (string) ( $response['message'] ?? '' ),
+                );
+                $payload[ (string) $record['tool_results_key'] ] = self::$tool_results;
+            }
+
+            if ( is_array( $record['fields'] ?? null ) ) {
+                foreach ( $record['fields'] as $field => $field_config ) {
+                    if ( ! is_string( $field ) || '' === $field ) {
+                        continue;
+                    }
+                    $value = $this->resolve_field_value( $sources, $field_config );
+                    if ( null !== $value ) {
+                        $payload[ $field ] = $value;
+                    }
+                }
+            }
+
+            if ( is_array( $record['event'] ?? null ) && $this->event_matches( $parameters, $response, $record['event'] ) ) {
+                $event_url = homeboy_datamachine_agent_first_url( $response );
+                if ( '' !== $event_url ) {
+                    $payload[ (string) ( $record['event']['key'] ?? 'event' ) ] = array(
+                        'type'   => (string) ( $record['event']['type'] ?? '' ),
+                        'url'    => $event_url,
+                        'repo'   => (string) ( $parameters['repo'] ?? '' ),
+                        'number' => (int) ( $response['pull_number'] ?? $response['issue_number'] ?? $response['number'] ?? $parameters['pull_number'] ?? 0 ),
+                    );
+                }
+            }
+
+            if ( ! empty( $payload ) ) {
+                datamachine_merge_engine_data( $job_id, array( $engine_key => $payload ) );
+            }
+        }
+
+        private function resolve_field_value( array $sources, $field_config ) {
+            $paths = is_array( $field_config ) && isset( $field_config['paths'] ) && is_array( $field_config['paths'] )
+                ? $field_config['paths']
+                : ( is_array( $field_config ) ? $field_config : array( $field_config ) );
+            foreach ( $paths as $path ) {
+                if ( ! is_scalar( $path ) ) {
+                    continue;
+                }
+                $value = homeboy_datamachine_agent_path_value( $sources, (string) $path );
+                if ( null === $value || '' === $value ) {
+                    continue;
+                }
+                if ( is_array( $field_config ) && isset( $field_config['strip_prefix'] ) && is_string( $value ) && is_scalar( $field_config['strip_prefix'] ) ) {
+                    $prefix = (string) $field_config['strip_prefix'];
+                    if ( str_starts_with( $value, $prefix ) ) {
+                        $value = substr( $value, strlen( $prefix ) );
+                    }
+                }
+                return $value;
+            }
+            return null;
+        }
+
+        private function event_matches( array $parameters, array $response, array $event ): bool {
+            if ( ! empty( $event['only_if_success'] ) && empty( $response['success'] ) ) {
+                return false;
+            }
+            $match = is_array( $event['match'] ?? null ) ? $event['match'] : array();
+            foreach ( $match as $parameter => $env_name ) {
+                if ( ! is_string( $parameter ) || ! is_scalar( $env_name ) ) {
+                    continue;
+                }
+                $expected = trim( (string) getenv( (string) $env_name ) );
+                if ( '' !== $expected && (string) ( $parameters[ $parameter ] ?? '' ) !== $expected ) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private function error( string $tool_name, string $message ): array {
+            return array(
+                'success'   => false,
+                'error'     => $message,
+                'tool_name' => $tool_name,
+            );
+        }
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_register_tool_recorders' ) ) {
+    function homeboy_datamachine_agent_register_tool_recorders( array $config ): void {
+        $ability_tools = is_array( $config['ability_tools'] ?? null ) ? $config['ability_tools'] : array();
+        $recorders     = is_array( $config['tool_recorders'] ?? null ) ? $config['tool_recorders'] : array();
+        if ( empty( $ability_tools ) && empty( $recorders ) ) {
+            return;
+        }
+
+        add_filter(
+            'datamachine_resolved_tools',
+            static function ( array $tools ) use ( $ability_tools, $recorders ): array {
+                foreach ( $ability_tools as $tool_config ) {
+                    if ( ! is_array( $tool_config ) ) {
+                        continue;
+                    }
+                    $tool_name    = (string) ( $tool_config['name'] ?? '' );
+                    $ability_name = (string) ( $tool_config['ability'] ?? '' );
+                    if ( '' === $tool_name || '' === $ability_name ) {
+                        continue;
+                    }
+                    $tools[ $tool_name ] = array(
+                        'class'          => 'Homeboy_Datamachine_Agent_Tool_Recorder',
+                        'method'         => 'handle_tool_call',
+                        'ability'        => $ability_name,
+                        'tool_name'      => $tool_name,
+                        'description'    => (string) ( $tool_config['description'] ?? 'Execute ' . $ability_name . '.' ),
+                        'parameters'     => homeboy_datamachine_agent_ability_schema( $ability_name ),
+                        'homeboy_record' => is_array( $tool_config['record'] ?? null ) ? $tool_config['record'] : array(),
+                    );
+                }
+
+                foreach ( $recorders as $recorder ) {
+                    if ( ! is_array( $recorder ) ) {
+                        continue;
+                    }
+                    $tool_name = (string) ( $recorder['tool'] ?? '' );
+                    if ( '' === $tool_name || empty( $tools[ $tool_name ] ) || ! is_array( $tools[ $tool_name ] ) ) {
+                        continue;
+                    }
+                    $original_tool = $tools[ $tool_name ];
+                    $tools[ $tool_name ]['class']                 = 'Homeboy_Datamachine_Agent_Tool_Recorder';
+                    $tools[ $tool_name ]['method']                = 'handle_tool_call';
+                    $tools[ $tool_name ]['tool_name']             = $tool_name;
+                    $tools[ $tool_name ]['homeboy_original_tool'] = $original_tool;
+                    $tools[ $tool_name ]['homeboy_record']        = is_array( $recorder['record'] ?? null ) ? $recorder['record'] : array();
+                }
+
+                return $tools;
+            },
+            100,
+            1
+        );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_array_merge_recursive_distinct' ) ) {
+    function homeboy_datamachine_agent_array_merge_recursive_distinct( array $base, array $patch ): array {
+        foreach ( $patch as $key => $value ) {
+            if ( is_array( $value ) && isset( $base[ $key ] ) && is_array( $base[ $key ] ) ) {
+                $base[ $key ] = homeboy_datamachine_agent_array_merge_recursive_distinct( $base[ $key ], $value );
+                continue;
+            }
+            $base[ $key ] = $value;
+        }
+        return $base;
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_apply_step_patches' ) ) {
+    function homeboy_datamachine_agent_apply_step_patches( array $steps, array $patches ): array {
+        if ( empty( $patches ) ) {
+            return $steps;
+        }
+
+        foreach ( $steps as &$step_config ) {
+            if ( ! is_array( $step_config ) ) {
+                continue;
+            }
+            foreach ( $patches as $patch ) {
+                if ( ! is_array( $patch ) ) {
+                    continue;
+                }
+                $step_type = (string) ( $patch['step_type'] ?? '' );
+                $step_id   = (string) ( $patch['step_id'] ?? '' );
+                if ( '' !== $step_type && $step_type !== (string) ( $step_config['step_type'] ?? '' ) ) {
+                    continue;
+                }
+                if ( '' !== $step_id && $step_id !== (string) ( $step_config['pipeline_step_id'] ?? $step_config['flow_step_id'] ?? '' ) ) {
+                    continue;
+                }
+                if ( is_array( $patch['set'] ?? null ) ) {
+                    foreach ( $patch['set'] as $key => $value ) {
+                        if ( is_string( $key ) && '' !== $key ) {
+                            $step_config[ $key ] = $value;
+                        }
+                    }
+                }
+                if ( is_array( $patch['merge'] ?? null ) ) {
+                    $step_config = homeboy_datamachine_agent_array_merge_recursive_distinct( $step_config, $patch['merge'] );
+                }
+            }
+        }
+        unset( $step_config );
+
+        return $steps;
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_bootstrap_provider' ) ) {
     function homeboy_datamachine_agent_bootstrap_provider( array $config ): void {
         $function = homeboy_datamachine_agent_scalar( $config, 'provider_register_function' );
@@ -246,6 +566,7 @@ foreach ( array( Agents::class, Pipelines::class, Flows::class, Jobs::class ) as
 }
 
 $settings = homeboy_datamachine_agent_configure_settings( $config );
+homeboy_datamachine_agent_register_tool_recorders( $config );
 
 $import_start = hrtime( true );
 $import_result = wp_get_ability( 'datamachine/import-agent' )->execute(
@@ -286,6 +607,12 @@ if ( '' !== $pipeline_slug ) {
         return homeboy_datamachine_agent_result( array( 'pipeline_resolved' => 0 ), $metadata + array( 'agent_id' => $agent_id ), 'Imported pipeline was not found' );
     }
     $pipeline_id = (int) $pipeline['pipeline_id'];
+    $pipeline_step_patches = is_array( $config['pipeline_step_patches'] ?? null ) ? $config['pipeline_step_patches'] : array();
+    if ( ! empty( $pipeline_step_patches ) ) {
+        $pipeline_config = is_array( $pipeline['pipeline_config'] ?? null ) ? $pipeline['pipeline_config'] : array();
+        $pipeline_config = homeboy_datamachine_agent_apply_step_patches( $pipeline_config, $pipeline_step_patches );
+        $pipelines->update_pipeline( $pipeline_id, array( 'pipeline_config' => $pipeline_config ) );
+    }
 }
 
 $flow = $flows->get_by_portable_slug( $pipeline_id, $flow_slug );
@@ -298,6 +625,7 @@ if ( ! $flow ) {
 
 $flow_id = (int) $flow['flow_id'];
 $flow_config = is_array( $flow['flow_config'] ?? null ) ? $flow['flow_config'] : array();
+$flow_config = homeboy_datamachine_agent_apply_step_patches( $flow_config, is_array( $config['flow_step_patches'] ?? null ) ? $config['flow_step_patches'] : array() );
 foreach ( $flow_config as &$step_config ) {
     if ( 'ai' === (string) ( $step_config['step_type'] ?? '' ) ) {
         $step_config['prompt_queue'] = array(
