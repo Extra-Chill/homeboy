@@ -23,6 +23,64 @@ if [ ! -f "$WORKLOAD_PATH" ]; then
     exit 1
 fi
 
+RUNTIME_DIR=""
+cleanup() {
+    if [ -n "$RUNTIME_DIR" ]; then
+        rm -rf "$RUNTIME_DIR"
+    fi
+}
+trap cleanup EXIT
+
+if [ -z "${HOMEBOY_RUNTIME_BENCH_HELPER_SH:-}" ] || [ -z "${HOMEBOY_RUNTIME_BENCH_HELPER_PHP:-}" ]; then
+    RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-datamachine-agent-runtime.XXXXXX")
+    if [ -z "${HOMEBOY_RUNTIME_BENCH_HELPER_SH:-}" ]; then
+        cat > "$RUNTIME_DIR/bench-helper.sh" <<'SH'
+#!/usr/bin/env bash
+homeboy_write_empty_bench_results() {
+    printf '{"component":"%s","iterations":%s,"scenarios":[]}\n' "$1" "$2" > "$3"
+}
+SH
+        export HOMEBOY_RUNTIME_BENCH_HELPER_SH="$RUNTIME_DIR/bench-helper.sh"
+    fi
+    if [ -z "${HOMEBOY_RUNTIME_BENCH_HELPER_PHP:-}" ]; then
+        cat > "$RUNTIME_DIR/bench-helper.php" <<'PHP'
+<?php
+function homeboy_bench_percentile(array $sorted_values, float $p): float {
+    $n = count($sorted_values);
+    if ($n === 0) {
+        return 0.0;
+    }
+    if ($n === 1) {
+        return (float) $sorted_values[0];
+    }
+    $rank = $p * ($n - 1);
+    $lo = (int) floor($rank);
+    $hi = (int) ceil($rank);
+    if ($lo === $hi) {
+        return (float) $sorted_values[$lo];
+    }
+    $frac = $rank - $lo;
+    return (float) ($sorted_values[$lo] * (1 - $frac) + $sorted_values[$hi] * $frac);
+}
+function homeboy_bench_scenario_id(string $basename): string {
+    $name = preg_replace('/\.[^.]+$/', '', $basename);
+    $name = preg_replace('/([a-z0-9])([A-Z])/', '$1-$2', $name);
+    $name = strtolower($name);
+    $name = preg_replace('/[^a-z0-9]+/', '-', $name);
+    return trim($name, '-');
+}
+function homeboy_write_bench_results(string $results_path, string $component_id, int $iterations, array $scenarios): void {
+    file_put_contents($results_path, json_encode([
+        'component_id' => $component_id,
+        'iterations' => $iterations,
+        'scenarios' => $scenarios,
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+}
+PHP
+        export HOMEBOY_RUNTIME_BENCH_HELPER_PHP="$RUNTIME_DIR/bench-helper.php"
+    fi
+fi
+
 RESULTS_FILE="${HOMEBOY_DATAMACHINE_AGENT_RESULTS_FILE:-${HOMEBOY_BENCH_RESULTS_FILE:-}}"
 if [ -z "$RESULTS_FILE" ]; then
     RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-datamachine-agent.XXXXXX")
