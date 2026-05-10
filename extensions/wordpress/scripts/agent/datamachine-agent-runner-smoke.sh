@@ -31,11 +31,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+REPO_ROOT="$(cd "$EXTENSION_PATH/.." && pwd)"
+BUNDLE_REF="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
 jq -n \
     --arg componentPath "$FIXTURE_DIR" \
+    --arg bundleRepo "$REPO_ROOT" \
+    --arg bundleRef "$BUNDLE_REF" \
     '{
         component_id: "playground-workloads",
         component_path: $componentPath,
+        bundle_repo: $bundleRepo,
+        bundle_ref: $bundleRef,
+        bundle_path_in_repo: ".",
         workload_id: "datamachine-agent-dry-run",
         workload_label: "Data Machine agent dry run",
         dry_run: true,
@@ -71,6 +79,9 @@ done
 provider=$(jq -r "$scenario | .metadata.provider // \"missing\"" "$RESULTS_TMPFILE")
 model=$(jq -r "$scenario | .metadata.model // \"missing\"" "$RESULTS_TMPFILE")
 bootstrap_value=$(jq -r "$scenario | .metadata.bootstrap_value // \"missing\"" "$RESULTS_TMPFILE")
+bundle_repo=$(jq -r "$scenario | .metadata.bundle_repo // \"missing\"" "$RESULTS_TMPFILE")
+bundle_ref=$(jq -r "$scenario | .metadata.bundle_ref // \"missing\"" "$RESULTS_TMPFILE")
+bundle_path=$(jq -r "$scenario | .metadata.bundle_path // \"missing\"" "$RESULTS_TMPFILE")
 if [ "$provider" != "example-provider" ] || [ "$model" != "example-model" ]; then
     echo "ERROR: provider/model metadata missing (provider=$provider model=$model)" >&2
     cat "$RESULTS_TMPFILE" >&2
@@ -78,6 +89,11 @@ if [ "$provider" != "example-provider" ] || [ "$model" != "example-model" ]; the
 fi
 if [ "$bootstrap_value" != "ran" ]; then
     echo "ERROR: bootstrap metadata missing (bootstrap_value=$bootstrap_value)" >&2
+    cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+if [ "$bundle_repo" != "$REPO_ROOT" ] || [ "$bundle_ref" != "$BUNDLE_REF" ] || [ -z "$bundle_path" ] || [ "$bundle_path" = "missing" ]; then
+    echo "ERROR: external bundle metadata missing (repo=$bundle_repo ref=$bundle_ref path=$bundle_path)" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
 fi
