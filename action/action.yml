@@ -149,6 +149,20 @@ inputs:
     required: false
     default: 'true'
 
+  # ── PR policy gate ──
+  pr-policy:
+    description: 'Path to a repo-local PR policy file. When set on pull_request events, classifies the PR for deterministic auto-merge eligibility.'
+    required: false
+    default: ''
+  pr-policy-merge:
+    description: 'Merge the pull request when pr-policy marks it safe. Requires pr-policy and a token with pull request write permissions.'
+    required: false
+    default: 'false'
+  pr-policy-merge-method:
+    description: 'Merge method for pr-policy-merge: merge, squash, or rebase.'
+    required: false
+    default: 'squash'
+
   # ── SSH (for fleet/deploy) ──
   ssh-key:
     description: 'SSH private key for fleet/deploy commands. Writes to ~/.ssh, starts ssh-agent, configures known_hosts. If empty, assumes SSH is pre-configured.'
@@ -207,6 +221,15 @@ outputs:
   skipped-reason:
     description: 'Why release was skipped when released is false'
     value: ${{ steps.release.outputs.skipped-reason }}
+  pr-policy-safe:
+    description: 'Whether the PR policy marked this pull request safe for auto-merge (true/false)'
+    value: ${{ steps.pr-policy.outputs.safe }}
+  pr-policy-merged:
+    description: 'Whether the PR policy gate merged this pull request (true/false)'
+    value: ${{ steps.pr-policy.outputs.merged }}
+  pr-policy-report:
+    description: 'Markdown summary from the PR policy gate'
+    value: ${{ steps.pr-policy.outputs.report }}
 
 runs:
   using: 'composite'
@@ -583,6 +606,22 @@ runs:
         OPERATIONS_RESULTS: ${{ steps.run-operations.outputs.results }}
         PR_ACTIVE: ${{ steps.check-pr-state.outputs.active }}
       run: bash ${{ github.action_path }}/scripts/core/enforce-final-status.sh
+
+    - name: Evaluate PR policy
+      id: pr-policy
+      if: github.event_name == 'pull_request' && steps.check-pr-state.outputs.active != 'false' && inputs.pr-policy != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.app-token || github.token }}
+        POLICY_PATH: ${{ inputs.pr-policy }}
+        POLICY_MERGE: ${{ inputs.pr-policy-merge }}
+        POLICY_MERGE_METHOD: ${{ inputs.pr-policy-merge-method }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        REPOSITORY: ${{ github.repository }}
+      run: bash ${{ github.action_path }}/scripts/pr/policy-gate.sh
 
     - name: Post PR comment
       if: always() && github.event_name == 'pull_request' && steps.check-pr-state.outputs.active != 'false' && inputs.pr-comment != 'false'

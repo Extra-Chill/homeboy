@@ -172,6 +172,9 @@ Use these outputs to gate downstream jobs:
 | `comment-key` | No | *(auto)* | Shared PR comment key so multiple jobs aggregate into one sticky comment |
 | `comment-section-key` | No | *(auto)* | Section key within the shared PR comment |
 | `comment-section-title` | No | *(auto)* | Visible heading for this section in the shared PR comment |
+| `pr-policy` | No | | Path to a repo-local PR policy file for deterministic PR auto-merge eligibility |
+| `pr-policy-merge` | No | `false` | Merge the PR when `pr-policy` marks it safe |
+| `pr-policy-merge-method` | No | `squash` | Merge method for `pr-policy-merge`: `merge`, `squash`, or `rebase` |
 | `release-dry-run` | No | `false` | Preview the release without making changes |
 | `release-branch` | No | `main` | Branch that releases are allowed from |
 | `release-skip-changelog` | No | `false` | Skip auto-generating changelog entries from conventional commits |
@@ -186,6 +189,9 @@ Use these outputs to gate downstream jobs:
 | `release-version` | The released version number (e.g. `1.2.3`) |
 | `release-tag` | The release git tag (e.g. `v1.2.3`) |
 | `release-bump-type` | The bump type used (`patch`, `minor`, `major`) |
+| `pr-policy-safe` | Whether the PR policy marked the PR safe for auto-merge (`true`/`false`) |
+| `pr-policy-merged` | Whether the PR policy gate merged the PR (`true`/`false`) |
+| `pr-policy-report` | Markdown summary from the PR policy gate |
 
 ## Examples
 
@@ -281,6 +287,46 @@ When enabled, the action will:
 For fork PRs, Homeboy Action now attempts the same direct-to-PR autofix flow first. Actual push success still depends on the token/permission model available to the workflow run.
 
 **Merge guard:** If the PR is merged or closed while CI is running, autofix and PR comments are automatically skipped. This prevents zombie commits to deleted branches and stale result noise on already-merged PRs. Pair with a `concurrency` group to cancel the entire run early.
+
+### Deterministic PR Policy Gate
+
+Use `pr-policy` to classify whether a PR is safe for deterministic auto-merge after Homeboy checks pass. The policy gate reads changed files from GitHub, applies repo-local author, branch, path, and content rules, then exposes `pr-policy-safe` and optionally merges the PR.
+
+```yaml
+- uses: actions/checkout@v4
+
+- uses: Extra-Chill/homeboy-action@v2
+  with:
+    extension: wordpress
+    commands: lint,test
+    pr-policy: .homeboy/pr-policy.yml
+    pr-policy-merge: 'true'
+    pr-policy-merge-method: squash
+```
+
+Example policy:
+
+```yaml
+title: World PR policy
+allowed_authors:
+  - github-actions[bot]
+allowed_head_branches:
+  - world-day/**
+allowed_paths:
+  - content/**
+  - themes/world-of-wordpress/patterns/**
+blocked_paths:
+  - .github/**
+  - bundles/**
+  - plugins/**
+blocked_content_patterns:
+  - 'eval[[:space:]]*\('
+  - 'shell_exec[[:space:]]*\('
+require_same_repository: true
+delete_branch_on_merge: true
+```
+
+The gate fails closed for missing policy, unknown changed files, blocked paths, unexpected authors, fork PRs when `require_same_repository` is true, or blocked content patterns. Unsafe PRs are not merged; the action still emits outputs so a workflow can decide whether to fail, comment, or route to human review.
 
 ### Auto-open Fix PRs on non-PR runs
 
