@@ -10,6 +10,7 @@ use DataMachine\Core\Database\Chat\ConversationStoreFactory;
 use DataMachine\Core\Database\Flows\Flows;
 use DataMachine\Core\Database\Jobs\Jobs;
 use DataMachine\Core\Database\Pipelines\Pipelines;
+use DataMachine\Core\JobArtifacts;
 use DataMachine\Core\PluginSettings;
 
 if ( ! function_exists( 'homeboy_datamachine_agent_result' ) ) {
@@ -136,6 +137,123 @@ if ( ! function_exists( 'homeboy_datamachine_agent_file_written' ) ) {
         }
 
         return false;
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_bundle_path_in_repo' ) ) {
+    function homeboy_datamachine_agent_bundle_path_in_repo( array $config ): string {
+        $configured = trim( (string) ( $config['bundle_path_in_repo'] ?? '' ), '/' );
+        if ( '' !== $configured ) {
+            return $configured;
+        }
+
+        $component_path = rtrim( homeboy_datamachine_agent_scalar( $config, 'component_path' ), '/' ) . '/';
+        $bundle_path    = homeboy_datamachine_agent_scalar( $config, 'bundle_path' );
+        if ( '' !== $component_path && '' !== $bundle_path && str_starts_with( $bundle_path, $component_path ) ) {
+            return trim( substr( $bundle_path, strlen( $component_path ) ), '/' );
+        }
+
+        return '';
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_slug_fragment' ) ) {
+    function homeboy_datamachine_agent_slug_fragment( string $value ): string {
+        $fragment = strtolower( preg_replace( '/[^a-zA-Z0-9._-]+/', '-', $value ) ?? '' );
+        $fragment = trim( $fragment, '.-' );
+        return '' !== $fragment ? $fragment : 'artifact';
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_export_bundle_artifacts' ) ) {
+    function homeboy_datamachine_agent_export_bundle_artifacts( int $job_id, array $config, bool $pr_opened ): array {
+        if ( $job_id <= 0 || $pr_opened || ! class_exists( JobArtifacts::class ) || ! function_exists( 'wp_get_ability' ) ) {
+            return array();
+        }
+
+        $target_repo = homeboy_datamachine_agent_scalar( $config, 'target_repo' );
+        $bundle_path = homeboy_datamachine_agent_bundle_path_in_repo( $config );
+        if ( '' === $target_repo || '' === $bundle_path ) {
+            return array();
+        }
+
+        $artifact_result = ( new JobArtifacts() )->get( $job_id );
+        $artifacts       = is_array( $artifact_result['artifacts'] ?? null ) ? $artifact_result['artifacts'] : array();
+        $daily_memory    = is_array( $artifacts['daily_memory_artifacts'] ?? null ) ? $artifacts['daily_memory_artifacts'] : array();
+        if ( empty( $daily_memory ) ) {
+            return array();
+        }
+
+        $file_ability = wp_get_ability( 'datamachine/create-or-update-github-file' );
+        $pr_ability   = wp_get_ability( 'datamachine/create-github-pull-request' );
+        if ( ! $file_ability || ! $pr_ability ) {
+            return array( 'error' => 'GitHub file or pull request ability unavailable.' );
+        }
+
+        $agent_slug = homeboy_datamachine_agent_slug_fragment( homeboy_datamachine_agent_scalar( $config, 'agent_slug', 'agent' ) );
+        $run_id     = homeboy_datamachine_agent_slug_fragment( (string) getenv( 'GITHUB_RUN_ID' ) );
+        $branch     = 'agent-artifacts/' . $agent_slug . '-' . $run_id . '-' . $job_id;
+        $written    = array();
+
+        foreach ( $daily_memory as $artifact ) {
+            if ( ! is_array( $artifact ) || 'agent_daily_memory' !== (string) ( $artifact['type'] ?? '' ) ) {
+                continue;
+            }
+
+            $relative_path = trim( (string) ( $artifact['bundle_relative_path'] ?? '' ), '/' );
+            $content       = (string) ( $artifact['content'] ?? '' );
+            if ( '' === $relative_path || '' === $content || str_contains( $relative_path, '..' ) ) {
+                continue;
+            }
+
+            $repo_path = $bundle_path . '/' . $relative_path;
+            $result    = $file_ability->execute(
+                array(
+                    'repo'           => $target_repo,
+                    'file_path'      => $repo_path,
+                    'content'        => $content,
+                    'commit_message' => 'chore: persist agent run artifact',
+                    'branch'         => $branch,
+                )
+            );
+            if ( function_exists( 'is_wp_error' ) && is_wp_error( $result ) ) {
+                return array( 'error' => $result->get_error_message(), 'written' => $written );
+            }
+            if ( ! is_array( $result ) || empty( $result['success'] ) ) {
+                return array( 'error' => (string) ( $result['error'] ?? 'Artifact file export failed.' ), 'written' => $written );
+            }
+
+            $written[] = $repo_path;
+        }
+
+        if ( empty( $written ) ) {
+            return array();
+        }
+
+        $pr_result = $pr_ability->execute(
+            array(
+                'repo'  => $target_repo,
+                'title' => 'Persist agent run artifacts',
+                'head'  => $branch,
+                'body'  => "## Summary\n- Persist bundle-file run artifacts from Data Machine agent job {$job_id}.\n\n## Artifacts\n- `" . implode( "`\n- `", $written ) . "`\n",
+            )
+        );
+        if ( function_exists( 'is_wp_error' ) && is_wp_error( $pr_result ) ) {
+            return array( 'error' => $pr_result->get_error_message(), 'written' => $written, 'branch' => $branch );
+        }
+
+        $pr_url = '';
+        if ( is_array( $pr_result ) ) {
+            $pr_url = homeboy_datamachine_agent_first_url( $pr_result );
+        }
+
+        return array_filter(
+            array(
+                'branch' => $branch,
+                'paths'  => $written,
+                'pr_url' => $pr_url,
+            )
+        );
     }
 }
 
@@ -805,6 +923,7 @@ $pr_opened = homeboy_datamachine_agent_pr_opened( $engine_data, $config );
 $file_written = homeboy_datamachine_agent_file_written( $engine_data, $config );
 $success_status = $pr_opened ? 'pr_opened' : 'no_changes';
 $success_requires_pr = ! empty( $config['success_requires_pr'] );
+$bundle_artifact_exports = homeboy_datamachine_agent_export_bundle_artifacts( $job_id, $config, $pr_opened );
 
 $metadata += array(
     'agent_id'             => $agent_id,
@@ -820,11 +939,16 @@ $metadata += array(
     'success_status'        => $success_status,
     'success_requires_pr'   => $success_requires_pr,
     'file_written'          => $file_written,
+    'bundle_artifact_exports' => $bundle_artifact_exports,
 );
 
 if ( $file_written && ! $pr_opened ) {
     $metadata['success_status'] = 'write_without_pr';
     return homeboy_datamachine_agent_result( array( 'file_written' => 1, 'pr_opened' => 0 ), $metadata, 'Agent wrote files without opening a pull request' );
+}
+
+if ( ! empty( $bundle_artifact_exports['error'] ) ) {
+    return homeboy_datamachine_agent_result( array( 'bundle_artifact_exported' => 0 ), $metadata, (string) $bundle_artifact_exports['error'] );
 }
 
 if ( $success_requires_pr && ! $pr_opened ) {
@@ -850,6 +974,7 @@ return homeboy_datamachine_agent_result(
         'file_written'                => $file_written ? 1 : 0,
         'pr_opened'                   => $pr_opened ? 1 : 0,
         'no_changes'                  => ! $file_written && ! $pr_opened ? 1 : 0,
+        'bundle_artifact_exported'    => ! empty( $bundle_artifact_exports['pr_url'] ) ? 1 : 0,
         'transcript_exported'         => ! empty( $transcript_artifacts['json'] ) ? 1 : 0,
         'total_tokens'                => (int) ( $metadata['token_usage']['total_tokens'] ?? 0 ),
     ),

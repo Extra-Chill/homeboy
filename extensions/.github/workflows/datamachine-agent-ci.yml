@@ -332,6 +332,7 @@ jobs:
               workload_run_before: $workloadRunBefore,
               required_abilities: (["datamachine/import-agent", "datamachine/run-flow", "datamachine/drain-job"] + $extraRequiredAbilities | reduce .[] as $ability ([]; if index($ability) then . else . + [$ability] end)),
               bundle_path: $bundlePath,
+              bundle_path_in_repo: $bundlePath,
               agent_slug: $agentSlug,
               pipeline_slug: $pipelineSlug,
               flow_slug: $flowSlug,
