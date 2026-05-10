@@ -118,17 +118,24 @@ if [ -n "$BUNDLE_REPO" ]; then
         echo "ERROR: bundle_path_in_repo does not exist in bundle_repo: $BUNDLE_PATH_IN_REPO" >&2
         exit 1
     fi
+    BUNDLE_GUEST_SLUG="$(basename "$(cd "$BUNDLE_PATH" && pwd)")"
+    BUNDLE_GUEST_PATH="/wordpress/wp-content/plugins/${BUNDLE_GUEST_SLUG}"
     CONFIG_JSON=$(jq -c \
         --arg bundlePath "$BUNDLE_PATH" \
+        --arg bundleGuestPath "$BUNDLE_GUEST_PATH" \
         --arg bundleRepo "$BUNDLE_REPO" \
         --arg bundleRef "$BUNDLE_REF" \
         --arg bundlePathInRepo "$BUNDLE_PATH_IN_REPO" \
         '. + {
-            bundle_path: $bundlePath,
+            bundle_path: $bundleGuestPath,
+            bundle_host_path: $bundlePath,
             bundle_repo: $bundleRepo,
             bundle_ref: $bundleRef,
             bundle_path_in_repo: $bundlePathInRepo
-        }' <<<"$CONFIG_JSON")
+        } | .validation_dependencies = (
+            (if (.validation_dependencies // .dependencies // []) | type == "array" then (.validation_dependencies // .dependencies // []) elif (.validation_dependencies // .dependencies // null) | type == "string" then [(.validation_dependencies // .dependencies)] else [] end)
+            + [$bundlePath]
+        )' <<<"$CONFIG_JSON")
 fi
 
 WORKLOAD_ID=$(jq -r '.workload_id // "datamachine-agent"' "$CONFIG_PATH")
