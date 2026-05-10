@@ -87,9 +87,19 @@ if ( ! function_exists( 'homeboy_datamachine_agent_first_url' ) ) {
 }
 
 if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
-    function homeboy_datamachine_agent_pr_opened( array $engine_data, array $config ): bool {
+    function homeboy_datamachine_agent_tool_results( array $engine_data, array $config ): array {
         $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
-        $tool_results     = is_array( $engine_data[ $tool_results_key ] ?? null ) ? $engine_data[ $tool_results_key ] : array();
+        $engine_key       = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
+
+        if ( '' !== $engine_key && is_array( $engine_data[ $engine_key ][ $tool_results_key ] ?? null ) ) {
+            return $engine_data[ $engine_key ][ $tool_results_key ];
+        }
+
+        return is_array( $engine_data[ $tool_results_key ] ?? null ) ? $engine_data[ $tool_results_key ] : array();
+    }
+
+    function homeboy_datamachine_agent_pr_opened( array $engine_data, array $config ): bool {
+        $tool_results = homeboy_datamachine_agent_tool_results( $engine_data, $config );
 
         foreach ( $tool_results as $tool_result ) {
             if ( ! is_array( $tool_result ) || empty( $tool_result['success'] ) ) {
@@ -108,8 +118,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
 
 if ( ! function_exists( 'homeboy_datamachine_agent_file_written' ) ) {
     function homeboy_datamachine_agent_file_written( array $engine_data, array $config ): bool {
-        $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
-        $tool_results     = is_array( $engine_data[ $tool_results_key ] ?? null ) ? $engine_data[ $tool_results_key ] : array();
+        $tool_results = homeboy_datamachine_agent_tool_results( $engine_data, $config );
 
         foreach ( $tool_results as $tool_result ) {
             if ( ! is_array( $tool_result ) || empty( $tool_result['success'] ) ) {
