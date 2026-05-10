@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.49.3] - 2026-05-10
+
+### Fixed
+- support reusable Data Machine agent bundles
+
 ## [2.49.2] - 2026-05-10
 
 ### Fixed
