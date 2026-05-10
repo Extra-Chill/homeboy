@@ -114,6 +114,33 @@ if ( ! function_exists( 'homeboy_datamachine_agent_first_url' ) ) {
 }
 
 if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
+    function homeboy_datamachine_agent_merge_recorded_tool_results( array $engine_data, array $config ): array {
+        if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
+            return $engine_data;
+        }
+
+        $recorded = Homeboy_Datamachine_Agent_Tool_Recorder::tool_results();
+        if ( empty( $recorded ) ) {
+            return $engine_data;
+        }
+
+        $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
+        $engine_key       = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
+
+        if ( '' !== $engine_key ) {
+            if ( ! isset( $engine_data[ $engine_key ] ) || ! is_array( $engine_data[ $engine_key ] ) ) {
+                $engine_data[ $engine_key ] = array();
+            }
+            $existing = is_array( $engine_data[ $engine_key ][ $tool_results_key ] ?? null ) ? $engine_data[ $engine_key ][ $tool_results_key ] : array();
+            $engine_data[ $engine_key ][ $tool_results_key ] = array_merge( $existing, $recorded );
+            return $engine_data;
+        }
+
+        $existing = is_array( $engine_data[ $tool_results_key ] ?? null ) ? $engine_data[ $tool_results_key ] : array();
+        $engine_data[ $tool_results_key ] = array_merge( $existing, $recorded );
+        return $engine_data;
+    }
+
     function homeboy_datamachine_agent_tool_results( array $engine_data, array $config ): array {
         $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
         $engine_key       = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
@@ -480,6 +507,10 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
     class Homeboy_Datamachine_Agent_Tool_Recorder {
         private static array $tool_results = array();
 
+        public static function tool_results(): array {
+            return self::$tool_results;
+        }
+
         public function handle_tool_call( array $parameters, array $tool_def = array() ): array {
             $parameters = $this->apply_forced_parameters( $parameters, $tool_def );
 
@@ -538,9 +569,6 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
             $record = is_array( $tool_def['homeboy_record'] ?? null ) ? $tool_def['homeboy_record'] : array();
             $engine_key = (string) ( $record['engine_key'] ?? '' );
             $job_id     = (int) ( $parameters['job_id'] ?? 0 );
-            if ( '' === $engine_key || $job_id <= 0 || ! function_exists( 'datamachine_merge_engine_data' ) ) {
-                return;
-            }
 
             $sources = array(
                 'parameters' => $parameters,
@@ -559,6 +587,10 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
                     'message'   => (string) ( $response['message'] ?? '' ),
                 );
                 $payload[ (string) $record['tool_results_key'] ] = self::$tool_results;
+            }
+
+            if ( '' === $engine_key || $job_id <= 0 || ! function_exists( 'datamachine_merge_engine_data' ) ) {
+                return;
             }
 
             if ( is_array( $record['fields'] ?? null ) ) {
@@ -644,6 +676,27 @@ if ( ! function_exists( 'homeboy_datamachine_agent_register_tool_recorders' ) ) 
     function homeboy_datamachine_agent_register_tool_recorders( array $config ): void {
         $ability_tools = is_array( $config['ability_tools'] ?? null ) ? $config['ability_tools'] : array();
         $recorders     = is_array( $config['tool_recorders'] ?? null ) ? $config['tool_recorders'] : array();
+
+        $recorded_tools = array();
+        foreach ( $recorders as $recorder ) {
+            if ( is_array( $recorder ) && ! empty( $recorder['tool'] ) && is_scalar( $recorder['tool'] ) ) {
+                $recorded_tools[] = (string) $recorder['tool'];
+            }
+        }
+
+        $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
+        foreach ( array( 'create_or_update_github_file', 'create_github_pull_request' ) as $tool_name ) {
+            if ( in_array( $tool_name, $recorded_tools, true ) ) {
+                continue;
+            }
+
+            $recorders[] = array(
+                'tool'   => $tool_name,
+                'record' => array(
+                    'tool_results_key' => $tool_results_key,
+                ),
+            );
+        }
         if ( empty( $ability_tools ) && empty( $recorders ) ) {
             return;
         }
@@ -1111,6 +1164,7 @@ $metadata['retry_waited_ms'] = $drain_summary['retry_waited_ms'];
 $job = $jobs->get_job( $job_id );
 $job_status = is_array( $job ) ? (string) ( $job['status'] ?? '' ) : '';
 $engine_data = function_exists( 'datamachine_get_engine_data' ) ? datamachine_get_engine_data( $job_id ) : array();
+$engine_data = homeboy_datamachine_agent_merge_recorded_tool_results( $engine_data, $config );
 $transcript_dir = homeboy_datamachine_agent_scalar( $config, 'transcript_dir' );
 $transcript_artifacts = homeboy_datamachine_agent_export_transcript( $job_id, $engine_data, $transcript_dir );
 $pr_opened = homeboy_datamachine_agent_pr_opened( $engine_data, $config );

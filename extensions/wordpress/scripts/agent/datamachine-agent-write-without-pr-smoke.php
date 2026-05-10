@@ -144,6 +144,21 @@ namespace {
         exit( 1 );
     }
 
+    $recorded_results = new ReflectionProperty( Homeboy_Datamachine_Agent_Tool_Recorder::class, 'tool_results' );
+    $recorded_results->setValue( null, array(
+        array(
+            'tool_name' => 'create_github_pull_request',
+            'success'   => true,
+            'repo'      => 'owner/repo',
+            'url'       => 'https://github.com/owner/repo/pull/789',
+        ),
+    ) );
+    $merged_recorded_results = homeboy_datamachine_agent_merge_recorded_tool_results( array(), $config );
+    if ( ! homeboy_datamachine_agent_pr_opened( $merged_recorded_results, $config ) ) {
+        fwrite( STDERR, "Expected current-run recorded tool results to drive PR classification.\n" );
+        exit( 1 );
+    }
+
     $no_changes = array( 'github_tool_results' => array() );
     if ( homeboy_datamachine_agent_file_written( $no_changes, $config ) || homeboy_datamachine_agent_pr_opened( $no_changes, $config ) ) {
         fwrite( STDERR, "Expected empty tool results to remain no-changes eligible.\n" );
