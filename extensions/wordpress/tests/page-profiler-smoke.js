@@ -12,9 +12,11 @@ const assert = require('node:assert/strict');
  */
 const {
 	classifyResourceUrl,
+	diagnoseWordPressPageProfile,
 	normalizePageManifest,
 	profileWordPressPage,
 	profileWordPressPages,
+	resourceFamily,
 	resolveWordPressUrl,
 	summarizeResourceTimings,
 } = require('../lib/page-profiler');
@@ -67,6 +69,8 @@ assert.equal(resolveWordPressUrl('https://example.test/site', '/wp-admin/index.p
 assert.equal(classifyResourceUrl('https://example.test/wp-json/wp/v2/posts?context=edit'), 'rest');
 assert.equal(classifyResourceUrl('https://example.test/wp-admin/load-styles.php'), 'admin');
 assert.equal(classifyResourceUrl('https://example.test/wp-content/themes/theme/style.css'), 'content-asset');
+assert.equal(resourceFamily('https://example.test/wp-includes/js/dist/block-editor.min.js?ver=1'), '/wp-includes/js/dist/block-editor.js');
+assert.equal(resourceFamily('https://example.test/wp-content/plugins/data-machine/assets/admin.js?ver=1'), '/wp-content/plugins/data-machine');
 
 const manifest = normalizePageManifest({
 	pages: [
@@ -91,7 +95,9 @@ const resources = [
 		requestStart: 30,
 		responseStart: 140,
 		responseEnd: 200,
-		transferSize: 1000,
+		transferSize: 600000,
+		encodedBodySize: 580000,
+		decodedBodySize: 580000,
 	},
 	{
 		name: 'https://example.test/wp-content/themes/twentytwentyfive/style.css',
@@ -101,6 +107,7 @@ const resources = [
 		requestStart: 6,
 		responseStart: 10,
 		responseEnd: 25,
+		transferSize: 2000,
 	},
 	{
 		name: 'https://example.test/favicon.ico',
@@ -108,11 +115,48 @@ const resources = [
 		startTime: 8,
 		duration: 5,
 	},
+	{
+		name: 'https://example.test/wp-json/wp/v2/settings',
+		initiatorType: 'fetch',
+		startTime: 1300,
+		duration: 90,
+		requestStart: 1310,
+		responseStart: 1360,
+		responseEnd: 1390,
+		transferSize: 3000,
+	},
 ];
 
 const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, kind: classifyResourceUrl(entry.name) })));
-assert.equal(summary.count, 3);
-assert.equal(summary.countsByKind.rest, 1);
+	assert.equal(summary.count, 4);
+	assert.equal(summary.countsByKind.rest, 2);
+	assert.equal(summary.resources[0].responseEndMs, 200);
+
+	const diagnosis = diagnoseWordPressPageProfile(
+		{
+			id: 'admin-dashboard',
+			readyMs: 1200,
+			resources: summary,
+		},
+		{
+			browserMetrics: {
+				admin_dashboard_ready_ms: 1500,
+				browser_network_idle_ms: 4700,
+				browser_request_count: 120,
+				browser_failed_request_count: 1,
+			},
+			networkRequests: [
+				{ url: 'https://example.test/wp-json/wp/v2/fail', method: 'GET', status: 500, failed: true, duration_ms: 120 },
+			],
+		}
+	);
+	assert.equal(diagnosis.summary.networkIdleAfterReadyMs, 3200);
+	assert.equal(diagnosis.summary.lateRequestCount, 1);
+	assert.equal(diagnosis.summary.restAfterReadyCount, 1);
+	assert.equal(diagnosis.summary.failedRequestCount, 1);
+	assert.equal(diagnosis.assets.heavyFamilies[0].family, '/wp-json/wp/v2/posts');
+	assert.equal(diagnosis.findings.some((finding) => finding.code === 'network-active-after-ready'), true);
+	assert.equal(diagnosis.findings.some((finding) => finding.code === 'rest-after-ready'), true);
 
 async function main() {
 	const page = new FakePage(resources);
@@ -128,14 +172,14 @@ async function main() {
 
 	assert.equal(result.id, 'site-editor');
 	assert.equal(result.status, 200);
-	assert.equal(result.resources.restCount, 1);
+	assert.equal(result.resources.restCount, 2);
 	assert.equal(result.correlation.correlated.length, 1);
 	assert.equal(page.calls.some((call) => call[0] === 'frame.waitForSelector' && call[1] === '[data-block]'), true);
 
 	const multiPage = new FakePage(resources);
 	const multi = await profileWordPressPages({ page: multiPage, baseUrl: 'https://example.test', manifest });
 	assert.equal(multi.pages.length, 2);
-	assert.equal(multi.topRestWaterfalls[0].restCount, 1);
+	assert.equal(multi.topRestWaterfalls[0].restCount, 2);
 
 	assert.throws(() => normalizePageManifest({ pages: [{ id: 'bad' }] }), /requires url or path/);
 
