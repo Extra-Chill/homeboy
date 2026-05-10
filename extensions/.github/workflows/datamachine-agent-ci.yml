@@ -74,6 +74,42 @@ name: Data Machine Agent CI (reusable)
         description: Build runner config and exercise the runner dry-run path without a live agent call.
         type: boolean
         default: false
+      extra_wp_config_defines:
+        description: |
+          JSON object merged into the runner config wp_config_defines.
+          Default '{}' means no extra defines.
+        type: string
+        default: "{}"
+      extra_playground_file_mounts:
+        description: |
+          JSON array appended to the runner config playground_file_mounts after
+          the default ci-driver fixture mount. Use for plugin drop-ins,
+          must-use plugin mounts, or any consumer-specific Playground file
+          placement. Default '[]' means no extra mounts.
+        type: string
+        default: "[]"
+      workload_run_before:
+        description: |
+          JSON array of pre-run hooks executed before the main bench workload
+          inside Playground. Each entry is { type, file } the same way
+          playground_workloads[*].run entries are. Default '[]' means no
+          pre-run hook.
+        type: string
+        default: "[]"
+      daily_memory_enabled:
+        description: |
+          When true, sets daily_memory_enabled in the runner config so the
+          imported agent runs with daily memory storage on. Default false.
+        type: boolean
+        default: false
+      extra_required_abilities:
+        description: |
+          JSON array of additional ability slugs the runner must assert are
+          registered before invoking the agent. Default '[]' means rely on
+          the runner's built-in ability set (datamachine/import-agent,
+          datamachine/run-flow, datamachine/drain-job).
+        type: string
+        default: "[]"
     secrets:
       HOMEBOY_APP_ID:
         required: true
@@ -228,6 +264,11 @@ jobs:
           STEP_BUDGET: ${{ inputs.step_budget }}
           TIME_BUDGET_MS: ${{ inputs.time_budget_ms }}
           DRY_RUN: ${{ inputs.dry_run }}
+          EXTRA_WP_CONFIG_DEFINES: ${{ inputs.extra_wp_config_defines }}
+          EXTRA_PLAYGROUND_FILE_MOUNTS: ${{ inputs.extra_playground_file_mounts }}
+          WORKLOAD_RUN_BEFORE: ${{ inputs.workload_run_before }}
+          DAILY_MEMORY_ENABLED: ${{ inputs.daily_memory_enabled }}
+          EXTRA_REQUIRED_ABILITIES: ${{ inputs.extra_required_abilities }}
           GITHUB_TOKEN_VALUE: ${{ steps.app-token.outputs.token || github.token }}
           OPENAI_API_KEY_VALUE: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -236,6 +277,19 @@ jobs:
           bundle_abs="${GITHUB_WORKSPACE}/${BUNDLE_PATH}"
           mapfile -t validation_paths < <(find "${GITHUB_WORKSPACE}/.ci" -mindepth 1 -maxdepth 1 -type d | sort)
           validation_json="$(printf '%s\n' "${validation_paths[@]}" | jq -Rsc 'split("\n") | map(select(. != ""))')"
+          validate_json_input() {
+            local name="$1"
+            local expected_type="$2"
+            local value="$3"
+            if ! jq -ce --arg expected_type "$expected_type" 'if type == $expected_type then . else error("expected " + $expected_type + ", got " + type) end' <<< "$value"; then
+              echo "Invalid $name: expected JSON $expected_type." >&2
+              return 1
+            fi
+          }
+          extra_wp_config_defines_json="$(validate_json_input extra_wp_config_defines object "$EXTRA_WP_CONFIG_DEFINES")"
+          extra_playground_file_mounts_json="$(validate_json_input extra_playground_file_mounts array "$EXTRA_PLAYGROUND_FILE_MOUNTS")"
+          workload_run_before_json="$(validate_json_input workload_run_before array "$WORKLOAD_RUN_BEFORE")"
+          extra_required_abilities_json="$(validate_json_input extra_required_abilities array "$EXTRA_REQUIRED_ABILITIES")"
           jq -n \
             --arg componentPath "$GITHUB_WORKSPACE" \
             --arg bundlePath "$bundle_abs" \
@@ -255,6 +309,11 @@ jobs:
             --argjson stepBudget "$STEP_BUDGET" \
             --argjson timeBudgetMs "$TIME_BUDGET_MS" \
             --argjson dryRun "$DRY_RUN" \
+            --argjson extraWpConfigDefines "$extra_wp_config_defines_json" \
+            --argjson extraPlaygroundFileMounts "$extra_playground_file_mounts_json" \
+            --argjson workloadRunBefore "$workload_run_before_json" \
+            --argjson dailyMemoryEnabled "$DAILY_MEMORY_ENABLED" \
+            --argjson extraRequiredAbilities "$extra_required_abilities_json" \
             '{
               component_id: "datamachine-agent-ci-driver",
               component_path: $componentPath,
@@ -262,13 +321,16 @@ jobs:
               workload_label: ("Run " + $agentSlug + " Data Machine agent"),
               validation_dependencies: $validationDependencies,
               playground_wordpress_version: $playgroundWordPress,
-              playground_file_mounts: [
+              playground_file_mounts: ([
                 {
                   from_dependency: "homeboy-extensions",
                   from: "wordpress/tests/fixtures/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php",
                   to: "/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php"
                 }
-              ],
+              ] + $extraPlaygroundFileMounts),
+              wp_config_defines: $extraWpConfigDefines,
+              workload_run_before: $workloadRunBefore,
+              required_abilities: (["datamachine/import-agent", "datamachine/run-flow", "datamachine/drain-job"] + $extraRequiredAbilities | reduce .[] as $ability ([]; if index($ability) then . else . + [$ability] end)),
               bundle_path: $bundlePath,
               agent_slug: $agentSlug,
               pipeline_slug: $pipelineSlug,
@@ -292,7 +354,7 @@ jobs:
                 GITHUB_TOKEN: $githubToken,
                 OPENAI_API_KEY: $openaiKey
               }
-            }' > "$config_path"
+            } + (if $dailyMemoryEnabled then {daily_memory_enabled: true} else {} end)' > "$config_path"
           printf 'config_path=%s\n' "$config_path" >> "$GITHUB_OUTPUT"
 
       - name: Run Data Machine agent

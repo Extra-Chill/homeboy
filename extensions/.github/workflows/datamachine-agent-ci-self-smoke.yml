@@ -20,6 +20,7 @@ jobs:
       prompt: Acknowledge this self-smoke run with a single line and stop. Do not call any GitHub tools.
       success_requires_pr: false
       dry_run: true
+      extra_wp_config_defines: '{"FIXTURE_DEFINE":"hello"}'
       engine_data_outputs: '{}'
     secrets:
       HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
