@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.52.0] - 2026-05-10
+
+### Added
+- add WordPress page profiler helpers
+
 ## [2.51.9] - 2026-05-10
 
 ### Fixed
