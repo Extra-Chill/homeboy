@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.51.1] - 2026-05-10
+
+### Fixed
+- fail agent writes without PRs
+
 ## [2.51.0] - 2026-05-10
 
 ### Added
