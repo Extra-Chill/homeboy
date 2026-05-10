@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.51.6] - 2026-05-10
+
+### Fixed
+- fail core lint on analyzer failures
+
 ## [2.51.5] - 2026-05-10
 
 ### Fixed
