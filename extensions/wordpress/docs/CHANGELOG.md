@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.49.5] - 2026-05-10
+
+### Fixed
+- mount external Data Machine agent bundles
+
 ## [2.49.4] - 2026-05-10
 
 ### Fixed
