@@ -107,6 +107,7 @@ namespace {
             array(
                 'tool_name' => 'create_github_pull_request',
                 'success'   => true,
+                'head'      => 'agent/change-branch',
                 'url'       => 'https://github.com/owner/repo/pull/123',
             ),
         ),
@@ -114,6 +115,11 @@ namespace {
 
     if ( ! homeboy_datamachine_agent_pr_opened( $pr_opened, $config ) ) {
         fwrite( STDERR, "Expected pull-request URL to count as pr_opened.\n" );
+        exit( 1 );
+    }
+
+    if ( 'agent/change-branch' !== homeboy_datamachine_agent_pr_head_branch( $pr_opened, $config ) ) {
+        fwrite( STDERR, "Expected pull-request tool result to expose the PR head branch.\n" );
         exit( 1 );
     }
 
@@ -150,6 +156,7 @@ namespace {
             'tool_name' => 'create_github_pull_request',
             'success'   => true,
             'repo'      => 'owner/repo',
+            'head'      => 'agent/recorded-branch',
             'url'       => 'https://github.com/owner/repo/pull/789',
         ),
     ) );
@@ -157,6 +164,22 @@ namespace {
     if ( ! homeboy_datamachine_agent_pr_opened( $merged_recorded_results, $config ) ) {
         fwrite( STDERR, "Expected current-run recorded tool results to drive PR classification.\n" );
         exit( 1 );
+    }
+
+    if ( 'agent/recorded-branch' !== homeboy_datamachine_agent_pr_head_branch( $merged_recorded_results, $config ) ) {
+        fwrite( STDERR, "Expected current-run recorded tool results to preserve the PR head branch.\n" );
+        exit( 1 );
+    }
+
+    $merged_daily_memory = homeboy_datamachine_agent_merge_daily_memory_artifact(
+        "# Daily Memory: 2026-05-10\n\n### Existing Entry\n- Keep this.\n### Concurrent Entry\n- Do not delete this.\n",
+        "# Daily Memory: 2026-05-10\n\n### Existing Entry\n- Keep this.\n### New Entry\n- Add this.\n"
+    );
+    foreach ( array( '### Existing Entry', '### Concurrent Entry', '### New Entry' ) as $expected_section ) {
+        if ( ! str_contains( $merged_daily_memory, $expected_section ) ) {
+            fwrite( STDERR, "Expected daily memory merge to preserve {$expected_section}.\n" );
+            exit( 1 );
+        }
     }
 
     $no_changes = array( 'github_tool_results' => array() );

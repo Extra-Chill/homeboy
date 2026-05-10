@@ -299,14 +299,48 @@ if ( ! function_exists( 'homeboy_datamachine_agent_exportable_artifacts' ) ) {
     }
 }
 
-if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
-    function homeboy_datamachine_agent_export_job_artifacts( int $job_id, array $config, bool $pr_opened ): array {
-        $export_config = is_array( $config['artifact_export'] ?? null ) ? $config['artifact_export'] : array();
-        if ( $job_id <= 0 || empty( $export_config['enabled'] ) || ! class_exists( JobArtifacts::class ) || ! function_exists( 'wp_get_ability' ) ) {
-            return array();
+if ( ! function_exists( 'homeboy_datamachine_agent_merge_daily_memory_artifact' ) ) {
+    function homeboy_datamachine_agent_merge_daily_memory_artifact( string $existing_content, string $artifact_content ): string {
+        $existing_content = rtrim( $existing_content );
+        $artifact_content = rtrim( $artifact_content );
+        if ( '' === $existing_content || str_starts_with( $artifact_content, $existing_content ) ) {
+            return $artifact_content . "\n";
         }
 
-        if ( $pr_opened && ! empty( $export_config['only_when_no_pr'] ) ) {
+        preg_match_all( '/^### .*(?:\n(?!### ).*)*/m', $artifact_content, $matches );
+        $merged = $existing_content;
+        foreach ( $matches[0] ?? array() as $section ) {
+            $section = trim( (string) $section );
+            if ( '' !== $section && ! str_contains( $existing_content, $section ) ) {
+                $merged .= "\n" . $section;
+            }
+        }
+
+        return rtrim( $merged ) . "\n";
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_pr_head_branch' ) ) {
+    function homeboy_datamachine_agent_pr_head_branch( array $engine_data, array $config ): string {
+        foreach ( homeboy_datamachine_agent_tool_results( $engine_data, $config ) as $tool_result ) {
+            if ( ! is_array( $tool_result ) || empty( $tool_result['success'] ) || 'create_github_pull_request' !== (string) ( $tool_result['tool_name'] ?? '' ) ) {
+                continue;
+            }
+
+            $head = trim( (string) ( $tool_result['head'] ?? '' ) );
+            if ( '' !== $head ) {
+                return $head;
+            }
+        }
+
+        return '';
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
+    function homeboy_datamachine_agent_export_job_artifacts( int $job_id, array $config, bool $pr_opened, array $engine_data = array() ): array {
+        $export_config = is_array( $config['artifact_export'] ?? null ) ? $config['artifact_export'] : array();
+        if ( $job_id <= 0 || empty( $export_config['enabled'] ) || ! class_exists( JobArtifacts::class ) || ! function_exists( 'wp_get_ability' ) ) {
             return array();
         }
 
@@ -325,7 +359,8 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
 
         $file_ability = wp_get_ability( 'datamachine/create-or-update-github-file' );
         $pr_ability   = wp_get_ability( 'datamachine/create-github-pull-request' );
-        if ( ! $file_ability || ! $pr_ability ) {
+        $get_ability  = wp_get_ability( 'datamachine/get-github-file' );
+        if ( ! $file_ability || ! $pr_ability || ! $get_ability ) {
             return array( 'error' => 'GitHub file or pull request ability unavailable.' );
         }
 
@@ -337,7 +372,18 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
             'job_id'     => $job_id,
         );
         $branch_template = (string) ( $export_config['branch_template'] ?? '' );
-        $branch          = homeboy_datamachine_agent_template( $branch_template, $template_values );
+        $attached_to_pr  = false;
+        $branch          = '';
+        if ( $pr_opened && ! empty( $export_config['only_when_no_pr'] ) ) {
+            $branch         = homeboy_datamachine_agent_pr_head_branch( $engine_data, $config );
+            $attached_to_pr = true;
+            if ( '' === $branch ) {
+                return array( 'error' => 'Artifact export could not identify the current run pull request branch.' );
+            }
+        }
+        if ( '' === $branch ) {
+            $branch = homeboy_datamachine_agent_template( $branch_template, $template_values );
+        }
         if ( '' === $branch ) {
             return array( 'error' => 'Artifact export requires artifact_export.branch_template.' );
         }
@@ -358,11 +404,25 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
                 return array( 'error' => 'Artifact export requires artifact_export.commit_message_template.' );
             }
 
+            $content = $artifact['content'];
+            if ( 'agent_daily_memory' === $artifact['type'] ) {
+                $existing = $get_ability->execute(
+                    array(
+                        'repo' => $target_repo,
+                        'path' => $repo_path,
+                        'ref'  => $branch,
+                    )
+                );
+                if ( is_array( $existing ) && ! empty( $existing['success'] ) && is_array( $existing['file'] ?? null ) && is_string( $existing['file']['content'] ?? null ) ) {
+                    $content = homeboy_datamachine_agent_merge_daily_memory_artifact( $existing['file']['content'], $content );
+                }
+            }
+
             $result = $file_ability->execute(
                 array(
                     'repo'           => $target_repo,
                     'file_path'      => $repo_path,
-                    'content'        => $artifact['content'],
+                    'content'        => $content,
                     'commit_message' => $commit_message,
                     'branch'         => $branch,
                 )
@@ -379,6 +439,16 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
 
         if ( empty( $written ) ) {
             return array();
+        }
+
+        if ( $attached_to_pr ) {
+            return array_filter(
+                array(
+                    'branch'         => $branch,
+                    'paths'          => $written,
+                    'attached_to_pr' => true,
+                )
+            );
         }
 
         $pr_title_template = (string) ( $export_config['pr_title_template'] ?? '' );
@@ -461,6 +531,8 @@ if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
             'tool_name' => 'create_github_pull_request',
             'success'   => true,
             'repo'      => $repo,
+            'head'      => $head,
+            'base'      => (string) ( $input['base'] ?? '' ),
             'url'       => (string) ( $result['html_url'] ?? '' ),
             'result'    => $result,
         );
@@ -582,6 +654,8 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
                     'tool_name' => (string) ( $tool_def['tool_name'] ?? '' ),
                     'success'   => ! empty( $response['success'] ),
                     'repo'      => (string) ( $parameters['repo'] ?? '' ),
+                    'head'      => (string) ( $parameters['head'] ?? '' ),
+                    'base'      => (string) ( $parameters['base'] ?? '' ),
                     'url'       => homeboy_datamachine_agent_first_url( $response ),
                     'error'     => (string) ( $response['error'] ?? '' ),
                     'message'   => (string) ( $response['message'] ?? '' ),
@@ -1180,7 +1254,7 @@ if ( $success_requires_pr && $file_written && ! $pr_opened ) {
 }
 $completion_outcome_satisfied = homeboy_datamachine_agent_completion_outcome_satisfied( $engine_data, $config );
 $success_status = $pr_opened ? 'pr_opened' : ( $completion_outcome_satisfied ? 'completion_outcome_satisfied' : 'no_changes' );
-$job_artifact_exports = homeboy_datamachine_agent_export_job_artifacts( $job_id, $config, $pr_opened );
+$job_artifact_exports = homeboy_datamachine_agent_export_job_artifacts( $job_id, $config, $pr_opened, $engine_data );
 
 $metadata += array(
     'agent_id'             => $agent_id,
