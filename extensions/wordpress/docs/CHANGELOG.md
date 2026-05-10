@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.51.5] - 2026-05-10
+
+### Fixed
+- allow agent completion outcomes to satisfy CI
+
 ## [2.51.4] - 2026-05-10
 
 ### Changed
