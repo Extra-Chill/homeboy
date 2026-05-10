@@ -89,7 +89,6 @@ else
     PRINT_RESULTS=0
 fi
 
-CONFIG_JSON=$(jq -c . "$CONFIG_PATH")
 COMPONENT_PATH=$(jq -r '.component_path // env.HOMEBOY_COMPONENT_PATH // empty' "$CONFIG_PATH")
 COMPONENT_ID=$(jq -r '.component_id // env.HOMEBOY_COMPONENT_ID // empty' "$CONFIG_PATH")
 if [ -z "$COMPONENT_PATH" ]; then
@@ -97,6 +96,39 @@ if [ -z "$COMPONENT_PATH" ]; then
 fi
 if [ -z "$COMPONENT_ID" ]; then
     COMPONENT_ID="$(basename "$COMPONENT_PATH")"
+fi
+
+CONFIG_JSON=$(jq -c . "$CONFIG_PATH")
+BUNDLE_REPO=$(jq -r '.bundle_repo // empty' "$CONFIG_PATH")
+if [ -n "$BUNDLE_REPO" ]; then
+    BUNDLE_REF=$(jq -r '.bundle_ref // "main"' "$CONFIG_PATH")
+    BUNDLE_PATH_IN_REPO=$(jq -r '.bundle_path_in_repo // "."' "$CONFIG_PATH")
+    if ! command -v git >/dev/null 2>&1; then
+        echo "ERROR: git required for bundle_repo" >&2
+        exit 1
+    fi
+    if [ -z "$RUNTIME_DIR" ]; then
+        RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-datamachine-agent-runtime.XXXXXX")
+    fi
+    BUNDLE_CHECKOUT_DIR="$RUNTIME_DIR/bundle-repo"
+    git clone --quiet "$BUNDLE_REPO" "$BUNDLE_CHECKOUT_DIR"
+    git -C "$BUNDLE_CHECKOUT_DIR" checkout --quiet "$BUNDLE_REF"
+    BUNDLE_PATH="$BUNDLE_CHECKOUT_DIR/$BUNDLE_PATH_IN_REPO"
+    if [ ! -d "$BUNDLE_PATH" ]; then
+        echo "ERROR: bundle_path_in_repo does not exist in bundle_repo: $BUNDLE_PATH_IN_REPO" >&2
+        exit 1
+    fi
+    CONFIG_JSON=$(jq -c \
+        --arg bundlePath "$BUNDLE_PATH" \
+        --arg bundleRepo "$BUNDLE_REPO" \
+        --arg bundleRef "$BUNDLE_REF" \
+        --arg bundlePathInRepo "$BUNDLE_PATH_IN_REPO" \
+        '. + {
+            bundle_path: $bundlePath,
+            bundle_repo: $bundleRepo,
+            bundle_ref: $bundleRef,
+            bundle_path_in_repo: $bundlePathInRepo
+        }' <<<"$CONFIG_JSON")
 fi
 
 WORKLOAD_ID=$(jq -r '.workload_id // "datamachine-agent"' "$CONFIG_PATH")
