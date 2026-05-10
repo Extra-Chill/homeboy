@@ -122,5 +122,27 @@ namespace {
         exit( 1 );
     }
 
+    $mailbox_reply = array(
+        'completion_assertions_satisfied' => array(
+            'complete_when_any' => array( 'mailbox_reply' ),
+        ),
+    );
+
+    if ( ! homeboy_datamachine_agent_completion_outcome_satisfied( $mailbox_reply, array( 'success_completion_outcomes' => array( 'mailbox_reply' ) ) ) ) {
+        fwrite( STDERR, "Expected allowed completion outcome to satisfy success.\n" );
+        exit( 1 );
+    }
+
+    if ( homeboy_datamachine_agent_completion_outcome_satisfied( $mailbox_reply, array( 'success_completion_outcomes' => array( 'pr_body' ) ) ) ) {
+        fwrite( STDERR, "Did not expect unlisted completion outcome to satisfy success.\n" );
+        exit( 1 );
+    }
+
+    $nested_mailbox_reply = array( 'world_creator' => $mailbox_reply );
+    if ( ! homeboy_datamachine_agent_completion_outcome_satisfied( $nested_mailbox_reply, array( 'engine_key' => 'world_creator', 'success_completion_outcomes' => array( 'mailbox_reply' ) ) ) ) {
+        fwrite( STDERR, "Expected nested completion outcome to satisfy success.\n" );
+        exit( 1 );
+    }
+
     fwrite( STDOUT, "Data Machine agent write-without-PR smoke passed.\n" );
 }

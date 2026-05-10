@@ -140,6 +140,44 @@ if ( ! function_exists( 'homeboy_datamachine_agent_file_written' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_completion_outcome_satisfied' ) ) {
+    function homeboy_datamachine_agent_completion_outcome_satisfied( array $engine_data, array $config ): bool {
+        $allowed_outcomes = is_array( $config['success_completion_outcomes'] ?? null ) ? $config['success_completion_outcomes'] : array();
+        $allowed_outcomes = array_values(
+            array_filter(
+                array_map(
+                    static fn( $outcome ) => is_scalar( $outcome ) ? trim( (string) $outcome ) : '',
+                    $allowed_outcomes
+                ),
+                static fn( string $outcome ) => '' !== $outcome
+            )
+        );
+
+        if ( empty( $allowed_outcomes ) ) {
+            return false;
+        }
+
+        $sources = $engine_data;
+        $engine_key = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
+        if ( '' !== $engine_key && is_array( $engine_data[ $engine_key ] ?? null ) ) {
+            $sources = $engine_data[ $engine_key ];
+        }
+
+        $completed_outcomes = homeboy_datamachine_agent_path_value( $sources, 'completion_assertions_satisfied.complete_when_any' );
+        if ( ! is_array( $completed_outcomes ) ) {
+            return false;
+        }
+
+        foreach ( $completed_outcomes as $outcome ) {
+            if ( is_scalar( $outcome ) && in_array( trim( (string) $outcome ), $allowed_outcomes, true ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_bundle_path_in_repo' ) ) {
     function homeboy_datamachine_agent_bundle_path_in_repo( array $config ): string {
         $configured = trim( (string) ( $config['bundle_path_in_repo'] ?? '' ), '/' );
@@ -993,7 +1031,8 @@ $transcript_dir = homeboy_datamachine_agent_scalar( $config, 'transcript_dir' );
 $transcript_artifacts = homeboy_datamachine_agent_export_transcript( $job_id, $engine_data, $transcript_dir );
 $pr_opened = homeboy_datamachine_agent_pr_opened( $engine_data, $config );
 $file_written = homeboy_datamachine_agent_file_written( $engine_data, $config );
-$success_status = $pr_opened ? 'pr_opened' : 'no_changes';
+$completion_outcome_satisfied = homeboy_datamachine_agent_completion_outcome_satisfied( $engine_data, $config );
+$success_status = $pr_opened ? 'pr_opened' : ( $completion_outcome_satisfied ? 'completion_outcome_satisfied' : 'no_changes' );
 $success_requires_pr = ! empty( $config['success_requires_pr'] );
 $job_artifact_exports = homeboy_datamachine_agent_export_job_artifacts( $job_id, $config, $pr_opened );
 
@@ -1010,6 +1049,7 @@ $metadata += array(
     'error_message'         => (string) ( $engine_data['error_message'] ?? '' ),
     'success_status'        => $success_status,
     'success_requires_pr'   => $success_requires_pr,
+    'completion_outcome_satisfied' => $completion_outcome_satisfied,
     'file_written'          => $file_written,
     'job_artifact_exports'    => $job_artifact_exports,
 );
@@ -1023,7 +1063,7 @@ if ( ! empty( $job_artifact_exports['error'] ) ) {
     return homeboy_datamachine_agent_result( array( 'job_artifact_exported' => 0 ), $metadata, (string) $job_artifact_exports['error'] );
 }
 
-if ( $success_requires_pr && ! $pr_opened ) {
+if ( $success_requires_pr && ! $pr_opened && ! $completion_outcome_satisfied ) {
     return homeboy_datamachine_agent_result( array( 'pr_opened' => 0 ), $metadata, 'Agent completed without opening a pull request' );
 }
 
@@ -1045,7 +1085,8 @@ return homeboy_datamachine_agent_result(
         'job_completed'               => 'completed' === $job_status ? 1 : 0,
         'file_written'                => $file_written ? 1 : 0,
         'pr_opened'                   => $pr_opened ? 1 : 0,
-        'no_changes'                  => ! $file_written && ! $pr_opened ? 1 : 0,
+        'completion_outcome_satisfied' => $completion_outcome_satisfied ? 1 : 0,
+        'no_changes'                  => ! $file_written && ! $pr_opened && ! $completion_outcome_satisfied ? 1 : 0,
         'job_artifact_exported'       => ! empty( $job_artifact_exports['pr_url'] ) ? 1 : 0,
         'transcript_exported'         => ! empty( $transcript_artifacts['json'] ) ? 1 : 0,
         'total_tokens'                => (int) ( $metadata['token_usage']['total_tokens'] ?? 0 ),

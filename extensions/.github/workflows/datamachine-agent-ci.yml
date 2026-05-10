@@ -42,6 +42,13 @@ name: Data Machine Agent CI (reusable)
       success_requires_pr:
         type: boolean
         default: true
+      success_completion_outcomes:
+        description: |
+          JSON array of Data Machine completion outcome names that may satisfy
+          success_requires_pr when no PR is opened. File writes without PRs
+          still fail. Default '[]' preserves PR-required behavior.
+        type: string
+        default: "[]"
       max_turns:
         type: number
         default: 12
@@ -277,6 +284,7 @@ jobs:
           MODEL: ${{ inputs.model }}
           PLAYGROUND_WORDPRESS: ${{ inputs.playground_wordpress }}
           SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
+          SUCCESS_COMPLETION_OUTCOMES: ${{ inputs.success_completion_outcomes }}
           MAX_TURNS: ${{ inputs.max_turns }}
           STEP_BUDGET: ${{ inputs.step_budget }}
           TIME_BUDGET_MS: ${{ inputs.time_budget_ms }}
@@ -308,6 +316,7 @@ jobs:
           extra_playground_file_mounts_json="$(validate_json_input extra_playground_file_mounts array "$EXTRA_PLAYGROUND_FILE_MOUNTS")"
           workload_run_before_json="$(validate_json_input workload_run_before array "$WORKLOAD_RUN_BEFORE")"
           extra_required_abilities_json="$(validate_json_input extra_required_abilities array "$EXTRA_REQUIRED_ABILITIES")"
+          success_completion_outcomes_json="$(validate_json_input success_completion_outcomes array "$SUCCESS_COMPLETION_OUTCOMES")"
           jq -n \
             --arg componentPath "$GITHUB_WORKSPACE" \
             --arg bundlePath "$bundle_abs" \
@@ -325,6 +334,7 @@ jobs:
             --argjson validationDependencies "$validation_json" \
             --argjson artifactExportConfig "$ARTIFACT_EXPORT_CONFIG" \
             --argjson successRequiresPr "$SUCCESS_REQUIRES_PR" \
+            --argjson successCompletionOutcomes "$success_completion_outcomes_json" \
             --argjson maxTurns "$MAX_TURNS" \
             --argjson stepBudget "$STEP_BUDGET" \
             --argjson timeBudgetMs "$TIME_BUDGET_MS" \
@@ -369,6 +379,7 @@ jobs:
               step_budget: $stepBudget,
               time_budget_ms: $timeBudgetMs,
               success_requires_pr: $successRequiresPr,
+              success_completion_outcomes: $successCompletionOutcomes,
               artifact_export: ({
                 enabled: true,
                 only_when_no_pr: true,
