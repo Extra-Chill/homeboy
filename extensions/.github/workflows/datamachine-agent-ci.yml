@@ -478,7 +478,7 @@ jobs:
             --required-status completed
 
       - name: Upload transcript artifact
-        if: ${{ always() && inputs.transcript_artifact_name != '' }}
+        if: ${{ always() && inputs.transcript_artifact_name != '' && (steps.extract.outputs.transcript_json != '' || steps.extract_dry_run.outputs.transcript_json != '') }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.transcript_artifact_name }}
