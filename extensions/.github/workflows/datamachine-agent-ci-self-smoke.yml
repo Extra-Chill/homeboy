@@ -1,0 +1,27 @@
+name: Data Machine Agent CI self-smoke
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  self-smoke:
+    uses: ./.github/workflows/datamachine-agent-ci.yml
+    with:
+      bundle_path: tests/fixtures/datamachine-agent-self-smoke/bundles/self-smoke-agent
+      agent_slug: self-smoke-agent
+      pipeline_slug: self-smoke-pipeline
+      flow_slug: self-smoke-flow
+      target_repo: Extra-Chill/homeboy-extensions
+      prompt: Acknowledge this self-smoke run with a single line and stop. Do not call any GitHub tools.
+      success_requires_pr: false
+      dry_run: true
+      engine_data_outputs: '{}'
+    secrets:
+      HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
+      HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

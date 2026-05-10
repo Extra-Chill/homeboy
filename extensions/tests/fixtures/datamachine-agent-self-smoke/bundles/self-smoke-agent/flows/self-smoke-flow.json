@@ -1,0 +1,23 @@
+{
+  "max_items": [],
+  "name": "Self Smoke Flow",
+  "pipeline_slug": "self-smoke-pipeline",
+  "schedule": "manual",
+  "schema_version": 1,
+  "slug": "self-smoke-flow",
+  "steps": [
+    {
+      "disabled_tools": [],
+      "handler_configs": [],
+      "prompt_queue": [
+        {
+          "added_at": "2026-05-10T00:00:00+00:00",
+          "prompt": "Acknowledge this self-smoke run with a single line and stop. Do not call any GitHub tools."
+        }
+      ],
+      "queue_mode": "static",
+      "step_position": 0,
+      "step_type": "ai"
+    }
+  ]
+}

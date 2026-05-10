@@ -1,0 +1,408 @@
+# Reusable wrapper for Data Machine agent CI runs.
+#
+# Consumers receive one stable `engine_data_json` output. GitHub Actions cannot
+# create dynamic workflow_call outputs from `engine_data_outputs`, so callers
+# should parse that JSON map in their own workflow when they need named fields.
+name: Data Machine Agent CI (reusable)
+
+'on':
+  workflow_call:
+    inputs:
+      bundle_path:
+        type: string
+        required: true
+      agent_slug:
+        type: string
+        required: true
+      pipeline_slug:
+        type: string
+        required: true
+      flow_slug:
+        type: string
+        required: true
+      target_repo:
+        type: string
+        required: true
+      prompt:
+        type: string
+        required: true
+      provider:
+        type: string
+        default: openai
+      model:
+        type: string
+        default: gpt-5.5
+      validation_dependencies:
+        description: Comma-separated OWNER/REPO@REF entries checked out under .ci/<repo>.
+        type: string
+        default: ""
+      playground_wordpress:
+        type: string
+        default: "7.0"
+      success_requires_pr:
+        type: boolean
+        default: true
+      max_turns:
+        type: number
+        default: 12
+      step_budget:
+        type: number
+        default: 16
+      time_budget_ms:
+        type: number
+        default: 600000
+      engine_data_outputs:
+        description: JSON map of output_name to jq path, collected into engine_data_json.
+        type: string
+        default: "{}"
+      transcript_artifact_name:
+        description: Empty string disables transcript artifact upload.
+        type: string
+        default: ""
+      comment_pr_summary:
+        type: boolean
+        default: false
+      bundle_validator_spec:
+        description: Optional repo-relative validate-bundle spec JSON path.
+        type: string
+        default: ""
+      app_token_repos:
+        description: Comma-separated OWNER/REPO entries for the Homeboy app token. Defaults to target_repo.
+        type: string
+        default: ""
+      dry_run:
+        description: Build runner config and exercise the runner dry-run path without a live agent call.
+        type: boolean
+        default: false
+    secrets:
+      HOMEBOY_APP_ID:
+        required: true
+      HOMEBOY_APP_PRIVATE_KEY:
+        required: true
+      OPENAI_API_KEY:
+        required: true
+    outputs:
+      job_status:
+        value: ${{ jobs.run-agent.outputs.job_status }}
+      transcript_json:
+        value: ${{ jobs.run-agent.outputs.transcript_json }}
+      transcript_summary:
+        value: ${{ jobs.run-agent.outputs.transcript_summary }}
+      engine_data_json:
+        value: ${{ jobs.run-agent.outputs.engine_data_json }}
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    outputs:
+      job_status: ${{ steps.extract.outputs.job_status || steps.extract_dry_run.outputs.job_status }}
+      transcript_json: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json }}
+      transcript_summary: ${{ steps.extract.outputs.transcript_summary || steps.extract_dry_run.outputs.transcript_summary }}
+      engine_data_json: ${{ steps.engine-data.outputs.engine_data_json }}
+    steps:
+      - name: Checkout consumer repo
+        uses: actions/checkout@v4
+
+      - name: Resolve Homeboy app token scope
+        id: token-scope
+        if: ${{ ! inputs.dry_run }}
+        env:
+          APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+        run: |
+          set -euo pipefail
+          repos_input="${APP_TOKEN_REPOS:-$TARGET_REPO}"
+          IFS=',' read -ra entries <<< "$repos_input"
+          owner=""
+          repositories=()
+          for raw_entry in "${entries[@]}"; do
+            entry="$(printf '%s' "$raw_entry" | xargs)"
+            [ -n "$entry" ] || continue
+            case "$entry" in
+              */*) ;;
+              *) echo "app_token_repos entries must be OWNER/REPO: $entry" >&2; exit 1 ;;
+            esac
+            entry_owner="${entry%%/*}"
+            repo_name="${entry#*/}"
+            if [ -z "$owner" ]; then
+              owner="$entry_owner"
+            elif [ "$owner" != "$entry_owner" ]; then
+              echo "actions/create-github-app-token supports one owner per token; got $owner and $entry_owner" >&2
+              exit 1
+            fi
+            repositories+=("$repo_name")
+          done
+          [ -n "$owner" ] || { echo "No repositories resolved for app token." >&2; exit 1; }
+          {
+            printf 'owner=%s\n' "$owner"
+            printf 'repositories=%s\n' "$(IFS=','; printf '%s' "${repositories[*]}")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate Homeboy app token
+        id: app-token
+        if: ${{ ! inputs.dry_run }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+          owner: ${{ steps.token-scope.outputs.owner }}
+          repositories: ${{ steps.token-scope.outputs.repositories }}
+
+      - name: Checkout homeboy-extensions
+        uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy-extensions
+          path: .ci/homeboy-extensions
+
+      - name: Checkout validation dependencies
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          VALIDATION_DEPENDENCIES: ${{ inputs.validation_dependencies }}
+        run: |
+          set -euo pipefail
+          [ -n "$VALIDATION_DEPENDENCIES" ] || exit 0
+          IFS=',' read -ra entries <<< "$VALIDATION_DEPENDENCIES"
+          for raw_entry in "${entries[@]}"; do
+            entry="$(printf '%s' "$raw_entry" | xargs)"
+            [ -n "$entry" ] || continue
+            repo_ref="${entry%@*}"
+            ref="${entry##*@}"
+            if [ "$repo_ref" = "$entry" ] || [ -z "$repo_ref" ] || [ -z "$ref" ]; then
+              echo "validation_dependencies entries must be OWNER/REPO@REF: $entry" >&2
+              exit 1
+            fi
+            repo_name="${repo_ref#*/}"
+            target=".ci/$repo_name"
+            rm -rf "$target"
+            gh repo clone "$repo_ref" "$target" -- --depth=1
+            git -C "$target" fetch --depth=1 origin "$ref"
+            git -C "$target" checkout --quiet FETCH_HEAD
+          done
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Homeboy WordPress extension dependencies
+        working-directory: .ci/homeboy-extensions/wordpress
+        run: |
+          set -euo pipefail
+          composer install --no-interaction --no-progress --prefer-dist
+          npm install
+
+      - name: Install checked-out PHP dependencies
+        run: |
+          set -euo pipefail
+          for composer_file in .ci/*/composer.json; do
+            [ -f "$composer_file" ] || continue
+            component_dir="$(dirname "$composer_file")"
+            [ "$component_dir" != ".ci/homeboy-extensions" ] || continue
+            [ "$component_dir" != ".ci/homeboy-extensions/wordpress" ] || continue
+            composer install --working-dir="$component_dir" --no-interaction --no-progress --prefer-dist
+          done
+
+      - name: Pre-flight bundle validation
+        if: ${{ inputs.bundle_validator_spec != '' }}
+        run: php .ci/homeboy-extensions/wordpress/scripts/agent/validate-bundle.php "${{ inputs.bundle_validator_spec }}"
+
+      - name: Build runner config
+        id: config
+        env:
+          AGENT_SLUG: ${{ inputs.agent_slug }}
+          PIPELINE_SLUG: ${{ inputs.pipeline_slug }}
+          FLOW_SLUG: ${{ inputs.flow_slug }}
+          BUNDLE_PATH: ${{ inputs.bundle_path }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          PROMPT: ${{ inputs.prompt }}
+          PROVIDER: ${{ inputs.provider }}
+          MODEL: ${{ inputs.model }}
+          PLAYGROUND_WORDPRESS: ${{ inputs.playground_wordpress }}
+          SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          STEP_BUDGET: ${{ inputs.step_budget }}
+          TIME_BUDGET_MS: ${{ inputs.time_budget_ms }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          GITHUB_TOKEN_VALUE: ${{ steps.app-token.outputs.token || github.token }}
+          OPENAI_API_KEY_VALUE: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          config_path="${RUNNER_TEMP}/datamachine-agent-config.json"
+          bundle_abs="${GITHUB_WORKSPACE}/${BUNDLE_PATH}"
+          mapfile -t validation_paths < <(find "${GITHUB_WORKSPACE}/.ci" -mindepth 1 -maxdepth 1 -type d | sort)
+          validation_json="$(printf '%s\n' "${validation_paths[@]}" | jq -Rsc 'split("\n") | map(select(. != ""))')"
+          jq -n \
+            --arg componentPath "$GITHUB_WORKSPACE" \
+            --arg bundlePath "$bundle_abs" \
+            --arg agentSlug "$AGENT_SLUG" \
+            --arg pipelineSlug "$PIPELINE_SLUG" \
+            --arg flowSlug "$FLOW_SLUG" \
+            --arg targetRepo "$TARGET_REPO" \
+            --arg prompt "$PROMPT" \
+            --arg provider "$PROVIDER" \
+            --arg model "$MODEL" \
+            --arg playgroundWordPress "$PLAYGROUND_WORDPRESS" \
+            --arg githubToken "$GITHUB_TOKEN_VALUE" \
+            --arg openaiKey "$OPENAI_API_KEY_VALUE" \
+            --argjson validationDependencies "$validation_json" \
+            --argjson successRequiresPr "$SUCCESS_REQUIRES_PR" \
+            --argjson maxTurns "$MAX_TURNS" \
+            --argjson stepBudget "$STEP_BUDGET" \
+            --argjson timeBudgetMs "$TIME_BUDGET_MS" \
+            --argjson dryRun "$DRY_RUN" \
+            '{
+              component_id: "datamachine-agent-ci-driver",
+              component_path: $componentPath,
+              workload_id: $flowSlug,
+              workload_label: ("Run " + $agentSlug + " Data Machine agent"),
+              validation_dependencies: $validationDependencies,
+              playground_wordpress_version: $playgroundWordPress,
+              playground_file_mounts: [
+                {
+                  from_dependency: "homeboy-extensions",
+                  from: "wordpress/tests/fixtures/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php",
+                  to: "/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php"
+                }
+              ],
+              bundle_path: $bundlePath,
+              agent_slug: $agentSlug,
+              pipeline_slug: $pipelineSlug,
+              flow_slug: $flowSlug,
+              provider: $provider,
+              model: $model,
+              provider_register_function: (if $provider == "openai" then "WordPress\\OpenAiAiProvider\\register_provider" else "" end),
+              provider_credentials: (if $provider == "openai" then {connectors_ai_openai_api_key: "OPENAI_API_KEY"} else {} end),
+              github_token_env: "GITHUB_TOKEN",
+              github_profile_id: ($agentSlug + "-ci"),
+              target_repo: $targetRepo,
+              allowed_repos: [$targetRepo],
+              max_turns: $maxTurns,
+              prompt: $prompt,
+              step_budget: $stepBudget,
+              time_budget_ms: $timeBudgetMs,
+              success_requires_pr: $successRequiresPr,
+              dry_run: $dryRun,
+              transcript_dir: ("/wordpress/wp-content/plugins/datamachine-agent-ci-driver/artifacts/" + $agentSlug),
+              bench_env: {
+                GITHUB_TOKEN: $githubToken,
+                OPENAI_API_KEY: $openaiKey
+              }
+            }' > "$config_path"
+          printf 'config_path=%s\n' "$config_path" >> "$GITHUB_OUTPUT"
+
+      - name: Run Data Machine agent
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          HOMEBOY_DATAMACHINE_AGENT_RESULTS_FILE: ${{ runner.temp }}/run-results.json
+        run: bash .ci/homeboy-extensions/wordpress/scripts/agent/run-datamachine-agent.sh "${{ steps.config.outputs.config_path }}"
+
+      - name: Extract scenario outputs
+        id: extract
+        if: ${{ ! inputs.dry_run }}
+        env:
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+        run: |
+          set -euo pipefail
+          bash .ci/homeboy-extensions/wordpress/scripts/agent/extract-engine-data.sh \
+            --results "$RESULTS_FILE" \
+            --scenario "${{ inputs.flow_slug }}" \
+            --field job_status=metadata.job_status \
+            --field transcript_json=metadata.transcript_artifacts.json \
+            --field transcript_summary=metadata.transcript_artifacts.summary \
+            --required-status "" \
+            --to-github-output
+
+      - name: Extract dry-run outputs
+        id: extract_dry_run
+        if: ${{ inputs.dry_run }}
+        env:
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+        run: |
+          set -euo pipefail
+          bash .ci/homeboy-extensions/wordpress/scripts/agent/extract-engine-data.sh \
+            --results "$RESULTS_FILE" \
+            --scenario "${{ inputs.flow_slug }}" \
+            --field job_status=metadata.agent_slug \
+            --field transcript_json=metadata.bundle_path \
+            --field transcript_summary=metadata.flow_slug \
+            --required-status "" \
+            --to-github-output
+          printf 'job_status=completed\n' >> "$GITHUB_OUTPUT"
+
+      - name: Project engine_data outputs
+        id: engine-data
+        env:
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          ENGINE_DATA_OUTPUTS: ${{ inputs.engine_data_outputs }}
+        run: |
+          set -euo pipefail
+          if [ "$ENGINE_DATA_OUTPUTS" = "{}" ] || [ -z "$ENGINE_DATA_OUTPUTS" ]; then
+            printf 'engine_data_json={}\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          scenario_json="$(jq -ec --arg scenario "${{ inputs.flow_slug }}" '.scenarios[] | select(.id == $scenario)' "$RESULTS_FILE")"
+          projected="{}"
+          while IFS=$'\t' read -r key path; do
+            [ -n "$key" ] || continue
+            jq_path="$path"
+            case "$jq_path" in .*) ;; *) jq_path=".$jq_path" ;; esac
+            value="$(jq -c "($jq_path) // null" <<< "$scenario_json")"
+            projected="$(jq -c --arg key "$key" --argjson value "$value" '. + {($key): $value}' <<< "$projected")"
+          done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<< "$ENGINE_DATA_OUTPUTS")
+          {
+            printf 'engine_data_json<<EOF\n'
+            printf '%s\n' "$projected"
+            printf 'EOF\n'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Assert success
+        if: ${{ inputs.success_requires_pr && ! inputs.dry_run }}
+        env:
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+        run: |
+          set -euo pipefail
+          bash .ci/homeboy-extensions/wordpress/scripts/agent/extract-engine-data.sh \
+            --results "$RESULTS_FILE" \
+            --scenario "${{ inputs.flow_slug }}" \
+            --field job_status=metadata.job_status \
+            --required-status completed
+
+      - name: Upload transcript artifact
+        if: ${{ always() && inputs.transcript_artifact_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.transcript_artifact_name }}
+          path: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json }}
+          if-no-files-found: ignore
+
+      - name: Comment PR summary
+        if: ${{ inputs.comment_pr_summary && github.event_name == 'pull_request' && ! inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          AGENT_SLUG: ${{ inputs.agent_slug }}
+          FLOW_SLUG: ${{ inputs.flow_slug }}
+          JOB_STATUS: ${{ steps.extract.outputs.job_status }}
+          TRANSCRIPT_ARTIFACT_NAME: ${{ inputs.transcript_artifact_name }}
+          ENGINE_DATA_JSON: ${{ steps.engine-data.outputs.engine_data_json }}
+        run: |
+          set -euo pipefail
+          body_file="${RUNNER_TEMP}/datamachine-agent-comment.md"
+          {
+            printf '## Data Machine Agent CI\n\n'
+            printf -- '- Agent: `%s`\n' "$AGENT_SLUG"
+            printf -- '- Flow: `%s`\n' "$FLOW_SLUG"
+            printf -- '- Job status: `%s`\n' "${JOB_STATUS:-unknown}"
+            if [ -n "$TRANSCRIPT_ARTIFACT_NAME" ]; then
+              printf -- '- Transcript artifact: `%s`\n' "$TRANSCRIPT_ARTIFACT_NAME"
+            fi
+            if [ -n "$ENGINE_DATA_JSON" ] && [ "$ENGINE_DATA_JSON" != "{}" ]; then
+              printf -- '- Engine data: `%s`\n' "$ENGINE_DATA_JSON"
+            fi
+          } > "$body_file"
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file "$body_file"
