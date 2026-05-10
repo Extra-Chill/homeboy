@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.51.0] - 2026-05-10
+
+### Added
+- add shared Data Machine agent bundle validator
+
 ## [2.50.1] - 2026-05-10
 
 ### Fixed
