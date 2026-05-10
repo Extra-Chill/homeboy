@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.51.3] - 2026-05-10
+
+### Changed
+- Export Data Machine bundle artifacts
+
 ## [2.51.2] - 2026-05-10
 
 ### Fixed
