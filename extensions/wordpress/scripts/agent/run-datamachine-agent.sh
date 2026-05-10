@@ -196,3 +196,10 @@ if jq -e "$scenario | .metadata.error?" "$RESULTS_FILE" >/dev/null; then
     jq -r "$scenario | .metadata.error" "$RESULTS_FILE" >&2
     exit 1
 fi
+
+# After this script returns, consumers can extract engine_data fields with:
+#
+#   "$EXTENSION_PATH/scripts/agent/extract-engine-data.sh" \
+#       --results "$RESULTS_FILE" \
+#       --scenario <scenario-id> \
+#       --field key=metadata.engine_data.path.to.value
