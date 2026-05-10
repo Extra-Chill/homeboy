@@ -494,6 +494,76 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_transcript' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_drain_job' ) ) {
+    function homeboy_datamachine_agent_drain_job( int $job_id, array $config, Jobs $jobs ): array {
+        $started_at              = hrtime( true );
+        $retry_wait_budget_ms    = isset( $config['retry_wait_budget_ms'] ) ? max( 0, (int) $config['retry_wait_budget_ms'] ) : 180000;
+        $retry_max_sleep_ms      = isset( $config['retry_max_sleep_ms'] ) ? max( 1000, (int) $config['retry_max_sleep_ms'] ) : 30000;
+        $step_budget             = isset( $config['step_budget'] ) ? max( 1, (int) $config['step_budget'] ) : 20;
+        $time_budget_ms          = isset( $config['time_budget_ms'] ) ? max( 1000, (int) $config['time_budget_ms'] ) : 300000;
+        $history                 = array();
+        $drain_result            = array( 'success' => false );
+        $waited_ms               = 0;
+
+        do {
+            $drain_result = wp_get_ability( 'datamachine/drain-job' )->execute(
+                array(
+                    'job_id'         => $job_id,
+                    'step_budget'    => $step_budget,
+                    'time_budget_ms' => $time_budget_ms,
+                )
+            );
+
+            $job         = $jobs->get_job( $job_id );
+            $job_status  = is_array( $job ) ? (string) ( $job['status'] ?? '' ) : '';
+            $engine_data = function_exists( 'datamachine_get_engine_data' ) ? datamachine_get_engine_data( $job_id ) : array();
+
+            $history[] = array(
+                'drain_result' => $drain_result,
+                'job_status'   => $job_status,
+                'retry'        => is_array( $engine_data['retry'] ?? null ) ? $engine_data['retry'] : array(),
+            );
+
+            if ( is_array( $drain_result ) && ! empty( $drain_result['success'] ) ) {
+                break;
+            }
+
+            if ( in_array( $job_status, array( 'completed', 'failed', 'cancelled' ), true ) ) {
+                break;
+            }
+
+            $retry = is_array( $engine_data['retry'] ?? null ) ? $engine_data['retry'] : array();
+            if ( empty( $retry['last_retryable'] ) || empty( $retry['next_retry_at'] ) ) {
+                break;
+            }
+
+            $next_retry_ts = strtotime( (string) $retry['next_retry_at'] );
+            if ( false === $next_retry_ts ) {
+                break;
+            }
+
+            $remaining_budget_ms = $retry_wait_budget_ms - $waited_ms;
+            if ( $remaining_budget_ms <= 0 ) {
+                break;
+            }
+
+            $delay_ms = max( 0, ( $next_retry_ts - time() ) * 1000 ) + 1000;
+            $sleep_ms = min( $delay_ms, $retry_max_sleep_ms, $remaining_budget_ms );
+            if ( $sleep_ms > 0 ) {
+                usleep( $sleep_ms * 1000 );
+                $waited_ms += $sleep_ms;
+            }
+        } while ( $waited_ms <= $retry_wait_budget_ms );
+
+        return array(
+            'drain_result'     => $drain_result,
+            'drain_elapsed_ms' => ( hrtime( true ) - $started_at ) / 1000000,
+            'drain_history'    => $history,
+            'retry_waited_ms'  => $waited_ms,
+        );
+    }
+}
+
 if ( function_exists( 'wp_set_current_user' ) ) {
     wp_set_current_user( 1 );
 }
@@ -649,16 +719,12 @@ if ( ! is_array( $run_result ) || empty( $run_result['success'] ) || $job_id <= 
     return homeboy_datamachine_agent_result( array( 'run_flow_succeeded' => 0, 'run_elapsed_ms' => $run_elapsed_ms ), $metadata, 'datamachine/run-flow failed or returned no job_id' );
 }
 
-$drain_start = hrtime( true );
-$drain_result = wp_get_ability( 'datamachine/drain-job' )->execute(
-    array(
-        'job_id'         => $job_id,
-        'step_budget'    => isset( $config['step_budget'] ) ? max( 1, (int) $config['step_budget'] ) : 20,
-        'time_budget_ms' => isset( $config['time_budget_ms'] ) ? max( 1000, (int) $config['time_budget_ms'] ) : 300000,
-    )
-);
-$drain_elapsed_ms = ( hrtime( true ) - $drain_start ) / 1000000;
+$drain_summary = homeboy_datamachine_agent_drain_job( $job_id, $config, $jobs );
+$drain_result = $drain_summary['drain_result'];
+$drain_elapsed_ms = (float) $drain_summary['drain_elapsed_ms'];
 $metadata['drain_result'] = $drain_result;
+$metadata['drain_history'] = $drain_summary['drain_history'];
+$metadata['retry_waited_ms'] = $drain_summary['retry_waited_ms'];
 
 $job = $jobs->get_job( $job_id );
 $job_status = is_array( $job ) ? (string) ( $job['status'] ?? '' ) : '';
