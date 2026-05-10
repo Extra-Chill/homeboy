@@ -260,6 +260,52 @@ credentials — runners must not publish it without redacting fields
 listed in `artifactPolicy.secretFields`. Full schema in
 [`docs/TESTING.md`](docs/TESTING.md#browser-bench-target-handoff).
 
+### Page profiler primitives
+
+The extension exports reusable Node helpers for browser-backed WordPress page
+profiling. Rigs keep ownership of site lifecycle and Playwright launch, then
+call `profileWordPressPage()` or `profileWordPressPages()` with a manifest of
+URLs and readiness gates. The helpers collect resource timings, classify REST /
+admin / asset waterfalls, and correlate browser timings with rows from the
+temporary request profiler.
+
+```js
+const {
+	installWordPressRequestProfiler,
+	collectWordPressRequestProfiles,
+	profileWordPressPages,
+} = require('homeboy-extension-wordpress');
+
+installWordPressRequestProfiler(sitePath, { clearArtifact: true });
+
+const result = await profileWordPressPages({
+	page,
+	baseUrl: status.siteUrl,
+	manifest: {
+		pages: [
+			{ id: 'home', path: '/', ready: { state: 'networkidle' } },
+			{ id: 'dashboard', path: '/wp-admin/index.php', ready: '#dashboard-widgets' },
+			{
+				id: 'site-editor',
+				path: '/wp-admin/site-editor.php',
+				ready: {
+					selector: 'iframe[name="editor-canvas"]',
+					frameName: 'editor-canvas',
+					frameSelector: '[data-block]',
+				},
+			},
+		],
+	},
+	wordpressProfilerRows: collectWordPressRequestProfiles(sitePath),
+});
+```
+
+This is intentionally extension-level infrastructure, not Homeboy core. Core
+keeps orchestration, run persistence, baselines, and reports; WordPress owns
+WP-specific browser readiness, REST route classification, request profiling,
+and URL manifests. If the same page-profiling primitive appears in another
+extension later, then the shared seam can be promoted into core.
+
 ## Trace runner
 
 Project-owned scenarios live under one of:
