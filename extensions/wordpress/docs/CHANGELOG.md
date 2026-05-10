@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.52.4] - 2026-05-10
+
+### Added
+- diagnose page profile bottlenecks
+
+### Fixed
+- attach agent artifacts to real pull requests
+
 ## [2.52.3] - 2026-05-10
 
 ### Fixed
