@@ -106,6 +106,30 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_file_written' ) ) {
+    function homeboy_datamachine_agent_file_written( array $engine_data, array $config ): bool {
+        $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
+        $tool_results     = is_array( $engine_data[ $tool_results_key ] ?? null ) ? $engine_data[ $tool_results_key ] : array();
+
+        foreach ( $tool_results as $tool_result ) {
+            if ( ! is_array( $tool_result ) || empty( $tool_result['success'] ) ) {
+                continue;
+            }
+
+            if ( 'create_or_update_github_file' === (string) ( $tool_result['tool_name'] ?? '' ) ) {
+                return true;
+            }
+
+            $url = (string) ( $tool_result['url'] ?? '' );
+            if ( str_contains( $url, '/commit/' ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_ability_schema' ) ) {
     function homeboy_datamachine_agent_ability_schema( string $ability_name ): array {
         $ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( $ability_name ) : null;
@@ -769,6 +793,7 @@ $engine_data = function_exists( 'datamachine_get_engine_data' ) ? datamachine_ge
 $transcript_dir = homeboy_datamachine_agent_scalar( $config, 'transcript_dir' );
 $transcript_artifacts = homeboy_datamachine_agent_export_transcript( $job_id, $engine_data, $transcript_dir );
 $pr_opened = homeboy_datamachine_agent_pr_opened( $engine_data, $config );
+$file_written = homeboy_datamachine_agent_file_written( $engine_data, $config );
 $success_status = $pr_opened ? 'pr_opened' : 'no_changes';
 $success_requires_pr = ! empty( $config['success_requires_pr'] );
 
@@ -785,7 +810,13 @@ $metadata += array(
     'error_message'         => (string) ( $engine_data['error_message'] ?? '' ),
     'success_status'        => $success_status,
     'success_requires_pr'   => $success_requires_pr,
+    'file_written'          => $file_written,
 );
+
+if ( $file_written && ! $pr_opened ) {
+    $metadata['success_status'] = 'write_without_pr';
+    return homeboy_datamachine_agent_result( array( 'file_written' => 1, 'pr_opened' => 0 ), $metadata, 'Agent wrote files without opening a pull request' );
+}
 
 if ( $success_requires_pr && ! $pr_opened ) {
     return homeboy_datamachine_agent_result( array( 'pr_opened' => 0 ), $metadata, 'Agent completed without opening a pull request' );
@@ -807,8 +838,9 @@ return homeboy_datamachine_agent_result(
         'drain_succeeded'             => is_array( $drain_result ) && ! empty( $drain_result['success'] ) ? 1 : 0,
         'drain_elapsed_ms'            => $drain_elapsed_ms,
         'job_completed'               => 'completed' === $job_status ? 1 : 0,
+        'file_written'                => $file_written ? 1 : 0,
         'pr_opened'                   => $pr_opened ? 1 : 0,
-        'no_changes'                  => ! $pr_opened ? 1 : 0,
+        'no_changes'                  => ! $file_written && ! $pr_opened ? 1 : 0,
         'transcript_exported'         => ! empty( $transcript_artifacts['json'] ) ? 1 : 0,
         'total_tokens'                => (int) ( $metadata['token_usage']['total_tokens'] ?? 0 ),
     ),
