@@ -128,12 +128,23 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
         private static array $tool_results = array();
 
         public function handle_tool_call( array $parameters, array $tool_def = array() ): array {
+            $parameters = $this->apply_forced_parameters( $parameters, $tool_def );
+
             $response = isset( $tool_def['homeboy_original_tool'] ) && is_array( $tool_def['homeboy_original_tool'] )
                 ? $this->call_original_tool( $parameters, $tool_def['homeboy_original_tool'] )
                 : $this->call_ability_tool( $parameters, $tool_def );
 
             $this->record( $parameters, $tool_def, $response );
             return $response;
+        }
+
+        private function apply_forced_parameters( array $parameters, array $tool_def ): array {
+            $forced_parameters = is_array( $tool_def['homeboy_forced_parameters'] ?? null ) ? $tool_def['homeboy_forced_parameters'] : array();
+            if ( empty( $forced_parameters ) ) {
+                return $parameters;
+            }
+
+            return array_replace_recursive( $parameters, $forced_parameters );
         }
 
         private function call_original_tool( array $parameters, array $original_tool ): array {
@@ -297,13 +308,14 @@ if ( ! function_exists( 'homeboy_datamachine_agent_register_tool_recorders' ) ) 
                         continue;
                     }
                     $tools[ $tool_name ] = array(
-                        'class'          => 'Homeboy_Datamachine_Agent_Tool_Recorder',
-                        'method'         => 'handle_tool_call',
-                        'ability'        => $ability_name,
-                        'tool_name'      => $tool_name,
-                        'description'    => (string) ( $tool_config['description'] ?? 'Execute ' . $ability_name . '.' ),
-                        'parameters'     => homeboy_datamachine_agent_ability_schema( $ability_name ),
-                        'homeboy_record' => is_array( $tool_config['record'] ?? null ) ? $tool_config['record'] : array(),
+                        'class'                      => 'Homeboy_Datamachine_Agent_Tool_Recorder',
+                        'method'                     => 'handle_tool_call',
+                        'ability'                    => $ability_name,
+                        'tool_name'                  => $tool_name,
+                        'description'                => (string) ( $tool_config['description'] ?? 'Execute ' . $ability_name . '.' ),
+                        'parameters'                 => homeboy_datamachine_agent_ability_schema( $ability_name ),
+                        'homeboy_record'             => is_array( $tool_config['record'] ?? null ) ? $tool_config['record'] : array(),
+                        'homeboy_forced_parameters' => is_array( $tool_config['forced_parameters'] ?? null ) ? $tool_config['forced_parameters'] : array(),
                     );
                 }
 
@@ -316,11 +328,12 @@ if ( ! function_exists( 'homeboy_datamachine_agent_register_tool_recorders' ) ) 
                         continue;
                     }
                     $original_tool = $tools[ $tool_name ];
-                    $tools[ $tool_name ]['class']                 = 'Homeboy_Datamachine_Agent_Tool_Recorder';
-                    $tools[ $tool_name ]['method']                = 'handle_tool_call';
-                    $tools[ $tool_name ]['tool_name']             = $tool_name;
-                    $tools[ $tool_name ]['homeboy_original_tool'] = $original_tool;
-                    $tools[ $tool_name ]['homeboy_record']        = is_array( $recorder['record'] ?? null ) ? $recorder['record'] : array();
+                    $tools[ $tool_name ]['class']                      = 'Homeboy_Datamachine_Agent_Tool_Recorder';
+                    $tools[ $tool_name ]['method']                     = 'handle_tool_call';
+                    $tools[ $tool_name ]['tool_name']                  = $tool_name;
+                    $tools[ $tool_name ]['homeboy_original_tool']      = $original_tool;
+                    $tools[ $tool_name ]['homeboy_record']             = is_array( $recorder['record'] ?? null ) ? $recorder['record'] : array();
+                    $tools[ $tool_name ]['homeboy_forced_parameters'] = is_array( $recorder['forced_parameters'] ?? null ) ? $recorder['forced_parameters'] : array();
                 }
 
                 return $tools;
