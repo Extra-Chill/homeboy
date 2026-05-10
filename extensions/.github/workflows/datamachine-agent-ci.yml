@@ -321,6 +321,8 @@ jobs:
             --arg componentPath "$GITHUB_WORKSPACE" \
             --arg bundlePath "$bundle_abs" \
             --arg bundlePathInRepo "$BUNDLE_PATH" \
+            --arg bundleRepo "https://github.com/${TARGET_REPO}.git" \
+            --arg bundleRef "$GITHUB_SHA" \
             --arg agentSlug "$AGENT_SLUG" \
             --arg pipelineSlug "$PIPELINE_SLUG" \
             --arg flowSlug "$FLOW_SLUG" \
@@ -362,6 +364,8 @@ jobs:
               workload_run_before: $workloadRunBefore,
               required_abilities: (["datamachine/import-agent", "datamachine/run-flow", "datamachine/drain-job"] + $extraRequiredAbilities | reduce .[] as $ability ([]; if index($ability) then . else . + [$ability] end)),
               bundle_path: $bundlePath,
+              bundle_repo: $bundleRepo,
+              bundle_ref: $bundleRef,
               bundle_path_in_repo: $bundlePathInRepo,
               agent_slug: $agentSlug,
               pipeline_slug: $pipelineSlug,
