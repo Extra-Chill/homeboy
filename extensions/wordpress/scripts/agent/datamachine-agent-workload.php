@@ -64,6 +64,32 @@ if ( ! function_exists( 'homeboy_datamachine_agent_path_value' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_run_prompt_queue' ) ) {
+    function homeboy_datamachine_agent_run_prompt_queue( array $step_config, string $prompt ): array {
+        $existing_prompts = array();
+        foreach ( $step_config['prompt_queue'] ?? array() as $queued_prompt ) {
+            $existing_prompt = is_array( $queued_prompt ) ? trim( (string) ( $queued_prompt['prompt'] ?? '' ) ) : '';
+            if ( '' !== $existing_prompt ) {
+                $existing_prompts[] = $existing_prompt;
+            }
+        }
+
+        $run_prompt = trim( $prompt );
+        if ( ! empty( $existing_prompts ) && '' !== $run_prompt ) {
+            $run_prompt = implode( "\n\n", $existing_prompts ) . "\n\nRun context:\n" . $run_prompt;
+        } elseif ( ! empty( $existing_prompts ) ) {
+            $run_prompt = implode( "\n\n", $existing_prompts );
+        }
+
+        return array(
+            array(
+                'prompt'   => $run_prompt,
+                'added_at' => gmdate( 'c' ),
+            ),
+        );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_first_url' ) ) {
     function homeboy_datamachine_agent_first_url( $value ): string {
         if ( is_string( $value ) ) {
@@ -996,12 +1022,7 @@ $flow_config = is_array( $flow['flow_config'] ?? null ) ? $flow['flow_config'] :
 $flow_config = homeboy_datamachine_agent_apply_step_patches( $flow_config, is_array( $config['flow_step_patches'] ?? null ) ? $config['flow_step_patches'] : array() );
 foreach ( $flow_config as &$step_config ) {
     if ( 'ai' === (string) ( $step_config['step_type'] ?? '' ) ) {
-        $step_config['prompt_queue'] = array(
-            array(
-                'prompt'   => $prompt,
-                'added_at' => gmdate( 'c' ),
-            ),
-        );
+        $step_config['prompt_queue'] = homeboy_datamachine_agent_run_prompt_queue( $step_config, $prompt );
         $step_config['queue_mode'] = 'static';
     }
 }
