@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.52.3] - 2026-05-10
+
+### Fixed
+- detect current-run agent pull requests
+
 ## [2.52.2] - 2026-05-10
 
 ### Fixed
