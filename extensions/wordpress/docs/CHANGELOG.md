@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.51.9] - 2026-05-10
+
+### Fixed
+- open fallback PR for required agent runs
+
 ## [2.51.8] - 2026-05-10
 
 ### Fixed
