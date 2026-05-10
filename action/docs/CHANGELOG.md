@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.3.0] - 2026-05-10
+
+### Added
+- add PR policy merge gate
+
 ## [2.2.11] - 2026-05-07
 
 ### Fixed
