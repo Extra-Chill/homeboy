@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.51.4] - 2026-05-10
+
+### Changed
+- Make Data Machine agent artifact export configurable
+
 ## [2.51.3] - 2026-05-10
 
 ### Changed
