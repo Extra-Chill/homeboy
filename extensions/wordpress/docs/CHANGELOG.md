@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.52.2] - 2026-05-10
+
+### Fixed
+- allow bundled prompts in agent CI
+
 ## [2.52.1] - 2026-05-10
 
 ### Fixed
