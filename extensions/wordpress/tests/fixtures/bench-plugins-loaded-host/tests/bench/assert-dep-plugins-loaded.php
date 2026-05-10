@@ -35,6 +35,13 @@ return function (): array {
         }
     }
 
+    if (!function_exists('is_plugin_active')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+
+    $plugin_file = 'bench-plugins-loaded-dep/bench-plugins-loaded-dep.php';
+    $plugin_active = is_plugin_active($plugin_file);
+
     $ability_registered = function_exists('wp_get_ability')
         && wp_get_ability('bench-plugins-loaded-dep/ping') !== null;
 
@@ -42,10 +49,12 @@ return function (): array {
         'metrics' => [
             'dep_plugins_loaded_fired' => 1,
             'dep_ability_registered' => $ability_registered ? 1 : 0,
+            'dep_plugin_active' => $plugin_active ? 1 : 0,
         ],
         'metadata' => [
             'fixture' => 'bench-plugins-loaded-host',
             'asserts_issue' => 'homeboy-extensions#426',
+            'active_plugins' => array_values((array) get_option('active_plugins', [])),
         ],
     ];
 };

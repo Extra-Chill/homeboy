@@ -9,8 +9,8 @@
 #   2. Mounting a host fixture (bench-plugins-loaded-host) whose tests/bench/
 #      workload throws if the global is unset.
 #   3. Confirming the bench dispatcher exits 0 (workload didn't throw) AND
-#      the BenchResults envelope reports `dep_plugins_loaded_fired_mean=1`
-#      and `dep_ability_registered_mean=1`.
+#      the BenchResults envelope reports `dep_plugins_loaded_fired_mean=1`,
+#      `dep_ability_registered_mean=1`, and `dep_plugin_active_mean=1`.
 #
 # Pre-#426 the workload threw because the dep's plugins_loaded callback
 # never ran — its file was required AFTER plugins_loaded had already fired.
@@ -125,6 +125,22 @@ if [ "$registered" != "1" ]; then
     exit 1
 fi
 echo "✓ dep ability registered with the Abilities API"
+
+# --- Assertion: dep is visible through WordPress active plugin state ---
+active=$(jq -r "$scenario | .metrics.dep_plugin_active_mean // \"missing\"" "$RESULTS_TMPFILE")
+if [ "$active" != "1" ]; then
+    echo "ERROR: dep_plugin_active_mean expected 1, got $active" >&2
+    echo "       The dep loaded, but WordPress still reports it inactive." >&2
+    exit 1
+fi
+echo "✓ dep appears in WordPress active plugin state"
+
+active_plugin_match=$(jq -r "$scenario | .metadata.active_plugins | index(\"bench-plugins-loaded-dep/bench-plugins-loaded-dep.php\") // \"missing\"" "$RESULTS_TMPFILE")
+if [ "$active_plugin_match" = "missing" ] || [ "$active_plugin_match" = "null" ]; then
+    echo "ERROR: bench-plugins-loaded-dep missing from active_plugins metadata" >&2
+    exit 1
+fi
+echo "✓ active_plugins metadata contains validation dependency"
 
 # --- Assertion: bootstrap stage timings still emitted ---
 first_id=$(jq -r '.scenarios[0].id' "$RESULTS_TMPFILE")

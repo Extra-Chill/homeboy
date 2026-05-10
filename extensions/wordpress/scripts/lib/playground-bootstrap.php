@@ -808,9 +808,32 @@ function pg_activate_plugin_file(string $plugin_file): void {
     pg_log("PLUGIN_ACTIVATE_BEGIN $plugin_basename " . pg_diagnostic_context());
 
     do_action("activate_$plugin_basename", false);
+    pg_mark_plugin_active($plugin_basename);
     do_action('activated_plugin', $plugin_basename, false);
 
     pg_log("PLUGIN_ACTIVATE_OK $plugin_basename " . pg_diagnostic_context());
+}
+
+/**
+ * Persist activation state for directly loaded Playground plugins.
+ *
+ * The Playground runners require plugin files directly, then fire activation
+ * hooks manually. Without updating `active_plugins`, runtime inspectors and
+ * SITE.md-style context see those loaded plugins as inactive even though their
+ * code and hooks are running.
+ */
+function pg_mark_plugin_active(string $plugin_basename): void {
+    if (!function_exists('get_option') || !function_exists('update_option')) {
+        pg_log("NOTICE:cannot mark plugin active before option API is available: $plugin_basename");
+        return;
+    }
+
+    $active_plugins = (array) get_option('active_plugins', []);
+    if (!in_array($plugin_basename, $active_plugins, true)) {
+        $active_plugins[] = $plugin_basename;
+        sort($active_plugins);
+        update_option('active_plugins', array_values($active_plugins));
+    }
 }
 
 /**
