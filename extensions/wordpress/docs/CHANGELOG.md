@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.50.0] - 2026-05-10
+
+### Added
+- add engine data extraction helper
+- add generic ci-driver plugin fixture
+
 ## [2.49.5] - 2026-05-10
 
 ### Fixed
