@@ -25,7 +25,7 @@ name: Data Machine Agent CI (reusable)
         required: true
       prompt:
         type: string
-        required: true
+        default: ""
       provider:
         type: string
         default: openai

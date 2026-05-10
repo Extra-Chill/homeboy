@@ -999,9 +999,6 @@ foreach ( array( 'bundle_path' => $bundle_path, 'agent_slug' => $agent_slug, 'fl
         return homeboy_datamachine_agent_result( array( $label . '_present' => 0 ), $metadata, $label . ' is required' );
     }
 }
-if ( '' === $prompt ) {
-    return homeboy_datamachine_agent_result( array( 'prompt_present' => 0 ), $metadata, 'prompt or prompt_env is required' );
-}
 if ( ! $metadata['bundle_exists'] || ! is_file( $bundle_path . '/manifest.json' ) ) {
     return homeboy_datamachine_agent_result( array( 'bundle_exists' => 0 ), $metadata, 'Agent bundle directory missing or incomplete' );
 }

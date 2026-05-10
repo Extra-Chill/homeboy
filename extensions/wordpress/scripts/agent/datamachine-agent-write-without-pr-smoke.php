@@ -52,6 +52,34 @@ namespace {
 
     require __DIR__ . '/datamachine-agent-workload.php';
 
+    $flow_prompt_queue = homeboy_datamachine_agent_run_prompt_queue(
+        array(
+            'prompt_queue' => array(
+                array( 'prompt' => 'Use the bundled flow prompt.' ),
+            ),
+        ),
+        ''
+    );
+
+    if ( 'Use the bundled flow prompt.' !== ( $flow_prompt_queue[0]['prompt'] ?? '' ) ) {
+        fwrite( STDERR, "Expected an empty run prompt to preserve the bundled flow prompt.\n" );
+        exit( 1 );
+    }
+
+    $combined_prompt_queue = homeboy_datamachine_agent_run_prompt_queue(
+        array(
+            'prompt_queue' => array(
+                array( 'prompt' => 'Use the bundled flow prompt.' ),
+            ),
+        ),
+        'Apply this run context.'
+    );
+
+    if ( "Use the bundled flow prompt.\n\nRun context:\nApply this run context." !== ( $combined_prompt_queue[0]['prompt'] ?? '' ) ) {
+        fwrite( STDERR, "Expected a run prompt to be appended to the bundled flow prompt.\n" );
+        exit( 1 );
+    }
+
     $config = array( 'tool_results_key' => 'github_tool_results' );
 
     $write_without_pr = array(
