@@ -186,7 +186,7 @@ if [ "$PRINT_RESULTS" = "1" ]; then
 fi
 
 scenario='.scenarios[] | select(.id == "'"$WORKLOAD_ID"'")'
-if ! jq -e "$scenario | .metrics.config_present_mean == 1" "$RESULTS_FILE" >/dev/null; then
+if ! jq -e "$scenario" "$RESULTS_FILE" >/dev/null; then
     echo "ERROR: Data Machine agent workload did not run" >&2
     exit 1
 fi
@@ -194,6 +194,11 @@ fi
 if jq -e "$scenario | .metadata.error?" "$RESULTS_FILE" >/dev/null; then
     echo "ERROR: Data Machine agent workload reported an error" >&2
     jq -r "$scenario | .metadata.error" "$RESULTS_FILE" >&2
+    exit 1
+fi
+
+if ! jq -e "$scenario | .metrics.config_present_mean == 1" "$RESULTS_FILE" >/dev/null; then
+    echo "ERROR: Data Machine agent workload returned an incomplete result" >&2
     exit 1
 fi
 
