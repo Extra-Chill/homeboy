@@ -857,25 +857,25 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_transcript' ) ) {
             return array( 'session_id' => $session_id, 'error' => 'Transcript directory could not be created' );
         }
 
-        $path = rtrim( $transcript_dir, '/' ) . '/job-' . $job_id . '-transcript.json';
-        file_put_contents(
-            $path,
-            wp_json_encode(
-                array(
-                    'job_id'     => $job_id,
-                    'session_id' => $session_id,
-                    'provider'   => $session['provider'] ?? null,
-                    'model'      => $session['model'] ?? null,
-                    'metadata'   => is_array( $session['metadata'] ?? null ) ? $session['metadata'] : array(),
-                    'messages'   => is_array( $session['messages'] ?? null ) ? $session['messages'] : array(),
-                ),
-                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
-            )
+        $path    = rtrim( $transcript_dir, '/' ) . '/job-' . $job_id . '-transcript.json';
+        $content = wp_json_encode(
+            array(
+                'job_id'     => $job_id,
+                'session_id' => $session_id,
+                'provider'   => $session['provider'] ?? null,
+                'model'      => $session['model'] ?? null,
+                'metadata'   => is_array( $session['metadata'] ?? null ) ? $session['metadata'] : array(),
+                'messages'   => is_array( $session['messages'] ?? null ) ? $session['messages'] : array(),
+            ),
+            JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
         );
+
+        file_put_contents( $path, $content );
 
         return array(
             'session_id' => $session_id,
             'json'       => $path,
+            'content'    => $content,
         );
     }
 }

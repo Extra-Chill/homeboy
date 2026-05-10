@@ -496,6 +496,8 @@ jobs:
         id: transcript-artifact
         if: ${{ always() && inputs.transcript_artifact_name != '' && (steps.extract.outputs.transcript_json != '' || steps.extract_dry_run.outputs.transcript_json != '') }}
         env:
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          FLOW_SLUG: ${{ inputs.flow_slug }}
           TRANSCRIPT_JSON: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json }}
           TRANSCRIPT_HOST_DIR: ${{ steps.config.outputs.transcript_host_dir }}
         run: |
@@ -507,6 +509,14 @@ jobs:
             candidate="${TRANSCRIPT_HOST_DIR}/$(basename "$TRANSCRIPT_JSON")"
             if [ -f "$candidate" ]; then
               transcript_path="$candidate"
+            fi
+          fi
+          if [ -z "$transcript_path" ] && [ -f "$RESULTS_FILE" ]; then
+            transcript_content_path="${RUNNER_TEMP}/datamachine-agent-transcripts/$(basename "${TRANSCRIPT_JSON:-job-transcript.json}")"
+            if jq -e --arg scenario "$FLOW_SLUG" '.scenarios[] | select(.id == $scenario) | .metadata.transcript_artifacts.content? // empty' "$RESULTS_FILE" >/dev/null; then
+              mkdir -p "$(dirname "$transcript_content_path")"
+              jq -r --arg scenario "$FLOW_SLUG" '.scenarios[] | select(.id == $scenario) | .metadata.transcript_artifacts.content' "$RESULTS_FILE" > "$transcript_content_path"
+              transcript_path="$transcript_content_path"
             fi
           fi
           if [ -z "$transcript_path" ]; then
