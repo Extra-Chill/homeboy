@@ -89,6 +89,33 @@ namespace {
         exit( 1 );
     }
 
+    $nested_config = array(
+        'engine_key'       => 'docs_agent',
+        'tool_results_key' => 'github_tool_results',
+    );
+
+    $nested_results = array(
+        'docs_agent' => array(
+            'github_tool_results' => array(
+                array(
+                    'tool_name' => 'create_or_update_github_file',
+                    'success'   => true,
+                    'url'       => 'https://github.com/owner/repo/commit/def456',
+                ),
+                array(
+                    'tool_name' => 'create_github_pull_request',
+                    'success'   => true,
+                    'url'       => 'https://github.com/owner/repo/pull/456',
+                ),
+            ),
+        ),
+    );
+
+    if ( ! homeboy_datamachine_agent_file_written( $nested_results, $nested_config ) || ! homeboy_datamachine_agent_pr_opened( $nested_results, $nested_config ) ) {
+        fwrite( STDERR, "Expected nested engine-key tool results to drive write and PR classification.\n" );
+        exit( 1 );
+    }
+
     $no_changes = array( 'github_tool_results' => array() );
     if ( homeboy_datamachine_agent_file_written( $no_changes, $config ) || homeboy_datamachine_agent_pr_opened( $no_changes, $config ) ) {
         fwrite( STDERR, "Expected empty tool results to remain no-changes eligible.\n" );
