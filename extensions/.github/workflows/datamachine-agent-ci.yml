@@ -296,6 +296,8 @@ jobs:
           DAILY_MEMORY_ENABLED: ${{ inputs.daily_memory_enabled }}
           EXTRA_REQUIRED_ABILITIES: ${{ inputs.extra_required_abilities }}
           GITHUB_TOKEN_VALUE: ${{ steps.app-token.outputs.token || github.token }}
+          GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
           OPENAI_API_KEY_VALUE: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
@@ -336,6 +338,8 @@ jobs:
             --arg playgroundWordPress "$PLAYGROUND_WORDPRESS" \
             --arg transcriptGuestDir "$transcript_guest_dir" \
             --arg githubToken "$GITHUB_TOKEN_VALUE" \
+            --arg githubRunId "$GITHUB_RUN_ID_VALUE" \
+            --arg githubRunAttempt "$GITHUB_RUN_ATTEMPT_VALUE" \
             --arg openaiKey "$OPENAI_API_KEY_VALUE" \
             --argjson validationDependencies "$validation_json" \
             --argjson artifactExportConfig "$ARTIFACT_EXPORT_CONFIG" \
@@ -402,6 +406,8 @@ jobs:
               transcript_dir: $transcriptGuestDir,
               bench_env: {
                 GITHUB_TOKEN: $githubToken,
+                GITHUB_RUN_ID: $githubRunId,
+                GITHUB_RUN_ATTEMPT: $githubRunAttempt,
                 OPENAI_API_KEY: $openaiKey
               }
             } + (if $dailyMemoryEnabled then {daily_memory_enabled: true} else {} end)' > "$config_path"
