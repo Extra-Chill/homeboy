@@ -59,6 +59,10 @@ name: Data Machine Agent CI (reusable)
         description: Empty string disables transcript artifact upload.
         type: string
         default: ""
+      artifact_export_config:
+        description: JSON config for exporting job artifacts back to the target repo. Empty object uses the reusable workflow defaults.
+        type: string
+        default: "{}"
       comment_pr_summary:
         type: boolean
         default: false
@@ -112,9 +116,9 @@ name: Data Machine Agent CI (reusable)
         default: "[]"
     secrets:
       HOMEBOY_APP_ID:
-        required: true
+        required: false
       HOMEBOY_APP_PRIVATE_KEY:
-        required: true
+        required: false
       OPENAI_API_KEY:
         required: true
     outputs:
@@ -144,9 +148,22 @@ jobs:
       - name: Checkout consumer repo
         uses: actions/checkout@v4
 
+      - name: Detect Homeboy app credentials
+        id: homeboy-app-creds
+        env:
+          HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
+          HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$HOMEBOY_APP_ID" ] && [ -n "$HOMEBOY_APP_PRIVATE_KEY" ]; then
+            printf 'available=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'available=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Resolve Homeboy app token scope
         id: token-scope
-        if: ${{ ! inputs.dry_run }}
+        if: ${{ ! inputs.dry_run && steps.homeboy-app-creds.outputs.available == 'true' }}
         env:
           APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
           TARGET_REPO: ${{ inputs.target_repo }}
@@ -181,7 +198,7 @@ jobs:
 
       - name: Generate Homeboy app token
         id: app-token
-        if: ${{ ! inputs.dry_run }}
+        if: ${{ ! inputs.dry_run && steps.homeboy-app-creds.outputs.available == 'true' }}
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
@@ -263,6 +280,7 @@ jobs:
           MAX_TURNS: ${{ inputs.max_turns }}
           STEP_BUDGET: ${{ inputs.step_budget }}
           TIME_BUDGET_MS: ${{ inputs.time_budget_ms }}
+          ARTIFACT_EXPORT_CONFIG: ${{ inputs.artifact_export_config }}
           DRY_RUN: ${{ inputs.dry_run }}
           EXTRA_WP_CONFIG_DEFINES: ${{ inputs.extra_wp_config_defines }}
           EXTRA_PLAYGROUND_FILE_MOUNTS: ${{ inputs.extra_playground_file_mounts }}
@@ -293,6 +311,7 @@ jobs:
           jq -n \
             --arg componentPath "$GITHUB_WORKSPACE" \
             --arg bundlePath "$bundle_abs" \
+            --arg bundlePathInRepo "$BUNDLE_PATH" \
             --arg agentSlug "$AGENT_SLUG" \
             --arg pipelineSlug "$PIPELINE_SLUG" \
             --arg flowSlug "$FLOW_SLUG" \
@@ -304,6 +323,7 @@ jobs:
             --arg githubToken "$GITHUB_TOKEN_VALUE" \
             --arg openaiKey "$OPENAI_API_KEY_VALUE" \
             --argjson validationDependencies "$validation_json" \
+            --argjson artifactExportConfig "$ARTIFACT_EXPORT_CONFIG" \
             --argjson successRequiresPr "$SUCCESS_REQUIRES_PR" \
             --argjson maxTurns "$MAX_TURNS" \
             --argjson stepBudget "$STEP_BUDGET" \
@@ -332,7 +352,7 @@ jobs:
               workload_run_before: $workloadRunBefore,
               required_abilities: (["datamachine/import-agent", "datamachine/run-flow", "datamachine/drain-job"] + $extraRequiredAbilities | reduce .[] as $ability ([]; if index($ability) then . else . + [$ability] end)),
               bundle_path: $bundlePath,
-              bundle_path_in_repo: $bundlePath,
+              bundle_path_in_repo: $bundlePathInRepo,
               agent_slug: $agentSlug,
               pipeline_slug: $pipelineSlug,
               flow_slug: $flowSlug,
@@ -349,6 +369,16 @@ jobs:
               step_budget: $stepBudget,
               time_budget_ms: $timeBudgetMs,
               success_requires_pr: $successRequiresPr,
+              artifact_export: ({
+                enabled: true,
+                only_when_no_pr: true,
+                repo: $targetRepo,
+                path_prefix: $bundlePathInRepo,
+                branch_template: "agent-artifacts/{agent_slug}-{run_id}-{job_id}",
+                commit_message_template: "chore: persist {type} artifact",
+                pr_title_template: "Persist agent run artifacts",
+                pr_body_template: "## Summary\n- Persist bundle-file run artifacts from Data Machine agent job {job_id}.\n\n## Artifacts\n{paths}\n"
+              } * $artifactExportConfig),
               dry_run: $dryRun,
               transcript_dir: ("/wordpress/wp-content/plugins/datamachine-agent-ci-driver/artifacts/" + $agentSlug),
               bench_env: {

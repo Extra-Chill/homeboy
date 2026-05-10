@@ -157,6 +157,17 @@ if ( ! function_exists( 'homeboy_datamachine_agent_bundle_path_in_repo' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_template' ) ) {
+    function homeboy_datamachine_agent_template( string $template, array $values ): string {
+        $replacements = array();
+        foreach ( $values as $key => $value ) {
+            $replacements[ '{' . $key . '}' ] = (string) $value;
+        }
+
+        return strtr( $template, $replacements );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_slug_fragment' ) ) {
     function homeboy_datamachine_agent_slug_fragment( string $value ): string {
         $fragment = strtolower( preg_replace( '/[^a-zA-Z0-9._-]+/', '-', $value ) ?? '' );
@@ -165,22 +176,59 @@ if ( ! function_exists( 'homeboy_datamachine_agent_slug_fragment' ) ) {
     }
 }
 
-if ( ! function_exists( 'homeboy_datamachine_agent_export_bundle_artifacts' ) ) {
-    function homeboy_datamachine_agent_export_bundle_artifacts( int $job_id, array $config, bool $pr_opened ): array {
-        if ( $job_id <= 0 || $pr_opened || ! class_exists( JobArtifacts::class ) || ! function_exists( 'wp_get_ability' ) ) {
+if ( ! function_exists( 'homeboy_datamachine_agent_exportable_artifacts' ) ) {
+    function homeboy_datamachine_agent_exportable_artifacts( array $artifacts ): array {
+        $exportable_artifacts = array();
+
+        foreach ( $artifacts as $artifact_group ) {
+            if ( ! is_array( $artifact_group ) ) {
+                continue;
+            }
+
+            foreach ( $artifact_group as $artifact ) {
+                if ( ! is_array( $artifact ) ) {
+                    continue;
+                }
+
+                $relative_path = trim( (string) ( $artifact['bundle_relative_path'] ?? '' ), '/' );
+                $content       = (string) ( $artifact['content'] ?? '' );
+                if ( '' === $relative_path || '' === $content || str_contains( $relative_path, '..' ) ) {
+                    continue;
+                }
+
+                $exportable_artifacts[] = array(
+                    'type'          => (string) ( $artifact['type'] ?? 'artifact' ),
+                    'relative_path' => $relative_path,
+                    'content'       => $content,
+                );
+            }
+        }
+
+        return $exportable_artifacts;
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
+    function homeboy_datamachine_agent_export_job_artifacts( int $job_id, array $config, bool $pr_opened ): array {
+        $export_config = is_array( $config['artifact_export'] ?? null ) ? $config['artifact_export'] : array();
+        if ( $job_id <= 0 || empty( $export_config['enabled'] ) || ! class_exists( JobArtifacts::class ) || ! function_exists( 'wp_get_ability' ) ) {
             return array();
         }
 
-        $target_repo = homeboy_datamachine_agent_scalar( $config, 'target_repo' );
-        $bundle_path = homeboy_datamachine_agent_bundle_path_in_repo( $config );
-        if ( '' === $target_repo || '' === $bundle_path ) {
+        if ( $pr_opened && ! empty( $export_config['only_when_no_pr'] ) ) {
             return array();
+        }
+
+        $target_repo = trim( (string) ( $export_config['repo'] ?? '' ) );
+        $path_prefix = trim( (string) ( $export_config['path_prefix'] ?? '' ), '/' );
+        if ( '' === $target_repo || '' === $path_prefix || str_contains( $path_prefix, '..' ) ) {
+            return array( 'error' => 'Artifact export requires artifact_export.repo and artifact_export.path_prefix.' );
         }
 
         $artifact_result = ( new JobArtifacts() )->get( $job_id );
         $artifacts       = is_array( $artifact_result['artifacts'] ?? null ) ? $artifact_result['artifacts'] : array();
-        $daily_memory    = is_array( $artifacts['daily_memory_artifacts'] ?? null ) ? $artifacts['daily_memory_artifacts'] : array();
-        if ( empty( $daily_memory ) ) {
+        $exportable_artifacts = homeboy_datamachine_agent_exportable_artifacts( $artifacts );
+        if ( empty( $exportable_artifacts ) ) {
             return array();
         }
 
@@ -190,29 +238,41 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_bundle_artifacts' ) ) 
             return array( 'error' => 'GitHub file or pull request ability unavailable.' );
         }
 
-        $agent_slug = homeboy_datamachine_agent_slug_fragment( homeboy_datamachine_agent_scalar( $config, 'agent_slug', 'agent' ) );
-        $run_id     = homeboy_datamachine_agent_slug_fragment( (string) getenv( 'GITHUB_RUN_ID' ) );
-        $branch     = 'agent-artifacts/' . $agent_slug . '-' . $run_id . '-' . $job_id;
-        $written    = array();
+        $agent_slug      = homeboy_datamachine_agent_slug_fragment( homeboy_datamachine_agent_scalar( $config, 'agent_slug', 'agent' ) );
+        $run_id          = homeboy_datamachine_agent_slug_fragment( (string) getenv( 'GITHUB_RUN_ID' ) );
+        $template_values = array(
+            'agent_slug' => $agent_slug,
+            'run_id'     => $run_id,
+            'job_id'     => $job_id,
+        );
+        $branch_template = (string) ( $export_config['branch_template'] ?? '' );
+        $branch          = homeboy_datamachine_agent_template( $branch_template, $template_values );
+        if ( '' === $branch ) {
+            return array( 'error' => 'Artifact export requires artifact_export.branch_template.' );
+        }
 
-        foreach ( $daily_memory as $artifact ) {
-            if ( ! is_array( $artifact ) || 'agent_daily_memory' !== (string) ( $artifact['type'] ?? '' ) ) {
-                continue;
+        $written = array();
+
+        foreach ( $exportable_artifacts as $artifact ) {
+            $repo_path        = $path_prefix . '/' . $artifact['relative_path'];
+            $artifact_values  = array_merge(
+                $template_values,
+                array(
+                    'type' => $artifact['type'],
+                    'path' => $repo_path,
+                )
+            );
+            $commit_message   = homeboy_datamachine_agent_template( (string) ( $export_config['commit_message_template'] ?? '' ), $artifact_values );
+            if ( '' === $commit_message ) {
+                return array( 'error' => 'Artifact export requires artifact_export.commit_message_template.' );
             }
 
-            $relative_path = trim( (string) ( $artifact['bundle_relative_path'] ?? '' ), '/' );
-            $content       = (string) ( $artifact['content'] ?? '' );
-            if ( '' === $relative_path || '' === $content || str_contains( $relative_path, '..' ) ) {
-                continue;
-            }
-
-            $repo_path = $bundle_path . '/' . $relative_path;
-            $result    = $file_ability->execute(
+            $result = $file_ability->execute(
                 array(
                     'repo'           => $target_repo,
                     'file_path'      => $repo_path,
-                    'content'        => $content,
-                    'commit_message' => 'chore: persist agent run artifact',
+                    'content'        => $artifact['content'],
+                    'commit_message' => $commit_message,
                     'branch'         => $branch,
                 )
             );
@@ -230,12 +290,24 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_bundle_artifacts' ) ) 
             return array();
         }
 
+        $pr_title_template = (string) ( $export_config['pr_title_template'] ?? '' );
+        $pr_body_template  = (string) ( $export_config['pr_body_template'] ?? '' );
+        if ( '' === $pr_title_template || '' === $pr_body_template ) {
+            return array( 'error' => 'Artifact export requires artifact_export.pr_title_template and artifact_export.pr_body_template.' );
+        }
+
+        $pr_values        = array_merge(
+            $template_values,
+            array(
+                'paths' => '- `' . implode( "`\n- `", $written ) . '`',
+            )
+        );
         $pr_result = $pr_ability->execute(
             array(
                 'repo'  => $target_repo,
-                'title' => 'Persist agent run artifacts',
+                'title' => homeboy_datamachine_agent_template( $pr_title_template, $template_values ),
                 'head'  => $branch,
-                'body'  => "## Summary\n- Persist bundle-file run artifacts from Data Machine agent job {$job_id}.\n\n## Artifacts\n- `" . implode( "`\n- `", $written ) . "`\n",
+                'body'  => homeboy_datamachine_agent_template( $pr_body_template, $pr_values ),
             )
         );
         if ( function_exists( 'is_wp_error' ) && is_wp_error( $pr_result ) ) {
@@ -923,7 +995,7 @@ $pr_opened = homeboy_datamachine_agent_pr_opened( $engine_data, $config );
 $file_written = homeboy_datamachine_agent_file_written( $engine_data, $config );
 $success_status = $pr_opened ? 'pr_opened' : 'no_changes';
 $success_requires_pr = ! empty( $config['success_requires_pr'] );
-$bundle_artifact_exports = homeboy_datamachine_agent_export_bundle_artifacts( $job_id, $config, $pr_opened );
+$job_artifact_exports = homeboy_datamachine_agent_export_job_artifacts( $job_id, $config, $pr_opened );
 
 $metadata += array(
     'agent_id'             => $agent_id,
@@ -939,7 +1011,7 @@ $metadata += array(
     'success_status'        => $success_status,
     'success_requires_pr'   => $success_requires_pr,
     'file_written'          => $file_written,
-    'bundle_artifact_exports' => $bundle_artifact_exports,
+    'job_artifact_exports'    => $job_artifact_exports,
 );
 
 if ( $file_written && ! $pr_opened ) {
@@ -947,8 +1019,8 @@ if ( $file_written && ! $pr_opened ) {
     return homeboy_datamachine_agent_result( array( 'file_written' => 1, 'pr_opened' => 0 ), $metadata, 'Agent wrote files without opening a pull request' );
 }
 
-if ( ! empty( $bundle_artifact_exports['error'] ) ) {
-    return homeboy_datamachine_agent_result( array( 'bundle_artifact_exported' => 0 ), $metadata, (string) $bundle_artifact_exports['error'] );
+if ( ! empty( $job_artifact_exports['error'] ) ) {
+    return homeboy_datamachine_agent_result( array( 'job_artifact_exported' => 0 ), $metadata, (string) $job_artifact_exports['error'] );
 }
 
 if ( $success_requires_pr && ! $pr_opened ) {
@@ -974,7 +1046,7 @@ return homeboy_datamachine_agent_result(
         'file_written'                => $file_written ? 1 : 0,
         'pr_opened'                   => $pr_opened ? 1 : 0,
         'no_changes'                  => ! $file_written && ! $pr_opened ? 1 : 0,
-        'bundle_artifact_exported'    => ! empty( $bundle_artifact_exports['pr_url'] ) ? 1 : 0,
+        'job_artifact_exported'       => ! empty( $job_artifact_exports['pr_url'] ) ? 1 : 0,
         'transcript_exported'         => ! empty( $transcript_artifacts['json'] ) ? 1 : 0,
         'total_tokens'                => (int) ( $metadata['token_usage']['total_tokens'] ?? 0 ),
     ),
