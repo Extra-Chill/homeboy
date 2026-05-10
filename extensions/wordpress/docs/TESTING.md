@@ -53,6 +53,21 @@ separate `php` process, emits `HOST_SMOKE_*` markers, and fails fast with the
 failing script name. It does not bootstrap WordPress, connect to MySQL, or start
 Playground.
 
+## Data Machine agent bundle validator
+
+Agent bundle repositories can run the shared bundle validator as a standalone
+CI smoke without booting WordPress:
+
+```bash
+php path/to/homeboy-extensions/wordpress/scripts/agent/validate-bundle.php path/to/spec.json
+```
+
+The spec declares the bundle directory, expected manifest slugs, bundled
+pipeline and flow files, required memory files, required AI tools, and optional
+dot-path assertions against the manifest or example runner config. `bundle_dir`
+and `example_runner_config` are resolved relative to the spec file's parent
+directory so specs can live at repo root or under `tests/`.
+
 ## Dependencies
 
 If your plugin depends on other local plugins at runtime, declare them:
