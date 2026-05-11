@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.64.0] - 2026-05-11
+
+### Added
+- emit playground bench artifacts
+- add playground scenario manifests
+
 ## [2.63.0] - 2026-05-11
 
 ### Added
