@@ -154,6 +154,10 @@ inputs:
     description: 'Path to a repo-local PR policy file. When set on pull_request events, classifies the PR for deterministic auto-merge eligibility.'
     required: false
     default: ''
+  pr-open-policy:
+    description: 'Path to a repo-local PR open/update policy file. Defaults to pr-policy when empty.'
+    required: false
+    default: ''
   pr-policy-merge:
     description: 'Merge the pull request when pr-policy marks it safe. Requires pr-policy and a token with pull request write permissions.'
     required: false
@@ -544,6 +548,7 @@ runs:
         AUTOFIX_FINDING_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-finding-types }}
         AUTOFIX_CHANGED_FILES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-changed-files }}
         AUTOFIX_REPORT: ${{ steps.autofix-prepare-nonpr.outputs.autofix-report }}
+        PR_OPEN_POLICY: ${{ inputs.pr-open-policy || inputs.pr-policy }}
       run: bash ${{ github.action_path }}/scripts/autofix/open-autofix-pr.sh
 
     # ── Phase 7: Results and reporting ──

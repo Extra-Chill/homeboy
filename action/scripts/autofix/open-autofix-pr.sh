@@ -30,6 +30,39 @@ trap 'rm -f "${BODY_FILE}"' EXIT
 
 build_autofix_pr_body "${RUN_URL}" "${AUTOFIX_BRANCH}" "${BASE_BRANCH}" > "${BODY_FILE}"
 
+if [ -n "${PR_OPEN_POLICY:-}" ]; then
+  FILES_FILE="$(mktemp)"
+  trap 'rm -f "${BODY_FILE}" "${FILES_FILE}"' EXIT
+  printf '%s\n' "${AUTOFIX_CHANGED_FILES:-}" | sed '/^[[:space:]]*$/d' > "${FILES_FILE}"
+
+  POLICY_RESULT=""
+  set +e
+  POLICY_RESULT=$(homeboy git pr policy open "${COMP_ID}" \
+    --path "${WORKSPACE}" \
+    --policy "${PR_OPEN_POLICY}" \
+    --source autofix \
+    --base "${BASE_BRANCH}" \
+    --head "${AUTOFIX_BRANCH}" \
+    --head-repo "${GITHUB_REPOSITORY}" \
+    --repository "${GITHUB_REPOSITORY}" \
+    --files-file "${FILES_FILE}" 2>&1)
+  POLICY_STATUS=$?
+  set -e
+
+  if [ "${POLICY_STATUS}" -ne 0 ]; then
+    REASON="$(printf '%s' "${POLICY_RESULT}" | jq -r '.data.reason // empty' 2>/dev/null || true)"
+    if [ -z "${REASON}" ]; then
+      REASON="${POLICY_RESULT}"
+    fi
+    echo "Skipping autofix PR: PR open policy blocked this change — ${REASON}"
+    echo "created=false" >> "${GITHUB_OUTPUT}"
+    echo "policy-safe=false" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
+
+  echo "policy-safe=true" >> "${GITHUB_OUTPUT}"
+fi
+
 # Find an existing open PR for (base, head). `homeboy git pr find` emits typed
 # JSON with a stable shape regardless of `gh` version; jq extracts the first
 # item's number + url.

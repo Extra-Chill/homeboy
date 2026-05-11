@@ -11,24 +11,30 @@ trap 'rm -rf "${TMPDIR}"' EXIT
 FAKE_BIN="${TMPDIR}/bin"
 mkdir -p "${FAKE_BIN}"
 
-cat > "${FAKE_BIN}/gh" <<'EOF'
+cat > "${FAKE_BIN}/homeboy" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$1" = "api" ]; then
-  printf '%s\n' "${GH_FAKE_FILES}"
+if [ "$1 $2 $3 $4" != "git pr policy merge" ]; then
+  printf 'unexpected homeboy invocation: %s\n' "$*" >&2
+  exit 1
+fi
+
+if [ "${HOMEBOY_FAKE_SAFE:-true}" = "true" ]; then
+  merged="false"
+  for arg in "$@"; do
+    if [ "${arg}" = "--merge" ]; then
+      merged="true"
+    fi
+  done
+  printf '{"success":true,"data":{"safe":true,"allowed":true,"merged":%s,"reason":"safe","report":"## PR policy\\n\\nSafe for merge."}}\n' "${merged}"
   exit 0
 fi
 
-if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
-  printf '%s\n' "$*" >> "${GH_FAKE_MERGES}"
-  exit 0
-fi
-
-printf 'unexpected gh invocation: %s\n' "$*" >&2
+printf '{"success":true,"data":{"safe":false,"allowed":false,"merged":false,"reason":"blocked path","report":"## PR policy\\n\\nUnsafe for merge: blocked path"}}\n'
 exit 1
 EOF
-chmod +x "${FAKE_BIN}/gh"
+chmod +x "${FAKE_BIN}/homeboy"
 
 assert_policy() {
   local expected_safe="$1"
@@ -36,14 +42,11 @@ assert_policy() {
   local label="$3"
   shift 3
 
-  local output_file merge_file output safe merged
+  local output_file safe merged
   output_file="${TMPDIR}/output-${label// /-}"
-  merge_file="${TMPDIR}/merge-${label// /-}"
-  : > "${merge_file}"
 
   PATH="${FAKE_BIN}:${PATH}" \
     GITHUB_OUTPUT="${output_file}" \
-    GH_FAKE_MERGES="${merge_file}" \
     "$@" >/dev/null
 
   safe="$(awk '/^safe<<HOMEBOY_PR_POLICY$/{getline; print; exit}' "${output_file}")"
@@ -58,56 +61,22 @@ assert_policy() {
   printf 'PASS: %s\n' "${label}"
 }
 
-POLICY="${TMPDIR}/policy.json"
-cat > "${POLICY}" <<'EOF'
-{
-  "allowed_authors": ["github-actions[bot]"],
-  "allowed_head_branches": ["world-day/**"],
-  "allowed_paths": ["content/**", "themes/world-of-wordpress/patterns/**"],
-  "blocked_paths": [".github/**", "bundles/**"],
-  "blocked_content_patterns": ["eval[[:space:]]*\\("]
-}
-EOF
+POLICY="${TMPDIR}/policy.yml"
+printf 'merge:\n  allowed_paths: ["content/**"]\n' > "${POLICY}"
 
-mkdir -p "${TMPDIR}/repo/content/page" "${TMPDIR}/repo/.github/workflows"
-printf '<!-- wp:paragraph --><p>Hello</p><!-- /wp:paragraph -->\n' > "${TMPDIR}/repo/content/page/world-index.md"
-printf 'eval( $code );\n' > "${TMPDIR}/repo/content/page/bad.md"
-
-assert_policy true false "safe content" \
-  env -C "${TMPDIR}/repo" \
+assert_policy true false "safe no merge" \
+  env -C "${TMPDIR}" \
     POLICY_PATH="${POLICY}" \
     PR_NUMBER="7" \
     REPOSITORY="chubes4/world-of-wordpress" \
     PR_AUTHOR="github-actions[bot]" \
     PR_HEAD_REF="world-day/2026-05-10" \
     PR_HEAD_REPO="chubes4/world-of-wordpress" \
-    GH_FAKE_FILES='content/page/world-index.md' \
-    bash "${POLICY_GATE}"
-
-assert_policy false false "blocked path" \
-  env -C "${TMPDIR}/repo" \
-    POLICY_PATH="${POLICY}" \
-    PR_NUMBER="7" \
-    REPOSITORY="chubes4/world-of-wordpress" \
-    PR_AUTHOR="github-actions[bot]" \
-    PR_HEAD_REF="world-day/2026-05-10" \
-    PR_HEAD_REPO="chubes4/world-of-wordpress" \
-    GH_FAKE_FILES='.github/workflows/world.yml' \
-    bash "${POLICY_GATE}"
-
-assert_policy false false "blocked content" \
-  env -C "${TMPDIR}/repo" \
-    POLICY_PATH="${POLICY}" \
-    PR_NUMBER="7" \
-    REPOSITORY="chubes4/world-of-wordpress" \
-    PR_AUTHOR="github-actions[bot]" \
-    PR_HEAD_REF="world-day/2026-05-10" \
-    PR_HEAD_REPO="chubes4/world-of-wordpress" \
-    GH_FAKE_FILES='content/page/bad.md' \
+    HOMEBOY_FAKE_SAFE="true" \
     bash "${POLICY_GATE}"
 
 assert_policy true true "safe merge" \
-  env -C "${TMPDIR}/repo" \
+  env -C "${TMPDIR}" \
     POLICY_PATH="${POLICY}" \
     POLICY_MERGE="true" \
     POLICY_MERGE_METHOD="squash" \
@@ -116,7 +85,18 @@ assert_policy true true "safe merge" \
     PR_AUTHOR="github-actions[bot]" \
     PR_HEAD_REF="world-day/2026-05-10" \
     PR_HEAD_REPO="chubes4/world-of-wordpress" \
-    GH_FAKE_FILES='content/page/world-index.md' \
+    HOMEBOY_FAKE_SAFE="true" \
+    bash "${POLICY_GATE}"
+
+assert_policy false false "blocked" \
+  env -C "${TMPDIR}" \
+    POLICY_PATH="${POLICY}" \
+    PR_NUMBER="7" \
+    REPOSITORY="chubes4/world-of-wordpress" \
+    PR_AUTHOR="github-actions[bot]" \
+    PR_HEAD_REF="world-day/2026-05-10" \
+    PR_HEAD_REPO="chubes4/world-of-wordpress" \
+    HOMEBOY_FAKE_SAFE="false" \
     bash "${POLICY_GATE}"
 
 printf 'All PR policy gate checks passed.\n'
