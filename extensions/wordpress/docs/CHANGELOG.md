@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.58.0] - 2026-05-11
+
+### Added
+- report unused REST preload cost
+
 ## [2.57.0] - 2026-05-11
 
 ### Added
