@@ -55,6 +55,8 @@ assert_not_contains 'remote set-url origin' "${RUN_RELEASE}" "run-release does n
 assert_contains 'homeboy_verify_github_release_exists "${TAG}" "${GITHUB_REPOSITORY:-}"' "${RUN_RELEASE}" "run-release verifies the GitHub Release after successful release"
 assert_contains 'release-verify-github-release:' "${ROOT_DIR}/action.yml" "action exposes GitHub Release verification toggle"
 assert_contains 'HOMEBOY_VERIFY_GITHUB_RELEASE: ${{ inputs.release-verify-github-release }}' "${ROOT_DIR}/action.yml" "action passes verification toggle to release script"
+assert_contains 'name: homeboy-observations-${{ github.job }}' "${ROOT_DIR}/action.yml" "observation artifacts are scoped per job"
+assert_not_contains 'name: homeboy-observations$' "${ROOT_DIR}/action.yml" "observation artifacts do not use a shared static name"
 assert_contains 'release-bump-type:' "${ROOT_DIR}/action.yml" "action exposes release bump type output"
 assert_contains 'skipped-reason:' "${ROOT_DIR}/action.yml" "action exposes skipped release reason output"
 assert_contains 'git/ref/tags/v${release_version}' "${HOMEBOY_CONFIG}" "post-release hook reads the pushed release tag ref"
