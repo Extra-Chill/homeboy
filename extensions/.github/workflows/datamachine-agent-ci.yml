@@ -419,7 +419,7 @@ jobs:
             local name="$1"
             local expected_type="$2"
             local value="$3"
-            if ! jq -ce --arg expected_type "$expected_type" 'if type == $expected_type then . else error("expected " + $expected_type + ", got " + type) end' <<< "$value"; then
+            if ! printf '%s' "$value" | jq -Rse --arg expected_type "$expected_type" 'gsub("^\\s+|\\s+$"; "") | fromjson | if type == $expected_type then . else error("expected " + $expected_type + ", got " + type) end'; then
               echo "Invalid $name: expected JSON $expected_type." >&2
               return 1
             fi
