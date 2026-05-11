@@ -1527,7 +1527,12 @@ $metadata += array(
 
 if ( $file_written && ! $pr_opened ) {
     $metadata['success_status'] = 'write_without_pr';
-    return homeboy_datamachine_agent_result( array( 'file_written' => 1, 'pr_opened' => 0 ), $metadata, 'Agent wrote files without opening a pull request' );
+    $fallback_error = is_array( $fallback_pull_request ) ? (string) ( $fallback_pull_request['error'] ?? '' ) : '';
+    $error_message  = 'Agent wrote files without opening a pull request';
+    if ( '' !== $fallback_error ) {
+        $error_message .= ': ' . $fallback_error;
+    }
+    return homeboy_datamachine_agent_result( array( 'file_written' => 1, 'pr_opened' => 0 ), $metadata, $error_message );
 }
 
 if ( ! empty( $job_artifact_exports['error'] ) ) {
