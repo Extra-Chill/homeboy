@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.60.1] - 2026-05-11
+
+### Fixed
+- collect runner workspace writes
+
 ## [2.60.0] - 2026-05-11
 
 ### Added
