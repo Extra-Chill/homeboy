@@ -464,10 +464,10 @@ runs:
       run: bash ${{ github.action_path }}/scripts/core/export-observations.sh
 
     - name: Upload Homeboy observations
-      if: always()
+      if: always() && steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != ''
       uses: actions/upload-artifact@v4
       with:
-        name: homeboy-observations
+        name: homeboy-observations-${{ github.job }}
         path: homeboy-observations/**
         if-no-files-found: ignore
 
