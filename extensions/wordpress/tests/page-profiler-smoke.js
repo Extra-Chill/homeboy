@@ -175,6 +175,10 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	});
 	const candidateWaterfall = summarizeWordPressRestWaterfall({
 		readyMs: 900,
+		restPreloads: [
+			{ path: '/wp/v2/template-parts/twentytwentyfive//header?context=edit', body: { ok: true } },
+			{ path: '/wp/v2/posts?context=edit&per_page=10', payloadBytes: 256 },
+		],
 		apiFetchAttempts: [
 			{ source: 'apiFetch', path: '/wp/v2/template-parts/twentytwentyfive//header?context=edit', method: 'GET', startedAtMs: 950, durationMs: 2 },
 			{ source: 'apiFetch', path: '/wp/v2/users/me?context=edit', method: 'GET', startedAtMs: 980 },
@@ -185,14 +189,30 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	});
 	assert.equal(baselineWaterfall.counts.network, 2);
 	assert.equal(candidateWaterfall.counts.preloadedOrCache, 1);
+	assert.equal(candidateWaterfall.counts.usedPreload, 1);
+	assert.equal(candidateWaterfall.counts.unusedPreloadCount, 1);
+	assert.equal(candidateWaterfall.counts.preloadPayloadBytes, 267);
+	assert.equal(candidateWaterfall.counts.remainingRestNetworkCount, 1);
+	assert.equal(candidateWaterfall.metrics.unused_preload_count, 1);
+	assert.equal(candidateWaterfall.metrics.preload_payload_bytes, 267);
+	assert.equal(candidateWaterfall.metrics.remaining_rest_network_count, 1);
+	assert.equal(candidateWaterfall.usedPreloadRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
+	assert.equal(candidateWaterfall.unusedPreloadRows[0].url, '/wp/v2/posts?context=edit&per_page=10');
 	assert.equal(candidateWaterfall.preloadedOrCacheRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
+	const objectPreloadWaterfall = summarizeWordPressRestWaterfall({
+		apiFetchAttempts: [{ path: '/wp/v2/settings', method: 'GET' }],
+		preloadMetadata: { '/wp/v2/settings': { body: { setting: true } } },
+	});
+	assert.equal(objectPreloadWaterfall.counts.usedPreload, 1);
 	const comparison = compareWordPressRestWaterfalls({ baseline: baselineWaterfall, candidate: candidateWaterfall });
 	assert.equal(comparison.counts.removedNetwork, 1);
 	assert.equal(comparison.remainingNetworkOpportunities[0].classification, 'client-state');
+	assert.equal(comparison.unusedPreloadRows.length, 1);
 	const opportunities = classifyWordPressRestPreloadOpportunities(baselineWaterfall);
 	assert.equal(opportunities.safeDeterministic.length, 1);
 	assert.equal(opportunities.clientState.length, 1);
 	assert.match(formatWordPressRestWaterfallMarkdownReport(comparison), /REST waterfall comparison/);
+	assert.match(formatWordPressRestWaterfallMarkdownReport(comparison), /Unused REST preloads/);
 
 async function main() {
 	const page = new FakePage(resources);
