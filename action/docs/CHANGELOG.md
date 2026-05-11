@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.5.0] - 2026-05-11
+
+### Added
+- add reusable CI workflow
+
 ## [2.4.5] - 2026-05-11
 
 ### Changed
