@@ -16,6 +16,7 @@ const {
 	createWordPressAdminPageScenarioManifest,
 	getWordPressAdminPageScenario,
 	listWordPressAdminPageScenarios,
+	normalizeWordPressAdminPageScenarioInput,
 	normalizePageManifest,
 	resolveWordPressAdminPageScenario,
 } = require('../index');
@@ -59,6 +60,28 @@ const subset = listWordPressAdminPageScenarios({
 });
 assert.deepEqual(subset.map((scenario) => scenario.id), ['dashboard', 'themes']);
 
+const customScenario = normalizeWordPressAdminPageScenarioInput({
+	id: 'woocommerce-orders',
+	label: 'WooCommerce orders',
+	path: '/wp-admin/admin.php?page=wc-orders',
+	ready: { selector: '.woocommerce-layout, .wp-list-table' },
+});
+assert.equal(customScenario.path, '/wp-admin/admin.php?page=wc-orders');
+assert.equal(customScenario.resources.includeResourceSubstrings.includes('/wp-json/'), true);
+
+const mixed = listWordPressAdminPageScenarios({
+	scenarios: [
+		'dashboard',
+		{
+			id: 'custom-settings',
+			label: 'Custom settings',
+			path: '/wp-admin/options-general.php?page=custom',
+			ready: { selector: '#wpbody-content' },
+		},
+	],
+});
+assert.deepEqual(mixed.map((scenario) => scenario.id), ['dashboard', 'custom-settings']);
+
 const template = getWordPressAdminPageScenario('site-editor-template', {
 	params: {
 		themeSlug: 'twentytwentyfive',
@@ -76,18 +99,18 @@ assert.throws(
 );
 
 const manifest = createWordPressAdminPageScenarioManifest({
-	ids: ['dashboard', 'site-editor-template', 'plugins'],
+	scenarios: ['dashboard', 'site-editor-template', customScenario],
 	params: {
 		themeSlug: 'twentytwentyfive',
 		templateSlug: 'home',
 	},
 	overrides: {
-		plugins: {
+		'woocommerce-orders': {
 			restObservationMs: 0,
 		},
 	},
 });
-assert.deepEqual(manifest.pages.map((scenario) => scenario.id), ['dashboard', 'site-editor-template', 'plugins']);
+assert.deepEqual(manifest.pages.map((scenario) => scenario.id), ['dashboard', 'site-editor-template', 'woocommerce-orders']);
 assert.equal(manifest.pages[2].restObservationMs, 0);
 assert.equal(normalizePageManifest(manifest).length, 3);
 

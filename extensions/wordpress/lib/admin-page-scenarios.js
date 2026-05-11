@@ -197,16 +197,33 @@ function getWordPressAdminPageScenario(id, options = {}) {
 	return resolveWordPressAdminPageScenario(scenario, options);
 }
 
+function normalizeWordPressAdminPageScenarioInput(scenario, options = {}) {
+	if (typeof scenario === 'string') {
+		return getWordPressAdminPageScenario(scenario, options);
+	}
+	return resolveWordPressAdminPageScenario({
+		resources: DEFAULT_SCENARIO_RESOURCES,
+		gate: {
+			browser: WORDPRESS_ADMIN_BROWSER_GATE,
+			rest: WORDPRESS_ADMIN_REST_GATE,
+		},
+		interactions: [],
+		...scenario,
+	}, options);
+}
+
 function listWordPressAdminPageScenarios(options = {}) {
 	assertPlainObject(options, 'options');
-	const ids = options.ids === undefined ? WORDPRESS_ADMIN_PAGE_SCENARIO_IDS : options.ids;
-	if (!Array.isArray(ids)) {
-		throw new TypeError('options.ids must be an array when provided');
+	const scenarios = options.scenarios === undefined
+		? (options.ids === undefined ? WORDPRESS_ADMIN_PAGE_SCENARIO_IDS : options.ids)
+		: options.scenarios;
+	if (!Array.isArray(scenarios)) {
+		throw new TypeError('options.scenarios or options.ids must be an array when provided');
 	}
 	const excludeIds = new Set(options.excludeIds || []);
-	return ids
-		.filter((id) => !excludeIds.has(id))
-		.map((id) => getWordPressAdminPageScenario(id, options));
+	return scenarios
+		.map((scenario) => normalizeWordPressAdminPageScenarioInput(scenario, options))
+		.filter((scenario) => !excludeIds.has(scenario.id));
 }
 
 function createWordPressAdminPageScenarioManifest(options = {}) {
@@ -224,9 +241,7 @@ function createWordPressAdminPageScenarioManifest(options = {}) {
 
 async function profileWordPressAdminPageScenarios(input = {}) {
 	assertPlainObject(input, 'input');
-	const manifest = input.manifest || (Array.isArray(input.scenarios)
-		? { pages: input.scenarios }
-		: createWordPressAdminPageScenarioManifest(input.scenarios || input));
+	const manifest = input.manifest || createWordPressAdminPageScenarioManifest(input);
 	return profileWordPressPages({
 		...input,
 		manifest,
@@ -243,6 +258,7 @@ module.exports = {
 	createWordPressAdminPageScenarioManifest,
 	getWordPressAdminPageScenario,
 	listWordPressAdminPageScenarios,
+	normalizeWordPressAdminPageScenarioInput,
 	profileWordPressAdminPageScenarios,
 	resolveWordPressAdminPageScenario,
 };
