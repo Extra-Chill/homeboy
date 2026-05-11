@@ -61,12 +61,15 @@ stdout=$(GITHUB_OUTPUT="$GITHUB_OUTPUT_TMPFILE" bash "$EXTRACTOR" \
     --results "$RESULTS_TMPFILE" \
     --scenario fixture-agent \
     --field foo_bar=metadata.engine_data.foo.bar \
+    --field expression='(.metadata.engine_data.foo | if type == "object" then (.bar // "") else "" end)' \
     --field nested=metadata.engine_data.deep.nested \
     --field missing=metadata.engine_data.missing \
     --required-field foo_bar \
+    --required-field expression \
     --required-field nested)
 
 if grep -F "foo_bar:" <<<"$stdout" | grep -F "baz" >/dev/null \
+    && grep -F "expression:" <<<"$stdout" | grep -F "baz" >/dev/null \
     && grep -F "nested:" <<<"$stdout" | grep -F "42" >/dev/null; then
     pass "stdout includes projected key/value pairs"
 else
@@ -75,6 +78,7 @@ else
 fi
 
 if grep -Fx "foo_bar=baz" "$GITHUB_OUTPUT_TMPFILE" >/dev/null \
+    && grep -Fx "expression=baz" "$GITHUB_OUTPUT_TMPFILE" >/dev/null \
     && grep -Fx "nested=42" "$GITHUB_OUTPUT_TMPFILE" >/dev/null \
     && grep -Fx "missing=" "$GITHUB_OUTPUT_TMPFILE" >/dev/null; then
     pass "GITHUB_OUTPUT includes projected key=value lines"
