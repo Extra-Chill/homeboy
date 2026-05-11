@@ -215,6 +215,30 @@ proxy goals. For example, reward a verified diff plus passing checks rather than
 only rewarding that a pull request URL exists. Mock or scope external services
 when reproducibility matters.
 
+Playground grader workloads should return the shared reward payload used by the
+bench runner:
+
+```json
+{
+  "success": false,
+  "reward": 0.75,
+  "done": true,
+  "grade": {
+    "max_score": 1,
+    "score": 0.75,
+    "checks": [
+      { "id": "valid_block_markup", "passed": true, "score": 0.4, "max_score": 0.4 }
+    ]
+  }
+}
+```
+
+Use `success` for binary pass/fail completion. Use `reward` and
+`grade.checks` for partial credit, with `reward` bounded from `0` to `1` and
+per-check scores bounded by their `max_score`. The runner exposes aggregate
+metrics such as `reward_mean`, while the structured details remain in
+`metadata.grade` for JSONL consumers.
+
 ## Related files
 
 - `.github/workflows/datamachine-agent-ci.yml` is the reusable workflow.

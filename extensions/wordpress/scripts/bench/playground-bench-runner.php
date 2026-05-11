@@ -44,6 +44,9 @@
  * `['metrics' => ['rows' => 10], 'metadata' => ['phase' => 'warm']]`;
  * numeric custom metrics are aggregated with the same percentile machinery
  * and the latest metadata/artifacts payloads are attached to the scenario.
+ * Grader payloads may also return top-level `success`, `reward`, `done`,
+ * and `grade` fields. These are normalized into stable metrics and the
+ * structured `metadata.grade` object for JSONL/eval aggregation.
  *
  * OUTPUT CONTRACT
  *
@@ -383,6 +386,129 @@ function pg_bench_json_object($value, string $label): array {
     return $value;
 }
 
+function pg_bench_float_in_range($value, string $label, float $min, float $max): float {
+    if (!is_numeric($value)) {
+        throw new RuntimeException("$label must be numeric");
+    }
+
+    $number = (float) $value;
+    if (!is_finite($number) || $number < $min || $number > $max) {
+        throw new RuntimeException("$label must be between $min and $max");
+    }
+
+    return $number;
+}
+
+function pg_bench_bool_value($value, string $label): bool {
+    if (is_bool($value)) {
+        return $value;
+    }
+    if ($value === 0 || $value === 1) {
+        return (bool) $value;
+    }
+
+    throw new RuntimeException("$label must be a boolean");
+}
+
+function pg_bench_normalize_grade_check($check, int $index): array {
+    if (!is_array($check) || pg_bench_is_list($check)) {
+        throw new RuntimeException("grade.checks[$index] must be an object");
+    }
+
+    $id = $check['id'] ?? ('check_' . ($index + 1));
+    if (!is_scalar($id) || trim((string) $id) === '') {
+        throw new RuntimeException("grade.checks[$index].id must be a non-empty string");
+    }
+
+    $max_score = pg_bench_float_in_range($check['max_score'] ?? 1, "grade.checks[$index].max_score", 0, PHP_FLOAT_MAX);
+    $score = pg_bench_float_in_range($check['score'] ?? 0, "grade.checks[$index].score", 0, $max_score);
+    $passed = array_key_exists('passed', $check)
+        ? pg_bench_bool_value($check['passed'], "grade.checks[$index].passed")
+        : ($max_score === 0.0 || $score >= $max_score);
+
+    $normalized = [
+        'id' => (string) $id,
+        'passed' => $passed,
+        'score' => $score,
+        'max_score' => $max_score,
+    ];
+
+    foreach (['message', 'details', 'expected', 'actual'] as $field) {
+        if (isset($check[$field]) && is_scalar($check[$field])) {
+            $normalized[$field] = (string) $check[$field];
+        }
+    }
+
+    return $normalized;
+}
+
+function pg_bench_normalize_grader_payload(array $payload): ?array {
+    $has_grade_payload = array_key_exists('success', $payload)
+        || array_key_exists('reward', $payload)
+        || array_key_exists('done', $payload)
+        || array_key_exists('grade', $payload);
+    if (!$has_grade_payload) {
+        return null;
+    }
+
+    $grade = pg_bench_json_object($payload['grade'] ?? [], 'grade');
+    $max_score = pg_bench_float_in_range($grade['max_score'] ?? 1, 'grade.max_score', 0, PHP_FLOAT_MAX);
+
+    $checks = [];
+    if (array_key_exists('checks', $grade)) {
+        if (!is_array($grade['checks']) || !pg_bench_is_list($grade['checks'])) {
+            throw new RuntimeException('grade.checks must be an array');
+        }
+        foreach ($grade['checks'] as $index => $check) {
+            $checks[] = pg_bench_normalize_grade_check($check, $index);
+        }
+    }
+
+    $score_default = array_key_exists('reward', $payload) ? $payload['reward'] : 0;
+    $score = pg_bench_float_in_range($grade['score'] ?? $score_default, 'grade.score', 0, $max_score);
+    $reward = pg_bench_float_in_range($payload['reward'] ?? ($max_score > 0 ? $score / $max_score : 0), 'reward', 0, 1);
+    $success = array_key_exists('success', $payload)
+        ? pg_bench_bool_value($payload['success'], 'success')
+        : ($reward >= 1.0);
+    $done = array_key_exists('done', $payload)
+        ? pg_bench_bool_value($payload['done'], 'done')
+        : true;
+
+    $normalized_grade = [
+        'max_score' => $max_score,
+        'score' => $score,
+        'checks' => $checks,
+    ];
+    if (isset($grade['failure']) && is_array($grade['failure']) && !pg_bench_is_list($grade['failure'])) {
+        $normalized_grade['failure'] = array_intersect_key($grade['failure'], array_flip(['type', 'message']));
+    }
+
+    return [
+        'success' => $success,
+        'reward' => $reward,
+        'done' => $done,
+        'grade' => $normalized_grade,
+    ];
+}
+
+function pg_bench_apply_grader_payload(array $payload, array &$metrics, array &$metadata): void {
+    $normalized = pg_bench_normalize_grader_payload($payload);
+    if ($normalized === null) {
+        return;
+    }
+
+    $metrics['success'] = $normalized['success'] ? 1.0 : 0.0;
+    $metrics['reward'] = $normalized['reward'];
+    $metrics['done'] = $normalized['done'] ? 1.0 : 0.0;
+    $metrics['grade_score'] = $normalized['grade']['score'];
+    $metrics['grade_max_score'] = $normalized['grade']['max_score'];
+
+    $metadata['success'] = $normalized['success'];
+    $metadata['reward'] = $normalized['reward'];
+    $metadata['done'] = $normalized['done'];
+    $metadata['grade'] = $normalized['grade'];
+}
+
 function pg_bench_merge_workload_payload($payload, array &$metrics, array &$artifacts, array &$metadata): void {
     if (!is_array($payload)) {
         return;
@@ -419,6 +545,45 @@ function pg_bench_merge_workload_payload($payload, array &$metrics, array &$arti
     }
 
     $metadata = array_replace($metadata, pg_bench_json_object($payload['metadata'] ?? [], 'metadata'));
+    pg_bench_apply_grader_payload($payload, $metrics, $metadata);
+}
+
+function pg_bench_step_is_grader(array $step): bool {
+    return (isset($step['grader']) && $step['grader'] === true)
+        || (isset($step['role']) && is_scalar($step['role']) && (string) $step['role'] === 'grader');
+}
+
+function pg_bench_grader_failure_payload(Throwable $error, array $step): array {
+    $check_id = isset($step['id']) && is_scalar($step['id']) && trim((string) $step['id']) !== ''
+        ? (string) $step['id']
+        : 'grader_exception';
+
+    return [
+        'success' => false,
+        'reward' => 0,
+        'done' => true,
+        'grade' => [
+            'score' => 0,
+            'max_score' => 1,
+            'checks' => [[
+                'id' => $check_id,
+                'passed' => false,
+                'score' => 0,
+                'max_score' => 1,
+                'message' => $error->getMessage(),
+            ]],
+            'failure' => [
+                'type' => get_class($error),
+                'message' => $error->getMessage(),
+            ],
+        ],
+        'metadata' => [
+            'grader_failure' => [
+                'type' => get_class($error),
+                'message' => $error->getMessage(),
+            ],
+        ],
+    ];
 }
 
 function pg_bench_run_php_step(array $step, string $plugin_path) {
@@ -733,18 +898,25 @@ function pg_bench_run_configured_workload(array $workload, string $plugin_path):
 
     foreach ($workload['run'] as $step) {
         $type = $step['type'];
-        switch ($type) {
-            case 'php':
-                $result = pg_bench_run_php_step($step, $plugin_path);
-                break;
-            case 'wp-cli':
-                $result = pg_bench_run_wp_cli_step($step);
-                break;
-            case 'ability':
-                $result = pg_bench_run_ability_step($step);
-                break;
-            default:
-                throw new RuntimeException("unsupported step type: $type");
+        try {
+            switch ($type) {
+                case 'php':
+                    $result = pg_bench_run_php_step($step, $plugin_path);
+                    break;
+                case 'wp-cli':
+                    $result = pg_bench_run_wp_cli_step($step);
+                    break;
+                case 'ability':
+                    $result = pg_bench_run_ability_step($step);
+                    break;
+                default:
+                    throw new RuntimeException("unsupported step type: $type");
+            }
+        } catch (Throwable $e) {
+            if (!pg_bench_step_is_grader($step)) {
+                throw $e;
+            }
+            $result = pg_bench_grader_failure_payload($e, $step);
         }
         pg_bench_merge_workload_payload($result, $metrics, $artifacts, $metadata);
     }
@@ -898,19 +1070,20 @@ function pg_bench_record_workload_result($result, array &$custom_metric_samples,
         return;
     }
 
-    if (array_key_exists('metadata', $result)) {
-        $latest_metadata = $result['metadata'];
+    $metrics = [];
+    $artifacts = [];
+    $metadata = [];
+    pg_bench_merge_workload_payload($result, $metrics, $artifacts, $metadata);
+
+    if (array_key_exists('metadata', $result) || !empty($metadata)) {
+        $latest_metadata = $metadata;
     }
 
-    if (array_key_exists('artifacts', $result)) {
-        $latest_artifacts = $result['artifacts'];
+    if (array_key_exists('artifacts', $result) || !empty($artifacts)) {
+        $latest_artifacts = $artifacts;
     }
 
-    if (!isset($result['metrics']) || !is_array($result['metrics'])) {
-        return;
-    }
-
-    foreach ($result['metrics'] as $metric => $value) {
+    foreach ($metrics as $metric => $value) {
         if (!is_string($metric) || $metric === '' || !is_numeric($value)) {
             continue;
         }
@@ -1016,6 +1189,9 @@ try {
             if (!$is_warmup) {
                 $timings_ms[] = $elapsed_ns / 1_000_000;
                 if (is_array($workload_result) && array_key_exists('metadata', $workload_result)) {
+                    $has_metadata = true;
+                }
+                if (is_array($workload_result) && pg_bench_normalize_grader_payload($workload_result) !== null) {
                     $has_metadata = true;
                 }
                 if (is_array($workload_result) && array_key_exists('artifacts', $workload_result)) {

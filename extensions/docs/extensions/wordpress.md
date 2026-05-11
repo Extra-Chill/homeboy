@@ -139,6 +139,38 @@ Numeric metrics are aggregated across measured iterations with the same
 mean/p50/p95/p99/min/max suffixes used by PHP bench files. Artifacts and metadata
 are carried into the Homeboy BenchResults scenario envelope.
 
+Playground grader workloads may also return a normalized reward payload:
+
+```json
+{
+  "success": false,
+  "reward": 0.75,
+  "done": true,
+  "grade": {
+    "max_score": 1,
+    "score": 0.75,
+    "checks": [
+      { "id": "valid_block_markup", "passed": true, "score": 0.4, "max_score": 0.4 },
+      { "id": "matches_expected_structure", "passed": false, "score": 0, "max_score": 0.3 }
+    ]
+  }
+}
+```
+
+`reward` is a finite number from `0` to `1`. `grade.score` and each check
+`score` are finite numbers from `0` to their matching `max_score`. The runner
+mirrors stable numeric keys into metrics (`success`, `reward`, `done`,
+`grade_score`, and `grade_max_score`) so the normal BenchResults aggregation
+emits fields such as `reward_mean` and `grade_score_mean`. The structured
+payload is stored under `metadata.grade` with per-check `id`, `passed`, `score`,
+`max_score`, and optional `message` fields.
+
+Use `success` for binary task completion and `reward`/`grade.checks` when a
+scenario can earn partial credit. Configured workload steps marked
+`"role": "grader"` or `"grader": true` convert thrown exceptions into a
+structured zero-reward grade with `metadata.grade.failure`, allowing result
+aggregation to consume failures without scenario-specific parsing.
+
 The same workload contract powers Data Machine agent CI in Playground. See
 [`../../wordpress/docs/AGENT_CI_PLAYGROUND.md`](../../wordpress/docs/AGENT_CI_PLAYGROUND.md)
 for the dedicated agent sandbox guide.
