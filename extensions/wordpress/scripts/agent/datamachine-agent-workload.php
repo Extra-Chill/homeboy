@@ -152,6 +152,53 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
         return is_array( $engine_data[ $tool_results_key ] ?? null ) ? $engine_data[ $tool_results_key ] : array();
     }
 
+    function homeboy_datamachine_agent_set_tool_results( array $engine_data, array $config, array $tool_results ): array {
+        $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
+        $engine_key       = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
+
+        if ( '' !== $engine_key ) {
+            if ( ! isset( $engine_data[ $engine_key ] ) || ! is_array( $engine_data[ $engine_key ] ) ) {
+                $engine_data[ $engine_key ] = array();
+            }
+            $engine_data[ $engine_key ][ $tool_results_key ] = $tool_results;
+            return $engine_data;
+        }
+
+        $engine_data[ $tool_results_key ] = $tool_results;
+        return $engine_data;
+    }
+
+    function homeboy_datamachine_agent_merge_child_engine_data( array $engine_data, array $child_jobs, array $config ): array {
+        if ( empty( $child_jobs ) ) {
+            return $engine_data;
+        }
+
+        $tool_results = homeboy_datamachine_agent_tool_results( $engine_data, $config );
+        $child_summaries = array();
+
+        foreach ( $child_jobs as $child_job ) {
+            if ( ! is_array( $child_job ) ) {
+                continue;
+            }
+
+            $child_engine_data = is_array( $child_job['engine_data'] ?? null ) ? $child_job['engine_data'] : array();
+            $child_tool_results = homeboy_datamachine_agent_tool_results( $child_engine_data, $config );
+            if ( ! empty( $child_tool_results ) ) {
+                $tool_results = array_merge( $tool_results, $child_tool_results );
+            }
+
+            $child_summaries[] = array(
+                'job_id'        => (int) ( $child_job['job_id'] ?? 0 ),
+                'status'        => (string) ( $child_job['status'] ?? '' ),
+                'parent_job_id' => (int) ( $child_job['parent_job_id'] ?? 0 ),
+            );
+        }
+
+        $engine_data = homeboy_datamachine_agent_set_tool_results( $engine_data, $config, $tool_results );
+        $engine_data['child_jobs'] = $child_summaries;
+        return $engine_data;
+    }
+
     function homeboy_datamachine_agent_pr_opened( array $engine_data, array $config ): bool {
         $tool_results = homeboy_datamachine_agent_tool_results( $engine_data, $config );
 
@@ -1301,6 +1348,34 @@ if ( ! function_exists( 'homeboy_datamachine_agent_drain_job' ) ) {
             'retry_waited_ms'  => $waited_ms,
         );
     }
+
+    function homeboy_datamachine_agent_drain_child_jobs( int $parent_job_id, array $config, Jobs $jobs ): array {
+        if ( ! method_exists( $jobs, 'get_children' ) ) {
+            return array(
+                'children'      => array(),
+                'drain_results' => array(),
+            );
+        }
+
+        $children = $jobs->get_children( $parent_job_id );
+        $drain_results = array();
+        foreach ( $children as $child_job ) {
+            $child_job_id = (int) ( $child_job['job_id'] ?? 0 );
+            if ( $child_job_id <= 0 ) {
+                continue;
+            }
+
+            $drain_results[] = array(
+                'job_id'  => $child_job_id,
+                'summary' => homeboy_datamachine_agent_drain_job( $child_job_id, $config, $jobs ),
+            );
+        }
+
+        return array(
+            'children'      => $jobs->get_children( $parent_job_id ),
+            'drain_results' => $drain_results,
+        );
+    }
 }
 
 if ( function_exists( 'wp_set_current_user' ) ) {
@@ -1471,10 +1546,22 @@ $metadata['drain_result'] = $drain_result;
 $metadata['drain_history'] = $drain_summary['drain_history'];
 $metadata['retry_waited_ms'] = $drain_summary['retry_waited_ms'];
 
+$child_drain_summary = homeboy_datamachine_agent_drain_child_jobs( $job_id, $config, $jobs );
+$metadata['child_jobs'] = array_map(
+    static fn( array $child_job ) => array(
+        'job_id'        => (int) ( $child_job['job_id'] ?? 0 ),
+        'status'        => (string) ( $child_job['status'] ?? '' ),
+        'parent_job_id' => (int) ( $child_job['parent_job_id'] ?? 0 ),
+    ),
+    $child_drain_summary['children']
+);
+$metadata['child_drain_results'] = $child_drain_summary['drain_results'];
+
 $job = $jobs->get_job( $job_id );
 $job_status = is_array( $job ) ? (string) ( $job['status'] ?? '' ) : '';
 $engine_data = function_exists( 'datamachine_get_engine_data' ) ? datamachine_get_engine_data( $job_id ) : array();
 $engine_data = homeboy_datamachine_agent_merge_recorded_tool_results( $engine_data, $config );
+$engine_data = homeboy_datamachine_agent_merge_child_engine_data( $engine_data, $child_drain_summary['children'], $config );
 $transcript_dir = homeboy_datamachine_agent_scalar( $config, 'transcript_dir' );
 $transcript_artifacts = homeboy_datamachine_agent_export_transcript( $job_id, $engine_data, $transcript_dir );
 $pr_opened = homeboy_datamachine_agent_pr_opened( $engine_data, $config );
