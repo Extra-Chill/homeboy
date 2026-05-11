@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.60.5] - 2026-05-11
+
+### Fixed
+- support engine data jq expressions
+
 ## [2.60.4] - 2026-05-11
 
 ### Fixed
