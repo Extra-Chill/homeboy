@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.66.0] - 2026-05-11
+
+### Added
+- add hidden agent workspace capture
+
 ## [2.65.1] - 2026-05-11
 
 ### Fixed
