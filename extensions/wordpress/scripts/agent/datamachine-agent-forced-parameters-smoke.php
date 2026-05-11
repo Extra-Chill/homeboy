@@ -105,5 +105,33 @@ namespace {
         exit( 1 );
     }
 
+    list( $runner_config, $runner_prompt ) = homeboy_datamachine_agent_apply_runner_workspace(
+        array(),
+        'Run the agent.',
+        array(
+            'success' => true,
+            'handle'  => 'demo@agent-run',
+            'branch'  => 'agent/run',
+        )
+    );
+
+    if ( ! str_contains( $runner_prompt, 'Workspace handle: demo@agent-run' ) ) {
+        fwrite( STDERR, "Expected runner workspace prompt prefix.\n" );
+        exit( 1 );
+    }
+
+    $workspace_recorder = null;
+    foreach ( $runner_config['tool_recorders'] ?? array() as $runner_recorder ) {
+        if ( is_array( $runner_recorder ) && 'workspace_edit' === ( $runner_recorder['tool'] ?? '' ) ) {
+            $workspace_recorder = $runner_recorder;
+            break;
+        }
+    }
+
+    if ( 'demo@agent-run' !== ( $workspace_recorder['forced_parameters']['repo'] ?? null ) ) {
+        fwrite( STDERR, "Expected runner workspace tools to force the worktree handle.\n" );
+        exit( 1 );
+    }
+
     fwrite( STDOUT, "Data Machine agent forced parameters smoke passed.\n" );
 }

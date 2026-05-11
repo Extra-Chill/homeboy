@@ -169,6 +169,10 @@ name: Data Machine Agent CI (reusable)
         description: JSON array of patches applied to imported flow step configs before the flow runs.
         type: string
         default: "[]"
+      runner_workspace:
+        description: JSON object for runner-owned Data Machine Code workspace/worktree provisioning before the agent runs.
+        type: string
+        default: "{}"
       fallback_pull_request:
         description: JSON object describing a fallback PR to open or reuse when files were written but the agent did not open a PR.
         type: string
@@ -371,6 +375,7 @@ jobs:
           TOOL_RECORDERS: ${{ inputs.tool_recorders }}
           PIPELINE_STEP_PATCHES: ${{ inputs.pipeline_step_patches }}
           FLOW_STEP_PATCHES: ${{ inputs.flow_step_patches }}
+          RUNNER_WORKSPACE: ${{ inputs.runner_workspace }}
           FALLBACK_PULL_REQUEST: ${{ inputs.fallback_pull_request }}
           GITHUB_TOKEN_VALUE: ${{ steps.app-token.outputs.token || github.token }}
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
@@ -408,6 +413,7 @@ jobs:
           tool_recorders_json="$(validate_json_input tool_recorders array "$TOOL_RECORDERS")"
           pipeline_step_patches_json="$(validate_json_input pipeline_step_patches array "$PIPELINE_STEP_PATCHES")"
           flow_step_patches_json="$(validate_json_input flow_step_patches array "$FLOW_STEP_PATCHES")"
+          runner_workspace_json="$(validate_json_input runner_workspace object "$RUNNER_WORKSPACE")"
           fallback_pull_request_json="$(validate_json_input fallback_pull_request object "$FALLBACK_PULL_REQUEST")"
           jq -n \
             --arg componentPath "$GITHUB_WORKSPACE" \
@@ -449,6 +455,7 @@ jobs:
             --argjson toolRecorders "$tool_recorders_json" \
             --argjson pipelineStepPatches "$pipeline_step_patches_json" \
             --argjson flowStepPatches "$flow_step_patches_json" \
+            --argjson runnerWorkspace "$runner_workspace_json" \
             --argjson fallbackPullRequest "$fallback_pull_request_json" \
             '{
               component_id: "datamachine-agent-ci-driver",
@@ -493,6 +500,7 @@ jobs:
               tool_recorders: $toolRecorders,
               pipeline_step_patches: $pipelineStepPatches,
               flow_step_patches: $flowStepPatches,
+              runner_workspace: $runnerWorkspace,
               fallback_pull_request: $fallbackPullRequest,
               success_requires_pr: $successRequiresPr,
               success_completion_outcomes: $successCompletionOutcomes,
