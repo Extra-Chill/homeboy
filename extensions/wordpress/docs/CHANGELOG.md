@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.57.0] - 2026-05-11
+
+### Added
+- add wp-admin page scenarios
+
+### Fixed
+- allow custom admin page scenarios
+
 ## [2.56.0] - 2026-05-11
 
 ### Added
