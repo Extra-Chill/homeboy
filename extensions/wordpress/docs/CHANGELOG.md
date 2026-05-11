@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.65.1] - 2026-05-11
+
+### Fixed
+- drain Data Machine child jobs
+
 ## [2.65.0] - 2026-05-11
 
 ### Added
