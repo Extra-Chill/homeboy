@@ -177,6 +177,54 @@ function restKey(row) {
 	return `${normalizeRestMethod(row?.method)} ${normalizeRestUrl(row?.url || row?.path || row?.normalizedUrl)}`;
 }
 
+function estimatePayloadBytes(value) {
+	if (typeof value === 'number' && Number.isFinite(value)) {
+		return Math.max(0, Math.round(value));
+	}
+	if (typeof value === 'string') {
+		return typeof Buffer !== 'undefined' ? Buffer.byteLength(value) : value.length;
+	}
+	if (value !== undefined && value !== null) {
+		try {
+			const serialized = JSON.stringify(value);
+			return typeof Buffer !== 'undefined' ? Buffer.byteLength(serialized) : serialized.length;
+		} catch {
+			return 0;
+		}
+	}
+	return 0;
+}
+
+function normalizeRestPreload(row) {
+	const value = typeof row === 'string' ? { path: row } : row || {};
+	const url = normalizeRestUrl(value.url || value.path || value.route || value.normalizedUrl || '');
+	const payload = value.body ?? value.data ?? value.response ?? value.result;
+	const payloadBytes = estimatePayloadBytes(
+		value.payloadBytes ?? value.bytes ?? value.size ?? value.contentLength ?? value.encodedBodySize ?? value.decodedBodySize ?? payload
+	);
+
+	return {
+		url,
+		method: normalizeRestMethod(value.method),
+		status: value.status || 0,
+		payloadBytes,
+		payloadAvailable: payloadBytes > 0,
+	};
+}
+
+function normalizeRestPreloadList(value) {
+	if (Array.isArray(value)) {
+		return value.map(normalizeRestPreload).filter((preload) => preload.url);
+	}
+	if (!isPlainObject(value)) {
+		return [];
+	}
+
+	return Object.entries(value)
+		.map(([path, metadata]) => normalizeRestPreload({ path, ...(isPlainObject(metadata) ? metadata : { body: metadata }) }))
+		.filter((preload) => preload.url);
+}
+
 function normalizeApiFetchAttempt(row) {
 	const url = normalizeRestUrl(row?.url || row?.path || row?.route || '');
 	return {
@@ -347,14 +395,38 @@ async function collectWordPressRestAttempts(page) {
 	return attempts.map(normalizeApiFetchAttempt).filter((attempt) => attempt.url);
 }
 
+async function collectWordPressRestPreloads(page) {
+	if (!page || typeof page.evaluate !== 'function') {
+		throw new TypeError('page must provide evaluate()');
+	}
+	const preloads = await page.evaluate(() => {
+		const candidates = [
+			window.__homeboyWordPressRestProbe?.preloads,
+			window.__homeboyWordPressRestPreloads,
+			window.__wpRestPreloads,
+			window.wp?.apiFetch?.preloadData,
+		];
+		return candidates.find((candidate) => Array.isArray(candidate) || (candidate && typeof candidate === 'object')) || [];
+	});
+	return normalizeRestPreloadList(preloads);
+}
+
 function summarizeWordPressRestWaterfall(input = {}) {
 	const readyMs = round(input.readyMs);
 	const rawApiFetchAttempts = Array.isArray(input.apiFetchAttempts) ? input.apiFetchAttempts.map(normalizeApiFetchAttempt).filter((row) => row.url) : [];
 	const apiFetchKeys = new Set(rawApiFetchAttempts.filter((row) => row.source === 'apiFetch').map(restKey));
 	const apiFetchAttempts = rawApiFetchAttempts.filter((row) => row.source !== 'fetch' || !apiFetchKeys.has(restKey(row)));
+	// Callers may pass an array of paths/metadata rows or a WordPress-style object keyed by REST path.
+	const preloads = [
+		...normalizeRestPreloadList(input.preloadedRestPaths),
+		...normalizeRestPreloadList(input.restPreloads),
+		...normalizeRestPreloadList(input.preloadMetadata),
+	];
 	const resourceTimings = Array.isArray(input.resourceTimings) ? input.resourceTimings.filter((row) => isRestUrl(row?.url || row?.name || row?.normalizedUrl)).map(normalizeRestNetworkRequest).filter((row) => row.url) : [];
 	const networkRequests = Array.isArray(input.networkRequests) ? input.networkRequests.filter((row) => isRestUrl(row?.url || row?.name || row?.normalizedUrl)).map(normalizeRestNetworkRequest).filter((row) => row.url) : [];
 	const networkByKey = new Map();
+	const clientKeys = new Set(apiFetchAttempts.map(restKey));
+	const preloadByKey = new Map();
 
 	for (const row of [...resourceTimings, ...networkRequests]) {
 		const key = restKey(row);
@@ -362,6 +434,9 @@ function summarizeWordPressRestWaterfall(input = {}) {
 			networkByKey.set(key, []);
 		}
 		networkByKey.get(key).push(row);
+	}
+	for (const preload of preloads) {
+		preloadByKey.set(restKey(preload), preload);
 	}
 
 	const rows = [];
@@ -371,11 +446,14 @@ function summarizeWordPressRestWaterfall(input = {}) {
 		seen.add(key);
 		const matches = networkByKey.get(key) || [];
 		const network = matches.shift();
+		const preload = preloadByKey.get(key);
 		rows.push({
 			url: attempt.url,
 			method: attempt.method,
 			source: network ? 'network' : 'preloaded-or-cache',
 			clientSource: attempt.source,
+			preloadMatched: Boolean(preload),
+			preloadPayloadBytes: preload?.payloadBytes || 0,
 			status: network?.status || attempt.status || 0,
 			failed: Boolean(network?.failed || attempt.failed),
 			startMs: network?.startMs || attempt.startedAtMs,
@@ -407,22 +485,42 @@ function summarizeWordPressRestWaterfall(input = {}) {
 	}
 
 	rows.sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
+	const usedPreloadRows = preloads.filter((preload) => clientKeys.has(restKey(preload)));
+	const unusedPreloadRows = preloads.filter((preload) => !clientKeys.has(restKey(preload)));
+	const networkRows = rows.filter((row) => row.networkMatched);
+	const preloadPayloadBytes = preloads.reduce((total, preload) => total + (preload.payloadBytes || 0), 0);
 	const counts = {
 		total: rows.length,
-		network: rows.filter((row) => row.networkMatched).length,
+		network: networkRows.length,
 		preloadedOrCache: rows.filter((row) => row.source === 'preloaded-or-cache').length,
 		afterReady: rows.filter((row) => row.afterReady).length,
 		failed: rows.filter((row) => row.failed || row.status >= 400).length,
+		preload: preloads.length,
+		usedPreload: usedPreloadRows.length,
+		unusedPreload: unusedPreloadRows.length,
+		unusedPreloadCount: unusedPreloadRows.length,
+		preloadPayloadBytes,
+		remainingRestNetworkCount: networkRows.length,
+	};
+	const metrics = {
+		unused_preload_count: unusedPreloadRows.length,
+		preload_payload_bytes: preloadPayloadBytes,
+		remaining_rest_network_count: networkRows.length,
 	};
 
 	return {
 		readyMs,
 		counts,
+		metrics,
 		apiFetchAttempts,
+		preloads,
 		resourceTimings,
 		networkRequests,
 		rows,
-		networkRows: rows.filter((row) => row.networkMatched),
+		networkRows,
+		usedPreloadRows,
+		unusedPreloadRows,
+		remainingRestNetworkRows: networkRows,
 		preloadedOrCacheRows: rows.filter((row) => row.source === 'preloaded-or-cache'),
 		afterReadyRows: rows.filter((row) => row.afterReady),
 	};
@@ -529,7 +627,10 @@ function compareWordPressRestWaterfalls({ baseline, candidate }) {
 	};
 	return {
 		counts,
+		baseline,
+		candidate,
 		rows,
+		unusedPreloadRows: candidate?.unusedPreloadRows || [],
 		remainingNetworkOpportunities: classifyWordPressRestPreloadOpportunities(candidate).rows,
 	};
 }
@@ -551,6 +652,13 @@ function formatWordPressRestWaterfallMarkdownReport(comparison, options = {}) {
 		lines.push('', '## Remaining preload opportunities', '', '| Endpoint | Classification | Reason |', '|---|---|---|');
 		for (const row of opportunities.slice(0, limit)) {
 			lines.push(`| \`${row.method} ${row.url}\` | ${row.classification} | ${row.reason} |`);
+		}
+	}
+	const unusedPreloads = comparison?.candidate?.unusedPreloadRows || comparison?.unusedPreloadRows || [];
+	if (unusedPreloads.length > 0) {
+		lines.push('', '## Unused REST preloads', '', '| Endpoint | Payload bytes |', '|---|---:|');
+		for (const row of unusedPreloads.slice(0, limit)) {
+			lines.push(`| \`${row.method} ${row.url}\` | ${row.payloadBytes || 0} |`);
 		}
 	}
 	return lines.join('\n');
@@ -836,9 +944,21 @@ async function profileWordPressPage(input) {
 	const apiFetchAttempts = typeof page.evaluate === 'function'
 		? await collectWordPressRestAttempts(page).catch(() => [])
 		: [];
+	const restPreloads = [
+		...normalizeRestPreloadList(input.preloadedRestPaths),
+		...normalizeRestPreloadList(input.restPreloads),
+		...normalizeRestPreloadList(input.preloadMetadata),
+		...normalizeRestPreloadList(spec.preloadedRestPaths),
+		...normalizeRestPreloadList(spec.restPreloads),
+		...normalizeRestPreloadList(spec.preloadMetadata),
+	];
+	if (restPreloads.length === 0 && typeof page.evaluate === 'function') {
+		restPreloads.push(...await collectWordPressRestPreloads(page).catch(() => []));
+	}
 	const restWaterfall = summarizeWordPressRestWaterfall({
 		readyMs,
 		apiFetchAttempts,
+		restPreloads,
 		resourceTimings: resources,
 		networkRequests: input.networkRequests || [],
 	});
@@ -892,6 +1012,7 @@ module.exports = {
 	classifyWordPressRestPreloadOpportunities,
 	collectBrowserResourceTimings,
 	collectWordPressRestAttempts,
+	collectWordPressRestPreloads,
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
 	formatWordPressRestWaterfallMarkdownReport,
