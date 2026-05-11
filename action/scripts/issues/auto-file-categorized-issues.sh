@@ -2,16 +2,13 @@
 #
 # File categorized GitHub issues from audit, lint, and test findings.
 #
-# Thin orchestrator over `homeboy issues reconcile` (homeboy v0.99+). The
-# decision logic — file new / update / close / dedupe / suppress — lives in
-# Rust with real types and tests. This script's only job is:
+# Thin orchestrator over `homeboy issues reconcile`. The decision logic and
+# native-output rendering live in Homeboy core with real types and tests. This
+# script's only job is:
 #
-#   1. Normalize each command's structured JSON into the canonical
-#      findings shape (groups by category + count).
-#   2. Render markdown bodies for each group using the action's templates
-#      (autofix status, finding tables, footers).
-#   3. Pipe the canonical JSON to `homeboy issues reconcile --apply`
-#      and surface its plan in the run log.
+#   1. Locate each command's structured JSON output.
+#   2. Call `homeboy issues reconcile --from-output ... --apply`.
+#   3. Surface the reconcile plan and totals in the run log.
 #
 # See homeboy issue #1551 for the architectural framing. This replaces
 # ~750 lines of bash + jq + `gh api` reconciliation logic with a single
@@ -28,481 +25,57 @@
 #   COMPONENT_NAME        — component ID
 #   COMMANDS              — comma-separated list of commands that were run
 #   RESULTS               — JSON object with pass/fail per command
-#   AUTOFIX_ATTEMPTED     — whether autofix was tried before filing
-#   AUTOFIX_PR_CREATED    — whether an autofix PR was opened
-#   BINARY_SOURCE         — how homeboy was obtained (source/release/fallback)
-#
-# Requires: jq, gh, python3, homeboy v0.99+
+# Requires: jq, gh, homeboy
 #
 
 set -euo pipefail
 
-REPO="${GITHUB_REPOSITORY}"
 COMP_ID="${COMPONENT_NAME:-$(basename "${GITHUB_REPOSITORY}")}"
 OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-AUTOFIX_ATTEMPTED="${AUTOFIX_ATTEMPTED:-false}"
 
 # CI runners check out a single repo to GITHUB_WORKSPACE and don't have the
 # component registered in homeboy's global registry. Always pass --path so
 # `homeboy issues reconcile` discovers the component from its homeboy.json.
 RECONCILE_PATH="${GITHUB_WORKSPACE:-$(pwd)}"
 
-HOMEBOY_CLI_VERSION="${HOMEBOY_CLI_VERSION:-unknown}"
-HOMEBOY_EXTENSION_ID="${HOMEBOY_EXTENSION_ID:-auto}"
-HOMEBOY_ACTION_REF="${HOMEBOY_ACTION_REF:-unknown}"
-HOMEBOY_ACTION_REPOSITORY="${HOMEBOY_ACTION_REPOSITORY:-unknown}"
-
 # Track totals across all command types — populated from reconcile output.
 TOTAL_ISSUES_CREATED=0
 TOTAL_ISSUES_UPDATED=0
 TOTAL_ISSUES_CLOSED=0
 COMMANDS_PROCESSED=0
+RECONCILE_FAILURES=0
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Normalizers: each command type produces the same intermediate JSON format
+# reconcile_command CMD_TYPE JSON_FILE COMP_ID
 #
-#   {
-#     "groups": { "kind_key": [ {file, description, suggestion}, ... ], ... },
-#     "total_findings": N,
-#     "component_id": "comp"
-#   }
-#
-# For aggregate-only results (no per-finding detail), groups has one key:
-#   { "groups": { "_aggregate": [] }, "total_findings": N, "aggregate": true }
-# ─────────────────────────────────────────────────────────────────────────────
-
-normalize_audit_json() {
-  local json_file="$1"
-  jq '{
-    groups: (if .data.findings then (.data.findings | group_by(.kind) | map({key: .[0].kind, value: [.[] | {file: (.file // "unknown"), description: (.description // ""), suggestion: (.suggestion // "")}]}) | from_entries | to_entries | sort_by(-(.value | length)) | from_entries) else {} end),
-    component_id: (.data.component_id // ""),
-    total_findings: (.data.findings | length),
-    fixability: (if .data.fixability and .data.fixability.by_kind then (.data.fixability.by_kind | map_values({total: (.total // 0), safe: (.automated // 0), plan_only: (.manual_only // 0)})) else {} end)
-  }' "${json_file}" 2>/dev/null
-}
-
-normalize_lint_json() {
-  local json_file="$1"
-  python3 -c "
-import json, sys
-payload = json.load(open(sys.argv[1]))
-data = payload.get('data', {})
-status = data.get('status', 'unknown')
-
-# Primary: use lint_findings grouped by category (available with baseline)
-lint_findings = data.get('lint_findings', [])
-if lint_findings:
-    groups = {}
-    for f in lint_findings:
-        cat = f.get('category', 'uncategorized')
-        groups.setdefault(cat, []).append({
-            'file': f.get('id', '').split('::')[0] if '::' in f.get('id', '') else 'unknown',
-            'description': f.get('message', ''),
-            'suggestion': ''
-        })
-    print(json.dumps({
-        'groups': {k: v for k, v in sorted(groups.items(), key=lambda x: -len(x[1]))},
-        'component_id': data.get('component', ''),
-        'total_findings': len(lint_findings)
-    }))
-    sys.exit(0)
-
-# Fallback: baseline_comparison has new_items (items above baseline)
-bc = data.get('baseline_comparison', {})
-if bc:
-    new_items = bc.get('new_items', [])
-    if new_items:
-        groups = {}
-        for item in new_items:
-            label = item.get('context_label', 'lint:unknown')
-            # context_label format: 'lint:category' — extract category
-            cat = label.split(':', 1)[-1] if ':' in label else label
-            groups.setdefault(cat, []).append({
-                'file': 'unknown',
-                'description': item.get('description', ''),
-                'suggestion': ''
-            })
-        print(json.dumps({
-            'groups': {k: v for k, v in sorted(groups.items(), key=lambda x: -len(x[1]))},
-            'component_id': data.get('component', ''),
-            'total_findings': len(new_items)
-        }))
-        sys.exit(0)
-    delta = bc.get('delta', 0)
-    if delta > 0:
-        # Baseline regression but no itemized findings — aggregate
-        print(json.dumps({
-            'groups': {'_aggregate': []},
-            'component_id': data.get('component', ''),
-            'total_findings': delta,
-            'aggregate': True,
-            'aggregate_label': str(delta) + ' new findings above baseline'
-        }))
-        sys.exit(0)
-
-# Last resort: lint failed but no structured findings — single aggregate issue
-if status == 'failed':
-    exit_code = data.get('exit_code', 1)
-    print(json.dumps({
-        'groups': {'_aggregate': []},
-        'component_id': data.get('component', ''),
-        'total_findings': exit_code,
-        'aggregate': True,
-        'aggregate_label': 'lint failure (exit ' + str(exit_code) + ')'
-    }))
-    sys.exit(0)
-
-# Lint passed — report zero findings (triggers auto-close of resolved issues)
-print(json.dumps({
-    'groups': {},
-    'component_id': data.get('component', ''),
-    'total_findings': 0
-}))
-" "${json_file}" 2>/dev/null
-}
-
-normalize_test_json() {
-  local json_file="$1"
-  python3 -c "
-import json, sys
-payload = json.load(open(sys.argv[1]))
-data = payload.get('data', {})
-status = data.get('status', 'unknown')
-component = data.get('component', '')
-
-# Primary: use analysis clusters (detailed failure grouping)
-analysis = data.get('analysis', {})
-if analysis and analysis.get('clusters'):
-    clusters = analysis['clusters']
-    groups = {}
-    for c in clusters:
-        cat = c.get('category', 'unknown')
-        count = c.get('count', 1)
-        for test in c.get('example_tests', [])[:count]:
-            groups.setdefault(cat, []).append({
-                'file': ', '.join(c.get('affected_files', ['unknown'])[:3]),
-                'description': c.get('pattern', ''),
-                'suggestion': c.get('suggested_fix', '')
-            })
-        # If example_tests is empty or less than count, pad with the cluster info
-        existing = len(groups.get(cat, []))
-        for _ in range(count - existing):
-            groups.setdefault(cat, []).append({
-                'file': ', '.join(c.get('affected_files', ['unknown'])[:3]),
-                'description': c.get('pattern', ''),
-                'suggestion': c.get('suggested_fix', '')
-            })
-    total = analysis.get('total_failures', sum(len(v) for v in groups.values()))
-    print(json.dumps({
-        'groups': {k: v for k, v in sorted(groups.items(), key=lambda x: -len(x[1]))},
-        'component_id': component,
-        'total_findings': total
-    }))
-    sys.exit(0)
-
-# Secondary: use summary.failures (from --json-summary)
-summary = data.get('summary', {})
-if summary and summary.get('failures'):
-    failures = summary['failures']
-    print(json.dumps({
-        'groups': {'_aggregate': []},
-        'component_id': component,
-        'total_findings': failures,
-        'aggregate': True,
-        'aggregate_label': str(failures) + ' test failures'
-    }))
-    sys.exit(0)
-
-# Last resort: test failed but no structured failures — single aggregate issue
-if status == 'failed':
-    exit_code = data.get('exit_code', 1)
-    print(json.dumps({
-        'groups': {'_aggregate': []},
-        'component_id': component,
-        'total_findings': exit_code,
-        'aggregate': True,
-        'aggregate_label': 'test failure (exit ' + str(exit_code) + ')'
-    }))
-    sys.exit(0)
-
-# Test passed — report zero findings (triggers auto-close of resolved issues)
-print(json.dumps({
-    'groups': {},
-    'component_id': component,
-    'total_findings': 0
-}))
-" "${json_file}" 2>/dev/null
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# build_autofix_status_section CMD_TYPE KIND COMP_ID COUNT FINDINGS_JSON
-#
-# Build the autofix status markdown section for an issue body.
-# Returns the section on stdout (empty string if no fixability data).
-# ─────────────────────────────────────────────────────────────────────────────
-
-build_autofix_status_section() {
-  local cmd_type="$1"
-  local kind="$2"
-  local comp_id="$3"
-  local count="$4"
-  local findings_json="$5"
-
-  # Only audit issues have per-kind fixability data
-  if [ "${cmd_type}" != "audit" ]; then
-    return
-  fi
-
-  # Extract fixability for this kind
-  local fix_data
-  fix_data=$(echo "${findings_json}" | jq -c --arg k "${kind}" '.fixability[$k] // empty' 2>/dev/null || true)
-
-  if [ -z "${fix_data}" ] || [ "${fix_data}" = "null" ]; then
-    # No fixer available for this category
-    cat <<NOFIXEOF
-
-### Autofix status
-
-❌ No fixer available for \`${kind}\`
-NOFIXEOF
-    return
-  fi
-
-  local fix_total fix_safe fix_plan_only
-  fix_total=$(echo "${fix_data}" | jq -r '.total // 0')
-  fix_safe=$(echo "${fix_data}" | jq -r '.safe // 0')
-  fix_plan_only=$(echo "${fix_data}" | jq -r '.plan_only // 0')
-
-  if [ "${fix_total}" -eq 0 ]; then
-    cat <<NOFIXEOF
-
-### Autofix status
-
-❌ No fixer available for \`${kind}\`
-NOFIXEOF
-    return
-  fi
-
-  local status_icon status_text
-  if [ "${fix_total}" -ge "${count}" ]; then
-    status_icon="✅"
-    status_text="${fix_total}/${count} findings auto-fixable"
-  elif [ "${fix_total}" -gt 0 ]; then
-    local skipped=$((count - fix_total))
-    status_icon="⚠️"
-    status_text="${fix_total}/${count} findings auto-fixable (${skipped} require manual fix)"
-  fi
-
-  local tier_note=""
-  if [ "${fix_safe}" -gt 0 ] && [ "${fix_plan_only}" -gt 0 ]; then
-    tier_note=$'\n'"- **${fix_safe}** safe (auto-applied) · **${fix_plan_only}** plan-only (needs review)"
-  elif [ "${fix_plan_only}" -gt 0 ]; then
-    tier_note=$'\n'"- All fixes are **plan-only** (preview, needs human review)"
-  fi
-
-  cat <<FIXEOF
-
-### Autofix status
-
-${status_icon} ${status_text}${tier_note}
-Run: \`homeboy refactor ${comp_id} --from audit --write --only ${kind}\`
-FIXEOF
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# render_group_body CMD_TYPE KIND COUNT FINDINGS_JSON IS_AGGREGATE AGGREGATE_LABEL
-#
-# Render a single group's full markdown body — the same template the bash
-# was writing inline before. Output goes to stdout for capture by the
-# canonical-payload builder.
-# ─────────────────────────────────────────────────────────────────────────────
-
-render_group_body() {
-  local cmd_type="$1"
-  local kind="$2"
-  local count="$3"
-  local findings_json="$4"
-  local is_aggregate="$5"
-  local aggregate_label="$6"
-
-  local cmd_label kind_label
-  cmd_label="$(echo "${cmd_type}" | sed 's/.*/\u&/')"  # Capitalize first letter
-  if [ "${is_aggregate}" = "true" ] && [ "${kind}" = "_aggregate" ]; then
-    kind_label="${aggregate_label}"
-  else
-    kind_label=$(echo "${kind}" | tr '_' ' ')
-  fi
-
-  cat <<HEADER
-## ${cmd_label}: ${kind_label}
-
-**Component:** \`${COMP_ID}\`
-**Count:** ${count} findings
-**Last run:** ${RUN_URL}
-**Updated:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
-**Homeboy:** \`${HOMEBOY_CLI_VERSION}\` | Action: \`${HOMEBOY_ACTION_REPOSITORY}@${HOMEBOY_ACTION_REF}\`
-HEADER
-
-  # Findings table (skip for aggregate groups)
-  if [ "${is_aggregate}" != "true" ] || [ "${kind}" != "_aggregate" ]; then
-    local category_findings
-    category_findings=$(echo "${findings_json}" | jq -c --arg k "${kind}" '.groups[$k][:50][]')
-
-    if [ -n "${category_findings}" ]; then
-      printf '\n### Findings\n\n| File | Description | Suggestion |\n| --- | --- | --- |\n'
-      while IFS= read -r FINDING; do
-        [ -z "${FINDING}" ] && continue
-        local file desc suggestion
-        file=$(echo "${FINDING}" | jq -r '.file // "unknown"')
-        desc=$(echo "${FINDING}" | jq -r '.description // "(no description)"' | sed 's/|/\\|/g')
-        suggestion=$(echo "${FINDING}" | jq -r '.suggestion // ""' | sed 's/|/\\|/g')
-        printf '| `%s` | %s | %s |\n' "${file}" "${desc}" "${suggestion}"
-      done <<< "${category_findings}"
-
-      if [ "${count}" -gt 50 ]; then
-        printf '\n*Showing 50 of %s findings. Run `homeboy %s %s` locally for the full list.*\n' \
-          "${count}" "${cmd_type}" "${COMP_ID}"
-      fi
-    fi
-  fi
-
-  # Autofix status section
-  local autofix_section
-  autofix_section=$(build_autofix_status_section "${cmd_type}" "${kind}" "${COMP_ID}" "${count}" "${findings_json}")
-  if [ -n "${autofix_section}" ]; then
-    echo "${autofix_section}"
-  elif [ "${AUTOFIX_ATTEMPTED}" = "true" ] && [ "${cmd_type}" != "audit" ]; then
-    cat <<'AUTOFIXEOF'
-
-### Autofix status
-
-Autofix was attempted before filing this issue. These findings are **not yet mechanically fixable** — they need either a new fixer rule or manual resolution.
-AUTOFIXEOF
-  fi
-
-  cat <<'FOOTEREOF'
-
----
-*Maintained automatically by [Homeboy Action](https://github.com/Extra-Chill/homeboy-action) on each CI run until resolved.*
-FOOTEREOF
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# build_reconcile_input CMD_TYPE FINDINGS_JSON COMP_ID
-#
-# Translate the action's intermediate findings JSON into the input shape
-# `homeboy issues reconcile` expects:
-#
-#   {
-#     "command": "audit",
-#     "groups": {
-#       "<category>": { "count": N, "label": "...", "body": "<rendered md>" },
-#       ...
-#     }
-#   }
-#
-# Per-group `body` is rendered from the action's templates, so the reconciler
-# stays format-agnostic. Categories with `count: 0` (which would never come
-# from a real findings stream) are not emitted here; category lifecycle is
-# reconciled by core from this run's group set.
-# ─────────────────────────────────────────────────────────────────────────────
-
-build_reconcile_input() {
-  local cmd_type="$1"
-  local findings_json="$2"
-  local _comp_id="$3"
-  local out_file="$4"
-
-  local total_findings is_aggregate aggregate_label
-  total_findings=$(echo "${findings_json}" | jq -r '.total_findings')
-  is_aggregate=$(echo "${findings_json}" | jq -r '.aggregate // false')
-  aggregate_label=$(echo "${findings_json}" | jq -r '.aggregate_label // "failures"')
-
-  local kinds
-  kinds=$(echo "${findings_json}" | jq -r '.groups | keys[]')
-
-  # Build the groups object incrementally with jq, injecting each rendered
-  # body. Start with an empty object.
-  local payload_file
-  payload_file=$(mktemp)
-  jq -n --arg cmd "${cmd_type}" '{command: $cmd, groups: {}}' > "${payload_file}"
-
-  while IFS= read -r KIND; do
-    [ -z "${KIND}" ] && continue
-
-    local count kind_label body
-    count=$(echo "${findings_json}" | jq -r --arg k "${KIND}" '.groups[$k] | length')
-    if [ "${is_aggregate}" = "true" ] && [ "${KIND}" = "_aggregate" ]; then
-      count="${total_findings}"
-      kind_label="${aggregate_label}"
-    else
-      kind_label=$(echo "${KIND}" | tr '_' ' ')
-    fi
-
-    body=$(render_group_body "${cmd_type}" "${KIND}" "${count}" "${findings_json}" \
-      "${is_aggregate}" "${aggregate_label}")
-
-    # Merge this group into the payload.
-    local next_file
-    next_file=$(mktemp)
-    jq --arg k "${KIND}" \
-       --argjson c "${count}" \
-       --arg label "${kind_label}" \
-       --arg body "${body}" \
-       '.groups[$k] = {count: $c, label: $label, body: $body}' \
-       "${payload_file}" > "${next_file}"
-    mv "${next_file}" "${payload_file}"
-  done <<< "${kinds}"
-
-  mv "${payload_file}" "${out_file}"
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# reconcile_command CMD_TYPE FINDINGS_JSON COMP_ID
-#
-# Build the canonical findings payload for `homeboy issues reconcile`,
-# invoke it, and surface its plan in the run log.
+# Invoke `homeboy issues reconcile` with native command output and surface its
+# plan in the run log. Core owns the command-specific rendering.
 # ─────────────────────────────────────────────────────────────────────────────
 
 reconcile_command() {
   local cmd_type="$1"
-  local findings_json="$2"
+  local json_file="$2"
   local comp_id="$3"
-
-  local total_findings
-  total_findings=$(echo "${findings_json}" | jq -r '.total_findings')
 
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  Reconciling ${cmd_type} issues for ${comp_id}"
-  echo "  Total findings: ${total_findings}"
-  echo "  Categories: $(echo "${findings_json}" | jq -r '.groups | keys | length')"
+  echo "  Source: ${json_file}"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
-
-  local input_file
-  input_file=$(mktemp)
-  build_reconcile_input "${cmd_type}" "${findings_json}" "${comp_id}" "${input_file}"
-
-  # Sanity check: the input file must be valid JSON or homeboy will fail
-  # noisily — log the problem and bail with a useful message.
-  if ! jq empty "${input_file}" >/dev/null 2>&1; then
-    echo "::warning::Failed to build reconcile input for ${cmd_type} (malformed JSON)"
-    rm -f "${input_file}"
-    return 1
-  fi
 
   local result_file
   result_file=$(mktemp)
   if ! homeboy issues reconcile "${comp_id}" \
-    --findings "${input_file}" \
+    --from-output "${cmd_type}=${json_file}" \
+    --run-url "${RUN_URL}" \
     --path "${RECONCILE_PATH}" \
     --apply \
     > "${result_file}" 2>&1; then
     echo "::warning::homeboy issues reconcile failed for ${cmd_type} — see log above"
     cat "${result_file}"
-    rm -f "${input_file}" "${result_file}"
+    rm -f "${result_file}"
     return 1
   fi
 
@@ -520,7 +93,7 @@ reconcile_command() {
   TOTAL_ISSUES_UPDATED=$((TOTAL_ISSUES_UPDATED + updated))
   TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + closed_count))
 
-  rm -f "${input_file}" "${result_file}"
+  rm -f "${result_file}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -546,29 +119,24 @@ for CMD in "${CMD_ARRAY[@]}"; do
     continue
   fi
 
-  # Normalize the JSON into the common intermediate format
-  FINDINGS_JSON=""
-  case "${CMD}" in
-    audit) FINDINGS_JSON=$(normalize_audit_json "${JSON_FILE}") ;;
-    lint)  FINDINGS_JSON=$(normalize_lint_json "${JSON_FILE}") ;;
-    test)  FINDINGS_JSON=$(normalize_test_json "${JSON_FILE}") ;;
-  esac
-
-  if [ -z "${FINDINGS_JSON}" ]; then
-    echo "Failed to normalize ${CMD}.json — skipping categorized issues for ${CMD}"
+  if ! jq empty "${JSON_FILE}" >/dev/null 2>&1; then
+    echo "::warning::Structured ${CMD}.json is malformed — skipping categorized issues for ${CMD}"
+    RECONCILE_FAILURES=$((RECONCILE_FAILURES + 1))
     continue
   fi
 
   # Resolve component ID from the JSON if available
   local_comp_id="${COMP_ID}"
-  COMPONENT_FROM_JSON=$(echo "${FINDINGS_JSON}" | jq -r '.component_id // empty')
+  COMPONENT_FROM_JSON=$(jq -r '.data.component_id // .data.component // .component_id // .component // empty' "${JSON_FILE}")
   if [ -n "${COMPONENT_FROM_JSON}" ]; then
     local_comp_id="${COMPONENT_FROM_JSON}"
   fi
 
   # Reconcile this command's findings against the tracker
-  if reconcile_command "${CMD}" "${FINDINGS_JSON}" "${local_comp_id}"; then
+  if reconcile_command "${CMD}" "${JSON_FILE}" "${local_comp_id}"; then
     COMMANDS_PROCESSED=$((COMMANDS_PROCESSED + 1))
+  else
+    RECONCILE_FAILURES=$((RECONCILE_FAILURES + 1))
   fi
 done
 
@@ -579,7 +147,12 @@ echo "  Commands processed: ${COMMANDS_PROCESSED}"
 echo "  Issues created: ${TOTAL_ISSUES_CREATED}"
 echo "  Issues updated: ${TOTAL_ISSUES_UPDATED}"
 echo "  Issues closed:  ${TOTAL_ISSUES_CLOSED}"
+echo "  Failures:       ${RECONCILE_FAILURES}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if [ "${RECONCILE_FAILURES}" -gt 0 ]; then
+  exit 1
+fi
 
 if [ "${COMMANDS_PROCESSED}" -gt 0 ]; then
   exit 0
