@@ -73,7 +73,9 @@ for field in "${FIELDS[@]}"; do
     path="${field#*=}"
     [ -n "$key" ] && [ -n "$path" ] || error "--field requires non-empty key and jq_path, got: $field"
     jq_path="$path"
-    [[ "$jq_path" == .* ]] || jq_path=".$jq_path"
+    if [[ "$jq_path" != .* && "$jq_path" != \(* ]]; then
+        jq_path=".$jq_path"
+    fi
     if ! value=$(jq -r "($jq_path) // empty" <<<"$scenario_json"); then
         error "failed to resolve jq path for $key: $path"
     fi
