@@ -99,14 +99,14 @@ Run `homeboy bench` in CI and preserve the raw structured output for downstream 
     iterations: 10
 ```
 
-Bench runs write the exact `homeboy bench --output` payload to `homeboy-ci-results/bench.json`, upload it as the `homeboy-ci-results` artifact, and render a compact PR-summary section when PR comments are enabled.
+Bench runs write the exact `homeboy bench --output` payload to `homeboy-ci-results/bench.json`, upload it as a `homeboy-ci-results-<component>-<commands>-<job>-<os>-<runtime>` artifact, and render a compact PR-summary section when PR comments are enabled.
 
-Homeboy Action also runs `homeboy runs export --since 24h --output homeboy-observations` after command execution and uploads the result as a separate `homeboy-observations-<job>-<commands>` artifact. This export is best-effort: if the current Homeboy version does not support observation export or no observations exist, the CI result is unchanged.
+Homeboy Action also runs `homeboy runs export --since 24h --output homeboy-observations` after command execution and uploads the result as a separate `homeboy-observations-<component>-<commands>-<job>-<os>-<runtime>` artifact. This export is best-effort: if the current Homeboy version does not support observation export or no observations exist, the CI result is unchanged.
 
 Artifact boundaries:
 
-- `homeboy-ci-results`: immediate structured command outputs used for pass/fail decisions and PR rendering, such as `bench.json`.
-- `homeboy-observations-<job>-<commands>`: persisted Homeboy run history exported for later import/query by agents and other tooling. The suffix prevents collisions when a workflow splits audit/lint/test across jobs or invokes the action multiple times in one job.
+- `homeboy-ci-results-<component>-<commands>-<job>-<os>-<runtime>`: immediate structured command outputs used for pass/fail decisions and PR rendering, such as `bench.json`.
+- `homeboy-observations-<component>-<commands>-<job>-<os>-<runtime>`: persisted Homeboy run history exported for later import/query by agents and other tooling. The suffix prevents collisions when a workflow splits audit/lint/test across jobs, matrix dimensions, or multiple action invocations.
 
 #### Continuous release outputs
 
@@ -157,7 +157,7 @@ Use these outputs to gate downstream jobs:
 | `iterations` | No | | Bench iteration count passed to `homeboy bench --iterations` |
 | `regression-threshold` | No | | Bench regression threshold passed to `homeboy bench --regression-threshold` |
 | `differential-gating` | No | `false` | On PRs, compare `audit`/`test` counts against the base SHA and fail only when the PR is worse. Opt-in; `lint` still gates on exit code. PR autofix is skipped while enabled. |
-| `observation-window` | No | `24h` | Duration window passed to best-effort `homeboy runs export --since` for the separate `homeboy-observations-<job>-<commands>` artifact. |
+| `observation-window` | No | `24h` | Duration window passed to best-effort `homeboy runs export --since` for the separate matrix-safe observations artifact. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
 | `node-version` | No | | Node.js version (sets up via `actions/setup-node`) |
 | `autofix` | No | `false` | On PR failures, run safe autofixes, commit, push, and re-run checks |

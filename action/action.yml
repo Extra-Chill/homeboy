@@ -448,11 +448,42 @@ runs:
         RUN_GROUP_PREFIX: homeboy
       run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
 
+    - name: Resolve artifact names
+      id: artifact-names
+      if: always()
+      shell: bash
+      env:
+        PORTABLE_ID_VALUE: ${{ steps.read-config.outputs.portable-id }}
+        COMMANDS_VALUE: ${{ steps.resolve-commands.outputs.resolved-commands }}
+        PHP_VALUE: ${{ steps.detect-env.outputs.portable-php }}
+        NODE_VALUE: ${{ steps.detect-env.outputs.portable-node }}
+        JOB_VALUE: ${{ github.job }}
+        RUNNER_OS_VALUE: ${{ runner.os }}
+      run: |
+        artifact_suffix="${PORTABLE_ID_VALUE}-${COMMANDS_VALUE}-${JOB_VALUE}-${RUNNER_OS_VALUE}"
+        if [ -n "${PHP_VALUE}" ]; then
+          artifact_suffix="${artifact_suffix}-php${PHP_VALUE}"
+        fi
+        if [ -n "${NODE_VALUE}" ]; then
+          artifact_suffix="${artifact_suffix}-node${NODE_VALUE}"
+        fi
+
+        artifact_suffix="$(printf '%s' "${artifact_suffix}" | tr -cs 'A-Za-z0-9._-' '-')"
+        artifact_suffix="${artifact_suffix#-}"
+        artifact_suffix="${artifact_suffix%-}"
+
+        if [ -z "${artifact_suffix}" ]; then
+          artifact_suffix="${JOB_VALUE:-homeboy}"
+        fi
+
+        echo "homeboy-ci-results=homeboy-ci-results-${artifact_suffix}" >> "${GITHUB_OUTPUT}"
+        echo "homeboy-observations=homeboy-observations-${artifact_suffix}" >> "${GITHUB_OUTPUT}"
+
     - name: Upload Homeboy CI results
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: homeboy-ci-results
+        name: ${{ steps.artifact-names.outputs.homeboy-ci-results }}
         path: homeboy-ci-results/*.json
         if-no-files-found: ignore
 
@@ -467,7 +498,7 @@ runs:
       if: always() && steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != ''
       uses: actions/upload-artifact@v4
       with:
-        name: homeboy-observations-${{ github.job }}-${{ steps.resolve-commands.outputs.resolved-commands }}
+        name: ${{ steps.artifact-names.outputs.homeboy-observations }}
         path: homeboy-observations/**
         if-no-files-found: ignore
 
