@@ -199,8 +199,6 @@ if [ "${DRY_RUN}" = "true" ]; then
   exit 0
 fi
 
-homeboy_verify_github_release_exists "${TAG}" "${GITHUB_REPOSITORY:-}"
-
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Released ${TAG} (${BUMP_TYPE})"
