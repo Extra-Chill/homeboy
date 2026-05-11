@@ -52,7 +52,7 @@ assert_contains 'GIT_ASKPASS' "${RUN_RELEASE}" "run-release provides token auth 
 assert_not_contains 'git config user.name' "${RUN_RELEASE}" "run-release does not configure git identity directly"
 assert_not_contains 'git config --local' "${RUN_RELEASE}" "run-release does not configure git auth directly"
 assert_not_contains 'remote set-url origin' "${RUN_RELEASE}" "run-release does not rewrite origin to an authenticated URL"
-assert_contains 'homeboy_verify_github_release_exists "${TAG}" "${GITHUB_REPOSITORY:-}"' "${RUN_RELEASE}" "run-release verifies the GitHub Release after successful release"
+assert_not_contains 'homeboy_verify_github_release_exists "${TAG}" "${GITHUB_REPOSITORY:-}"' "${RUN_RELEASE}" "run-release does not verify GitHub Release before tag workflow creates it"
 assert_contains 'release-verify-github-release:' "${ROOT_DIR}/action.yml" "action exposes GitHub Release verification toggle"
 assert_contains 'HOMEBOY_VERIFY_GITHUB_RELEASE: ${{ inputs.release-verify-github-release }}' "${ROOT_DIR}/action.yml" "action passes verification toggle to release script"
 assert_contains 'name: homeboy-observations-${{ github.job }}' "${ROOT_DIR}/action.yml" "observation artifacts are scoped per job"
