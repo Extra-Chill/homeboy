@@ -457,5 +457,6 @@ at the root to grandfather pre-existing findings (see PHPStan above).
 ## Further reading
 
 - [`docs/TESTING.md`](docs/TESTING.md) — canonical test/lint/bench reference, debug markers, sanctioned suppressions, browser-target schema, known gaps
+- [`docs/AGENT_CI_PLAYGROUND.md`](docs/AGENT_CI_PLAYGROUND.md) — running Data Machine agents in WordPress Playground CI and why Playground is the agent sandbox
 - [`docs/PLAYGROUND_DROPIN.md`](docs/PLAYGROUND_DROPIN.md) — `db.php` coexistence with Playground SQLite
 - [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — release history

@@ -139,6 +139,10 @@ Numeric metrics are aggregated across measured iterations with the same
 mean/p50/p95/p99/min/max suffixes used by PHP bench files. Artifacts and metadata
 are carried into the Homeboy BenchResults scenario envelope.
 
+The same workload contract powers Data Machine agent CI in Playground. See
+[`../../wordpress/docs/AGENT_CI_PLAYGROUND.md`](../../wordpress/docs/AGENT_CI_PLAYGROUND.md)
+for the dedicated agent sandbox guide.
+
 Example: drive a plugin's pipeline through an Abilities API entry point.
 
 ```json

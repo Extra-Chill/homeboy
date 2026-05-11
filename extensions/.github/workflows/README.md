@@ -3,6 +3,8 @@
 `datamachine-agent-ci.yml` wraps the common GitHub Actions shape for running a
 Data Machine agent bundle in WordPress Playground. Consumers provide bundle and
 flow identifiers, dependency refs, a prompt, and optional output projections.
+See [`wordpress/docs/AGENT_CI_PLAYGROUND.md`](../../wordpress/docs/AGENT_CI_PLAYGROUND.md)
+for the full Playground sandbox model, runtime contract, and evaluation notes.
 
 The reusable workflow exposes `engine_data_json` as one combined JSON object.
 Dynamic per-key `workflow_call` outputs are not possible in GitHub Actions, so

@@ -68,6 +68,9 @@ dot-path assertions against the manifest or example runner config. `bundle_dir`
 and `example_runner_config` are resolved relative to the spec file's parent
 directory so specs can live at repo root or under `tests/`.
 
+For full CI agent runs inside WordPress Playground, see
+[`AGENT_CI_PLAYGROUND.md`](AGENT_CI_PLAYGROUND.md).
+
 ## Dependencies
 
 If your plugin depends on other local plugins at runtime, declare them:
