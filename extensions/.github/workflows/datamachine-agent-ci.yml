@@ -611,8 +611,8 @@ jobs:
             --results "$RESULTS_FILE" \
             --scenario "${{ inputs.flow_slug }}" \
             --field job_status=metadata.job_status \
-            --field transcript_json='.metadata.transcript_artifacts.json? // .metadata.transcript_artifacts[0].json?' \
-            --field transcript_summary='.metadata.transcript_artifacts.summary? // .metadata.transcript_artifacts[0].summary?' \
+            --field transcript_json='(.metadata.transcript_artifacts | if type == "array" then (.[0].json? // "") elif type == "object" then (.json? // "") else "" end)' \
+            --field transcript_summary='(.metadata.transcript_artifacts | if type == "array" then (.[0].summary? // "") elif type == "object" then (.summary? // "") else "" end)' \
             --required-status "" \
             --to-github-output
 
@@ -693,9 +693,9 @@ jobs:
           fi
           if [ -z "$transcript_path" ] && [ -f "$RESULTS_FILE" ]; then
             transcript_content_path="${RUNNER_TEMP}/datamachine-agent-transcripts/$(basename "${TRANSCRIPT_JSON:-job-transcript.json}")"
-            if jq -e --arg scenario "$FLOW_SLUG" '.scenarios[] | select(.id == $scenario) | (.metadata.transcript_artifacts.content? // .metadata.transcript_artifacts[0].content? // empty)' "$RESULTS_FILE" >/dev/null; then
+            if jq -e --arg scenario "$FLOW_SLUG" '.scenarios[] | select(.id == $scenario) | (.metadata.transcript_artifacts | if type == "array" then (.[0].content? // empty) elif type == "object" then (.content? // empty) else empty end)' "$RESULTS_FILE" >/dev/null; then
               mkdir -p "$(dirname "$transcript_content_path")"
-              jq -r --arg scenario "$FLOW_SLUG" '.scenarios[] | select(.id == $scenario) | (.metadata.transcript_artifacts.content? // .metadata.transcript_artifacts[0].content?)' "$RESULTS_FILE" > "$transcript_content_path"
+              jq -r --arg scenario "$FLOW_SLUG" '.scenarios[] | select(.id == $scenario) | (.metadata.transcript_artifacts | if type == "array" then (.[0].content? // "") elif type == "object" then (.content? // "") else "" end)' "$RESULTS_FILE" > "$transcript_content_path"
               transcript_path="$transcript_content_path"
             fi
           fi
