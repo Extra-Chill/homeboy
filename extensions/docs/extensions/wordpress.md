@@ -171,6 +171,86 @@ scenario can earn partial credit. Configured workload steps marked
 structured zero-reward grade with `metadata.grade.failure`, allowing result
 aggregation to consume failures without scenario-specific parsing.
 
+## Block Theme Quality Probe
+
+Playground scenario graders can call a generic PHP-first WordPress quality probe
+after the scenario action loop has modified the site. The helper is mounted with
+the WordPress extension inside Playground:
+
+```php
+require_once '/homeboy-extension/scripts/bench/lib/block-theme-quality-probe.php';
+
+return homeboy_wordpress_block_theme_quality_payload([
+    'target_post_ids' => [(int) get_option('page_on_front', 0)],
+]);
+```
+
+`homeboy_wordpress_collect_block_theme_quality()` returns the raw structured
+probe. `homeboy_wordpress_block_theme_quality_payload()` wraps it as a Playground
+workload payload: numeric and boolean values are emitted under `metrics`, and
+the full raw probe is stored under `metadata.wordpress_quality`.
+
+Collected signals include:
+
+- active theme signals: `used_block_theme`, `theme_json_present`
+- site/content counts: `front_page_id`, `pages_seen`, `templates_seen`,
+  `template_parts_seen`, `navigation_posts_seen`
+- block counts: `posts_with_blocks`, `total_blocks`, `core_html_blocks`,
+  `serialized_block_comments`, `template_part_blocks`, `navigation_blocks`
+- target/front-page counts: `target_pages_seen`, `target_posts_with_blocks`,
+  `target_total_blocks`, `target_core_html_blocks`,
+  `target_serialized_block_comments`
+- fallback-quality signals: `raw_html_unconverted`,
+  `target_raw_html_unconverted`, `navigation_created`
+
+Use `target_post_ids` or `target_post_titles` when a scenario creates a specific
+page that should be graded independently from the rest of the site. If no target
+is supplied, the helper automatically treats `page_on_front` as the target when
+that option is set.
+
+Example grader that gives partial credit:
+
+```php
+require_once '/homeboy-extension/scripts/bench/lib/block-theme-quality-probe.php';
+
+$quality = homeboy_wordpress_collect_block_theme_quality();
+$checks = [
+    [
+        'id' => 'uses_block_theme',
+        'passed' => $quality['used_block_theme'],
+        'score' => $quality['used_block_theme'] ? 0.25 : 0,
+        'max_score' => 0.25,
+    ],
+    [
+        'id' => 'front_page_has_blocks',
+        'passed' => $quality['target_total_blocks'] >= 5,
+        'score' => $quality['target_total_blocks'] >= 5 ? 0.5 : 0,
+        'max_score' => 0.5,
+    ],
+    [
+        'id' => 'avoids_raw_html',
+        'passed' => $quality['target_raw_html_unconverted'] === 0,
+        'score' => $quality['target_raw_html_unconverted'] === 0 ? 0.25 : 0,
+        'max_score' => 0.25,
+    ],
+];
+
+$score = array_sum(array_column($checks, 'score'));
+
+return [
+    'success' => $score >= 1,
+    'reward' => $score,
+    'grade' => [
+        'score' => $score,
+        'max_score' => 1,
+        'checks' => $checks,
+    ],
+    'metadata' => [
+        'wordpress_quality' => $quality,
+    ],
+];
+```
+
 Playground bench runs also emit `wp-rl`-friendly artifacts next to the
 BenchResults JSON file:
 

@@ -73,7 +73,7 @@ homeboy_wordpress_playground_leaderboard_filter() {
             errors: (map(select(.error != null or .success == false)) | length),
             avg_reward: (map(.reward | num_or_null) | map(select(. != null)) | if length == 0 then null else add / length end),
             avg_duration_ms: (map(.duration_ms | num_or_null) | map(select(. != null)) | if length == 0 then null else add / length end)
-        }) | sort_by(-.avg_reward, .avg_duration_ms // 999999999, .provider, .model)) as $groups
+        }) | sort_by(-(.avg_reward // -1), .avg_duration_ms // 999999999, .provider, .model)) as $groups
         | [
             "# Playground Scenario Leaderboard",
             "",
