@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.59.0] - 2026-05-11
+
+### Added
+- provision runner-owned agent worktrees
+- recommend page profiler gates
+
 ## [2.58.0] - 2026-05-11
 
 ### Added
