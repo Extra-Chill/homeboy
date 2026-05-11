@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.62.0] - 2026-05-11
+
+### Added
+- add data machine agent replay bundles
+
 ## [2.61.0] - 2026-05-11
 
 ### Added
