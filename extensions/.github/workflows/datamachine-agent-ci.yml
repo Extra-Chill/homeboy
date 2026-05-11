@@ -33,7 +33,7 @@ name: Data Machine Agent CI (reusable)
         type: string
         default: gpt-5.5
       validation_dependencies:
-        description: Comma-separated OWNER/REPO@REF entries checked out under .ci/<repo>.
+        description: Comma-separated OWNER/REPO or OWNER/REPO@REF entries checked out under .ci/<repo>. Entries without @REF use the repository default branch.
         type: string
         default: ""
       playground_wordpress:
@@ -230,15 +230,28 @@ jobs:
           for raw_entry in "${entries[@]}"; do
             entry="$(printf '%s' "$raw_entry" | xargs)"
             [ -n "$entry" ] || continue
-            repo_ref="${entry%@*}"
-            ref="${entry##*@}"
-            if [ "$repo_ref" = "$entry" ] || [ -z "$repo_ref" ] || [ -z "$ref" ]; then
-              echo "validation_dependencies entries must be OWNER/REPO@REF: $entry" >&2
+            repo_ref="$entry"
+            ref=""
+            if [[ "$entry" == *@* ]]; then
+              repo_ref="${entry%@*}"
+              ref="${entry##*@}"
+            fi
+            if [ -z "$repo_ref" ] || [[ "$repo_ref" != */* ]]; then
+              echo "validation_dependencies entries must be OWNER/REPO or OWNER/REPO@REF: $entry" >&2
               exit 1
+            fi
+            if [[ "$entry" == *@* && -z "$ref" ]]; then
+              echo "validation_dependencies entries must include a non-empty ref after @: $entry" >&2
+              exit 1
+            fi
+            if [ -z "$ref" ]; then
+              ref="$(gh repo view "$repo_ref" --json defaultBranchRef --jq '.defaultBranchRef.name')"
+              [ -n "$ref" ] || { echo "Could not resolve default branch for validation dependency: $repo_ref" >&2; exit 1; }
             fi
             repo_name="${repo_ref#*/}"
             target=".ci/$repo_name"
             rm -rf "$target"
+            echo "Checking out validation dependency $repo_ref@$ref into $target"
             gh repo clone "$repo_ref" "$target" -- --depth=1
             git -C "$target" fetch --depth=1 origin "$ref"
             git -C "$target" checkout --quiet FETCH_HEAD
