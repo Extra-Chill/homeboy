@@ -145,6 +145,7 @@ RELEASE_ARGS=(
   --path "${WORKSPACE}"
   --skip-checks
   --skip-publish
+  --no-github-release
   --git-identity bot
 )
 

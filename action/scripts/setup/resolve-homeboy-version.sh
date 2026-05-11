@@ -49,23 +49,16 @@ wait_for_asset() {
   return 1
 }
 
-previous_release_with_asset() {
-  local current_tag="$1"
-  local archive="$2"
-  local tag assets asset
+latest_stable_release_with_asset() {
+  local archive="$1"
+  local tag asset
 
-  while IFS=$'\t' read -r tag assets; do
-    if [ "${tag}" = "${current_tag}" ]; then
-      continue
+  while IFS=$'\t' read -r tag asset; do
+    if [ "${asset}" = "${archive}" ]; then
+      printf '%s' "${tag}"
+      return 0
     fi
-
-    for asset in ${assets//$'\t'/ }; do
-      if [ "${asset}" = "${archive}" ]; then
-        printf '%s' "${tag}"
-        return 0
-      fi
-    done
-  done < <(gh api "repos/${REPO}/releases?per_page=20" --jq '.[] | [.tag_name, (.assets[].name)] | @tsv' 2>/dev/null || true)
+  done < <(gh api "repos/${REPO}/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | . as $release | $release.assets[]? | [$release.tag_name, .name] | @tsv' 2>/dev/null || true)
 
   return 1
 }
@@ -74,21 +67,10 @@ TARGET="$(platform_target)"
 ARCHIVE="homeboy-${TARGET}.tar.xz"
 
 if [ "${HOMEBOY_VERSION}" = "latest" ]; then
-  TAG=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+  TAG=$(latest_stable_release_with_asset "${ARCHIVE}" || true)
   if [ -z "${TAG}" ]; then
-    echo "::error::Could not determine latest Homeboy release"
+    echo "::error::Could not find a stable Homeboy release with asset ${ARCHIVE}"
     exit 1
-  fi
-
-  if ! wait_for_asset "${TAG}" "${ARCHIVE}"; then
-    FALLBACK_TAG=$(previous_release_with_asset "${TAG}" "${ARCHIVE}" || true)
-    if [ -z "${FALLBACK_TAG}" ]; then
-      echo "::error::Homeboy ${TAG#v} asset ${ARCHIVE} was not available and no previous release with that asset was found"
-      exit 1
-    fi
-
-    echo "::warning::Homeboy ${TAG#v} asset ${ARCHIVE} was not available; falling back to ${FALLBACK_TAG#v}"
-    TAG="${FALLBACK_TAG}"
   fi
 else
   TAG="v${HOMEBOY_VERSION#v}"

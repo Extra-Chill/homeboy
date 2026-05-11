@@ -50,9 +50,6 @@ for arg in "$@"; do
 done
 
 case "${endpoint}" in
-  repos/Extra-Chill/homeboy/releases/latest)
-    printf '%s\n' "${FAKE_LATEST_TAG}"
-    ;;
   repos/Extra-Chill/homeboy/releases/tags/*)
     tag="${endpoint##*/}"
     attempts_file="${FAKE_STATE_DIR}/${tag}.attempts"
@@ -69,7 +66,7 @@ case "${endpoint}" in
       printf '%s\n' "${asset}"
     done
     ;;
-  repos/Extra-Chill/homeboy/releases?per_page=20)
+  repos/Extra-Chill/homeboy/releases?per_page=100)
     printf '%b' "${FAKE_RELEASE_ROWS}"
     ;;
   *)
@@ -109,35 +106,40 @@ TAB=$'\t'
 GITHUB_OUTPUT_FILE="${TMPDIR}/output-complete"
 LOG_FILE="${TMPDIR}/log-complete"
 FAKE_STATE_DIR="${TMPDIR}/state-complete" \
-FAKE_LATEST_TAG="v0.122.0" \
 FAKE_ASSETS_v0_122_0="${ARCHIVE}" \
 FAKE_RELEASE_ROWS="v0.122.0${TAB}${ARCHIVE}"$'\n' \
 mkdir -p "${TMPDIR}/state-complete"
 
 FAKE_STATE_DIR="${TMPDIR}/state-complete" \
-FAKE_LATEST_TAG="v0.122.0" \
 FAKE_ASSETS_v0_122_0="${ARCHIVE}" \
 FAKE_RELEASE_ROWS="v0.122.0${TAB}${ARCHIVE}"$'\n' \
 run_resolver "latest" "${GITHUB_OUTPUT_FILE}" "${LOG_FILE}"
 assert_equals "resolved-version=0.122.0" "$(cat "${GITHUB_OUTPUT_FILE}")" "latest keeps newest when asset exists"
 
-GITHUB_OUTPUT_FILE="${TMPDIR}/output-fallback"
-LOG_FILE="${TMPDIR}/log-fallback"
-mkdir -p "${TMPDIR}/state-fallback"
-FAKE_STATE_DIR="${TMPDIR}/state-fallback" \
-FAKE_LATEST_TAG="v0.122.0" \
+GITHUB_OUTPUT_FILE="${TMPDIR}/output-scan"
+LOG_FILE="${TMPDIR}/log-scan"
+mkdir -p "${TMPDIR}/state-scan"
+FAKE_STATE_DIR="${TMPDIR}/state-scan" \
 FAKE_ASSETS_v0_122_0="" \
-FAKE_RELEASE_ROWS="v0.122.0${TAB}other-platform.tar.xz"$'\n'"v0.121.0${TAB}other-platform.tar.xz${TAB}${ARCHIVE}"$'\n' \
+FAKE_RELEASE_ROWS="v0.122.0${TAB}other-platform.tar.xz"$'\n'"v0.121.0${TAB}other-platform.tar.xz"$'\n'"v0.120.0${TAB}${ARCHIVE}"$'\n'"v0.119.0${TAB}${ARCHIVE}"$'\n' \
 run_resolver "latest" "${GITHUB_OUTPUT_FILE}" "${LOG_FILE}"
-assert_equals "resolved-version=0.121.0" "$(cat "${GITHUB_OUTPUT_FILE}")" "latest falls back to previous release with asset"
-assert_contains "falling back to 0.121.0" "${LOG_FILE}" "fallback is visible in logs"
-assert_equals "2" "$(cat "${TMPDIR}/state-fallback/v0.122.0.attempts")" "latest retries before fallback"
+assert_equals "resolved-version=0.120.0" "$(cat "${GITHUB_OUTPUT_FILE}")" "latest scans newest-to-oldest for newest asset-bearing release"
+
+GITHUB_OUTPUT_FILE="${TMPDIR}/output-missing"
+LOG_FILE="${TMPDIR}/log-missing"
+mkdir -p "${TMPDIR}/state-missing"
+if FAKE_STATE_DIR="${TMPDIR}/state-missing" \
+  FAKE_RELEASE_ROWS="v0.122.0${TAB}other-platform.tar.xz"$'\n'"v0.121.0${TAB}another-platform.tar.xz"$'\n' \
+  run_resolver "latest" "${GITHUB_OUTPUT_FILE}" "${LOG_FILE}"; then
+  printf 'FAIL: latest without a platform asset should fail\n'
+  exit 1
+fi
+assert_contains "Could not find a stable Homeboy release with asset ${ARCHIVE}" "${LOG_FILE}" "latest missing asset fails clearly"
 
 GITHUB_OUTPUT_FILE="${TMPDIR}/output-pinned"
 LOG_FILE="${TMPDIR}/log-pinned"
 mkdir -p "${TMPDIR}/state-pinned"
 if FAKE_STATE_DIR="${TMPDIR}/state-pinned" \
-  FAKE_LATEST_TAG="v0.122.0" \
   FAKE_ASSETS_v0_122_0="" \
   FAKE_RELEASE_ROWS="v0.121.0${TAB}${ARCHIVE}"$'\n' \
   run_resolver "0.122.0" "${GITHUB_OUTPUT_FILE}" "${LOG_FILE}"; then
@@ -145,5 +147,6 @@ if FAKE_STATE_DIR="${TMPDIR}/state-pinned" \
   exit 1
 fi
 assert_contains "explicit versions do not fall back" "${LOG_FILE}" "pinned missing asset fails clearly"
+assert_contains 'select(.draft == false and .prerelease == false)' "${SCRIPT_DIR}/resolve-homeboy-version.sh" "latest scans only stable releases"
 
 printf 'All Homeboy version resolver checks passed.\n'
