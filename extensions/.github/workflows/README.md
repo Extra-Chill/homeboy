@@ -2,7 +2,8 @@
 
 `datamachine-agent-ci.yml` wraps the common GitHub Actions shape for running a
 Data Machine agent bundle in WordPress Playground. Consumers provide bundle and
-flow identifiers, dependency refs, a prompt, and optional output projections.
+flow identifiers, a prompt, and optional output projections. By default the
+workflow brings the standard WordPress agent runtime dependencies.
 See [`wordpress/docs/AGENT_CI_PLAYGROUND.md`](../../wordpress/docs/AGENT_CI_PLAYGROUND.md)
 for the full Playground sandbox model, runtime contract, and evaluation notes.
 
@@ -24,7 +25,6 @@ jobs:
       flow_slug: static-site-manual-flow
       target_repo: chubes4/wp-site-generator
       prompt: ${{ inputs.prompt }}
-      validation_dependencies: Automattic/agents-api@main,Extra-Chill/data-machine@main,Extra-Chill/data-machine-code@main,WordPress/ai-provider-for-openai@main
       success_requires_pr: true
       engine_data_outputs: '{"static_site_pr_url":"metadata.engine_data.static_site_agent.pr_url"}'
       comment_pr_summary: true
@@ -51,7 +51,7 @@ jobs:
       flow_slug: world-creator-day-cycle-flow
       target_repo: chubes4/world-of-wordpress
       prompt: ${{ inputs.prompt }}
-      validation_dependencies: chubes4/world-of-wordpress@main,chubes4/markdown-database-integration@main,Automattic/agents-api@main,Extra-Chill/data-machine@main,Extra-Chill/data-machine-code@main,WordPress/ai-provider-for-openai@main
+      validation_dependencies: chubes4/world-of-wordpress@main,chubes4/markdown-database-integration@main
       playground_wordpress: beta
       max_turns: 16
       step_budget: 20
@@ -84,7 +84,9 @@ jobs:
 
 ## Inputs worth calling out
 
-- `validation_dependencies` accepts `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`.
+- `include_agent_runtime_dependencies` defaults to `true` and checks out the standard WordPress agent runtime stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin.
+- `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref`, and `openai_provider_ref` control runtime dependency refs. `openai_provider_ref` defaults to `trunk`.
+- `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
 - `bundle_path` is resolved relative to the consumer checkout.
 - `bundle_repo`, `bundle_ref`, and `bundle_path_in_repo` let a consumer run against a bundle stored in another repository. The runner clones that repository before mounting the bundle into Playground.
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`.

@@ -31,6 +31,9 @@ WordPress APIs while the host stays small and repeatable:
 
 - No host MySQL, local WordPress install, or component-owned PHPUnit bootstrap.
 - Runtime dependencies are mounted into the same Playground site as the bundle.
+- The reusable workflow can bring the standard WordPress agent runtime stack by
+  default, so consumers do not repeat Agents API, Data Machine, Data Machine
+  Code, or provider plugin refs in every workflow.
 - Blueprints and runner config declare the initial WordPress state.
 - Workload steps can call PHP files, WP-CLI commands, and registered abilities.
 - Homeboy captures metrics, metadata, artifacts, transcripts, and status checks.
@@ -52,7 +55,6 @@ jobs:
       flow_slug: static-site-manual-flow
       target_repo: chubes4/wp-site-generator
       prompt: ${{ inputs.prompt }}
-      validation_dependencies: Automattic/agents-api@main,Extra-Chill/data-machine@main,Extra-Chill/data-machine-code@main,WordPress/ai-provider-for-openai@main
       success_requires_pr: true
       engine_data_outputs: '{"static_site_pr_url":"metadata.engine_data.static_site_agent.pr_url"}'
       comment_pr_summary: true
@@ -61,8 +63,9 @@ jobs:
 ```
 
 The workflow checks out `homeboy-extensions`, installs the WordPress extension
-toolchain, mounts validation dependencies under `.ci/<repo>`, builds a runner
-config, and calls `wordpress/scripts/agent/run-datamachine-agent.sh`.
+toolchain, mounts the standard agent runtime and any additional validation
+dependencies under `.ci/<repo>`, builds a runner config, and calls
+`wordpress/scripts/agent/run-datamachine-agent.sh`.
 
 ## Fully Custom Agents
 
@@ -93,7 +96,8 @@ The runner converts the agent config into a single Playground bench workload:
 
 - `component_path` points at the consumer checkout.
 - `bundle_path` points at the Data Machine agent bundle.
-- `validation_dependencies` are mounted as local plugins or support checkouts.
+- `include_agent_runtime_dependencies` mounts the standard Data Machine agent
+  runtime before consumer-supplied `validation_dependencies`.
 - `playground_file_mounts` adds fixture files such as the CI driver plugin.
 - `bench_env` forwards credentials and the serialized runner config into
   PHP-WASM.
@@ -124,7 +128,7 @@ knobs to `run-datamachine-agent.sh`:
 
 - Bundle location: `bundle_path`, `bundle_repo`, `bundle_ref`, `bundle_path_in_repo`.
 - Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
-- WordPress runtime: `playground_wordpress`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`.
+- WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `playground_wordpress`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`.
 - GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`.

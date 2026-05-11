@@ -49,9 +49,29 @@ name: Data Machine Agent CI (reusable)
         type: string
         default: gpt-5.5
       validation_dependencies:
-        description: Comma-separated OWNER/REPO or OWNER/REPO@REF entries checked out under .ci/<repo>. Entries without @REF use the repository default branch.
+        description: Comma-separated additional OWNER/REPO or OWNER/REPO@REF entries checked out under .ci/<repo>. Entries without @REF use the repository default branch.
         type: string
         default: ""
+      include_agent_runtime_dependencies:
+        description: "Include the standard WordPress agent runtime stack: Agents API, Data Machine, Data Machine Code, and the selected provider plugin."
+        type: boolean
+        default: true
+      agents_api_ref:
+        description: Ref for Automattic/agents-api when include_agent_runtime_dependencies is true.
+        type: string
+        default: main
+      data_machine_ref:
+        description: Ref for Extra-Chill/data-machine when include_agent_runtime_dependencies is true.
+        type: string
+        default: main
+      data_machine_code_ref:
+        description: Ref for Extra-Chill/data-machine-code when include_agent_runtime_dependencies is true.
+        type: string
+        default: main
+      openai_provider_ref:
+        description: Ref for WordPress/ai-provider-for-openai when provider is openai and include_agent_runtime_dependencies is true.
+        type: string
+        default: trunk
       playground_wordpress:
         type: string
         default: "7.0"
@@ -297,11 +317,30 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           VALIDATION_DEPENDENCIES: ${{ inputs.validation_dependencies }}
+          INCLUDE_AGENT_RUNTIME_DEPENDENCIES: ${{ inputs.include_agent_runtime_dependencies }}
+          AGENTS_API_REF: ${{ inputs.agents_api_ref }}
+          DATA_MACHINE_REF: ${{ inputs.data_machine_ref }}
+          DATA_MACHINE_CODE_REF: ${{ inputs.data_machine_code_ref }}
+          OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
+          PROVIDER: ${{ inputs.provider }}
         run: |
           set -euo pipefail
-          [ -n "$VALIDATION_DEPENDENCIES" ] || exit 0
-          IFS=',' read -ra entries <<< "$VALIDATION_DEPENDENCIES"
-          for raw_entry in "${entries[@]}"; do
+          dependency_entries=()
+          if [ "$INCLUDE_AGENT_RUNTIME_DEPENDENCIES" = "true" ]; then
+            dependency_entries+=("Automattic/agents-api@${AGENTS_API_REF}")
+            dependency_entries+=("Extra-Chill/data-machine@${DATA_MACHINE_REF}")
+            dependency_entries+=("Extra-Chill/data-machine-code@${DATA_MACHINE_CODE_REF}")
+            if [ "$PROVIDER" = "openai" ]; then
+              dependency_entries+=("WordPress/ai-provider-for-openai@${OPENAI_PROVIDER_REF}")
+            fi
+          fi
+          if [ -n "$VALIDATION_DEPENDENCIES" ]; then
+            IFS=',' read -ra extra_entries <<< "$VALIDATION_DEPENDENCIES"
+            dependency_entries+=("${extra_entries[@]}")
+          fi
+          [ "${#dependency_entries[@]}" -gt 0 ] || exit 0
+          declare -A seen_dependencies=()
+          for raw_entry in "${dependency_entries[@]}"; do
             entry="$(printf '%s' "$raw_entry" | xargs)"
             [ -n "$entry" ] || continue
             repo_ref="$entry"
@@ -322,6 +361,11 @@ jobs:
               ref="$(gh repo view "$repo_ref" --json defaultBranchRef --jq '.defaultBranchRef.name')"
               [ -n "$ref" ] || { echo "Could not resolve default branch for validation dependency: $repo_ref" >&2; exit 1; }
             fi
+            dedupe_key="${repo_ref}@${ref}"
+            if [ -n "${seen_dependencies[$dedupe_key]:-}" ]; then
+              continue
+            fi
+            seen_dependencies[$dedupe_key]=1
             repo_name="${repo_ref#*/}"
             target=".ci/$repo_name"
             rm -rf "$target"
