@@ -83,7 +83,7 @@ Consumers can customize:
 - Runtime tools through `ability_tools` and `tool_recorders`.
 - GitHub scope through `target_repo`, `allowed_repos`, and `app_token_repos`.
 - WordPress state through `extra_wp_config_defines`, file mounts, and pre-run
-  hooks.
+  and post-run hooks.
 - Success criteria through `success_requires_pr`, completion outcomes,
   engine-data projections, artifacts, and verifier jobs.
 
@@ -97,6 +97,8 @@ The runner converts the agent config into a single Playground bench workload:
 - `playground_file_mounts` adds fixture files such as the CI driver plugin.
 - `bench_env` forwards credentials and the serialized runner config into
   PHP-WASM.
+- `workload_run_before` and `workload_run_after` attach setup and verifier hooks
+  around the agent run inside the same Playground scenario.
 - `transcript_dir` controls where exported conversation artifacts are written.
 - `success_requires_pr` can require the agent to open or reuse a pull request.
 - `tool_recorders` can force tool parameters and project tool results into
@@ -122,7 +124,7 @@ knobs to `run-datamachine-agent.sh`:
 
 - Bundle location: `bundle_path`, `bundle_repo`, `bundle_ref`, `bundle_path_in_repo`.
 - Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
-- WordPress runtime: `playground_wordpress`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`.
+- WordPress runtime: `playground_wordpress`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`.
 - GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`.

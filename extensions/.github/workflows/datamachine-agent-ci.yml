@@ -131,6 +131,14 @@ name: Data Machine Agent CI (reusable)
           pre-run hook.
         type: string
         default: "[]"
+      workload_run_after:
+        description: |
+          JSON array of post-run hooks executed after the agent workload inside
+          the same Playground scenario. Use this for verifier probes that assert
+          the agent left WordPress in a valid state. Default '[]' means no
+          post-run hook.
+        type: string
+        default: "[]"
       daily_memory_enabled:
         description: |
           When true, sets daily_memory_enabled in the runner config so the
@@ -353,6 +361,7 @@ jobs:
           EXTRA_WP_CONFIG_DEFINES: ${{ inputs.extra_wp_config_defines }}
           EXTRA_PLAYGROUND_FILE_MOUNTS: ${{ inputs.extra_playground_file_mounts }}
           WORKLOAD_RUN_BEFORE: ${{ inputs.workload_run_before }}
+          WORKLOAD_RUN_AFTER: ${{ inputs.workload_run_after }}
           DAILY_MEMORY_ENABLED: ${{ inputs.daily_memory_enabled }}
           EXTRA_REQUIRED_ABILITIES: ${{ inputs.extra_required_abilities }}
           ALLOWED_REPOS: ${{ inputs.allowed_repos }}
@@ -391,6 +400,7 @@ jobs:
           extra_wp_config_defines_json="$(validate_json_input extra_wp_config_defines object "$EXTRA_WP_CONFIG_DEFINES")"
           extra_playground_file_mounts_json="$(validate_json_input extra_playground_file_mounts array "$EXTRA_PLAYGROUND_FILE_MOUNTS")"
           workload_run_before_json="$(validate_json_input workload_run_before array "$WORKLOAD_RUN_BEFORE")"
+          workload_run_after_json="$(validate_json_input workload_run_after array "$WORKLOAD_RUN_AFTER")"
           extra_required_abilities_json="$(validate_json_input extra_required_abilities array "$EXTRA_REQUIRED_ABILITIES")"
           success_completion_outcomes_json="$(validate_json_input success_completion_outcomes array "$SUCCESS_COMPLETION_OUTCOMES")"
           allowed_repos_json="$(validate_json_input allowed_repos array "$ALLOWED_REPOS")"
@@ -431,6 +441,7 @@ jobs:
             --argjson extraWpConfigDefines "$extra_wp_config_defines_json" \
             --argjson extraPlaygroundFileMounts "$extra_playground_file_mounts_json" \
             --argjson workloadRunBefore "$workload_run_before_json" \
+            --argjson workloadRunAfter "$workload_run_after_json" \
             --argjson dailyMemoryEnabled "$DAILY_MEMORY_ENABLED" \
             --argjson extraRequiredAbilities "$extra_required_abilities_json" \
             --argjson allowedRepos "$allowed_repos_json" \
@@ -455,6 +466,7 @@ jobs:
               ] + $extraPlaygroundFileMounts),
               wp_config_defines: $extraWpConfigDefines,
               workload_run_before: $workloadRunBefore,
+              workload_run_after: $workloadRunAfter,
               required_abilities: (["datamachine/import-agent", "datamachine/run-flow", "datamachine/drain-job"] + $extraRequiredAbilities | reduce .[] as $ability ([]; if index($ability) then . else . + [$ability] end)),
               bundle_path: $bundlePath,
               bundle_repo: $bundleRepo,

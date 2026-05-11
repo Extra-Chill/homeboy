@@ -93,7 +93,8 @@ jobs:
 - `dry_run` is intended for workflow smoke tests only; production consumers should leave it `false`.
 - `transcript_artifact_name` controls artifact upload. An empty value skips upload.
 - `extra_wp_config_defines` must be a JSON object and is merged into the runner config `wp_config_defines`.
-- `extra_playground_file_mounts`, `workload_run_before`, and `extra_required_abilities` must be JSON arrays.
+- `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`, and `extra_required_abilities` must be JSON arrays.
+- `workload_run_after` runs post-agent Playground verifier hooks in the same scenario, so consumers can assert the agent left WordPress in a valid state.
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
 - `tool_recorders` configures tool-result projection, forced parameters, and engine-data capture. It must be a JSON array.
 - `pipeline_step_patches` and `flow_step_patches` modify imported bundle step config before the flow runs. They must be JSON arrays.
