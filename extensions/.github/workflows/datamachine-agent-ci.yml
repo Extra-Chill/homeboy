@@ -716,7 +716,7 @@ jobs:
 
       - name: Extract scenario outputs
         id: extract
-        if: ${{ inputs.run_agent && ! inputs.dry_run }}
+        if: ${{ always() && inputs.run_agent && ! inputs.dry_run }}
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
         run: |
@@ -732,7 +732,7 @@ jobs:
 
       - name: Extract dry-run outputs
         id: extract_dry_run
-        if: ${{ inputs.run_agent && inputs.dry_run }}
+        if: ${{ always() && inputs.run_agent && inputs.dry_run }}
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
         run: |
