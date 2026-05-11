@@ -83,6 +83,8 @@ requests against `Automattic/agents-api`.
 Consumers can customize:
 
 - Agent behavior through the bundle manifest, prompts, flows, and pipelines.
+- AI provider plugins through `provider_plugin`, including the plugin repo, ref,
+  subdirectory path, register function, and Data Machine credential mapping.
 - Runtime tools through `ability_tools` and `tool_recorders`.
 - GitHub scope through `target_repo`, `allowed_repos`, and `app_token_repos`.
 - WordPress state through `extra_wp_config_defines`, file mounts, and pre-run
@@ -128,6 +130,7 @@ knobs to `run-datamachine-agent.sh`:
 
 - Bundle location: `bundle_path`, `bundle_repo`, `bundle_ref`, `bundle_path_in_repo`.
 - Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
+- Provider plugin: `provider_plugin`, with OpenAI defaults preserved when omitted for `provider: openai`.
 - WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `playground_wordpress`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`.
 - GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
@@ -144,6 +147,40 @@ maintaining a bespoke runner script.
 wrap GitHub tools. A recorder can attach forced parameters, capture selected input
 or output fields, and write them under a stable `metadata.engine_data` key for
 later `engine_data_outputs` projection.
+
+`provider_plugin` lets callers replace the OpenAI provider preset without
+changing the workload. The reusable workflow checks out the configured plugin,
+passes the configured register function to `datamachine-agent-workload.php`, and
+copies credential env values into `bench_env` for the workload to store as Data
+Machine options. OpenAI callers can keep using the default preset:
+
+```yaml
+with:
+  provider: openai
+  model: gpt-5.5
+secrets: inherit
+```
+
+Generic providers should provide a full plugin object and map Data Machine option
+names to generic provider secret env names:
+
+```yaml
+with:
+  provider: example-provider
+  model: example-model
+  provider_plugin: |
+    {
+      "repo": "Example/example-ai-provider",
+      "ref": "main",
+      "path": ".",
+      "register_function": "Example\\AiProvider\\register_provider",
+      "credentials": {
+        "connectors_ai_example_api_key": "PROVIDER_SECRET_1"
+      }
+    }
+secrets:
+  PROVIDER_SECRET_1: ${{ secrets.EXAMPLE_PROVIDER_API_KEY }}
+```
 
 ## Outputs and assertions
 

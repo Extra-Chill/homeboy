@@ -45,6 +45,14 @@ name: Data Machine Agent CI (reusable)
       provider:
         type: string
         default: openai
+      provider_plugin:
+        description: |
+          JSON object describing the AI provider plugin to mount and configure.
+          Defaults to the OpenAI provider preset when provider is openai.
+          Supported keys: repo, ref, path, register_function, credentials.
+          credentials maps Data Machine option names to bench env names.
+        type: string
+        default: "{}"
       model:
         type: string
         default: gpt-5.5
@@ -207,7 +215,17 @@ name: Data Machine Agent CI (reusable)
       HOMEBOY_APP_PRIVATE_KEY:
         required: false
       OPENAI_API_KEY:
-        required: true
+        required: false
+      PROVIDER_SECRET_1:
+        required: false
+      PROVIDER_SECRET_2:
+        required: false
+      PROVIDER_SECRET_3:
+        required: false
+      PROVIDER_SECRET_4:
+        required: false
+      PROVIDER_SECRET_5:
+        required: false
     outputs:
       job_status:
         value: ${{ jobs.run-agent.outputs.job_status }}
@@ -323,15 +341,33 @@ jobs:
           DATA_MACHINE_CODE_REF: ${{ inputs.data_machine_code_ref }}
           OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
           PROVIDER: ${{ inputs.provider }}
+          PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
         run: |
           set -euo pipefail
           dependency_entries=()
+          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | jq -Rsc --arg provider "$PROVIDER" --arg openaiRef "$OPENAI_PROVIDER_REF" '
+            if (gsub("^\\s+|\\s+$"; "") | length) == 0 then {} else fromjson end
+            | if type == "object" then . else error("provider_plugin must be a JSON object") end
+            | {
+                repo: (.repo // (if $provider == "openai" then "WordPress/ai-provider-for-openai" else "" end)),
+                ref: (.ref // (if $provider == "openai" then $openaiRef else "" end)),
+                path: (.path // "."),
+                register_function: (.register_function // (if $provider == "openai" then "WordPress\\OpenAiAiProvider\\register_provider" else "" end)),
+                credentials: (.credentials // (if $provider == "openai" then {connectors_ai_openai_api_key: "OPENAI_API_KEY"} else {} end))
+              }
+          ')"
+          provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
+          provider_plugin_ref="$(jq -r '.ref // ""' <<< "$provider_plugin_json")"
           if [ "$INCLUDE_AGENT_RUNTIME_DEPENDENCIES" = "true" ]; then
             dependency_entries+=("Automattic/agents-api@${AGENTS_API_REF}")
             dependency_entries+=("Extra-Chill/data-machine@${DATA_MACHINE_REF}")
             dependency_entries+=("Extra-Chill/data-machine-code@${DATA_MACHINE_CODE_REF}")
-            if [ "$PROVIDER" = "openai" ]; then
-              dependency_entries+=("WordPress/ai-provider-for-openai@${OPENAI_PROVIDER_REF}")
+            if [ -n "$provider_plugin_repo" ]; then
+              if [ -n "$provider_plugin_ref" ]; then
+                dependency_entries+=("${provider_plugin_repo}@${provider_plugin_ref}")
+              else
+                dependency_entries+=("${provider_plugin_repo}")
+              fi
             fi
           fi
           if [ -n "$VALIDATION_DEPENDENCIES" ]; then
@@ -391,6 +427,10 @@ jobs:
 
       - name: Install checked-out PHP dependencies
         if: ${{ inputs.run_agent }}
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
+          OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
         run: |
           set -euo pipefail
           for composer_file in .ci/*/composer.json; do
@@ -400,6 +440,22 @@ jobs:
             [ "$component_dir" != ".ci/homeboy-extensions/wordpress" ] || continue
             composer install --working-dir="$component_dir" --no-interaction --no-progress --prefer-dist
           done
+          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | jq -Rsc --arg provider "$PROVIDER" --arg openaiRef "$OPENAI_PROVIDER_REF" '
+            if (gsub("^\\s+|\\s+$"; "") | length) == 0 then {} else fromjson end
+            | if type == "object" then . else error("provider_plugin must be a JSON object") end
+            | {
+                repo: (.repo // (if $provider == "openai" then "WordPress/ai-provider-for-openai" else "" end)),
+                path: (.path // ".")
+              }
+          ')"
+          provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
+          provider_plugin_path="$(jq -r '.path // "."' <<< "$provider_plugin_json")"
+          if [ -n "$provider_plugin_repo" ] && [ "$provider_plugin_path" != "." ]; then
+            provider_plugin_dir=".ci/${provider_plugin_repo#*/}/${provider_plugin_path}"
+            if [ -f "${provider_plugin_dir}/composer.json" ]; then
+              composer install --working-dir="$provider_plugin_dir" --no-interaction --no-progress --prefer-dist
+            fi
+          fi
 
       - name: Pre-flight bundle validation
         if: ${{ inputs.run_agent && inputs.bundle_validator_spec != '' }}
@@ -446,7 +502,14 @@ jobs:
           GITHUB_TOKEN_VALUE: ${{ steps.app-token.outputs.token || github.token }}
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
-          OPENAI_API_KEY_VALUE: ${{ secrets.OPENAI_API_KEY }}
+          PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
+          OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
+          PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
+          PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
+          PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
+          PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
         run: |
           set -euo pipefail
           config_path="${RUNNER_TEMP}/datamachine-agent-config.json"
@@ -458,6 +521,33 @@ jobs:
           transcript_host_dir="${GITHUB_WORKSPACE}/datamachine-agent-artifacts/${AGENT_SLUG}"
           transcript_guest_dir="/wordpress/wp-content/plugins/${component_slug}/datamachine-agent-artifacts/${AGENT_SLUG}"
           mapfile -t validation_paths < <(find "${GITHUB_WORKSPACE}/.ci" -mindepth 1 -maxdepth 1 -type d | sort)
+          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | jq -Rsc --arg provider "$PROVIDER" --arg openaiRef "$OPENAI_PROVIDER_REF" '
+            if (gsub("^\\s+|\\s+$"; "") | length) == 0 then {} else fromjson end
+            | if type == "object" then . else error("provider_plugin must be a JSON object") end
+            | {
+                repo: (.repo // (if $provider == "openai" then "WordPress/ai-provider-for-openai" else "" end)),
+                ref: (.ref // (if $provider == "openai" then $openaiRef else "" end)),
+                path: (.path // "."),
+                register_function: (.register_function // (if $provider == "openai" then "WordPress\\OpenAiAiProvider\\register_provider" else "" end)),
+                credentials: (.credentials // (if $provider == "openai" then {connectors_ai_openai_api_key: "OPENAI_API_KEY"} else {} end))
+              }
+              | if (.credentials | type) == "object" then . else error("provider_plugin.credentials must be a JSON object") end
+          ')"
+          provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
+          provider_plugin_path="$(jq -r '.path // "."' <<< "$provider_plugin_json")"
+          if [ -n "$provider_plugin_repo" ] && [ "$provider_plugin_path" != "." ]; then
+            provider_plugin_repo_name="${provider_plugin_repo#*/}"
+            provider_plugin_root="${GITHUB_WORKSPACE}/.ci/${provider_plugin_repo_name}"
+            provider_plugin_host_path="${provider_plugin_root}/${provider_plugin_path}"
+            if [ -d "$provider_plugin_host_path" ]; then
+              filtered_validation_paths=()
+              for validation_path in "${validation_paths[@]}"; do
+                [ "$validation_path" != "$provider_plugin_root" ] || continue
+                filtered_validation_paths+=("$validation_path")
+              done
+              validation_paths=("${filtered_validation_paths[@]}" "$provider_plugin_host_path")
+            fi
+          fi
           validation_json="$(printf '%s\n' "${validation_paths[@]}" | jq -Rsc 'split("\n") | map(select(. != ""))')"
           validate_json_input() {
             local name="$1"
@@ -481,6 +571,19 @@ jobs:
           flow_step_patches_json="$(validate_json_input flow_step_patches array "$FLOW_STEP_PATCHES")"
           runner_workspace_json="$(validate_json_input runner_workspace object "$RUNNER_WORKSPACE_CONFIG")"
           fallback_pull_request_json="$(validate_json_input fallback_pull_request object "$FALLBACK_PULL_REQUEST")"
+          provider_register_function="$(jq -r '.register_function // ""' <<< "$provider_plugin_json")"
+          provider_credentials_json="$(jq -c '.credentials // {}' <<< "$provider_plugin_json")"
+          provider_bench_env_json="{}"
+          while IFS= read -r provider_env_name; do
+            [ -n "$provider_env_name" ] || continue
+            case "$provider_env_name" in
+              (*[!A-Za-z0-9_]*|[0-9]*|'') echo "Invalid provider credential env name: $provider_env_name" >&2; exit 1 ;;
+            esac
+            provider_env_value="${!provider_env_name:-}"
+            if [ -n "$provider_env_value" ]; then
+              provider_bench_env_json="$(jq -c --arg name "$provider_env_name" --arg value "$provider_env_value" '. + {($name): $value}' <<< "$provider_bench_env_json")"
+            fi
+          done < <(jq -r 'to_entries[] | .value | select(type == "string" and length > 0)' <<< "$provider_credentials_json")
           jq -n \
             --arg componentPath "$GITHUB_WORKSPACE" \
             --arg bundlePath "$bundle_abs" \
@@ -501,8 +604,10 @@ jobs:
             --arg githubToken "$GITHUB_TOKEN_VALUE" \
             --arg githubRunId "$GITHUB_RUN_ID_VALUE" \
             --arg githubRunAttempt "$GITHUB_RUN_ATTEMPT_VALUE" \
-            --arg openaiKey "$OPENAI_API_KEY_VALUE" \
+            --arg providerRegisterFunction "$provider_register_function" \
             --argjson validationDependencies "$validation_json" \
+            --argjson providerCredentials "$provider_credentials_json" \
+            --argjson providerBenchEnv "$provider_bench_env_json" \
             --argjson artifactExportConfig "$ARTIFACT_EXPORT_CONFIG" \
             --argjson successRequiresPr "$SUCCESS_REQUIRES_PR" \
             --argjson successCompletionOutcomes "$success_completion_outcomes_json" \
@@ -550,8 +655,8 @@ jobs:
               flow_slug: $flowSlug,
               provider: $provider,
               model: $model,
-              provider_register_function: (if $provider == "openai" then "WordPress\\OpenAiAiProvider\\register_provider" else "" end),
-              provider_credentials: (if $provider == "openai" then {connectors_ai_openai_api_key: "OPENAI_API_KEY"} else {} end),
+              provider_register_function: $providerRegisterFunction,
+              provider_credentials: $providerCredentials,
               github_token_env: "GITHUB_TOKEN",
               github_profile_id: ($agentSlug + "-ci"),
               target_repo: $targetRepo,
@@ -585,9 +690,8 @@ jobs:
               bench_env: {
                 GITHUB_TOKEN: $githubToken,
                 GITHUB_RUN_ID: $githubRunId,
-                GITHUB_RUN_ATTEMPT: $githubRunAttempt,
-                OPENAI_API_KEY: $openaiKey
-              }
+                GITHUB_RUN_ATTEMPT: $githubRunAttempt
+              } + $providerBenchEnv
             } + (if $dailyMemoryEnabled then {daily_memory_enabled: true} else {} end)' > "$config_path"
           printf 'config_path=%s\n' "$config_path" >> "$GITHUB_OUTPUT"
           printf 'transcript_host_dir=%s\n' "$transcript_host_dir" >> "$GITHUB_OUTPUT"
@@ -597,6 +701,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
+          PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
+          PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
+          PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
+          PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
           HOMEBOY_DATAMACHINE_AGENT_RESULTS_FILE: ${{ runner.temp }}/run-results.json
         run: bash .ci/homeboy-extensions/wordpress/scripts/agent/run-datamachine-agent.sh "${{ steps.config.outputs.config_path }}"
 

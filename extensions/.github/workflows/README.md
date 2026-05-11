@@ -85,7 +85,8 @@ jobs:
 ## Inputs worth calling out
 
 - `include_agent_runtime_dependencies` defaults to `true` and checks out the standard WordPress agent runtime stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin.
-- `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref`, and `openai_provider_ref` control runtime dependency refs. `openai_provider_ref` defaults to `trunk`.
+- `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref`, and `openai_provider_ref` control runtime dependency refs. `openai_provider_ref` defaults to `trunk` for the built-in OpenAI preset.
+- `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `credentials` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
 - `bundle_path` is resolved relative to the consumer checkout.
 - `bundle_repo`, `bundle_ref`, and `bundle_path_in_repo` let a consumer run against a bundle stored in another repository. The runner clones that repository before mounting the bundle into Playground.
@@ -148,3 +149,53 @@ jobs:
 Use tool recorders when a consumer currently has a custom bootstrap file whose
 only job is to force GitHub tool parameters or copy selected tool results into
 `metadata.engine_data`.
+
+## Provider plugin examples
+
+OpenAI remains the compatibility preset. Existing callers can keep omitting
+`provider_plugin` and pass `OPENAI_API_KEY` through inherited secrets:
+
+```yaml
+jobs:
+  run-agent:
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@v3
+    with:
+      bundle_path: bundles/example-agent
+      agent_slug: example-agent
+      pipeline_slug: example-pipeline
+      flow_slug: example-flow
+      target_repo: Extra-Chill/example
+      provider: openai
+      model: gpt-5.5
+    secrets: inherit
+```
+
+Non-OpenAI providers supply the plugin checkout and Data Machine credential
+mapping explicitly. Map each Data Machine option to one of the generic provider
+secret env names, then pass that secret in the reusable workflow call:
+
+```yaml
+jobs:
+  run-agent:
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@v3
+    with:
+      bundle_path: bundles/example-agent
+      agent_slug: example-agent
+      pipeline_slug: example-pipeline
+      flow_slug: example-flow
+      target_repo: Extra-Chill/example
+      provider: example-provider
+      model: example-model
+      provider_plugin: |
+        {
+          "repo": "Example/example-ai-provider",
+          "ref": "main",
+          "path": ".",
+          "register_function": "Example\\AiProvider\\register_provider",
+          "credentials": {
+            "connectors_ai_example_api_key": "PROVIDER_SECRET_1"
+          }
+        }
+    secrets:
+      PROVIDER_SECRET_1: ${{ secrets.EXAMPLE_PROVIDER_API_KEY }}
+```
