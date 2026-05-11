@@ -38,6 +38,10 @@ name: Data Machine Agent CI (reusable)
       prompt:
         type: string
         default: ""
+      run_agent:
+        description: When false, record a skipped run and bypass agent setup/execution.
+        type: boolean
+        default: true
       provider:
         type: string
         default: openai
@@ -203,16 +207,28 @@ jobs:
       pull-requests: write
       issues: write
     outputs:
-      job_status: ${{ steps.extract.outputs.job_status || steps.extract_dry_run.outputs.job_status }}
-      transcript_json: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json }}
-      transcript_summary: ${{ steps.extract.outputs.transcript_summary || steps.extract_dry_run.outputs.transcript_summary }}
-      engine_data_json: ${{ steps.engine-data.outputs.engine_data_json }}
+      job_status: ${{ steps.extract.outputs.job_status || steps.extract_dry_run.outputs.job_status || steps.skipped.outputs.job_status }}
+      transcript_json: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json || steps.skipped.outputs.transcript_json }}
+      transcript_summary: ${{ steps.extract.outputs.transcript_summary || steps.extract_dry_run.outputs.transcript_summary || steps.skipped.outputs.transcript_summary }}
+      engine_data_json: ${{ steps.engine-data.outputs.engine_data_json || steps.skipped.outputs.engine_data_json }}
     steps:
+      - name: Record skipped agent run
+        id: skipped
+        if: ${{ ! inputs.run_agent }}
+        run: |
+          set -euo pipefail
+          printf 'job_status=skipped\n' >> "$GITHUB_OUTPUT"
+          printf 'transcript_json=\n' >> "$GITHUB_OUTPUT"
+          printf 'transcript_summary=\n' >> "$GITHUB_OUTPUT"
+          printf 'engine_data_json={}\n' >> "$GITHUB_OUTPUT"
+
       - name: Checkout consumer repo
+        if: ${{ inputs.run_agent }}
         uses: actions/checkout@v4
 
       - name: Detect Homeboy app credentials
         id: homeboy-app-creds
+        if: ${{ inputs.run_agent }}
         env:
           HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
           HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
@@ -226,7 +242,7 @@ jobs:
 
       - name: Resolve Homeboy app token scope
         id: token-scope
-        if: ${{ ! inputs.dry_run && steps.homeboy-app-creds.outputs.available == 'true' }}
+        if: ${{ inputs.run_agent && ! inputs.dry_run && steps.homeboy-app-creds.outputs.available == 'true' }}
         env:
           APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
           TARGET_REPO: ${{ inputs.target_repo }}
@@ -261,7 +277,7 @@ jobs:
 
       - name: Generate Homeboy app token
         id: app-token
-        if: ${{ ! inputs.dry_run && steps.homeboy-app-creds.outputs.available == 'true' }}
+        if: ${{ inputs.run_agent && ! inputs.dry_run && steps.homeboy-app-creds.outputs.available == 'true' }}
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
@@ -270,12 +286,14 @@ jobs:
           repositories: ${{ steps.token-scope.outputs.repositories }}
 
       - name: Checkout homeboy-extensions
+        if: ${{ inputs.run_agent }}
         uses: actions/checkout@v4
         with:
           repository: Extra-Chill/homeboy-extensions
           path: .ci/homeboy-extensions
 
       - name: Checkout validation dependencies
+        if: ${{ inputs.run_agent }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           VALIDATION_DEPENDENCIES: ${{ inputs.validation_dependencies }}
@@ -314,11 +332,13 @@ jobs:
           done
 
       - name: Set up Node.js
+        if: ${{ inputs.run_agent }}
         uses: actions/setup-node@v4
         with:
           node-version: 24
 
       - name: Install Homeboy WordPress extension dependencies
+        if: ${{ inputs.run_agent }}
         working-directory: .ci/homeboy-extensions/wordpress
         run: |
           set -euo pipefail
@@ -326,6 +346,7 @@ jobs:
           npm install
 
       - name: Install checked-out PHP dependencies
+        if: ${{ inputs.run_agent }}
         run: |
           set -euo pipefail
           for composer_file in .ci/*/composer.json; do
@@ -337,11 +358,12 @@ jobs:
           done
 
       - name: Pre-flight bundle validation
-        if: ${{ inputs.bundle_validator_spec != '' }}
+        if: ${{ inputs.run_agent && inputs.bundle_validator_spec != '' }}
         run: php .ci/homeboy-extensions/wordpress/scripts/agent/validate-bundle.php "${{ inputs.bundle_validator_spec }}"
 
       - name: Build runner config
         id: config
+        if: ${{ inputs.run_agent }}
         env:
           AGENT_SLUG: ${{ inputs.agent_slug }}
           PIPELINE_SLUG: ${{ inputs.pipeline_slug }}
@@ -527,6 +549,7 @@ jobs:
           printf 'transcript_host_dir=%s\n' "$transcript_host_dir" >> "$GITHUB_OUTPUT"
 
       - name: Run Data Machine agent
+        if: ${{ inputs.run_agent }}
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -535,7 +558,7 @@ jobs:
 
       - name: Extract scenario outputs
         id: extract
-        if: ${{ ! inputs.dry_run }}
+        if: ${{ inputs.run_agent && ! inputs.dry_run }}
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
         run: |
@@ -551,7 +574,7 @@ jobs:
 
       - name: Extract dry-run outputs
         id: extract_dry_run
-        if: ${{ inputs.dry_run }}
+        if: ${{ inputs.run_agent && inputs.dry_run }}
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
         run: |
@@ -568,6 +591,7 @@ jobs:
 
       - name: Project engine_data outputs
         id: engine-data
+        if: ${{ inputs.run_agent }}
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
           ENGINE_DATA_OUTPUTS: ${{ inputs.engine_data_outputs }}
@@ -593,7 +617,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Assert success
-        if: ${{ inputs.success_requires_pr && ! inputs.dry_run }}
+        if: ${{ inputs.run_agent && inputs.success_requires_pr && ! inputs.dry_run }}
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
         run: |
@@ -606,7 +630,7 @@ jobs:
 
       - name: Resolve transcript artifact path
         id: transcript-artifact
-        if: ${{ always() && inputs.transcript_artifact_name != '' && (steps.extract.outputs.transcript_json != '' || steps.extract_dry_run.outputs.transcript_json != '') }}
+        if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' && (steps.extract.outputs.transcript_json != '' || steps.extract_dry_run.outputs.transcript_json != '') }}
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
           FLOW_SLUG: ${{ inputs.flow_slug }}
@@ -638,7 +662,7 @@ jobs:
           printf 'path=%s\n' "$transcript_path" >> "$GITHUB_OUTPUT"
 
       - name: Upload transcript artifact
-        if: ${{ always() && inputs.transcript_artifact_name != '' && steps.transcript-artifact.outputs.path != '' }}
+        if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' && steps.transcript-artifact.outputs.path != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.transcript_artifact_name }}
@@ -646,7 +670,7 @@ jobs:
           if-no-files-found: error
 
       - name: Comment PR summary
-        if: ${{ inputs.comment_pr_summary && github.event_name == 'pull_request' && ! inputs.dry_run }}
+        if: ${{ inputs.run_agent && inputs.comment_pr_summary && github.event_name == 'pull_request' && ! inputs.dry_run }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           AGENT_SLUG: ${{ inputs.agent_slug }}
