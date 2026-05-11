@@ -185,6 +185,29 @@ function restKey(row) {
 	return `${normalizeRestMethod(row?.method)} ${normalizeRestUrl(row?.url || row?.path || row?.normalizedUrl)}`;
 }
 
+function normalizeRestWaterfallUrl(url) {
+	const normalized = normalizeUrl(url, {
+		lowercasePath: false,
+		dropQueryParams: ['_', 'v', '_wpnonce', 'nocache', 'cb', 't', '_locale'],
+	});
+	if (!normalized) {
+		return '';
+	}
+	const restIndex = normalized.indexOf('/wp-json/');
+	if (restIndex >= 0) {
+		return normalized.slice(restIndex + '/wp-json'.length);
+	}
+	return normalized;
+}
+
+function restWaterfallKey(row) {
+	return `${normalizeRestMethod(row?.method)} ${normalizeRestWaterfallUrl(row?.url || row?.path || row?.normalizedUrl)}`;
+}
+
+function restRoutePath(url) {
+	return normalizeRestWaterfallUrl(url).split('?', 1)[0];
+}
+
 function estimatePayloadBytes(value) {
 	if (typeof value === 'number' && Number.isFinite(value)) {
 		return Math.max(0, Math.round(value));
@@ -579,6 +602,192 @@ function classifyWordPressRestPreloadOpportunities(waterfall, options = {}) {
 		investigate: candidates.filter((row) => row.classification === 'investigate'),
 		rows: candidates,
 	};
+}
+
+function classifyWordPressRestNetworkRoute(row) {
+	const method = normalizeRestMethod(row?.method);
+	const url = normalizeRestWaterfallUrl(row?.url || '');
+	const pathOnly = restRoutePath(url);
+
+	if (method === 'OPTIONS') {
+		return { classification: 'options-schema', reason: 'REST schema/options request' };
+	}
+	if (/\/wp\/v2\/users\/me(?:$|\?)/.test(pathOnly)) {
+		return { classification: 'current-user', reason: 'current user/session state' };
+	}
+	if (/\/wp\/v2\/template-parts\//.test(pathOnly) || /\/wp\/v2\/templates\//.test(pathOnly)) {
+		return { classification: 'template-data', reason: 'template or template-part data can often be derived from the initial route' };
+	}
+	if (/\/wp\/v2\/posts(?:$|\?)/.test(pathOnly)) {
+		return { classification: 'query-loop-posts', reason: 'post collection is preloadable when the resolved template contains a Query Loop' };
+	}
+	if (/\/wp\/v2\/taxonomies(?:$|\?)/.test(pathOnly)) {
+		return { classification: 'taxonomy-data', reason: 'taxonomy data is deterministic for the initial editor boot' };
+	}
+	if (/\/wp\/v2\/(?:navigation|menus)(?:\/|$|\?)/.test(pathOnly) || /\/wp-block-editor\/v1\/navigation-fallback/.test(pathOnly)) {
+		return { classification: 'navigation-state', reason: 'navigation data depends on current site menu/navigation state' };
+	}
+	if (/\/wp\/v2\/pages(?:\/|$|\?)/.test(pathOnly)) {
+		return { classification: 'page-tree', reason: 'page tree or page record data depends on the initial editor route/site content' };
+	}
+	if (/\/wp\/v2\/(?:block-patterns|wp_pattern_category)(?:\/|$|\?)/.test(pathOnly)) {
+		return { classification: 'pattern-data', reason: 'pattern browser data is global editor background data' };
+	}
+	if (/\/wp\/v2\/types(?:\/|$|\?)/.test(pathOnly)) {
+		return { classification: 'type-metadata', reason: 'post type metadata' };
+	}
+	if (/\/wp\/v2\/settings(?:$|\?)/.test(pathOnly)) {
+		return { classification: 'settings', reason: 'site settings data' };
+	}
+
+	return { classification: 'investigate', reason: 'no built-in WordPress REST route rule matched' };
+}
+
+function summarizeWordPressRestNetworkRows(input = []) {
+	const sourceRows = Array.isArray(input)
+		? input
+		: Array.isArray(input?.networkRequests)
+			? input.networkRequests
+			: Array.isArray(input?.rows)
+				? input.rows
+				: [];
+	const groups = new Map();
+
+	for (const rawRow of sourceRows) {
+		if (!isRestUrl(rawRow?.url || rawRow?.name || rawRow?.normalizedUrl || rawRow?.path)) {
+			continue;
+		}
+		const row = normalizeRestNetworkRequest(rawRow);
+		const key = restWaterfallKey(row);
+		if (!row.url || !key.trim()) {
+			continue;
+		}
+		const existing = groups.get(key) || {
+			key,
+			url: normalizeRestWaterfallUrl(row.url),
+			method: row.method,
+			count: 0,
+			totalDurationMs: 0,
+			maxDurationMs: 0,
+			statuses: [],
+			rows: [],
+			...classifyWordPressRestNetworkRoute(row),
+		};
+		existing.count += 1;
+		existing.totalDurationMs += row.durationMs || 0;
+		existing.maxDurationMs = Math.max(existing.maxDurationMs, row.durationMs || 0);
+		if (row.status && !existing.statuses.includes(row.status)) {
+			existing.statuses.push(row.status);
+		}
+		existing.rows.push(row);
+		groups.set(key, existing);
+	}
+
+	const routes = [...groups.values()]
+		.map((group) => ({
+			...group,
+			avgDurationMs: group.count > 0 ? group.totalDurationMs / group.count : 0,
+			maxDurationMs: round(group.maxDurationMs),
+			totalDurationMs: round(group.totalDurationMs),
+		}))
+		.sort((a, b) => (b.count - a.count) || (b.maxDurationMs - a.maxDurationMs) || a.key.localeCompare(b.key));
+	const byClassification = {};
+	for (const route of routes) {
+		byClassification[route.classification] = (byClassification[route.classification] || 0) + route.count;
+	}
+
+	return {
+		count: routes.reduce((total, route) => total + route.count, 0),
+		uniqueCount: routes.length,
+		byClassification,
+		routes,
+	};
+}
+
+function compareWordPressRestNetworkWaterfalls({ baseline, candidate }) {
+	const baselineSummary = summarizeWordPressRestNetworkRows(baseline);
+	const candidateSummary = summarizeWordPressRestNetworkRows(candidate);
+	const candidateByKey = new Map(candidateSummary.routes.map((route) => [route.key, route]));
+	const baselineByKey = new Map(baselineSummary.routes.map((route) => [route.key, route]));
+	const rows = [];
+
+	for (const baselineRoute of baselineSummary.routes) {
+		const candidateRoute = candidateByKey.get(baselineRoute.key);
+		rows.push({
+			key: baselineRoute.key,
+			url: baselineRoute.url,
+			method: baselineRoute.method,
+			classification: baselineRoute.classification,
+			reason: baselineRoute.reason,
+			before: baselineRoute.count,
+			after: candidateRoute?.count || 0,
+			beforeMaxDurationMs: baselineRoute.maxDurationMs,
+			afterMaxDurationMs: candidateRoute?.maxDurationMs || 0,
+			result: candidateRoute ? 'remaining' : 'removed',
+		});
+	}
+	for (const candidateRoute of candidateSummary.routes) {
+		if (baselineByKey.has(candidateRoute.key)) {
+			continue;
+		}
+		rows.push({
+			key: candidateRoute.key,
+			url: candidateRoute.url,
+			method: candidateRoute.method,
+			classification: candidateRoute.classification,
+			reason: candidateRoute.reason,
+			before: 0,
+			after: candidateRoute.count,
+			beforeMaxDurationMs: 0,
+			afterMaxDurationMs: candidateRoute.maxDurationMs,
+			result: 'added',
+		});
+	}
+
+	rows.sort((a, b) => {
+		const order = { removed: 0, remaining: 1, added: 2 };
+		return (order[a.result] - order[b.result]) || (b.before - a.before) || (b.beforeMaxDurationMs - a.beforeMaxDurationMs) || a.key.localeCompare(b.key);
+	});
+
+	return {
+		counts: {
+			baseline: baselineSummary.count,
+			candidate: candidateSummary.count,
+			baselineUnique: baselineSummary.uniqueCount,
+			candidateUnique: candidateSummary.uniqueCount,
+			removed: rows.filter((row) => row.result === 'removed').reduce((total, row) => total + row.before, 0),
+			removedUnique: rows.filter((row) => row.result === 'removed').length,
+			remainingUnique: rows.filter((row) => row.result === 'remaining').length,
+			added: rows.filter((row) => row.result === 'added').reduce((total, row) => total + row.after, 0),
+			addedUnique: rows.filter((row) => row.result === 'added').length,
+		},
+		baseline: baselineSummary,
+		candidate: candidateSummary,
+		rows,
+		removedRoutes: rows.filter((row) => row.result === 'removed'),
+		remainingRoutes: rows.filter((row) => row.result === 'remaining'),
+		addedRoutes: rows.filter((row) => row.result === 'added'),
+	};
+}
+
+function formatWordPressRestNetworkDiffMarkdownReport(diff, options = {}) {
+	const limit = options.limit || 40;
+	const lines = [
+		'## WordPress REST network diff',
+		'',
+		`- Baseline REST requests: ${diff?.counts?.baseline || 0} (${diff?.counts?.baselineUnique || 0} unique)`,
+		`- Candidate REST requests: ${diff?.counts?.candidate || 0} (${diff?.counts?.candidateUnique || 0} unique)`,
+		`- Removed REST requests: ${diff?.counts?.removed || 0} (${diff?.counts?.removedUnique || 0} unique)`,
+		'',
+		'| Result | Endpoint | Before | After | Max before | Max after | Class |',
+		'|---|---|---:|---:|---:|---:|---|',
+	];
+
+	for (const row of (diff?.rows || []).slice(0, limit)) {
+		lines.push(`| ${row.result} | \`${row.method} ${row.url}\` | ${row.before} | ${row.after} | ${round(row.beforeMaxDurationMs)}ms | ${round(row.afterMaxDurationMs)}ms | ${row.classification} |`);
+	}
+
+	return lines.join('\n');
 }
 
 function compareWordPressRestWaterfalls({ baseline, candidate }) {
@@ -1263,12 +1472,14 @@ module.exports = {
 	DEFAULT_REST_OBSERVATION_MS,
 	classifyResourceUrl,
 	classifyWordPressRestPreloadOpportunities,
+	compareWordPressRestNetworkWaterfalls,
 	collectBrowserResourceTimings,
 	collectWordPressRestAttempts,
 	collectWordPressRestPreloads,
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
 	formatWordPressPerformanceGateReport,
+	formatWordPressRestNetworkDiffMarkdownReport,
 	formatWordPressRestWaterfallMarkdownReport,
 	installWordPressRestInstrumentation,
 	normalizePageManifest,
@@ -1278,6 +1489,7 @@ module.exports = {
 	profileWordPressPages,
 	recommendWordPressPerformanceGates,
 	resolveWordPressUrl,
+	summarizeWordPressRestNetworkRows,
 	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,
 	waitForPageReady,

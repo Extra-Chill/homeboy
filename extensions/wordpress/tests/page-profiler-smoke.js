@@ -13,9 +13,11 @@ const assert = require('node:assert/strict');
 const {
 	classifyResourceUrl,
 	classifyWordPressRestPreloadOpportunities,
+	compareWordPressRestNetworkWaterfalls,
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
 	formatWordPressPerformanceGateReport,
+	formatWordPressRestNetworkDiffMarkdownReport,
 	formatWordPressRestWaterfallMarkdownReport,
 	normalizePageManifest,
 	profileWordPressPage,
@@ -23,6 +25,7 @@ const {
 	recommendWordPressPerformanceGates,
 	resourceFamily,
 	resolveWordPressUrl,
+	summarizeWordPressRestNetworkRows,
 	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,
 } = require('../lib/page-profiler');
@@ -215,6 +218,41 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.equal(opportunities.clientState.length, 1);
 	assert.match(formatWordPressRestWaterfallMarkdownReport(comparison), /REST waterfall comparison/);
 	assert.match(formatWordPressRestWaterfallMarkdownReport(comparison), /Unused REST preloads/);
+
+	const baselineRestNetwork = [
+		{ url: 'https://example.test/wp-json/wp/v2/template-parts/twentytwentyfive//header?context=edit&_locale=user', method: 'GET', status: 200, duration_ms: 340 },
+		{ url: 'https://example.test/wp-json/wp/v2/template-parts/twentytwentyfive//footer?context=edit&_locale=user', method: 'GET', status: 200, duration_ms: 320 },
+		{ url: 'https://example.test/wp-json/wp/v2/posts?context=edit&per_page=3&_locale=user', method: 'GET', status: 200, duration_ms: 360 },
+		{ url: 'https://example.test/wp-json/wp/v2/settings?_locale=user', method: 'OPTIONS', status: 200, duration_ms: 120 },
+		{ url: 'https://example.test/wp-json/wp/v2/pages?context=view&parent=0&per_page=100&_locale=user', method: 'GET', status: 200, duration_ms: 210 },
+		{ url: 'https://example.test/wp-json/wp/v2/users/me?context=edit&_locale=user', method: 'GET', status: 200, duration_ms: 80 },
+		{ url: 'https://example.test/wp-json/wp/v2/wp_pattern_category?context=view&per_page=100&_fields=id%2Cname&_locale=user', method: 'GET', status: 200, duration_ms: 90 },
+	];
+	const candidateRestNetwork = [
+		{ url: 'https://candidate.test/wp-json/wp/v2/settings?_locale=user', method: 'OPTIONS', status: 200, duration_ms: 100 },
+		{ url: 'https://candidate.test/wp-json/wp/v2/pages?context=view&parent=0&per_page=100&_locale=user', method: 'GET', status: 200, duration_ms: 190 },
+		{ url: 'https://candidate.test/wp-json/wp/v2/users/me?context=edit&_locale=user', method: 'GET', status: 200, duration_ms: 70 },
+		{ url: 'https://candidate.test/wp-json/wp/v2/wp_pattern_category?context=view&per_page=100&_fields=id%2Cname&_locale=user', method: 'GET', status: 200, duration_ms: 95 },
+		{ url: 'https://candidate.test/wp-json/wp/v2/navigation?context=edit&_locale=user', method: 'GET', status: 200, duration_ms: 150 },
+	];
+	const baselineRestSummary = summarizeWordPressRestNetworkRows(baselineRestNetwork);
+	assert.equal(baselineRestSummary.count, 7);
+	assert.equal(baselineRestSummary.uniqueCount, 7);
+	assert.equal(baselineRestSummary.routes.find((row) => row.url.includes('/template-parts/')).classification, 'template-data');
+	assert.equal(baselineRestSummary.routes.find((row) => row.method === 'OPTIONS').classification, 'options-schema');
+	assert.equal(baselineRestSummary.routes.find((row) => row.url.includes('/pages')).classification, 'page-tree');
+	assert.equal(baselineRestSummary.routes.find((row) => row.url.includes('/users/me')).classification, 'current-user');
+	assert.equal(baselineRestSummary.routes.find((row) => row.url.includes('wp_pattern_category')).classification, 'pattern-data');
+	const restNetworkDiff = compareWordPressRestNetworkWaterfalls({ baseline: baselineRestNetwork, candidate: candidateRestNetwork });
+	assert.equal(restNetworkDiff.counts.baseline, 7);
+	assert.equal(restNetworkDiff.counts.candidate, 5);
+	assert.equal(restNetworkDiff.counts.removed, 3);
+	assert.equal(restNetworkDiff.counts.removedUnique, 3);
+	assert.equal(restNetworkDiff.counts.added, 1);
+	assert.equal(restNetworkDiff.removedRoutes.some((row) => row.url.includes('/posts')), true);
+	assert.equal(restNetworkDiff.addedRoutes[0].classification, 'navigation-state');
+	assert.match(formatWordPressRestNetworkDiffMarkdownReport(restNetworkDiff), /WordPress REST network diff/);
+	assert.match(formatWordPressRestNetworkDiffMarkdownReport(restNetworkDiff), /template-data/);
 
 	const baselineProfile = {
 		readyMs: 1000,
