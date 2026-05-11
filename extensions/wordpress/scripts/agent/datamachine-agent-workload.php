@@ -500,78 +500,6 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
 }
 
 if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
-    function homeboy_datamachine_agent_finalize_runner_workspace( array $config ): array {
-        $runner_workspace = is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array();
-        $handle           = homeboy_datamachine_agent_scalar( $runner_workspace, 'handle' );
-        $branch           = homeboy_datamachine_agent_scalar( $runner_workspace, 'branch' );
-        if ( empty( $runner_workspace['success'] ) || '' === $handle ) {
-            return array( 'success' => true, 'skipped' => true );
-        }
-
-        $status_ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'datamachine/workspace-git-status' ) : null;
-        $add_ability    = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'datamachine/workspace-git-add' ) : null;
-        $commit_ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'datamachine/workspace-git-commit' ) : null;
-        $push_ability   = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'datamachine/workspace-git-push' ) : null;
-        if ( ! $status_ability || ! $add_ability || ! $commit_ability || ! $push_ability ) {
-            return array( 'success' => false, 'error' => 'Workspace git abilities are not available.' );
-        }
-
-        $status = $status_ability->execute( array( 'name' => $handle ) );
-        if ( function_exists( 'is_wp_error' ) && is_wp_error( $status ) ) {
-            return array( 'success' => false, 'error' => $status->get_error_message(), 'step' => 'workspace_git_status' );
-        }
-        if ( ! is_array( $status ) || empty( $status['success'] ) ) {
-            return array( 'success' => false, 'error' => is_array( $status ) ? (string) ( $status['error'] ?? 'Workspace git status failed.' ) : 'Workspace git status failed.', 'step' => 'workspace_git_status' );
-        }
-
-        $files = is_array( $status['files'] ?? null ) ? array_values( array_filter( array_map( 'strval', $status['files'] ) ) ) : array();
-        if ( (int) ( $status['dirty'] ?? 0 ) > 0 ) {
-            if ( empty( $files ) ) {
-                return array( 'success' => false, 'error' => 'Workspace git status reported dirty files without paths.', 'step' => 'workspace_git_status' );
-            }
-
-            $add = $add_ability->execute( array( 'name' => $handle, 'paths' => $files ) );
-            if ( function_exists( 'is_wp_error' ) && is_wp_error( $add ) ) {
-                return array( 'success' => false, 'error' => $add->get_error_message(), 'step' => 'workspace_git_add' );
-            }
-            if ( ! is_array( $add ) || empty( $add['success'] ) ) {
-                return array( 'success' => false, 'error' => is_array( $add ) ? (string) ( $add['error'] ?? 'Workspace git add failed.' ) : 'Workspace git add failed.', 'step' => 'workspace_git_add' );
-            }
-
-            $commit_message = sprintf( 'chore: persist %s workspace changes', homeboy_datamachine_agent_scalar( $config, 'agent_slug', 'agent' ) );
-            $commit = $commit_ability->execute( array( 'name' => $handle, 'message' => $commit_message ) );
-            if ( function_exists( 'is_wp_error' ) && is_wp_error( $commit ) ) {
-                return array( 'success' => false, 'error' => $commit->get_error_message(), 'step' => 'workspace_git_commit' );
-            }
-            if ( ! is_array( $commit ) || empty( $commit['success'] ) ) {
-                return array( 'success' => false, 'error' => is_array( $commit ) ? (string) ( $commit['error'] ?? 'Workspace git commit failed.' ) : 'Workspace git commit failed.', 'step' => 'workspace_git_commit' );
-            }
-        }
-
-        $push_input = array_filter(
-            array(
-                'name'   => $handle,
-                'branch' => $branch,
-            ),
-            static fn( $value ) => '' !== $value
-        );
-        $push = $push_ability->execute( $push_input );
-        if ( function_exists( 'is_wp_error' ) && is_wp_error( $push ) ) {
-            return array( 'success' => false, 'error' => $push->get_error_message(), 'step' => 'workspace_git_push' );
-        }
-        if ( ! is_array( $push ) || empty( $push['success'] ) ) {
-            return array( 'success' => false, 'error' => is_array( $push ) ? (string) ( $push['error'] ?? 'Workspace git push failed.' ) : 'Workspace git push failed.', 'step' => 'workspace_git_push' );
-        }
-
-        return array_filter(
-            array(
-                'success' => true,
-                'status'  => $status,
-                'push'    => $push,
-            )
-        );
-    }
-
     function homeboy_datamachine_agent_record_pr_tool_result( array $engine_data, array $config, array $tool_result ): array {
         $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
         $engine_key       = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
@@ -634,38 +562,6 @@ if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
 
     function homeboy_datamachine_agent_open_fallback_pr( array $engine_data, array $config ): array {
         $fallback = is_array( $config['fallback_pull_request'] ?? null ) ? $config['fallback_pull_request'] : array();
-        if ( empty( $fallback ) ) {
-            $runner_workspace = is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array();
-            $branch           = homeboy_datamachine_agent_scalar( $runner_workspace, 'branch' );
-            $repo             = homeboy_datamachine_agent_scalar( $config, 'target_repo' );
-            if ( ! empty( $runner_workspace['success'] ) && '' !== $repo && '' !== $branch ) {
-                $finalize = homeboy_datamachine_agent_finalize_runner_workspace( $config );
-                if ( empty( $finalize['success'] ) ) {
-                    return array(
-                        'opened' => false,
-                        'error'  => sprintf(
-                            'Runner workspace finalization failed%s: %s',
-                            '' !== (string) ( $finalize['step'] ?? '' ) ? ' during ' . (string) $finalize['step'] : '',
-                            (string) ( $finalize['error'] ?? 'Unknown error' )
-                        ),
-                        'finalize' => $finalize,
-                    );
-                }
-                $agent_slug = homeboy_datamachine_agent_scalar( $config, 'agent_slug', 'agent' );
-                $model      = homeboy_datamachine_agent_scalar( $config, 'model', 'unknown' );
-                $fallback   = array(
-                    'repo'  => $repo,
-                    'head'  => $branch,
-                    'title' => sprintf( 'Persist %s workspace changes', $agent_slug ),
-                    'body'  => sprintf(
-                        "## Summary\n- Persist runner-owned workspace changes produced by `%s`.\n\n## Runner workspace\n- Branch: `%s`\n\n## AI assistance\n- **AI assistance:** Yes\n- **Tool(s):** Data Machine Agent CI (%s)\n- **Used for:** Drafting the repository changes collected from this runner-owned workspace.\n",
-                        $agent_slug,
-                        $branch,
-                        $model
-                    ),
-                );
-            }
-        }
         if ( empty( $fallback ) ) {
             return array( 'opened' => false );
         }

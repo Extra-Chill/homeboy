@@ -138,7 +138,7 @@ namespace {
         exit( 1 );
     }
 
-    $fallback = homeboy_datamachine_agent_open_fallback_pr(
+    $implicit_fallback = homeboy_datamachine_agent_open_fallback_pr(
         array(),
         array(
             'target_repo'             => 'owner/demo',
@@ -151,8 +151,31 @@ namespace {
         )
     );
 
+    if ( ! empty( $implicit_fallback['opened'] ) ) {
+        fwrite( STDERR, "Did not expect runner workspace fallback PR to open without explicit fallback config.\n" );
+        exit( 1 );
+    }
+
+    $fallback = homeboy_datamachine_agent_open_fallback_pr(
+        array(),
+        array(
+            'target_repo'             => 'owner/demo',
+            'agent_slug'              => 'demo-agent',
+            'model'                   => 'gpt-5.5',
+            'fallback_pull_request'   => array(
+                'repo'  => 'owner/demo',
+                'head'  => 'agent/run',
+                'title' => 'Fallback PR',
+            ),
+            'runner_workspace_result' => array(
+                'success' => true,
+                'branch'  => 'agent/run',
+            ),
+        )
+    );
+
     if ( empty( $fallback['opened'] ) ) {
-        fwrite( STDERR, "Expected runner workspace fallback PR to open.\n" );
+        fwrite( STDERR, "Expected explicit fallback PR to open.\n" );
         exit( 1 );
     }
 
