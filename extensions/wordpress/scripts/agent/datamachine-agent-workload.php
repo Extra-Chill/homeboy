@@ -630,11 +630,13 @@ if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
             'repo'                  => $repo,
             'title'                 => $title,
             'head'                  => $head,
-            'base'                  => $base,
             'body'                  => (string) ( $fallback['body'] ?? '' ),
             'draft'                 => ! empty( $fallback['draft'] ),
             'maintainer_can_modify' => array_key_exists( 'maintainer_can_modify', $fallback ) ? (bool) $fallback['maintainer_can_modify'] : true,
         );
+        if ( '' !== $base ) {
+            $input['base'] = $base;
+        }
 
         $result = $ability->execute( $input );
         if ( is_wp_error( $result ) ) {
