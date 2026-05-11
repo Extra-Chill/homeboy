@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.61.0] - 2026-05-11
+
+### Added
+- define playground grader reward schema
+- support custom agent CI provider plugins
+
 ## [2.60.6] - 2026-05-11
 
 ### Fixed
