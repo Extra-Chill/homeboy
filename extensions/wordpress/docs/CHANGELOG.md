@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.63.0] - 2026-05-11
+
+### Added
+- report WordPress REST network diffs
+
 ## [2.62.0] - 2026-05-11
 
 ### Added
