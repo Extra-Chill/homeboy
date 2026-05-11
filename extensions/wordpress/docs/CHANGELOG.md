@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.54.0] - 2026-05-11
+
+### Added
+- expose agent CI engine data keys
+
 ## [2.53.0] - 2026-05-11
 
 ### Added
