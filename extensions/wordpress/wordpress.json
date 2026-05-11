@@ -823,6 +823,13 @@
       "description": "Config-declared WordPress Playground bench workloads run after the shared bootstrap, playground_blueprint, dependency mounts, and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file} or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata. Step returns use the same {metrics, artifacts, metadata} shape as Node.js bench workloads."
     },
     {
+      "id": "playground_scenario_manifests",
+      "label": "Playground scenario manifests",
+      "type": "array",
+      "default": [],
+      "description": "Scenario manifest files or inline manifest objects for WordPress Playground eval runs. Each manifest declares id, label, prompt or prompt_file, blueprint or blueprint_file, grader PHP file, tags, metadata, limits, and optional run steps. The runner compiles manifests into playground_workloads so existing Playground bench execution remains the only runner path. Relative paths resolve from the manifest file directory, or the component root for inline manifests."
+    },
+    {
       "id": "bench_site_mode",
       "label": "Bench site mode",
       "type": "string",

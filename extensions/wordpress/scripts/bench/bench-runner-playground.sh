@@ -111,6 +111,174 @@ if [ ! -f "$PLAYGROUND_CLI" ]; then
     exit 1
 fi
 
+homeboy_playground_resolve_host_path() {
+    local base_dir="$1"
+    local path_value="$2"
+    if [[ "$path_value" = /* ]]; then
+        printf '%s\n' "$path_value"
+    else
+        printf '%s\n' "${base_dir}/${path_value}"
+    fi
+}
+
+homeboy_playground_component_relative_path() {
+    local host_path="$1"
+    if [[ "$host_path" = "$PLUGIN_PATH"/* ]]; then
+        printf '%s\n' "${host_path#"$PLUGIN_PATH/"}"
+    else
+        echo "Error: scenario manifest file references must stay under component root: $host_path" >&2
+        FAILED_STEP="Scenario manifest setup"
+        exit 1
+    fi
+}
+
+homeboy_playground_compile_scenario_manifests() {
+    local entries_json settings_json
+    settings_json="${HOMEBOY_SETTINGS_JSON:-}"
+    if [ -z "$settings_json" ]; then
+        settings_json="{}"
+    fi
+    entries_json=$(printf '%s' "$settings_json" | jq -c '
+        .playground_scenario_manifests // .scenario_manifests // []
+        | if type == "array" then . elif type == "string" or type == "object" then [.] else [] end
+    ' 2>/dev/null || echo '[]')
+
+    SCENARIO_MANIFEST_WORKLOADS_JSON="[]"
+    SCENARIO_MANIFEST_BLUEPRINT_JSON=""
+    SCENARIO_MANIFESTS_PROVIDED=0
+    if ! printf '%s' "$entries_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    SCENARIO_MANIFESTS_PROVIDED=1
+    local index=0
+    while IFS= read -r manifest_entry; do
+        [ -n "$manifest_entry" ] || continue
+        local entry_type manifest_json manifest_host manifest_dir manifest_rel
+        entry_type=$(printf '%s' "$manifest_entry" | jq -r 'type')
+        manifest_host=""
+        manifest_dir="$PLUGIN_PATH"
+        manifest_rel=""
+        if [ "$entry_type" = "string" ]; then
+            local manifest_ref
+            manifest_ref=$(printf '%s' "$manifest_entry" | jq -r '.')
+            manifest_host=$(homeboy_playground_resolve_host_path "$PLUGIN_PATH" "$manifest_ref")
+            if [ ! -f "$manifest_host" ]; then
+                echo "Error: scenario manifest not found: $manifest_host" >&2
+                FAILED_STEP="Scenario manifest setup"
+                exit 1
+            fi
+            manifest_dir=$(dirname "$manifest_host")
+            manifest_rel=$(homeboy_playground_component_relative_path "$manifest_host")
+            manifest_json=$(jq -c '.' "$manifest_host")
+        elif [ "$entry_type" = "object" ]; then
+            manifest_json=$(printf '%s' "$manifest_entry" | jq -c '.')
+        else
+            echo "Error: playground_scenario_manifests[$index] must be a path string or object" >&2
+            FAILED_STEP="Scenario manifest setup"
+            exit 1
+        fi
+
+        local prompt prompt_file_ref prompt_file_host prompt_file_rel
+        prompt=$(printf '%s' "$manifest_json" | jq -r 'if (.prompt? | type) == "string" then .prompt else empty end')
+        prompt_file_ref=$(printf '%s' "$manifest_json" | jq -r 'if ((.prompt_file? // .prompt_path?) | type) == "string" then (.prompt_file // .prompt_path) else empty end')
+        prompt_file_rel=""
+        if [ -z "$prompt" ] && [ -n "$prompt_file_ref" ]; then
+            prompt_file_host=$(homeboy_playground_resolve_host_path "$manifest_dir" "$prompt_file_ref")
+            if [ ! -f "$prompt_file_host" ]; then
+                echo "Error: scenario prompt file not found: $prompt_file_host" >&2
+                FAILED_STEP="Scenario manifest setup"
+                exit 1
+            fi
+            prompt=$(<"$prompt_file_host")
+            prompt_file_rel=$(homeboy_playground_component_relative_path "$prompt_file_host")
+        fi
+
+        local blueprint_json blueprint_ref blueprint_host blueprint_rel
+        blueprint_json="null"
+        blueprint_rel=""
+        if printf '%s' "$manifest_json" | jq -e '(.blueprint? | type) == "object"' >/dev/null 2>&1; then
+            blueprint_json=$(printf '%s' "$manifest_json" | jq -c '.blueprint')
+        else
+            blueprint_ref=$(printf '%s' "$manifest_json" | jq -r 'if ((.blueprint? // .blueprint_file?) | type) == "string" then (.blueprint // .blueprint_file) else empty end')
+            if [ -n "$blueprint_ref" ]; then
+                blueprint_host=$(homeboy_playground_resolve_host_path "$manifest_dir" "$blueprint_ref")
+                if [ ! -f "$blueprint_host" ]; then
+                    echo "Error: scenario blueprint file not found: $blueprint_host" >&2
+                    FAILED_STEP="Scenario manifest setup"
+                    exit 1
+                fi
+                blueprint_json=$(jq -c '.' "$blueprint_host")
+                blueprint_rel=$(homeboy_playground_component_relative_path "$blueprint_host")
+            fi
+        fi
+        if [ "$blueprint_json" != "null" ]; then
+            if [ -z "$SCENARIO_MANIFEST_BLUEPRINT_JSON" ]; then
+                SCENARIO_MANIFEST_BLUEPRINT_JSON="$blueprint_json"
+            elif [ "$(printf '%s' "$SCENARIO_MANIFEST_BLUEPRINT_JSON" | jq -S -c '.')" != "$(printf '%s' "$blueprint_json" | jq -S -c '.')" ]; then
+                echo "Error: multiple scenario manifests with different blueprints cannot run in one Playground process" >&2
+                FAILED_STEP="Scenario manifest setup"
+                exit 1
+            fi
+        fi
+
+        local grader_ref grader_host grader_rel run_json
+        grader_ref=$(printf '%s' "$manifest_json" | jq -r 'if ((.grader? // .grader_file?) | type) == "string" then (.grader // .grader_file) else empty end')
+        grader_rel=""
+        if [ -n "$grader_ref" ]; then
+            grader_host=$(homeboy_playground_resolve_host_path "$manifest_dir" "$grader_ref")
+            if [ ! -f "$grader_host" ]; then
+                echo "Error: scenario grader file not found: $grader_host" >&2
+                FAILED_STEP="Scenario manifest setup"
+                exit 1
+            fi
+            grader_rel=$(homeboy_playground_component_relative_path "$grader_host")
+        fi
+
+        run_json=$(printf '%s' "$manifest_json" | jq -c 'if (.run? | type) == "array" then .run else [] end')
+        if [ -n "$grader_rel" ]; then
+            run_json=$(jq -nc --argjson run "$run_json" --arg grader "$grader_rel" '$run + [{type: "php", file: $grader}]')
+        fi
+        if ! printf '%s' "$run_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+            echo "Error: scenario manifest requires run steps or a grader PHP file" >&2
+            FAILED_STEP="Scenario manifest setup"
+            exit 1
+        fi
+
+        local workload_json
+        workload_json=$(jq -nc \
+            --argjson manifest "$manifest_json" \
+            --argjson run "$run_json" \
+            --arg prompt "$prompt" \
+            --arg manifestFile "$manifest_rel" \
+            --arg promptFile "$prompt_file_rel" \
+            --arg blueprintFile "$blueprint_rel" \
+            --arg graderFile "$grader_rel" \
+            '($manifest.metadata // {}) as $metadata |
+            {
+                id: ($manifest.id // $manifest.label),
+                label: $manifest.label,
+                run: $run,
+                tags: ($manifest.tags // []),
+                artifacts: ($manifest.artifacts // {}),
+                metadata: ($metadata + {
+                    scenario_manifest: $manifestFile,
+                    prompt: $prompt,
+                    prompt_file: $promptFile,
+                    blueprint_file: $blueprintFile,
+                    grader_file: $graderFile,
+                    limits: ($manifest.limits // {})
+                })
+            }
+            | if .label == null then del(.label) else . end
+            | .metadata |= with_entries(select(.value != "" and .value != {}))')
+        SCENARIO_MANIFEST_WORKLOADS_JSON=$(jq -nc --argjson workloads "$SCENARIO_MANIFEST_WORKLOADS_JSON" --argjson workload "$workload_json" '$workloads + [$workload]')
+        index=$((index + 1))
+    done < <(printf '%s' "$entries_json" | jq -c '.[]')
+}
+
+homeboy_playground_compile_scenario_manifests
+
 BENCH_WORKLOADS_FILTER_PROVIDED=0
 if [ -n "${HOMEBOY_BENCH_WORKLOADS:-}" ]; then
     BENCH_WORKLOADS_FILTER_PROVIDED=1
@@ -121,7 +289,9 @@ elif [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}"
 fi
 
 PLAYGROUND_WORKLOADS_PROVIDED=0
-if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+if [ "$SCENARIO_MANIFESTS_PROVIDED" = "1" ]; then
+    PLAYGROUND_WORKLOADS_PROVIDED=1
+elif [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
     if printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -e 'has("playground_workloads") and (.playground_workloads != null) and (.playground_workloads != [])' >/dev/null 2>&1; then
         PLAYGROUND_WORKLOADS_PROVIDED=1
     fi
@@ -223,6 +393,9 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
         PLAYGROUND_WORKLOADS_JSON="$extracted"
     fi
 fi
+if [ "$SCENARIO_MANIFESTS_PROVIDED" = "1" ]; then
+    PLAYGROUND_WORKLOADS_JSON=$(jq -nc --argjson existing "$PLAYGROUND_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$existing + $scenarios')
+fi
 
 # Extract `playground_file_mounts` from the merged settings JSON. Components can
 # mount files from themselves or validation dependencies into arbitrary absolute
@@ -279,6 +452,9 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
         PLAYGROUND_BLUEPRINT_JSON="$extracted"
     fi
+fi
+if printf '%s' "$PLAYGROUND_BLUEPRINT_JSON" | jq -e 'type == "object" and length == 0' >/dev/null 2>&1 && [ -n "$SCENARIO_MANIFEST_BLUEPRINT_JSON" ]; then
+    PLAYGROUND_BLUEPRINT_JSON="$SCENARIO_MANIFEST_BLUEPRINT_JSON"
 fi
 
 # Optional direct pass-through for Playground's own install-mode flag. Most
@@ -463,7 +639,7 @@ else
     fi
 fi
 
-if ! homeboy_wordpress_emit_browser_target "${HOMEBOY_SETTINGS_JSON:-{}}" "$SHARED_STATE_HOST" "$COMPONENT_ID" "$PLUGIN_SLUG" "$BENCH_SITE_MODE"; then
+if ! homeboy_wordpress_emit_browser_target "${HOMEBOY_SETTINGS_JSON:-}" "$SHARED_STATE_HOST" "$COMPONENT_ID" "$PLUGIN_SLUG" "$BENCH_SITE_MODE"; then
     FAILED_STEP="Browser bench target setup"
     exit 1
 fi

@@ -175,6 +175,68 @@ The same workload contract powers Data Machine agent CI in Playground. See
 [`../../wordpress/docs/AGENT_CI_PLAYGROUND.md`](../../wordpress/docs/AGENT_CI_PLAYGROUND.md)
 for the dedicated agent sandbox guide.
 
+## Playground Scenario Manifests
+
+Repos can declare first-class scenario manifests and let the WordPress runner
+compile them into `playground_workloads`. This keeps eval/RL-style scenarios on
+the existing Playground bench execution path instead of adding a second runner.
+
+```json
+{
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "playground_scenario_manifests": [
+          "scenarios/navigation-001.json"
+        ]
+      }
+    }
+  }
+}
+```
+
+Manifest shape:
+
+```json
+{
+  "id": "block-markup/navigation-001",
+  "label": "Generate valid navigation block markup",
+  "prompt_file": "prompt.md",
+  "blueprint": "blueprints/navigation-001.json",
+  "grader": "graders/navigation-001.php",
+  "tags": ["blocks", "markup", "medium"],
+  "limits": {
+    "max_turns": 8,
+    "step_budget": 12,
+    "time_budget_ms": 600000
+  },
+  "run": [
+    { "type": "php", "file": "workloads/run-agent.php" }
+  ],
+  "metadata": {
+    "corpus": "wp-rl-smoke"
+  }
+}
+```
+
+Supported fields:
+
+- `prompt` or `prompt_file`: prompt text is copied into scenario metadata. File
+  references resolve relative to the manifest file.
+- `blueprint` or `blueprint_file`: inline object or JSON file passed to
+  Playground as the run blueprint. Multiple manifests in one run must use the
+  same blueprint because the existing Playground process boots once.
+- `run`: existing `playground_workloads` steps for the model or agent action
+  loop. The supported step types are still `php`, `ability`, and `wp-cli`.
+- `grader` or `grader_file`: PHP file appended after `run`, so grading happens
+  after the action loop.
+- `tags`, `metadata`, and `limits`: copied into the BenchResults scenario
+  envelope for reports, filtering, and downstream eval tooling.
+
+Relative manifest entries resolve from the component/corpus root. Relative
+references inside a manifest resolve from the manifest file's directory. Inline
+manifest objects resolve relative paths from the component root.
+
 Example: drive a plugin's pipeline through an Abilities API entry point.
 
 ```json

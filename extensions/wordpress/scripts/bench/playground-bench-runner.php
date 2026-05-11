@@ -509,6 +509,25 @@ function pg_bench_apply_grader_payload(array $payload, array &$metrics, array &$
     $metadata['grade'] = $normalized['grade'];
 }
 
+function pg_bench_workload_tags($value): array {
+    if (!is_array($value) || !pg_bench_is_list($value)) {
+        return [];
+    }
+
+    $tags = [];
+    foreach ($value as $tag) {
+        if (!is_scalar($tag)) {
+            continue;
+        }
+        $tag = trim((string) $tag);
+        if ($tag !== '' && !in_array($tag, $tags, true)) {
+            $tags[] = $tag;
+        }
+    }
+
+    return $tags;
+}
+
 function pg_bench_merge_workload_payload($payload, array &$metrics, array &$artifacts, array &$metadata): void {
     if (!is_array($payload)) {
         return;
@@ -986,6 +1005,7 @@ try {
             'kind' => 'configured',
             'id' => $configured_workload['id'],
             'label' => isset($configured_workload['label']) && is_scalar($configured_workload['label']) ? (string) $configured_workload['label'] : null,
+            'tags' => pg_bench_workload_tags($configured_workload['tags'] ?? []),
             'workload' => $configured_workload,
             'source' => 'config',
         ];
@@ -1121,7 +1141,7 @@ if (HOMEBOY_BENCH_LIST_ONLY) {
             'source' => $source,
             'iterations' => 0,
             'default_iterations' => $iterations_per_workload,
-            'tags' => [],
+            'tags' => $workload['tags'] ?? [],
             'metrics' => new stdClass(),
         ];
         if ($relative_file !== null) {
@@ -1214,6 +1234,7 @@ try {
             'id' => $scenario_id,
             'source' => $source,
             'iterations' => $iterations_per_workload,
+            'tags' => $workload['tags'] ?? [],
             'metrics' => $metrics,
             'memory' => ['peak_bytes' => $peak_memory],
         ];
