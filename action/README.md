@@ -172,7 +172,8 @@ Use these outputs to gate downstream jobs:
 | `comment-key` | No | *(auto)* | Shared PR comment key so multiple jobs aggregate into one sticky comment |
 | `comment-section-key` | No | *(auto)* | Section key within the shared PR comment |
 | `comment-section-title` | No | *(auto)* | Visible heading for this section in the shared PR comment |
-| `pr-policy` | No | | Path to a repo-local PR policy file for deterministic PR auto-merge eligibility |
+| `pr-policy` | No | | Path to a repo-local PR policy file for deterministic PR open/update and auto-merge eligibility |
+| `pr-open-policy` | No | | Path to a repo-local PR open/update policy file. Defaults to `pr-policy` when empty. |
 | `pr-policy-merge` | No | `false` | Merge the PR when `pr-policy` marks it safe |
 | `pr-policy-merge-method` | No | `squash` | Merge method for `pr-policy-merge`: `merge`, `squash`, or `rebase` |
 | `release-dry-run` | No | `false` | Preview the release without making changes |
@@ -290,7 +291,7 @@ For fork PRs, Homeboy Action now attempts the same direct-to-PR autofix flow fir
 
 ### Deterministic PR Policy Gate
 
-Use `pr-policy` to classify whether a PR is safe for deterministic auto-merge after Homeboy checks pass. The policy gate reads changed files from GitHub, applies repo-local author, branch, path, and content rules, then exposes `pr-policy-safe` and optionally merges the PR.
+Use `pr-policy` to classify whether a PR is safe for deterministic auto-merge after Homeboy checks pass. Homeboy core reads changed files from GitHub, applies repo-local author, branch, path, and content rules, then exposes `pr-policy-safe` and optionally merges the PR.
 
 ```yaml
 - uses: actions/checkout@v4
@@ -307,26 +308,43 @@ Use `pr-policy` to classify whether a PR is safe for deterministic auto-merge af
 Example policy:
 
 ```yaml
-title: World PR policy
-allowed_authors:
-  - github-actions[bot]
-allowed_head_branches:
-  - world-day/**
-allowed_paths:
-  - content/**
-  - themes/world-of-wordpress/patterns/**
-blocked_paths:
-  - .github/**
-  - bundles/**
-  - plugins/**
-blocked_content_patterns:
-  - 'eval[[:space:]]*\('
-  - 'shell_exec[[:space:]]*\('
-require_same_repository: true
-delete_branch_on_merge: true
+open:
+  title: World PR open policy
+  allowed_sources: [autofix, generated]
+  allowed_head_branches:
+    - world-day/**
+    - ci/autofix/**
+  allowed_paths:
+    - content/**
+    - themes/world-of-wordpress/patterns/**
+  blocked_paths:
+    - .github/**
+    - bundles/**
+    - plugins/**
+  require_same_repository: true
+
+merge:
+  title: World PR merge policy
+  allowed_authors:
+    - github-actions[bot]
+  allowed_head_branches:
+    - world-day/**
+    - ci/autofix/**
+  allowed_paths:
+    - content/**
+    - themes/world-of-wordpress/patterns/**
+  blocked_paths:
+    - .github/**
+    - bundles/**
+    - plugins/**
+  blocked_content_patterns:
+    - 'eval[[:space:]]*\('
+    - 'shell_exec[[:space:]]*\('
+  require_same_repository: true
+  delete_branch_on_merge: true
 ```
 
-The gate fails closed for missing policy, unknown changed files, blocked paths, unexpected authors, fork PRs when `require_same_repository` is true, or blocked content patterns. Unsafe PRs are not merged; the action still emits outputs so a workflow can decide whether to fail, comment, or route to human review.
+Flat policy files from earlier action versions continue to work as merge policies. The gate fails closed for missing policy, unknown changed files, blocked paths, unexpected authors, fork PRs when `require_same_repository` is true, or blocked content patterns. Unsafe PRs are not merged; the action still emits outputs so a workflow can decide whether to fail, comment, or route to human review.
 
 ### Auto-open Fix PRs on non-PR runs
 
