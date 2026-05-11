@@ -1,0 +1,304 @@
+# Reusable Homeboy CI workflow.
+#
+# Consumers should call this workflow instead of hand-rolling quality-check DAGs.
+# It preserves a hard build gate when requested, then runs Homeboy quality
+# commands in one action invocation so audit/lint/test all report before the
+# workflow fails.
+
+name: Homeboy CI
+
+on:
+  workflow_call:
+    inputs:
+      commands:
+        description: 'Homeboy quality commands to run.'
+        type: string
+        default: 'audit,lint,test'
+      expected-commands:
+        description: 'Full command set expected across the workflow.'
+        type: string
+        default: ''
+      component:
+        description: 'Component name override.'
+        type: string
+        default: ''
+      extension:
+        description: 'Single extension ID override.'
+        type: string
+        default: ''
+      extension-source:
+        description: 'Git URL or path to install the extension from.'
+        type: string
+        default: 'https://github.com/Extra-Chill/homeboy-extensions'
+      args:
+        description: 'Additional arguments passed to each Homeboy command.'
+        type: string
+        default: ''
+      rig:
+        description: 'Bench rig pair/list passed to homeboy bench.'
+        type: string
+        default: ''
+      scenario:
+        description: 'Bench scenario ID passed to homeboy bench.'
+        type: string
+        default: ''
+      runs:
+        description: 'Bench run count passed to homeboy bench.'
+        type: string
+        default: ''
+      iterations:
+        description: 'Bench iteration count passed to homeboy bench.'
+        type: string
+        default: ''
+      regression-threshold:
+        description: 'Bench regression threshold passed to homeboy bench.'
+        type: string
+        default: ''
+      version:
+        description: 'Homeboy release version to install when no source or binary path is provided.'
+        type: string
+        default: 'latest'
+      source:
+        description: 'Path to build Homeboy from source inside the quality job.'
+        type: string
+        default: ''
+      binary-path:
+        description: 'Path to an existing Homeboy binary inside the caller checkout.'
+        type: string
+        default: ''
+      build-command:
+        description: 'Optional command that builds a Homeboy binary before quality checks.'
+        type: string
+        default: ''
+      build-artifact-path:
+        description: 'Path created by build-command and uploaded for the quality job.'
+        type: string
+        default: 'target/release/homeboy'
+      build-artifact-file:
+        description: 'Downloaded binary filename used by the quality job.'
+        type: string
+        default: 'homeboy'
+      rust-toolchain:
+        description: 'Rust toolchain for optional build and action source builds.'
+        type: string
+        default: 'stable'
+      auto-setup:
+        description: 'Whether Homeboy Action should install detected runtime dependencies.'
+        type: string
+        default: 'true'
+      php-version:
+        description: 'PHP version override.'
+        type: string
+        default: ''
+      node-version:
+        description: 'Node.js version override.'
+        type: string
+        default: ''
+      differential-gating:
+        description: 'Enable PR differential gating for audit/test.'
+        type: string
+        default: 'false'
+      observation-window:
+        description: 'Duration window for best-effort observation export.'
+        type: string
+        default: '24h'
+      autofix:
+        description: 'Enable PR autofix.'
+        type: string
+        default: 'false'
+      autofix-mode:
+        description: 'When to run autofix.'
+        type: string
+        default: 'on-failure'
+      autofix-open-pr:
+        description: 'Enable non-PR autofix PR creation.'
+        type: string
+        default: 'false'
+      autofix-max-commits:
+        description: 'Maximum autofix commits per branch.'
+        type: string
+        default: '2'
+      autofix-commands:
+        description: 'Override autofix commands.'
+        type: string
+        default: ''
+      autofix-label:
+        description: 'PR label required before autofix runs.'
+        type: string
+        default: ''
+      pr-comment:
+        description: 'Post the default Homeboy PR comment.'
+        type: string
+        default: 'true'
+      auto-issue:
+        description: 'Override auto-issue filing.'
+        type: string
+        default: ''
+      comment-key:
+        description: 'Shared PR comment key.'
+        type: string
+        default: ''
+      comment-section-key:
+        description: 'Section key within the shared PR comment.'
+        type: string
+        default: ''
+      comment-section-title:
+        description: 'Section title within the shared PR comment.'
+        type: string
+        default: ''
+      pr-policy:
+        description: 'Path to a repo-local PR policy file.'
+        type: string
+        default: ''
+      pr-open-policy:
+        description: 'Path to a repo-local PR open/update policy file.'
+        type: string
+        default: ''
+      pr-policy-merge:
+        description: 'Merge the PR when pr-policy marks it safe.'
+        type: string
+        default: 'false'
+      pr-policy-merge-method:
+        description: 'Merge method for pr-policy-merge.'
+        type: string
+        default: 'squash'
+      action-ref:
+        description: 'homeboy-action ref used by this workflow.'
+        type: string
+        default: 'v2'
+    secrets:
+      HOMEBOY_APP_ID:
+        required: false
+      HOMEBOY_APP_PRIVATE_KEY:
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  build:
+    name: Build
+    if: inputs.build-command != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        if: inputs.rust-toolchain != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+
+      - name: Cache cargo
+        if: hashFiles('Cargo.lock') != ''
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ci-
+
+      - name: Build Homeboy binary
+        run: ${{ inputs.build-command }}
+
+      - name: Upload Homeboy binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: homeboy-binary
+          path: ${{ inputs.build-artifact-path }}
+          retention-days: 1
+
+  quality:
+    name: Homeboy
+    needs: [build]
+    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Download built Homeboy binary
+        if: inputs.build-command != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Resolve Homeboy binary path
+        id: binary-path
+        shell: bash
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+          BUILD_ARTIFACT_FILE: ${{ inputs.build-artifact-file }}
+          BINARY_PATH: ${{ inputs.binary-path }}
+        run: |
+          if [ -n "${BUILD_COMMAND}" ]; then
+            path=".homeboy-bin/${BUILD_ARTIFACT_FILE}"
+            chmod +x "${path}"
+            echo "value=${path}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "value=${BINARY_PATH}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Check out Homeboy Action
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: ./.homeboy-action
+        with:
+          version: ${{ inputs.version }}
+          source: ${{ inputs.source }}
+          binary-path: ${{ steps.binary-path.outputs.value }}
+          rust-toolchain: ${{ inputs.rust-toolchain }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          commands: ${{ inputs.commands }}
+          expected-commands: ${{ inputs.expected-commands }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          rig: ${{ inputs.rig }}
+          scenario: ${{ inputs.scenario }}
+          runs: ${{ inputs.runs }}
+          iterations: ${{ inputs.iterations }}
+          regression-threshold: ${{ inputs.regression-threshold }}
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          differential-gating: ${{ inputs.differential-gating }}
+          observation-window: ${{ inputs.observation-window }}
+          autofix: ${{ inputs.autofix }}
+          autofix-mode: ${{ inputs.autofix-mode }}
+          autofix-open-pr: ${{ inputs.autofix-open-pr }}
+          autofix-max-commits: ${{ inputs.autofix-max-commits }}
+          autofix-commands: ${{ inputs.autofix-commands }}
+          autofix-label: ${{ inputs.autofix-label }}
+          app-token: ${{ steps.app-token.outputs.token || github.token }}
+          auto-issue: ${{ inputs.auto-issue }}
+          comment-key: ${{ inputs.comment-key }}
+          comment-section-key: ${{ inputs.comment-section-key }}
+          comment-section-title: ${{ inputs.comment-section-title }}
+          pr-comment: ${{ inputs.pr-comment }}
+          pr-policy: ${{ inputs.pr-policy }}
+          pr-open-policy: ${{ inputs.pr-open-policy }}
+          pr-policy-merge: ${{ inputs.pr-policy-merge }}
+          pr-policy-merge-method: ${{ inputs.pr-policy-merge-method }}

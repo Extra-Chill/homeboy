@@ -18,6 +18,10 @@ The action release stream is aligned with that channel. Release commits and tags
 
 ### PR Quality Checks
 
+Prefer the reusable workflow so Homeboy Action owns the CI DAG and result
+aggregation. The workflow runs all requested quality commands before failing,
+so an audit failure does not hide lint or test feedback.
+
 ```yaml
 name: CI
 on: [pull_request]
@@ -28,15 +32,28 @@ concurrency:
 
 jobs:
   homeboy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
+    with:
+      extension: wordpress
+      commands: audit,lint,test
+      php-version: '8.3'
+    secrets: inherit
+```
 
-      - uses: Extra-Chill/homeboy-action@v2
-        with:
-          extension: wordpress
-          commands: lint,test
-          php-version: '8.3'
+When validating Homeboy itself or another project that needs to build a binary
+before running quality checks, keep the build as the hard gate and let the
+reusable workflow run all quality commands after the binary is available:
+
+```yaml
+jobs:
+  homeboy:
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
+    with:
+      component: homeboy
+      commands: audit,lint,test
+      build-command: cargo build --release
+      build-artifact-path: target/release/homeboy
+    secrets: inherit
 ```
 
 ### Continuous Release
@@ -210,12 +227,15 @@ Use these outputs to gate downstream jobs:
 ### Full Suite with Audit
 
 ```yaml
-- uses: Extra-Chill/homeboy-action@v2
-  with:
-    extension: wordpress
-    commands: lint,test,audit
-    php-version: '8.3'
-    node-version: '20'
+jobs:
+  homeboy:
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
+    with:
+      extension: wordpress
+      commands: audit,lint,test
+      php-version: '8.3'
+      node-version: '20'
+    secrets: inherit
 ```
 
 ### PR Scoped Checks (Changed Files)
@@ -230,6 +250,11 @@ Use these outputs to gate downstream jobs:
 ```
 
 ### Split Jobs, Shared PR Comment
+
+Use the reusable workflow for normal CI. Split jobs are still supported for
+specialized cases, but the workflow author is responsible for dependency
+semantics. Avoid chaining `audit -> lint -> test` with `needs` unless skipped
+downstream checks are intentional.
 
 ```yaml
 jobs:
