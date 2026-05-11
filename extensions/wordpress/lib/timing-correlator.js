@@ -125,6 +125,19 @@ function pickFirstString(source, keys) {
 	return undefined;
 }
 
+function pickFirstBoolean(source, keys) {
+	if (!source || typeof source !== 'object') {
+		return undefined;
+	}
+	for (const key of keys) {
+		const value = source[key];
+		if (typeof value === 'boolean') {
+			return value;
+		}
+	}
+	return undefined;
+}
+
 /**
  * Convert a single browser resource timing entry into a normalized record.
  * Accepts native `PerformanceResourceTiming`-shaped objects as well as
@@ -144,9 +157,9 @@ function normalizeBrowserTiming(entry, options = {}) {
 		return null;
 	}
 
-	const startTime = pickFirstNumber(entry, ['startTime', 'fetchStart', 'requestStart', 'start_ms', 'startMs']);
+	const startTime = pickFirstNumber(entry, ['startTime', 'fetchStart', 'requestStart', 'start_time_ms', 'start_ms', 'startMs']);
 	const responseStart = pickFirstNumber(entry, ['responseStart', 'ttfb_ms', 'ttfbMs', 'response_start']);
-	const responseEnd = pickFirstNumber(entry, ['responseEnd', 'response_end', 'endMs', 'end_ms']);
+	const responseEnd = pickFirstNumber(entry, ['responseEnd', 'response_end', 'endMs', 'end_ms', 'response_end_ms']);
 	const duration = pickFirstNumber(entry, ['duration', 'duration_ms', 'durationMs']);
 
 	let computedDuration = duration;
@@ -164,11 +177,15 @@ function normalizeBrowserTiming(entry, options = {}) {
 	const initiator = pickFirstString(entry, ['initiatorType', 'initiator_type', 'initiator', 'resourceType']);
 	const phase = pickFirstString(entry, ['phase', 'phase_label', 'phaseLabel']);
 	const method = pickFirstString(entry, ['method', 'request_method', 'requestMethod']);
+	const status = pickFirstNumber(entry, ['status', 'statusCode', 'status_code', 'http_status']);
+	const failed = pickFirstBoolean(entry, ['failed', 'error']);
 
 	return {
 		url: rawUrl,
 		normalizedUrl: normalizeUrl(rawUrl, options),
 		method: method ? method.toUpperCase() : undefined,
+		status: typeof status === 'number' ? status : undefined,
+		failed,
 		startTime: typeof startTime === 'number' ? startTime : undefined,
 		ttfbMs: typeof computedTtfb === 'number' ? computedTtfb : undefined,
 		durationMs: typeof computedDuration === 'number' ? computedDuration : undefined,
@@ -176,6 +193,112 @@ function normalizeBrowserTiming(entry, options = {}) {
 		phase,
 		raw: entry,
 	};
+}
+
+function normalizeBrowserProfileTimings(profile, options = {}) {
+	if (!profile || typeof profile !== 'object') {
+		return [];
+	}
+
+	const phases = normalizeProfilePhases(profile);
+	const resources = Array.isArray(profile.resources) ? profile.resources : [];
+	const network = Array.isArray(profile.network) ? profile.network : [];
+	const resourcesByUrl = new Map();
+
+	for (const resource of resources) {
+		const rawUrl = pickFirstString(resource, ['name', 'url']);
+		const normalizedUrl = normalizeUrl(rawUrl, options);
+		if (!normalizedUrl) {
+			continue;
+		}
+		if (!resourcesByUrl.has(normalizedUrl)) {
+			resourcesByUrl.set(normalizedUrl, []);
+		}
+		resourcesByUrl.get(normalizedUrl).push(resource);
+	}
+
+	const rows = [];
+	for (const entry of network) {
+		const rawUrl = pickFirstString(entry, ['url', 'name']);
+		const normalizedUrl = normalizeUrl(rawUrl, options);
+		const resource = normalizedUrl ? (resourcesByUrl.get(normalizedUrl) || []).shift() : undefined;
+		const startTime = pickFirstNumber(entry, ['start_time_ms', 'startTime', 'start_ms', 'startMs'])
+			?? pickFirstNumber(resource, ['startTime', 'fetchStart', 'requestStart']);
+		const phase = pickFirstString(entry, ['phase', 'phase_label', 'phaseLabel'])
+			|| pickFirstString(resource, ['phase', 'phase_label', 'phaseLabel'])
+			|| phaseForStartTime(phases, startTime);
+
+		rows.push({
+			...resource,
+			...entry,
+			name: rawUrl,
+			url: rawUrl,
+			startTime,
+			responseStart: pickFirstNumber(resource, ['responseStart']) ?? pickFirstNumber(entry, ['responseStart', 'ttfb_ms', 'ttfbMs']),
+			responseEnd: pickFirstNumber(resource, ['responseEnd']) ?? pickFirstNumber(entry, ['response_end_ms', 'responseEnd']),
+			durationMs: pickFirstNumber(entry, ['duration_ms', 'durationMs']) ?? pickFirstNumber(resource, ['duration', 'duration_ms', 'durationMs']),
+			phase,
+		});
+	}
+
+	for (const entries of resourcesByUrl.values()) {
+		for (const resource of entries) {
+			const startTime = pickFirstNumber(resource, ['startTime', 'fetchStart', 'requestStart']);
+			rows.push({
+				...resource,
+				phase: pickFirstString(resource, ['phase', 'phase_label', 'phaseLabel']) || phaseForStartTime(phases, startTime),
+			});
+		}
+	}
+
+	return rows;
+}
+
+function normalizeProfilePhases(profile) {
+	const phases = [];
+	if (profile.phases && typeof profile.phases === 'object' && !Array.isArray(profile.phases)) {
+		for (const [name, phase] of Object.entries(profile.phases)) {
+			if (!phase || typeof phase !== 'object') {
+				continue;
+			}
+			const startMs = pickFirstNumber(phase, ['start_time_ms', 'startTime', 'start_ms', 'startMs']);
+			const endMs = pickFirstNumber(phase, ['end_time_ms', 'endTime', 'end_ms', 'endMs']);
+			if (startMs !== undefined) {
+				phases.push({ name, startMs, endMs });
+			}
+		}
+	} else if (Array.isArray(profile.phase_marks)) {
+		const marks = profile.phase_marks
+			.map((mark) => ({
+				name: pickFirstString(mark, ['name', 'phase', 'label']),
+				startMs: pickFirstNumber(mark, ['start_time_ms', 'startTime', 'start_ms', 'startMs']),
+			}))
+			.filter((mark) => mark.name && mark.startMs !== undefined)
+			.sort((a, b) => a.startMs - b.startMs);
+		for (let i = 0; i < marks.length; i++) {
+			phases.push({
+				name: marks[i].name,
+				startMs: marks[i].startMs,
+				endMs: marks[i + 1]?.startMs,
+			});
+		}
+	}
+
+	return phases.sort((a, b) => a.startMs - b.startMs);
+}
+
+function phaseForStartTime(phases, startTime) {
+	if (!Array.isArray(phases) || typeof startTime !== 'number') {
+		return undefined;
+	}
+	let matched;
+	for (const phase of phases) {
+		const endMs = typeof phase.endMs === 'number' ? phase.endMs : Infinity;
+		if (startTime >= phase.startMs && startTime < endMs) {
+			matched = phase.name;
+		}
+	}
+	return matched;
 }
 
 /**
@@ -298,16 +421,23 @@ function correlateBrowserAndWordPressTimings(input, options = {}) {
 	if (!input || typeof input !== 'object') {
 		throw new TypeError('correlateBrowserAndWordPressTimings requires an input object');
 	}
-	const { browserTimings, wordpressProfilerRows } = input;
+	const { browserTimings, browserProfile, wordpressProfilerRows } = input;
 
-	if (!Array.isArray(browserTimings)) {
+	const rawBrowserTimings = Array.isArray(browserTimings)
+		? browserTimings
+		: normalizeBrowserProfileTimings(browserProfile, options);
+
+	if (!Array.isArray(rawBrowserTimings)) {
+		throw new TypeError('input.browserTimings must be an array');
+	}
+	if (!Array.isArray(browserTimings) && !browserProfile) {
 		throw new TypeError('input.browserTimings must be an array');
 	}
 	if (!Array.isArray(wordpressProfilerRows)) {
 		throw new TypeError('input.wordpressProfilerRows must be an array');
 	}
 
-	const normalizedBrowser = browserTimings
+	const normalizedBrowser = rawBrowserTimings
 		.map((entry) => normalizeBrowserTiming(entry, options))
 		.filter((entry) => entry !== null && entry.normalizedUrl !== '');
 
@@ -347,6 +477,7 @@ function correlateBrowserAndWordPressTimings(input, options = {}) {
 
 		if (bucket && bucket.length > 0) {
 			const summary = bucket.shift();
+			const browserMethod = browser.method || method;
 			const browserDurationMs = browser.durationMs;
 			const browserTtfbMs = browser.ttfbMs;
 			const wordpressDurationMs = summary.durationMs;
@@ -361,6 +492,9 @@ function correlateBrowserAndWordPressTimings(input, options = {}) {
 				url: browser.url,
 				normalizedUrl: browser.normalizedUrl,
 				method,
+				browserUrl: browser.url,
+				browserMethod,
+				browserStatus: browser.status,
 				phase: browser.phase,
 				initiatorType: browser.initiatorType,
 				browserDurationMs,
@@ -368,6 +502,8 @@ function correlateBrowserAndWordPressTimings(input, options = {}) {
 				wordpressDurationMs,
 				wordpressRequestId: summary.requestId,
 				wordpressUri: summary.uri,
+				wordpressNormalizedUri: summary.normalizedUri,
+				wordpressMethod: summary.method,
 				transportDeltaMs,
 				totalDeltaMs,
 			});
@@ -384,12 +520,17 @@ function correlateBrowserAndWordPressTimings(input, options = {}) {
 	}
 
 	const phaseGroups = groupByPhase(correlated);
+	const topDeltasByPhase = buildTopDeltasByPhase(correlated, options.topDeltaLimit || 5);
+	const metrics = buildCorrelationMetrics(phaseGroups);
 
 	return {
 		correlated,
+		matchedRows: correlated,
 		unmatchedBrowser,
 		unmatchedWordPress,
 		phaseGroups,
+		topDeltasByPhase,
+		metrics,
 	};
 }
 
@@ -405,6 +546,8 @@ function groupByPhase(correlated) {
 				totalBrowserTtfbMs: 0,
 				totalWordPressDurationMs: 0,
 				totalTransportDeltaMs: 0,
+				transportDeltaCount: 0,
+				maxTransportDeltaMs: undefined,
 			});
 		}
 		const group = groups.get(key);
@@ -420,6 +563,10 @@ function groupByPhase(correlated) {
 		}
 		if (typeof row.transportDeltaMs === 'number') {
 			group.totalTransportDeltaMs += row.transportDeltaMs;
+			group.transportDeltaCount += 1;
+			if (group.maxTransportDeltaMs === undefined || row.transportDeltaMs > group.maxTransportDeltaMs) {
+				group.maxTransportDeltaMs = row.transportDeltaMs;
+			}
 		}
 	}
 
@@ -432,15 +579,117 @@ function groupByPhase(correlated) {
 			avgBrowserDurationMs: group.totalBrowserDurationMs / count,
 			avgBrowserTtfbMs: group.totalBrowserTtfbMs / count,
 			avgWordPressDurationMs: group.totalWordPressDurationMs / count,
-			avgTransportDeltaMs: group.totalTransportDeltaMs / count,
+			avgTransportDeltaMs: group.transportDeltaCount > 0 ? group.totalTransportDeltaMs / group.transportDeltaCount : undefined,
+			maxTransportDeltaMs: group.maxTransportDeltaMs,
 		});
 	}
 	return result;
 }
 
+function buildTopDeltasByPhase(correlated, limit) {
+	const groups = new Map();
+	for (const row of correlated) {
+		if (typeof row.transportDeltaMs !== 'number') {
+			continue;
+		}
+		const key = row.phase || '__unphased__';
+		if (!groups.has(key)) {
+			groups.set(key, { phase: row.phase, rows: [] });
+		}
+		groups.get(key).rows.push(row);
+	}
+
+	return [...groups.values()].map((group) => ({
+		phase: group.phase,
+		rows: group.rows
+			.sort((a, b) => Math.abs(b.transportDeltaMs) - Math.abs(a.transportDeltaMs))
+			.slice(0, limit),
+	}));
+}
+
+function buildCorrelationMetrics(phaseGroups) {
+	const phases = {};
+	for (const group of phaseGroups) {
+		const key = group.phase || 'unphased';
+		phases[key] = {
+			count: group.count,
+			avg_transport_delta_ms: group.avgTransportDeltaMs,
+			max_transport_delta_ms: group.maxTransportDeltaMs,
+			avg_browser_ttfb_ms: group.avgBrowserTtfbMs,
+			avg_browser_duration_ms: group.avgBrowserDurationMs,
+			avg_wordpress_duration_ms: group.avgWordPressDurationMs,
+		};
+	}
+	return { phases };
+}
+
+function formatNumber(value) {
+	return typeof value === 'number' && Number.isFinite(value) ? String(Math.round(value)) : '';
+}
+
+function escapeMarkdownCell(value) {
+	return String(value ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+}
+
+function formatEndpoint(method, url) {
+	const endpoint = `${method || ''} ${url || ''}`.trim();
+	return endpoint ? `\`${escapeMarkdownCell(endpoint)}\`` : '';
+}
+
+function formatTimingCorrelationMarkdownReport(correlation, options = {}) {
+	const limit = options.limit || 10;
+	const lines = [
+		'## WordPress timing correlation',
+		'',
+		'| Phase | Count | Avg transport delta | Max transport delta | Avg browser TTFB | Avg WP app |',
+		'|---|---:|---:|---:|---:|---:|',
+	];
+
+	for (const group of correlation.phaseGroups || []) {
+		lines.push(`| ${escapeMarkdownCell(group.phase || 'unphased')} | ${group.count} | ${formatNumber(group.avgTransportDeltaMs)} | ${formatNumber(group.maxTransportDeltaMs)} | ${formatNumber(group.avgBrowserTtfbMs)} | ${formatNumber(group.avgWordPressDurationMs)} |`);
+	}
+
+	const topDeltas = correlation.topDeltasByPhase || buildTopDeltasByPhase(correlation.correlated || [], limit);
+	for (const group of topDeltas) {
+		if (!Array.isArray(group.rows) || group.rows.length === 0) {
+			continue;
+		}
+		lines.push(
+			'',
+			`## Largest transport deltas: ${escapeMarkdownCell(group.phase || 'unphased')}`,
+			'',
+			'| Browser request | Status | WordPress request | Browser TTFB | Browser duration | WP app | Transport delta |',
+			'|---|---:|---|---:|---:|---:|---:|'
+		);
+		for (const row of group.rows.slice(0, limit)) {
+			lines.push(`| ${formatEndpoint(row.browserMethod || row.method, row.browserUrl || row.url)} | ${formatNumber(row.browserStatus)} | ${formatEndpoint(row.wordpressMethod, row.wordpressNormalizedUri || row.normalizedUrl)} | ${formatNumber(row.browserTtfbMs)} | ${formatNumber(row.browserDurationMs)} | ${formatNumber(row.wordpressDurationMs)} | ${formatNumber(row.transportDeltaMs)} |`);
+		}
+	}
+
+	const unmatchedBrowser = correlation.unmatchedBrowser || [];
+	if (unmatchedBrowser.length > 0) {
+		lines.push('', '## Unmatched browser rows', '', '| Browser request | Status | Phase | Duration |', '|---|---:|---|---:|');
+		for (const row of unmatchedBrowser.slice(0, limit)) {
+			lines.push(`| ${formatEndpoint(row.method, row.url)} | ${formatNumber(row.status)} | ${escapeMarkdownCell(row.phase || 'unphased')} | ${formatNumber(row.durationMs)} |`);
+		}
+	}
+
+	const unmatchedWordPress = correlation.unmatchedWordPress || [];
+	if (unmatchedWordPress.length > 0) {
+		lines.push('', '## Unmatched WordPress rows', '', '| WordPress request | App duration | Request ID |', '|---|---:|---|');
+		for (const row of unmatchedWordPress.slice(0, limit)) {
+			lines.push(`| ${formatEndpoint(row.method, row.normalizedUri || row.uri)} | ${formatNumber(row.durationMs)} | ${escapeMarkdownCell(row.requestId || '')} |`);
+		}
+	}
+
+	return lines.join('\n');
+}
+
 module.exports = {
 	correlateBrowserAndWordPressTimings,
+	formatTimingCorrelationMarkdownReport,
 	normalizeBrowserTiming,
+	normalizeBrowserProfileTimings,
 	normalizeUrl,
 	summarizeWordPressProfilerRows,
 };
