@@ -691,11 +691,11 @@ jobs:
               } * $artifactExportConfig),
               dry_run: $dryRun,
               transcript_dir: $transcriptGuestDir,
-              bench_env: {
+              bench_env: ({
                 GITHUB_TOKEN: $githubToken,
                 GITHUB_RUN_ID: $githubRunId,
                 GITHUB_RUN_ATTEMPT: $githubRunAttempt
-              } + $providerBenchEnv
+              } + $providerBenchEnv)
             } + (if $dailyMemoryEnabled then {daily_memory_enabled: true} else {} end)' > "$config_path"
           printf 'config_path=%s\n' "$config_path" >> "$GITHUB_OUTPUT"
           printf 'transcript_host_dir=%s\n' "$transcript_host_dir" >> "$GITHUB_OUTPUT"
