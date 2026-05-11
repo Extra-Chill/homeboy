@@ -237,6 +237,44 @@ namespace {
         exit( 1 );
     }
 
+    $fallback_pr_input = array();
+    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
+        'datamachine/list-github-pulls' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            fn() => array(
+                'success' => true,
+                'pulls'   => array(),
+            )
+        ),
+        'datamachine/create-github-pull-request' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            function ( array $input ) use ( &$fallback_pr_input ): array {
+                $fallback_pr_input = $input;
+                return array(
+                    'success'  => true,
+                    'html_url' => 'https://github.com/owner/repo/pull/654',
+                );
+            }
+        ),
+    );
+    $created_fallback = homeboy_datamachine_agent_open_fallback_pr(
+        array(),
+        array(
+            'tool_results_key'      => 'github_tool_results',
+            'fallback_pull_request' => array(
+                'repo'  => 'owner/repo',
+                'title' => 'Fallback PR',
+                'head'  => 'agent/new-pr-branch',
+            ),
+        )
+    );
+    if ( empty( $created_fallback['opened'] ) ) {
+        fwrite( STDERR, "Expected fallback PR handling to create a PR when no existing PR matches.\n" );
+        exit( 1 );
+    }
+    if ( array_key_exists( 'base', $fallback_pr_input ) ) {
+        fwrite( STDERR, "Expected fallback PR creation to omit an empty base parameter.\n" );
+        exit( 1 );
+    }
+
     $merged_daily_memory = homeboy_datamachine_agent_merge_daily_memory_artifact(
         "# Daily Memory: 2026-05-10\n\n### Existing Entry\n- Keep this.\n### Concurrent Entry\n- Do not delete this.\n",
         "# Daily Memory: 2026-05-10\n\n### Existing Entry\n- Keep this.\n### New Entry\n- Add this.\n"
