@@ -25,6 +25,14 @@ const DEFAULT_DIAGNOSIS_THRESHOLDS = {
 
 const DEFAULT_REST_OBSERVATION_MS = 1000;
 
+const DEFAULT_GATE_THRESHOLDS = {
+	readyMsRegression: 250,
+	networkIdleMsRegression: 500,
+	unusedPreloadCount: 0,
+	preloadPayloadBytes: 250000,
+	serverRequestDurationMsRegression: 100,
+};
+
 function round(value) {
 	return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : 0;
 }
@@ -771,6 +779,251 @@ function addFinding(findings, severity, code, message, data = {}) {
 	findings.push({ severity, code, message, ...data });
 }
 
+function addGateRecommendation(recommendations, gate) {
+	recommendations.push({
+		status: gate.available === false ? 'skipped' : 'recommended',
+		...gate,
+	});
+}
+
+function pickNumber(source, keys) {
+	if (!source || typeof source !== 'object') {
+		return undefined;
+	}
+	for (const key of keys) {
+		const value = source[key];
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value;
+		}
+	}
+	return undefined;
+}
+
+function maxNumber(values) {
+	const numbers = values.filter((value) => typeof value === 'number' && Number.isFinite(value));
+	return numbers.length > 0 ? Math.max(...numbers) : undefined;
+}
+
+function sumNumbers(rows, keys) {
+	if (!Array.isArray(rows)) {
+		return undefined;
+	}
+	let total = 0;
+	let found = false;
+	for (const row of rows) {
+		const value = pickNumber(row, keys);
+		if (value !== undefined) {
+			total += value;
+			found = true;
+		}
+	}
+	return found ? total : undefined;
+}
+
+function normalizeGateInput(input = {}) {
+	const comparison = input.comparison || (input.counts && Array.isArray(input.rows) ? input : undefined);
+	const baseline = input.baselineProfile || input.baseline;
+	const candidate = input.candidateProfile || input.candidate || (comparison ? undefined : input);
+	return { comparison, baseline, candidate };
+}
+
+function metricFromProfile(profile, keys) {
+	return pickNumber(profile?.metrics, keys)
+		?? pickNumber(profile?.browserMetrics, keys)
+		?? pickNumber(profile?.diagnosis?.summary, keys)
+		?? pickNumber(profile, keys);
+}
+
+function restNetworkCount(source) {
+	return pickNumber(source?.counts, ['candidateNetwork'])
+		?? pickNumber(source?.restWaterfall?.counts, ['network'])
+		?? pickNumber(source?.resources, ['restCount']);
+}
+
+function lateRestCount(source) {
+	return pickNumber(source?.restWaterfall?.counts, ['afterReady'])
+		?? pickNumber(source?.diagnosis?.summary, ['restAfterReadyCount']);
+}
+
+function serverRequestDurationMs(source) {
+	return maxNumber([
+		metricFromProfile(source, ['serverRequestDurationMs', 'wordpressRequestDurationMs']),
+		maxNumber((source?.correlation?.correlated || []).map((row) => row.wordpressDurationMs)),
+	]);
+}
+
+function gateThreshold(baselineValue, regressionThreshold) {
+	return typeof baselineValue === 'number' ? round(baselineValue + regressionThreshold) : undefined;
+}
+
+function recommendWordPressPerformanceGates(profileOrComparison, options = {}) {
+	if (!profileOrComparison || typeof profileOrComparison !== 'object') {
+		throw new TypeError('recommendWordPressPerformanceGates requires a profile or comparison object');
+	}
+	const thresholds = { ...DEFAULT_GATE_THRESHOLDS, ...(options.thresholds || {}) };
+	const { comparison, baseline, candidate } = normalizeGateInput(profileOrComparison);
+	const recommendations = [];
+	const baselineFailed = metricFromProfile(baseline, ['failedRequestCount', 'browser_failed_request_count']);
+	const candidateFailed = metricFromProfile(candidate, ['failedRequestCount', 'browser_failed_request_count']);
+	const baselineConsoleErrors = metricFromProfile(baseline, ['consoleErrorCount', 'pageErrorCount', 'browser_console_error_count', 'browser_page_error_count']);
+	const candidateConsoleErrors = metricFromProfile(candidate, ['consoleErrorCount', 'pageErrorCount', 'browser_console_error_count', 'browser_page_error_count']);
+	const baselineRestNetwork = pickNumber(comparison?.counts, ['baselineNetwork']) ?? restNetworkCount(baseline);
+	const candidateRestNetwork = pickNumber(comparison?.counts, ['candidateNetwork']) ?? restNetworkCount(candidate);
+	const baselineLateRest = lateRestCount(baseline);
+	const candidateLateRest = lateRestCount(candidate);
+	const baselineReadyMs = metricFromProfile(baseline, ['readyMs']);
+	const candidateReadyMs = metricFromProfile(candidate, ['readyMs']);
+	const baselineNetworkIdleMs = metricFromProfile(baseline, ['networkIdleAfterReadyMs', 'browser_network_idle_ms']);
+	const candidateNetworkIdleMs = metricFromProfile(candidate, ['networkIdleAfterReadyMs', 'browser_network_idle_ms']);
+	const unusedPreloadCount = metricFromProfile(candidate, ['unusedPreloadCount', 'wordpressUnusedPreloadCount', 'wordpress_unused_preload_count']);
+	const preloadPayloadBytes = metricFromProfile(candidate, ['preloadPayloadBytes', 'wordpressPreloadPayloadBytes', 'wordpress_preload_payload_bytes'])
+		?? sumNumbers(candidate?.preloads || candidate?.preloadRequests, ['bytes', 'payloadBytes', 'transferSize']);
+	const baselineServerMs = serverRequestDurationMs(baseline);
+	const candidateServerMs = serverRequestDurationMs(candidate);
+	const restNetworkThreshold = baselineRestNetwork ?? candidateRestNetwork;
+	const lateRestThreshold = baselineLateRest ?? candidateLateRest;
+	const readyMsThreshold = baselineReadyMs !== undefined
+		? gateThreshold(baselineReadyMs, thresholds.readyMsRegression)
+		: gateThreshold(candidateReadyMs, thresholds.readyMsRegression);
+	const networkIdleMsThreshold = baselineNetworkIdleMs !== undefined
+		? gateThreshold(baselineNetworkIdleMs, thresholds.networkIdleMsRegression)
+		: gateThreshold(candidateNetworkIdleMs, thresholds.networkIdleMsRegression);
+	const serverMsThreshold = baselineServerMs !== undefined
+		? gateThreshold(baselineServerMs, thresholds.serverRequestDurationMsRegression)
+		: gateThreshold(candidateServerMs, thresholds.serverRequestDurationMsRegression);
+
+	addGateRecommendation(recommendations, {
+		id: 'wordpress.no_new_failed_requests',
+		metric: 'wordpress_failed_request_count',
+		description: 'No new failed REST/browser requests.',
+		operator: '<=',
+		threshold: baselineFailed ?? 0,
+		baselineValue: baselineFailed,
+		candidateValue: candidateFailed,
+		available: candidateFailed !== undefined || baselineFailed !== undefined,
+		reason: candidateFailed === undefined && baselineFailed === undefined ? 'failed request counts were not captured' : undefined,
+	});
+	addGateRecommendation(recommendations, {
+		id: 'wordpress.rest_network_count',
+		metric: 'wordpress_rest_network_count',
+		description: 'Candidate REST network count does not increase.',
+		operator: '<=',
+		threshold: restNetworkThreshold,
+		baselineValue: baselineRestNetwork,
+		candidateValue: candidateRestNetwork,
+		available: restNetworkThreshold !== undefined,
+		reason: restNetworkThreshold === undefined ? 'REST network counts were not captured' : undefined,
+	});
+	addGateRecommendation(recommendations, {
+		id: 'wordpress.late_rest_count',
+		metric: 'wordpress_late_rest_count',
+		description: 'Candidate late REST count does not increase.',
+		operator: '<=',
+		threshold: lateRestThreshold,
+		baselineValue: baselineLateRest,
+		candidateValue: candidateLateRest,
+		available: lateRestThreshold !== undefined,
+		reason: lateRestThreshold === undefined ? 'late REST counts were not captured' : undefined,
+	});
+	addGateRecommendation(recommendations, {
+		id: 'wordpress.ready_ms',
+		metric: 'wordpress_ready_ms',
+		description: 'Ready time does not regress beyond threshold.',
+		operator: '<=',
+		threshold: readyMsThreshold,
+		baselineValue: baselineReadyMs,
+		candidateValue: candidateReadyMs,
+		available: readyMsThreshold !== undefined,
+		reason: readyMsThreshold === undefined ? 'ready timings were not captured' : undefined,
+	});
+	addGateRecommendation(recommendations, {
+		id: 'wordpress.network_idle_ms',
+		metric: 'wordpress_network_idle_after_ready_ms',
+		description: 'Network-idle time does not regress beyond threshold.',
+		operator: '<=',
+		threshold: networkIdleMsThreshold,
+		baselineValue: baselineNetworkIdleMs,
+		candidateValue: candidateNetworkIdleMs,
+		available: networkIdleMsThreshold !== undefined,
+		reason: networkIdleMsThreshold === undefined ? 'network-idle timings were not captured' : undefined,
+	});
+	addGateRecommendation(recommendations, {
+		id: 'wordpress.unused_preload_count',
+		metric: 'wordpress_unused_preload_count',
+		description: 'Unused preload count is zero or under threshold when available.',
+		operator: '<=',
+		threshold: thresholds.unusedPreloadCount,
+		candidateValue: unusedPreloadCount,
+		available: unusedPreloadCount !== undefined,
+		reason: unusedPreloadCount === undefined ? 'unused preload counts were not captured' : undefined,
+	});
+	addGateRecommendation(recommendations, {
+		id: 'wordpress.preload_payload_bytes',
+		metric: 'wordpress_preload_payload_bytes',
+		description: 'Preload payload bytes stay under threshold when available.',
+		operator: '<=',
+		threshold: thresholds.preloadPayloadBytes,
+		candidateValue: preloadPayloadBytes,
+		available: preloadPayloadBytes !== undefined,
+		reason: preloadPayloadBytes === undefined ? 'preload payload bytes were not captured' : undefined,
+	});
+	addGateRecommendation(recommendations, {
+		id: 'wordpress.server_request_duration_ms',
+		metric: 'wordpress_server_request_duration_ms',
+		description: 'Server request duration does not regress beyond threshold when available.',
+		operator: '<=',
+		threshold: serverMsThreshold,
+		baselineValue: baselineServerMs,
+		candidateValue: candidateServerMs,
+		available: serverMsThreshold !== undefined,
+		reason: serverMsThreshold === undefined ? 'server request durations were not captured' : undefined,
+	});
+	addGateRecommendation(recommendations, {
+		id: 'wordpress.no_new_console_errors',
+		metric: 'wordpress_console_error_count',
+		description: 'No new console/page errors when available.',
+		operator: '<=',
+		threshold: baselineConsoleErrors ?? 0,
+		baselineValue: baselineConsoleErrors,
+		candidateValue: candidateConsoleErrors,
+		available: candidateConsoleErrors !== undefined || baselineConsoleErrors !== undefined,
+		reason: candidateConsoleErrors === undefined && baselineConsoleErrors === undefined ? 'console/page error counts were not captured' : undefined,
+	});
+
+	return {
+		thresholds,
+		recommendations,
+		recommended: recommendations.filter((gate) => gate.status === 'recommended'),
+		skipped: recommendations.filter((gate) => gate.status === 'skipped'),
+	};
+}
+
+function formatWordPressPerformanceGateReport(recommendations, options = {}) {
+	const gates = Array.isArray(recommendations)
+		? recommendations
+		: Array.isArray(recommendations?.recommendations) ? recommendations.recommendations : [];
+	const title = options.title || 'WordPress performance gate recommendations';
+	const lines = [
+		`## ${title}`,
+		'',
+		'| Gate | Metric | Operator | Threshold | Candidate | Status |',
+		'|---|---|---:|---:|---:|---|',
+	];
+	for (const gate of gates) {
+		const threshold = gate.threshold === undefined ? '-' : gate.threshold;
+		const candidate = gate.candidateValue === undefined ? '-' : gate.candidateValue;
+		lines.push(`| ${gate.description || gate.id} | \`${gate.metric}\` | ${gate.operator || '<='} | ${threshold} | ${candidate} | ${gate.status} |`);
+	}
+	const skipped = gates.filter((gate) => gate.status === 'skipped' && gate.reason);
+	if (skipped.length > 0) {
+		lines.push('', '## Skipped gates', '');
+		for (const gate of skipped) {
+			lines.push(`- \`${gate.id}\`: ${gate.reason}`);
+		}
+	}
+	return lines.join('\n');
+}
+
 function aggregateResourcesByKind(resources) {
 	const groups = {};
 	for (const resource of resources) {
@@ -1015,6 +1268,7 @@ module.exports = {
 	collectWordPressRestPreloads,
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
+	formatWordPressPerformanceGateReport,
 	formatWordPressRestWaterfallMarkdownReport,
 	installWordPressRestInstrumentation,
 	normalizePageManifest,
@@ -1022,6 +1276,7 @@ module.exports = {
 	resourceFamily,
 	profileWordPressPage,
 	profileWordPressPages,
+	recommendWordPressPerformanceGates,
 	resolveWordPressUrl,
 	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,

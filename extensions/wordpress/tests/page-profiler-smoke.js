@@ -15,10 +15,12 @@ const {
 	classifyWordPressRestPreloadOpportunities,
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
+	formatWordPressPerformanceGateReport,
 	formatWordPressRestWaterfallMarkdownReport,
 	normalizePageManifest,
 	profileWordPressPage,
 	profileWordPressPages,
+	recommendWordPressPerformanceGates,
 	resourceFamily,
 	resolveWordPressUrl,
 	summarizeWordPressRestWaterfall,
@@ -213,6 +215,64 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.equal(opportunities.clientState.length, 1);
 	assert.match(formatWordPressRestWaterfallMarkdownReport(comparison), /REST waterfall comparison/);
 	assert.match(formatWordPressRestWaterfallMarkdownReport(comparison), /Unused REST preloads/);
+
+	const baselineProfile = {
+		readyMs: 1000,
+		restWaterfall: baselineWaterfall,
+		diagnosis: {
+			summary: {
+				failedRequestCount: 0,
+				networkIdleAfterReadyMs: 1200,
+				restAfterReadyCount: baselineWaterfall.counts.afterReady,
+			},
+		},
+		metrics: {
+			consoleErrorCount: 0,
+		},
+		correlation: {
+			correlated: [
+				{ wordpressDurationMs: 90 },
+			],
+		},
+	};
+	const candidateProfile = {
+		readyMs: 1100,
+		restWaterfall: candidateWaterfall,
+		diagnosis: {
+			summary: {
+				failedRequestCount: 0,
+				networkIdleAfterReadyMs: 1300,
+				restAfterReadyCount: candidateWaterfall.counts.afterReady,
+			},
+		},
+		metrics: {
+			consoleErrorCount: 0,
+			unusedPreloadCount: 0,
+			preloadPayloadBytes: 12000,
+		},
+		correlation: {
+			correlated: [
+				{ wordpressDurationMs: 120 },
+			],
+		},
+	};
+	const gateRecommendations = recommendWordPressPerformanceGates({
+		baseline: baselineProfile,
+		candidate: candidateProfile,
+		comparison,
+	});
+	assert.equal(gateRecommendations.recommendations.length, 9);
+	assert.equal(gateRecommendations.recommended.length, 9);
+	assert.equal(gateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.rest_network_count').threshold, 2);
+	assert.equal(gateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.ready_ms').threshold, 1250);
+	assert.equal(gateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.server_request_duration_ms').threshold, 190);
+	assert.match(formatWordPressPerformanceGateReport(gateRecommendations), /WordPress performance gate recommendations/);
+	assert.match(formatWordPressPerformanceGateReport(gateRecommendations), /wordpress_rest_network_count/);
+
+	const skippedGateRecommendations = recommendWordPressPerformanceGates({ comparison });
+	assert.equal(skippedGateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.rest_network_count').status, 'recommended');
+	assert.equal(skippedGateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.late_rest_count').status, 'skipped');
+	assert.match(formatWordPressPerformanceGateReport(skippedGateRecommendations), /Skipped gates/);
 
 async function main() {
 	const page = new FakePage(resources);
