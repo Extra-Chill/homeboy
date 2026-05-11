@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.4.5] - 2026-05-11
+
+### Changed
+- delegate issue rendering to homeboy
+
 ## [2.4.4] - 2026-05-11
 
 ### Fixed
