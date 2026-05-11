@@ -12,12 +12,16 @@ const assert = require('node:assert/strict');
  */
 const {
 	classifyResourceUrl,
+	classifyWordPressRestPreloadOpportunities,
+	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
+	formatWordPressRestWaterfallMarkdownReport,
 	normalizePageManifest,
 	profileWordPressPage,
 	profileWordPressPages,
 	resourceFamily,
 	resolveWordPressUrl,
+	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,
 } = require('../lib/page-profiler');
 
@@ -157,6 +161,38 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.equal(diagnosis.assets.heavyFamilies[0].family, '/wp-json/wp/v2/posts');
 	assert.equal(diagnosis.findings.some((finding) => finding.code === 'network-active-after-ready'), true);
 	assert.equal(diagnosis.findings.some((finding) => finding.code === 'rest-after-ready'), true);
+
+	const baselineWaterfall = summarizeWordPressRestWaterfall({
+		readyMs: 1000,
+		apiFetchAttempts: [
+			{ source: 'apiFetch', path: '/wp/v2/template-parts/twentytwentyfive//header?context=edit', method: 'GET', startedAtMs: 1100 },
+			{ source: 'apiFetch', path: '/wp/v2/users/me?context=edit', method: 'GET', startedAtMs: 1150 },
+		],
+		networkRequests: [
+			{ url: 'https://example.test/wp-json/wp/v2/template-parts/twentytwentyfive//header?context=edit', method: 'GET', status: 200, start_ms: 1102, duration_ms: 180 },
+			{ url: 'https://example.test/wp-json/wp/v2/users/me?context=edit', method: 'GET', status: 200, start_ms: 1152, duration_ms: 90 },
+		],
+	});
+	const candidateWaterfall = summarizeWordPressRestWaterfall({
+		readyMs: 900,
+		apiFetchAttempts: [
+			{ source: 'apiFetch', path: '/wp/v2/template-parts/twentytwentyfive//header?context=edit', method: 'GET', startedAtMs: 950, durationMs: 2 },
+			{ source: 'apiFetch', path: '/wp/v2/users/me?context=edit', method: 'GET', startedAtMs: 980 },
+		],
+		networkRequests: [
+			{ url: 'https://example.test/wp-json/wp/v2/users/me?context=edit', method: 'GET', status: 200, start_ms: 982, duration_ms: 90 },
+		],
+	});
+	assert.equal(baselineWaterfall.counts.network, 2);
+	assert.equal(candidateWaterfall.counts.preloadedOrCache, 1);
+	assert.equal(candidateWaterfall.preloadedOrCacheRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
+	const comparison = compareWordPressRestWaterfalls({ baseline: baselineWaterfall, candidate: candidateWaterfall });
+	assert.equal(comparison.counts.removedNetwork, 1);
+	assert.equal(comparison.remainingNetworkOpportunities[0].classification, 'client-state');
+	const opportunities = classifyWordPressRestPreloadOpportunities(baselineWaterfall);
+	assert.equal(opportunities.safeDeterministic.length, 1);
+	assert.equal(opportunities.clientState.length, 1);
+	assert.match(formatWordPressRestWaterfallMarkdownReport(comparison), /REST waterfall comparison/);
 
 async function main() {
 	const page = new FakePage(resources);

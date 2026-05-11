@@ -23,6 +23,8 @@ const DEFAULT_DIAGNOSIS_THRESHOLDS = {
 	failedRequestCount: 1,
 };
 
+const DEFAULT_REST_OBSERVATION_MS = 1000;
+
 function round(value) {
 	return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : 0;
 }
@@ -145,6 +147,413 @@ function resourceFamily(url) {
 
 function browserMetricName(name) {
 	return String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'mark';
+}
+
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeRestUrl(url) {
+	const normalized = normalizeUrl(url, { lowercasePath: false });
+	if (!normalized) {
+		return '';
+	}
+	const restIndex = normalized.indexOf('/wp-json/');
+	if (restIndex >= 0) {
+		return normalized.slice(restIndex + '/wp-json'.length);
+	}
+	const restRouteIndex = normalized.indexOf('rest_route=');
+	if (restRouteIndex >= 0) {
+		return normalized;
+	}
+	return normalized;
+}
+
+function normalizeRestMethod(method) {
+	return String(method || 'GET').trim().toUpperCase() || 'GET';
+}
+
+function restKey(row) {
+	return `${normalizeRestMethod(row?.method)} ${normalizeRestUrl(row?.url || row?.path || row?.normalizedUrl)}`;
+}
+
+function normalizeApiFetchAttempt(row) {
+	const url = normalizeRestUrl(row?.url || row?.path || row?.route || '');
+	return {
+		source: row?.source || 'apiFetch',
+		url,
+		method: normalizeRestMethod(row?.method),
+		startedAtMs: round(row?.startedAtMs ?? row?.startMs),
+		resolvedAtMs: round(row?.resolvedAtMs ?? row?.endMs),
+		durationMs: round(row?.durationMs),
+		status: row?.status || 0,
+		failed: Boolean(row?.failed),
+		error: row?.error,
+	};
+}
+
+function normalizeRestNetworkRequest(row) {
+	const url = normalizeRestUrl(row?.url || row?.name || row?.normalizedUrl || '');
+	return {
+		source: 'network',
+		url,
+		method: normalizeRestMethod(row?.method),
+		status: row?.status || 0,
+		failed: Boolean(row?.failed) || (typeof row?.status === 'number' && row.status >= 400),
+		startMs: round(row?.start_ms ?? row?.startMs ?? row?.startTime),
+		responseEndMs: round(row?.end_ms ?? row?.endMs ?? row?.responseEnd),
+		durationMs: round(row?.duration_ms ?? row?.durationMs ?? row?.duration),
+		ttfbMs: round(row?.ttfb_ms ?? row?.ttfbMs),
+		resourceType: row?.resource_type || row?.resourceType || row?.initiatorType,
+	};
+}
+
+function isRestUrl(url) {
+	const value = String(url || '');
+	return value.includes('/wp-json/') || value.includes('rest_route=');
+}
+
+async function installWordPressRestInstrumentation(page) {
+	if (!page || typeof page.addInitScript !== 'function') {
+		throw new TypeError('page must provide addInitScript()');
+	}
+
+	await page.addInitScript(() => {
+		if (window.__homeboyWordPressRestProbe?.installed) {
+			return;
+		}
+
+		const probe = window.__homeboyWordPressRestProbe = {
+			installed: true,
+			attempts: [],
+			startedAt: performance.now(),
+		};
+
+		const normalizePath = (input) => {
+			if (!input) {
+				return '';
+			}
+			if (typeof input === 'string') {
+				return input;
+			}
+			if (input instanceof Request) {
+				return input.url;
+			}
+			if (typeof input === 'object') {
+				if (typeof input.url === 'string') {
+					return input.url;
+				}
+				if (typeof input.path === 'string') {
+					return input.path;
+				}
+				if (typeof input.endpoint === 'string') {
+					return input.namespace ? `/${input.namespace.replace(/^\/+|\/+$/g, '')}/${input.endpoint.replace(/^\/+/, '')}` : input.endpoint;
+				}
+			}
+			return '';
+		};
+
+		const isRest = (url) => String(url || '').includes('/wp-json/') || String(url || '').startsWith('/wp/v2/') || String(url || '').includes('rest_route=');
+		const record = (source, input, init) => {
+			const url = normalizePath(input);
+			if (!isRest(url)) {
+				return null;
+			}
+			const entry = {
+				source,
+				url,
+				method: (input?.method || init?.method || 'GET').toUpperCase(),
+				startedAtMs: performance.now() - probe.startedAt,
+			};
+			probe.attempts.push(entry);
+			return entry;
+		};
+
+		if (typeof window.fetch === 'function' && !window.fetch.__homeboyRestProbeWrapped) {
+			const originalFetch = window.fetch.bind(window);
+			const wrappedFetch = async (...args) => {
+				const entry = record('fetch', args[0], args[1]);
+				try {
+					const response = await originalFetch(...args);
+					if (entry) {
+						entry.status = response.status;
+						entry.resolvedAtMs = performance.now() - probe.startedAt;
+						entry.durationMs = entry.resolvedAtMs - entry.startedAtMs;
+					}
+					return response;
+				} catch (error) {
+					if (entry) {
+						entry.failed = true;
+						entry.error = error?.message || String(error);
+						entry.resolvedAtMs = performance.now() - probe.startedAt;
+						entry.durationMs = entry.resolvedAtMs - entry.startedAtMs;
+					}
+					throw error;
+				}
+			};
+			wrappedFetch.__homeboyRestProbeWrapped = true;
+			window.fetch = wrappedFetch;
+		}
+
+		const patchApiFetch = () => {
+			const apiFetch = window.wp?.apiFetch;
+			if (typeof apiFetch !== 'function' || apiFetch.__homeboyRestProbeWrapped) {
+				return Boolean(apiFetch?.__homeboyRestProbeWrapped);
+			}
+			const wrappedApiFetch = async (options = {}) => {
+				const entry = record('apiFetch', options, options);
+				try {
+					const result = await apiFetch(options);
+					if (entry) {
+						entry.resolvedAtMs = performance.now() - probe.startedAt;
+						entry.durationMs = entry.resolvedAtMs - entry.startedAtMs;
+					}
+					return result;
+				} catch (error) {
+					if (entry) {
+						entry.failed = true;
+						entry.error = error?.message || String(error);
+						entry.status = error?.data?.status || error?.status || 0;
+						entry.resolvedAtMs = performance.now() - probe.startedAt;
+						entry.durationMs = entry.resolvedAtMs - entry.startedAtMs;
+					}
+					throw error;
+				}
+			};
+			for (const key of Object.keys(apiFetch)) {
+				wrappedApiFetch[key] = apiFetch[key];
+			}
+			wrappedApiFetch.__homeboyRestProbeWrapped = true;
+			window.wp.apiFetch = wrappedApiFetch;
+			return true;
+		};
+
+		if (!patchApiFetch()) {
+			const interval = setInterval(() => {
+				if (patchApiFetch()) {
+					clearInterval(interval);
+				}
+			}, 20);
+			setTimeout(() => clearInterval(interval), 30000);
+		}
+	});
+}
+
+async function collectWordPressRestAttempts(page) {
+	if (!page || typeof page.evaluate !== 'function') {
+		throw new TypeError('page must provide evaluate()');
+	}
+	const attempts = await page.evaluate(() => window.__homeboyWordPressRestProbe?.attempts || []);
+	return attempts.map(normalizeApiFetchAttempt).filter((attempt) => attempt.url);
+}
+
+function summarizeWordPressRestWaterfall(input = {}) {
+	const readyMs = round(input.readyMs);
+	const rawApiFetchAttempts = Array.isArray(input.apiFetchAttempts) ? input.apiFetchAttempts.map(normalizeApiFetchAttempt).filter((row) => row.url) : [];
+	const apiFetchKeys = new Set(rawApiFetchAttempts.filter((row) => row.source === 'apiFetch').map(restKey));
+	const apiFetchAttempts = rawApiFetchAttempts.filter((row) => row.source !== 'fetch' || !apiFetchKeys.has(restKey(row)));
+	const resourceTimings = Array.isArray(input.resourceTimings) ? input.resourceTimings.filter((row) => isRestUrl(row?.url || row?.name || row?.normalizedUrl)).map(normalizeRestNetworkRequest).filter((row) => row.url) : [];
+	const networkRequests = Array.isArray(input.networkRequests) ? input.networkRequests.filter((row) => isRestUrl(row?.url || row?.name || row?.normalizedUrl)).map(normalizeRestNetworkRequest).filter((row) => row.url) : [];
+	const networkByKey = new Map();
+
+	for (const row of [...resourceTimings, ...networkRequests]) {
+		const key = restKey(row);
+		if (!networkByKey.has(key)) {
+			networkByKey.set(key, []);
+		}
+		networkByKey.get(key).push(row);
+	}
+
+	const rows = [];
+	const seen = new Set();
+	for (const attempt of apiFetchAttempts) {
+		const key = restKey(attempt);
+		seen.add(key);
+		const matches = networkByKey.get(key) || [];
+		const network = matches.shift();
+		rows.push({
+			url: attempt.url,
+			method: attempt.method,
+			source: network ? 'network' : 'preloaded-or-cache',
+			clientSource: attempt.source,
+			status: network?.status || attempt.status || 0,
+			failed: Boolean(network?.failed || attempt.failed),
+			startMs: network?.startMs || attempt.startedAtMs,
+			responseEndMs: network?.responseEndMs || attempt.resolvedAtMs,
+			durationMs: network?.durationMs || attempt.durationMs,
+			ttfbMs: network?.ttfbMs,
+			afterReady: readyMs > 0 && (network?.startMs || attempt.startedAtMs) > readyMs,
+			networkMatched: Boolean(network),
+		});
+	}
+
+	for (const [key, matches] of networkByKey.entries()) {
+		for (const network of matches) {
+			rows.push({
+				url: network.url,
+				method: network.method,
+				source: seen.has(key) ? 'network-duplicate' : 'raw-network',
+				clientSource: undefined,
+				status: network.status,
+				failed: network.failed,
+				startMs: network.startMs,
+				responseEndMs: network.responseEndMs,
+				durationMs: network.durationMs,
+				ttfbMs: network.ttfbMs,
+				afterReady: readyMs > 0 && network.startMs > readyMs,
+				networkMatched: true,
+			});
+		}
+	}
+
+	rows.sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
+	const counts = {
+		total: rows.length,
+		network: rows.filter((row) => row.networkMatched).length,
+		preloadedOrCache: rows.filter((row) => row.source === 'preloaded-or-cache').length,
+		afterReady: rows.filter((row) => row.afterReady).length,
+		failed: rows.filter((row) => row.failed || row.status >= 400).length,
+	};
+
+	return {
+		readyMs,
+		counts,
+		apiFetchAttempts,
+		resourceTimings,
+		networkRequests,
+		rows,
+		networkRows: rows.filter((row) => row.networkMatched),
+		preloadedOrCacheRows: rows.filter((row) => row.source === 'preloaded-or-cache'),
+		afterReadyRows: rows.filter((row) => row.afterReady),
+	};
+}
+
+function classifyWordPressRestPreloadOpportunity(row) {
+	const url = normalizeRestUrl(row?.url || '');
+	const pathOnly = url.split('?', 1)[0];
+	const reason = [];
+	let classification = 'investigate';
+
+	if (/\/wp\/v2\/(?:users\/me|autosaves|revisions|preferences)/.test(pathOnly)) {
+		classification = 'client-state';
+		reason.push('user/session or editor state request');
+	} else if (/\/wp\/v2\/template-parts\//.test(pathOnly) || /\/wp\/v2\/templates\/lookup/.test(pathOnly) || /\/wp\/v2\/types\//.test(pathOnly) || /\/wp\/v2\/taxonomies/.test(pathOnly) || /\/wp\/v2\/pages\/\d+/.test(pathOnly)) {
+		classification = 'safe-deterministic';
+		reason.push('route/template/page data can usually be derived server-side');
+	} else if (/\/wp\/v2\/(?:posts|pages)(?:\?|$)/.test(pathOnly) || /\/wp\/v2\/search/.test(pathOnly) || /\/wp\/v2\/navigation/.test(pathOnly)) {
+		classification = 'conditional';
+		reason.push('depends on resolved template blocks or initial editor route');
+	} else if (row?.source === 'preloaded-or-cache') {
+		classification = 'already-preloaded-or-cache';
+		reason.push('client requested it without an observed network request');
+	}
+
+	return {
+		...row,
+		classification,
+		reason: reason.join('; ') || 'no built-in rule matched',
+	};
+}
+
+function classifyWordPressRestPreloadOpportunities(waterfall, options = {}) {
+	const rows = Array.isArray(waterfall?.rows) ? waterfall.rows : [];
+	const candidates = rows
+		.filter((row) => options.includePreloaded || row.networkMatched)
+		.map(classifyWordPressRestPreloadOpportunity);
+	const byClassification = {};
+	for (const row of candidates) {
+		byClassification[row.classification] = (byClassification[row.classification] || 0) + 1;
+	}
+	return {
+		byClassification,
+		safeDeterministic: candidates.filter((row) => row.classification === 'safe-deterministic'),
+		conditional: candidates.filter((row) => row.classification === 'conditional'),
+		clientState: candidates.filter((row) => row.classification === 'client-state'),
+		alreadyPreloadedOrCache: candidates.filter((row) => row.classification === 'already-preloaded-or-cache'),
+		investigate: candidates.filter((row) => row.classification === 'investigate'),
+		rows: candidates,
+	};
+}
+
+function compareWordPressRestWaterfalls({ baseline, candidate }) {
+	const baselineRows = Array.isArray(baseline?.rows) ? baseline.rows : [];
+	const candidateRows = Array.isArray(candidate?.rows) ? candidate.rows : [];
+	const candidateByKey = new Map();
+	for (const row of candidateRows) {
+		const key = restKey(row);
+		if (!candidateByKey.has(key)) {
+			candidateByKey.set(key, []);
+		}
+		candidateByKey.get(key).push(row);
+	}
+	const rows = [];
+	const seen = new Set();
+	for (const row of baselineRows) {
+		const key = restKey(row);
+		seen.add(key);
+		const candidateMatch = (candidateByKey.get(key) || []).shift();
+		rows.push({
+			url: row.url,
+			method: row.method,
+			baselineSource: row.source,
+			candidateSource: candidateMatch?.source || 'missing',
+			baselineNetwork: Boolean(row.networkMatched),
+			candidateNetwork: Boolean(candidateMatch?.networkMatched),
+			baselineDurationMs: row.durationMs,
+			candidateDurationMs: candidateMatch?.durationMs,
+			result: row.networkMatched && !candidateMatch?.networkMatched ? 'removed-network' : candidateMatch ? 'unchanged' : 'missing',
+		});
+	}
+	for (const [key, candidateMatches] of candidateByKey.entries()) {
+		if (seen.has(key)) {
+			continue;
+		}
+		for (const row of candidateMatches) {
+			rows.push({
+				url: row.url,
+				method: row.method,
+				baselineSource: 'missing',
+				candidateSource: row.source,
+				baselineNetwork: false,
+				candidateNetwork: Boolean(row.networkMatched),
+				candidateDurationMs: row.durationMs,
+				result: row.networkMatched ? 'new-network' : 'new-preloaded-or-cache',
+			});
+		}
+	}
+	const counts = {
+		baselineNetwork: baselineRows.filter((row) => row.networkMatched).length,
+		candidateNetwork: candidateRows.filter((row) => row.networkMatched).length,
+		removedNetwork: rows.filter((row) => row.result === 'removed-network').length,
+		newNetwork: rows.filter((row) => row.result === 'new-network').length,
+	};
+	return {
+		counts,
+		rows,
+		remainingNetworkOpportunities: classifyWordPressRestPreloadOpportunities(candidate).rows,
+	};
+}
+
+function formatWordPressRestWaterfallMarkdownReport(comparison, options = {}) {
+	const rows = Array.isArray(comparison?.rows) ? comparison.rows : [];
+	const limit = options.limit || 30;
+	const lines = [
+		'## REST waterfall comparison',
+		'',
+		'| Endpoint | Baseline | Candidate | Result |',
+		'|---|---:|---:|---|',
+	];
+	for (const row of rows.slice(0, limit)) {
+		lines.push(`| \`${row.method} ${row.url}\` | ${row.baselineSource} | ${row.candidateSource} | ${row.result} |`);
+	}
+	const opportunities = comparison?.remainingNetworkOpportunities || [];
+	if (opportunities.length > 0) {
+		lines.push('', '## Remaining preload opportunities', '', '| Endpoint | Classification | Reason |', '|---|---|---|');
+		for (const row of opportunities.slice(0, limit)) {
+			lines.push(`| \`${row.method} ${row.url}\` | ${row.classification} | ${row.reason} |`);
+		}
+	}
+	return lines.join('\n');
 }
 
 async function collectBrowserResourceTimings(page, options = {}) {
@@ -400,6 +809,9 @@ async function profileWordPressPage(input) {
 	if (!page || typeof page.goto !== 'function') {
 		throw new TypeError('page must provide goto()');
 	}
+	if (input.restInstrumentation !== false && typeof page.addInitScript === 'function') {
+		await installWordPressRestInstrumentation(page);
+	}
 
 	const response = await page.goto(url, {
 		waitUntil: spec.gotoWaitUntil || 'commit',
@@ -415,8 +827,21 @@ async function profileWordPressPage(input) {
 	}
 
 	const readyMs = Date.now() - started;
+	const restObservationMs = Number(spec.restObservationMs ?? input.restObservationMs ?? DEFAULT_REST_OBSERVATION_MS);
+	if (restObservationMs > 0) {
+		await sleep(restObservationMs);
+	}
 	const resources = await collectBrowserResourceTimings(page, spec.resources || {});
 	const resourceSummary = summarizeResourceTimings(resources);
+	const apiFetchAttempts = typeof page.evaluate === 'function'
+		? await collectWordPressRestAttempts(page).catch(() => [])
+		: [];
+	const restWaterfall = summarizeWordPressRestWaterfall({
+		readyMs,
+		apiFetchAttempts,
+		resourceTimings: resources,
+		networkRequests: input.networkRequests || [],
+	});
 	const correlation = correlateBrowserAndWordPressTimings({
 		browserTimings: resources,
 		wordpressProfilerRows,
@@ -429,6 +854,7 @@ async function profileWordPressPage(input) {
 		status: response && typeof response.status === 'function' ? response.status() : 0,
 		readyMs,
 		resources: resourceSummary,
+		restWaterfall,
 		correlation,
 	};
 
@@ -461,15 +887,22 @@ async function profileWordPressPages(input) {
 
 module.exports = {
 	DEFAULT_RESOURCE_INCLUDE,
+	DEFAULT_REST_OBSERVATION_MS,
 	classifyResourceUrl,
+	classifyWordPressRestPreloadOpportunities,
 	collectBrowserResourceTimings,
+	collectWordPressRestAttempts,
+	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
+	formatWordPressRestWaterfallMarkdownReport,
+	installWordPressRestInstrumentation,
 	normalizePageManifest,
 	normalizePageSpec,
 	resourceFamily,
 	profileWordPressPage,
 	profileWordPressPages,
 	resolveWordPressUrl,
+	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,
 	waitForPageReady,
 };
