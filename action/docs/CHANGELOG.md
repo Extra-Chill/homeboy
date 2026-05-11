@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.4.1] - 2026-05-11
+
+### Fixed
+- scope observation artifacts by job
+
 ## [2.4.0] - 2026-05-11
 
 ### Added
