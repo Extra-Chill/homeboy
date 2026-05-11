@@ -110,6 +110,10 @@ name: Data Machine Agent CI (reusable)
         description: Empty string disables transcript artifact upload.
         type: string
         default: ""
+      replay_bundle_artifact_name:
+        description: Empty string disables replay bundle generation and artifact upload.
+        type: string
+        default: ""
       artifact_export_config:
         description: JSON config for exporting job artifacts back to the target repo. Empty object uses the reusable workflow defaults.
         type: string
@@ -707,6 +711,7 @@ jobs:
           PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
           PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
           HOMEBOY_DATAMACHINE_AGENT_RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          HOMEBOY_DATAMACHINE_AGENT_REPLAY_BUNDLE_DIR: ${{ inputs.replay_bundle_artifact_name != '' && format('{0}/datamachine-agent-replay-bundles', runner.temp) || '' }}
         run: bash .ci/homeboy-extensions/wordpress/scripts/agent/run-datamachine-agent.sh "${{ steps.config.outputs.config_path }}"
 
       - name: Extract scenario outputs
@@ -820,6 +825,14 @@ jobs:
         with:
           name: ${{ inputs.transcript_artifact_name }}
           path: ${{ steps.transcript-artifact.outputs.path }}
+          if-no-files-found: error
+
+      - name: Upload replay bundle artifact
+        if: ${{ always() && inputs.run_agent && inputs.replay_bundle_artifact_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.replay_bundle_artifact_name }}
+          path: ${{ runner.temp }}/datamachine-agent-replay-bundles
           if-no-files-found: error
 
       - name: Comment PR summary

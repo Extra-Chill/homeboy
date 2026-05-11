@@ -134,7 +134,7 @@ knobs to `run-datamachine-agent.sh`:
 - WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `playground_wordpress`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`.
 - GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
-- Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`.
+- Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.
 - Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `pipeline_step_patches`, `flow_step_patches`, `fallback_pull_request`.
 
 `bundle_repo` is for cross-repo consumers. The shell runner clones the bundle
@@ -195,6 +195,21 @@ Use `success_requires_pr: true` when the task is only successful if the agent
 opens or reuses a pull request. Use `engine_data_outputs` for additional
 consumer-specific assertions such as a generated PR URL, published artifact path,
 or scenario result field.
+
+Set `replay_bundle_artifact_name` to publish a redacted replay bundle alongside
+the run. The bundle snapshots the scenario envelope, initial Playground
+blueprint, prompt, runner config, provider/model/seed metadata, transcript/action
+log references, and grader metadata. The runner also attaches
+`artifacts.replay_bundle.path` and `metadata.playground_review` to the scenario
+result JSON so downstream JSONL publishers can link failure rows back to the
+bundle.
+
+Final-state Playground review URLs are only emitted when the caller supplies a
+hosted review URL in runner config or scenario metadata. The current Playground
+PHP bench runner exits after scenario execution and does not export a restorable
+site state, so the default bundle records `playground_review.available=false`
+and `final_state.available=false` rather than pretending an encoded initial
+blueprint is a final-state replay.
 
 ## Why this can support agent evaluation
 

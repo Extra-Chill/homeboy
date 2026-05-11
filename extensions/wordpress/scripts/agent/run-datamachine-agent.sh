@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORKLOAD_PATH="$SCRIPT_DIR/datamachine-agent-workload.php"
 WORKLOAD_PLAYGROUND_PATH="/homeboy-extension/scripts/agent/datamachine-agent-workload.php"
+REPLAY_BUNDLE_BUILDER="$SCRIPT_DIR/build-replay-bundle.js"
 
 CONFIG_PATH="${HOMEBOY_DATAMACHINE_AGENT_CONFIG_PATH:-}"
 if [ -z "$CONFIG_PATH" ] && [ "${1:-}" != "" ]; then
@@ -189,6 +190,23 @@ scenario='.scenarios[] | select(.id == "'"$WORKLOAD_ID"'")'
 if ! jq -e "$scenario" "$RESULTS_FILE" >/dev/null; then
     echo "ERROR: Data Machine agent workload did not run" >&2
     exit 1
+fi
+
+REPLAY_BUNDLE_DIR="${HOMEBOY_DATAMACHINE_AGENT_REPLAY_BUNDLE_DIR:-}"
+if [ -z "$REPLAY_BUNDLE_DIR" ]; then
+    REPLAY_BUNDLE_DIR=$(jq -r '.replay_bundle_dir // empty' "$CONFIG_PATH")
+fi
+if [ -n "$REPLAY_BUNDLE_DIR" ]; then
+    if [ ! -f "$REPLAY_BUNDLE_BUILDER" ]; then
+        echo "ERROR: replay bundle builder missing at $REPLAY_BUNDLE_BUILDER" >&2
+        exit 1
+    fi
+    node "$REPLAY_BUNDLE_BUILDER" \
+        --results "$RESULTS_FILE" \
+        --scenario "$WORKLOAD_ID" \
+        --config "$CONFIG_PATH" \
+        --output-dir "$REPLAY_BUNDLE_DIR" \
+        --update-results >/dev/null
 fi
 
 if jq -e "$scenario | .metadata.error?" "$RESULTS_FILE" >/dev/null; then
