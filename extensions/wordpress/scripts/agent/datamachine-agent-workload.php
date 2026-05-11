@@ -179,7 +179,16 @@ if ( ! function_exists( 'homeboy_datamachine_agent_file_written' ) ) {
                 continue;
             }
 
-            if ( 'create_or_update_github_file' === (string) ( $tool_result['tool_name'] ?? '' ) ) {
+            $write_tools = array(
+                'create_or_update_github_file',
+                'workspace_write',
+                'workspace_edit',
+                'workspace_apply_patch',
+                'workspace_delete',
+                'workspace_git_commit',
+                'workspace_git_push',
+            );
+            if ( in_array( (string) ( $tool_result['tool_name'] ?? '' ), $write_tools, true ) ) {
                 return true;
             }
 
@@ -553,6 +562,26 @@ if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
 
     function homeboy_datamachine_agent_open_fallback_pr( array $engine_data, array $config ): array {
         $fallback = is_array( $config['fallback_pull_request'] ?? null ) ? $config['fallback_pull_request'] : array();
+        if ( empty( $fallback ) ) {
+            $runner_workspace = is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array();
+            $branch           = homeboy_datamachine_agent_scalar( $runner_workspace, 'branch' );
+            $repo             = homeboy_datamachine_agent_scalar( $config, 'target_repo' );
+            if ( ! empty( $runner_workspace['success'] ) && '' !== $repo && '' !== $branch ) {
+                $agent_slug = homeboy_datamachine_agent_scalar( $config, 'agent_slug', 'agent' );
+                $model      = homeboy_datamachine_agent_scalar( $config, 'model', 'unknown' );
+                $fallback   = array(
+                    'repo'  => $repo,
+                    'head'  => $branch,
+                    'title' => sprintf( 'Persist %s workspace changes', $agent_slug ),
+                    'body'  => sprintf(
+                        "## Summary\n- Persist runner-owned workspace changes produced by `%s`.\n\n## Runner workspace\n- Branch: `%s`\n\n## AI assistance\n- **AI assistance:** Yes\n- **Tool(s):** Data Machine Agent CI (%s)\n- **Used for:** Drafting the repository changes collected from this runner-owned workspace.\n",
+                        $agent_slug,
+                        $branch,
+                        $model
+                    ),
+                );
+            }
+        }
         if ( empty( $fallback ) ) {
             return array( 'opened' => false );
         }
@@ -1065,17 +1094,21 @@ if ( ! function_exists( 'homeboy_datamachine_agent_apply_runner_workspace' ) ) {
         $prefix = "Runner-provided workspace:\n- Workspace handle: {$handle}\n- Branch: {$branch}\n\nUse this workspace handle for all repository file and git changes. Do not mutate the primary checkout and do not create another worktree for this run.";
         $prompt = '' === trim( $prompt ) ? $prefix : $prefix . "\n\n" . $prompt;
 
-        $recorders = is_array( $config['tool_recorders'] ?? null ) ? $config['tool_recorders'] : array();
+        $recorders        = is_array( $config['tool_recorders'] ?? null ) ? $config['tool_recorders'] : array();
+        $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
+        $record_config    = array( 'tool_results_key' => $tool_results_key );
         foreach ( array( 'workspace_ls', 'workspace_read', 'workspace_grep', 'workspace_write', 'workspace_edit', 'workspace_apply_patch', 'workspace_delete' ) as $tool_name ) {
             $recorders[] = array(
                 'tool'              => $tool_name,
                 'forced_parameters' => array( 'repo' => $handle ),
+                'record'            => $record_config,
             );
         }
         foreach ( array( 'workspace_git_status', 'workspace_git_log', 'workspace_git_diff', 'workspace_git_pull', 'workspace_git_add', 'workspace_git_commit', 'workspace_git_push' ) as $tool_name ) {
             $recorders[] = array(
                 'tool'              => $tool_name,
                 'forced_parameters' => array( 'name' => $handle ),
+                'record'            => $record_config,
             );
         }
         $config['tool_recorders'] = $recorders;
@@ -1349,6 +1382,7 @@ if ( ! empty( $runner_workspace['enabled'] ) ) {
     if ( empty( $runner_workspace['success'] ) ) {
         return homeboy_datamachine_agent_result( array( 'runner_workspace_provisioned' => 0 ), $metadata, (string) ( $runner_workspace['error'] ?? 'Runner workspace provisioning failed' ) );
     }
+    $config['runner_workspace_result'] = $runner_workspace;
     list( $config, $prompt ) = homeboy_datamachine_agent_apply_runner_workspace( $config, $prompt, $runner_workspace );
 }
 
@@ -1461,7 +1495,7 @@ $pr_opened = homeboy_datamachine_agent_pr_opened( $engine_data, $config );
 $file_written = homeboy_datamachine_agent_file_written( $engine_data, $config );
 $fallback_pull_request = array( 'opened' => false );
 $success_requires_pr = ! empty( $config['success_requires_pr'] );
-if ( $success_requires_pr && $file_written && ! $pr_opened ) {
+if ( $file_written && ! $pr_opened ) {
     $fallback_pull_request = homeboy_datamachine_agent_open_fallback_pr( $engine_data, $config );
     if ( ! empty( $fallback_pull_request['opened'] ) && is_array( $fallback_pull_request['engine_data'] ?? null ) ) {
         $engine_data = $fallback_pull_request['engine_data'];
