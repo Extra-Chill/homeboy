@@ -171,6 +171,33 @@ scenario can earn partial credit. Configured workload steps marked
 structured zero-reward grade with `metadata.grade.failure`, allowing result
 aggregation to consume failures without scenario-specific parsing.
 
+Playground bench runs also emit `wp-rl`-friendly artifacts next to the
+BenchResults JSON file:
+
+- `results.jsonl` — one JSON object per workload scenario row, excluding the
+  synthetic `__bootstrap` BenchResults scenario. Rows include `scenario_id`,
+  `provider`, `model`, `seed`, `run_id`, `success`, `reward`, `duration_ms`,
+  `turns`, `tokens`, `artifacts`, and `error` when those values are present in
+  scenario metadata, metrics, artifacts, or runner environment.
+- `leaderboard.md` — a basic human summary grouped by provider/model with run
+  count, success rate, error count, average reward, and average duration.
+
+Rows tolerate partial and failed scenario envelopes. If a workload reports
+`metadata.provider`, `metadata.model`, `metadata.seed`, `metadata.tokens`,
+`metrics.reward_mean`, `metrics.success_mean`, `metrics.turns_mean`, or an
+`error`/`failure` object, those fields are projected directly into
+`results.jsonl` for downstream analysis without custom post-processing.
+
+Example `results.jsonl` row:
+
+```json
+{"component_id":"example-plugin","scenario_id":"block-markup/navigation-001","provider":"openai","model":"gpt-5.5","seed":1,"run_id":"1","success":true,"reward":1,"duration_ms":1234,"turns":7,"tokens":{"input":1000,"output":500},"artifacts":{"transcript":{"path":"artifacts/transcript.json","kind":"json"}},"error":null}
+```
+
+Set `HOMEBOY_PLAYGROUND_RESULTS_ARTIFACT_DIR` to write these derived artifacts
+to a specific directory. Otherwise they are written beside
+`HOMEBOY_BENCH_RESULTS_FILE`.
+
 The same workload contract powers Data Machine agent CI in Playground. See
 [`../../wordpress/docs/AGENT_CI_PLAYGROUND.md`](../../wordpress/docs/AGENT_CI_PLAYGROUND.md)
 for the dedicated agent sandbox guide.

@@ -39,6 +39,7 @@ BENCH_HELPER_SH="${HOMEBOY_RUNTIME_BENCH_HELPER_SH:-${HOME}/.homeboy/runtime/ben
 BENCH_HELPER_PHP_HOST="${HOMEBOY_RUNTIME_BENCH_HELPER_PHP:-${HOME}/.homeboy/runtime/bench-helper.php}"
 BENCH_HELPER_PHP_GUEST="/homeboy-runtime/bench-helper.php"
 BENCH_BROWSER_TARGET_HELPER="${SCRIPT_DIR}/browser-target.sh"
+PLAYGROUND_RESULTS_ARTIFACTS_HELPER="${SCRIPT_DIR}/playground-results-artifacts.sh"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 PLAYGROUND_PATHS_HELPER="${SCRIPT_DIR}/../lib/playground-paths.sh"
@@ -76,6 +77,8 @@ if [ ! -f "$BENCH_HELPER_PHP_HOST" ]; then
 fi
 # shellcheck source=browser-target.sh
 source "$BENCH_BROWSER_TARGET_HELPER"
+# shellcheck source=playground-results-artifacts.sh
+source "$PLAYGROUND_RESULTS_ARTIFACTS_HELPER"
 
 # PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
 # mount the component-under-test. The historical default was
@@ -307,6 +310,7 @@ if [ ! -d "$BENCH_DIR" ] && [ -z "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ] && [ "$B
     # doesn't see a missing file and treat the run as a crash.
     if [ -n "${HOMEBOY_BENCH_RESULTS_FILE:-}" ]; then
         homeboy_write_empty_bench_results "$COMPONENT_ID" 0 "${HOMEBOY_BENCH_RESULTS_FILE}"
+        homeboy_wordpress_emit_playground_results_artifacts "${HOMEBOY_BENCH_RESULTS_FILE}"
     fi
     exit 0
 fi
@@ -890,10 +894,12 @@ fi
 # print the path so a human can inspect it.
 if [ -n "${HOMEBOY_BENCH_RESULTS_FILE:-}" ]; then
     cp "$RESULT_JSON" "${HOMEBOY_BENCH_RESULTS_FILE}"
+    homeboy_wordpress_emit_playground_results_artifacts "${HOMEBOY_BENCH_RESULTS_FILE}"
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
         echo "DEBUG: [bench:playground] Results copied to ${HOMEBOY_BENCH_RESULTS_FILE}"
     fi
 else
+    homeboy_wordpress_emit_playground_results_artifacts "$RESULT_JSON"
     echo ""
     echo "Bench results: $RESULT_JSON"
 fi
