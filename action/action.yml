@@ -467,7 +467,7 @@ runs:
       if: always() && steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != ''
       uses: actions/upload-artifact@v4
       with:
-        name: homeboy-observations-${{ github.job }}
+        name: homeboy-observations-${{ github.job }}-${{ steps.resolve-commands.outputs.resolved-commands }}
         path: homeboy-observations/**
         if-no-files-found: ignore
 
