@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.4.3] - 2026-05-11
+
+### Fixed
+- defer release verification to tag workflow
+
 ## [2.4.2] - 2026-05-11
 
 ### Fixed
