@@ -661,7 +661,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Assert success
-        if: ${{ inputs.run_agent && inputs.success_requires_pr && ! inputs.dry_run }}
+        if: ${{ inputs.run_agent && ! inputs.dry_run }}
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
         run: |
