@@ -11,6 +11,18 @@ name: Data Machine Agent CI (reusable)
       bundle_path:
         type: string
         required: true
+      bundle_repo:
+        description: Optional git URL for an external bundle repository. When set, the runner clones this repo and uses bundle_path_in_repo inside it.
+        type: string
+        default: ""
+      bundle_ref:
+        description: Ref to check out from bundle_repo. Defaults to the current workflow SHA when bundle_repo is empty.
+        type: string
+        default: ""
+      bundle_path_in_repo:
+        description: Path to the bundle inside bundle_repo. Defaults to bundle_path.
+        type: string
+        default: ""
       agent_slug:
         type: string
         required: true
@@ -81,6 +93,10 @@ name: Data Machine Agent CI (reusable)
         description: Comma-separated OWNER/REPO entries for the Homeboy app token. Defaults to target_repo.
         type: string
         default: ""
+      allowed_repos:
+        description: JSON array of OWNER/REPO strings the injected GitHub profile may access. Defaults to [target_repo].
+        type: string
+        default: "[]"
       dry_run:
         description: Build runner config and exercise the runner dry-run path without a live agent call.
         type: boolean
@@ -121,6 +137,26 @@ name: Data Machine Agent CI (reusable)
           datamachine/run-flow, datamachine/drain-job).
         type: string
         default: "[]"
+      ability_tools:
+        description: JSON array of additional tool definitions backed by WordPress abilities.
+        type: string
+        default: "[]"
+      tool_recorders:
+        description: JSON array of existing tool recorder configs for field projection, forced parameters, and tool result capture.
+        type: string
+        default: "[]"
+      pipeline_step_patches:
+        description: JSON array of patches applied to imported pipeline step configs before the flow runs.
+        type: string
+        default: "[]"
+      flow_step_patches:
+        description: JSON array of patches applied to imported flow step configs before the flow runs.
+        type: string
+        default: "[]"
+      fallback_pull_request:
+        description: JSON object describing a fallback PR to open or reuse when files were written but the agent did not open a PR.
+        type: string
+        default: "{}"
     secrets:
       HOMEBOY_APP_ID:
         required: false
@@ -291,6 +327,9 @@ jobs:
           PIPELINE_SLUG: ${{ inputs.pipeline_slug }}
           FLOW_SLUG: ${{ inputs.flow_slug }}
           BUNDLE_PATH: ${{ inputs.bundle_path }}
+          BUNDLE_REPO: ${{ inputs.bundle_repo }}
+          BUNDLE_REF: ${{ inputs.bundle_ref }}
+          BUNDLE_PATH_IN_REPO: ${{ inputs.bundle_path_in_repo }}
           TARGET_REPO: ${{ inputs.target_repo }}
           PROMPT: ${{ inputs.prompt }}
           PROVIDER: ${{ inputs.provider }}
@@ -308,6 +347,12 @@ jobs:
           WORKLOAD_RUN_BEFORE: ${{ inputs.workload_run_before }}
           DAILY_MEMORY_ENABLED: ${{ inputs.daily_memory_enabled }}
           EXTRA_REQUIRED_ABILITIES: ${{ inputs.extra_required_abilities }}
+          ALLOWED_REPOS: ${{ inputs.allowed_repos }}
+          ABILITY_TOOLS: ${{ inputs.ability_tools }}
+          TOOL_RECORDERS: ${{ inputs.tool_recorders }}
+          PIPELINE_STEP_PATCHES: ${{ inputs.pipeline_step_patches }}
+          FLOW_STEP_PATCHES: ${{ inputs.flow_step_patches }}
+          FALLBACK_PULL_REQUEST: ${{ inputs.fallback_pull_request }}
           GITHUB_TOKEN_VALUE: ${{ steps.app-token.outputs.token || github.token }}
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
@@ -316,6 +361,9 @@ jobs:
           set -euo pipefail
           config_path="${RUNNER_TEMP}/datamachine-agent-config.json"
           bundle_abs="${GITHUB_WORKSPACE}/${BUNDLE_PATH}"
+          bundle_repo_value="${BUNDLE_REPO:-https://github.com/${TARGET_REPO}.git}"
+          bundle_ref_value="${BUNDLE_REF:-$GITHUB_SHA}"
+          bundle_path_in_repo_value="${BUNDLE_PATH_IN_REPO:-$BUNDLE_PATH}"
           component_slug="$(basename "$GITHUB_WORKSPACE")"
           transcript_host_dir="${GITHUB_WORKSPACE}/datamachine-agent-artifacts/${AGENT_SLUG}"
           transcript_guest_dir="/wordpress/wp-content/plugins/${component_slug}/datamachine-agent-artifacts/${AGENT_SLUG}"
@@ -335,12 +383,18 @@ jobs:
           workload_run_before_json="$(validate_json_input workload_run_before array "$WORKLOAD_RUN_BEFORE")"
           extra_required_abilities_json="$(validate_json_input extra_required_abilities array "$EXTRA_REQUIRED_ABILITIES")"
           success_completion_outcomes_json="$(validate_json_input success_completion_outcomes array "$SUCCESS_COMPLETION_OUTCOMES")"
+          allowed_repos_json="$(validate_json_input allowed_repos array "$ALLOWED_REPOS")"
+          ability_tools_json="$(validate_json_input ability_tools array "$ABILITY_TOOLS")"
+          tool_recorders_json="$(validate_json_input tool_recorders array "$TOOL_RECORDERS")"
+          pipeline_step_patches_json="$(validate_json_input pipeline_step_patches array "$PIPELINE_STEP_PATCHES")"
+          flow_step_patches_json="$(validate_json_input flow_step_patches array "$FLOW_STEP_PATCHES")"
+          fallback_pull_request_json="$(validate_json_input fallback_pull_request object "$FALLBACK_PULL_REQUEST")"
           jq -n \
             --arg componentPath "$GITHUB_WORKSPACE" \
             --arg bundlePath "$bundle_abs" \
-            --arg bundlePathInRepo "$BUNDLE_PATH" \
-            --arg bundleRepo "https://github.com/${TARGET_REPO}.git" \
-            --arg bundleRef "$GITHUB_SHA" \
+            --arg bundlePathInRepo "$bundle_path_in_repo_value" \
+            --arg bundleRepo "$bundle_repo_value" \
+            --arg bundleRef "$bundle_ref_value" \
             --arg agentSlug "$AGENT_SLUG" \
             --arg pipelineSlug "$PIPELINE_SLUG" \
             --arg flowSlug "$FLOW_SLUG" \
@@ -367,6 +421,12 @@ jobs:
             --argjson workloadRunBefore "$workload_run_before_json" \
             --argjson dailyMemoryEnabled "$DAILY_MEMORY_ENABLED" \
             --argjson extraRequiredAbilities "$extra_required_abilities_json" \
+            --argjson allowedRepos "$allowed_repos_json" \
+            --argjson abilityTools "$ability_tools_json" \
+            --argjson toolRecorders "$tool_recorders_json" \
+            --argjson pipelineStepPatches "$pipeline_step_patches_json" \
+            --argjson flowStepPatches "$flow_step_patches_json" \
+            --argjson fallbackPullRequest "$fallback_pull_request_json" \
             '{
               component_id: "datamachine-agent-ci-driver",
               component_path: $componentPath,
@@ -398,11 +458,16 @@ jobs:
               github_token_env: "GITHUB_TOKEN",
               github_profile_id: ($agentSlug + "-ci"),
               target_repo: $targetRepo,
-              allowed_repos: [$targetRepo],
+              allowed_repos: (if ($allowedRepos | length) > 0 then $allowedRepos else [$targetRepo] end),
               max_turns: $maxTurns,
               prompt: $prompt,
               step_budget: $stepBudget,
               time_budget_ms: $timeBudgetMs,
+              ability_tools: $abilityTools,
+              tool_recorders: $toolRecorders,
+              pipeline_step_patches: $pipelineStepPatches,
+              flow_step_patches: $flowStepPatches,
+              fallback_pull_request: $fallbackPullRequest,
               success_requires_pr: $successRequiresPr,
               success_completion_outcomes: $successCompletionOutcomes,
               artifact_export: ({

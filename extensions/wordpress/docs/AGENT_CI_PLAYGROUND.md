@@ -76,10 +76,43 @@ The runner converts the agent config into a single Playground bench workload:
   PHP-WASM.
 - `transcript_dir` controls where exported conversation artifacts are written.
 - `success_requires_pr` can require the agent to open or reuse a pull request.
+- `tool_recorders` can force tool parameters and project tool results into
+  `metadata.engine_data`.
+- `ability_tools` can expose additional WordPress abilities as tools during the
+  agent run.
+- `pipeline_step_patches` and `flow_step_patches` can adjust imported bundle
+  step configuration before execution.
+- `fallback_pull_request` can open a PR when files were written but the agent did
+  not explicitly call the PR tool.
 
 Inside Playground, `datamachine-agent-workload.php` installs the bundle, configures
 the provider, starts the Data Machine flow, drains queued work, records tool
 results, exports the transcript, and writes a Homeboy scenario result.
+
+## Runner config surface
+
+Most consumers should use `.github/workflows/datamachine-agent-ci.yml` rather than
+building runner config directly. The reusable workflow forwards these generic
+knobs to `run-datamachine-agent.sh`:
+
+- Bundle location: `bundle_path`, `bundle_repo`, `bundle_ref`, `bundle_path_in_repo`.
+- Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
+- WordPress runtime: `playground_wordpress`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`.
+- GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`.
+- Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
+- Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`.
+- Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `pipeline_step_patches`, `flow_step_patches`, `fallback_pull_request`.
+
+`bundle_repo` is for cross-repo consumers. The shell runner clones the bundle
+repository, points `bundle_path` at the cloned bundle inside Playground, and adds
+that checkout to the mounted validation dependencies. This lets a repository such
+as `agents-api` run a bundle owned by `docs-agent` without copying the bundle or
+maintaining a bespoke runner script.
+
+`tool_recorders` are the main migration path for custom bootstrap files that only
+wrap GitHub tools. A recorder can attach forced parameters, capture selected input
+or output fields, and write them under a stable `metadata.engine_data` key for
+later `engine_data_outputs` projection.
 
 ## Outputs and assertions
 
