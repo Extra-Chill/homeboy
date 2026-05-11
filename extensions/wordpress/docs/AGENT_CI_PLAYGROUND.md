@@ -64,6 +64,29 @@ The workflow checks out `homeboy-extensions`, installs the WordPress extension
 toolchain, mounts validation dependencies under `.ci/<repo>`, builds a runner
 config, and calls `wordpress/scripts/agent/run-datamachine-agent.sh`.
 
+## Fully Custom Agents
+
+The reusable workflow does not hard-code a specific agent. A consumer supplies a
+Data Machine agent bundle, pipeline slug, flow slug, prompt, model, dependency
+refs, and runner configuration. The bundle can live in the target repository or
+in a separate repository through `bundle_repo`, `bundle_ref`, and
+`bundle_path_in_repo`.
+
+That means one repository can own an agent while another repository is the
+workspace the agent edits. For example, `docs-agent` can own a documentation
+agent bundle while `agents-api` invokes that bundle to write docs and open pull
+requests against `Automattic/agents-api`.
+
+Consumers can customize:
+
+- Agent behavior through the bundle manifest, prompts, flows, and pipelines.
+- Runtime tools through `ability_tools` and `tool_recorders`.
+- GitHub scope through `target_repo`, `allowed_repos`, and `app_token_repos`.
+- WordPress state through `extra_wp_config_defines`, file mounts, and pre-run
+  hooks.
+- Success criteria through `success_requires_pr`, completion outcomes,
+  engine-data projections, artifacts, and verifier jobs.
+
 ## Runtime contract
 
 The runner converts the agent config into a single Playground bench workload:
