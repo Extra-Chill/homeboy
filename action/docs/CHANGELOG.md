@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.3.1] - 2026-05-11
+
+### Fixed
+- ignore assetless latest releases
+
 ## [2.3.0] - 2026-05-10
 
 ### Added
