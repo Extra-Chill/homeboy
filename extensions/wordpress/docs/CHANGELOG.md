@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.60.0] - 2026-05-11
+
+### Added
+- correlate WordPress timings by browser phase
+- include default agent runtime dependencies
+
 ## [2.59.0] - 2026-05-11
 
 ### Added
