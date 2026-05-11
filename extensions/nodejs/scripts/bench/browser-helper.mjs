@@ -166,54 +166,123 @@ export function compareBrowserPerformanceProfiles({ baseline, candidate }, optio
     }
 
     const config = normalizeComparisonOptions(options);
-    const baselineMetrics = profileComparisonMetrics(baseline);
-    const candidateMetrics = profileComparisonMetrics(candidate);
+    const baselineProfile = scopeBrowserPerformanceProfile(baseline, config);
+    const candidateProfile = scopeBrowserPerformanceProfile(candidate, config);
+    const baselineMetrics = profileComparisonMetrics(baselineProfile);
+    const candidateMetrics = profileComparisonMetrics(candidateProfile);
     const metrics = {};
     for (const key of [...new Set([...Object.keys(baselineMetrics), ...Object.keys(candidateMetrics)])].sort()) {
-        const before = finiteNumber(baselineMetrics[key]);
-        const after = finiteNumber(candidateMetrics[key]);
-        metrics[key] = {
-            baseline: before,
-            candidate: after,
-            delta: after - before,
-            percent_change: before === 0 ? null : ((after - before) / before) * 100,
-            threshold_percent: config.thresholdPercent,
-            status: metricStatus(before, after, config.thresholdPercent),
-        };
+        metrics[key] = compareMetric(baselineMetrics[key], candidateMetrics[key], config);
     }
 
     const phases = {};
     for (const name of [...new Set([...Object.keys(baseline.phases || {}), ...Object.keys(candidate.phases || {})])].sort()) {
-        const before = finiteNumber(baseline.phases?.[name]?.duration_ms);
-        const after = finiteNumber(candidate.phases?.[name]?.duration_ms);
+        if (config.phaseNames.length > 0 && !config.phaseNames.includes(name)) continue;
+        const comparison = compareMetric(baseline.phases?.[name]?.duration_ms, candidate.phases?.[name]?.duration_ms, config);
         phases[name] = {
-            baseline_duration_ms: before,
-            candidate_duration_ms: after,
-            delta_ms: after - before,
-            percent_change: before === 0 ? null : ((after - before) / before) * 100,
-            status: metricStatus(before, after, config.thresholdPercent),
+            baseline_duration_ms: comparison.baseline,
+            candidate_duration_ms: comparison.candidate,
+            delta_ms: comparison.delta,
+            percent_change: comparison.percent_change,
+            status: comparison.status,
         };
     }
 
-    return stableJson({ schema_version: 1, metrics, phases });
+    const requests = compareProfileRequests(baselineProfile, candidateProfile, config);
+    const transfer = compareTransferBytes(baselineProfile, candidateProfile, config);
+    const slowestRequests = compareSlowestRequests(baselineProfile, candidateProfile, config);
+    const failedRequests = compareFailedRequests(baselineProfile, candidateProfile, config);
+    const lateRequests = compareLateRequests(baselineProfile, candidateProfile, config);
+    const longTasks = compareLongTasks(baselineProfile, candidateProfile, config);
+    const paints = comparePaintTimings(baselineProfile, candidateProfile, config);
+    const errors = compareProfileErrors(baselineProfile, candidateProfile, config);
+
+    return stableJson({
+        schema_version: 1,
+        summary: {
+            requests_added: requests.added.length,
+            requests_removed: requests.removed.length,
+            requests_changed: requests.changed.length,
+            transfer_bytes_delta: transfer.total.delta,
+            failed_requests_delta: failedRequests.count.delta,
+            late_requests_delta: lateRequests.count.delta,
+            long_tasks_delta: longTasks.count.delta,
+            console_errors_delta: errors.console_errors.delta,
+            page_errors_delta: errors.page_errors.delta,
+        },
+        phase_scope: config.phaseNames,
+        metrics,
+        requests,
+        transfer,
+        slowest_requests: slowestRequests,
+        failed_requests: failedRequests,
+        late_requests: lateRequests,
+        long_tasks: longTasks,
+        paints,
+        errors,
+        phases,
+    });
 }
 
-export function formatBrowserPerformanceReport(comparison, options = {}) {
-    const title = options.title || 'Browser performance comparison';
-    const lines = [`# ${title}`, '', '| Metric | Baseline | Candidate | Delta | Change | Status |', '| --- | ---: | ---: | ---: | ---: | --- |'];
-    for (const [name, metric] of Object.entries(comparison.metrics || {})) {
-        lines.push(`| ${name} | ${formatNumber(metric.baseline)} | ${formatNumber(metric.candidate)} | ${formatSignedNumber(metric.delta)} | ${formatPercent(metric.percent_change)} | ${metric.status} |`);
+export function formatBrowserPerformanceDiffMarkdown(diff, options = {}) {
+    const title = options.title || 'Browser performance diff';
+    const maxRows = Number.isInteger(options.maxRows) && options.maxRows > 0 ? options.maxRows : 8;
+    const lines = [`# ${title}`, ''];
+
+    lines.push('## Summary', '');
+    lines.push('| Area | Baseline | Candidate | Delta | Change | Status |');
+    lines.push('| --- | ---: | ---: | ---: | ---: | --- |');
+    for (const [name, metric] of summaryMetrics(diff)) {
+        lines.push(formatMetricRow(name, metric));
     }
 
-    const phases = Object.entries(comparison.phases || {});
-    if (phases.length > 0) {
+    const requestRows = [
+        ['Requests added', countMetric(0, diff.requests?.added?.length || 0, diff.requests?.added?.length || 0)],
+        ['Requests removed', countMetric(diff.requests?.removed?.length || 0, 0, -(diff.requests?.removed?.length || 0))],
+        ['Requests changed', countMetric(0, diff.requests?.changed?.length || 0, diff.requests?.changed?.length || 0)],
+    ];
+    lines.push('', '## Requests', '', '| Area | Baseline | Candidate | Delta | Change | Status |', '| --- | ---: | ---: | ---: | ---: | --- |');
+    for (const [name, metric] of requestRows) lines.push(formatMetricRow(name, metric));
+    appendDetailRows(lines, 'Added requests', diff.requests?.added, maxRows, formatRequestDetailRow);
+    appendDetailRows(lines, 'Removed requests', diff.requests?.removed, maxRows, formatRequestDetailRow);
+    appendDetailRows(lines, 'Changed requests', diff.requests?.changed, maxRows, formatChangedRequestRow);
+
+    appendMetricSection(lines, 'Transfer', [
+        ['Total transfer bytes', diff.transfer?.total, 'bytes'],
+        ['Network-after-ready bytes', diff.late_requests?.transfer_bytes, 'bytes'],
+    ]);
+    appendDetailRows(lines, 'Transfer changes by resource', diff.transfer?.changed, maxRows, formatTransferRow);
+
+    appendMetricSection(lines, 'Timing', [
+        ['Slowest request ms', diff.slowest_requests?.slowest_duration_ms, 'ms'],
+        ['Late request count', diff.late_requests?.count],
+        ['Late request total ms', diff.late_requests?.total_duration_ms, 'ms'],
+        ['Long task count', diff.long_tasks?.count],
+        ['Long task total ms', diff.long_tasks?.total_duration_ms, 'ms'],
+        ['Long task max ms', diff.long_tasks?.max_duration_ms, 'ms'],
+    ]);
+    appendDetailRows(lines, 'Slowest request deltas', diff.slowest_requests?.changed, maxRows, formatRequestDurationRow);
+
+    appendMetricSection(lines, 'Paint, Load, Ready, Idle', Object.entries(diff.paints || {}).map(([name, metric]) => [name, metric, 'ms']));
+    appendMetricSection(lines, 'Errors', [
+        ['Console messages', diff.errors?.console_messages],
+        ['Console errors', diff.errors?.console_errors],
+        ['Page errors', diff.errors?.page_errors],
+    ]);
+
+    const phaseRows = Object.entries(diff.phases || {});
+    if (phaseRows.length > 0) {
         lines.push('', '## Phases', '', '| Phase | Baseline | Candidate | Delta | Change | Status |', '| --- | ---: | ---: | ---: | ---: | --- |');
-        for (const [name, phase] of phases) {
-            lines.push(`| ${name} | ${formatNumber(phase.baseline_duration_ms)} | ${formatNumber(phase.candidate_duration_ms)} | ${formatSignedNumber(phase.delta_ms)} | ${formatPercent(phase.percent_change)} | ${phase.status} |`);
+        for (const [name, phase] of phaseRows) {
+            lines.push(`| ${escapeMarkdownCell(name)} | ${formatValue(phase.baseline_duration_ms, 'ms')} | ${formatValue(phase.candidate_duration_ms, 'ms')} | ${formatSignedValue(phase.delta_ms, 'ms')} | ${formatPercent(phase.percent_change)} | ${phase.status} |`);
         }
     }
 
     return `${lines.join('\n')}\n`;
+}
+
+export function formatBrowserPerformanceReport(comparison, options = {}) {
+    return formatBrowserPerformanceDiffMarkdown(comparison, { title: options.title || 'Browser performance comparison', ...options });
 }
 
 export async function runBrowserBench(options) {
@@ -494,9 +563,54 @@ function normalizeBrowserPerformanceOptions(options) {
 }
 
 function normalizeComparisonOptions(options) {
+    const phaseNames = normalizePhaseNames(options.phases ?? options.phase ?? options.phaseName);
     return {
         thresholdPercent: Number.isFinite(options.thresholdPercent) ? options.thresholdPercent : 5,
+        phaseNames,
     };
+}
+
+function normalizePhaseNames(value) {
+    const values = Array.isArray(value) ? value : value ? [value] : [];
+    return values.map(sanitizePhaseName).filter(Boolean).sort();
+}
+
+function scopeBrowserPerformanceProfile(profile, config) {
+    if (!config.phaseNames || config.phaseNames.length === 0) return profile;
+
+    const network = filterEntriesByPhases(profile, profile.network || [], config.phaseNames, 'start_time_ms');
+    const resources = filterEntriesByPhases(profile, profile.resources || [], config.phaseNames, 'start_time');
+    const paints = filterEntriesByPhases(profile, profile.paints || [], config.phaseNames, 'start_time_ms', 'start_time');
+    const longTasks = filterEntriesByPhases(profile, profile.long_tasks || [], config.phaseNames, 'start_time_ms');
+
+    return stableJson({
+        ...profile,
+        network,
+        resources,
+        paints,
+        long_tasks: longTasks,
+        summary: {
+            ...(profile.summary || {}),
+            failed_network_request_count: network.filter((entry) => entry.failed || finiteNumber(entry.status) >= 400).length,
+            long_task_count: longTasks.length,
+            long_task_total_ms: sumValues(longTasks, 'duration_ms'),
+            network_request_count: network.length,
+            resource_count: resources.length,
+        },
+    });
+}
+
+function filterEntriesByPhases(profile, entries, phaseNames, ...timeKeys) {
+    return entries.filter((entry) => phaseNames.some((phaseName) => entryFallsInPhase(profile, entry, phaseName, timeKeys)));
+}
+
+function entryFallsInPhase(profile, entry, phaseName, timeKeys) {
+    const phase = profile.phases?.[phaseName];
+    if (!phase) return false;
+    const start = firstFinite(...timeKeys.map((key) => entry[key]));
+    const phaseStart = finiteNumber(phase.start_time_ms);
+    const phaseEnd = phase.end_time_ms === null || phase.end_time_ms === undefined ? Infinity : finiteNumber(phase.end_time_ms);
+    return start >= phaseStart && start <= phaseEnd;
 }
 
 function createBrowserPerformanceController(page, state) {
@@ -740,17 +854,352 @@ function collectPhases(phaseMarks) {
 
 function profileComparisonMetrics(profile) {
     const summary = profile.summary || {};
+    const readyMs = firstFinite(summary.ready_ms, summary.app_ready_ms, profile.ready_ms);
+    const networkIdleMs = firstFinite(summary.network_idle_ms, summary.browser_network_idle_ms, profile.network_idle_ms);
     return {
         resource_count: finiteNumber(summary.resource_count),
         network_request_count: finiteNumber(summary.network_request_count),
         failed_network_request_count: finiteNumber(summary.failed_network_request_count),
+        total_transfer_bytes: totalTransferBytes(profile),
         dom_content_loaded_ms: finiteNumber(summary.dom_content_loaded_ms),
         load_event_ms: finiteNumber(summary.load_event_ms),
+        ready_ms: readyMs,
+        network_idle_ms: networkIdleMs,
+        first_contentful_paint_ms: paintTiming(profile, 'first-contentful-paint'),
+        first_paint_ms: paintTiming(profile, 'first-paint'),
         largest_contentful_paint_ms: finiteNumber(summary.largest_contentful_paint_ms),
         cumulative_layout_shift: finiteNumber(summary.cumulative_layout_shift),
         long_task_count: finiteNumber(summary.long_task_count),
         long_task_total_ms: finiteNumber(summary.long_task_total_ms),
+        console_message_count: finiteNumber(summary.console_message_count ?? profile.console_messages?.length),
+        page_error_count: finiteNumber(summary.page_error_count ?? profile.page_errors?.length),
     };
+}
+
+function compareProfileRequests(baseline, candidate, config) {
+    const baselineEntries = keyedRequests(baseline.network || []);
+    const candidateEntries = keyedRequests(candidate.network || []);
+    const added = [];
+    const removed = [];
+    const changed = [];
+
+    for (const [key, entry] of candidateEntries) {
+        if (!baselineEntries.has(key)) added.push(requestDetail(entry));
+    }
+    for (const [key, entry] of baselineEntries) {
+        if (!candidateEntries.has(key)) removed.push(requestDetail(entry));
+    }
+    for (const [key, before] of baselineEntries) {
+        const after = candidateEntries.get(key);
+        if (!after) continue;
+        const fields = compareRequestFields(before, after, config);
+        if (Object.keys(fields).length > 0) {
+            changed.push(stableJson({ key, request: requestIdentity(after), fields }));
+        }
+    }
+
+    return stableJson({
+        count: compareMetric(baselineEntries.size, candidateEntries.size, config),
+        added: added.sort(compareRequestDetails),
+        removed: removed.sort(compareRequestDetails),
+        changed: changed.sort((a, b) => a.key.localeCompare(b.key)),
+    });
+}
+
+function compareRequestFields(before, after, config) {
+    const fields = {};
+    for (const key of ['status', 'failed', 'resource_type', 'failure_text']) {
+        const baselineValue = before[key] ?? null;
+        const candidateValue = after[key] ?? null;
+        if (baselineValue !== candidateValue) fields[key] = { baseline: baselineValue, candidate: candidateValue };
+    }
+    for (const key of ['duration_ms', 'start_time_ms']) {
+        const comparison = compareMetric(before[key], after[key], config);
+        if (comparison.delta !== 0) fields[key] = comparison;
+    }
+    return stableJson(fields);
+}
+
+function compareTransferBytes(baseline, candidate, config) {
+    const baselineEntries = keyedResources(baseline.resources || []);
+    const candidateEntries = keyedResources(candidate.resources || []);
+    const changed = [];
+    for (const [key, before] of baselineEntries) {
+        const after = candidateEntries.get(key);
+        if (!after) continue;
+        const comparison = compareMetric(before.transfer_size, after.transfer_size, config);
+        if (comparison.delta !== 0) changed.push(stableJson({ key, resource: resourceIdentity(after), transfer_bytes: comparison }));
+    }
+    return stableJson({
+        total: compareMetric(totalTransferBytes(baseline), totalTransferBytes(candidate), config),
+        added: [...candidateEntries].filter(([key]) => !baselineEntries.has(key)).map(([, entry]) => resourceDetail(entry)).sort(compareResourceDetails),
+        removed: [...baselineEntries].filter(([key]) => !candidateEntries.has(key)).map(([, entry]) => resourceDetail(entry)).sort(compareResourceDetails),
+        changed: changed.sort((a, b) => Math.abs(b.transfer_bytes.delta) - Math.abs(a.transfer_bytes.delta) || a.key.localeCompare(b.key)),
+    });
+}
+
+function compareSlowestRequests(baseline, candidate, config) {
+    const baselineSlowest = slowestRequest(baseline.network || []);
+    const candidateSlowest = slowestRequest(candidate.network || []);
+    const baselineEntries = keyedRequests(baseline.network || []);
+    const candidateEntries = keyedRequests(candidate.network || []);
+    const changed = [];
+    for (const [key, before] of baselineEntries) {
+        const after = candidateEntries.get(key);
+        if (!after) continue;
+        const duration = compareMetric(before.duration_ms, after.duration_ms, config);
+        if (duration.delta !== 0) changed.push(stableJson({ key, request: requestIdentity(after), duration_ms: duration }));
+    }
+    return stableJson({
+        baseline: baselineSlowest ? requestDetail(baselineSlowest) : null,
+        candidate: candidateSlowest ? requestDetail(candidateSlowest) : null,
+        slowest_duration_ms: compareMetric(baselineSlowest?.duration_ms, candidateSlowest?.duration_ms, config),
+        changed: changed.sort((a, b) => Math.abs(b.duration_ms.delta) - Math.abs(a.duration_ms.delta) || a.key.localeCompare(b.key)),
+    });
+}
+
+function compareFailedRequests(baseline, candidate, config) {
+    const baselineFailed = (baseline.network || []).filter((entry) => entry.failed || finiteNumber(entry.status) >= 400);
+    const candidateFailed = (candidate.network || []).filter((entry) => entry.failed || finiteNumber(entry.status) >= 400);
+    return stableJson({
+        count: compareMetric(baselineFailed.length, candidateFailed.length, config),
+        added: diffRequestSet(baselineFailed, candidateFailed).added,
+        removed: diffRequestSet(baselineFailed, candidateFailed).removed,
+    });
+}
+
+function compareLateRequests(baseline, candidate, config) {
+    const baselineLate = lateRequests(baseline);
+    const candidateLate = lateRequests(candidate);
+    return stableJson({
+        ready_ms: compareMetric(profileReadyMs(baseline), profileReadyMs(candidate), config),
+        count: compareMetric(baselineLate.length, candidateLate.length, config),
+        total_duration_ms: compareMetric(sumValues(baselineLate, 'duration_ms'), sumValues(candidateLate, 'duration_ms'), config),
+        transfer_bytes: compareMetric(transferBytesForRequests(baselineLate, baseline), transferBytesForRequests(candidateLate, candidate), config),
+        added: diffRequestSet(baselineLate, candidateLate).added,
+        removed: diffRequestSet(baselineLate, candidateLate).removed,
+    });
+}
+
+function compareLongTasks(baseline, candidate, config) {
+    const baselineTasks = baseline.long_tasks || [];
+    const candidateTasks = candidate.long_tasks || [];
+    return stableJson({
+        count: compareMetric(baselineTasks.length, candidateTasks.length, config),
+        total_duration_ms: compareMetric(sumValues(baselineTasks, 'duration_ms'), sumValues(candidateTasks, 'duration_ms'), config),
+        max_duration_ms: compareMetric(maxValue(baselineTasks, 'duration_ms'), maxValue(candidateTasks, 'duration_ms'), config),
+    });
+}
+
+function comparePaintTimings(baseline, candidate, config) {
+    return stableJson({
+        first_paint_ms: compareMetric(paintTiming(baseline, 'first-paint'), paintTiming(candidate, 'first-paint'), config),
+        first_contentful_paint_ms: compareMetric(paintTiming(baseline, 'first-contentful-paint'), paintTiming(candidate, 'first-contentful-paint'), config),
+        largest_contentful_paint_ms: compareMetric(profileMetric(baseline, 'largest_contentful_paint_ms'), profileMetric(candidate, 'largest_contentful_paint_ms'), config),
+        dom_content_loaded_ms: compareMetric(profileMetric(baseline, 'dom_content_loaded_ms'), profileMetric(candidate, 'dom_content_loaded_ms'), config),
+        load_event_ms: compareMetric(profileMetric(baseline, 'load_event_ms'), profileMetric(candidate, 'load_event_ms'), config),
+        ready_ms: compareMetric(profileReadyMs(baseline), profileReadyMs(candidate), config),
+        network_idle_ms: compareMetric(profileNetworkIdleMs(baseline), profileNetworkIdleMs(candidate), config),
+    });
+}
+
+function compareProfileErrors(baseline, candidate, config) {
+    const baselineConsole = baseline.console_messages || [];
+    const candidateConsole = candidate.console_messages || [];
+    const baselineConsoleErrors = baselineConsole.filter(isConsoleError);
+    const candidateConsoleErrors = candidateConsole.filter(isConsoleError);
+    const baselinePageErrors = baseline.page_errors || [];
+    const candidatePageErrors = candidate.page_errors || [];
+    return stableJson({
+        console_messages: compareMetric(baselineConsole.length, candidateConsole.length, config),
+        console_errors: compareMetric(baselineConsoleErrors.length, candidateConsoleErrors.length, config),
+        page_errors: compareMetric(baselinePageErrors.length, candidatePageErrors.length, config),
+        added_console_errors: diffTextSet(baselineConsoleErrors, candidateConsoleErrors, consoleMessageKey).added,
+        removed_console_errors: diffTextSet(baselineConsoleErrors, candidateConsoleErrors, consoleMessageKey).removed,
+        added_page_errors: diffTextSet(baselinePageErrors, candidatePageErrors, errorKey).added,
+        removed_page_errors: diffTextSet(baselinePageErrors, candidatePageErrors, errorKey).removed,
+    });
+}
+
+function compareMetric(baseline, candidate, config) {
+    const before = finiteNumber(baseline);
+    const after = finiteNumber(candidate);
+    return {
+        baseline: before,
+        candidate: after,
+        delta: roundNumber(after - before),
+        percent_change: before === 0 ? null : roundNumber(((after - before) / before) * 100),
+        threshold_percent: config.thresholdPercent,
+        status: metricStatus(before, after, config.thresholdPercent),
+    };
+}
+
+function countMetric(baseline, candidate, delta) {
+    return { baseline, candidate, delta, percent_change: baseline === 0 ? null : (delta / baseline) * 100, status: delta === 0 ? 'unchanged' : delta > 0 ? 'regressed' : 'improved' };
+}
+
+function keyedRequests(entries) {
+    const seen = new Map();
+    const keyed = new Map();
+    for (const entry of entries) {
+        const identity = [entry.method || 'GET', entry.url || '', entry.resource_type || ''].join(' ');
+        const count = (seen.get(identity) || 0) + 1;
+        seen.set(identity, count);
+        keyed.set(`${identity} #${count}`, entry);
+    }
+    return keyed;
+}
+
+function keyedResources(entries) {
+    const seen = new Map();
+    const keyed = new Map();
+    for (const entry of entries) {
+        const identity = [entry.name || '', entry.initiator_type || ''].join(' ');
+        const count = (seen.get(identity) || 0) + 1;
+        seen.set(identity, count);
+        keyed.set(`${identity} #${count}`, entry);
+    }
+    return keyed;
+}
+
+function requestIdentity(entry) {
+    return stableJson({
+        method: entry.method || '',
+        url: entry.url || '',
+        resource_type: entry.resource_type || '',
+    });
+}
+
+function requestDetail(entry) {
+    return stableJson({
+        ...requestIdentity(entry),
+        status: entry.status ?? null,
+        failed: Boolean(entry.failed),
+        start_time_ms: finiteOrNull(entry.start_time_ms),
+        duration_ms: finiteOrNull(entry.duration_ms),
+        failure_text: entry.failure_text || undefined,
+    });
+}
+
+function resourceIdentity(entry) {
+    return stableJson({
+        name: entry.name || '',
+        initiator_type: entry.initiator_type || '',
+    });
+}
+
+function resourceDetail(entry) {
+    return stableJson({
+        ...resourceIdentity(entry),
+        duration_ms: finiteOrNull(entry.duration),
+        transfer_bytes: finiteNumber(entry.transfer_size),
+    });
+}
+
+function diffRequestSet(baseline, candidate) {
+    const baselineEntries = keyedRequests(baseline);
+    const candidateEntries = keyedRequests(candidate);
+    return stableJson({
+        added: [...candidateEntries].filter(([key]) => !baselineEntries.has(key)).map(([, entry]) => requestDetail(entry)).sort(compareRequestDetails),
+        removed: [...baselineEntries].filter(([key]) => !candidateEntries.has(key)).map(([, entry]) => requestDetail(entry)).sort(compareRequestDetails),
+    });
+}
+
+function diffTextSet(baseline, candidate, keyFn) {
+    const baselineKeys = new Set(baseline.map(keyFn));
+    const candidateKeys = new Set(candidate.map(keyFn));
+    return stableJson({
+        added: candidate.map(keyFn).filter((key) => !baselineKeys.has(key)).sort(),
+        removed: baseline.map(keyFn).filter((key) => !candidateKeys.has(key)).sort(),
+    });
+}
+
+function slowestRequest(entries) {
+    return entries.reduce((slowest, entry) => finiteNumber(entry.duration_ms) > finiteNumber(slowest?.duration_ms) ? entry : slowest, null);
+}
+
+function lateRequests(profile) {
+    const readyMs = profileReadyMs(profile);
+    if (readyMs <= 0) return [];
+    return (profile.network || []).filter((entry) => finiteNumber(entry.start_time_ms) > readyMs);
+}
+
+function totalTransferBytes(profile) {
+    return sumValues(profile.resources || [], 'transfer_size');
+}
+
+function transferBytesForRequests(requests, profile) {
+    const urls = new Set(requests.map((entry) => entry.url).filter(Boolean));
+    return (profile.resources || []).reduce((sum, entry) => urls.has(entry.name) ? sum + finiteNumber(entry.transfer_size) : sum, 0);
+}
+
+function paintTiming(profile, paintName) {
+    const paint = (profile.paints || []).find((entry) => entry.name === paintName);
+    return finiteNumber(paint?.start_time_ms ?? paint?.start_time ?? paint?.startTime);
+}
+
+function profileMetric(profile, key) {
+    return firstFinite(profile.summary?.[key], profile.metrics?.[key], profile[key]);
+}
+
+function profileReadyMs(profile) {
+    return firstFinite(
+        profile.summary?.ready_ms,
+        profile.summary?.app_ready_ms,
+        profile.metrics?.ready_ms,
+        profile.ready_ms,
+        phaseStart(profile, 'ready')
+    );
+}
+
+function profileNetworkIdleMs(profile) {
+    return firstFinite(
+        profile.summary?.network_idle_ms,
+        profile.summary?.browser_network_idle_ms,
+        profile.metrics?.network_idle_ms,
+        profile.metrics?.browser_network_idle_ms,
+        profile.network_idle_ms,
+        phaseStart(profile, 'network-idle')
+    );
+}
+
+function phaseStart(profile, phaseName) {
+    return finiteNumber((profile.phase_marks || []).find((mark) => mark.name === phaseName)?.start_time_ms);
+}
+
+function sumValues(entries, key) {
+    return roundNumber(entries.reduce((sum, entry) => sum + finiteNumber(entry[key]), 0));
+}
+
+function maxValue(entries, key) {
+    return entries.reduce((max, entry) => Math.max(max, finiteNumber(entry[key])), 0);
+}
+
+function firstFinite(...values) {
+    for (const value of values) {
+        if (typeof value === 'number' && Number.isFinite(value)) return roundNumber(value);
+    }
+    return 0;
+}
+
+function isConsoleError(entry) {
+    return ['error', 'assert'].includes(String(entry.type || '').toLowerCase());
+}
+
+function consoleMessageKey(entry) {
+    return [entry.type || '', entry.text || '', JSON.stringify(entry.location || {})].join(' ');
+}
+
+function errorKey(entry) {
+    return [entry.name || 'Error', entry.message || '', entry.stack || ''].join(' ');
+}
+
+function compareRequestDetails(a, b) {
+    return String(a.url || '').localeCompare(String(b.url || '')) || String(a.method || '').localeCompare(String(b.method || ''));
+}
+
+function compareResourceDetails(a, b) {
+    return String(a.name || '').localeCompare(String(b.name || ''));
 }
 
 function metricStatus(baseline, candidate, thresholdPercent) {
@@ -817,6 +1266,101 @@ function roundNumber(value) {
 
 function sanitizePhaseName(name) {
     return sanitizeMetricName(name).replace(/_/g, '-') || 'phase';
+}
+
+function summaryMetrics(diff) {
+    return [
+        ['Request count', diff.requests?.count],
+        ['Total transfer bytes', diff.transfer?.total],
+        ['Failed requests', diff.failed_requests?.count],
+        ['Network-after-ready requests', diff.late_requests?.count],
+        ['Long tasks', diff.long_tasks?.count],
+        ['Load event ms', diff.paints?.load_event_ms],
+        ['Ready ms', diff.paints?.ready_ms],
+        ['Network idle ms', diff.paints?.network_idle_ms],
+        ['Console errors', diff.errors?.console_errors],
+        ['Page errors', diff.errors?.page_errors],
+    ].filter(([, metric]) => metric);
+}
+
+function appendMetricSection(lines, title, rows) {
+    const filteredRows = rows.filter(([, metric]) => metric);
+    if (filteredRows.length === 0) return;
+    lines.push('', `## ${title}`, '', '| Metric | Baseline | Candidate | Delta | Change | Status |', '| --- | ---: | ---: | ---: | ---: | --- |');
+    for (const [name, metric, unit] of filteredRows) lines.push(formatMetricRow(name, metric, unit));
+}
+
+function appendDetailRows(lines, title, rows, maxRows, formatter) {
+    if (!Array.isArray(rows) || rows.length === 0) return;
+    lines.push('', `### ${title}`, '');
+    lines.push(formatter.header);
+    lines.push(formatter.separator);
+    for (const row of rows.slice(0, maxRows)) lines.push(formatter(row));
+    if (rows.length > maxRows) lines.push(`| ... | ${rows.length - maxRows} more | | | |`);
+}
+
+function formatMetricRow(name, metric, unit = '') {
+    return `| ${escapeMarkdownCell(name)} | ${formatValue(metric.baseline, unit)} | ${formatValue(metric.candidate, unit)} | ${formatSignedValue(metric.delta, unit)} | ${formatPercent(metric.percent_change)} | ${metric.status} |`;
+}
+
+function formatRequestDetailRow(row) {
+    return `| ${escapeMarkdownCell(row.method)} | ${escapeMarkdownCell(row.url)} | ${escapeMarkdownCell(row.resource_type)} | ${row.status ?? 'n/a'} | ${formatValue(row.duration_ms, 'ms')} |`;
+}
+formatRequestDetailRow.header = '| Method | URL | Type | Status | Duration |';
+formatRequestDetailRow.separator = '| --- | --- | --- | ---: | ---: |';
+
+function formatChangedRequestRow(row) {
+    const fields = Object.entries(row.fields || {})
+        .map(([key, value]) => `${key}: ${formatFieldChange(value)}`)
+        .join('<br>');
+    return `| ${escapeMarkdownCell(row.request?.method)} | ${escapeMarkdownCell(row.request?.url)} | ${escapeMarkdownCell(row.request?.resource_type)} | ${escapeMarkdownCell(fields)} | |`;
+}
+formatChangedRequestRow.header = '| Method | URL | Type | Changes | |';
+formatChangedRequestRow.separator = '| --- | --- | --- | --- | --- |';
+
+function formatTransferRow(row) {
+    return `| ${escapeMarkdownCell(row.resource?.name)} | ${escapeMarkdownCell(row.resource?.initiator_type)} | ${formatValue(row.transfer_bytes.baseline, 'bytes')} | ${formatValue(row.transfer_bytes.candidate, 'bytes')} | ${formatSignedValue(row.transfer_bytes.delta, 'bytes')} |`;
+}
+formatTransferRow.header = '| Resource | Type | Baseline | Candidate | Delta |';
+formatTransferRow.separator = '| --- | --- | ---: | ---: | ---: |';
+
+function formatRequestDurationRow(row) {
+    return `| ${escapeMarkdownCell(row.request?.method)} | ${escapeMarkdownCell(row.request?.url)} | ${formatValue(row.duration_ms.baseline, 'ms')} | ${formatValue(row.duration_ms.candidate, 'ms')} | ${formatSignedValue(row.duration_ms.delta, 'ms')} |`;
+}
+formatRequestDurationRow.header = '| Method | URL | Baseline | Candidate | Delta |';
+formatRequestDurationRow.separator = '| --- | --- | ---: | ---: | ---: |';
+
+function formatFieldChange(value) {
+    if (value && typeof value === 'object' && 'delta' in value) {
+        return `${formatValue(value.baseline)} -> ${formatValue(value.candidate)} (${formatSignedValue(value.delta)})`;
+    }
+    return `${formatValue(value?.baseline)} -> ${formatValue(value?.candidate)}`;
+}
+
+function formatValue(value, unit = '') {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return 'n/a';
+    if (unit === 'bytes') return formatBytes(value);
+    if (unit === 'ms') return `${value.toFixed(2)} ms`;
+    return formatNumber(value);
+}
+
+function formatSignedValue(value, unit = '') {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return 'n/a';
+    if (unit === 'bytes') return `${value >= 0 ? '+' : ''}${formatBytes(value)}`;
+    if (unit === 'ms') return `${value >= 0 ? '+' : ''}${value.toFixed(2)} ms`;
+    return formatSignedNumber(value);
+}
+
+function formatBytes(value) {
+    const sign = value < 0 ? '-' : '';
+    const absolute = Math.abs(value);
+    if (absolute >= 1024 * 1024) return `${sign}${(absolute / (1024 * 1024)).toFixed(2)} MiB`;
+    if (absolute >= 1024) return `${sign}${(absolute / 1024).toFixed(2)} KiB`;
+    return `${sign}${absolute.toFixed(0)} B`;
+}
+
+function escapeMarkdownCell(value) {
+    return String(value ?? '').replace(/\|/g, '\\|').replace(/\n/g, '<br>');
 }
 
 function formatNumber(value) {
