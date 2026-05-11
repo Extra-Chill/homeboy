@@ -97,6 +97,14 @@ name: Data Machine Agent CI (reusable)
         description: JSON array of OWNER/REPO strings the injected GitHub profile may access. Defaults to [target_repo].
         type: string
         default: "[]"
+      engine_key:
+        description: Optional engine data key used by built-in tool result capture and fallback pull request recording.
+        type: string
+        default: ""
+      tool_results_key:
+        description: Engine data field used for captured tool results.
+        type: string
+        default: github_tool_results
       dry_run:
         description: Build runner config and exercise the runner dry-run path without a live agent call.
         type: boolean
@@ -348,6 +356,8 @@ jobs:
           DAILY_MEMORY_ENABLED: ${{ inputs.daily_memory_enabled }}
           EXTRA_REQUIRED_ABILITIES: ${{ inputs.extra_required_abilities }}
           ALLOWED_REPOS: ${{ inputs.allowed_repos }}
+          ENGINE_KEY: ${{ inputs.engine_key }}
+          TOOL_RESULTS_KEY: ${{ inputs.tool_results_key }}
           ABILITY_TOOLS: ${{ inputs.ability_tools }}
           TOOL_RECORDERS: ${{ inputs.tool_recorders }}
           PIPELINE_STEP_PATCHES: ${{ inputs.pipeline_step_patches }}
@@ -402,6 +412,8 @@ jobs:
             --arg prompt "$PROMPT" \
             --arg provider "$PROVIDER" \
             --arg model "$MODEL" \
+            --arg engineKey "$ENGINE_KEY" \
+            --arg toolResultsKey "$TOOL_RESULTS_KEY" \
             --arg playgroundWordPress "$PLAYGROUND_WORDPRESS" \
             --arg transcriptGuestDir "$transcript_guest_dir" \
             --arg githubToken "$GITHUB_TOKEN_VALUE" \
@@ -459,6 +471,8 @@ jobs:
               github_profile_id: ($agentSlug + "-ci"),
               target_repo: $targetRepo,
               allowed_repos: (if ($allowedRepos | length) > 0 then $allowedRepos else [$targetRepo] end),
+              engine_key: $engineKey,
+              tool_results_key: $toolResultsKey,
               max_turns: $maxTurns,
               prompt: $prompt,
               step_budget: $stepBudget,

@@ -78,6 +78,8 @@ The runner converts the agent config into a single Playground bench workload:
 - `success_requires_pr` can require the agent to open or reuse a pull request.
 - `tool_recorders` can force tool parameters and project tool results into
   `metadata.engine_data`.
+- `engine_key` and `tool_results_key` control where built-in tool capture and
+  fallback pull request data are recorded.
 - `ability_tools` can expose additional WordPress abilities as tools during the
   agent run.
 - `pipeline_step_patches` and `flow_step_patches` can adjust imported bundle
@@ -98,7 +100,7 @@ knobs to `run-datamachine-agent.sh`:
 - Bundle location: `bundle_path`, `bundle_repo`, `bundle_ref`, `bundle_path_in_repo`.
 - Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
 - WordPress runtime: `playground_wordpress`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`.
-- GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`.
+- GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`.
 - Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `pipeline_step_patches`, `flow_step_patches`, `fallback_pull_request`.

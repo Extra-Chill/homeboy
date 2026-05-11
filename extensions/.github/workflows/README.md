@@ -89,6 +89,7 @@ jobs:
 - `bundle_repo`, `bundle_ref`, and `bundle_path_in_repo` let a consumer run against a bundle stored in another repository. The runner clones that repository before mounting the bundle into Playground.
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`.
 - `allowed_repos` is a JSON array of `OWNER/REPO` entries exposed to the injected GitHub profile. It defaults to `[target_repo]`.
+- `engine_key` and `tool_results_key` control where built-in GitHub tool captures and fallback PR data are written in `metadata.engine_data`.
 - `dry_run` is intended for workflow smoke tests only; production consumers should leave it `false`.
 - `transcript_artifact_name` controls artifact upload. An empty value skips upload.
 - `extra_wp_config_defines` must be a JSON object and is merged into the runner config `wp_config_defines`.
@@ -119,6 +120,8 @@ jobs:
       target_repo: Automattic/agents-api
       app_token_repos: Automattic/agents-api,Automattic/docs-agent
       allowed_repos: '["Automattic/agents-api", "Automattic/docs-agent"]'
+      engine_key: docs_agent
+      tool_results_key: github_tool_results
       tool_recorders: |
         [
           {
