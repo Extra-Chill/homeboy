@@ -101,6 +101,8 @@ jobs:
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
 - `tool_recorders` configures tool-result projection, forced parameters, and engine-data capture. It must be a JSON array.
 - `pipeline_step_patches` and `flow_step_patches` modify imported bundle step config before the flow runs. They must be JSON arrays.
+- `runner_workspace` provisions a Data Machine Code worktree before the agent runs. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for opt-in runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner inspects, commits, pushes, and opens/reuses a fallback PR for captured workspace changes after completion.
+- `runner_workspace.capture_changes` defaults to `true` only when `expose_to_agent: false`; set it explicitly to disable hidden-mode publication or to enable runner-owned capture while still exposing the workspace handle.
 - `fallback_pull_request` opens or reuses a PR when files were written but the agent did not call the PR tool. It must be a JSON object.
 
 ## External bundle and tool recording example

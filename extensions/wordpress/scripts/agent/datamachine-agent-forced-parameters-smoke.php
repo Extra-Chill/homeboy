@@ -138,6 +138,39 @@ namespace {
         exit( 1 );
     }
 
+    list( $hidden_config, $hidden_prompt ) = homeboy_datamachine_agent_apply_runner_workspace(
+        array(
+            'runner_workspace' => array(
+                'enabled'         => true,
+                'expose_to_agent' => false,
+            ),
+        ),
+        'Run the agent naturally.',
+        array(
+            'success' => true,
+            'handle'  => 'demo@hidden-run',
+            'branch'  => 'agent/hidden-run',
+        )
+    );
+
+    if ( 'Run the agent naturally.' !== $hidden_prompt ) {
+        fwrite( STDERR, "Expected hidden runner workspace mode to preserve the natural prompt.\n" );
+        exit( 1 );
+    }
+
+    $hidden_workspace_recorder = null;
+    foreach ( $hidden_config['tool_recorders'] ?? array() as $runner_recorder ) {
+        if ( is_array( $runner_recorder ) && 'workspace_write' === ( $runner_recorder['tool'] ?? '' ) ) {
+            $hidden_workspace_recorder = $runner_recorder;
+            break;
+        }
+    }
+
+    if ( 'demo@hidden-run' !== ( $hidden_workspace_recorder['forced_parameters']['repo'] ?? null ) ) {
+        fwrite( STDERR, "Expected hidden runner workspace mode to keep workspace tool scoping.\n" );
+        exit( 1 );
+    }
+
     $implicit_fallback = homeboy_datamachine_agent_open_fallback_pr(
         array(),
         array(

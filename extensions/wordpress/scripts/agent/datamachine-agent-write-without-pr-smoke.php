@@ -275,6 +275,80 @@ namespace {
         exit( 1 );
     }
 
+    $runner_capture_calls = array();
+    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
+        'datamachine/workspace-git-status' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            function ( array $input ) use ( &$runner_capture_calls ): array {
+                $runner_capture_calls[] = array( 'ability' => 'status', 'input' => $input );
+                return array(
+                    'success' => true,
+                    'dirty'   => 1,
+                    'files'   => array( 'docs/generated.md' ),
+                );
+            }
+        ),
+        'datamachine/workspace-git-diff' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            fn( array $input ) => array(
+                'success' => true,
+                'name'    => $input['name'] ?? '',
+                'diff'    => "diff --git a/docs/generated.md b/docs/generated.md\n",
+            )
+        ),
+        'datamachine/workspace-git-add' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            function ( array $input ) use ( &$runner_capture_calls ): array {
+                $runner_capture_calls[] = array( 'ability' => 'add', 'input' => $input );
+                return array( 'success' => true, 'paths' => $input['paths'] ?? array() );
+            }
+        ),
+        'datamachine/workspace-git-commit' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            fn( array $input ) => array( 'success' => true, 'commit' => 'abc123', 'message' => $input['message'] ?? '' )
+        ),
+        'datamachine/workspace-git-push' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            fn( array $input ) => array( 'success' => true, 'branch' => $input['branch'] ?? '', 'html_url' => 'https://github.com/owner/repo/tree/agent/hidden-run' )
+        ),
+        'datamachine/list-github-pulls' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            fn() => array( 'success' => true, 'pulls' => array() )
+        ),
+        'datamachine/create-github-pull-request' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            function ( array $input ) use ( &$fallback_pr_input ): array {
+                $fallback_pr_input = $input;
+                return array(
+                    'success'  => true,
+                    'html_url' => 'https://github.com/owner/repo/pull/987',
+                );
+            }
+        ),
+    );
+    $runner_capture = homeboy_datamachine_agent_capture_runner_workspace(
+        array(),
+        array(
+            'target_repo'              => 'owner/repo',
+            'tool_results_key'         => 'github_tool_results',
+            'runner_workspace'         => array(
+                'enabled'         => true,
+                'expose_to_agent' => false,
+            ),
+            'runner_workspace_result'  => array(
+                'success' => true,
+                'handle'  => 'repo@hidden-run',
+                'branch'  => 'agent/hidden-run',
+            ),
+        )
+    );
+
+    if ( empty( $runner_capture['changed'] ) || empty( $runner_capture['fallback_pull_request']['opened'] ) ) {
+        fwrite( STDERR, "Expected hidden runner workspace capture to commit, push, and open a fallback PR.\n" );
+        exit( 1 );
+    }
+    if ( 'agent/hidden-run' !== ( $fallback_pr_input['head'] ?? null ) || 'owner/repo' !== ( $fallback_pr_input['repo'] ?? null ) ) {
+        fwrite( STDERR, "Expected runner workspace capture fallback PR to use the captured branch.\n" );
+        exit( 1 );
+    }
+    if ( 'repo@hidden-run' !== ( $runner_capture_calls[0]['input']['name'] ?? null ) || array( 'docs/generated.md' ) !== ( $runner_capture_calls[1]['input']['paths'] ?? null ) ) {
+        fwrite( STDERR, "Expected runner workspace capture to inspect and stage the provisioned handle.\n" );
+        exit( 1 );
+    }
+
     $merged_daily_memory = homeboy_datamachine_agent_merge_daily_memory_artifact(
         "# Daily Memory: 2026-05-10\n\n### Existing Entry\n- Keep this.\n### Concurrent Entry\n- Do not delete this.\n",
         "# Daily Memory: 2026-05-10\n\n### Existing Entry\n- Keep this.\n### New Entry\n- Add this.\n"

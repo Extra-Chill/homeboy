@@ -693,6 +693,136 @@ if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_config' ) ) {
+    function homeboy_datamachine_agent_runner_workspace_config( array $config ): array {
+        return is_array( $config['runner_workspace'] ?? null ) ? $config['runner_workspace'] : array();
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_exposed' ) ) {
+    function homeboy_datamachine_agent_runner_workspace_exposed( array $config ): bool {
+        return homeboy_datamachine_agent_bool_config( homeboy_datamachine_agent_runner_workspace_config( $config ), 'expose_to_agent', true );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_capture_enabled' ) ) {
+    function homeboy_datamachine_agent_runner_workspace_capture_enabled( array $config ): bool {
+        $workspace = homeboy_datamachine_agent_runner_workspace_config( $config );
+        if ( ! homeboy_datamachine_agent_bool_config( $workspace, 'enabled', false ) ) {
+            return false;
+        }
+        if ( array_key_exists( 'capture_changes', $workspace ) ) {
+            return homeboy_datamachine_agent_bool_config( $workspace, 'capture_changes', false );
+        }
+
+        return ! homeboy_datamachine_agent_runner_workspace_exposed( $config );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_execute_workspace_ability' ) ) {
+    function homeboy_datamachine_agent_execute_workspace_ability( string $ability_name, array $input ): array {
+        $ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( $ability_name ) : null;
+        if ( ! $ability ) {
+            return array( 'success' => false, 'error' => $ability_name . ' is not registered.' );
+        }
+
+        $result = $ability->execute( $input );
+        if ( function_exists( 'is_wp_error' ) && is_wp_error( $result ) ) {
+            return array( 'success' => false, 'error' => $result->get_error_message(), 'input' => $input );
+        }
+        if ( ! is_array( $result ) ) {
+            return array( 'success' => false, 'error' => $ability_name . ' returned a non-array result.', 'input' => $input );
+        }
+
+        return $result + array( 'success' => ! empty( $result['success'] ) );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_fallback_config' ) ) {
+    function homeboy_datamachine_agent_runner_workspace_fallback_config( array $config, array $runner_workspace ): array {
+        $fallback = is_array( $config['fallback_pull_request'] ?? null ) ? $config['fallback_pull_request'] : array();
+        $repo     = homeboy_datamachine_agent_scalar( $fallback, 'repo', homeboy_datamachine_agent_scalar( $config, 'target_repo' ) );
+        $branch   = (string) ( $runner_workspace['branch'] ?? '' );
+
+        if ( '' === homeboy_datamachine_agent_scalar( $fallback, 'head' ) && '' !== $branch ) {
+            $fallback['head'] = $branch;
+        }
+        if ( '' === homeboy_datamachine_agent_scalar( $fallback, 'repo' ) && '' !== $repo ) {
+            $fallback['repo'] = $repo;
+        }
+        if ( '' === homeboy_datamachine_agent_scalar( $fallback, 'title' ) ) {
+            $fallback['title'] = 'Persist Data Machine agent workspace changes';
+        }
+
+        return $fallback;
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_capture_runner_workspace' ) ) {
+    function homeboy_datamachine_agent_capture_runner_workspace( array $engine_data, array $config ): array {
+        if ( ! homeboy_datamachine_agent_runner_workspace_capture_enabled( $config ) ) {
+            return array( 'enabled' => false, 'changed' => false, 'engine_data' => $engine_data );
+        }
+
+        $runner_workspace = is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array();
+        $handle           = (string) ( $runner_workspace['handle'] ?? '' );
+        if ( empty( $runner_workspace['success'] ) || '' === $handle ) {
+            return array( 'enabled' => true, 'changed' => false, 'engine_data' => $engine_data, 'error' => 'Runner workspace capture requires a provisioned workspace handle.' );
+        }
+
+        $status = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-status', array( 'name' => $handle ) );
+        if ( empty( $status['success'] ) ) {
+            return array( 'enabled' => true, 'changed' => false, 'engine_data' => $engine_data, 'status' => $status, 'error' => (string) ( $status['error'] ?? 'Workspace status failed.' ) );
+        }
+
+        $files = is_array( $status['files'] ?? null ) ? array_values( array_filter( $status['files'], 'is_string' ) ) : array();
+        if ( (int) ( $status['dirty'] ?? 0 ) <= 0 && empty( $files ) ) {
+            return array( 'enabled' => true, 'changed' => false, 'engine_data' => $engine_data, 'status' => $status );
+        }
+
+        $diff = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-diff', array( 'name' => $handle ) );
+        $add  = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-add', array( 'name' => $handle, 'paths' => empty( $files ) ? array( '.' ) : $files ) );
+        if ( empty( $add['success'] ) ) {
+            return array( 'enabled' => true, 'changed' => true, 'engine_data' => $engine_data, 'status' => $status, 'diff' => $diff, 'add' => $add, 'error' => (string) ( $add['error'] ?? 'Workspace git add failed.' ) );
+        }
+
+        $workspace_config = homeboy_datamachine_agent_runner_workspace_config( $config );
+        $message          = isset( $workspace_config['commit_message'] ) && is_scalar( $workspace_config['commit_message'] ) ? trim( (string) $workspace_config['commit_message'] ) : '';
+        if ( '' === $message ) {
+            $message = 'chore: persist Data Machine agent workspace changes';
+        }
+
+        $commit = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-commit', array( 'name' => $handle, 'message' => $message ) );
+        if ( empty( $commit['success'] ) ) {
+            return array( 'enabled' => true, 'changed' => true, 'engine_data' => $engine_data, 'status' => $status, 'diff' => $diff, 'add' => $add, 'commit' => $commit, 'error' => (string) ( $commit['error'] ?? 'Workspace git commit failed.' ) );
+        }
+
+        $push = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-push', array( 'name' => $handle, 'branch' => (string) ( $runner_workspace['branch'] ?? '' ) ) );
+        if ( empty( $push['success'] ) ) {
+            return array( 'enabled' => true, 'changed' => true, 'engine_data' => $engine_data, 'status' => $status, 'diff' => $diff, 'add' => $add, 'commit' => $commit, 'push' => $push, 'error' => (string) ( $push['error'] ?? 'Workspace git push failed.' ) );
+        }
+
+        $capture_config                          = $config;
+        $capture_config['fallback_pull_request'] = homeboy_datamachine_agent_runner_workspace_fallback_config( $config, $runner_workspace );
+        $fallback_pull_request                   = homeboy_datamachine_agent_open_fallback_pr( $engine_data, $capture_config );
+        if ( ! empty( $fallback_pull_request['engine_data'] ) && is_array( $fallback_pull_request['engine_data'] ) ) {
+            $engine_data = $fallback_pull_request['engine_data'];
+        }
+
+        return array(
+            'enabled'               => true,
+            'changed'               => true,
+            'engine_data'           => $engine_data,
+            'status'                => $status,
+            'diff'                  => $diff,
+            'add'                   => $add,
+            'commit'                => $commit,
+            'push'                  => $push,
+            'fallback_pull_request' => $fallback_pull_request,
+        );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_ability_schema' ) ) {
     function homeboy_datamachine_agent_ability_schema( string $ability_name ): array {
         $ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( $ability_name ) : null;
@@ -1031,7 +1161,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_slug' ) ) {
 
 if ( ! function_exists( 'homeboy_datamachine_agent_provision_workspace' ) ) {
     function homeboy_datamachine_agent_provision_workspace( array $config ): array {
-        $workspace = is_array( $config['runner_workspace'] ?? null ) ? $config['runner_workspace'] : array();
+        $workspace = homeboy_datamachine_agent_runner_workspace_config( $config );
         if ( ! homeboy_datamachine_agent_bool_config( $workspace, 'enabled', false ) ) {
             return array( 'enabled' => false );
         }
@@ -1123,9 +1253,11 @@ if ( ! function_exists( 'homeboy_datamachine_agent_apply_runner_workspace' ) ) {
         }
 
         $handle = (string) $runner_workspace['handle'];
-        $branch = (string) ( $runner_workspace['branch'] ?? '' );
-        $prefix = "Runner-provided workspace:\n- Workspace handle: {$handle}\n- Branch: {$branch}\n\nUse this workspace handle for all repository file and git changes. Do not mutate the primary checkout and do not create another worktree for this run.";
-        $prompt = '' === trim( $prompt ) ? $prefix : $prefix . "\n\n" . $prompt;
+        if ( homeboy_datamachine_agent_runner_workspace_exposed( $config ) ) {
+            $branch = (string) ( $runner_workspace['branch'] ?? '' );
+            $prefix = "Runner-provided workspace:\n- Workspace handle: {$handle}\n- Branch: {$branch}\n\nUse this workspace handle for all repository file and git changes. Do not mutate the primary checkout and do not create another worktree for this run.";
+            $prompt = '' === trim( $prompt ) ? $prefix : $prefix . "\n\n" . $prompt;
+        }
 
         $recorders        = is_array( $config['tool_recorders'] ?? null ) ? $config['tool_recorders'] : array();
         $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
@@ -1562,13 +1694,17 @@ $job_status = is_array( $job ) ? (string) ( $job['status'] ?? '' ) : '';
 $engine_data = function_exists( 'datamachine_get_engine_data' ) ? datamachine_get_engine_data( $job_id ) : array();
 $engine_data = homeboy_datamachine_agent_merge_recorded_tool_results( $engine_data, $config );
 $engine_data = homeboy_datamachine_agent_merge_child_engine_data( $engine_data, $child_drain_summary['children'], $config );
+$runner_workspace_capture = homeboy_datamachine_agent_capture_runner_workspace( $engine_data, $config );
+if ( is_array( $runner_workspace_capture['engine_data'] ?? null ) ) {
+    $engine_data = $runner_workspace_capture['engine_data'];
+}
 $transcript_dir = homeboy_datamachine_agent_scalar( $config, 'transcript_dir' );
 $transcript_artifacts = homeboy_datamachine_agent_export_transcript( $job_id, $engine_data, $transcript_dir );
 $pr_opened = homeboy_datamachine_agent_pr_opened( $engine_data, $config );
-$file_written = homeboy_datamachine_agent_file_written( $engine_data, $config );
-$fallback_pull_request = array( 'opened' => false );
+$file_written = homeboy_datamachine_agent_file_written( $engine_data, $config ) || ! empty( $runner_workspace_capture['changed'] );
+$fallback_pull_request = is_array( $runner_workspace_capture['fallback_pull_request'] ?? null ) ? $runner_workspace_capture['fallback_pull_request'] : array( 'opened' => false );
 $success_requires_pr = ! empty( $config['success_requires_pr'] );
-if ( $file_written && ! $pr_opened ) {
+if ( $file_written && ! $pr_opened && empty( $runner_workspace_capture['changed'] ) ) {
     $fallback_pull_request = homeboy_datamachine_agent_open_fallback_pr( $engine_data, $config );
     if ( ! empty( $fallback_pull_request['opened'] ) && is_array( $fallback_pull_request['engine_data'] ?? null ) ) {
         $engine_data = $fallback_pull_request['engine_data'];
@@ -1593,17 +1729,25 @@ $metadata += array(
     'success_status'        => $success_status,
     'success_requires_pr'   => $success_requires_pr,
     'fallback_pull_request' => $fallback_pull_request,
+    'runner_workspace_capture' => $runner_workspace_capture,
     'completion_outcome_satisfied' => $completion_outcome_satisfied,
     'file_written'          => $file_written,
     'job_artifact_exports'    => $job_artifact_exports,
 );
 
+if ( ! empty( $runner_workspace_capture['enabled'] ) && ! empty( $runner_workspace_capture['error'] ) && empty( $runner_workspace_capture['changed'] ) ) {
+    return homeboy_datamachine_agent_result( array( 'runner_workspace_captured' => 0 ), $metadata, (string) $runner_workspace_capture['error'] );
+}
+
 if ( $file_written && ! $pr_opened ) {
     $metadata['success_status'] = 'write_without_pr';
     $fallback_error = is_array( $fallback_pull_request ) ? (string) ( $fallback_pull_request['error'] ?? '' ) : '';
+    $capture_error  = is_array( $runner_workspace_capture ) ? (string) ( $runner_workspace_capture['error'] ?? '' ) : '';
     $error_message  = 'Agent wrote files without opening a pull request';
     if ( '' !== $fallback_error ) {
         $error_message .= ': ' . $fallback_error;
+    } elseif ( '' !== $capture_error ) {
+        $error_message .= ': ' . $capture_error;
     }
     return homeboy_datamachine_agent_result( array( 'file_written' => 1, 'pr_opened' => 0 ), $metadata, $error_message );
 }
@@ -1626,6 +1770,7 @@ return homeboy_datamachine_agent_result(
         'import_elapsed_ms'           => $import_elapsed_ms,
         'agent_resolved'              => 1,
         'runner_workspace_provisioned' => empty( $runner_workspace['enabled'] ) || ! empty( $runner_workspace['success'] ) ? 1 : 0,
+        'runner_workspace_captured'    => empty( $runner_workspace_capture['enabled'] ) || empty( $runner_workspace_capture['error'] ) ? 1 : 0,
         'pipeline_resolved'           => '' === $pipeline_slug || $pipeline_id > 0 ? 1 : 0,
         'flow_resolved'               => 1,
         'run_flow_succeeded'          => 1,
