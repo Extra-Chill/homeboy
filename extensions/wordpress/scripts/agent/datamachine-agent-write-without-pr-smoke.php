@@ -40,6 +40,30 @@ namespace {
         }
     }
 
+    if ( ! function_exists( 'is_wp_error' ) ) {
+        function is_wp_error( $value ): bool {
+            return false;
+        }
+    }
+
+    class Homeboy_Datamachine_Agent_Fake_Ability {
+        private $callback;
+
+        public function __construct( callable $callback ) {
+            $this->callback = $callback;
+        }
+
+        public function execute( array $input ): array {
+            return ( $this->callback )( $input );
+        }
+    }
+
+    if ( ! function_exists( 'wp_get_ability' ) ) {
+        function wp_get_ability( string $name ) {
+            return $GLOBALS['homeboy_datamachine_agent_fake_abilities'][ $name ] ?? null;
+        }
+    }
+
     putenv(
         'HOMEBOY_DATAMACHINE_AGENT_CONFIG=' . wp_json_encode(
             array(
@@ -168,6 +192,48 @@ namespace {
 
     if ( 'agent/recorded-branch' !== homeboy_datamachine_agent_pr_head_branch( $merged_recorded_results, $config ) ) {
         fwrite( STDERR, "Expected current-run recorded tool results to preserve the PR head branch.\n" );
+        exit( 1 );
+    }
+
+    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
+        'datamachine/list-github-pulls' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            fn() => array(
+                'success' => true,
+                'pulls'   => array(
+                    array(
+                        'number'   => 321,
+                        'html_url' => 'https://github.com/owner/repo/pull/321',
+                        'head'     => 'agent/existing-pr-branch',
+                        'base'     => 'main',
+                    ),
+                ),
+            )
+        ),
+        'datamachine/create-github-pull-request' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            function (): array {
+                fwrite( STDERR, "Did not expect fallback PR creation when an existing PR matches the head branch.\n" );
+                exit( 1 );
+            }
+        ),
+    );
+    $existing_fallback = homeboy_datamachine_agent_open_fallback_pr(
+        array(),
+        array(
+            'tool_results_key'      => 'github_tool_results',
+            'fallback_pull_request' => array(
+                'repo'  => 'owner/repo',
+                'title' => 'Fallback PR',
+                'head'  => 'agent/existing-pr-branch',
+                'base'  => 'main',
+            ),
+        )
+    );
+    if ( empty( $existing_fallback['opened'] ) || empty( $existing_fallback['reused'] ) ) {
+        fwrite( STDERR, "Expected fallback PR handling to reuse an existing open PR.\n" );
+        exit( 1 );
+    }
+    if ( ! homeboy_datamachine_agent_pr_opened( $existing_fallback['engine_data'] ?? array(), $config ) ) {
+        fwrite( STDERR, "Expected reused fallback PR to be recorded as pr_opened.\n" );
         exit( 1 );
     }
 

@@ -491,6 +491,66 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
 }
 
 if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
+    function homeboy_datamachine_agent_record_pr_tool_result( array $engine_data, array $config, array $tool_result ): array {
+        $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
+        $engine_key       = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
+        if ( '' !== $engine_key ) {
+            if ( ! isset( $engine_data[ $engine_key ] ) || ! is_array( $engine_data[ $engine_key ] ) ) {
+                $engine_data[ $engine_key ] = array();
+            }
+            if ( ! isset( $engine_data[ $engine_key ][ $tool_results_key ] ) || ! is_array( $engine_data[ $engine_key ][ $tool_results_key ] ) ) {
+                $engine_data[ $engine_key ][ $tool_results_key ] = array();
+            }
+            $engine_data[ $engine_key ][ $tool_results_key ][] = $tool_result;
+            return $engine_data;
+        }
+
+        if ( ! isset( $engine_data[ $tool_results_key ] ) || ! is_array( $engine_data[ $tool_results_key ] ) ) {
+            $engine_data[ $tool_results_key ] = array();
+        }
+        $engine_data[ $tool_results_key ][] = $tool_result;
+
+        return $engine_data;
+    }
+
+    function homeboy_datamachine_agent_existing_fallback_pr( string $repo, string $head, string $base ): array {
+        $ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'datamachine/list-github-pulls' ) : null;
+        if ( ! $ability ) {
+            return array();
+        }
+
+        $result = $ability->execute(
+            array(
+                'repo'     => $repo,
+                'state'    => 'open',
+                'per_page' => 100,
+            )
+        );
+        if ( function_exists( 'is_wp_error' ) && is_wp_error( $result ) ) {
+            return array();
+        }
+        if ( ! is_array( $result ) || empty( $result['success'] ) || ! is_array( $result['pulls'] ?? null ) ) {
+            return array();
+        }
+
+        foreach ( $result['pulls'] as $pull ) {
+            if ( ! is_array( $pull ) ) {
+                continue;
+            }
+            if ( $head !== (string) ( $pull['head'] ?? $pull['head_ref'] ?? '' ) ) {
+                continue;
+            }
+            if ( '' !== $base && $base !== (string) ( $pull['base'] ?? $pull['base_ref'] ?? '' ) ) {
+                continue;
+            }
+            if ( '' !== homeboy_datamachine_agent_first_url( $pull ) ) {
+                return $pull;
+            }
+        }
+
+        return array();
+    }
+
     function homeboy_datamachine_agent_open_fallback_pr( array $engine_data, array $config ): array {
         $fallback = is_array( $config['fallback_pull_request'] ?? null ) ? $config['fallback_pull_request'] : array();
         if ( empty( $fallback ) ) {
@@ -504,6 +564,34 @@ if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
             return array( 'opened' => false, 'error' => 'fallback_pull_request requires repo, title, and head.' );
         }
 
+        $base        = homeboy_datamachine_agent_scalar( $fallback, 'base' );
+        $existing_pr = homeboy_datamachine_agent_existing_fallback_pr( $repo, $head, $base );
+        if ( ! empty( $existing_pr ) ) {
+            $tool_result = array(
+                'tool_name' => 'create_github_pull_request',
+                'success'   => true,
+                'repo'      => $repo,
+                'head'      => $head,
+                'base'      => $base,
+                'url'       => homeboy_datamachine_agent_first_url( $existing_pr ),
+                'result'    => array(
+                    'success'      => true,
+                    'pull_request' => $existing_pr,
+                    'pull_number'  => (int) ( $existing_pr['number'] ?? 0 ),
+                    'html_url'     => homeboy_datamachine_agent_first_url( $existing_pr ),
+                    'message'      => sprintf( 'Reused existing pull request #%d in %s.', (int) ( $existing_pr['number'] ?? 0 ), $repo ),
+                ),
+            );
+
+            return array(
+                'opened'      => true,
+                'reused'      => true,
+                'result'      => $tool_result['result'],
+                'input'       => array( 'repo' => $repo, 'title' => $title, 'head' => $head, 'base' => $base ),
+                'engine_data' => homeboy_datamachine_agent_record_pr_tool_result( $engine_data, $config, $tool_result ),
+            );
+        }
+
         $ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'datamachine/create-github-pull-request' ) : null;
         if ( ! $ability ) {
             return array( 'opened' => false, 'error' => 'datamachine/create-github-pull-request ability is not available.' );
@@ -513,7 +601,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
             'repo'                  => $repo,
             'title'                 => $title,
             'head'                  => $head,
-            'base'                  => homeboy_datamachine_agent_scalar( $fallback, 'base' ),
+            'base'                  => $base,
             'body'                  => (string) ( $fallback['body'] ?? '' ),
             'draft'                 => ! empty( $fallback['draft'] ),
             'maintainer_can_modify' => array_key_exists( 'maintainer_can_modify', $fallback ) ? (bool) $fallback['maintainer_can_modify'] : true,
@@ -537,22 +625,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
             'result'    => $result,
         );
 
-        $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
-        $engine_key       = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
-        if ( '' !== $engine_key ) {
-            if ( ! isset( $engine_data[ $engine_key ] ) || ! is_array( $engine_data[ $engine_key ] ) ) {
-                $engine_data[ $engine_key ] = array();
-            }
-            if ( ! isset( $engine_data[ $engine_key ][ $tool_results_key ] ) || ! is_array( $engine_data[ $engine_key ][ $tool_results_key ] ) ) {
-                $engine_data[ $engine_key ][ $tool_results_key ] = array();
-            }
-            $engine_data[ $engine_key ][ $tool_results_key ][] = $tool_result;
-        } else {
-            if ( ! isset( $engine_data[ $tool_results_key ] ) || ! is_array( $engine_data[ $tool_results_key ] ) ) {
-                $engine_data[ $tool_results_key ] = array();
-            }
-            $engine_data[ $tool_results_key ][] = $tool_result;
-        }
+        $engine_data = homeboy_datamachine_agent_record_pr_tool_result( $engine_data, $config, $tool_result );
 
         return array( 'opened' => true, 'result' => $result, 'input' => $input, 'engine_data' => $engine_data );
     }
