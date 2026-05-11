@@ -133,5 +133,34 @@ namespace {
         exit( 1 );
     }
 
+    if ( 'github_tool_results' !== ( $workspace_recorder['record']['tool_results_key'] ?? null ) ) {
+        fwrite( STDERR, "Expected runner workspace tools to record tool results.\n" );
+        exit( 1 );
+    }
+
+    $fallback = homeboy_datamachine_agent_open_fallback_pr(
+        array(),
+        array(
+            'target_repo'             => 'owner/demo',
+            'agent_slug'              => 'demo-agent',
+            'model'                   => 'gpt-5.5',
+            'runner_workspace_result' => array(
+                'success' => true,
+                'branch'  => 'agent/run',
+            ),
+        )
+    );
+
+    if ( empty( $fallback['opened'] ) ) {
+        fwrite( STDERR, "Expected runner workspace fallback PR to open.\n" );
+        exit( 1 );
+    }
+
+    $fallback_args = $GLOBALS['homeboy_forced_parameters_args'] ?? array();
+    if ( 'agent/run' !== ( $fallback_args['head'] ?? null ) || 'owner/demo' !== ( $fallback_args['repo'] ?? null ) ) {
+        fwrite( STDERR, "Expected fallback PR to target the runner workspace branch.\n" );
+        exit( 1 );
+    }
+
     fwrite( STDOUT, "Data Machine agent forced parameters smoke passed.\n" );
 }
