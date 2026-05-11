@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.56.0] - 2026-05-11
+
+### Added
+- capture REST preload waterfalls
+
 ## [2.55.0] - 2026-05-11
 
 ### Added
