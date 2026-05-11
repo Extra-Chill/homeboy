@@ -111,6 +111,13 @@ The runner converts the agent config into a single Playground bench workload:
   `metadata.engine_data`.
 - `engine_key` and `tool_results_key` control where built-in tool capture and
   fallback pull request data are recorded.
+- `runner_workspace` can provision a Data Machine Code worktree. The default
+  mode prepends the workspace handle to the agent prompt so current consumers
+  can explicitly ask the agent to work in that checkout and open a PR.
+- `runner_workspace.expose_to_agent: false` is an opt-in runner-owned capture
+  mode. It preserves the natural task prompt, keeps workspace tool calls scoped
+  to the provisioned handle when those tools are used, then captures final git
+  status/diff, commits, pushes, and opens or reuses a fallback PR after the run.
 - `ability_tools` can expose additional WordPress abilities as tools during the
   agent run.
 - `pipeline_step_patches` and `flow_step_patches` can adjust imported bundle
@@ -135,7 +142,7 @@ knobs to `run-datamachine-agent.sh`:
 - GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.
-- Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `pipeline_step_patches`, `flow_step_patches`, `fallback_pull_request`.
+- Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`, `fallback_pull_request`.
 
 `bundle_repo` is for cross-repo consumers. The shell runner clones the bundle
 repository, points `bundle_path` at the cloned bundle inside Playground, and adds
@@ -147,6 +154,12 @@ maintaining a bespoke runner script.
 wrap GitHub tools. A recorder can attach forced parameters, capture selected input
 or output fields, and write them under a stable `metadata.engine_data` key for
 later `engine_data_outputs` projection.
+
+`runner_workspace.expose_to_agent` defaults to `true` for backwards
+compatibility. Set it to `false` for task-sandbox runs where the agent should see
+only the natural task request. Hidden mode enables runner-owned change capture by
+default; set `runner_workspace.capture_changes: false` only when a consumer wants
+hidden prompt behavior without post-run workspace publication.
 
 `provider_plugin` lets callers replace the OpenAI provider preset without
 changing the workload. The reusable workflow checks out the configured plugin,
