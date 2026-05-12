@@ -52,6 +52,10 @@ inputs:
     description: 'Additional arguments to pass to each command.'
     required: false
     default: ''
+  scope:
+    description: 'Execution scope: auto uses changed scope on PRs and full scope elsewhere; changed forces --changed-since when a base SHA is available; full scans the full workspace.'
+    required: false
+    default: 'auto'
   rig:
     description: 'Bench rig pair/list to pass to `homeboy bench --rig` when command includes bench.'
     required: false
@@ -256,6 +260,7 @@ runs:
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        SCOPE_INPUT: ${{ inputs.scope }}
       run: bash ${{ github.action_path }}/scripts/scope/resolve.sh
 
     - name: Resolve commands

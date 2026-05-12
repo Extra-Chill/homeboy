@@ -33,6 +33,10 @@ on:
         description: 'Additional arguments passed to each Homeboy command.'
         type: string
         default: ''
+      scope:
+        description: 'Execution scope: auto, changed, or full.'
+        type: string
+        default: 'auto'
       rig:
         description: 'Bench rig pair/list passed to homeboy bench.'
         type: string
@@ -355,6 +359,7 @@ jobs:
           expected-commands: ${{ inputs.expected-commands || inputs.commands }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
+          scope: ${{ inputs.scope }}
           rig: ${{ inputs.rig }}
           scenario: ${{ inputs.scenario }}
           runs: ${{ inputs.runs }}

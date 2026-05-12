@@ -182,9 +182,7 @@ Use these outputs to gate downstream jobs:
 | `autofix-max-commits` | No | `2` | Safety limit for autofix commit chain depth per branch |
 | `autofix-commands` | No | | Override autofix commands (comma-separated, e.g. `lint --fix,test --fix`) |
 | `autofix-label` | No | | Optional PR label required before autofix runs (e.g. `autofix`) |
-| `scope` | No | `changed` | Execution scope: `changed` for PRs or `full` for entire codebase |
-| `lint-changed-only` | No | `true` | Deprecated: use `scope` instead |
-| `test-scope` | No | `changed` | Deprecated: use `scope` instead |
+| `scope` | No | `auto` | Execution scope: `auto` uses changed scope on PRs and full scope elsewhere; `changed` forces `--changed-since` when a base SHA is available; `full` scans the full workspace. |
 | `auto-issue` | No | *(auto)* | Reconcile categorized audit, lint, and test issues on non-PR runs. Empty means enabled for non-PR events and disabled for PRs; set `false` to suppress issue maintenance. |
 | `comment-key` | No | *(auto)* | Shared PR comment key so multiple jobs aggregate into one sticky comment |
 | `comment-section-key` | No | *(auto)* | Section key within the shared PR comment |
@@ -237,6 +235,10 @@ jobs:
       node-version: '20'
     secrets: inherit
 ```
+
+### Scope
+
+By default, `scope: auto` uses changed-file scope for pull requests and full-workspace scope for non-PR events. Set `scope: changed` to force changed-file scope when a pull request base SHA is available, or `scope: full` to scan the full workspace.
 
 ### PR Scoped Checks (Changed Files)
 
@@ -539,9 +541,9 @@ If you also run continuous release, keep release as its own workflow or separate
 
 > **Avoid cron-based release triggers.** A `schedule` cron fires whether there are new commits or not. Push-to-main triggers the quality/release pipeline only when there is new code to evaluate.
 
-#### Single workflow with event-aware inputs
+#### Single workflow with default scope
 
-If you prefer one workflow, make the scope and issue-filing policy event-aware:
+If you prefer one workflow, keep the default `scope: auto` behavior and make only the issue-filing policy event-aware:
 
 ```yaml
 name: Homeboy CI
@@ -568,14 +570,13 @@ jobs:
         with:
           extension: wordpress
           commands: lint,test,audit
-          scope: ${{ github.event_name == 'pull_request' && 'changed' || 'full' }}
           auto-issue: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
           php-version: '8.3'
 ```
 
 #### Compatibility notes
 
-`scope: changed` is a thin wrapper around the Homeboy CLI. On PRs, the action resolves the base SHA and passes `--changed-since <base-sha>` to Homeboy for `audit`, `lint`, and `test`.
+`scope: changed` is a thin wrapper around the Homeboy CLI. When a pull request base SHA is available, the action resolves the base SHA and passes `--changed-since <base-sha>` to Homeboy for scoped commands.
 
 Use changed scope for a command only when the installed Homeboy CLI and extension implement changed-file semantics for that command. If a command does not support changed scope yet, prefer one of these patterns:
 
