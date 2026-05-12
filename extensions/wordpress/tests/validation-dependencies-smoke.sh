@@ -12,8 +12,10 @@ CLONED_DATA_MACHINE_DIR="${TMPDIR}/cache/data-machine"
 AGENTS_API_DIR="${TMPDIR}/agents-api"
 OPENAI_PROVIDER_DIR="${TMPDIR}/ai-provider-for-openai"
 BIN_DIR="${TMPDIR}/bin"
+CLONE_BIN_DIR="${TMPDIR}/clone-bin"
+FALLBACK_CACHE_DIR="${TMPDIR}/fallback-cache"
 
-mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$OPENAI_PROVIDER_DIR" "$BIN_DIR"
+mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$OPENAI_PROVIDER_DIR" "$BIN_DIR" "$CLONE_BIN_DIR" "$FALLBACK_CACHE_DIR"
 
 cat > "${COMPONENT_DIR}/intelligence.php" <<'PHP'
 <?php
@@ -71,6 +73,53 @@ fi
 SH
 chmod +x "${BIN_DIR}/homeboy"
 
+cat > "${CLONE_BIN_DIR}/homeboy" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "component" ] && [ "${2:-}" = "show" ]; then
+    printf '%s\n' '{"data":{"entity":{}}}'
+fi
+SH
+chmod +x "${CLONE_BIN_DIR}/homeboy"
+
+cat > "${CLONE_BIN_DIR}/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${1:-}" = "-C" ]; then
+    shift 2
+fi
+
+if [ "${1:-}" = "remote" ] && [ "${2:-}" = "get-url" ] && [ "${3:-}" = "origin" ]; then
+    printf '%s\n' 'https://github.com/Automattic/intelligence.git'
+    exit 0
+fi
+
+if [ "${1:-}" = "clone" ]; then
+    repo_url="${@: -2:1}"
+    clone_path="${@: -1}"
+    case "$repo_url" in
+        *github.com/Automattic/data-machine.git)
+            echo "FAIL: data-machine should resolve through its canonical Extra-Chill owner" >&2
+            exit 1
+            ;;
+        *github.com/Extra-Chill/data-machine.git)
+            mkdir -p "$clone_path"
+            cat > "${clone_path}/data-machine.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Data Machine
+ */
+PHP
+            exit 0
+            ;;
+    esac
+fi
+
+exit 1
+SH
+chmod +x "${CLONE_BIN_DIR}/git"
+
 source "$HELPER"
 
 resolved=$(PATH="${BIN_DIR}:$PATH" homeboy_resolve_validation_dependency_paths "$COMPONENT_DIR")
@@ -92,6 +141,18 @@ data_machine_line=$(grep -nF -- "$DATA_MACHINE_DIR" <<< "$resolved" | cut -d: -f
 if [ "$agents_api_line" -ge "$data_machine_line" ]; then
     echo "FAIL: transitive dependency should be emitted before dependent plugin" >&2
     printf '%s\n' "$resolved" >&2
+    exit 1
+fi
+
+fallback_resolved=$(
+    PATH="${CLONE_BIN_DIR}:$PATH" \
+    HOMEBOY_CACHE_DIR="$FALLBACK_CACHE_DIR" \
+    homeboy_resolve_validation_dependency_paths "$COMPONENT_DIR"
+)
+fallback_data_machine="${FALLBACK_CACHE_DIR}/homeboy-deps/data-machine"
+if ! grep -F -- "$fallback_data_machine" <<< "$fallback_resolved" >/dev/null; then
+    echo "FAIL: data-machine dependency should resolve from Extra-Chill/data-machine" >&2
+    printf '%s\n' "$fallback_resolved" >&2
     exit 1
 fi
 

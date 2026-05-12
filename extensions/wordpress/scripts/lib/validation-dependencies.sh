@@ -193,6 +193,16 @@ _homeboy_clone_dependency() {
     return 1
 }
 
+_homeboy_known_dependency_github_org() {
+    local slug="${1:-}"
+
+    case "$slug" in
+        data-machine)
+            printf '%s\n' 'Extra-Chill'
+            ;;
+    esac
+}
+
 homeboy_resolve_validation_dependency_path() {
     local dependency="${1:-}"
 
@@ -224,7 +234,19 @@ homeboy_resolve_validation_dependency_path() {
             github_org=$(_homeboy_infer_github_org "${_HOMEBOY_DEP_PLUGIN_PATH:-.}" || true)
         fi
 
-        if [ -n "$github_org" ]; then
+        local known_github_org
+        known_github_org=$(_homeboy_known_dependency_github_org "$dependency" || true)
+        if [ -n "$known_github_org" ]; then
+            local cloned_path
+            cloned_path=$(_homeboy_clone_dependency "$dependency" "$known_github_org" || true)
+            if [ -n "$cloned_path" ] && [ -d "$cloned_path" ]; then
+                echo "Resolved dependency '$dependency' via git clone from ${known_github_org}/${dependency}" >&2
+                printf '%s\n' "$cloned_path"
+                return 0
+            fi
+        fi
+
+        if [ -n "$github_org" ] && [ "$github_org" != "$known_github_org" ]; then
             local cloned_path
             cloned_path=$(_homeboy_clone_dependency "$dependency" "$github_org" || true)
             if [ -n "$cloned_path" ] && [ -d "$cloned_path" ]; then
