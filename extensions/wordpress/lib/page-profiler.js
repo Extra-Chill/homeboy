@@ -1118,11 +1118,12 @@ function formatWordPressRestMatrixMarkdownReport(matrix, options = {}) {
 		'|---|---:|---:|---:|---|---:|',
 	];
 	for (const result of results.slice(0, limit)) {
-		const shape = result.jsonShape?.type === 'object'
-			? `object(${(result.topLevelKeys || []).slice(0, 6).join(', ')})`
-			: result.jsonShape?.type === 'array'
-				? `array(${result.itemCount || 0})`
-				: result.jsonShape?.type || 'unknown';
+		let shape = result.jsonShape?.type || 'unknown';
+		if (result.jsonShape?.type === 'object') {
+			shape = `object(${(result.topLevelKeys || []).slice(0, 6).join(', ')})`;
+		} else if (result.jsonShape?.type === 'array') {
+			shape = `array(${result.itemCount || 0})`;
+		}
 		lines.push(`| \`${result.method} ${result.normalizedUrl}\` | ${result.status} | ${result.durationMs}ms | ${result.responseBytes} | ${shape} | ${(result.findings || []).length} |`);
 	}
 	return lines.join('\n');
@@ -1177,12 +1178,12 @@ function classifyWordPressRestPreloadOpportunities(waterfall, options = {}) {
 
 function classifyWordPressRestNetworkRoute(row) {
 	const method = normalizeRestMethod(row?.method);
-	const url = normalizeRestWaterfallUrl(row?.url || '');
-	const pathOnly = restRoutePath(url);
 
 	if (method === 'OPTIONS') {
 		return { classification: 'options-schema', reason: 'REST schema/options request' };
 	}
+	const url = normalizeRestWaterfallUrl(row?.url || '');
+	const pathOnly = restRoutePath(url);
 	if (/\/wp\/v2\/users\/me(?:$|\?)/.test(pathOnly)) {
 		return { classification: 'current-user', reason: 'current user/session state' };
 	}
@@ -1215,13 +1216,14 @@ function classifyWordPressRestNetworkRoute(row) {
 }
 
 function summarizeWordPressRestNetworkRows(input = []) {
-	const sourceRows = Array.isArray(input)
-		? input
-		: Array.isArray(input?.networkRequests)
-			? input.networkRequests
-			: Array.isArray(input?.rows)
-				? input.rows
-				: [];
+	let sourceRows = [];
+	if (Array.isArray(input)) {
+		sourceRows = input;
+	} else if (Array.isArray(input?.networkRequests)) {
+		sourceRows = input.networkRequests;
+	} else if (Array.isArray(input?.rows)) {
+		sourceRows = input.rows;
+	}
 	const groups = new Map();
 
 	for (const rawRow of sourceRows) {
@@ -1378,6 +1380,12 @@ function compareWordPressRestWaterfalls({ baseline, candidate }) {
 		const key = restKey(row);
 		seen.add(key);
 		const candidateMatch = (candidateByKey.get(key) || []).shift();
+		let result = 'missing';
+		if (row.networkMatched && !candidateMatch?.networkMatched) {
+			result = 'removed-network';
+		} else if (candidateMatch) {
+			result = 'unchanged';
+		}
 		rows.push({
 			url: row.url,
 			method: row.method,
@@ -1387,7 +1395,7 @@ function compareWordPressRestWaterfalls({ baseline, candidate }) {
 			candidateNetwork: Boolean(candidateMatch?.networkMatched),
 			baselineDurationMs: row.durationMs,
 			candidateDurationMs: candidateMatch?.durationMs,
-			result: row.networkMatched && !candidateMatch?.networkMatched ? 'removed-network' : candidateMatch ? 'unchanged' : 'missing',
+			result,
 		});
 	}
 	for (const [key, candidateMatches] of candidateByKey.entries()) {
@@ -1779,9 +1787,12 @@ function recommendWordPressPerformanceGates(profileOrComparison, options = {}) {
 }
 
 function formatWordPressPerformanceGateReport(recommendations, options = {}) {
-	const gates = Array.isArray(recommendations)
-		? recommendations
-		: Array.isArray(recommendations?.recommendations) ? recommendations.recommendations : [];
+	let gates = [];
+	if (Array.isArray(recommendations)) {
+		gates = recommendations;
+	} else if (Array.isArray(recommendations?.recommendations)) {
+		gates = recommendations.recommendations;
+	}
 	const title = options.title || 'WordPress performance gate recommendations';
 	const lines = [
 		`## ${title}`,
@@ -1943,6 +1954,149 @@ function diagnoseWordPressPageProfile(profile, options = {}) {
 		failedRequests: failedRequests.slice(0, 20),
 		findings,
 	};
+}
+
+function isFailureFinding(finding) {
+	const severity = String(finding?.severity || '').toLowerCase();
+	return severity === 'error' || severity === 'fail' || severity === 'failed';
+}
+
+function combinedRestWaterfallRows(profile) {
+	const rows = [];
+	const seen = new Set();
+	for (const row of [
+		...(Array.isArray(profile?.restWaterfall?.rows) ? profile.restWaterfall.rows : []),
+		...(Array.isArray(profile?.interactionRestWaterfall?.rows) ? profile.interactionRestWaterfall.rows : []),
+	]) {
+		const key = [
+			normalizeRestMethod(row?.method),
+			normalizeRestWaterfallUrl(row?.url || row?.path || row?.normalizedUrl),
+			round(row?.startMs ?? row?.startedAtMs),
+			round(row?.durationMs),
+			row?.source || '',
+		].join('|');
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		rows.push(row);
+	}
+	return rows;
+}
+
+function interactionStatus(interactions) {
+	const actions = Array.isArray(interactions?.actions) ? interactions.actions : [];
+	if (interactions?.failed || actions.some((action) => action.status === 'failed')) {
+		return 'failed';
+	}
+	return actions.length > 0 ? 'passed' : 'none';
+}
+
+function summarizeWordPressAdminPageProfile(input = {}) {
+	const profile = input.profile || input;
+	if (!profile || typeof profile !== 'object' || !profile.resources) {
+		throw new TypeError('summarizeWordPressAdminPageProfile requires a page profile object');
+	}
+	const spec = input.spec || input.pageSpec || {};
+	const resources = Array.isArray(profile.resources?.resources) ? profile.resources.resources : [];
+	const restRows = combinedRestWaterfallRows(profile);
+	const failedRestRows = restRows.filter((row) => row?.failed || row?.status >= 400);
+	const failureFindings = (Array.isArray(profile.diagnosis?.findings) ? profile.diagnosis.findings : []).filter(isFailureFinding);
+	const readyMs = round(profile.readyMs);
+
+	return {
+		id: profile.id || spec.id || profile.path || 'page',
+		label: profile.label || spec.label || profile.id || spec.id || profile.path || 'Page',
+		url: profile.url || spec.url,
+		path: profile.path || spec.path || spec.url || profile.url,
+		status: profile.status || 0,
+		readyMs,
+		resourceCount: profile.resources?.count ?? resources.length,
+		restCount: restRows.length || profile.resources?.restCount || 0,
+		restBytes: restRows.reduce((total, row) => total + restResponseBytes(row), 0),
+		failedRequestCount: failedRestRows.length,
+		failureFindingCount: failureFindings.length,
+		failureCount: failedRestRows.length + failureFindings.length,
+		slowestResources: [...(profile.resources?.slowest || resources)].sort((a, b) => round(b.durationMs) - round(a.durationMs)).slice(0, input.slowestLimit || 5),
+		slowestRestRows: [...restRows].sort((a, b) => round(b.durationMs) - round(a.durationMs)).slice(0, input.slowestRestLimit || 5),
+		interactionStatus: interactionStatus(profile.interactions),
+		interactionActionCount: Array.isArray(profile.interactions?.actions) ? profile.interactions.actions.length : 0,
+		findings: failureFindings,
+		failedRestRows,
+	};
+}
+
+function buildWordPressAdminPageSweepSummary(input = {}) {
+	let pages = [];
+	if (Array.isArray(input)) {
+		pages = input;
+	} else if (Array.isArray(input.pages)) {
+		pages = input.pages;
+	}
+	if (!Array.isArray(pages)) {
+		throw new TypeError('buildWordPressAdminPageSweepSummary requires pages');
+	}
+	const pageSummaries = pages.map((page) => page?.failureCount !== undefined && page?.restBytes !== undefined
+		? page
+		: summarizeWordPressAdminPageProfile(page));
+	const sortedPages = [...pageSummaries].sort((a, b) => (
+		(b.failureCount - a.failureCount)
+		|| (b.failedRequestCount - a.failedRequestCount)
+		|| (b.readyMs - a.readyMs)
+		|| (b.resourceCount - a.resourceCount)
+	));
+	const slowestRestRows = sortedPages
+		.flatMap((page) => page.slowestRestRows.map((row) => ({ ...row, pageId: page.id, pageLabel: page.label })))
+		.sort((a, b) => round(b.durationMs) - round(a.durationMs))
+		.slice(0, input.slowestRestLimit || 10);
+
+	return {
+		pages: sortedPages,
+		totals: {
+			pageCount: pageSummaries.length,
+			failedPageCount: pageSummaries.filter((page) => page.failureCount > 0 || page.interactionStatus === 'failed').length,
+			failureCount: pageSummaries.reduce((total, page) => total + page.failureCount, 0),
+			failedRequestCount: pageSummaries.reduce((total, page) => total + page.failedRequestCount, 0),
+			resourceCount: pageSummaries.reduce((total, page) => total + page.resourceCount, 0),
+			restCount: pageSummaries.reduce((total, page) => total + page.restCount, 0),
+			restBytes: pageSummaries.reduce((total, page) => total + page.restBytes, 0),
+		},
+		slowestPages: [...pageSummaries].sort((a, b) => b.readyMs - a.readyMs).slice(0, input.slowestPageLimit || 10),
+		slowestRestRows,
+	};
+}
+
+function escapeMarkdownCell(value) {
+	return String(value ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+}
+
+function formatRestRowLabel(row) {
+	return `\`${escapeMarkdownCell(`${normalizeRestMethod(row?.method)} ${normalizeRestWaterfallUrl(row?.url || row?.path || row?.normalizedUrl)}`)}\``;
+}
+
+function formatWordPressAdminPageSweepMarkdownReport(summary, options = {}) {
+	const report = summary?.totals ? summary : buildWordPressAdminPageSweepSummary(summary);
+	const pageLimit = options.pageLimit || 30;
+	const requestLimit = options.requestLimit || 10;
+	const lines = [
+		`## ${options.title || 'WordPress admin page sweep'}`,
+		'',
+		`Pages: ${report.totals.pageCount}; failed pages: ${report.totals.failedPageCount}; failures: ${report.totals.failureCount}; REST requests: ${report.totals.restCount}; REST bytes: ${report.totals.restBytes}`,
+		'',
+		'| Page | Status | Ready ms | Resources | REST | REST bytes | Failed requests | Failures | Interaction |',
+		'|---|---:|---:|---:|---:|---:|---:|---:|---|',
+	];
+	for (const page of report.pages.slice(0, pageLimit)) {
+		const pageLabel = page.path ? `${page.label} (${page.path})` : page.label;
+		lines.push(`| ${escapeMarkdownCell(pageLabel)} | ${page.status} | ${page.readyMs} | ${page.resourceCount} | ${page.restCount} | ${page.restBytes} | ${page.failedRequestCount} | ${page.failureCount} | ${page.interactionStatus} |`);
+	}
+	if (report.slowestRestRows.length > 0) {
+		lines.push('', '## Slowest REST requests', '', '| Page | Endpoint | Status | Duration ms | Bytes | Source |', '|---|---|---:|---:|---:|---|');
+		for (const row of report.slowestRestRows.slice(0, requestLimit)) {
+			lines.push(`| ${escapeMarkdownCell(row.pageLabel || row.pageId || '')} | ${formatRestRowLabel(row)} | ${row.status || 0} | ${round(row.durationMs)} | ${restResponseBytes(row)} | ${escapeMarkdownCell(row.source || '')} |`);
+		}
+	}
+	return lines.join('\n');
 }
 
 async function runBrowserActions(page, actions, options = {}) {
@@ -2222,9 +2376,14 @@ async function profileWordPressPage(input) {
 
 	const readyMs = Date.now() - started;
 	const initialResources = await collectBrowserResourceTimings(page, spec.resources || {}).catch(() => []);
-	const interactionActions = Array.isArray(input.interactions)
-		? input.interactions
-		: Array.isArray(spec.interactions) ? spec.interactions : Array.isArray(spec.actions) ? spec.actions : [];
+	let interactionActions = [];
+	if (Array.isArray(input.interactions)) {
+		interactionActions = input.interactions;
+	} else if (Array.isArray(spec.interactions)) {
+		interactionActions = spec.interactions;
+	} else if (Array.isArray(spec.actions)) {
+		interactionActions = spec.actions;
+	}
 	const interactionStartedMs = Date.now() - started;
 	const interactions = await runBrowserActions(page, interactionActions, {
 		mark,
@@ -2337,6 +2496,8 @@ module.exports = {
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
 	evaluateWordPressRestPayloadBudgets,
+	buildWordPressAdminPageSweepSummary,
+	formatWordPressAdminPageSweepMarkdownReport,
 	formatWordPressPerformanceGateReport,
 	formatWordPressRestMatrixMarkdownReport,
 	formatWordPressRestNetworkDiffMarkdownReport,
@@ -2354,6 +2515,7 @@ module.exports = {
 	recommendWordPressPerformanceGates,
 	resolveWordPressUrl,
 	runBrowserActions,
+	summarizeWordPressAdminPageProfile,
 	summarizeWordPressRestNetworkRows,
 	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,
