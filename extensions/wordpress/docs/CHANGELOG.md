@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.71.0] - 2026-05-12
+
+### Added
+- add declarative browser interactions
+
 ## [2.70.0] - 2026-05-12
 
 ### Added
