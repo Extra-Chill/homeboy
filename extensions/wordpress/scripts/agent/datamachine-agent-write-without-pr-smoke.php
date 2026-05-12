@@ -26,7 +26,9 @@ namespace DataMachine\Core\Database\Pipelines {
 }
 
 namespace DataMachine\Core {
-    class PluginSettings {}
+    class PluginSettings {
+        public static function clearCache(): void {}
+    }
 }
 
 namespace {
@@ -43,6 +45,19 @@ namespace {
     if ( ! function_exists( 'is_wp_error' ) ) {
         function is_wp_error( $value ): bool {
             return false;
+        }
+    }
+
+    if ( ! function_exists( 'get_option' ) ) {
+        function get_option( string $name, $default = false ) {
+            return $GLOBALS['homeboy_datamachine_agent_fake_options'][ $name ] ?? $default;
+        }
+    }
+
+    if ( ! function_exists( 'update_option' ) ) {
+        function update_option( string $name, $value, bool $autoload = true ): bool {
+            $GLOBALS['homeboy_datamachine_agent_fake_options'][ $name ] = $value;
+            return true;
         }
     }
 
@@ -385,6 +400,30 @@ namespace {
     $nested_mailbox_reply = array( 'world_creator' => $mailbox_reply );
     if ( ! homeboy_datamachine_agent_completion_outcome_satisfied( $nested_mailbox_reply, array( 'engine_key' => 'world_creator', 'success_completion_outcomes' => array( 'mailbox_reply' ) ) ) ) {
         fwrite( STDERR, "Expected nested completion outcome to satisfy success.\n" );
+        exit( 1 );
+    }
+
+    putenv( 'GITHUB_TOKEN=repository-token' );
+    putenv( 'HOMEBOY_GITHUB_APP_TOKEN=app-token' );
+    homeboy_datamachine_agent_configure_settings(
+        array(
+            'provider'                    => 'openai',
+            'model'                       => 'gpt-5.5',
+            'github_token_env'            => 'HOMEBOY_GITHUB_APP_TOKEN',
+            'github_repository_token_env' => 'GITHUB_TOKEN',
+            'github_profile_id'           => 'smoke-ci',
+            'target_repo'                 => 'owner/repo',
+            'allowed_repos'               => array( 'owner/repo', 'owner/other' ),
+        )
+    );
+    $datamachine_settings = $GLOBALS['homeboy_datamachine_agent_fake_options']['datamachine_settings'] ?? array();
+    $github_profiles = $datamachine_settings['github_credential_profiles'] ?? array();
+    if ( 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) || array( 'owner/repo' ) !== ( $github_profiles[0]['allowed_repos'] ?? array() ) ) {
+        fwrite( STDERR, "Expected repository token profile to be first and scoped to the target repo.\n" );
+        exit( 1 );
+    }
+    if ( 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'owner/repo', 'owner/other' ) !== ( $github_profiles[1]['allowed_repos'] ?? array() ) ) {
+        fwrite( STDERR, "Expected app token profile to preserve cross-repo allowed repositories.\n" );
         exit( 1 );
     }
 
