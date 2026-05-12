@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.75.5] - 2026-05-12
+
+### Changed
+- guard read-only lint from phpcbf
+- pin PHPStan baseline and level behavior
+
 ## [2.75.4] - 2026-05-12
 
 ### Fixed
