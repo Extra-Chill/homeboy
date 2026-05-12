@@ -19,6 +19,7 @@ FINDINGS_FILE="${TMPDIR}/phpstan-findings.json"
 mkdir -p "${EXTENSION_DIR}/vendor/bin" "${COMPONENT_DIR}/tests" "${COMPONENT_DIR}/assets" "${COMPONENT_DIR}/includes" "${COMPONENT_DIR}/vendor_prefixed"
 touch "${EXTENSION_DIR}/phpstan.neon.dist"
 printf '%s\n' '<?php missing_function();' > "${COMPONENT_DIR}/main.php"
+printf '%s\n' 'parameters:' '    ignoreErrors: []' > "${COMPONENT_DIR}/phpstan-baseline.neon"
 touch "${COMPONENT_DIR}/tests/FooTest.php" "${COMPONENT_DIR}/assets/app.js"
 touch "${COMPONENT_DIR}/includes/interface-example.php" "${COMPONENT_DIR}/includes/extra.php" "${COMPONENT_DIR}/vendor_prefixed/autoload.php"
 
@@ -113,6 +114,8 @@ assert_file_not_contains() {
 HOMEBOY_LINT_FILE="main.php" run_phpstan
 assert_contains "${COMPONENT_DIR}/main.php" "single-file scope passes the requested PHP file to PHPStan"
 assert_not_contains "$COMPONENT_DIR " "single-file scope does not pass the whole component root"
+assert_contains "--level=7" "PHPStan defaults to the same level declared by wordpress/phpstan.neon.dist"
+assert_not_contains "--baseline" "PHPStan 2.x removed the --baseline CLI flag"
 
 if [ ! -f "$CONFIG_CAPTURE" ]; then
     echo "FAIL: scoped PHPStan run should generate a context config" >&2
@@ -129,6 +132,11 @@ assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/vendor_prefixed" "scope
 assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/main.php" "scoped context scans top-level plugin files"
 assert_file_not_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/tests" "scoped context excludes test declarations"
 assert_file_contains "$AUTOLOAD_CAPTURE" "${COMPONENT_DIR}/vendor_prefixed/autoload.php" "composite autoload loads prefixed vendor autoloader"
+
+run_phpstan
+assert_contains "--level=7" "full-component PHPStan run defaults to level 7"
+assert_not_contains "--baseline" "full-component PHPStan run avoids removed --baseline flag"
+assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan-baseline.neon" "full-component PHPStan config includes component baseline via neon"
 
 HOMEBOY_LINT_GLOB='{main.php,assets/app.js,includes/extra.php}' run_phpstan
 assert_contains "${COMPONENT_DIR}/main.php" "glob scope includes matching PHP source file"
