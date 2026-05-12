@@ -190,7 +190,7 @@ name: Data Machine Agent CI (reusable)
           JSON array of additional ability slugs the runner must assert are
           registered before invoking the agent. Default '[]' means rely on
           the runner's built-in ability set (datamachine/import-agent,
-          datamachine/run-flow, datamachine/drain-job).
+          datamachine/run-flow or datamachine/execute-workflow, datamachine/drain-job).
         type: string
         default: "[]"
       ability_tools:
@@ -708,7 +708,7 @@ jobs:
               wp_config_defines: $extraWpConfigDefines,
               workload_run_before: $workloadRunBefore,
               workload_run_after: $workloadRunAfter,
-              required_abilities: (((if $executeWorkflowPath != "" then ["datamachine/execute-workflow", "datamachine/drain-job"] else ["datamachine/import-agent", "datamachine/run-flow", "datamachine/drain-job"] end) + $extraRequiredAbilities) | reduce .[] as $ability ([]; if index($ability) then . else . + [$ability] end)),
+              required_abilities: (((if $executeWorkflowPath != "" then ["datamachine/import-agent", "datamachine/execute-workflow", "datamachine/drain-job"] else ["datamachine/import-agent", "datamachine/run-flow", "datamachine/drain-job"] end) + $extraRequiredAbilities) | reduce .[] as $ability ([]; if index($ability) then . else . + [$ability] end)),
               bundle_path: $bundlePath,
               bundle_repo: $bundleRepo,
               bundle_ref: $bundleRef,

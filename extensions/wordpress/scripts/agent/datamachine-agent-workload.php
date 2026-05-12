@@ -1795,7 +1795,7 @@ if ( ! empty( $runner_workspace['enabled'] ) ) {
 
 $required_abilities = is_array( $config['required_abilities'] ?? null )
     ? $config['required_abilities']
-    : ( '' !== $execute_workflow_path ? array( 'datamachine/execute-workflow', 'datamachine/drain-job' ) : array( 'datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job' ) );
+    : ( '' !== $execute_workflow_path ? array( 'datamachine/import-agent', 'datamachine/execute-workflow', 'datamachine/drain-job' ) : array( 'datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job' ) );
 foreach ( $required_abilities as $ability_name ) {
     if ( ! is_string( $ability_name ) || ! wp_get_ability( $ability_name ) ) {
         return homeboy_datamachine_agent_result( array( 'required_abilities_resolved' => 0 ), $metadata, (string) $ability_name . ' not registered' );
@@ -1822,6 +1822,32 @@ $pipeline_slug = homeboy_datamachine_agent_scalar( $config, 'pipeline_slug' );
 $import_elapsed_ms = 0;
 
 if ( '' !== $execute_workflow_path ) {
+	$import_start = hrtime( true );
+	$import_result = wp_get_ability( 'datamachine/import-agent' )->execute(
+		array(
+			'source'      => $bundle_path,
+			'on_conflict' => homeboy_datamachine_agent_scalar( $config, 'on_conflict', 'skip' ),
+		)
+	);
+	$import_elapsed_ms = ( hrtime( true ) - $import_start ) / 1000000;
+	$metadata['import_result'] = $import_result;
+	if ( ! is_array( $import_result ) || empty( $import_result['success'] ) ) {
+		return homeboy_datamachine_agent_result( array( 'import_succeeded' => 0, 'import_elapsed_ms' => $import_elapsed_ms ), $metadata, 'datamachine/import-agent did not succeed' );
+	}
+
+	$agent = $agents->get_by_slug( $agent_slug );
+	if ( ! $agent ) {
+		return homeboy_datamachine_agent_result( array( 'agent_resolved' => 0 ), $metadata, 'Imported agent was not found' );
+	}
+
+	$agent_id = (int) $agent['agent_id'];
+	$agent_config = is_array( $agent['agent_config'] ?? null ) ? $agent['agent_config'] : array();
+	$agent_config['default_provider'] = $settings['default_provider'];
+	$agent_config['default_model']    = $settings['default_model'];
+	$agent_config['mode_models']      = $settings['mode_models'];
+	$agents->update_agent( $agent_id, array( 'agent_config' => $agent_config ) );
+	PluginSettings::clearCache();
+
     $workflow_payload_path = str_starts_with( $execute_workflow_path, '/' ) ? $execute_workflow_path : rtrim( homeboy_datamachine_agent_scalar( $config, 'component_path' ), '/' ) . '/' . ltrim( $execute_workflow_path, '/' );
     if ( ! is_file( $workflow_payload_path ) ) {
         return homeboy_datamachine_agent_result( array( 'execute_workflow_payload_exists' => 0 ), $metadata, 'execute_workflow_path does not exist: ' . $execute_workflow_path );
@@ -1836,6 +1862,7 @@ if ( '' !== $execute_workflow_path ) {
         $execute_input['initial_data'] = array();
     }
     $execute_input['initial_data']['agent_slug'] = $execute_input['initial_data']['agent_slug'] ?? $agent_slug;
+    $execute_input['initial_data']['agent_id'] = $execute_input['initial_data']['agent_id'] ?? $agent_id;
     $execute_input['initial_data']['job_source'] = $execute_input['initial_data']['job_source'] ?? 'system';
     $execute_input['initial_data']['job_label'] = $execute_input['initial_data']['job_label'] ?? 'Data Machine agent workflow';
 
@@ -2016,31 +2043,31 @@ if ( $success_requires_pr && ! $pr_opened && ! $completion_outcome_satisfied ) {
 }
 
 return homeboy_datamachine_agent_result(
-    array(
-        'config_present'              => 1,
-        'required_abilities_resolved' => 1,
-        'required_classes_available'  => 1,
-        'bundle_exists'               => 1,
-        'import_succeeded'            => '' !== $execute_workflow_path ? 0 : 1,
-        'execute_workflow_succeeded'  => '' !== $execute_workflow_path ? 1 : 0,
-        'import_elapsed_ms'           => $import_elapsed_ms,
-        'agent_resolved'              => '' !== $execute_workflow_path ? 0 : 1,
-        'runner_workspace_provisioned' => empty( $runner_workspace['enabled'] ) || ! empty( $runner_workspace['success'] ) ? 1 : 0,
-        'runner_workspace_captured'    => empty( $runner_workspace_capture['enabled'] ) || empty( $runner_workspace_capture['error'] ) ? 1 : 0,
-        'pipeline_resolved'           => '' !== $execute_workflow_path || '' === $pipeline_slug || $pipeline_id > 0 ? 1 : 0,
-        'flow_resolved'               => 1,
-        'run_flow_succeeded'          => 1,
-        'run_elapsed_ms'              => $run_elapsed_ms,
-        'drain_succeeded'             => is_array( $drain_result ) && ! empty( $drain_result['success'] ) ? 1 : 0,
-        'drain_elapsed_ms'            => $drain_elapsed_ms,
-        'job_completed'               => 'completed' === $job_status ? 1 : 0,
-        'file_written'                => $file_written ? 1 : 0,
-        'pr_opened'                   => $pr_opened ? 1 : 0,
-        'completion_outcome_satisfied' => $completion_outcome_satisfied ? 1 : 0,
-        'no_changes'                  => ! $file_written && ! $pr_opened && ! $completion_outcome_satisfied ? 1 : 0,
-        'job_artifact_exported'       => ! empty( $job_artifact_exports['pr_url'] ) ? 1 : 0,
-        'transcript_exported'         => ! empty( $transcript_artifacts['json'] ) ? 1 : 0,
-        'total_tokens'                => (int) ( $metadata['token_usage']['total_tokens'] ?? 0 ),
-    ),
-    $metadata
+	array(
+		'config_present'              => 1,
+		'required_abilities_resolved' => 1,
+		'required_classes_available'  => 1,
+		'bundle_exists'               => 1,
+		'import_succeeded'            => 1,
+		'execute_workflow_succeeded'  => '' !== $execute_workflow_path ? 1 : 0,
+		'import_elapsed_ms'           => $import_elapsed_ms,
+		'agent_resolved'              => 1,
+		'runner_workspace_provisioned' => empty( $runner_workspace['enabled'] ) || ! empty( $runner_workspace['success'] ) ? 1 : 0,
+		'runner_workspace_captured'    => empty( $runner_workspace_capture['enabled'] ) || empty( $runner_workspace_capture['error'] ) ? 1 : 0,
+		'pipeline_resolved'           => '' !== $execute_workflow_path || '' === $pipeline_slug || $pipeline_id > 0 ? 1 : 0,
+		'flow_resolved'               => 1,
+		'run_flow_succeeded'          => 1,
+		'run_elapsed_ms'              => $run_elapsed_ms,
+		'drain_succeeded'             => is_array( $drain_result ) && ! empty( $drain_result['success'] ) ? 1 : 0,
+		'drain_elapsed_ms'            => $drain_elapsed_ms,
+		'job_completed'               => 'completed' === $job_status ? 1 : 0,
+		'file_written'                => $file_written ? 1 : 0,
+		'pr_opened'                   => $pr_opened ? 1 : 0,
+		'completion_outcome_satisfied' => $completion_outcome_satisfied ? 1 : 0,
+		'no_changes'                  => ! $file_written && ! $pr_opened && ! $completion_outcome_satisfied ? 1 : 0,
+		'job_artifact_exported'       => ! empty( $job_artifact_exports['pr_url'] ) ? 1 : 0,
+		'transcript_exported'         => ! empty( $transcript_artifacts['json'] ) ? 1 : 0,
+		'total_tokens'                => (int) ( $metadata['token_usage']['total_tokens'] ?? 0 ),
+	),
+	$metadata
 );
