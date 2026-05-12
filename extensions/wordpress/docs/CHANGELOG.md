@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.75.0] - 2026-05-12
+
+### Added
+- declare structured sidecar capabilities
+
 ## [2.74.2] - 2026-05-12
 
 ### Changed
