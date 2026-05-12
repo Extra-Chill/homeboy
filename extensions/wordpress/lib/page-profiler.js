@@ -1945,6 +1945,252 @@ function diagnoseWordPressPageProfile(profile, options = {}) {
 	};
 }
 
+async function runBrowserActions(page, actions, options = {}) {
+	if (!Array.isArray(actions) || actions.length === 0) {
+		return { actions: [], durationMs: 0, failed: false };
+	}
+	if (!page || typeof page !== 'object') {
+		throw new TypeError('runBrowserActions requires a Playwright page');
+	}
+
+	const startedAt = Date.now();
+	const evidence = [];
+	for (let index = 0; index < actions.length; index += 1) {
+		const action = normalizeBrowserAction(actions[index], index, options);
+		const actionStartedAt = Date.now();
+		const row = {
+			index,
+			name: action.name,
+			type: action.type,
+			target: action.target,
+			timeoutMs: action.timeout,
+			startedAtMs: actionStartedAt - startedAt,
+		};
+		evidence.push(row);
+		try {
+			const result = await executeBrowserAction(page, action);
+			row.durationMs = Date.now() - actionStartedAt;
+			row.status = 'passed';
+			if (result) {
+				row.result = result;
+			}
+			if (typeof options.mark === 'function') {
+				await options.mark(action.name || `interaction_${index + 1}`);
+			}
+		} catch (error) {
+			row.durationMs = Date.now() - actionStartedAt;
+			row.status = 'failed';
+			row.error = error?.message || String(error);
+			await attachBrowserActionFailureEvidence(page, row, options).catch(() => {});
+			const wrapped = new Error(formatBrowserActionFailure(row, error));
+			wrapped.cause = error;
+			wrapped.action = row;
+			wrapped.actions = evidence;
+			throw wrapped;
+		}
+	}
+
+	return {
+		actions: evidence,
+		durationMs: Date.now() - startedAt,
+		failed: false,
+	};
+}
+
+function normalizeBrowserAction(action, index, options = {}) {
+	if (!isPlainObject(action)) {
+		throw new TypeError(`browser action ${index} must be an object`);
+	}
+	const candidates = [
+		['click', action.click],
+		['clickSelector', action.clickSelector],
+		['clickRole', action.clickRole],
+		['clickText', action.clickText],
+		['fill', action.fill],
+		['select', action.select],
+		['waitForSelector', action.waitForSelector],
+		['waitForResponse', action.waitForResponse],
+		['sleep', action.sleep],
+	].filter(([, value]) => value !== undefined);
+	if (candidates.length !== 1) {
+		throw new TypeError(`browser action ${index} must define exactly one supported action`);
+	}
+	const [type, rawSpec] = candidates[0];
+	const spec = typeof rawSpec === 'string' || typeof rawSpec === 'number' ? { value: rawSpec } : { ...(rawSpec || {}) };
+	const timeout = Number(action.timeout ?? spec.timeout ?? options.timeout) || 30000;
+	const name = action.name || spec.name || `interaction_${index + 1}`;
+	return { index, name, type, spec, timeout, target: describeBrowserAction(type, spec) };
+}
+
+async function executeBrowserAction(page, action) {
+	const { type, spec, timeout } = action;
+	if (type === 'sleep') {
+		await sleep(Number(spec.ms ?? spec.value ?? 0));
+		return null;
+	}
+	if (type === 'waitForResponse') {
+		if (typeof page.waitForResponse !== 'function') {
+			throw new TypeError('waitForResponse requires page.waitForResponse()');
+		}
+		const response = await page.waitForResponse((candidate) => responseMatches(candidate, spec), { timeout });
+		return normalizeActionResponse(response);
+	}
+	if (type === 'waitForSelector') {
+		const selector = requiredString(spec.selector ?? spec.value, 'waitForSelector.selector');
+		if (Number.isInteger(spec.index)) {
+			await selectorLocator(page, selector, spec.index).waitFor({ state: spec.state || 'visible', timeout });
+			return null;
+		}
+		if (typeof page.waitForSelector !== 'function') {
+			throw new TypeError('waitForSelector requires page.waitForSelector()');
+		}
+		await page.waitForSelector(selector, { state: spec.state || 'visible', timeout });
+		return null;
+	}
+	if (type === 'clickRole') {
+		const role = requiredString(spec.role, 'clickRole.role');
+		await indexedLocator(page.getByRole(role, roleOptions(spec)), spec.index).click({ timeout });
+		return null;
+	}
+	if (type === 'clickText') {
+		const text = requiredString(spec.text ?? spec.value, 'clickText.text');
+		await indexedLocator(page.getByText(text, { exact: spec.exact }), spec.index).click({ timeout });
+		return null;
+	}
+	if (type === 'click' || type === 'clickSelector') {
+		const selector = requiredString(spec.selector ?? spec.value, `${type}.selector`);
+		if (Number.isInteger(spec.index)) {
+			await selectorLocator(page, selector, spec.index).click({ timeout });
+			return null;
+		}
+		if (typeof page.click === 'function') {
+			await page.click(selector, { timeout });
+			return null;
+		}
+		await selectorLocator(page, selector, 0).click({ timeout });
+		return null;
+	}
+	if (type === 'fill') {
+		await selectorLocator(page, requiredString(spec.selector, 'fill.selector'), spec.index).fill(String(spec.value ?? ''), { timeout });
+		return null;
+	}
+	if (type === 'select') {
+		await selectorLocator(page, requiredString(spec.selector, 'select.selector'), spec.index).selectOption(selectOptionValue(spec), { timeout });
+		return null;
+	}
+	throw new Error(`unsupported browser action type: ${type}`);
+}
+
+function selectorLocator(page, selector, index = 0) {
+	if (typeof page.locator !== 'function') {
+		throw new TypeError('selector actions require page.locator()');
+	}
+	return indexedLocator(page.locator(selector), index);
+}
+
+function indexedLocator(locator, index = 0) {
+	return Number.isInteger(index) && index > 0 ? locator.nth(index) : locator;
+}
+
+function roleOptions(spec) {
+	const options = {};
+	if (spec.name !== undefined) {
+		options.name = spec.name;
+	}
+	if (spec.exact !== undefined) {
+		options.exact = spec.exact;
+	}
+	return options;
+}
+
+function selectOptionValue(spec) {
+	if (spec.optionIndex !== undefined) {
+		return { index: spec.optionIndex };
+	}
+	if (spec.label !== undefined) {
+		return { label: spec.label };
+	}
+	if (spec.value !== undefined) {
+		return spec.value;
+	}
+	throw new TypeError('select requires value, label, or optionIndex');
+}
+
+function responseMatches(response, spec) {
+	const url = typeof response.url === 'function' ? response.url() : response.url;
+	const request = typeof response.request === 'function' ? response.request() : undefined;
+	const method = typeof request?.method === 'function' ? request.method() : request?.method;
+	const status = typeof response.status === 'function' ? response.status() : response.status;
+	if (spec.method && String(method || '').toUpperCase() !== String(spec.method).toUpperCase()) {
+		return false;
+	}
+	if (spec.status !== undefined && Number(status) !== Number(spec.status)) {
+		return false;
+	}
+	if (spec.substring && !String(url).includes(spec.substring)) {
+		return false;
+	}
+	if (spec.url && !String(url).includes(spec.url)) {
+		return false;
+	}
+	if (spec.pattern && !(new RegExp(spec.pattern).test(String(url)))) {
+		return false;
+	}
+	return Boolean(spec.substring || spec.url || spec.pattern || spec.method || spec.status !== undefined);
+}
+
+function normalizeActionResponse(response) {
+	return response ? {
+		url: typeof response.url === 'function' ? response.url() : response.url,
+		status: typeof response.status === 'function' ? response.status() : response.status,
+	} : null;
+}
+
+async function attachBrowserActionFailureEvidence(page, row, options) {
+	if (typeof page.screenshot === 'function' && options.failureScreenshotPath) {
+		await page.screenshot({ path: options.failureScreenshotPath, fullPage: true });
+		row.screenshot = options.failureScreenshotPath;
+	}
+	if (options.tracePath) {
+		row.trace = options.tracePath;
+	}
+}
+
+function formatBrowserActionFailure(row, error) {
+	return [
+		`Browser action ${row.index} (${row.name || row.type}) failed`,
+		`type=${row.type}`,
+		`target=${row.target || 'unknown'}`,
+		`timeout=${row.timeoutMs}ms`,
+		row.screenshot ? `screenshot=${row.screenshot}` : null,
+		row.trace ? `trace=${row.trace}` : null,
+		error?.message || String(error),
+	].filter(Boolean).join('; ');
+}
+
+function describeBrowserAction(type, spec) {
+	if (type === 'clickRole') {
+		return `role:${spec.role}${spec.name !== undefined ? ` name:${spec.name}` : ''}`;
+	}
+	if (type === 'clickText') {
+		return `text:${spec.text ?? spec.value ?? ''}`;
+	}
+	if (type === 'waitForResponse') {
+		return `response:${spec.substring || spec.url || spec.pattern || spec.method || spec.status || ''}`;
+	}
+	if (type === 'sleep') {
+		return `${spec.ms ?? spec.value ?? 0}ms`;
+	}
+	return spec.selector ?? spec.value ?? '';
+}
+
+function requiredString(value, label) {
+	if (typeof value !== 'string' || value.trim() === '') {
+		throw new TypeError(`${label} must be a non-empty string`);
+	}
+	return value;
+}
+
 async function profileWordPressPage(input) {
 	if (!input || typeof input !== 'object') {
 		throw new TypeError('profileWordPressPage requires an input object');
@@ -1975,15 +2221,30 @@ async function profileWordPressPage(input) {
 	}
 
 	const readyMs = Date.now() - started;
+	const initialResources = await collectBrowserResourceTimings(page, spec.resources || {}).catch(() => []);
+	const interactionActions = Array.isArray(input.interactions)
+		? input.interactions
+		: Array.isArray(spec.interactions) ? spec.interactions : Array.isArray(spec.actions) ? spec.actions : [];
+	const interactionStartedMs = Date.now() - started;
+	const interactions = await runBrowserActions(page, interactionActions, {
+		mark,
+		timeout: spec.interactionTimeout || input.interactionTimeout,
+		failureScreenshotPath: spec.failureScreenshotPath || input.failureScreenshotPath,
+		tracePath: spec.tracePath || input.tracePath,
+	});
 	const restObservationMs = Number(spec.restObservationMs ?? input.restObservationMs ?? DEFAULT_REST_OBSERVATION_MS);
 	if (restObservationMs > 0) {
 		await sleep(restObservationMs);
 	}
 	const resources = await collectBrowserResourceTimings(page, spec.resources || {});
+	const interactionResources = resources.filter((resource) => typeof resource.startTime === 'number' && resource.startTime >= interactionStartedMs);
 	const resourceSummary = summarizeResourceTimings(resources);
+	const initialResourceSummary = summarizeResourceTimings(initialResources);
+	const interactionResourceSummary = summarizeResourceTimings(interactionResources);
 	const apiFetchAttempts = typeof page.evaluate === 'function'
 		? await collectWordPressRestAttempts(page).catch(() => [])
 		: [];
+	const interactionApiFetchAttempts = apiFetchAttempts.filter((attempt) => typeof attempt.startedAtMs === 'number' && attempt.startedAtMs >= interactionStartedMs);
 	const restPreloads = [
 		...normalizeRestPreloadList(input.preloadedRestPaths),
 		...normalizeRestPreloadList(input.restPreloads),
@@ -2002,6 +2263,13 @@ async function profileWordPressPage(input) {
 		resourceTimings: resources,
 		networkRequests: input.networkRequests || [],
 	});
+	const interactionRestWaterfall = summarizeWordPressRestWaterfall({
+		readyMs: interactionStartedMs,
+		apiFetchAttempts: interactionApiFetchAttempts,
+		restPreloads,
+		resourceTimings: interactionResources,
+		networkRequests: (input.networkRequests || []).filter((request) => Number(request?.start_ms ?? request?.startMs ?? request?.startTime) >= interactionStartedMs),
+	});
 	const correlation = correlateBrowserAndWordPressTimings({
 		browserTimings: resources,
 		wordpressProfilerRows,
@@ -2014,7 +2282,11 @@ async function profileWordPressPage(input) {
 		status: response && typeof response.status === 'function' ? response.status() : 0,
 		readyMs,
 		resources: resourceSummary,
+		initialResources: initialResourceSummary,
+		interactions,
+		interactionResources: interactionResourceSummary,
 		restWaterfall,
+		interactionRestWaterfall,
 		budgets: {
 			...(input.budgets || {}),
 			...(spec.budgets || {}),
@@ -2071,6 +2343,7 @@ module.exports = {
 	formatWordPressRestPayloadBudgetMarkdownReport,
 	formatWordPressRestWaterfallMarkdownReport,
 	installWordPressRestInstrumentation,
+	normalizeBrowserAction,
 	runWordPressFixtureSetup,
 	normalizePageManifest,
 	normalizePageSpec,
@@ -2080,6 +2353,7 @@ module.exports = {
 	profileWordPressPages,
 	recommendWordPressPerformanceGates,
 	resolveWordPressUrl,
+	runBrowserActions,
 	summarizeWordPressRestNetworkRows,
 	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,

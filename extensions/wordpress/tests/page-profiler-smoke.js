@@ -21,6 +21,7 @@ const {
 	formatWordPressRestNetworkDiffMarkdownReport,
 	formatWordPressRestPayloadBudgetMarkdownReport,
 	formatWordPressRestWaterfallMarkdownReport,
+	normalizeBrowserAction,
 	normalizePageManifest,
 	profileWordPressPage,
 	profileWordPressPages,
@@ -28,6 +29,7 @@ const {
 	recommendWordPressPerformanceGates,
 	resourceFamily,
 	resolveWordPressUrl,
+	runBrowserActions,
 	summarizeWordPressRestNetworkRows,
 	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,
@@ -67,6 +69,38 @@ class FakePage {
 		this.calls.push(['waitForSelector', selector]);
 	}
 
+	async click(selector) {
+		this.calls.push(['click', selector]);
+	}
+
+	locator(selector) {
+		this.calls.push(['locator', selector]);
+		return new FakeLocator(this.calls, selector);
+	}
+
+	getByRole(role, options) {
+		this.calls.push(['getByRole', role, options?.name]);
+		return new FakeLocator(this.calls, `role:${role}`);
+	}
+
+	getByText(text, options) {
+		this.calls.push(['getByText', text, options?.exact]);
+		return new FakeLocator(this.calls, `text:${text}`);
+	}
+
+	async waitForResponse(predicate) {
+		this.calls.push(['waitForResponse']);
+		const response = {
+			url: () => 'https://example.test/wp-json/datamachine/v1/jobs',
+			status: () => 200,
+			request: () => ({ method: () => 'GET' }),
+		};
+		if (!predicate(response)) {
+			throw new Error('response predicate did not match');
+		}
+		return response;
+	}
+
 	frame(query) {
 		this.calls.push(['frame', query?.name || query]);
 		return this.fakeFrame;
@@ -74,6 +108,34 @@ class FakePage {
 
 	async evaluate() {
 		return this.resources;
+	}
+}
+
+class FakeLocator {
+	constructor(calls, selector) {
+		this.calls = calls;
+		this.selector = selector;
+	}
+
+	nth(index) {
+		this.calls.push(['locator.nth', this.selector, index]);
+		return this;
+	}
+
+	async click() {
+		this.calls.push(['locator.click', this.selector]);
+	}
+
+	async fill(value) {
+		this.calls.push(['locator.fill', this.selector, value]);
+	}
+
+	async selectOption(value) {
+		this.calls.push(['locator.selectOption', this.selector, value]);
+	}
+
+	async waitFor(options) {
+		this.calls.push(['locator.waitFor', this.selector, options?.state]);
 	}
 }
 
@@ -110,12 +172,21 @@ const manifest = normalizePageManifest({
 			id: 'site-editor',
 			path: '/wp-admin/site-editor.php',
 			ready: { selector: 'iframe[name="editor-canvas"]', frameName: 'editor-canvas', frameSelector: '[data-block]' },
+			interactions: [
+				{ name: 'open_admin', clickRole: { role: 'button', name: 'Admin' } },
+				{ waitForSelector: '.datamachine-jobs-admin-modal' },
+				{ select: { selector: '.datamachine-jobs-admin-modal select', index: 0, value: 'flow' } },
+				{ select: { selector: '.datamachine-jobs-admin-modal select', index: 1, optionIndex: 1 } },
+				{ fill: { selector: '.datamachine-filter', value: 'queued' } },
+				{ waitForResponse: { substring: '/wp-json/datamachine/v1/jobs', status: 200 } },
+			],
 		},
 	],
 });
 assert.equal(manifest.length, 2);
 assert.equal(manifest[0].ready.selector, '#dashboard-widgets');
 assert.equal(manifest[1].ready.frameSelector, '[data-block]');
+assert.equal(normalizeBrowserAction({ clickText: 'Save' }, 0).target, 'text:Save');
 
 const resources = [
 	{
@@ -413,6 +484,16 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.match(formatWordPressPerformanceGateReport(skippedGateRecommendations), /Skipped gates/);
 
 async function main() {
+	const actionPage = new FakePage(resources);
+	const actionEvidence = await runBrowserActions(actionPage, [
+		{ click: '.button-primary' },
+		{ clickText: { text: 'Open', exact: true } },
+		{ sleep: 1 },
+	]);
+	assert.equal(actionEvidence.actions.length, 3);
+	assert.equal(actionEvidence.actions[0].status, 'passed');
+	assert.equal(actionPage.calls.some((call) => call[0] === 'click' && call[1] === '.button-primary'), true);
+
 	const page = new FakePage(resources);
 	const result = await profileWordPressPage({
 		page,
@@ -427,8 +508,14 @@ async function main() {
 	assert.equal(result.id, 'site-editor');
 	assert.equal(result.status, 200);
 	assert.equal(result.resources.restCount, 2);
+	assert.equal(result.initialResources.restCount, 2);
+	assert.equal(result.interactions.actions.length, 6);
+	assert.equal(result.interactionResources.restCount, 2);
+	assert.equal(result.interactionRestWaterfall.counts.total, 2);
 	assert.equal(result.correlation.correlated.length, 1);
 	assert.equal(page.calls.some((call) => call[0] === 'frame.waitForSelector' && call[1] === '[data-block]'), true);
+	assert.equal(page.calls.some((call) => call[0] === 'getByRole' && call[1] === 'button' && call[2] === 'Admin'), true);
+	assert.equal(page.calls.some((call) => call[0] === 'locator.selectOption' && call[2]?.index === 1), true);
 
 	const multiPage = new FakePage(resources);
 	const multi = await profileWordPressPages({
