@@ -217,6 +217,18 @@ name: Data Machine Agent CI (reusable)
         description: JSON object describing a fallback PR to open or reuse when files were written but the agent did not open a PR.
         type: string
         default: "{}"
+      actions_artifact_downloads:
+        description: JSON array of GitHub Actions artifacts to download before the agent run. Each item supports repo, run_id, name, and dir.
+        type: string
+        default: "[]"
+      execute_workflow_builder_command:
+        description: Optional shell command run after artifact downloads to build an execute-workflow JSON payload.
+        type: string
+        default: ""
+      execute_workflow_path:
+        description: Optional workspace-relative JSON payload path for datamachine/execute-workflow. When set, the runner executes this ephemeral workflow instead of run-flow.
+        type: string
+        default: ""
     secrets:
       HOMEBOY_APP_ID:
         required: false
@@ -426,6 +438,37 @@ jobs:
         with:
           node-version: 24
 
+      - name: Download workflow input artifacts
+        if: ${{ inputs.run_agent && inputs.actions_artifact_downloads != '[]' && inputs.actions_artifact_downloads != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTIONS_ARTIFACT_DOWNLOADS: ${{ inputs.actions_artifact_downloads }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$ACTIONS_ARTIFACT_DOWNLOADS" | jq -e 'type == "array"' >/dev/null
+          while IFS= read -r item; do
+            [ -n "$item" ] || continue
+            repo="$(jq -r '.repo // env.GITHUB_REPOSITORY' <<< "$item")"
+            run_id="$(jq -r '.run_id // .runId // ""' <<< "$item")"
+            name="$(jq -r '.name // .artifact_name // .artifactName // ""' <<< "$item")"
+            dir="$(jq -r '.dir // .destination // (".ci/actions-artifacts/" + $name)' --arg name "$(jq -r '.name // .artifact_name // .artifactName // ""' <<< "$item")" <<< "$item")"
+            [ -n "$repo" ] || { echo "Artifact download repo is required" >&2; exit 1; }
+            [ -n "$run_id" ] || { echo "Artifact download run_id is required" >&2; exit 1; }
+            [ -n "$name" ] || { echo "Artifact download name is required" >&2; exit 1; }
+            mkdir -p "$dir"
+            gh run download "$run_id" --repo "$repo" --name "$name" --dir "$dir"
+          done < <(printf '%s' "$ACTIONS_ARTIFACT_DOWNLOADS" | jq -c '.[]')
+
+      - name: Build execute-workflow payload
+        if: ${{ inputs.run_agent && inputs.execute_workflow_builder_command != '' }}
+        shell: bash
+        env:
+          EXECUTE_WORKFLOW_BUILDER_COMMAND: ${{ inputs.execute_workflow_builder_command }}
+        run: |
+          set -euo pipefail
+          bash -lc "$EXECUTE_WORKFLOW_BUILDER_COMMAND"
+
       - name: Install Homeboy WordPress extension dependencies
         if: ${{ inputs.run_agent }}
         working-directory: .ci/homeboy-extensions/wordpress
@@ -508,6 +551,7 @@ jobs:
           FLOW_STEP_PATCHES: ${{ inputs.flow_step_patches }}
           RUNNER_WORKSPACE_CONFIG: ${{ inputs.runner_workspace }}
           FALLBACK_PULL_REQUEST: ${{ inputs.fallback_pull_request }}
+          EXECUTE_WORKFLOW_PATH: ${{ inputs.execute_workflow_path }}
           GITHUB_APP_TOKEN_VALUE: ${{ steps.app-token.outputs.token }}
           GITHUB_REPOSITORY_TOKEN_VALUE: ${{ github.token }}
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
@@ -615,6 +659,7 @@ jobs:
             --arg githubRepositoryToken "$GITHUB_REPOSITORY_TOKEN_VALUE" \
             --arg githubRunId "$GITHUB_RUN_ID_VALUE" \
             --arg githubRunAttempt "$GITHUB_RUN_ATTEMPT_VALUE" \
+            --arg executeWorkflowPath "$EXECUTE_WORKFLOW_PATH" \
             --arg providerRegisterFunction "$provider_register_function" \
             --argjson validationDependencies "$validation_json" \
             --argjson providerCredentials "$provider_credentials_json" \
@@ -685,6 +730,7 @@ jobs:
               flow_step_patches: $flowStepPatches,
               runner_workspace: $runnerWorkspace,
               fallback_pull_request: $fallbackPullRequest,
+              execute_workflow_path: $executeWorkflowPath,
               success_requires_pr: $successRequiresPr,
               success_completion_outcomes: $successCompletionOutcomes,
               artifact_export: ({
