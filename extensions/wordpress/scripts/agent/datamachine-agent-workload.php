@@ -904,6 +904,14 @@ if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_exposed' ) )
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_alias' ) ) {
+    function homeboy_datamachine_agent_runner_workspace_alias( array $config ): string {
+        $workspace = homeboy_datamachine_agent_runner_workspace_config( $config );
+        $alias     = isset( $workspace['agent_alias'] ) && is_scalar( $workspace['agent_alias'] ) ? trim( (string) $workspace['agent_alias'] ) : '';
+        return '' !== $alias ? $alias : '';
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_capture_enabled' ) ) {
     function homeboy_datamachine_agent_runner_workspace_capture_enabled( array $config ): bool {
         $workspace = homeboy_datamachine_agent_runner_workspace_config( $config );
@@ -1451,10 +1459,23 @@ if ( ! function_exists( 'homeboy_datamachine_agent_apply_runner_workspace' ) ) {
             return array( $config, $prompt );
         }
 
-        $handle = (string) $runner_workspace['handle'];
+        $handle       = (string) $runner_workspace['handle'];
+        $agent_alias  = homeboy_datamachine_agent_runner_workspace_alias( $config );
+        $agent_handle = '' !== $agent_alias ? $agent_alias : $handle;
+        if ( '' !== $agent_alias ) {
+            add_filter(
+                'datamachine_code_workspace_aliases',
+                static function ( array $aliases ) use ( $agent_alias, $handle ): array {
+                    $aliases[ $agent_alias ] = $handle;
+                    return $aliases;
+                }
+            );
+        }
+
         if ( homeboy_datamachine_agent_runner_workspace_exposed( $config ) ) {
-            $branch = (string) ( $runner_workspace['branch'] ?? '' );
-            $prefix = "Runner-provided workspace:\n- Workspace handle: {$handle}\n- Branch: {$branch}\n\nUse this workspace handle for all repository file and git changes. Do not mutate the primary checkout and do not create another worktree for this run.";
+            $prefix = '' !== $agent_alias
+                ? "Project workspace:\nUse `{$agent_alias}` for repository file and git changes when a workspace tool asks for a project or repository name."
+                : "Runner-provided workspace:\n- Workspace handle: {$handle}\n- Branch: " . (string) ( $runner_workspace['branch'] ?? '' ) . "\n\nUse this workspace handle for all repository file and git changes. Do not mutate the primary checkout and do not create another worktree for this run.";
             $prompt = '' === trim( $prompt ) ? $prefix : $prefix . "\n\n" . $prompt;
         }
 
@@ -1464,14 +1485,14 @@ if ( ! function_exists( 'homeboy_datamachine_agent_apply_runner_workspace' ) ) {
         foreach ( array( 'workspace_ls', 'workspace_read', 'workspace_grep', 'workspace_write', 'workspace_edit', 'workspace_apply_patch', 'workspace_delete' ) as $tool_name ) {
             $recorders[] = array(
                 'tool'              => $tool_name,
-                'forced_parameters' => array( 'repo' => $handle ),
+                'forced_parameters' => array( 'repo' => $agent_handle ),
                 'record'            => $record_config,
             );
         }
         foreach ( array( 'workspace_git_status', 'workspace_git_log', 'workspace_git_diff', 'workspace_git_pull', 'workspace_git_add', 'workspace_git_commit', 'workspace_git_push' ) as $tool_name ) {
             $recorders[] = array(
                 'tool'              => $tool_name,
-                'forced_parameters' => array( 'name' => $handle ),
+                'forced_parameters' => array( 'name' => $agent_handle ),
                 'record'            => $record_config,
             );
         }

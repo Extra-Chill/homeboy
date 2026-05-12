@@ -210,7 +210,7 @@ name: Data Machine Agent CI (reusable)
         type: string
         default: "[]"
       runner_workspace:
-        description: JSON object for runner-owned Data Machine Code workspace/worktree provisioning before the agent runs.
+        description: JSON object for runner-owned Data Machine Code workspace/worktree provisioning before the agent runs. Set agent_alias to expose an opaque project name instead of the real workspace handle.
         type: string
         default: "{}"
       fallback_pull_request:

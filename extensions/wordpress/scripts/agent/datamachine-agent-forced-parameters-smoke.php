@@ -38,6 +38,29 @@ namespace {
         function wp_set_current_user( int $user_id ): void {}
     }
 
+    $GLOBALS['homeboy_forced_parameters_filters'] = array();
+
+    if ( ! function_exists( 'add_filter' ) ) {
+        function add_filter( string $tag, callable $callback, int $priority = 10, int $accepted_args = 1 ): void {
+            $GLOBALS['homeboy_forced_parameters_filters'][ $tag ][ $priority ][] = $callback;
+        }
+    }
+
+    if ( ! function_exists( 'apply_filters' ) ) {
+        function apply_filters( string $tag, $value ) {
+            if ( empty( $GLOBALS['homeboy_forced_parameters_filters'][ $tag ] ) ) {
+                return $value;
+            }
+            ksort( $GLOBALS['homeboy_forced_parameters_filters'][ $tag ] );
+            foreach ( $GLOBALS['homeboy_forced_parameters_filters'][ $tag ] as $callbacks ) {
+                foreach ( $callbacks as $callback ) {
+                    $value = $callback( $value );
+                }
+            }
+            return $value;
+        }
+    }
+
     if ( ! function_exists( 'wp_get_ability' ) ) {
         function wp_get_ability( string $ability_name ): object {
             return new class {
@@ -168,6 +191,50 @@ namespace {
 
     if ( 'demo@hidden-run' !== ( $hidden_workspace_recorder['forced_parameters']['repo'] ?? null ) ) {
         fwrite( STDERR, "Expected hidden runner workspace mode to keep workspace tool scoping.\n" );
+        exit( 1 );
+    }
+
+    list( $alias_config, $alias_prompt ) = homeboy_datamachine_agent_apply_runner_workspace(
+        array(
+            'runner_workspace' => array(
+                'enabled'     => true,
+                'agent_alias' => 'current-project',
+            ),
+        ),
+        'Make the requested code changes.',
+        array(
+            'success' => true,
+            'handle'  => 'demo@agent-run-openai-gpt-5-5',
+            'branch'  => 'agent/run-openai-gpt-5-5',
+        )
+    );
+
+    if ( str_contains( $alias_prompt, 'demo@agent-run-openai-gpt-5-5' ) || str_contains( $alias_prompt, 'agent/run-openai-gpt-5-5' ) ) {
+        fwrite( STDERR, "Expected alias runner prompt to hide the real workspace handle and branch.\n" );
+        exit( 1 );
+    }
+
+    if ( ! str_contains( $alias_prompt, 'current-project' ) ) {
+        fwrite( STDERR, "Expected alias runner prompt to mention the opaque project alias.\n" );
+        exit( 1 );
+    }
+
+    $alias_workspace_recorder = null;
+    foreach ( $alias_config['tool_recorders'] ?? array() as $runner_recorder ) {
+        if ( is_array( $runner_recorder ) && 'workspace_git_status' === ( $runner_recorder['tool'] ?? '' ) ) {
+            $alias_workspace_recorder = $runner_recorder;
+            break;
+        }
+    }
+
+    if ( 'current-project' !== ( $alias_workspace_recorder['forced_parameters']['name'] ?? null ) ) {
+        fwrite( STDERR, "Expected alias runner workspace mode to scope git tools to the opaque alias.\n" );
+        exit( 1 );
+    }
+
+    $aliases = apply_filters( 'datamachine_code_workspace_aliases', array() );
+    if ( 'demo@agent-run-openai-gpt-5-5' !== ( $aliases['current-project'] ?? null ) ) {
+        fwrite( STDERR, "Expected alias runner workspace mode to register the opaque alias mapping.\n" );
         exit( 1 );
     }
 
