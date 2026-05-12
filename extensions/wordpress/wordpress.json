@@ -853,6 +853,13 @@
       "description": "Map of NAME => value forwarded into Playground PHP-WASM as environment variables. Workloads (bench) and test fixtures (test runner) read them via getenv() / $_ENV. Required because host shell env doesn't cross the wp-playground-cli sandbox boundary; without this seam, getenv('MY_KNOB') returns false regardless of what the parent shell set. Values are coerced to strings (via json_encode for non-scalars) per PHP env-var convention. Component declares static defaults; matrix drivers can synthesize HOMEBOY_SETTINGS_JSON inline to override per-cell."
     },
     {
+      "id": "phpunit_no_tests",
+      "label": "No PHPUnit tests discovered",
+      "type": "string",
+      "default": "skipped",
+      "description": "How the Playground PHPUnit backend treats successful WordPress install/activation when discovery finds zero PHPUnit files. Use 'skipped' for components that intentionally test through smoke scripts, or 'failed' when the component expects PHPUnit coverage. Components with phpunit.xml(.dist) still fail on zero discovery."
+    },
+    {
       "id": "playground_blueprint",
       "label": "Playground blueprint",
       "type": "object",

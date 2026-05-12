@@ -87,6 +87,7 @@ fi
 write_phpunit_discovery_result() {
     local status="$1"
     local partial="$2"
+    local message="$3"
 
     if ! type homeboy_write_test_results >/dev/null 2>&1; then
         return 0
@@ -96,6 +97,23 @@ write_phpunit_discovery_result() {
         homeboy_write_test_results 1 0 1 0 "$partial"
     else
         homeboy_write_test_results 0 0 0 0 "$partial"
+    fi
+
+    if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$HOMEBOY_TEST_RESULTS_FILE" ]; then
+        php -r '
+            $path = $argv[1];
+            $status = $argv[2];
+            $message = $argv[3];
+            $data = json_decode(file_get_contents($path), true);
+            if (!is_array($data)) {
+                $data = [];
+            }
+            $data["status"] = $status;
+            if ($message !== "") {
+                $data["message"] = $message;
+            }
+            file_put_contents($path, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL);
+        ' "$HOMEBOY_TEST_RESULTS_FILE" "$status" "$message"
     fi
 }
 
@@ -251,6 +269,14 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
     if [ -n "$extracted" ]; then
         BENCH_ENV_JSON="$extracted"
+    fi
+fi
+
+PHPUNIT_NO_TESTS="skipped"
+if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.phpunit_no_tests // empty' 2>/dev/null || true)
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        PHPUNIT_NO_TESTS="$extracted"
     fi
 fi
 
@@ -614,21 +640,26 @@ if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
         exit $?
     fi
 
-    if [ -f "${PLUGIN_PATH}/phpunit.xml" ] || [ -f "${PLUGIN_PATH}/phpunit.xml.dist" ]; then
+    if [ "$PHPUNIT_NO_TESTS" = "failed" ] || [ "$PHPUNIT_NO_TESTS" = "fail" ] || [ -f "${PLUGIN_PATH}/phpunit.xml" ] || [ -f "${PLUGIN_PATH}/phpunit.xml.dist" ]; then
         echo ""
-        echo "PHPUnit config exists, but no files matched the WordPress runner discovery contract."
+        if [ "$PHPUNIT_NO_TESTS" = "failed" ] || [ "$PHPUNIT_NO_TESTS" = "fail" ]; then
+            echo "PHPUnit no-test discovery is configured as failure, and no files matched the WordPress runner discovery contract."
+        else
+            echo "PHPUnit config exists, but no files matched the WordPress runner discovery contract."
+        fi
         echo "  Check phpunit.xml(.dist), tests/ directory layout, and Test.php/test- naming."
         FAILED_STEP="PHPUnit tests (configured suite discovered no test files, playground)"
-        write_phpunit_discovery_result failed "no-phpunit-tests-configured"
+        write_phpunit_discovery_result failed "no-phpunit-tests-configured" "Plugin activation/install passed; PHPUnit discovery found zero tests; no PHPUnit assertions ran."
         rm -f "$RESULT_FILE"
         exit 1
     fi
 
     echo ""
-    echo "Skipping PHPUnit tests: no files matched the WordPress runner discovery contract."
+    echo "Skipping PHPUnit tests: plugin activation/install passed, but no files matched the WordPress runner discovery contract."
     echo "  Contract: files under ${TEST_DIR} ending in Test.php or starting with test-."
+    echo "  PHPUnit discovery found zero tests; no PHPUnit assertions ran."
     echo "  Add matching PHPUnit files or a component phpunit.xml(.dist) if this suite should run here."
-    write_phpunit_discovery_result skipped "no-phpunit-tests"
+    write_phpunit_discovery_result skipped "no-phpunit-tests" "Plugin activation/install passed; PHPUnit discovery found zero tests; no PHPUnit assertions ran."
     rm -f "$RESULT_FILE"
     exit 0
 fi

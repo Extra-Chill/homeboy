@@ -96,11 +96,13 @@ if [ "$skip_status" -ne 0 ]; then
     exit 1
 fi
 assert_contains "$skip_output" "NO PHPUNIT TEST FILES DISCOVERED"
-assert_contains "$skip_output" "Skipping PHPUnit tests: no files matched the WordPress runner discovery contract."
+assert_contains "$skip_output" "Skipping PHPUnit tests: plugin activation/install passed, but no files matched the WordPress runner discovery contract."
 assert_contains "$skip_output" "ending in Test.php or starting with test-."
+assert_contains "$skip_output" "PHPUnit discovery found zero tests; no PHPUnit assertions ran."
 assert_not_contains "$skip_output" "UNCLASSIFIED PLAYGROUND FAILURE"
 assert_contains "$(cat "$RESULTS_FILE")" '"total": 0'
 assert_contains "$(cat "$RESULTS_FILE")" '"failed": 0'
+assert_contains "$(cat "$RESULTS_FILE")" '"status": "skipped"'
 assert_contains "$(cat "$RESULTS_FILE")" '"partial": "no-phpunit-tests"'
 
 cat > "${PLUGIN_PATH}/composer.json" <<'JSON'
@@ -146,6 +148,22 @@ assert_not_contains "$failure_output" "UNCLASSIFIED PLAYGROUND FAILURE"
 assert_not_contains "$failure_output" "Skipping PHPUnit tests: no files matched"
 assert_contains "$(cat "$RESULTS_FILE")" '"total": 1'
 assert_contains "$(cat "$RESULTS_FILE")" '"failed": 1'
+assert_contains "$(cat "$RESULTS_FILE")" '"status": "failed"'
+assert_contains "$(cat "$RESULTS_FILE")" '"partial": "no-phpunit-tests-configured"'
+rm -f "${PLUGIN_PATH}/phpunit.xml.dist" "$RESULTS_FILE"
+
+set +e
+configured_failure_output=$(HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" HOMEBOY_COMPONENT_PATH="$PLUGIN_PATH" HOMEBOY_COMPONENT_ID="example" HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"failed"}' HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WRITE_RESULTS_HELPER" HOMEBOY_TEST_RESULTS_FILE="$RESULTS_FILE" bash "$RUNNER" 2>&1)
+configured_failure_status=$?
+set -e
+
+if [ "$configured_failure_status" -eq 0 ]; then
+    echo "Expected phpunit_no_tests=failed to fail zero-discovery runs" >&2
+    echo "$configured_failure_output" >&2
+    exit 1
+fi
+assert_contains "$configured_failure_output" "PHPUnit no-test discovery is configured as failure"
+assert_contains "$(cat "$RESULTS_FILE")" '"status": "failed"'
 assert_contains "$(cat "$RESULTS_FILE")" '"partial": "no-phpunit-tests-configured"'
 
 assert_contains "$RUNNER_SRC" "pg_run_install_stage(['config_path' => \$config_path, 'tests_dir' => \$tests_dir]);"
@@ -176,4 +194,4 @@ assert_contains "$RUNNER_SRC" "pg_reopen_wordpress_action('wp_abilities_api_cate
 assert_contains "$RUNNER_SRC" "pg_fire_reopened_wordpress_action('wp_abilities_api_init'"
 assert_contains "$BOOTSTRAP_SRC" "\$cfg['activate'] ?? true"
 
-echo "Playground no-test-files smoke passed (43 assertions)"
+echo "Playground no-test-files smoke passed (50 assertions)"
