@@ -11,6 +11,7 @@ const {
   collectBrowserPerformanceProfile,
   compareBrowserPerformanceProfiles,
   formatBrowserPerformanceReport,
+  runBrowserActions,
 } = await import(process.argv[2]);
 
 class FakePage {
@@ -56,8 +57,70 @@ class FakePage {
     return null;
   }
 
+  async click(selector) {
+    this.emit('action', ['click', selector]);
+  }
+
+  locator(selector) {
+    this.emit('action', ['locator', selector]);
+    return new FakeLocator(this, selector);
+  }
+
+  getByRole(role, options) {
+    this.emit('action', ['getByRole', role, options?.name]);
+    return new FakeLocator(this, `role:${role}`);
+  }
+
+  getByText(text, options) {
+    this.emit('action', ['getByText', text, options?.exact]);
+    return new FakeLocator(this, `text:${text}`);
+  }
+
+  async waitForSelector(selector) {
+    this.emit('action', ['waitForSelector', selector]);
+  }
+
+  async waitForResponse(predicate) {
+    this.emit('action', ['waitForResponse']);
+    const response = {
+      url: () => 'https://example.test/wp-json/datamachine/v1/jobs',
+      status: () => 200,
+      request: () => ({ method: () => 'GET' }),
+    };
+    if (!predicate(response)) throw new Error('response predicate did not match');
+    return response;
+  }
+
   emit(name, value) {
     for (const handler of this.handlers.get(name) || []) handler(value);
+  }
+}
+
+class FakeLocator {
+  constructor(page, selector) {
+    this.page = page;
+    this.selector = selector;
+  }
+
+  nth(index) {
+    this.page.emit('action', ['locator.nth', this.selector, index]);
+    return this;
+  }
+
+  async click() {
+    this.page.emit('action', ['locator.click', this.selector]);
+  }
+
+  async fill(value) {
+    this.page.emit('action', ['locator.fill', this.selector, value]);
+  }
+
+  async selectOption(value) {
+    this.page.emit('action', ['locator.selectOption', this.selector, value]);
+  }
+
+  async waitFor(options) {
+    this.page.emit('action', ['locator.waitFor', this.selector, options?.state]);
   }
 }
 
@@ -75,6 +138,22 @@ const response = {
 };
 
 const page = new FakePage();
+const actionCalls = [];
+page.on('action', (call) => actionCalls.push(call));
+const actionEvidence = await runBrowserActions(page, [
+  { click: '.button-primary' },
+  { clickRole: { role: 'button', name: 'Admin' } },
+  { fill: { selector: '.filter', value: 'queued' } },
+  { select: { selector: 'select', index: 1, optionIndex: 2 } },
+  { waitForSelector: '.modal' },
+  { waitForResponse: { substring: '/wp-json/datamachine/v1/jobs', status: 200 } },
+  { sleep: 1 },
+]);
+assert.equal(actionEvidence.actions.length, 7);
+assert.equal(actionEvidence.actions[0].status, 'passed');
+assert.equal(actionCalls.some((call) => call[0] === 'getByRole' && call[1] === 'button' && call[2] === 'Admin'), true);
+assert.equal(actionCalls.some((call) => call[0] === 'locator.selectOption' && call[2]?.index === 2), true);
+
 const controller = await installBrowserPerformanceObservers(page, { includeHeaders: true });
 page.emit('request', request);
 page.emit('response', response);

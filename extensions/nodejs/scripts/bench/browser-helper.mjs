@@ -9,6 +9,56 @@ const BROWSER_PERFORMANCE_STATE = new WeakMap();
 const SECRET_HEADER_PATTERN = /^(authorization|cookie|set-cookie|proxy-authorization|x-api-key|x-auth-token|x-csrf-token|x-xsrf-token)$/i;
 const SECRET_HEADER_PART_PATTERN = /(token|secret|session|cookie|credential|password|key)/i;
 
+export async function runBrowserActions(page, actions, options = {}) {
+    if (!Array.isArray(actions) || actions.length === 0) {
+        return { actions: [], duration_ms: 0, failed: false };
+    }
+    if (!page || typeof page !== 'object') {
+        throw new Error('runBrowserActions requires a Playwright page.');
+    }
+
+    const startedAt = performance.now();
+    const evidence = [];
+    for (let index = 0; index < actions.length; index += 1) {
+        const normalized = normalizeBrowserAction(actions[index], index, options);
+        const actionStartedAt = performance.now();
+        const row = {
+            index,
+            name: normalized.name,
+            type: normalized.type,
+            target: normalized.target,
+            timeout_ms: normalized.timeout,
+            started_at_ms: roundNumber(actionStartedAt - startedAt),
+        };
+        evidence.push(row);
+        try {
+            const result = await executeBrowserAction(page, normalized);
+            row.duration_ms = roundNumber(performance.now() - actionStartedAt);
+            row.status = 'passed';
+            if (result) row.result = result;
+            if (typeof options.mark === 'function') {
+                await options.mark(normalized.name || `interaction_${index + 1}`);
+            }
+        } catch (error) {
+            row.duration_ms = roundNumber(performance.now() - actionStartedAt);
+            row.status = 'failed';
+            row.error = error?.message || String(error);
+            await attachBrowserActionFailureEvidence(page, row, normalized, options).catch(() => {});
+            const wrapped = new Error(formatBrowserActionFailure(row, error));
+            wrapped.cause = error;
+            wrapped.action = row;
+            wrapped.actions = evidence;
+            throw wrapped;
+        }
+    }
+
+    return stableJson({
+        actions: evidence,
+        duration_ms: roundNumber(performance.now() - startedAt),
+        failed: false,
+    });
+}
+
 export async function installBrowserPerformanceObservers(page, options = {}) {
     if (!page || typeof page.on !== 'function' || typeof page.evaluate !== 'function') {
         throw new Error('installBrowserPerformanceObservers requires a Playwright page.');
@@ -304,6 +354,7 @@ export async function runBrowserBench(options) {
     let browser;
     let context;
     let page;
+    let tracePath;
 
     const mark = async (name) => {
         const key = `${sanitizeMetricName(name)}_ms`;
@@ -315,12 +366,29 @@ export async function runBrowserBench(options) {
         browser = await launchBrowser(browserType, config);
         context = await browser.newContext(config.contextOptions);
         if (config.trace) {
+            tracePath = join(config.artifactsDir, `${config.id}-trace.zip`);
             await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
         }
         page = await context.newPage();
         attachPageObservers(page, network, consoleMessages, requestStarts);
 
-        await config.action({ browser, context, page, mark });
+        const actionFailureOptions = {
+            mark,
+            failureScreenshotPath: join(config.artifactsDir, `${config.id}-interaction-failure.png`),
+            tracePath,
+        };
+        await config.action({ browser, context, page, mark, runActions: (actions, actionOptions = {}) => runBrowserActions(page, actions, { ...actionFailureOptions, ...actionOptions }) });
+        if (config.actions.length > 0) {
+            const interactionEvidence = await runBrowserActions(page, config.actions, { ...actionFailureOptions, ...config.actionOptions });
+            metrics.browser_interaction_count = interactionEvidence.actions.length;
+            metrics.browser_interaction_duration_ms = interactionEvidence.duration_ms;
+            artifacts.interactions = {
+                path: join(config.artifactsDir, `${config.id}-interactions.json`),
+                kind: 'browser-interactions',
+                label: 'Browser interaction evidence',
+            };
+            await writeJson(artifacts.interactions.path, interactionEvidence);
+        }
 
         if (config.waitForNetworkIdle) {
             await recordNetworkIdle(page, metrics, start, config.networkIdleTimeoutMs);
@@ -356,7 +424,6 @@ export async function runBrowserBench(options) {
         };
 
         if (config.trace) {
-            const tracePath = join(config.artifactsDir, `${config.id}-trace.zip`);
             await context.tracing.stop({ path: tracePath });
             artifacts.trace = {
                 path: tracePath,
@@ -364,6 +431,17 @@ export async function runBrowserBench(options) {
                 label: 'Playwright trace',
             };
         }
+    } catch (error) {
+        if (page && typeof page.screenshot === 'function') {
+            const screenshotPath = join(config.artifactsDir, `${config.id}-interaction-failure.png`);
+            await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+            error.screenshotPath = screenshotPath;
+        }
+        if (context && config.trace && tracePath) {
+            await context.tracing.stop({ path: tracePath }).catch(() => {});
+            error.tracePath = tracePath;
+        }
+        throw error;
     } finally {
         if (context && config.trace) {
             try {
@@ -384,8 +462,8 @@ function normalizeOptions(options) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
         throw new Error('runBrowserBench requires an options object.');
     }
-    if (typeof options.action !== 'function') {
-        throw new Error('runBrowserBench requires an async action({ page, mark }) function.');
+    if (typeof options.action !== 'function' && !Array.isArray(options.actions)) {
+        throw new Error('runBrowserBench requires an async action({ page, mark }) function or an actions array.');
     }
 
     const id = sanitizeFilePart(options.id || 'browser-bench');
@@ -399,7 +477,9 @@ function normalizeOptions(options) {
     return {
         id,
         artifactsDir,
-        action: options.action,
+        action: typeof options.action === 'function' ? options.action : async () => {},
+        actions: Array.isArray(options.actions) ? options.actions : [],
+        actionOptions: options.actionOptions || {},
         browserName: options.browserName || 'chromium',
         headless: options.headless !== false,
         trace: options.trace !== false,
@@ -409,6 +489,177 @@ function normalizeOptions(options) {
         launchOptions: options.launchOptions || {},
         contextOptions: options.contextOptions || {},
     };
+}
+
+function normalizeBrowserAction(action, index, options = {}) {
+    if (!action || typeof action !== 'object' || Array.isArray(action)) {
+        throw new Error(`Browser action ${index} must be an object.`);
+    }
+
+    const timeout = finitePositiveNumber(action.timeout ?? options.timeout) || 30000;
+    const name = sanitizeMetricName(action.name || `interaction_${index + 1}`);
+    const candidates = [
+        ['click', action.click],
+        ['clickSelector', action.clickSelector],
+        ['clickRole', action.clickRole],
+        ['clickText', action.clickText],
+        ['fill', action.fill],
+        ['select', action.select],
+        ['waitForSelector', action.waitForSelector],
+        ['waitForResponse', action.waitForResponse],
+        ['sleep', action.sleep],
+    ].filter(([, value]) => value !== undefined);
+    if (candidates.length !== 1) {
+        throw new Error(`Browser action ${index} must define exactly one supported action.`);
+    }
+
+    const [type, rawSpec] = candidates[0];
+    const spec = typeof rawSpec === 'string' || typeof rawSpec === 'number' ? { value: rawSpec } : { ...(rawSpec || {}) };
+    return { index, name, type, timeout, spec, target: describeBrowserAction(type, spec) };
+}
+
+async function executeBrowserAction(page, action) {
+    const { type, spec, timeout } = action;
+    if (type === 'sleep') {
+        await new Promise((resolve) => setTimeout(resolve, Number(spec.ms ?? spec.value ?? 0)));
+        return null;
+    }
+    if (type === 'waitForResponse') {
+        if (typeof page.waitForResponse !== 'function') throw new Error('waitForResponse requires page.waitForResponse().');
+        const response = await page.waitForResponse((candidate) => responseMatches(candidate, spec), { timeout });
+        return normalizeActionResponse(response);
+    }
+    if (type === 'waitForSelector') {
+        const selector = requiredString(spec.selector ?? spec.value, 'waitForSelector.selector');
+        if (Number.isInteger(spec.index)) {
+            const locator = selectorLocator(page, selector, spec.index);
+            await locator.waitFor({ state: spec.state || 'visible', timeout });
+            return null;
+        }
+        if (typeof page.waitForSelector !== 'function') throw new Error('waitForSelector requires page.waitForSelector().');
+        await page.waitForSelector(selector, { state: spec.state || 'visible', timeout });
+        return null;
+    }
+    if (type === 'clickRole') {
+        const role = requiredString(spec.role, 'clickRole.role');
+        const locator = indexedLocator(page.getByRole(role, roleOptions(spec)), spec.index);
+        await locator.click({ timeout });
+        return null;
+    }
+    if (type === 'clickText') {
+        const text = requiredString(spec.text ?? spec.value, 'clickText.text');
+        const locator = indexedLocator(page.getByText(text, { exact: spec.exact }), spec.index);
+        await locator.click({ timeout });
+        return null;
+    }
+    if (type === 'click' || type === 'clickSelector') {
+        const selector = requiredString(spec.selector ?? spec.value, `${type}.selector`);
+        if (Number.isInteger(spec.index)) {
+            await selectorLocator(page, selector, spec.index).click({ timeout });
+            return null;
+        }
+        if (typeof page.click === 'function') {
+            await page.click(selector, { timeout });
+            return null;
+        }
+        await selectorLocator(page, selector, 0).click({ timeout });
+        return null;
+    }
+    if (type === 'fill') {
+        const selector = requiredString(spec.selector, 'fill.selector');
+        await selectorLocator(page, selector, spec.index).fill(String(spec.value ?? ''), { timeout });
+        return null;
+    }
+    if (type === 'select') {
+        const selector = requiredString(spec.selector, 'select.selector');
+        await selectorLocator(page, selector, spec.index).selectOption(selectOptionValue(spec), { timeout });
+        return null;
+    }
+    throw new Error(`Unsupported browser action type: ${type}`);
+}
+
+function selectorLocator(page, selector, index = 0) {
+    if (typeof page.locator !== 'function') throw new Error('selector actions require page.locator().');
+    return indexedLocator(page.locator(selector), index);
+}
+
+function indexedLocator(locator, index = 0) {
+    if (Number.isInteger(index) && index > 0) return locator.nth(index);
+    return locator;
+}
+
+function roleOptions(spec) {
+    const options = {};
+    if (spec.name !== undefined) options.name = spec.name;
+    if (spec.exact !== undefined) options.exact = spec.exact;
+    return options;
+}
+
+function selectOptionValue(spec) {
+    if (spec.optionIndex !== undefined) return { index: spec.optionIndex };
+    if (spec.label !== undefined) return { label: spec.label };
+    if (spec.value !== undefined) return spec.value;
+    throw new Error('select requires value, label, or optionIndex.');
+}
+
+function responseMatches(response, spec) {
+    const url = typeof response.url === 'function' ? response.url() : response.url;
+    const method = typeof response.request === 'function' ? response.request()?.method?.() : undefined;
+    const status = typeof response.status === 'function' ? response.status() : response.status;
+    if (spec.method && String(method || '').toUpperCase() !== String(spec.method).toUpperCase()) return false;
+    if (spec.status !== undefined && Number(status) !== Number(spec.status)) return false;
+    if (spec.substring && !String(url).includes(spec.substring)) return false;
+    if (spec.url && !String(url).includes(spec.url)) return false;
+    if (spec.pattern && !(new RegExp(spec.pattern).test(String(url)))) return false;
+    return Boolean(spec.substring || spec.url || spec.pattern || spec.method || spec.status !== undefined);
+}
+
+function normalizeActionResponse(response) {
+    if (!response) return null;
+    return {
+        url: typeof response.url === 'function' ? response.url() : response.url,
+        status: typeof response.status === 'function' ? response.status() : response.status,
+    };
+}
+
+async function attachBrowserActionFailureEvidence(page, row, action, options) {
+    if (typeof page.screenshot === 'function' && options.failureScreenshotPath) {
+        await page.screenshot({ path: options.failureScreenshotPath, fullPage: true });
+        row.screenshot = options.failureScreenshotPath;
+    }
+    if (options.tracePath) row.trace = options.tracePath;
+    row.action = { name: action.name, type: action.type, target: action.target };
+}
+
+function formatBrowserActionFailure(row, error) {
+    const parts = [
+        `Browser action ${row.index} (${row.name || row.type}) failed`,
+        `type=${row.type}`,
+        `target=${row.target || 'unknown'}`,
+        `timeout=${row.timeout_ms}ms`,
+    ];
+    if (row.screenshot) parts.push(`screenshot=${row.screenshot}`);
+    if (row.trace) parts.push(`trace=${row.trace}`);
+    parts.push(error?.message || String(error));
+    return parts.join('; ');
+}
+
+function describeBrowserAction(type, spec) {
+    if (type === 'clickRole') return `role:${spec.role}${spec.name !== undefined ? ` name:${spec.name}` : ''}`;
+    if (type === 'clickText') return `text:${spec.text ?? spec.value ?? ''}`;
+    if (type === 'waitForResponse') return `response:${spec.substring || spec.url || spec.pattern || spec.method || spec.status || ''}`;
+    if (type === 'sleep') return `${spec.ms ?? spec.value ?? 0}ms`;
+    return spec.selector ?? spec.value ?? '';
+}
+
+function requiredString(value, label) {
+    if (typeof value !== 'string' || value.trim() === '') throw new Error(`${label} must be a non-empty string.`);
+    return value;
+}
+
+function finitePositiveNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : undefined;
 }
 
 async function loadPlaywright() {
