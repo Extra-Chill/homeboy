@@ -444,6 +444,12 @@
           "rest_ensure_response"
         ]
       },
+      "dead_guard_context_comment_patterns": [
+        "(?i)pure-php smoke tests run without wordpress loaded",
+        "(?i)fallback when wordpress is not loaded",
+        "(?i)wordpress is not loaded",
+        "(?i)without wordpress loaded"
+      ],
       "known_symbols": {
         "header_versions": [
           {
@@ -451,10 +457,16 @@
             "version_header": "Requires at least:",
             "symbols": [
               { "name": "get_post_type_object", "kind": "function", "introduced": "3.0" },
+              { "name": "wp_json_encode", "kind": "function", "introduced": "4.1" },
               { "name": "register_rest_route", "kind": "function", "introduced": "4.4" },
+              { "name": "wp_parse_url", "kind": "function", "introduced": "4.4" },
+              { "name": "wp_generate_uuid4", "kind": "function", "introduced": "4.7" },
               { "name": "register_block_type", "kind": "function", "introduced": "5.0" },
               { "name": "has_blocks", "kind": "function", "introduced": "5.0" },
               { "name": "parse_blocks", "kind": "function", "introduced": "5.0" },
+              { "name": "wp_date", "kind": "function", "introduced": "5.3" },
+              { "name": "wp_timezone", "kind": "function", "introduced": "5.3" },
+              { "name": "wp_timezone_string", "kind": "function", "introduced": "5.3" },
               { "name": "wp_get_environment_type", "kind": "function", "introduced": "5.5" },
               { "name": "WP_REST_Server", "kind": "class", "introduced": "4.4" },
               { "name": "WP_REST_Request", "kind": "class", "introduced": "4.4" },
@@ -534,7 +546,14 @@
           "source_pattern": "(?ms)^[ \\t]*(?:final\\s+|abstract\\s+)?class\\s+(?P<class>[A-Za-z_][A-Za-z0-9_]*)\\b[^{}\\n]*\\{.*?\\b(?:(?:public|protected|private)\\s+)?const\\s+(?P<const>[A-Z][A-Z0-9_]*)\\s*=\\s*['\\\"](?P<value>[a-z][a-z0-9]*(?:[-_/:][a-z0-9]+)+)['\\\"]",
           "value_capture": "value",
           "label": "{class}::{const}",
-          "literal_pattern": "(?m)(?:[=!]==?\\s*['\\\"]{value}['\\\"]|['\\\"]{value}['\\\"]\\s*[=!]==?)",
+          "literal_pattern": "['\\\"]{value}['\\\"]",
+          "exclude_match_context_patterns": [
+            "['\\\"]{value}['\\\"]\\s*=>",
+            "\\bdo_action\\s*\\(\\s*['\\\"]{value}['\\\"]",
+            "\\bapply_filters\\s*\\(\\s*['\\\"]{value}['\\\"]",
+            "\\bdo_action_ref_array\\s*\\(\\s*['\\\"]{value}['\\\"]",
+            "\\bapply_filters_ref_array\\s*\\(\\s*['\\\"]{value}['\\\"]"
+          ],
           "description": "Raw slug literal `{value}` at line {line} duplicates constant {label}",
           "suggestion": "Use {label} instead of repeating the literal slug so the constant remains the source of truth."
         },

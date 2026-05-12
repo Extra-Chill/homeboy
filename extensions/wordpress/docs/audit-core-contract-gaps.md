@@ -75,18 +75,20 @@ private static function json_encode( $data ) {
 }
 ```
 
-This is correct production code, not a dead branch. The extension therefore curates `known_symbols.header_versions` along a single principle:
+This is correct production code, not a dead branch. The extension uses `dead_guard_context_comment_patterns` for those call-site comments and curates `known_symbols.header_versions` along a single principle:
 
 - **Include** WordPress symbols that have no natural pure-PHP equivalent and whose presence implies "WordPress is loaded": REST classes (`WP_REST_Server`, `WP_REST_Request`, `WP_REST_Response`), block infrastructure (`WP_Block`, `WP_Block_Type_Registry`, `register_block_type`, `parse_blocks`, `has_blocks`), HTML processing (`WP_HTML_Tag_Processor`), abilities (`WP_Ability`), REST routing (`register_rest_route`), post-type metadata (`get_post_type_object`), environment classification (`wp_get_environment_type`), and the `REST_REQUEST` constant.
-- **Exclude** WordPress utility wrappers that are interchangeable with a pure-PHP standard-library call: JSON encoding (`wp_json_encode` ↔ `json_encode`), UUID generation (`wp_generate_uuid4` ↔ `random_bytes` + `bin2hex`), URL parsing (`wp_parse_url` ↔ `parse_url`), date/timezone helpers (`wp_date`, `wp_timezone`, `wp_timezone_string` ↔ `DateTimeImmutable`/`DateTimeZone`).
+- **Include** WordPress utility wrappers that are interchangeable with a pure-PHP standard-library call, but only exempt dual-context guard sites whose nearby comments identify the pure-PHP fallback path: JSON encoding (`wp_json_encode` ↔ `json_encode`), UUID generation (`wp_generate_uuid4` ↔ `random_bytes` + `bin2hex`), URL parsing (`wp_parse_url` ↔ `parse_url`), date/timezone helpers (`wp_date`, `wp_timezone`, `wp_timezone_string` ↔ `DateTimeImmutable`/`DateTimeZone`).
 
-Excluded symbols simply never enter the dead-guard known-symbol table, so a guard around `wp_json_encode` is treated like any unknown symbol — left alone. WP-only symbols still produce real `dead_guard` findings when guarded outside lifecycle/test contexts. Both behaviors are exercised by `tests/audit-detector-config-smoke.sh` against fixtures under `tests/fixtures/audit-dead-guard-fallback/` and `tests/fixtures/audit-dead-guard-wp-only/`.
+Comment-marked fallback guards are treated as contextual, while the same utility wrappers still produce real `dead_guard` findings when guarded in unambiguously WordPress-only code. WP-only symbols also continue to produce findings when guarded outside lifecycle/test contexts. These behaviors are exercised by `tests/audit-detector-config-smoke.sh` against fixtures under `tests/fixtures/audit-dead-guard-fallback/` and `tests/fixtures/audit-dead-guard-wp-only/`.
 
 This curation is generic: it expresses "what WordPress utility functions have natural pure-PHP fallbacks" without naming any consumer plugin's paths.
 
 ## Other Generic Core Hooks Still Missing
 
 ### Comment-Based Dead-Guard Contexts
+
+Status: implemented in the WordPress extension config via `dead_guard_context_comment_patterns`.
 
 Core `dead_guard` can exempt paths and known lifecycle callbacks, but not source comments near a guard. A more granular comment-context exemption would let the extension keep utility wrappers in `known_symbols` while letting individual call sites mark themselves as dual-context. Sketch:
 
@@ -103,11 +105,13 @@ Core `dead_guard` can exempt paths and known lifecycle callbacks, but not source
 }
 ```
 
-Expected core behavior: when a guard is on or near a matching comment block, treat it as contextual and do not emit `dead_guard` even if the guarded symbol is known in production runtime metadata. Until that lands, the curation principle above is the WordPress-extension-only resolution.
+Expected core behavior: when a guard is on or near a matching comment block, treat it as contextual and do not emit `dead_guard` even if the guarded symbol is known in production runtime metadata.
 
 ### Requested Detector Context Filters
 
-Core requested detectors currently support language, extension, and path filters. If the slug-literal detector needs to recover broader matching later, it needs generic match-context filters, for example:
+Status: implemented in the WordPress extension config via `exclude_match_context_patterns`.
+
+The slug-literal detector keeps its literal regex broad and uses generic match-context filters for contexts where WordPress conventions make a repeated literal acceptable:
 
 ```json
 {
