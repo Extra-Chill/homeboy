@@ -193,7 +193,6 @@ Use these outputs to gate downstream jobs:
 | `pr-policy-merge-method` | No | `squash` | Merge method for `pr-policy-merge`: `merge`, `squash`, or `rebase` |
 | `release-dry-run` | No | `false` | Preview the release without making changes |
 | `release-branch` | No | `main` | Branch that releases are allowed from |
-| `release-skip-changelog` | No | `false` | Skip auto-generating changelog entries from conventional commits |
 
 ## Outputs
 
