@@ -204,6 +204,29 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.equal(candidateWaterfall.usedPreloadRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
 	assert.equal(candidateWaterfall.unusedPreloadRows[0].url, '/wp/v2/posts?context=edit&per_page=10');
 	assert.equal(candidateWaterfall.preloadedOrCacheRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
+	const invalidJsonWaterfall = summarizeWordPressRestWaterfall({
+		apiFetchAttempts: [
+			{
+				source: 'apiFetch',
+				path: '/datamachine/v1/pipelines',
+				method: 'GET',
+				failed: true,
+				error: 'The response is not a valid JSON response.',
+				errorCode: 'invalid_json',
+			},
+			{
+				source: 'fetch',
+				url: 'https://example.test/wp-json/datamachine/v1/pipelines',
+				method: 'GET',
+				status: 200,
+				responseContentType: 'text/html; charset=UTF-8',
+				responseBodySample: '<br />Unexpected debug output{"ok":true}',
+			},
+		],
+	});
+	assert.equal(invalidJsonWaterfall.apiFetchAttempts.length, 1);
+	assert.equal(invalidJsonWaterfall.apiFetchAttempts[0].errorCode, 'invalid_json');
+	assert.match(invalidJsonWaterfall.rows[0].responseBodySample, /Unexpected debug output/);
 	const objectPreloadWaterfall = summarizeWordPressRestWaterfall({
 		apiFetchAttempts: [{ path: '/wp/v2/settings', method: 'GET' }],
 		preloadMetadata: { '/wp/v2/settings': { body: { setting: true } } },
