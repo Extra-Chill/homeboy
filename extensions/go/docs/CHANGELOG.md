@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.5.0] - 2026-05-12
+
+### Added
+- declare structured sidecar capabilities
+
 ## [1.4.0] - 2026-05-06
 
 ### Added
