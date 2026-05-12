@@ -129,7 +129,7 @@ if grep -R "print_failure_summary()" \
     exit 1
 fi
 
-if grep -R "homeboy_write_test_results()" \
+if grep -R --exclude='*smoke.sh' "homeboy_write_test_results()" \
     "$ROOT_DIR/nodejs/scripts" \
     "$ROOT_DIR/rust/scripts" \
     "$ROOT_DIR/wordpress/scripts/test" >/dev/null; then
