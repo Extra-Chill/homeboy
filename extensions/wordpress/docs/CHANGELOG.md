@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.75.1] - 2026-05-12
+
+### Fixed
+- Fix data-machine dependency resolution for scoped PHPStan
+
 ## [2.75.0] - 2026-05-12
 
 ### Added
