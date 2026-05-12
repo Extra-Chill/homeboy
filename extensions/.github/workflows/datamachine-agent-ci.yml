@@ -11,6 +11,10 @@ name: Data Machine Agent CI (reusable)
       bundle_path:
         type: string
         required: true
+      homeboy_extensions_ref:
+        description: Ref of Extra-Chill/homeboy-extensions to check out for runner scripts.
+        type: string
+        default: main
       bundle_repo:
         description: Optional git URL for an external bundle repository. When set, the runner clones this repo and uses bundle_path_in_repo inside it.
         type: string
@@ -332,6 +336,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Extra-Chill/homeboy-extensions
+          ref: ${{ inputs.homeboy_extensions_ref }}
           path: .ci/homeboy-extensions
 
       - name: Checkout validation dependencies
