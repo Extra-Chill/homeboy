@@ -22,12 +22,21 @@ def require(condition, message):
         raise SystemExit(message)
 
 utility_suffixes = set(rules.get("utility_suffixes", []))
-for suffix in ["Authenticator", "Contract", "Credential", "Interface", "Store", "Lock", "Policy", "Result", "Secret", "Service", "Token", "Value", "Package"]:
+for suffix in ["Authenticator", "Base", "Contract", "Credential", "Handlers", "Interface", "Projector", "Store", "Lock", "Policy", "Result", "Secret", "Service", "Token", "Value", "Package"]:
     require(suffix in utility_suffixes, f"missing PHP role utility suffix: {suffix}")
 
 exception_globs = set(rules.get("convention_exception_globs", []))
+require("**/register.php" in exception_globs, "procedural register.php loaders must be convention-exempt")
 require("**/register-*.php" in exception_globs, "procedural register helpers must be convention-exempt")
 require("**/*-functions.php" in exception_globs, "procedural functions files must be convention-exempt")
+
+duplication_detector = rules.get("duplication_detector", {})
+for call in ["array", "empty", "get_param"]:
+    require(call in set(duplication_detector.get("trivial_calls", [])),
+            f"generic PHP/REST call must be trivial in parallel-implementation signal: {call}")
+for call in ["WP_REST_Response", "rest_ensure_response"]:
+    require(call in set(duplication_detector.get("plumbing_calls", [])),
+            f"WordPress REST response wrapper must be plumbing in parallel-implementation signal: {call}")
 
 # v0.157.0 best-effort — off-role file suffixes must be exempt from sibling-method conventions.
 for pattern in [
@@ -162,6 +171,8 @@ require(matches_any("src/Packages/class-demo-package-artifacts-registry.php", gl
         "artifacts registry fixture must be tagged as registry role")
 require(matches_any("src/Packages/register-demo-package-artifacts.php", globs_for("wordpress:php-role:procedural-helper")),
         "procedural helper fixture must be tagged as procedural-helper role")
+require(matches_any("src/Packages/register.php", globs_for("wordpress:php-role:procedural-helper")),
+        "register.php loader fixture must be tagged as procedural-helper role")
 
 # Auth fixture: normal DTOs stay in the value-object convention; credential/token
 # objects and request-edge authenticators get separate role tags so neither
