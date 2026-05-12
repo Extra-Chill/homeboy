@@ -1,9 +1,8 @@
 # Reusable Homeboy CI workflow.
 #
 # Consumers should call this workflow instead of hand-rolling quality-check DAGs.
-# It preserves a hard build gate when requested, then runs Homeboy quality
-# commands in one action invocation so audit/lint/test all report before the
-# workflow fails.
+# It preserves a hard build gate when requested, then exposes each Homeboy
+# quality command as its own GitHub check so failures stay easy to scan.
 
 name: Homeboy CI
 
@@ -215,11 +214,91 @@ jobs:
           path: ${{ inputs.build-artifact-path }}
           retention-days: 1
 
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Plan quality checks
+        id: plan
+        shell: bash
+        env:
+          COMMANDS: ${{ inputs.commands }}
+        run: |
+          declare -A selected_commands=()
+          unknown_commands=()
+
+          IFS=',' read -ra raw_commands <<< "${COMMANDS}"
+          for raw_command in "${raw_commands[@]}"; do
+            command="$(echo "${raw_command}" | xargs)"
+            [ -n "${command}" ] || continue
+            base="${command%% *}"
+            case "${base}" in
+              audit|lint|test|refactor|bench)
+                if [ -z "${selected_commands[${base}]:-}" ]; then
+                  selected_commands[${base}]="${command}"
+                fi
+                ;;
+              *)
+                unknown_commands+=("${command}")
+                ;;
+            esac
+          done
+
+          rows=()
+          add_row() {
+            rows+=("$(jq -cn \
+              --arg command "$1" \
+              --arg title "$2" \
+              --arg section_key "$3" \
+              --arg section_title "$4" \
+              '{command:$command,title:$title,section_key:$section_key,section_title:$section_title}')")
+          }
+
+          title_for() {
+            case "$1" in
+              audit) printf '%s\n' 'Audit' ;;
+              lint) printf '%s\n' 'Lint' ;;
+              test) printf '%s\n' 'Test' ;;
+              refactor) printf '%s\n' 'Refactor' ;;
+              bench) printf '%s\n' 'Bench' ;;
+              *) printf '%s\n' "${1:-Homeboy}" ;;
+            esac
+          }
+
+          section_key_for() {
+            printf '%s\n' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/-+/-/g; s/^[-._]+//; s/[-._]+$//'
+          }
+
+          for base in audit lint test refactor bench; do
+            if [ -n "${selected_commands[${base}]:-}" ]; then
+              title="$(title_for "${base}")"
+              add_row "${selected_commands[${base}]}" "${title}" "${base}" "${title}"
+            fi
+          done
+
+          for command in "${unknown_commands[@]}"; do
+            base="${command%% *}"
+            title="$(title_for "${base:-homeboy}")"
+            section_key="$(section_key_for "${command}")"
+            add_row "${command}" "${title}" "${section_key:-homeboy}" "${title}"
+          done
+
+          matrix="$(printf '%s\n' "${rows[@]}" | jq -sc '{include:.}')"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+
   quality:
-    name: Homeboy
-    needs: [build]
+    name: ${{ matrix.title }}
+    needs: [build, plan]
     if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -272,8 +351,8 @@ jobs:
           rust-toolchain: ${{ inputs.rust-toolchain }}
           extension: ${{ inputs.extension }}
           extension-source: ${{ inputs.extension-source }}
-          commands: ${{ inputs.commands }}
-          expected-commands: ${{ inputs.expected-commands }}
+          commands: ${{ matrix.command }}
+          expected-commands: ${{ inputs.expected-commands || inputs.commands }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
           rig: ${{ inputs.rig }}
@@ -295,8 +374,8 @@ jobs:
           app-token: ${{ steps.app-token.outputs.token || github.token }}
           auto-issue: ${{ inputs.auto-issue }}
           comment-key: ${{ inputs.comment-key }}
-          comment-section-key: ${{ inputs.comment-section-key }}
-          comment-section-title: ${{ inputs.comment-section-title }}
+          comment-section-key: ${{ inputs.comment-section-key || matrix.section_key }}
+          comment-section-title: ${{ inputs.comment-section-title || matrix.section_title }}
           pr-comment: ${{ inputs.pr-comment }}
           pr-policy: ${{ inputs.pr-policy }}
           pr-open-policy: ${{ inputs.pr-open-policy }}
