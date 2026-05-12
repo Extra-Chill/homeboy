@@ -24,7 +24,6 @@ const DEFAULT_DIAGNOSIS_THRESHOLDS = {
 };
 
 const DEFAULT_REST_OBSERVATION_MS = 1000;
-
 const DEFAULT_GATE_THRESHOLDS = {
 	readyMsRegression: 250,
 	networkIdleMsRegression: 500,
@@ -268,6 +267,12 @@ function normalizeApiFetchAttempt(row) {
 		status: row?.status || 0,
 		failed: Boolean(row?.failed),
 		error: row?.error,
+		errorCode: row?.errorCode,
+		responseContentType: row?.responseContentType,
+		responseBodyBytes: row?.responseBodyBytes,
+		responseBodySample: row?.responseBodySample,
+		responseBodySampleTruncated: Boolean(row?.responseBodySampleTruncated),
+		responseBodySampleError: row?.responseBodySampleError,
 	};
 }
 
@@ -284,7 +289,24 @@ function normalizeRestNetworkRequest(row) {
 		durationMs: round(row?.duration_ms ?? row?.durationMs ?? row?.duration),
 		ttfbMs: round(row?.ttfb_ms ?? row?.ttfbMs),
 		resourceType: row?.resource_type || row?.resourceType || row?.initiatorType,
+		responseContentType: row?.responseContentType,
+		responseBodyBytes: row?.responseBodyBytes,
+		responseBodySample: row?.responseBodySample,
+		responseBodySampleTruncated: Boolean(row?.responseBodySampleTruncated),
+		responseBodySampleError: row?.responseBodySampleError,
 	};
+}
+
+function copyResponseSampleFields(target, source) {
+	if (!target || !source) {
+		return target;
+	}
+	for (const key of ['responseContentType', 'responseBodyBytes', 'responseBodySample', 'responseBodySampleTruncated', 'responseBodySampleError']) {
+		if (target[key] === undefined && source[key] !== undefined) {
+			target[key] = source[key];
+		}
+	}
+	return target;
 }
 
 function isRestUrl(url) {
@@ -305,6 +327,7 @@ async function installWordPressRestInstrumentation(page) {
 		const probe = window.__homeboyWordPressRestProbe = {
 			installed: true,
 			attempts: [],
+			samplePromises: [],
 			startedAt: performance.now(),
 		};
 
@@ -332,7 +355,60 @@ async function installWordPressRestInstrumentation(page) {
 			return '';
 		};
 
-		const isRest = (url) => String(url || '').includes('/wp-json/') || String(url || '').startsWith('/wp/v2/') || String(url || '').includes('rest_route=');
+		const isRest = (url) => {
+			const value = String(url || '');
+			return value.includes('/wp-json/') || /^\/[A-Za-z0-9_-]+\/v\d+(?:\/|$)/.test(value) || value.includes('rest_route=');
+		};
+		const responseSampleBytes = 4096;
+		const attachResponseSample = async (entry, response) => {
+			if (!entry || !response || typeof response.clone !== 'function') {
+				return;
+			}
+
+			const contentType = response.headers?.get?.('content-type') || '';
+			entry.responseContentType = contentType;
+			if (!/json|text|html|xml|javascript/i.test(contentType)) {
+				return;
+			}
+
+			const maxBytes = responseSampleBytes;
+			try {
+				const clone = response.clone();
+				if (clone.body?.getReader && typeof TextDecoder !== 'undefined') {
+					const reader = clone.body.getReader();
+					const decoder = new TextDecoder();
+					let sample = '';
+					let bytes = 0;
+					let truncated = false;
+
+					while (bytes <= maxBytes) {
+						const { done, value } = await reader.read();
+						if (done) {
+							break;
+						}
+						bytes += value.byteLength || value.length || 0;
+						sample += decoder.decode(value, { stream: true });
+						if (bytes > maxBytes) {
+							truncated = true;
+							await reader.cancel().catch(() => {});
+							break;
+						}
+					}
+					sample += decoder.decode();
+					entry.responseBodyBytes = bytes;
+					entry.responseBodySample = sample.slice(0, maxBytes);
+					entry.responseBodySampleTruncated = truncated;
+					return;
+				}
+
+				const text = await clone.text();
+				entry.responseBodyBytes = text.length;
+				entry.responseBodySample = text.slice(0, maxBytes);
+				entry.responseBodySampleTruncated = text.length > maxBytes;
+			} catch (error) {
+				entry.responseBodySampleError = error?.message || String(error);
+			}
+		};
 		const record = (source, input, init) => {
 			const url = normalizePath(input);
 			if (!isRest(url)) {
@@ -358,6 +434,7 @@ async function installWordPressRestInstrumentation(page) {
 						entry.status = response.status;
 						entry.resolvedAtMs = performance.now() - probe.startedAt;
 						entry.durationMs = entry.resolvedAtMs - entry.startedAtMs;
+						probe.samplePromises.push(attachResponseSample(entry, response));
 					}
 					return response;
 				} catch (error) {
@@ -392,6 +469,7 @@ async function installWordPressRestInstrumentation(page) {
 					if (entry) {
 						entry.failed = true;
 						entry.error = error?.message || String(error);
+						entry.errorCode = error?.code;
 						entry.status = error?.data?.status || error?.status || 0;
 						entry.resolvedAtMs = performance.now() - probe.startedAt;
 						entry.durationMs = entry.resolvedAtMs - entry.startedAtMs;
@@ -422,7 +500,14 @@ async function collectWordPressRestAttempts(page) {
 	if (!page || typeof page.evaluate !== 'function') {
 		throw new TypeError('page must provide evaluate()');
 	}
-	const attempts = await page.evaluate(() => window.__homeboyWordPressRestProbe?.attempts || []);
+	const attempts = await page.evaluate(async () => {
+		const probe = window.__homeboyWordPressRestProbe;
+		if (!probe) {
+			return [];
+		}
+		await Promise.allSettled(probe.samplePromises || []);
+		return probe.attempts || [];
+	});
 	return attempts.map(normalizeApiFetchAttempt).filter((attempt) => attempt.url);
 }
 
@@ -445,6 +530,17 @@ async function collectWordPressRestPreloads(page) {
 function summarizeWordPressRestWaterfall(input = {}) {
 	const readyMs = round(input.readyMs);
 	const rawApiFetchAttempts = Array.isArray(input.apiFetchAttempts) ? input.apiFetchAttempts.map(normalizeApiFetchAttempt).filter((row) => row.url) : [];
+	const fetchSamplesByKey = new Map();
+	for (const attempt of rawApiFetchAttempts) {
+		if (attempt.source === 'fetch' && attempt.responseBodySample !== undefined) {
+			fetchSamplesByKey.set(restKey(attempt), attempt);
+		}
+	}
+	for (const attempt of rawApiFetchAttempts) {
+		if (attempt.source === 'apiFetch') {
+			copyResponseSampleFields(attempt, fetchSamplesByKey.get(restKey(attempt)));
+		}
+	}
 	const apiFetchKeys = new Set(rawApiFetchAttempts.filter((row) => row.source === 'apiFetch').map(restKey));
 	const apiFetchAttempts = rawApiFetchAttempts.filter((row) => row.source !== 'fetch' || !apiFetchKeys.has(restKey(row)));
 	// Callers may pass an array of paths/metadata rows or a WordPress-style object keyed by REST path.
@@ -493,6 +589,13 @@ function summarizeWordPressRestWaterfall(input = {}) {
 			ttfbMs: network?.ttfbMs,
 			afterReady: readyMs > 0 && (network?.startMs || attempt.startedAtMs) > readyMs,
 			networkMatched: Boolean(network),
+			error: attempt.error,
+			errorCode: attempt.errorCode,
+			responseContentType: attempt.responseContentType || network?.responseContentType,
+			responseBodyBytes: attempt.responseBodyBytes || network?.responseBodyBytes,
+			responseBodySample: attempt.responseBodySample || network?.responseBodySample,
+			responseBodySampleTruncated: Boolean(attempt.responseBodySampleTruncated || network?.responseBodySampleTruncated),
+			responseBodySampleError: attempt.responseBodySampleError || network?.responseBodySampleError,
 		});
 	}
 
@@ -511,6 +614,11 @@ function summarizeWordPressRestWaterfall(input = {}) {
 				ttfbMs: network.ttfbMs,
 				afterReady: readyMs > 0 && network.startMs > readyMs,
 				networkMatched: true,
+				responseContentType: network.responseContentType,
+				responseBodyBytes: network.responseBodyBytes,
+				responseBodySample: network.responseBodySample,
+				responseBodySampleTruncated: Boolean(network.responseBodySampleTruncated),
+				responseBodySampleError: network.responseBodySampleError,
 			});
 		}
 	}
