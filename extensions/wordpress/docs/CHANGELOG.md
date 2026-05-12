@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.67.2] - 2026-05-12
+
+### Fixed
+- preserve repository token for agent artifacts
+
 ## [2.67.1] - 2026-05-12
 
 ### Fixed
