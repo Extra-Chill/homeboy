@@ -329,6 +329,11 @@ if ( ! function_exists( 'homeboy_datamachine_agent_exportable_artifacts' ) ) {
         return sprintf( 'run-artifacts/%s/job-%d/job-artifacts.json', $flow_slug, $job_id );
     }
 
+    function homeboy_datamachine_agent_export_includes_job_artifacts( array $config ): bool {
+        $export_config = is_array( $config['artifact_export'] ?? null ) ? $config['artifact_export'] : array();
+        return filter_var( $export_config['include_job_artifacts'] ?? false, FILTER_VALIDATE_BOOLEAN );
+    }
+
     function homeboy_datamachine_agent_exportable_artifacts( array $artifacts ): array {
         $exportable_artifacts = array();
 
@@ -413,7 +418,11 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
 
         $artifact_result = ( new JobArtifacts() )->get( $job_id );
         $artifacts       = is_array( $artifact_result['artifacts'] ?? null ) ? $artifact_result['artifacts'] : array();
-        if ( ! empty( $artifact_result['success'] ) && ! empty( $artifacts ) ) {
+        if (
+            ! empty( $artifact_result['success'] )
+            && ! empty( $artifacts )
+            && homeboy_datamachine_agent_export_includes_job_artifacts( $config )
+        ) {
             $artifacts['job_artifacts'] = array(
                 array(
                     'type'                 => 'job_artifacts',
