@@ -171,6 +171,66 @@ scenario can earn partial credit. Configured workload steps marked
 structured zero-reward grade with `metadata.grade.failure`, allowing result
 aggregation to consume failures without scenario-specific parsing.
 
+## Reusable Profiling Fixtures
+
+Browser/API profiling workloads can seed a WordPress site before profiling by
+calling the reusable fixture setup helper exported from
+`wordpress/lib/page-profiler.js` or `wordpress/lib/fixture-setup.js`.
+
+```js
+const { profileWordPressPages } = require('./wordpress/lib/page-profiler');
+
+await profileWordPressPages({
+  page,
+  baseUrl,
+  manifest,
+  sitePath,
+  artifactDir,
+  fixtures: [
+    { id: 'scale-content', type: 'wp-eval-file', path: 'fixtures/scale.php' },
+    { id: 'ready-flag', type: 'wp-cli', command: 'option update fixture_ready 1' }
+  ]
+});
+```
+
+For imperative setup, pass `setupWordPressFixture`:
+
+```js
+await profileWordPressPages({
+  page,
+  baseUrl,
+  manifest,
+  sitePath,
+  artifactDir,
+  async setupWordPressFixture({ runCli }) {
+    await runCli('wp eval-file fixtures/scale.php');
+  }
+});
+```
+
+Supported declarative fixture step types:
+
+- `wp-eval-file` with `path`: runs `wp eval-file <path>`.
+- `wp-cli` with `command`: runs the command through WP-CLI. The command may
+  include or omit the leading `wp` token.
+
+Fixtures may declare `skipIf` or `idempotencyCheck` as a WP-CLI command. A zero
+exit code skips that fixture step so already-seeded sites can be reused:
+
+```json
+{
+  "id": "scale-content",
+  "type": "wp-eval-file",
+  "path": "fixtures/scale.php",
+  "skipIf": "option get scale_fixture_ready"
+}
+```
+
+The helper returns a `fixtureSetup` summary and writes
+`wordpress-fixture-setup.json` when `artifactDir` is provided. Failed fixture
+steps throw errors that include the fixture label, command, exit code, stdout,
+and stderr.
+
 ## Block Theme Quality Probe
 
 Playground scenario graders can call a generic PHP-first WordPress quality probe

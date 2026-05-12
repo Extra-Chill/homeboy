@@ -4,6 +4,7 @@
  * Internal dependencies
  */
 const { correlateBrowserAndWordPressTimings, normalizeUrl } = require('./timing-correlator');
+const { runWordPressFixtureSetup } = require('./fixture-setup');
 
 const DEFAULT_RESOURCE_INCLUDE = [
 	'/wp-json/',
@@ -1556,12 +1557,16 @@ async function profileWordPressPages(input) {
 		throw new TypeError('profileWordPressPages requires an input object');
 	}
 	const specs = normalizePageManifest(input.manifest || input.pages || []);
+	const fixtureSetup = input.fixtures || input.setupWordPressFixture
+		? await runWordPressFixtureSetup(input)
+		: undefined;
 	const results = [];
 	for (const spec of specs) {
 		results.push(await profileWordPressPage({ ...input, spec }));
 	}
 	return {
 		pages: results,
+		...(fixtureSetup ? { fixtureSetup } : {}),
 		topRestWaterfalls: [...results]
 			.sort((a, b) => (b.resources.restCount - a.resources.restCount) || (b.readyMs - a.readyMs))
 			.slice(0, input.topLimit || 10)
@@ -1590,6 +1595,7 @@ module.exports = {
 	formatWordPressRestNetworkDiffMarkdownReport,
 	formatWordPressRestWaterfallMarkdownReport,
 	installWordPressRestInstrumentation,
+	runWordPressFixtureSetup,
 	normalizePageManifest,
 	normalizePageSpec,
 	resourceFamily,
