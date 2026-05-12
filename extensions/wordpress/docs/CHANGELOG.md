@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.75.3] - 2026-05-12
+
+### Fixed
+- refresh runner PR summaries after grading
+
 ## [2.75.2] - 2026-05-12
 
 ### Fixed
