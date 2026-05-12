@@ -249,6 +249,27 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.equal(payloadBudgetResult.findings.some((finding) => finding.code === 'wordpress.rest.max_total_response_bytes'), true);
 	assert.equal(payloadBudgetResult.restPayloadBudgets.topPayloadRows[0].responseBytes, 2000);
 	assert.match(formatWordPressRestPayloadBudgetMarkdownReport(payloadBudgetResult.restPayloadBudgets), /REST payload budgets/);
+	const truncatedSampleBudgetResult = diagnoseWordPressPageProfile({
+		id: 'truncated-sample-budget',
+		readyMs: 500,
+		resources: { resources: [], restCount: 0 },
+		restWaterfall: summarizeWordPressRestWaterfall({
+			apiFetchAttempts: [
+				{
+					path: '/datamachine/v1/pipelines?per_page=100',
+					method: 'GET',
+					status: 200,
+					responseBodyBytes: 4096,
+					responseBodySampleTruncated: true,
+					decodedBodySize: 2000000,
+				},
+			],
+		}),
+		budgets: { rest: { maxResponseBytes: 250000 } },
+	});
+	const truncatedSampleFinding = truncatedSampleBudgetResult.findings.find((finding) => finding.code === 'wordpress.rest.max_response_bytes');
+	assert.equal(truncatedSampleFinding.actual, 2000000);
+	assert.equal(truncatedSampleBudgetResult.restPayloadBudgets.topPayloadRows[0].responseBytes, 2000000);
 	assert.equal(candidateWaterfall.usedPreloadRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
 	assert.equal(candidateWaterfall.unusedPreloadRows[0].url, '/wp/v2/posts?context=edit&per_page=10');
 	assert.equal(candidateWaterfall.preloadedOrCacheRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');

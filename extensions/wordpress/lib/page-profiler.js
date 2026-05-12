@@ -725,7 +725,13 @@ function summarizeWordPressRestWaterfall(input = {}) {
 }
 
 function restResponseBytes(row) {
-	return pickNumber(row, ['responseBodyBytes', 'decodedBodySize', 'encodedBodySize', 'transferSize', 'preloadPayloadBytes']) || 0;
+	return maxNumber([
+		pickNumber(row, ['decodedBodySize']),
+		pickNumber(row, ['encodedBodySize']),
+		pickNumber(row, ['transferSize']),
+		pickNumber(row, ['responseBodyBytes']),
+		pickNumber(row, ['preloadPayloadBytes']),
+	]) || 0;
 }
 
 function normalizeRestRouteBudgets(restBudget = {}) {
