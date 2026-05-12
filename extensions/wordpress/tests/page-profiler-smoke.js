@@ -354,8 +354,15 @@ async function main() {
 	assert.equal(page.calls.some((call) => call[0] === 'frame.waitForSelector' && call[1] === '[data-block]'), true);
 
 	const multiPage = new FakePage(resources);
-	const multi = await profileWordPressPages({ page: multiPage, baseUrl: 'https://example.test', manifest });
+	const multi = await profileWordPressPages({
+		page: multiPage,
+		baseUrl: 'https://example.test',
+		manifest,
+		fixtures: [{ id: 'profile-ready', type: 'wp-cli', command: 'option update profile_ready 1' }],
+		runCli: async (command) => ({ exitCode: 0, stdout: command, stderr: '' }),
+	});
 	assert.equal(multi.pages.length, 2);
+	assert.equal(multi.fixtureSetup.steps[0].label, 'profile-ready');
 	assert.equal(multi.topRestWaterfalls[0].restCount, 2);
 
 	assert.throws(() => normalizePageManifest({ pages: [{ id: 'bad' }] }), /requires url or path/);
