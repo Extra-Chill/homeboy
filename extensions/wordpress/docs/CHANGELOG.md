@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.68.0] - 2026-05-12
+
+### Added
+- run agent execute-workflow payloads
+
 ## [2.67.3] - 2026-05-12
 
 ### Fixed
