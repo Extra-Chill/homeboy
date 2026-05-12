@@ -574,6 +574,12 @@ jobs:
           component_slug="$(basename "$GITHUB_WORKSPACE")"
           transcript_host_dir="${GITHUB_WORKSPACE}/datamachine-agent-artifacts/${AGENT_SLUG}"
           transcript_guest_dir="/wordpress/wp-content/plugins/${component_slug}/datamachine-agent-artifacts/${AGENT_SLUG}"
+          execute_workflow_guest_path="$EXECUTE_WORKFLOW_PATH"
+          execute_workflow_mounts_json="[]"
+          if [ -n "$EXECUTE_WORKFLOW_PATH" ] && [[ "$EXECUTE_WORKFLOW_PATH" != /* ]]; then
+            execute_workflow_guest_path="/wordpress/wp-content/plugins/${component_slug}/${EXECUTE_WORKFLOW_PATH}"
+            execute_workflow_mounts_json="$(jq -nc --arg from "$EXECUTE_WORKFLOW_PATH" --arg to "$execute_workflow_guest_path" '[{from: $from, to: $to}]')"
+          fi
           mapfile -t validation_paths < <(find "${GITHUB_WORKSPACE}/.ci" -mindepth 1 -maxdepth 1 -type d | sort)
           provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | jq -Rsc --arg provider "$PROVIDER" --arg openaiRef "$OPENAI_PROVIDER_REF" '
             if (gsub("^\\s+|\\s+$"; "") | length) == 0 then {} else fromjson end
@@ -659,7 +665,7 @@ jobs:
             --arg githubRepositoryToken "$GITHUB_REPOSITORY_TOKEN_VALUE" \
             --arg githubRunId "$GITHUB_RUN_ID_VALUE" \
             --arg githubRunAttempt "$GITHUB_RUN_ATTEMPT_VALUE" \
-            --arg executeWorkflowPath "$EXECUTE_WORKFLOW_PATH" \
+            --arg executeWorkflowPath "$execute_workflow_guest_path" \
             --arg providerRegisterFunction "$provider_register_function" \
             --argjson validationDependencies "$validation_json" \
             --argjson providerCredentials "$provider_credentials_json" \
@@ -673,6 +679,7 @@ jobs:
             --argjson dryRun "$DRY_RUN" \
             --argjson extraWpConfigDefines "$extra_wp_config_defines_json" \
             --argjson extraPlaygroundFileMounts "$extra_playground_file_mounts_json" \
+            --argjson executeWorkflowMounts "$execute_workflow_mounts_json" \
             --argjson workloadRunBefore "$workload_run_before_json" \
             --argjson workloadRunAfter "$workload_run_after_json" \
             --argjson dailyMemoryEnabled "$DAILY_MEMORY_ENABLED" \
@@ -697,11 +704,11 @@ jobs:
                   from: "wordpress/tests/fixtures/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php",
                   to: "/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php"
                 }
-              ] + $extraPlaygroundFileMounts),
+              ] + $extraPlaygroundFileMounts + $executeWorkflowMounts),
               wp_config_defines: $extraWpConfigDefines,
               workload_run_before: $workloadRunBefore,
               workload_run_after: $workloadRunAfter,
-              required_abilities: (["datamachine/import-agent", "datamachine/run-flow", "datamachine/drain-job"] + $extraRequiredAbilities | reduce .[] as $ability ([]; if index($ability) then . else . + [$ability] end)),
+              required_abilities: (((if $executeWorkflowPath != "" then ["datamachine/execute-workflow", "datamachine/drain-job"] else ["datamachine/import-agent", "datamachine/run-flow", "datamachine/drain-job"] end) + $extraRequiredAbilities) | reduce .[] as $ability ([]; if index($ability) then . else . + [$ability] end)),
               bundle_path: $bundlePath,
               bundle_repo: $bundleRepo,
               bundle_ref: $bundleRef,
