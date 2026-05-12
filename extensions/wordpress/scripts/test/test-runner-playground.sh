@@ -43,6 +43,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 PLAYGROUND_PATHS_HELPER="${SCRIPT_DIR}/../lib/playground-paths.sh"
@@ -78,6 +79,25 @@ else
     FAILURE_OUTPUT=""
     FAILURE_REPLAY_MODE="full"
 fi
+# shellcheck source=/dev/null
+if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; then
+    source "$WRITE_TEST_RESULTS_HELPER"
+fi
+
+write_phpunit_discovery_result() {
+    local status="$1"
+    local partial="$2"
+
+    if ! type homeboy_write_test_results >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [ "$status" = "failed" ]; then
+        homeboy_write_test_results 1 0 1 0 "$partial"
+    else
+        homeboy_write_test_results 0 0 0 0 "$partial"
+    fi
+}
 
 SETTINGS_JSON="${HOMEBOY_SETTINGS_JSON:-}"
 SELECTED_TEST_FILE="${HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE:-}"
@@ -599,6 +619,7 @@ if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
         echo "PHPUnit config exists, but no files matched the WordPress runner discovery contract."
         echo "  Check phpunit.xml(.dist), tests/ directory layout, and Test.php/test- naming."
         FAILED_STEP="PHPUnit tests (configured suite discovered no test files, playground)"
+        write_phpunit_discovery_result failed "no-phpunit-tests-configured"
         rm -f "$RESULT_FILE"
         exit 1
     fi
@@ -607,6 +628,7 @@ if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
     echo "Skipping PHPUnit tests: no files matched the WordPress runner discovery contract."
     echo "  Contract: files under ${TEST_DIR} ending in Test.php or starting with test-."
     echo "  Add matching PHPUnit files or a component phpunit.xml(.dist) if this suite should run here."
+    write_phpunit_discovery_result skipped "no-phpunit-tests"
     rm -f "$RESULT_FILE"
     exit 0
 fi
