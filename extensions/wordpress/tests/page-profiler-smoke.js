@@ -247,6 +247,11 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.equal(payloadBudgetResult.restPayloadBudgets.findings.length, 2);
 	assert.equal(payloadBudgetResult.findings.some((finding) => finding.code === 'wordpress.rest.max_response_bytes'), true);
 	assert.equal(payloadBudgetResult.findings.some((finding) => finding.code === 'wordpress.rest.max_total_response_bytes'), true);
+	for (const finding of payloadBudgetResult.restPayloadBudgets.findings) {
+		assert.equal(finding.context_label, 'profile:wordpress-rest');
+		assert.equal(finding.passed, false);
+		assert.equal(typeof finding.expected, 'number');
+	}
 	assert.equal(payloadBudgetResult.restPayloadBudgets.topPayloadRows[0].responseBytes, 2000);
 	assert.match(formatWordPressRestPayloadBudgetMarkdownReport(payloadBudgetResult.restPayloadBudgets), /REST payload budgets/);
 	const truncatedSampleBudgetResult = diagnoseWordPressPageProfile({
@@ -268,6 +273,9 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 		budgets: { rest: { maxResponseBytes: 250000 } },
 	});
 	const truncatedSampleFinding = truncatedSampleBudgetResult.findings.find((finding) => finding.code === 'wordpress.rest.max_response_bytes');
+	assert.equal(truncatedSampleFinding.context_label, 'profile:wordpress-rest');
+	assert.equal(truncatedSampleFinding.passed, false);
+	assert.equal(typeof truncatedSampleFinding.expected, 'number');
 	assert.equal(truncatedSampleFinding.actual, 2000000);
 	assert.equal(truncatedSampleBudgetResult.restPayloadBudgets.topPayloadRows[0].responseBytes, 2000000);
 	assert.equal(candidateWaterfall.usedPreloadRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
@@ -446,6 +454,14 @@ async function main() {
 	assert.equal(matrix.findings.some((finding) => finding.code === 'wordpress.rest_matrix.max_item_count'), true);
 	assert.equal(matrix.findings.some((finding) => finding.code === 'wordpress.rest_matrix.expected_status'), true);
 	assert.equal(matrix.findings.some((finding) => finding.code === 'wordpress.rest_matrix.max_ms'), true);
+	for (const finding of matrix.findings) {
+		assert.equal(finding.context_label, 'profile:wordpress-rest-matrix');
+		assert.equal(finding.passed, false);
+		assert.equal(typeof finding.expected, 'number');
+	}
+	const expectedStatusFinding = matrix.findings.find((finding) => finding.code === 'wordpress.rest_matrix.expected_status');
+	assert.equal(expectedStatusFinding.expected, 201);
+	assert.deepEqual(expectedStatusFinding.expectedStatuses, [201]);
 	assert.match(formatWordPressRestMatrixMarkdownReport(matrix), /REST endpoint matrix/);
 
 	assert.throws(() => normalizePageManifest({ pages: [{ id: 'bad' }] }), /requires url or path/);

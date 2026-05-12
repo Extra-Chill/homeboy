@@ -768,9 +768,11 @@ function routeBudgetForRow(row, restBudget = {}) {
 	return routeBudgets.find((budget) => urlMatchesPattern(row.url, budget.pattern || budget.path || budget.route));
 }
 
-function createWordPressBudgetFinding({ severity = 'error', code, message, actual, expected, unit, subject, data = {} }) {
+function createWordPressBudgetFinding({ severity = 'error', contextLabel = 'profile:wordpress-rest', code, message, actual, expected, unit, subject, data = {} }) {
 	return {
 		category: 'budget',
+		context_label: contextLabel,
+		passed: false,
 		severity,
 		code,
 		message,
@@ -949,19 +951,22 @@ function restMatrixResultFindings(result) {
 	if (expectedStatus !== undefined) {
 		const expectedStatuses = Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus];
 		if (!expectedStatuses.includes(result.status)) {
+			const representativeExpectedStatus = Number(expectedStatuses[0]);
 			findings.push(createWordPressBudgetFinding({
+				contextLabel: 'profile:wordpress-rest-matrix',
 				code: 'wordpress.rest_matrix.expected_status',
 				message: `REST matrix endpoint returned status ${result.status}`,
 				actual: result.status,
-				expected: expectedStatuses.join(','),
+				expected: Number.isFinite(representativeExpectedStatus) ? representativeExpectedStatus : 0,
 				unit: 'status',
 				subject,
-				data: { phase: 'rest-matrix', method: result.method, normalizedPath: result.normalizedPath, queryString: result.queryString, threshold: expectedStatuses },
+				data: { phase: 'rest-matrix', method: result.method, normalizedPath: result.normalizedPath, queryString: result.queryString, expectedStatuses, threshold: expectedStatuses },
 			}));
 		}
 	}
 	if (typeof budget.maxBytes === 'number' && result.responseBytes > budget.maxBytes) {
 		findings.push(createWordPressBudgetFinding({
+			contextLabel: 'profile:wordpress-rest-matrix',
 			code: 'wordpress.rest_matrix.max_bytes',
 			message: `REST matrix endpoint exceeded ${budget.maxBytes} byte budget`,
 			actual: result.responseBytes,
@@ -973,6 +978,7 @@ function restMatrixResultFindings(result) {
 	}
 	if (typeof budget.maxMs === 'number' && result.durationMs > budget.maxMs) {
 		findings.push(createWordPressBudgetFinding({
+			contextLabel: 'profile:wordpress-rest-matrix',
 			code: 'wordpress.rest_matrix.max_ms',
 			message: `REST matrix endpoint exceeded ${budget.maxMs}ms duration budget`,
 			actual: result.durationMs,
@@ -984,6 +990,7 @@ function restMatrixResultFindings(result) {
 	}
 	if (typeof budget.maxItemCount === 'number' && typeof result.itemCount === 'number' && result.itemCount > budget.maxItemCount) {
 		findings.push(createWordPressBudgetFinding({
+			contextLabel: 'profile:wordpress-rest-matrix',
 			code: 'wordpress.rest_matrix.max_item_count',
 			message: `REST matrix endpoint exceeded ${budget.maxItemCount} item budget`,
 			actual: result.itemCount,
