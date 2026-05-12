@@ -912,6 +912,23 @@ if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_alias' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_root' ) ) {
+    function homeboy_datamachine_agent_runner_workspace_root( array $config ): string {
+        $workspace = homeboy_datamachine_agent_runner_workspace_config( $config );
+        $root      = isset( $workspace['agent_root'] ) && is_scalar( $workspace['agent_root'] ) ? trim( (string) $workspace['agent_root'] ) : '';
+        $root      = trim( str_replace( '\\', '/', $root ), '/' );
+        $parts     = array();
+        foreach ( explode( '/', $root ) as $part ) {
+            if ( '' === $part || '.' === $part || '..' === $part ) {
+                continue;
+            }
+            $parts[] = $part;
+        }
+
+        return implode( '/', $parts );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_capture_enabled' ) ) {
     function homeboy_datamachine_agent_runner_workspace_capture_enabled( array $config ): bool {
         $workspace = homeboy_datamachine_agent_runner_workspace_config( $config );
@@ -1461,12 +1478,18 @@ if ( ! function_exists( 'homeboy_datamachine_agent_apply_runner_workspace' ) ) {
 
         $handle       = (string) $runner_workspace['handle'];
         $agent_alias  = homeboy_datamachine_agent_runner_workspace_alias( $config );
+        $agent_root   = homeboy_datamachine_agent_runner_workspace_root( $config );
         $agent_handle = '' !== $agent_alias ? $agent_alias : $handle;
         if ( '' !== $agent_alias ) {
             add_filter(
                 'datamachine_code_workspace_aliases',
-                static function ( array $aliases ) use ( $agent_alias, $handle ): array {
-                    $aliases[ $agent_alias ] = $handle;
+                static function ( array $aliases ) use ( $agent_alias, $handle, $agent_root ): array {
+                    $aliases[ $agent_alias ] = '' !== $agent_root
+                        ? array(
+                            'target' => $handle,
+                            'root'   => $agent_root,
+                        )
+                        : $handle;
                     return $aliases;
                 }
             );

@@ -199,6 +199,7 @@ namespace {
             'runner_workspace' => array(
                 'enabled'     => true,
                 'agent_alias' => 'current-project',
+                'agent_root'  => '.agent-workspace/current-project',
             ),
         ),
         'Make the requested code changes.',
@@ -233,8 +234,13 @@ namespace {
     }
 
     $aliases = apply_filters( 'datamachine_code_workspace_aliases', array() );
-    if ( 'demo@agent-run-openai-gpt-5-5' !== ( $aliases['current-project'] ?? null ) ) {
+    if ( 'demo@agent-run-openai-gpt-5-5' !== ( $aliases['current-project']['target'] ?? null ) ) {
         fwrite( STDERR, "Expected alias runner workspace mode to register the opaque alias mapping.\n" );
+        exit( 1 );
+    }
+
+    if ( '.agent-workspace/current-project' !== ( $aliases['current-project']['root'] ?? null ) ) {
+        fwrite( STDERR, "Expected alias runner workspace mode to register the scoped alias root.\n" );
         exit( 1 );
     }
 
