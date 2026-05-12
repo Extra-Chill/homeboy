@@ -1583,6 +1583,7 @@ $metadata = array(
     'model'         => homeboy_datamachine_agent_scalar( $config, 'model', 'gpt-5.5' ),
     'bundle_exists' => '' !== $bundle_path && is_dir( $bundle_path ),
 );
+$execute_workflow_path = homeboy_datamachine_agent_scalar( $config, 'execute_workflow_path' );
 
 foreach ( array( 'bundle_path' => $bundle_path, 'agent_slug' => $agent_slug, 'flow_slug' => $flow_slug ) as $label => $value ) {
     if ( '' === $value ) {
@@ -1609,7 +1610,9 @@ if ( ! empty( $runner_workspace['enabled'] ) ) {
     list( $config, $prompt ) = homeboy_datamachine_agent_apply_runner_workspace( $config, $prompt, $runner_workspace );
 }
 
-$required_abilities = is_array( $config['required_abilities'] ?? null ) ? $config['required_abilities'] : array( 'datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job' );
+$required_abilities = is_array( $config['required_abilities'] ?? null )
+    ? $config['required_abilities']
+    : ( '' !== $execute_workflow_path ? array( 'datamachine/execute-workflow', 'datamachine/drain-job' ) : array( 'datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job' ) );
 foreach ( $required_abilities as $ability_name ) {
     if ( ! is_string( $ability_name ) || ! wp_get_ability( $ability_name ) ) {
         return homeboy_datamachine_agent_result( array( 'required_abilities_resolved' => 0 ), $metadata, (string) $ability_name . ' not registered' );
@@ -1625,80 +1628,111 @@ foreach ( array( Agents::class, Pipelines::class, Flows::class, Jobs::class ) as
 $settings = homeboy_datamachine_agent_configure_settings( $config );
 homeboy_datamachine_agent_register_tool_recorders( $config );
 
-$import_start = hrtime( true );
-$import_result = wp_get_ability( 'datamachine/import-agent' )->execute(
-    array(
-        'source'      => $bundle_path,
-        'on_conflict' => homeboy_datamachine_agent_scalar( $config, 'on_conflict', 'skip' ),
-    )
-);
-$import_elapsed_ms = ( hrtime( true ) - $import_start ) / 1000000;
-$metadata['import_result'] = $import_result;
-if ( ! is_array( $import_result ) || empty( $import_result['success'] ) ) {
-    return homeboy_datamachine_agent_result( array( 'import_succeeded' => 0, 'import_elapsed_ms' => $import_elapsed_ms ), $metadata, 'datamachine/import-agent did not succeed' );
-}
-
-$agents    = new Agents();
+$agents = new Agents();
 $pipelines = new Pipelines();
-$flows     = new Flows();
-$jobs      = new Jobs();
-
-$agent = $agents->get_by_slug( $agent_slug );
-if ( ! $agent ) {
-    return homeboy_datamachine_agent_result( array( 'agent_resolved' => 0 ), $metadata, 'Imported agent was not found' );
-}
-
-$agent_id = (int) $agent['agent_id'];
-$agent_config = is_array( $agent['agent_config'] ?? null ) ? $agent['agent_config'] : array();
-$agent_config['default_provider'] = $settings['default_provider'];
-$agent_config['default_model']    = $settings['default_model'];
-$agent_config['mode_models']      = $settings['mode_models'];
-$agents->update_agent( $agent_id, array( 'agent_config' => $agent_config ) );
-PluginSettings::clearCache();
-
+$flows = new Flows();
+$jobs = new Jobs();
+$agent_id = 0;
 $pipeline_id = 0;
+$flow_id = 0;
 $pipeline_slug = homeboy_datamachine_agent_scalar( $config, 'pipeline_slug' );
-if ( '' !== $pipeline_slug ) {
-    $pipeline = $pipelines->get_by_portable_slug( $agent_id, $pipeline_slug );
-    if ( ! $pipeline ) {
-        return homeboy_datamachine_agent_result( array( 'pipeline_resolved' => 0 ), $metadata + array( 'agent_id' => $agent_id ), 'Imported pipeline was not found' );
-    }
-    $pipeline_id = (int) $pipeline['pipeline_id'];
-    $pipeline_step_patches = is_array( $config['pipeline_step_patches'] ?? null ) ? $config['pipeline_step_patches'] : array();
-    if ( ! empty( $pipeline_step_patches ) ) {
-        $pipeline_config = is_array( $pipeline['pipeline_config'] ?? null ) ? $pipeline['pipeline_config'] : array();
-        $pipeline_config = homeboy_datamachine_agent_apply_step_patches( $pipeline_config, $pipeline_step_patches );
-        $pipelines->update_pipeline( $pipeline_id, array( 'pipeline_config' => $pipeline_config ) );
-    }
-}
+$import_elapsed_ms = 0;
 
-$flow = $flows->get_by_portable_slug( $pipeline_id, $flow_slug );
-if ( ! $flow && 0 !== $pipeline_id ) {
-    $flow = $flows->get_by_portable_slug( 0, $flow_slug );
-}
-if ( ! $flow ) {
-    return homeboy_datamachine_agent_result( array( 'flow_resolved' => 0 ), $metadata + array( 'agent_id' => $agent_id, 'pipeline_id' => $pipeline_id ), 'Imported flow was not found' );
-}
-
-$flow_id = (int) $flow['flow_id'];
-$flow_config = is_array( $flow['flow_config'] ?? null ) ? $flow['flow_config'] : array();
-$flow_config = homeboy_datamachine_agent_apply_step_patches( $flow_config, is_array( $config['flow_step_patches'] ?? null ) ? $config['flow_step_patches'] : array() );
-foreach ( $flow_config as &$step_config ) {
-    if ( 'ai' === (string) ( $step_config['step_type'] ?? '' ) ) {
-        $step_config['prompt_queue'] = homeboy_datamachine_agent_run_prompt_queue( $step_config, $prompt );
-        $step_config['queue_mode'] = 'static';
+if ( '' !== $execute_workflow_path ) {
+    $workflow_payload_path = str_starts_with( $execute_workflow_path, '/' ) ? $execute_workflow_path : rtrim( homeboy_datamachine_agent_scalar( $config, 'component_path' ), '/' ) . '/' . ltrim( $execute_workflow_path, '/' );
+    if ( ! is_file( $workflow_payload_path ) ) {
+        return homeboy_datamachine_agent_result( array( 'execute_workflow_payload_exists' => 0 ), $metadata, 'execute_workflow_path does not exist: ' . $execute_workflow_path );
     }
-}
-unset( $step_config );
-$flows->update_flow( $flow_id, array( 'flow_config' => $flow_config, 'agent_id' => $agent_id ) );
+    $workflow_payload = json_decode( file_get_contents( $workflow_payload_path ) ?: '', true );
+    if ( ! is_array( $workflow_payload ) ) {
+        return homeboy_datamachine_agent_result( array( 'execute_workflow_payload_valid' => 0 ), $metadata, 'execute_workflow_path did not contain a JSON object: ' . $execute_workflow_path );
+    }
 
-$run_start = hrtime( true );
-$run_result = wp_get_ability( 'datamachine/run-flow' )->execute( array( 'flow_id' => $flow_id ) );
-$run_elapsed_ms = ( hrtime( true ) - $run_start ) / 1000000;
-$metadata['run_result'] = $run_result;
-$job_id = is_array( $run_result ) ? (int) ( $run_result['job_id'] ?? 0 ) : 0;
-if ( ! is_array( $run_result ) || empty( $run_result['success'] ) || $job_id <= 0 ) {
-    return homeboy_datamachine_agent_result( array( 'run_flow_succeeded' => 0, 'run_elapsed_ms' => $run_elapsed_ms ), $metadata, 'datamachine/run-flow failed or returned no job_id' );
+    $execute_input = isset( $workflow_payload['workflow'] ) ? $workflow_payload : array( 'workflow' => $workflow_payload );
+    if ( ! isset( $execute_input['initial_data'] ) || ! is_array( $execute_input['initial_data'] ) ) {
+        $execute_input['initial_data'] = array();
+    }
+    $execute_input['initial_data']['agent_slug'] = $execute_input['initial_data']['agent_slug'] ?? $agent_slug;
+    $execute_input['initial_data']['job_source'] = $execute_input['initial_data']['job_source'] ?? 'system';
+    $execute_input['initial_data']['job_label'] = $execute_input['initial_data']['job_label'] ?? 'Data Machine agent workflow';
+
+    $run_start = hrtime( true );
+    $run_result = wp_get_ability( 'datamachine/execute-workflow' )->execute( $execute_input );
+    $run_elapsed_ms = ( hrtime( true ) - $run_start ) / 1000000;
+    $metadata['run_result'] = $run_result;
+    $job_id = is_array( $run_result ) ? (int) ( $run_result['job_id'] ?? 0 ) : 0;
+    if ( ! is_array( $run_result ) || empty( $run_result['success'] ) || $job_id <= 0 ) {
+        return homeboy_datamachine_agent_result( array( 'execute_workflow_succeeded' => 0, 'run_elapsed_ms' => $run_elapsed_ms ), $metadata, 'datamachine/execute-workflow failed or returned no job_id' );
+    }
+} else {
+    $import_start = hrtime( true );
+    $import_result = wp_get_ability( 'datamachine/import-agent' )->execute(
+        array(
+            'source'      => $bundle_path,
+            'on_conflict' => homeboy_datamachine_agent_scalar( $config, 'on_conflict', 'skip' ),
+        )
+    );
+    $import_elapsed_ms = ( hrtime( true ) - $import_start ) / 1000000;
+    $metadata['import_result'] = $import_result;
+    if ( ! is_array( $import_result ) || empty( $import_result['success'] ) ) {
+        return homeboy_datamachine_agent_result( array( 'import_succeeded' => 0, 'import_elapsed_ms' => $import_elapsed_ms ), $metadata, 'datamachine/import-agent did not succeed' );
+    }
+
+    $agent = $agents->get_by_slug( $agent_slug );
+    if ( ! $agent ) {
+        return homeboy_datamachine_agent_result( array( 'agent_resolved' => 0 ), $metadata, 'Imported agent was not found' );
+    }
+
+    $agent_id = (int) $agent['agent_id'];
+    $agent_config = is_array( $agent['agent_config'] ?? null ) ? $agent['agent_config'] : array();
+    $agent_config['default_provider'] = $settings['default_provider'];
+    $agent_config['default_model']    = $settings['default_model'];
+    $agent_config['mode_models']      = $settings['mode_models'];
+    $agents->update_agent( $agent_id, array( 'agent_config' => $agent_config ) );
+    PluginSettings::clearCache();
+
+    if ( '' !== $pipeline_slug ) {
+        $pipeline = $pipelines->get_by_portable_slug( $agent_id, $pipeline_slug );
+        if ( ! $pipeline ) {
+            return homeboy_datamachine_agent_result( array( 'pipeline_resolved' => 0 ), $metadata + array( 'agent_id' => $agent_id ), 'Imported pipeline was not found' );
+        }
+        $pipeline_id = (int) $pipeline['pipeline_id'];
+        $pipeline_step_patches = is_array( $config['pipeline_step_patches'] ?? null ) ? $config['pipeline_step_patches'] : array();
+        if ( ! empty( $pipeline_step_patches ) ) {
+            $pipeline_config = is_array( $pipeline['pipeline_config'] ?? null ) ? $pipeline['pipeline_config'] : array();
+            $pipeline_config = homeboy_datamachine_agent_apply_step_patches( $pipeline_config, $pipeline_step_patches );
+            $pipelines->update_pipeline( $pipeline_id, array( 'pipeline_config' => $pipeline_config ) );
+        }
+    }
+
+    $flow = $flows->get_by_portable_slug( $pipeline_id, $flow_slug );
+    if ( ! $flow && 0 !== $pipeline_id ) {
+        $flow = $flows->get_by_portable_slug( 0, $flow_slug );
+    }
+    if ( ! $flow ) {
+        return homeboy_datamachine_agent_result( array( 'flow_resolved' => 0 ), $metadata + array( 'agent_id' => $agent_id, 'pipeline_id' => $pipeline_id ), 'Imported flow was not found' );
+    }
+
+    $flow_id = (int) $flow['flow_id'];
+    $flow_config = is_array( $flow['flow_config'] ?? null ) ? $flow['flow_config'] : array();
+    $flow_config = homeboy_datamachine_agent_apply_step_patches( $flow_config, is_array( $config['flow_step_patches'] ?? null ) ? $config['flow_step_patches'] : array() );
+    foreach ( $flow_config as &$step_config ) {
+        if ( 'ai' === (string) ( $step_config['step_type'] ?? '' ) ) {
+            $step_config['prompt_queue'] = homeboy_datamachine_agent_run_prompt_queue( $step_config, $prompt );
+            $step_config['queue_mode'] = 'static';
+        }
+    }
+    unset( $step_config );
+    $flows->update_flow( $flow_id, array( 'flow_config' => $flow_config, 'agent_id' => $agent_id ) );
+
+    $run_start = hrtime( true );
+    $run_result = wp_get_ability( 'datamachine/run-flow' )->execute( array( 'flow_id' => $flow_id ) );
+    $run_elapsed_ms = ( hrtime( true ) - $run_start ) / 1000000;
+    $metadata['run_result'] = $run_result;
+    $job_id = is_array( $run_result ) ? (int) ( $run_result['job_id'] ?? 0 ) : 0;
+    if ( ! is_array( $run_result ) || empty( $run_result['success'] ) || $job_id <= 0 ) {
+        return homeboy_datamachine_agent_result( array( 'run_flow_succeeded' => 0, 'run_elapsed_ms' => $run_elapsed_ms ), $metadata, 'datamachine/run-flow failed or returned no job_id' );
+    }
 }
 
 $drain_summary = homeboy_datamachine_agent_drain_job( $job_id, $config, $jobs );
@@ -1796,12 +1830,13 @@ return homeboy_datamachine_agent_result(
         'required_abilities_resolved' => 1,
         'required_classes_available'  => 1,
         'bundle_exists'               => 1,
-        'import_succeeded'            => 1,
+        'import_succeeded'            => '' !== $execute_workflow_path ? 0 : 1,
+        'execute_workflow_succeeded'  => '' !== $execute_workflow_path ? 1 : 0,
         'import_elapsed_ms'           => $import_elapsed_ms,
-        'agent_resolved'              => 1,
+        'agent_resolved'              => '' !== $execute_workflow_path ? 0 : 1,
         'runner_workspace_provisioned' => empty( $runner_workspace['enabled'] ) || ! empty( $runner_workspace['success'] ) ? 1 : 0,
         'runner_workspace_captured'    => empty( $runner_workspace_capture['enabled'] ) || empty( $runner_workspace_capture['error'] ) ? 1 : 0,
-        'pipeline_resolved'           => '' === $pipeline_slug || $pipeline_id > 0 ? 1 : 0,
+        'pipeline_resolved'           => '' !== $execute_workflow_path || '' === $pipeline_slug || $pipeline_id > 0 ? 1 : 0,
         'flow_resolved'               => 1,
         'run_flow_succeeded'          => 1,
         'run_elapsed_ms'              => $run_elapsed_ms,
