@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.67.3] - 2026-05-12
+
+### Fixed
+- isolate matrix artifact branches
+- export agent job artifacts to PRs
+
 ## [2.67.2] - 2026-05-12
 
 ### Fixed
