@@ -2,6 +2,26 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.70.0] - 2026-05-12
+
+### Added
+- add REST budgets and matrix profiling
+- add profiling fixture setup hooks
+
+### Fixed
+- align budget findings with core schema
+- budget full REST payload sizes
+
+## [2.69.1] - 2026-05-12
+
+### Fixed
+- import agent before execute workflows
+
+## [2.69.0] - 2026-05-12
+
+### Added
+- enrich agent artifact pull requests
+
 ## [2.68.1] - 2026-05-12
 
 ### Fixed

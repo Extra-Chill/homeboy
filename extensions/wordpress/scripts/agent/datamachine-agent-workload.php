@@ -323,6 +323,182 @@ if ( ! function_exists( 'homeboy_datamachine_agent_slug_fragment' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_markdown_cell' ) ) {
+    function homeboy_datamachine_agent_markdown_cell( $value ): string {
+        if ( is_bool( $value ) ) {
+            $value = $value ? 'yes' : 'no';
+        } elseif ( is_array( $value ) || is_object( $value ) ) {
+            $value = wp_json_encode( $value, JSON_UNESCAPED_SLASHES );
+        }
+
+        $value = trim( str_replace( array( "\r", "\n", '|' ), array( '', '<br>', '\\|' ), (string) $value ) );
+        return '' !== $value ? $value : '-';
+    }
+
+    function homeboy_datamachine_agent_markdown_table( array $headers, array $rows ): string {
+        if ( empty( $rows ) ) {
+            return '_None recorded._';
+        }
+
+        $header = '| ' . implode( ' | ', array_map( 'homeboy_datamachine_agent_markdown_cell', $headers ) ) . ' |';
+        $rule   = '| ' . implode( ' | ', array_fill( 0, count( $headers ), '---' ) ) . ' |';
+        $lines  = array( $header, $rule );
+        foreach ( $rows as $row ) {
+            $cells = array();
+            foreach ( array_keys( $headers ) as $index ) {
+                $cells[] = homeboy_datamachine_agent_markdown_cell( is_array( $row ) ? ( $row[ $index ] ?? '' ) : '' );
+            }
+            $lines[] = '| ' . implode( ' | ', $cells ) . ' |';
+        }
+
+        return implode( "\n", $lines );
+    }
+
+    function homeboy_datamachine_agent_source_value( array $sources, string $path ) {
+        $parts = array_filter( explode( '.', $path ), static fn( $part ) => '' !== $part );
+        if ( empty( $parts ) ) {
+            return null;
+        }
+        $source = array_shift( $parts );
+        $value  = $sources[ $source ] ?? null;
+        foreach ( $parts as $part ) {
+            if ( ! is_array( $value ) || ! array_key_exists( $part, $value ) ) {
+                return null;
+            }
+            $value = $value[ $part ];
+        }
+        return $value;
+    }
+
+    function homeboy_datamachine_agent_workflow_run_url(): string {
+        $repository = trim( (string) getenv( 'GITHUB_REPOSITORY' ) );
+        $run_id     = trim( (string) getenv( 'GITHUB_RUN_ID' ) );
+        if ( '' === $repository || '' === $run_id ) {
+            return '';
+        }
+        $server = trim( (string) getenv( 'GITHUB_SERVER_URL' ) );
+        if ( '' === $server ) {
+            $server = 'https://github.com';
+        }
+        return rtrim( $server, '/' ) . '/' . $repository . '/actions/runs/' . rawurlencode( $run_id );
+    }
+
+    function homeboy_datamachine_agent_artifact_pr_context( int $job_id, array $config, array $engine_data, array $artifact_result, array $written, array $run_context ): array {
+        $workflow_url      = homeboy_datamachine_agent_workflow_run_url();
+        $task_id           = homeboy_datamachine_agent_scalar( $config, 'task_id', homeboy_datamachine_agent_scalar( $config, 'workload_id', homeboy_datamachine_agent_scalar( $config, 'flow_slug', 'task' ) ) );
+        $task_label        = homeboy_datamachine_agent_scalar( $config, 'task_label', homeboy_datamachine_agent_scalar( $config, 'workload_label', $task_id ) );
+        $provider          = homeboy_datamachine_agent_scalar( $config, 'provider', 'provider' );
+        $model             = homeboy_datamachine_agent_scalar( $config, 'model', 'model' );
+        $agent_slug        = homeboy_datamachine_agent_scalar( $config, 'agent_slug', 'agent' );
+        $error_message     = (string) ( $run_context['error_message'] ?? $engine_data['error_message'] ?? '' );
+        $success_status    = (string) ( $run_context['success_status'] ?? '' );
+        $result_label      = '' !== $success_status ? $success_status : ( '' !== $error_message ? 'failed' : 'artifact' );
+        $runner_workspace  = is_array( $run_context['runner_workspace_capture']['status'] ?? null ) ? $run_context['runner_workspace_capture']['status'] : array();
+        $transcript        = is_array( $run_context['transcript_artifacts'] ?? null ) ? $run_context['transcript_artifacts'] : array();
+        $grade             = is_array( $run_context['grade'] ?? null ) ? $run_context['grade'] : ( is_array( $engine_data['grade'] ?? null ) ? $engine_data['grade'] : array() );
+
+        $result_rows = array(
+            array( 'Task', $task_label ),
+            array( 'Task ID', $task_id ),
+            array( 'Agent', $agent_slug ),
+            array( 'Model', $provider . ' / ' . $model ),
+            array( 'Job', $job_id ),
+            array( 'Result', $result_label ),
+        );
+        if ( '' !== $error_message ) {
+            $result_rows[] = array( 'Error', $error_message );
+        }
+
+        $check_rows = array();
+        foreach ( (array) ( $grade['checks'] ?? array() ) as $check ) {
+            if ( is_array( $check ) ) {
+                $check_rows[] = array(
+                    (string) ( $check['id'] ?? '' ),
+                    ! empty( $check['passed'] ),
+                    (string) ( $check['score'] ?? '' ),
+                    (string) ( $check['max_score'] ?? '' ),
+                    (string) ( $check['message'] ?? '' ),
+                );
+            }
+        }
+
+        $tool_rows = array();
+        foreach ( (array) ( $engine_data['tool_execution_summary'] ?? array() ) as $tool ) {
+            if ( is_array( $tool ) ) {
+                $tool_rows[] = array(
+                    (string) ( $tool['turn_count'] ?? '' ),
+                    (string) ( $tool['tool_name'] ?? '' ),
+                    ! empty( $tool['success'] ),
+                );
+            }
+        }
+
+        $link_rows = array();
+        if ( '' !== $workflow_url ) {
+            $link_rows[] = array( 'Workflow run', $workflow_url );
+        }
+        foreach ( array( 'json' => 'Transcript JSON', 'summary' => 'Transcript summary' ) as $key => $label ) {
+            if ( ! empty( $transcript[ $key ] ) && is_string( $transcript[ $key ] ) ) {
+                $link_rows[] = array( $label, '`' . $transcript[ $key ] . '`' );
+            }
+        }
+        foreach ( $written as $path ) {
+            $link_rows[] = array( 'Artifact', '`' . $path . '`' );
+        }
+
+        $values = array(
+            'task_id'           => $task_id,
+            'task_label'        => $task_label,
+            'agent_slug'        => $agent_slug,
+            'provider'          => $provider,
+            'model'             => $model,
+            'model_label'       => $provider . '/' . $model,
+            'job_id'            => $job_id,
+            'result_label'      => $result_label,
+            'error_message'     => $error_message,
+            'workflow_run_url'  => $workflow_url,
+            'workspace_branch'  => (string) ( $runner_workspace['branch'] ?? '' ),
+            'workspace_handle'  => (string) ( $runner_workspace['name'] ?? '' ),
+            'workspace_changed' => ! empty( $run_context['runner_workspace_capture']['changed'] ) ? 'yes' : 'no',
+            'result_table'      => homeboy_datamachine_agent_markdown_table( array( 'Field', 'Value' ), $result_rows ),
+            'checks_table'      => homeboy_datamachine_agent_markdown_table( array( 'Check', 'Passed', 'Score', 'Max', 'Message' ), $check_rows ),
+            'tools_table'       => homeboy_datamachine_agent_markdown_table( array( 'Turn', 'Tool', 'Success' ), $tool_rows ),
+            'links_table'       => homeboy_datamachine_agent_markdown_table( array( 'Artifact', 'Location' ), $link_rows ),
+            'paths'             => '- `' . implode( "`\n- `", $written ) . '`',
+        );
+
+        $export_config = is_array( $config['artifact_export'] ?? null ) ? $config['artifact_export'] : array();
+        foreach ( (array) ( $export_config['pr_template_values'] ?? array() ) as $key => $value ) {
+            if ( is_string( $key ) && '' !== $key && is_scalar( $value ) ) {
+                $values[ $key ] = (string) $value;
+            }
+        }
+
+        $sources = array(
+            'config'          => $config,
+            'engine_data'     => $engine_data,
+            'artifact_result' => $artifact_result,
+            'run'             => $run_context,
+            'env'             => array(
+                'GITHUB_RUN_ID'      => (string) getenv( 'GITHUB_RUN_ID' ),
+                'GITHUB_RUN_ATTEMPT' => (string) getenv( 'GITHUB_RUN_ATTEMPT' ),
+                'GITHUB_REPOSITORY'  => (string) getenv( 'GITHUB_REPOSITORY' ),
+            ),
+        );
+        foreach ( (array) ( $export_config['pr_template_paths'] ?? array() ) as $key => $path ) {
+            if ( ! is_string( $key ) || '' === $key || ! is_string( $path ) || '' === $path ) {
+                continue;
+            }
+            $value = homeboy_datamachine_agent_source_value( $sources, $path );
+            if ( is_scalar( $value ) ) {
+                $values[ $key ] = (string) $value;
+            }
+        }
+
+        return $values;
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_exportable_artifacts' ) ) {
     function homeboy_datamachine_agent_job_artifact_relative_path( int $job_id, array $config ): string {
         $flow_slug = homeboy_datamachine_agent_slug_fragment( homeboy_datamachine_agent_scalar( $config, 'flow_slug', 'run' ) );
@@ -404,7 +580,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_head_branch' ) ) {
 }
 
 if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
-    function homeboy_datamachine_agent_export_job_artifacts( int $job_id, array $config, bool $pr_opened, array $engine_data = array() ): array {
+    function homeboy_datamachine_agent_export_job_artifacts( int $job_id, array $config, bool $pr_opened, array $engine_data = array(), array $run_context = array() ): array {
         $export_config = is_array( $config['artifact_export'] ?? null ) ? $config['artifact_export'] : array();
         if ( $job_id <= 0 || empty( $export_config['enabled'] ) || ! class_exists( JobArtifacts::class ) || ! function_exists( 'wp_get_ability' ) ) {
             return array();
@@ -538,16 +714,14 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
             return array( 'error' => 'Artifact export requires artifact_export.pr_title_template and artifact_export.pr_body_template.' );
         }
 
-        $pr_values        = array_merge(
+        $pr_values = array_merge(
             $template_values,
-            array(
-                'paths' => '- `' . implode( "`\n- `", $written ) . '`',
-            )
+            homeboy_datamachine_agent_artifact_pr_context( $job_id, $config, $engine_data, $artifact_result, $written, $run_context )
         );
         $pr_result = $pr_ability->execute(
             array(
                 'repo'  => $target_repo,
-                'title' => homeboy_datamachine_agent_template( $pr_title_template, $template_values ),
+                'title' => homeboy_datamachine_agent_template( $pr_title_template, $pr_values ),
                 'head'  => $branch,
                 'body'  => homeboy_datamachine_agent_template( $pr_body_template, $pr_values ),
             )
@@ -1621,7 +1795,7 @@ if ( ! empty( $runner_workspace['enabled'] ) ) {
 
 $required_abilities = is_array( $config['required_abilities'] ?? null )
     ? $config['required_abilities']
-    : ( '' !== $execute_workflow_path ? array( 'datamachine/execute-workflow', 'datamachine/drain-job' ) : array( 'datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job' ) );
+    : ( '' !== $execute_workflow_path ? array( 'datamachine/import-agent', 'datamachine/execute-workflow', 'datamachine/drain-job' ) : array( 'datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job' ) );
 foreach ( $required_abilities as $ability_name ) {
     if ( ! is_string( $ability_name ) || ! wp_get_ability( $ability_name ) ) {
         return homeboy_datamachine_agent_result( array( 'required_abilities_resolved' => 0 ), $metadata, (string) $ability_name . ' not registered' );
@@ -1648,6 +1822,32 @@ $pipeline_slug = homeboy_datamachine_agent_scalar( $config, 'pipeline_slug' );
 $import_elapsed_ms = 0;
 
 if ( '' !== $execute_workflow_path ) {
+	$import_start = hrtime( true );
+	$import_result = wp_get_ability( 'datamachine/import-agent' )->execute(
+		array(
+			'source'      => $bundle_path,
+			'on_conflict' => homeboy_datamachine_agent_scalar( $config, 'on_conflict', 'skip' ),
+		)
+	);
+	$import_elapsed_ms = ( hrtime( true ) - $import_start ) / 1000000;
+	$metadata['import_result'] = $import_result;
+	if ( ! is_array( $import_result ) || empty( $import_result['success'] ) ) {
+		return homeboy_datamachine_agent_result( array( 'import_succeeded' => 0, 'import_elapsed_ms' => $import_elapsed_ms ), $metadata, 'datamachine/import-agent did not succeed' );
+	}
+
+	$agent = $agents->get_by_slug( $agent_slug );
+	if ( ! $agent ) {
+		return homeboy_datamachine_agent_result( array( 'agent_resolved' => 0 ), $metadata, 'Imported agent was not found' );
+	}
+
+	$agent_id = (int) $agent['agent_id'];
+	$agent_config = is_array( $agent['agent_config'] ?? null ) ? $agent['agent_config'] : array();
+	$agent_config['default_provider'] = $settings['default_provider'];
+	$agent_config['default_model']    = $settings['default_model'];
+	$agent_config['mode_models']      = $settings['mode_models'];
+	$agents->update_agent( $agent_id, array( 'agent_config' => $agent_config ) );
+	PluginSettings::clearCache();
+
     $workflow_payload_path = str_starts_with( $execute_workflow_path, '/' ) ? $execute_workflow_path : rtrim( homeboy_datamachine_agent_scalar( $config, 'component_path' ), '/' ) . '/' . ltrim( $execute_workflow_path, '/' );
     if ( ! is_file( $workflow_payload_path ) ) {
         return homeboy_datamachine_agent_result( array( 'execute_workflow_payload_exists' => 0 ), $metadata, 'execute_workflow_path does not exist: ' . $execute_workflow_path );
@@ -1662,6 +1862,7 @@ if ( '' !== $execute_workflow_path ) {
         $execute_input['initial_data'] = array();
     }
     $execute_input['initial_data']['agent_slug'] = $execute_input['initial_data']['agent_slug'] ?? $agent_slug;
+    $execute_input['initial_data']['agent_id'] = $execute_input['initial_data']['agent_id'] ?? $agent_id;
     $execute_input['initial_data']['job_source'] = $execute_input['initial_data']['job_source'] ?? 'system';
     $execute_input['initial_data']['job_label'] = $execute_input['initial_data']['job_label'] ?? 'Data Machine agent workflow';
 
@@ -1786,7 +1987,15 @@ if ( $file_written && ! $pr_opened && empty( $runner_workspace_capture['changed'
 }
 $completion_outcome_satisfied = homeboy_datamachine_agent_completion_outcome_satisfied( $engine_data, $config );
 $success_status = $pr_opened ? 'pr_opened' : ( $completion_outcome_satisfied ? 'completion_outcome_satisfied' : 'no_changes' );
-$job_artifact_exports = homeboy_datamachine_agent_export_job_artifacts( $job_id, $config, $pr_opened, $engine_data );
+$artifact_pr_context = array(
+    'success_status'           => $success_status,
+    'success_requires_pr'      => $success_requires_pr,
+    'transcript_artifacts'     => $transcript_artifacts,
+    'runner_workspace_capture' => $runner_workspace_capture,
+    'fallback_pull_request'    => $fallback_pull_request,
+    'error_message'            => (string) ( $engine_data['error_message'] ?? '' ),
+);
+$job_artifact_exports = homeboy_datamachine_agent_export_job_artifacts( $job_id, $config, $pr_opened, $engine_data, $artifact_pr_context );
 
 $metadata += array(
     'agent_id'             => $agent_id,
@@ -1834,31 +2043,31 @@ if ( $success_requires_pr && ! $pr_opened && ! $completion_outcome_satisfied ) {
 }
 
 return homeboy_datamachine_agent_result(
-    array(
-        'config_present'              => 1,
-        'required_abilities_resolved' => 1,
-        'required_classes_available'  => 1,
-        'bundle_exists'               => 1,
-        'import_succeeded'            => '' !== $execute_workflow_path ? 0 : 1,
-        'execute_workflow_succeeded'  => '' !== $execute_workflow_path ? 1 : 0,
-        'import_elapsed_ms'           => $import_elapsed_ms,
-        'agent_resolved'              => '' !== $execute_workflow_path ? 0 : 1,
-        'runner_workspace_provisioned' => empty( $runner_workspace['enabled'] ) || ! empty( $runner_workspace['success'] ) ? 1 : 0,
-        'runner_workspace_captured'    => empty( $runner_workspace_capture['enabled'] ) || empty( $runner_workspace_capture['error'] ) ? 1 : 0,
-        'pipeline_resolved'           => '' !== $execute_workflow_path || '' === $pipeline_slug || $pipeline_id > 0 ? 1 : 0,
-        'flow_resolved'               => 1,
-        'run_flow_succeeded'          => 1,
-        'run_elapsed_ms'              => $run_elapsed_ms,
-        'drain_succeeded'             => is_array( $drain_result ) && ! empty( $drain_result['success'] ) ? 1 : 0,
-        'drain_elapsed_ms'            => $drain_elapsed_ms,
-        'job_completed'               => 'completed' === $job_status ? 1 : 0,
-        'file_written'                => $file_written ? 1 : 0,
-        'pr_opened'                   => $pr_opened ? 1 : 0,
-        'completion_outcome_satisfied' => $completion_outcome_satisfied ? 1 : 0,
-        'no_changes'                  => ! $file_written && ! $pr_opened && ! $completion_outcome_satisfied ? 1 : 0,
-        'job_artifact_exported'       => ! empty( $job_artifact_exports['pr_url'] ) ? 1 : 0,
-        'transcript_exported'         => ! empty( $transcript_artifacts['json'] ) ? 1 : 0,
-        'total_tokens'                => (int) ( $metadata['token_usage']['total_tokens'] ?? 0 ),
-    ),
-    $metadata
+	array(
+		'config_present'              => 1,
+		'required_abilities_resolved' => 1,
+		'required_classes_available'  => 1,
+		'bundle_exists'               => 1,
+		'import_succeeded'            => 1,
+		'execute_workflow_succeeded'  => '' !== $execute_workflow_path ? 1 : 0,
+		'import_elapsed_ms'           => $import_elapsed_ms,
+		'agent_resolved'              => 1,
+		'runner_workspace_provisioned' => empty( $runner_workspace['enabled'] ) || ! empty( $runner_workspace['success'] ) ? 1 : 0,
+		'runner_workspace_captured'    => empty( $runner_workspace_capture['enabled'] ) || empty( $runner_workspace_capture['error'] ) ? 1 : 0,
+		'pipeline_resolved'           => '' !== $execute_workflow_path || '' === $pipeline_slug || $pipeline_id > 0 ? 1 : 0,
+		'flow_resolved'               => 1,
+		'run_flow_succeeded'          => 1,
+		'run_elapsed_ms'              => $run_elapsed_ms,
+		'drain_succeeded'             => is_array( $drain_result ) && ! empty( $drain_result['success'] ) ? 1 : 0,
+		'drain_elapsed_ms'            => $drain_elapsed_ms,
+		'job_completed'               => 'completed' === $job_status ? 1 : 0,
+		'file_written'                => $file_written ? 1 : 0,
+		'pr_opened'                   => $pr_opened ? 1 : 0,
+		'completion_outcome_satisfied' => $completion_outcome_satisfied ? 1 : 0,
+		'no_changes'                  => ! $file_written && ! $pr_opened && ! $completion_outcome_satisfied ? 1 : 0,
+		'job_artifact_exported'       => ! empty( $job_artifact_exports['pr_url'] ) ? 1 : 0,
+		'transcript_exported'         => ! empty( $transcript_artifacts['json'] ) ? 1 : 0,
+		'total_tokens'                => (int) ( $metadata['token_usage']['total_tokens'] ?? 0 ),
+	),
+	$metadata
 );
