@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.5.1] - 2026-05-12
+
+### Fixed
+- split reusable CI quality checks
+
 ## [2.5.0] - 2026-05-11
 
 ### Added
