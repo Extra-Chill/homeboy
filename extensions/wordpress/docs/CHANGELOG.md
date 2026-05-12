@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.73.0] - 2026-05-12
+
+### Added
+- add admin page sweep summaries
+
 ## [2.72.0] - 2026-05-12
 
 ### Added
