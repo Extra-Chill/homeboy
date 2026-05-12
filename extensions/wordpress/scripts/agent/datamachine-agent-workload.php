@@ -168,12 +168,61 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
         return $engine_data;
     }
 
+    function homeboy_datamachine_agent_completion_outcomes( array $engine_data, array $config ): array {
+        $sources = $engine_data;
+        $engine_key = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
+        if ( '' !== $engine_key && is_array( $engine_data[ $engine_key ] ?? null ) ) {
+            $sources = $engine_data[ $engine_key ];
+        }
+
+        $completed_outcomes = homeboy_datamachine_agent_path_value( $sources, 'completion_assertions_satisfied.complete_when_any' );
+        if ( ! is_array( $completed_outcomes ) ) {
+            return array();
+        }
+
+        return array_values(
+            array_filter(
+                array_map(
+                    static fn( $outcome ) => is_scalar( $outcome ) ? trim( (string) $outcome ) : '',
+                    $completed_outcomes
+                ),
+                static fn( string $outcome ) => '' !== $outcome
+            )
+        );
+    }
+
+    function homeboy_datamachine_agent_set_completion_outcomes( array $engine_data, array $config, array $completed_outcomes ): array {
+        $completed_outcomes = array_values( array_unique( $completed_outcomes ) );
+        if ( empty( $completed_outcomes ) ) {
+            return $engine_data;
+        }
+
+        $engine_key = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
+        if ( '' !== $engine_key ) {
+            if ( ! isset( $engine_data[ $engine_key ] ) || ! is_array( $engine_data[ $engine_key ] ) ) {
+                $engine_data[ $engine_key ] = array();
+            }
+            if ( ! isset( $engine_data[ $engine_key ]['completion_assertions_satisfied'] ) || ! is_array( $engine_data[ $engine_key ]['completion_assertions_satisfied'] ) ) {
+                $engine_data[ $engine_key ]['completion_assertions_satisfied'] = array();
+            }
+            $engine_data[ $engine_key ]['completion_assertions_satisfied']['complete_when_any'] = $completed_outcomes;
+            return $engine_data;
+        }
+
+        if ( ! isset( $engine_data['completion_assertions_satisfied'] ) || ! is_array( $engine_data['completion_assertions_satisfied'] ) ) {
+            $engine_data['completion_assertions_satisfied'] = array();
+        }
+        $engine_data['completion_assertions_satisfied']['complete_when_any'] = $completed_outcomes;
+        return $engine_data;
+    }
+
     function homeboy_datamachine_agent_merge_child_engine_data( array $engine_data, array $child_jobs, array $config ): array {
         if ( empty( $child_jobs ) ) {
             return $engine_data;
         }
 
         $tool_results = homeboy_datamachine_agent_tool_results( $engine_data, $config );
+        $completed_outcomes = homeboy_datamachine_agent_completion_outcomes( $engine_data, $config );
         $child_summaries = array();
 
         foreach ( $child_jobs as $child_job ) {
@@ -186,6 +235,10 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
             if ( ! empty( $child_tool_results ) ) {
                 $tool_results = array_merge( $tool_results, $child_tool_results );
             }
+            $child_completion_outcomes = homeboy_datamachine_agent_completion_outcomes( $child_engine_data, $config );
+            if ( ! empty( $child_completion_outcomes ) ) {
+                $completed_outcomes = array_merge( $completed_outcomes, $child_completion_outcomes );
+            }
 
             $child_summaries[] = array(
                 'job_id'        => (int) ( $child_job['job_id'] ?? 0 ),
@@ -195,6 +248,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
         }
 
         $engine_data = homeboy_datamachine_agent_set_tool_results( $engine_data, $config, $tool_results );
+        $engine_data = homeboy_datamachine_agent_set_completion_outcomes( $engine_data, $config, $completed_outcomes );
         $engine_data['child_jobs'] = $child_summaries;
         return $engine_data;
     }
@@ -266,16 +320,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_completion_outcome_satisfied'
             return false;
         }
 
-        $sources = $engine_data;
-        $engine_key = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
-        if ( '' !== $engine_key && is_array( $engine_data[ $engine_key ] ?? null ) ) {
-            $sources = $engine_data[ $engine_key ];
-        }
-
-        $completed_outcomes = homeboy_datamachine_agent_path_value( $sources, 'completion_assertions_satisfied.complete_when_any' );
-        if ( ! is_array( $completed_outcomes ) ) {
-            return false;
-        }
+        $completed_outcomes = homeboy_datamachine_agent_completion_outcomes( $engine_data, $config );
 
         foreach ( $completed_outcomes as $outcome ) {
             if ( is_scalar( $outcome ) && in_array( trim( (string) $outcome ), $allowed_outcomes, true ) ) {

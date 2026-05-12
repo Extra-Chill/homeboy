@@ -41,6 +41,9 @@ namespace DataMachine\Core\Database\Jobs {
                                 'url'       => 'https://github.com/example/site/pull/99#issuecomment-1',
                             ),
                         ),
+                        'completion_assertions_satisfied' => array(
+                            'complete_when_any' => array( 'issue_fallback_path' ),
+                        ),
                     ),
                 ),
             );
@@ -149,6 +152,10 @@ namespace {
     $engine_data = homeboy_datamachine_agent_merge_child_engine_data( array(), $summary['children'], array() );
     if ( ! homeboy_datamachine_agent_pr_opened( $engine_data, array() ) ) {
         fwrite( STDERR, "Expected child pull request result to satisfy PR detection.\n" );
+        exit( 1 );
+    }
+    if ( ! homeboy_datamachine_agent_completion_outcome_satisfied( $engine_data, array( 'success_completion_outcomes' => array( 'issue_fallback_path' ) ) ) ) {
+        fwrite( STDERR, "Expected child issue fallback outcome to satisfy completion.\n" );
         exit( 1 );
     }
 
