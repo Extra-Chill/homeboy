@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.75.6] - 2026-05-12
+
+### Fixed
+- merge child completion outcomes
+
 ## [2.75.5] - 2026-05-12
 
 ### Changed
