@@ -2,14 +2,16 @@
 
 # Unified scope resolver — detects execution context and computes scope state.
 #
-# v2: Scope is always context-driven. PRs use changed-file scope automatically.
-# Non-PR events always use full scope. No user input needed.
+# v2: Scope defaults to context-driven. PRs use changed-file scope automatically
+# and non-PR events use full scope. Consumers may override with scope=changed
+# or scope=full when a workflow needs explicit policy.
 #
 # Inputs (env vars):
 #   GITHUB_EVENT_NAME  — pull_request, schedule, workflow_dispatch, push
 #   BASE_SHA           — PR base commit (from github.event.pull_request.base.sha)
 #   PR_HEAD_REPO       — full_name of PR head repo (fork detection)
 #   GITHUB_REPOSITORY  — full_name of the base repo
+#   SCOPE_INPUT        — auto | changed | full (default: auto)
 #
 # Outputs (GITHUB_ENV + GITHUB_OUTPUT):
 #   SCOPE_CONTEXT      — pr | push | cron | manual
@@ -53,8 +55,20 @@ fi
 
 SCOPE_BASE_REF=""
 SCOPE_MODE="full"
+SCOPE_INPUT="${SCOPE_INPUT:-auto}"
 
-if [ "${SCOPE_CONTEXT}" = "pr" ]; then
+case "${SCOPE_INPUT}" in
+  ""|auto|changed|full)
+    ;;
+  *)
+    echo "::warning::Unsupported scope '${SCOPE_INPUT}' - falling back to auto"
+    SCOPE_INPUT="auto"
+    ;;
+esac
+
+if [ "${SCOPE_INPUT}" = "full" ]; then
+  SCOPE_MODE="full"
+elif [ "${SCOPE_CONTEXT}" = "pr" ] || [ "${SCOPE_INPUT}" = "changed" ]; then
   if [ -n "${BASE_SHA:-}" ]; then
     # Fetch enough ancestry for three-dot diff (base...HEAD) to find the merge base.
     # GitHub's default checkout is --depth=1 (shallow), which only has the tip commits.
@@ -82,12 +96,15 @@ if [ "${SCOPE_CONTEXT}" = "pr" ]; then
       echo "::warning::Could not find merge base — falling back to full scope"
       SCOPE_MODE="full"
     fi
-  else
+  elif [ "${SCOPE_CONTEXT}" = "pr" ]; then
     echo "::warning::PR event but no BASE_SHA provided — falling back to full scope"
+    SCOPE_MODE="full"
+  else
+    echo "::warning::scope=changed requires a pull request base SHA - falling back to full scope"
     SCOPE_MODE="full"
   fi
 else
-  # Non-PR events always use full scope
+  # Non-PR auto scope uses full scope.
   SCOPE_MODE="full"
 fi
 
@@ -103,4 +120,4 @@ echo "scope-base-ref=${SCOPE_BASE_REF}" >> "${GITHUB_OUTPUT}"
 echo "scope-mode=${SCOPE_MODE}" >> "${GITHUB_OUTPUT}"
 echo "scope-is-fork=${SCOPE_IS_FORK}" >> "${GITHUB_OUTPUT}"
 
-echo "Scope resolved: context=${SCOPE_CONTEXT} mode=${SCOPE_MODE} fork=${SCOPE_IS_FORK} base_ref=${SCOPE_BASE_REF:-(none)}"
+echo "Scope resolved: context=${SCOPE_CONTEXT} input=${SCOPE_INPUT} mode=${SCOPE_MODE} fork=${SCOPE_IS_FORK} base_ref=${SCOPE_BASE_REF:-(none)}"
