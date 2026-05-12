@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.75.4] - 2026-05-12
+
+### Fixed
+- mark empty PHPUnit discovery as skipped
+
 ## [2.75.3] - 2026-05-12
 
 ### Fixed
