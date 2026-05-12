@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.69.0] - 2026-05-12
+
+### Added
+- enrich agent artifact pull requests
+
 ## [2.68.1] - 2026-05-12
 
 ### Fixed
