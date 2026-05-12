@@ -9,6 +9,13 @@
     "file_extensions": ["go", "mod", "sum"],
     "capabilities": ["fingerprint", "format", "validate"]
   },
+  "structured_sidecars": {
+    "lint.findings": false,
+    "test.results": false,
+    "test.failures": false,
+    "test.coverage": false,
+    "annotations": false
+  },
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
     "validate": "scripts/validate.sh",
