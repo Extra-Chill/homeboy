@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.5.2] - 2026-05-12
+
+### Fixed
+- restore scope input
+
 ## [2.5.1] - 2026-05-12
 
 ### Fixed
