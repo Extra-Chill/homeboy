@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.74.0] - 2026-05-12
+
+### Added
+- support scoped runner workspace roots
+
 ## [2.73.0] - 2026-05-12
 
 ### Added
