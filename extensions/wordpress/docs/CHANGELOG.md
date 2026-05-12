@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.66.1] - 2026-05-12
+
+### Fixed
+- authenticate bundle repo clones
+
 ## [2.66.0] - 2026-05-11
 
 ### Added
