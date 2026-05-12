@@ -304,6 +304,7 @@ namespace {
     }
 
     $runner_capture_calls = array();
+    $fallback_pr_input    = array();
     $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
         'datamachine/workspace-git-status' => new Homeboy_Datamachine_Agent_Fake_Ability(
             function ( array $input ) use ( &$runner_capture_calls ): array {
@@ -347,39 +348,146 @@ namespace {
             }
         ),
     );
+    putenv( 'GITHUB_REPOSITORY=owner/repo' );
+    putenv( 'GITHUB_RUN_ID=123456' );
+    $runner_config = array(
+        'target_repo'              => 'owner/repo',
+        'task_id'                  => 'runner-task',
+        'task_label'               => 'Runner task',
+        'provider'                 => 'openai',
+        'model'                    => 'gpt-smoke',
+        'agent_slug'               => 'runner-agent',
+        'tool_results_key'         => 'github_tool_results',
+        'artifact_export'          => array(
+            'pr_title_template'  => '[{agent_slug}] {task_id} - {workspace_branch} - {result_label}',
+            'pr_body_template'   => "## Runner Workspace\nBranch: {workspace_branch}\nHandle: {workspace_handle}\nStatus: {engine_status}\nCustom: {custom_label}\n\n## Checks\n{checks_table}\n\n## Links\n{links_table}\n\n## Paths\n{paths}\n",
+            'pr_template_values' => array( 'custom_label' => 'custom fallback value' ),
+            'pr_template_paths'  => array( 'engine_status' => 'engine_data.status' ),
+        ),
+        'runner_workspace'         => array(
+            'enabled'         => true,
+            'expose_to_agent' => false,
+        ),
+        'runner_workspace_result'  => array(
+            'success' => true,
+            'handle'  => 'repo@hidden-run',
+            'branch'  => 'agent/hidden-run',
+        ),
+    );
+    $runner_engine_data = array(
+        'status' => 'runner-workspace-status',
+        'grade'  => array(
+            'checks' => array(
+                array( 'id' => 'runner_check', 'passed' => true, 'score' => 1, 'max_score' => 1, 'message' => 'Looks good.' ),
+            ),
+        ),
+    );
     $runner_capture = homeboy_datamachine_agent_capture_runner_workspace(
-        array(),
-        array(
-            'target_repo'              => 'owner/repo',
-            'tool_results_key'         => 'github_tool_results',
-            'runner_workspace'         => array(
-                'enabled'         => true,
-                'expose_to_agent' => false,
-            ),
-            'runner_workspace_result'  => array(
-                'success' => true,
-                'handle'  => 'repo@hidden-run',
-                'branch'  => 'agent/hidden-run',
-            ),
-        )
+        $runner_engine_data,
+        $runner_config
     );
 
-    if ( empty( $runner_capture['changed'] ) || empty( $runner_capture['fallback_pull_request']['opened'] ) ) {
-        fwrite( STDERR, "Expected hidden runner workspace capture to commit, push, and open a fallback PR.\n" );
+    if ( ! empty( $fallback_pr_input ) ) {
+        fwrite( STDERR, "Did not expect runner workspace capture to open the fallback PR before artifact context is assembled.\n" );
+        exit( 1 );
+    }
+    $runner_template_values = homeboy_datamachine_agent_artifact_pr_context(
+        43,
+        $runner_config,
+        $runner_engine_data,
+        array(),
+        homeboy_datamachine_agent_runner_workspace_written_paths( $runner_capture ),
+        array(
+            'success_status'           => 'completion_outcome_satisfied',
+            'transcript_artifacts'     => array( 'json' => 'artifacts/runner-transcript.json' ),
+            'runner_workspace_capture' => $runner_capture,
+        )
+    );
+    $runner_capture_config = $runner_config;
+    $runner_capture_config['fallback_pull_request'] = homeboy_datamachine_agent_runner_workspace_fallback_config(
+        $runner_config,
+        $runner_config['runner_workspace_result'],
+        $runner_template_values
+    );
+    $runner_fallback = homeboy_datamachine_agent_open_fallback_pr( $runner_engine_data, $runner_capture_config );
+
+    if ( empty( $runner_capture['changed'] ) || empty( $runner_fallback['opened'] ) ) {
+        fwrite( STDERR, "Expected hidden runner workspace capture to commit, push, and open a fallback PR after context assembly.\n" );
         exit( 1 );
     }
     if ( 'agent/hidden-run' !== ( $fallback_pr_input['head'] ?? null ) || 'owner/repo' !== ( $fallback_pr_input['repo'] ?? null ) ) {
         fwrite( STDERR, "Expected runner workspace capture fallback PR to use the captured branch.\n" );
         exit( 1 );
     }
+    if ( '[runner-agent] runner-task - agent/hidden-run - completion_outcome_satisfied' !== ( $fallback_pr_input['title'] ?? '' ) ) {
+        fwrite( STDERR, "Expected runner workspace fallback PR to use the final artifact PR title context.\n" );
+        exit( 1 );
+    }
+    foreach ( array( 'Branch: agent/hidden-run', 'Handle: repo@hidden-run', 'Status: runner-workspace-status', 'Custom: custom fallback value', 'runner_check', 'https://github.com/owner/repo/actions/runs/123456', 'artifacts/runner-transcript.json', 'docs/generated.md' ) as $expected_fallback_body_fragment ) {
+        if ( ! str_contains( (string) ( $fallback_pr_input['body'] ?? '' ), $expected_fallback_body_fragment ) ) {
+            fwrite( STDERR, "Expected runner workspace fallback PR body to include {$expected_fallback_body_fragment}.\n" );
+            exit( 1 );
+        }
+    }
     if ( 'repo@hidden-run' !== ( $runner_capture_calls[0]['input']['name'] ?? null ) || array( 'docs/generated.md' ) !== ( $runner_capture_calls[1]['input']['paths'] ?? null ) ) {
         fwrite( STDERR, "Expected runner workspace capture to inspect and stage the provisioned handle.\n" );
         exit( 1 );
     }
 
+    $fallback_pr_input = array();
+    $explicit_runner_config = array(
+        'target_repo'              => 'owner/repo',
+        'tool_results_key'         => 'github_tool_results',
+        'fallback_pull_request'    => array(
+            'title' => 'Explicit fallback title',
+            'body'  => 'Explicit fallback body',
+        ),
+        'artifact_export'          => array(
+            'pr_title_template' => 'Templated {task_id}',
+            'pr_body_template'  => 'Templated {workspace_branch}',
+        ),
+        'runner_workspace'         => array(
+            'enabled'         => true,
+            'expose_to_agent' => false,
+        ),
+        'runner_workspace_result'  => array(
+            'success' => true,
+            'handle'  => 'repo@explicit-run',
+            'branch'  => 'agent/explicit-run',
+        ),
+    );
+    $explicit_runner_capture = homeboy_datamachine_agent_capture_runner_workspace(
+        array(),
+        $explicit_runner_config
+    );
+    $explicit_runner_template_values = homeboy_datamachine_agent_artifact_pr_context(
+        43,
+        $explicit_runner_config,
+        array(),
+        array(),
+        array(),
+        array(
+            'success_status'           => 'no_changes',
+            'runner_workspace_capture' => $explicit_runner_capture,
+        )
+    );
+    $explicit_runner_capture_config = $explicit_runner_config;
+    $explicit_runner_capture_config['fallback_pull_request'] = homeboy_datamachine_agent_runner_workspace_fallback_config(
+        $explicit_runner_config,
+        $explicit_runner_config['runner_workspace_result'],
+        $explicit_runner_template_values
+    );
+    $explicit_runner_fallback = homeboy_datamachine_agent_open_fallback_pr( array(), $explicit_runner_capture_config );
+    if ( empty( $explicit_runner_fallback['opened'] ) ) {
+        fwrite( STDERR, "Expected explicit runner workspace fallback PR to open.\n" );
+        exit( 1 );
+    }
+    if ( 'Explicit fallback title' !== ( $fallback_pr_input['title'] ?? '' ) || 'Explicit fallback body' !== ( $fallback_pr_input['body'] ?? '' ) ) {
+        fwrite( STDERR, "Expected explicit runner workspace fallback PR title/body to take precedence over artifact templates.\n" );
+        exit( 1 );
+    }
+
     $artifact_export_calls = array();
-    putenv( 'GITHUB_REPOSITORY=owner/repo' );
-    putenv( 'GITHUB_RUN_ID=123456' );
     $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
         'datamachine/create-or-update-github-file' => new Homeboy_Datamachine_Agent_Fake_Ability(
             function ( array $input ) use ( &$artifact_export_calls ): array {
