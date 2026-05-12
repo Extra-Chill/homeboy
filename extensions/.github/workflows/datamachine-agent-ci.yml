@@ -748,8 +748,8 @@ jobs:
                 include_job_artifacts: false,
                 branch_template: "agent-artifacts/{agent_slug}-{run_id}-{provider}-{model}-{job_id}",
                 commit_message_template: "chore: persist {type} artifact",
-                pr_title_template: "Persist agent run artifacts",
-                pr_body_template: "## Summary\n- Persist bundle-file run artifacts from Data Machine agent job {job_id}.\n\n## Artifacts\n{paths}\n"
+                pr_title_template: "[{agent_slug}] {task_id} - {model_label} - {result_label}",
+                pr_body_template: "## Result\n{result_table}\n\n## Checks\n{checks_table}\n\n## Tools\n{tools_table}\n\n## Review Artifacts\n{links_table}\n"
               } * $artifactExportConfig),
               dry_run: $dryRun,
               transcript_dir: $transcriptGuestDir,

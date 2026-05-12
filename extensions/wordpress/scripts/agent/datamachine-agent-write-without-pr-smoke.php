@@ -378,6 +378,8 @@ namespace {
     }
 
     $artifact_export_calls = array();
+    putenv( 'GITHUB_REPOSITORY=owner/repo' );
+    putenv( 'GITHUB_RUN_ID=123456' );
     $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
         'datamachine/create-or-update-github-file' => new Homeboy_Datamachine_Agent_Fake_Ability(
             function ( array $input ) use ( &$artifact_export_calls ): array {
@@ -399,19 +401,41 @@ namespace {
         42,
         array(
             'target_repo'     => 'owner/repo',
+            'task_id'         => 'example-task',
+            'task_label'      => 'Example task',
+            'provider'        => 'openai',
+            'model'           => 'gpt-smoke',
+            'agent_slug'      => 'review-agent',
             'flow_slug'       => 'review-flow',
             'artifact_export' => array(
                 'enabled'                 => true,
                 'repo'                    => 'owner/repo',
                 'path_prefix'             => 'bundles/task-runner',
+                'include_job_artifacts'    => true,
                 'branch_template'         => 'agent-artifacts/{agent_slug}-{run_id}-{job_id}',
                 'commit_message_template' => 'chore: persist {type} artifact',
-                'pr_title_template'       => 'Persist agent run artifacts',
-                'pr_body_template'        => "## Artifacts\n{paths}\n",
+                'pr_title_template'       => '[{agent_slug}] {task_id} - {model_label} - {result_label}',
+                'pr_body_template'        => "## Result\n{result_table}\n\nStatus: {engine_status}\nCustom: {custom_label}\n\n## Checks\n{checks_table}\n\n## Tools\n{tools_table}\n\n## Review Artifacts\n{links_table}\n",
+                'pr_template_values'      => array( 'custom_label' => 'custom value' ),
+                'pr_template_paths'       => array( 'engine_status' => 'engine_data.status' ),
             ),
         ),
         false,
-        array()
+        array(
+            'status'                 => 'processing',
+            'tool_execution_summary' => array(
+                array( 'turn_count' => 1, 'tool_name' => 'workspace_read', 'success' => true ),
+            ),
+        ),
+        array(
+            'success_status'       => 'no_changes',
+            'transcript_artifacts' => array( 'json' => 'artifacts/transcript.json' ),
+            'grade'                => array(
+                'checks' => array(
+                    array( 'id' => 'example_check', 'passed' => false, 'score' => 0, 'max_score' => 1, 'message' => 'Needs work.' ),
+                ),
+            ),
+        )
     );
 
     if ( empty( $job_artifact_export['pr_url'] ) ) {
@@ -421,6 +445,17 @@ namespace {
     if ( 'bundles/task-runner/run-artifacts/review-flow/job-42/job-artifacts.json' !== ( $artifact_export_calls[0]['input']['file_path'] ?? null ) ) {
         fwrite( STDERR, "Expected Data Machine job artifact payload to be written as reviewable JSON.\n" );
         exit( 1 );
+    }
+    $artifact_pr_input = $artifact_export_calls[1]['input'] ?? array();
+    if ( '[review-agent] example-task - openai/gpt-smoke - no_changes' !== ( $artifact_pr_input['title'] ?? '' ) ) {
+        fwrite( STDERR, "Expected artifact PR title to include agent, task, model, and result.\n" );
+        exit( 1 );
+    }
+    foreach ( array( 'Example task', 'Status: processing', 'Custom: custom value', 'example_check', 'workspace_read', 'https://github.com/owner/repo/actions/runs/123456', 'artifacts/transcript.json' ) as $expected_pr_body_fragment ) {
+        if ( ! str_contains( (string) ( $artifact_pr_input['body'] ?? '' ), $expected_pr_body_fragment ) ) {
+            fwrite( STDERR, "Expected artifact PR body to include {$expected_pr_body_fragment}.\n" );
+            exit( 1 );
+        }
     }
 
     $merged_daily_memory = homeboy_datamachine_agent_merge_daily_memory_artifact(
