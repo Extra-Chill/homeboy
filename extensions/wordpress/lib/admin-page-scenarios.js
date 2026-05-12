@@ -4,14 +4,10 @@
  * Internal dependencies
  */
 const { profileWordPressPages } = require('./page-profiler');
-
-const WORDPRESS_ADMIN_RESOURCE_INCLUDE = [
-	'/wp-json/',
-	'?rest_route=',
-	'/wp-admin/',
-	'/wp-content/',
-	'/wp-includes/',
-];
+const {
+	WORDPRESS_RESOURCE_INCLUDE,
+	assertPlainObject,
+} = require('./shared');
 
 const WORDPRESS_ADMIN_RESOURCE_EXCLUDE = [
 	'/wp-admin/admin-ajax.php?action=heartbeat',
@@ -29,7 +25,7 @@ const WORDPRESS_ADMIN_REST_GATE = {
 };
 
 const DEFAULT_SCENARIO_RESOURCES = {
-	includeResourceSubstrings: WORDPRESS_ADMIN_RESOURCE_INCLUDE,
+	includeResourceSubstrings: WORDPRESS_RESOURCE_INCLUDE,
 	excludeResourceSubstrings: WORDPRESS_ADMIN_RESOURCE_EXCLUDE,
 };
 
@@ -146,12 +142,6 @@ function clone(value) {
 	return JSON.parse(JSON.stringify(value));
 }
 
-function assertPlainObject(value, name) {
-	if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-		throw new TypeError(`${name} must be an object`);
-	}
-}
-
 function replaceParams(value, params, missing) {
 	if (typeof value === 'string') {
 		return value.replace(/\{([A-Za-z0-9_:-]+)\}/g, (match, key) => {
@@ -253,7 +243,7 @@ module.exports = {
 	WORDPRESS_ADMIN_PAGE_SCENARIO_IDS,
 	WORDPRESS_ADMIN_PAGE_SCENARIOS,
 	WORDPRESS_ADMIN_RESOURCE_EXCLUDE,
-	WORDPRESS_ADMIN_RESOURCE_INCLUDE,
+	WORDPRESS_RESOURCE_INCLUDE,
 	WORDPRESS_ADMIN_REST_GATE,
 	createWordPressAdminPageScenarioManifest,
 	getWordPressAdminPageScenario,

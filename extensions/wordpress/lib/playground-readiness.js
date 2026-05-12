@@ -1,8 +1,16 @@
 'use strict';
 
+/**
+ * External dependencies
+ */
 const http = require('node:http');
 const https = require('node:https');
 const net = require('node:net');
+
+/**
+ * Internal dependencies
+ */
+const { sleep } = require('./shared');
 
 const DEFAULT_READINESS_PATH = '/wp-json/';
 const DEFAULT_DIAGNOSTIC_PATHS = ['/', '/wp-login.php', '/wp-json/', '/wp-admin/'];
@@ -162,10 +170,6 @@ async function emit(onEvent, source, event, data) {
 	} catch (_) {
 		// trace bridge errors must not break readiness polling
 	}
-}
-
-function sleep(ms) {
-	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function processExited(child) {

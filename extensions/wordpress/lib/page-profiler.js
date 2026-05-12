@@ -5,14 +5,11 @@
  */
 const { correlateBrowserAndWordPressTimings, normalizeUrl } = require('./timing-correlator');
 const { runWordPressFixtureSetup } = require('./fixture-setup');
-
-const DEFAULT_RESOURCE_INCLUDE = [
-	'/wp-json/',
-	'?rest_route=',
-	'/wp-admin/',
-	'/wp-content/',
-	'/wp-includes/',
-];
+const {
+	WORDPRESS_RESOURCE_INCLUDE,
+	isPlainObject,
+	sleep,
+} = require('./shared');
 
 const DEFAULT_DIAGNOSIS_THRESHOLDS = {
 	readyMs: 1000,
@@ -35,10 +32,6 @@ const DEFAULT_GATE_THRESHOLDS = {
 
 function round(value) {
 	return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : 0;
-}
-
-function isPlainObject(value) {
-	return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function normalizeBaseUrl(baseUrl) {
@@ -103,7 +96,7 @@ function normalizePageManifest(manifest) {
 function shouldIncludeResource(url, options = {}) {
 	const include = Array.isArray(options.includeResourceSubstrings)
 		? options.includeResourceSubstrings
-		: DEFAULT_RESOURCE_INCLUDE;
+		: WORDPRESS_RESOURCE_INCLUDE;
 	const exclude = Array.isArray(options.excludeResourceSubstrings)
 		? options.excludeResourceSubstrings
 		: [];
@@ -155,10 +148,6 @@ function resourceFamily(url) {
 
 function browserMetricName(name) {
 	return String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'mark';
-}
-
-function sleep(ms) {
-	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizeRestUrl(url) {
@@ -2485,8 +2474,8 @@ async function profileWordPressPages(input) {
 }
 
 module.exports = {
-	DEFAULT_RESOURCE_INCLUDE,
 	DEFAULT_REST_OBSERVATION_MS,
+	WORDPRESS_RESOURCE_INCLUDE,
 	classifyResourceUrl,
 	classifyWordPressRestPreloadOpportunities,
 	compareWordPressRestNetworkWaterfalls,
