@@ -17,11 +17,14 @@ const {
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
 	formatWordPressPerformanceGateReport,
+	formatWordPressRestMatrixMarkdownReport,
 	formatWordPressRestNetworkDiffMarkdownReport,
+	formatWordPressRestPayloadBudgetMarkdownReport,
 	formatWordPressRestWaterfallMarkdownReport,
 	normalizePageManifest,
 	profileWordPressPage,
 	profileWordPressPages,
+	profileWordPressRestMatrix,
 	recommendWordPressPerformanceGates,
 	resourceFamily,
 	resolveWordPressUrl,
@@ -71,6 +74,25 @@ class FakePage {
 
 	async evaluate() {
 		return this.resources;
+	}
+}
+
+class FakeRestMatrixPage {
+	constructor(responses) {
+		this.responses = responses;
+		this.requests = [];
+	}
+
+	async evaluate(fn, request) {
+		void fn;
+		this.requests.push(request);
+		const response = this.responses.shift();
+		return {
+			status: response.status,
+			durationMs: response.durationMs,
+			contentType: response.contentType || 'application/json',
+			bodyText: JSON.stringify(response.body),
+		};
 	}
 }
 
@@ -201,6 +223,61 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.equal(candidateWaterfall.metrics.unused_preload_count, 1);
 	assert.equal(candidateWaterfall.metrics.preload_payload_bytes, 267);
 	assert.equal(candidateWaterfall.metrics.remaining_rest_network_count, 1);
+	const payloadBudgetResult = diagnoseWordPressPageProfile({
+		id: 'payload-budget',
+		readyMs: 500,
+		resources: { resources: [], restCount: 0 },
+		restWaterfall: summarizeWordPressRestWaterfall({
+			apiFetchAttempts: [
+				{ path: '/datamachine/v1/pipelines?per_page=100', method: 'GET', status: 200, responseBodyBytes: 2000, durationMs: 120 },
+				{ path: '/wp/v2/users/me', method: 'GET', status: 200, responseBodyBytes: 600, durationMs: 40 },
+			],
+		}),
+		budgets: {
+			rest: {
+				maxResponseBytes: 1000,
+				maxTotalResponseBytes: 1500,
+				allow: ['/wp/v2/users/me'],
+				routes: {
+					'/datamachine/v1/pipelines*': { maxResponseBytes: 1500 },
+				},
+			},
+		},
+	});
+	assert.equal(payloadBudgetResult.restPayloadBudgets.findings.length, 2);
+	assert.equal(payloadBudgetResult.findings.some((finding) => finding.code === 'wordpress.rest.max_response_bytes'), true);
+	assert.equal(payloadBudgetResult.findings.some((finding) => finding.code === 'wordpress.rest.max_total_response_bytes'), true);
+	for (const finding of payloadBudgetResult.restPayloadBudgets.findings) {
+		assert.equal(finding.context_label, 'profile:wordpress-rest');
+		assert.equal(finding.passed, false);
+		assert.equal(typeof finding.expected, 'number');
+	}
+	assert.equal(payloadBudgetResult.restPayloadBudgets.topPayloadRows[0].responseBytes, 2000);
+	assert.match(formatWordPressRestPayloadBudgetMarkdownReport(payloadBudgetResult.restPayloadBudgets), /REST payload budgets/);
+	const truncatedSampleBudgetResult = diagnoseWordPressPageProfile({
+		id: 'truncated-sample-budget',
+		readyMs: 500,
+		resources: { resources: [], restCount: 0 },
+		restWaterfall: summarizeWordPressRestWaterfall({
+			apiFetchAttempts: [
+				{
+					path: '/datamachine/v1/pipelines?per_page=100',
+					method: 'GET',
+					status: 200,
+					responseBodyBytes: 4096,
+					responseBodySampleTruncated: true,
+					decodedBodySize: 2000000,
+				},
+			],
+		}),
+		budgets: { rest: { maxResponseBytes: 250000 } },
+	});
+	const truncatedSampleFinding = truncatedSampleBudgetResult.findings.find((finding) => finding.code === 'wordpress.rest.max_response_bytes');
+	assert.equal(truncatedSampleFinding.context_label, 'profile:wordpress-rest');
+	assert.equal(truncatedSampleFinding.passed, false);
+	assert.equal(typeof truncatedSampleFinding.expected, 'number');
+	assert.equal(truncatedSampleFinding.actual, 2000000);
+	assert.equal(truncatedSampleBudgetResult.restPayloadBudgets.topPayloadRows[0].responseBytes, 2000000);
 	assert.equal(candidateWaterfall.usedPreloadRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
 	assert.equal(candidateWaterfall.unusedPreloadRows[0].url, '/wp/v2/posts?context=edit&per_page=10');
 	assert.equal(candidateWaterfall.preloadedOrCacheRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
@@ -364,6 +441,35 @@ async function main() {
 	assert.equal(multi.pages.length, 2);
 	assert.equal(multi.fixtureSetup.steps[0].label, 'profile-ready');
 	assert.equal(multi.topRestWaterfalls[0].restCount, 2);
+
+	const matrixPage = new FakeRestMatrixPage([
+		{ status: 200, durationMs: 80, body: [{ id: 1 }, { id: 2 }] },
+		{ status: 500, durationMs: 1200, body: { code: 'server_error' } },
+	]);
+	const matrix = await profileWordPressRestMatrix({
+		page: matrixPage,
+		baseUrl: 'https://example.test',
+		restMatrix: [
+			{ method: 'GET', path: '/datamachine/v1/pipelines', params: { per_page: 100 }, budget: { expectedStatus: 200, maxBytes: 50, maxMs: 1000, maxItemCount: 1 } },
+			{ method: 'POST', path: '/datamachine/v1/flows', body: { pipeline_id: 1 }, budget: { expectedStatus: 201, maxBytes: 100, maxMs: 1000 } },
+		],
+	});
+	assert.equal(matrix.results.length, 2);
+	assert.equal(matrix.results[0].normalizedUrl, '/datamachine/v1/pipelines?per_page=100');
+	assert.equal(matrix.results[0].jsonShape.type, 'array');
+	assert.equal(matrix.results[0].itemCount, 2);
+	assert.equal(matrix.findings.some((finding) => finding.code === 'wordpress.rest_matrix.max_item_count'), true);
+	assert.equal(matrix.findings.some((finding) => finding.code === 'wordpress.rest_matrix.expected_status'), true);
+	assert.equal(matrix.findings.some((finding) => finding.code === 'wordpress.rest_matrix.max_ms'), true);
+	for (const finding of matrix.findings) {
+		assert.equal(finding.context_label, 'profile:wordpress-rest-matrix');
+		assert.equal(finding.passed, false);
+		assert.equal(typeof finding.expected, 'number');
+	}
+	const expectedStatusFinding = matrix.findings.find((finding) => finding.code === 'wordpress.rest_matrix.expected_status');
+	assert.equal(expectedStatusFinding.expected, 201);
+	assert.deepEqual(expectedStatusFinding.expectedStatuses, [201]);
+	assert.match(formatWordPressRestMatrixMarkdownReport(matrix), /REST endpoint matrix/);
 
 	assert.throws(() => normalizePageManifest({ pages: [{ id: 'bad' }] }), /requires url or path/);
 
