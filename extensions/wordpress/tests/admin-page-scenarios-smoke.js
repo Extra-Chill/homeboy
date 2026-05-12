@@ -13,6 +13,7 @@ const assert = require('node:assert/strict');
 const {
 	WORDPRESS_ADMIN_PAGE_SCENARIO_IDS,
 	WORDPRESS_ADMIN_PAGE_SCENARIOS,
+	WORDPRESS_RESOURCE_INCLUDE,
 	createWordPressAdminPageScenarioManifest,
 	getWordPressAdminPageScenario,
 	listWordPressAdminPageScenarios,
@@ -20,6 +21,8 @@ const {
 	normalizePageManifest,
 	resolveWordPressAdminPageScenario,
 } = require('../index');
+
+assert.equal(Object.isFrozen(WORDPRESS_RESOURCE_INCLUDE), true);
 
 const expectedIds = [
 	'dashboard',

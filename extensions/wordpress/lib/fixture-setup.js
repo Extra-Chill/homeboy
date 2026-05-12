@@ -1,12 +1,16 @@
 'use strict';
 
+/**
+ * External dependencies
+ */
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-function isPlainObject(value) {
-	return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
+/**
+ * Internal dependencies
+ */
+const { isPlainObject } = require('./shared');
 
 function normalizeFixtureList(fixtures) {
 	if (fixtures === undefined || fixtures === null) {
