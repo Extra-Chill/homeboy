@@ -8,6 +8,16 @@
     "file_extensions": ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json"],
     "capabilities": ["format", "validate"]
   },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "test.results": true,
+    "test.failures": true,
+    "test.coverage": false,
+    "bench.results": true,
+    "trace.results": true,
+    "trace.artifacts": true,
+    "annotations": false
+  },
   "scripts": {
     "validate": "scripts/validate.sh",
     "format": "scripts/format.sh"

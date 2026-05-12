@@ -8,6 +8,15 @@
     "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
     "capabilities": ["fingerprint", "refactor", "crossref", "validate"]
   },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "test.results": true,
+    "test.failures": true,
+    "test.coverage": false,
+    "bench.results": true,
+    "trace.results": true,
+    "annotations": false
+  },
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.py",
