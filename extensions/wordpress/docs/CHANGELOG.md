@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.68.1] - 2026-05-12
+
+### Fixed
+- make job artifact export opt-in
+
 ## [2.68.0] - 2026-05-12
 
 ### Added
