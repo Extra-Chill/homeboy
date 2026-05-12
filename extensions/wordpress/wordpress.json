@@ -221,8 +221,10 @@
         "Exception",
         "Factory",
         "Fallback",
+        "Base",
         "Helper",
         "Helpers",
+        "Handlers",
         "Hydrator",
         "Interface",
         "Lock",
@@ -230,6 +232,7 @@
         "Payload",
         "Policy",
         "Provider",
+        "Projector",
         "Registry",
         "Repository",
         "Request",
@@ -251,6 +254,7 @@
         "Validator"
       ],
       "convention_exception_globs": [
+        "**/register.php",
         "**/register-*.php",
         "**/*-register.php",
         "**/bootstrap.php",
@@ -314,6 +318,7 @@
           "tag": "wordpress:php-role:procedural-helper",
           "globs": [
             "**/register-*.php",
+            "**/register.php",
             "**/*-register.php",
             "**/bootstrap.php",
             "**/*-bootstrap.php",
@@ -428,6 +433,17 @@
           ]
         }
       ],
+      "duplication_detector": {
+        "trivial_calls": [
+          "array",
+          "empty",
+          "get_param"
+        ],
+        "plumbing_calls": [
+          "WP_REST_Response",
+          "rest_ensure_response"
+        ]
+      },
       "known_symbols": {
         "header_versions": [
           {
