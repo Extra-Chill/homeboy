@@ -26,6 +26,19 @@ namespace DataMachine\Core\Database\Pipelines {
 }
 
 namespace DataMachine\Core {
+    class JobArtifacts {
+        public function get( int $job_id, array $additional_tool_summaries = array() ): array {
+            return array(
+                'success'   => true,
+                'artifacts' => array(
+                    'transcript'             => array( 'session_id' => 'session-123' ),
+                    'agent_memory_artifacts' => array(),
+                    'daily_memory_artifacts' => array(),
+                ),
+            );
+        }
+    }
+
     class PluginSettings {
         public static function clearCache(): void {}
     }
@@ -361,6 +374,52 @@ namespace {
     }
     if ( 'repo@hidden-run' !== ( $runner_capture_calls[0]['input']['name'] ?? null ) || array( 'docs/generated.md' ) !== ( $runner_capture_calls[1]['input']['paths'] ?? null ) ) {
         fwrite( STDERR, "Expected runner workspace capture to inspect and stage the provisioned handle.\n" );
+        exit( 1 );
+    }
+
+    $artifact_export_calls = array();
+    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
+        'datamachine/create-or-update-github-file' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            function ( array $input ) use ( &$artifact_export_calls ): array {
+                $artifact_export_calls[] = array( 'ability' => 'file', 'input' => $input );
+                return array( 'success' => true, 'html_url' => 'https://github.com/owner/repo/commit/artifact' );
+            }
+        ),
+        'datamachine/create-github-pull-request' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            function ( array $input ) use ( &$artifact_export_calls ): array {
+                $artifact_export_calls[] = array( 'ability' => 'pr', 'input' => $input );
+                return array( 'success' => true, 'html_url' => 'https://github.com/owner/repo/pull/988' );
+            }
+        ),
+        'datamachine/get-github-file' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            fn() => array( 'success' => false )
+        ),
+    );
+    $job_artifact_export = homeboy_datamachine_agent_export_job_artifacts(
+        42,
+        array(
+            'target_repo'     => 'owner/repo',
+            'flow_slug'       => 'review-flow',
+            'artifact_export' => array(
+                'enabled'                 => true,
+                'repo'                    => 'owner/repo',
+                'path_prefix'             => 'bundles/task-runner',
+                'branch_template'         => 'agent-artifacts/{agent_slug}-{run_id}-{job_id}',
+                'commit_message_template' => 'chore: persist {type} artifact',
+                'pr_title_template'       => 'Persist agent run artifacts',
+                'pr_body_template'        => "## Artifacts\n{paths}\n",
+            ),
+        ),
+        false,
+        array()
+    );
+
+    if ( empty( $job_artifact_export['pr_url'] ) ) {
+        fwrite( STDERR, "Expected job artifact export to open a runner-owned PR.\n" );
+        exit( 1 );
+    }
+    if ( 'bundles/task-runner/run-artifacts/review-flow/job-42/job-artifacts.json' !== ( $artifact_export_calls[0]['input']['file_path'] ?? null ) ) {
+        fwrite( STDERR, "Expected Data Machine job artifact payload to be written as reviewable JSON.\n" );
         exit( 1 );
     }
 

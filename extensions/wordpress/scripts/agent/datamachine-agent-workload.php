@@ -324,6 +324,11 @@ if ( ! function_exists( 'homeboy_datamachine_agent_slug_fragment' ) ) {
 }
 
 if ( ! function_exists( 'homeboy_datamachine_agent_exportable_artifacts' ) ) {
+    function homeboy_datamachine_agent_job_artifact_relative_path( int $job_id, array $config ): string {
+        $flow_slug = homeboy_datamachine_agent_slug_fragment( homeboy_datamachine_agent_scalar( $config, 'flow_slug', 'run' ) );
+        return sprintf( 'run-artifacts/%s/job-%d/job-artifacts.json', $flow_slug, $job_id );
+    }
+
     function homeboy_datamachine_agent_exportable_artifacts( array $artifacts ): array {
         $exportable_artifacts = array();
 
@@ -408,6 +413,15 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
 
         $artifact_result = ( new JobArtifacts() )->get( $job_id );
         $artifacts       = is_array( $artifact_result['artifacts'] ?? null ) ? $artifact_result['artifacts'] : array();
+        if ( ! empty( $artifact_result['success'] ) && ! empty( $artifacts ) ) {
+            $artifacts['job_artifacts'] = array(
+                array(
+                    'type'                 => 'job_artifacts',
+                    'bundle_relative_path' => homeboy_datamachine_agent_job_artifact_relative_path( $job_id, $config ),
+                    'content'              => wp_json_encode( $artifacts, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n",
+                ),
+            );
+        }
         $exportable_artifacts = homeboy_datamachine_agent_exportable_artifacts( $artifacts );
         if ( empty( $exportable_artifacts ) ) {
             return array();
@@ -426,6 +440,8 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
             'agent_slug' => $agent_slug,
             'run_id'     => $run_id,
             'job_id'     => $job_id,
+            'provider'   => homeboy_datamachine_agent_slug_fragment( homeboy_datamachine_agent_scalar( $config, 'provider', 'provider' ) ),
+            'model'      => homeboy_datamachine_agent_slug_fragment( homeboy_datamachine_agent_scalar( $config, 'model', 'model' ) ),
         );
         $branch_template = (string) ( $export_config['branch_template'] ?? '' );
         $attached_to_pr  = false;

@@ -693,7 +693,7 @@ jobs:
                 only_when_no_pr: true,
                 repo: $targetRepo,
                 path_prefix: $bundlePathInRepo,
-                branch_template: "agent-artifacts/{agent_slug}-{run_id}-{job_id}",
+                branch_template: "agent-artifacts/{agent_slug}-{run_id}-{provider}-{model}-{job_id}",
                 commit_message_template: "chore: persist {type} artifact",
                 pr_title_template: "Persist agent run artifacts",
                 pr_body_template: "## Summary\n- Persist bundle-file run artifacts from Data Machine agent job {job_id}.\n\n## Artifacts\n{paths}\n"
