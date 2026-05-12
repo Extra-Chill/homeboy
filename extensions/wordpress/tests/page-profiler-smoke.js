@@ -13,9 +13,11 @@ const assert = require('node:assert/strict');
 const {
 	classifyResourceUrl,
 	classifyWordPressRestPreloadOpportunities,
+	buildWordPressAdminPageSweepSummary,
 	compareWordPressRestNetworkWaterfalls,
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
+	formatWordPressAdminPageSweepMarkdownReport,
 	formatWordPressPerformanceGateReport,
 	formatWordPressRestMatrixMarkdownReport,
 	formatWordPressRestNetworkDiffMarkdownReport,
@@ -30,6 +32,7 @@ const {
 	resourceFamily,
 	resolveWordPressUrl,
 	runBrowserActions,
+	summarizeWordPressAdminPageProfile,
 	summarizeWordPressRestNetworkRows,
 	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,
@@ -516,6 +519,50 @@ async function main() {
 	assert.equal(page.calls.some((call) => call[0] === 'frame.waitForSelector' && call[1] === '[data-block]'), true);
 	assert.equal(page.calls.some((call) => call[0] === 'getByRole' && call[1] === 'button' && call[2] === 'Admin'), true);
 	assert.equal(page.calls.some((call) => call[0] === 'locator.selectOption' && call[2]?.index === 1), true);
+
+	const adminSummary = summarizeWordPressAdminPageProfile({ profile: result, spec: manifest[1] });
+	assert.equal(adminSummary.id, 'site-editor');
+	assert.equal(adminSummary.interactionStatus, 'passed');
+	assert.equal(adminSummary.restCount, 2);
+	assert.equal(adminSummary.restBytes, 603000);
+	assert.equal(adminSummary.failureCount, 0);
+	assert.equal(adminSummary.slowestRestRows[0].url, '/wp/v2/posts?context=edit');
+
+	const failedAdminSummary = summarizeWordPressAdminPageProfile({
+		...result,
+		id: 'failed-admin-page',
+		label: 'Failed admin page',
+		readyMs: 2500,
+		interactions: { actions: [{ status: 'failed' }], failed: true },
+		restWaterfall: {
+			rows: [
+				{ method: 'GET', url: '/wp/v2/users', status: 500, failed: true, durationMs: 300, transferSize: 1000 },
+			],
+		},
+		interactionRestWaterfall: {
+			rows: [
+				{ method: 'GET', url: '/wp/v2/settings', status: 200, durationMs: 120, transferSize: 500 },
+			],
+		},
+		diagnosis: {
+			findings: [
+				{ severity: 'error', code: 'wordpress.rest.max_response_bytes' },
+				{ severity: 'warn', code: 'rest-after-ready' },
+			],
+		},
+	});
+	assert.equal(failedAdminSummary.restCount, 2);
+	assert.equal(failedAdminSummary.failedRequestCount, 1);
+	assert.equal(failedAdminSummary.failureFindingCount, 1);
+	assert.equal(failedAdminSummary.failureCount, 2);
+	assert.equal(failedAdminSummary.interactionStatus, 'failed');
+
+	const sweepSummary = buildWordPressAdminPageSweepSummary({ pages: [adminSummary, failedAdminSummary] });
+	assert.equal(sweepSummary.totals.pageCount, 2);
+	assert.equal(sweepSummary.totals.failedPageCount, 1);
+	assert.equal(sweepSummary.pages[0].id, 'failed-admin-page');
+	assert.match(formatWordPressAdminPageSweepMarkdownReport(sweepSummary), /WordPress admin page sweep/);
+	assert.match(formatWordPressAdminPageSweepMarkdownReport(sweepSummary), /Slowest REST requests/);
 
 	const multiPage = new FakePage(resources);
 	const multi = await profileWordPressPages({
