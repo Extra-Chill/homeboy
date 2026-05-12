@@ -113,9 +113,26 @@ namespace {
         )
     );
 
-    require __DIR__ . '/datamachine-agent-workload.php';
+	require __DIR__ . '/datamachine-agent-workload.php';
 
-    $jobs = new \DataMachine\Core\Database\Jobs\Jobs();
+	$workload_source = file_get_contents( __DIR__ . '/datamachine-agent-workload.php' ) ?: '';
+	$import_position = strpos( $workload_source, "wp_get_ability( 'datamachine/import-agent' )" );
+	$execute_position = strpos( $workload_source, "wp_get_ability( 'datamachine/execute-workflow' )" );
+	if ( false === $import_position || false === $execute_position || $import_position > $execute_position ) {
+		fwrite( STDERR, "Expected execute-workflow mode to import the agent bundle before running the raw workflow.\n" );
+		exit( 1 );
+	}
+	if ( ! str_contains( $workload_source, "array( 'datamachine/import-agent', 'datamachine/execute-workflow', 'datamachine/drain-job' )" ) ) {
+		fwrite( STDERR, "Expected execute-workflow mode to require import-agent, execute-workflow, and drain-job.\n" );
+		exit( 1 );
+	}
+	$workflow_source = file_get_contents( dirname( __DIR__, 3 ) . '/.github/workflows/datamachine-agent-ci.yml' ) ?: '';
+	if ( ! str_contains( $workflow_source, '["datamachine/import-agent", "datamachine/execute-workflow", "datamachine/drain-job"]' ) ) {
+		fwrite( STDERR, "Expected reusable workflow config to require import-agent for execute-workflow runs.\n" );
+		exit( 1 );
+	}
+
+	$jobs = new \DataMachine\Core\Database\Jobs\Jobs();
     $summary = homeboy_datamachine_agent_drain_child_jobs( 101, array(), $jobs );
     $calls = $GLOBALS['homeboy_child_drain_calls'] ?? array();
 
