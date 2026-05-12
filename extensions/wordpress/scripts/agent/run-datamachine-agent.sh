@@ -7,6 +7,30 @@ WORKLOAD_PATH="$SCRIPT_DIR/datamachine-agent-workload.php"
 WORKLOAD_PLAYGROUND_PATH="/homeboy-extension/scripts/agent/datamachine-agent-workload.php"
 REPLAY_BUNDLE_BUILDER="$SCRIPT_DIR/build-replay-bundle.js"
 
+homeboy_datamachine_agent_bundle_clone_url() {
+    local repo_url="${1:-}"
+
+    if [ -z "${GITHUB_TOKEN:-}" ]; then
+        printf '%s\n' "$repo_url"
+        return 0
+    fi
+
+    case "$repo_url" in
+        https://github.com/*)
+            printf 'https://x-access-token:%s@github.com/%s\n' "$GITHUB_TOKEN" "${repo_url#https://github.com/}"
+            ;;
+        http://github.com/*)
+            printf 'https://x-access-token:%s@github.com/%s\n' "$GITHUB_TOKEN" "${repo_url#http://github.com/}"
+            ;;
+        git@github.com:*)
+            printf 'https://x-access-token:%s@github.com/%s\n' "$GITHUB_TOKEN" "${repo_url#git@github.com:}"
+            ;;
+        *)
+            printf '%s\n' "$repo_url"
+            ;;
+    esac
+}
+
 CONFIG_PATH="${HOMEBOY_DATAMACHINE_AGENT_CONFIG_PATH:-}"
 if [ -z "$CONFIG_PATH" ] && [ "${1:-}" != "" ]; then
     CONFIG_PATH="$1"
@@ -112,7 +136,8 @@ if [ -n "$BUNDLE_REPO" ]; then
         RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-datamachine-agent-runtime.XXXXXX")
     fi
     BUNDLE_CHECKOUT_DIR="$RUNTIME_DIR/bundle-repo"
-    git clone --quiet "$BUNDLE_REPO" "$BUNDLE_CHECKOUT_DIR"
+    BUNDLE_CLONE_URL=$(homeboy_datamachine_agent_bundle_clone_url "$BUNDLE_REPO")
+    git clone --quiet "$BUNDLE_CLONE_URL" "$BUNDLE_CHECKOUT_DIR"
     git -C "$BUNDLE_CHECKOUT_DIR" checkout --quiet "$BUNDLE_REF"
     BUNDLE_PATH="$BUNDLE_CHECKOUT_DIR/$BUNDLE_PATH_IN_REPO"
     if [ ! -d "$BUNDLE_PATH" ]; then
