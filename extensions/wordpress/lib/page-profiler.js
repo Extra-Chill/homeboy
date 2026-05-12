@@ -207,6 +207,53 @@ function restRoutePath(url) {
 	return normalizeRestWaterfallUrl(url).split('?', 1)[0];
 }
 
+function restRouteQuery(url) {
+	const normalized = normalizeRestWaterfallUrl(url);
+	const queryIndex = normalized.indexOf('?');
+	return queryIndex >= 0 ? normalized.slice(queryIndex + 1) : '';
+}
+
+function joinRestPathAndParams(path, params) {
+	const normalizedPath = normalizeRestUrl(path || '');
+	if (!isPlainObject(params) || Object.keys(params).length === 0) {
+		return normalizedPath;
+	}
+	const searchParams = new URLSearchParams();
+	for (const [key, value] of Object.entries(params)) {
+		if (value === undefined || value === null) {
+			continue;
+		}
+		if (Array.isArray(value)) {
+			for (const item of value) {
+				searchParams.append(key, String(item));
+			}
+			continue;
+		}
+		searchParams.set(key, String(value));
+	}
+	const query = searchParams.toString();
+	return query ? `${normalizedPath}${normalizedPath.includes('?') ? '&' : '?'}${query}` : normalizedPath;
+}
+
+function urlMatchesPattern(url, pattern) {
+	if (typeof pattern === 'function') {
+		return Boolean(pattern(url));
+	}
+	if (pattern instanceof RegExp) {
+		return pattern.test(url);
+	}
+	if (typeof pattern !== 'string' || pattern.trim() === '') {
+		return false;
+	}
+	const normalized = normalizeRestWaterfallUrl(url);
+	const value = pattern.trim();
+	if (value.includes('*')) {
+		const escaped = value.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+		return new RegExp(`^${escaped}$`).test(normalized) || new RegExp(`^${escaped}$`).test(restRoutePath(normalized));
+	}
+	return normalized === value || restRoutePath(normalized) === value || normalized.startsWith(`${value}?`);
+}
+
 function estimatePayloadBytes(value) {
 	if (typeof value === 'number' && Number.isFinite(value)) {
 		return Math.max(0, Math.round(value));
@@ -269,7 +316,10 @@ function normalizeApiFetchAttempt(row) {
 		error: row?.error,
 		errorCode: row?.errorCode,
 		responseContentType: row?.responseContentType,
-		responseBodyBytes: row?.responseBodyBytes,
+		responseBodyBytes: row?.responseBodyBytes ?? row?.decodedBodySize ?? row?.encodedBodySize ?? row?.transferSize,
+		transferSize: row?.transferSize,
+		encodedBodySize: row?.encodedBodySize,
+		decodedBodySize: row?.decodedBodySize,
 		responseBodySample: row?.responseBodySample,
 		responseBodySampleTruncated: Boolean(row?.responseBodySampleTruncated),
 		responseBodySampleError: row?.responseBodySampleError,
@@ -290,7 +340,10 @@ function normalizeRestNetworkRequest(row) {
 		ttfbMs: round(row?.ttfb_ms ?? row?.ttfbMs),
 		resourceType: row?.resource_type || row?.resourceType || row?.initiatorType,
 		responseContentType: row?.responseContentType,
-		responseBodyBytes: row?.responseBodyBytes,
+		responseBodyBytes: row?.responseBodyBytes ?? row?.decodedBodySize ?? row?.encodedBodySize ?? row?.transferSize,
+		transferSize: row?.transferSize,
+		encodedBodySize: row?.encodedBodySize,
+		decodedBodySize: row?.decodedBodySize,
 		responseBodySample: row?.responseBodySample,
 		responseBodySampleTruncated: Boolean(row?.responseBodySampleTruncated),
 		responseBodySampleError: row?.responseBodySampleError,
@@ -301,7 +354,7 @@ function copyResponseSampleFields(target, source) {
 	if (!target || !source) {
 		return target;
 	}
-	for (const key of ['responseContentType', 'responseBodyBytes', 'responseBodySample', 'responseBodySampleTruncated', 'responseBodySampleError']) {
+	for (const key of ['responseContentType', 'responseBodyBytes', 'transferSize', 'encodedBodySize', 'decodedBodySize', 'responseBodySample', 'responseBodySampleTruncated', 'responseBodySampleError']) {
 		if (target[key] === undefined && source[key] !== undefined) {
 			target[key] = source[key];
 		}
@@ -593,6 +646,9 @@ function summarizeWordPressRestWaterfall(input = {}) {
 			errorCode: attempt.errorCode,
 			responseContentType: attempt.responseContentType || network?.responseContentType,
 			responseBodyBytes: attempt.responseBodyBytes || network?.responseBodyBytes,
+			transferSize: network?.transferSize || attempt.transferSize,
+			encodedBodySize: network?.encodedBodySize || attempt.encodedBodySize,
+			decodedBodySize: network?.decodedBodySize || attempt.decodedBodySize,
 			responseBodySample: attempt.responseBodySample || network?.responseBodySample,
 			responseBodySampleTruncated: Boolean(attempt.responseBodySampleTruncated || network?.responseBodySampleTruncated),
 			responseBodySampleError: attempt.responseBodySampleError || network?.responseBodySampleError,
@@ -616,6 +672,9 @@ function summarizeWordPressRestWaterfall(input = {}) {
 				networkMatched: true,
 				responseContentType: network.responseContentType,
 				responseBodyBytes: network.responseBodyBytes,
+				transferSize: network.transferSize,
+				encodedBodySize: network.encodedBodySize,
+				decodedBodySize: network.decodedBodySize,
 				responseBodySample: network.responseBodySample,
 				responseBodySampleTruncated: Boolean(network.responseBodySampleTruncated),
 				responseBodySampleError: network.responseBodySampleError,
@@ -663,6 +722,396 @@ function summarizeWordPressRestWaterfall(input = {}) {
 		preloadedOrCacheRows: rows.filter((row) => row.source === 'preloaded-or-cache'),
 		afterReadyRows: rows.filter((row) => row.afterReady),
 	};
+}
+
+function restResponseBytes(row) {
+	return pickNumber(row, ['responseBodyBytes', 'decodedBodySize', 'encodedBodySize', 'transferSize', 'preloadPayloadBytes']) || 0;
+}
+
+function normalizeRestRouteBudgets(restBudget = {}) {
+	const routes = [];
+	const addRouteBudget = (pattern, budget) => {
+		if (!pattern || !isPlainObject(budget)) {
+			return;
+		}
+		routes.push({ pattern, ...budget });
+	};
+
+	if (Array.isArray(restBudget.routes)) {
+		for (const route of restBudget.routes) {
+			if (isPlainObject(route)) {
+				routes.push(route);
+			}
+		}
+	}
+	if (isPlainObject(restBudget.routes)) {
+		for (const [pattern, budget] of Object.entries(restBudget.routes)) {
+			addRouteBudget(pattern, budget);
+		}
+	}
+	if (isPlainObject(restBudget.perRoute)) {
+		for (const [pattern, budget] of Object.entries(restBudget.perRoute)) {
+			addRouteBudget(pattern, budget);
+		}
+	}
+	return routes;
+}
+
+function routeBudgetForRow(row, restBudget = {}) {
+	const routeBudgets = normalizeRestRouteBudgets(restBudget);
+	return routeBudgets.find((budget) => urlMatchesPattern(row.url, budget.pattern || budget.path || budget.route));
+}
+
+function createWordPressBudgetFinding({ severity = 'error', code, message, actual, expected, unit, subject, data = {} }) {
+	return {
+		category: 'budget',
+		severity,
+		code,
+		message,
+		actual,
+		expected,
+		unit,
+		subject,
+		...data,
+	};
+}
+
+function restBudgetRowData(row, budgetThreshold, phase = 'page-profile') {
+	return {
+		method: normalizeRestMethod(row.method),
+		normalizedPath: restRoutePath(row.url),
+		queryString: restRouteQuery(row.url),
+		status: row.status || 0,
+		durationMs: round(row.durationMs),
+		phase,
+		threshold: budgetThreshold,
+		responseBodyBytes: restResponseBytes(row),
+		decodedBodySize: row.decodedBodySize,
+		encodedBodySize: row.encodedBodySize,
+		transferSize: row.transferSize,
+	};
+}
+
+function evaluateWordPressRestPayloadBudgets(waterfall, budgets = {}, options = {}) {
+	const restBudget = budgets.rest || budgets;
+	if (!isPlainObject(restBudget)) {
+		return { findings: [], topPayloadRows: [], totals: { responseBytes: 0, restRequests: 0 } };
+	}
+	const rows = Array.isArray(waterfall?.rows) ? waterfall.rows : [];
+	const allow = Array.isArray(restBudget.allow) ? restBudget.allow : [];
+	const evaluatedRows = rows.filter((row) => !allow.some((pattern) => urlMatchesPattern(row.url, pattern)));
+	const topPayloadRows = [...evaluatedRows]
+		.map((row) => ({ ...row, responseBytes: restResponseBytes(row) }))
+		.sort((a, b) => b.responseBytes - a.responseBytes)
+		.slice(0, options.limit || 10);
+	const totalResponseBytes = evaluatedRows.reduce((total, row) => total + restResponseBytes(row), 0);
+	const findings = [];
+
+	for (const row of evaluatedRows) {
+		const routeBudget = routeBudgetForRow(row, restBudget);
+		const maxResponseBytes = routeBudget?.maxResponseBytes ?? routeBudget?.maxBytes ?? restBudget.maxResponseBytes ?? restBudget.maxBytes;
+		const bytes = restResponseBytes(row);
+		if (typeof maxResponseBytes === 'number' && bytes > maxResponseBytes) {
+			const subject = `${normalizeRestMethod(row.method)} ${normalizeRestWaterfallUrl(row.url)}`;
+			findings.push(createWordPressBudgetFinding({
+				code: 'wordpress.rest.max_response_bytes',
+				message: `REST response exceeded ${maxResponseBytes} byte budget`,
+				actual: bytes,
+				expected: maxResponseBytes,
+				unit: 'bytes',
+				subject,
+				data: restBudgetRowData(row, maxResponseBytes, options.phase),
+			}));
+		}
+	}
+
+	if (typeof restBudget.maxTotalResponseBytes === 'number' && totalResponseBytes > restBudget.maxTotalResponseBytes) {
+		findings.push(createWordPressBudgetFinding({
+			code: 'wordpress.rest.max_total_response_bytes',
+			message: `Total REST responses exceeded ${restBudget.maxTotalResponseBytes} byte budget`,
+			actual: totalResponseBytes,
+			expected: restBudget.maxTotalResponseBytes,
+			unit: 'bytes',
+			subject: options.subject || 'WordPress REST page profile',
+			data: {
+				phase: options.phase || 'page-profile',
+				threshold: restBudget.maxTotalResponseBytes,
+				topPayloadRows,
+			},
+		}));
+	}
+	if (typeof restBudget.maxRestRequests === 'number' && evaluatedRows.length > restBudget.maxRestRequests) {
+		findings.push(createWordPressBudgetFinding({
+			code: 'wordpress.rest.max_requests',
+			message: `REST request count exceeded ${restBudget.maxRestRequests} request budget`,
+			actual: evaluatedRows.length,
+			expected: restBudget.maxRestRequests,
+			unit: 'requests',
+			subject: options.subject || 'WordPress REST page profile',
+			data: {
+				phase: options.phase || 'page-profile',
+				threshold: restBudget.maxRestRequests,
+			},
+		}));
+	}
+
+	return {
+		findings,
+		topPayloadRows,
+		totals: {
+			responseBytes: totalResponseBytes,
+			restRequests: evaluatedRows.length,
+		},
+	};
+}
+
+function formatWordPressRestPayloadBudgetMarkdownReport(result, options = {}) {
+	const rows = Array.isArray(result?.topPayloadRows) ? result.topPayloadRows : [];
+	const findings = Array.isArray(result?.findings) ? result.findings : [];
+	const limit = options.limit || 10;
+	const lines = [
+		'## WordPress REST payload budgets',
+		'',
+		`- REST response bytes: ${result?.totals?.responseBytes || 0}`,
+		`- REST requests evaluated: ${result?.totals?.restRequests || 0}`,
+		`- Budget findings: ${findings.length}`,
+		'',
+		'| Endpoint | Status | Duration | Bytes |',
+		'|---|---:|---:|---:|',
+	];
+	for (const row of rows.slice(0, limit)) {
+		lines.push(`| \`${normalizeRestMethod(row.method)} ${normalizeRestWaterfallUrl(row.url)}\` | ${row.status || 0} | ${round(row.durationMs)}ms | ${row.responseBytes || restResponseBytes(row)} |`);
+	}
+	if (findings.length > 0) {
+		lines.push('', '## Budget findings', '', '| Code | Subject | Actual | Expected |', '|---|---|---:|---:|');
+		for (const finding of findings.slice(0, limit)) {
+			lines.push(`| \`${finding.code}\` | \`${finding.subject}\` | ${finding.actual} ${finding.unit || ''} | ${finding.expected} ${finding.unit || ''} |`);
+		}
+	}
+	return lines.join('\n');
+}
+
+function normalizeRestMatrixEndpoint(endpoint, index = 0) {
+	if (typeof endpoint === 'string') {
+		return { id: `rest-${index + 1}`, method: 'GET', path: endpoint, params: {}, headers: {}, body: undefined, budget: {} };
+	}
+	if (!isPlainObject(endpoint)) {
+		throw new TypeError('REST matrix endpoint must be a string or object');
+	}
+	const path = endpoint.path || endpoint.url || endpoint.route;
+	if (typeof path !== 'string' || path.trim() === '') {
+		throw new TypeError('REST matrix endpoint requires path, url, or route');
+	}
+	return {
+		id: endpoint.id || endpoint.label || `${normalizeRestMethod(endpoint.method)} ${joinRestPathAndParams(path, endpoint.params)}`,
+		label: endpoint.label,
+		method: normalizeRestMethod(endpoint.method),
+		path,
+		params: isPlainObject(endpoint.params) ? endpoint.params : {},
+		headers: isPlainObject(endpoint.headers) ? endpoint.headers : {},
+		body: endpoint.body,
+		budget: isPlainObject(endpoint.budget) ? endpoint.budget : {},
+		user: endpoint.user,
+	};
+}
+
+function summarizeJsonShape(value) {
+	if (Array.isArray(value)) {
+		return {
+			type: 'array',
+			itemCount: value.length,
+			itemType: value.length > 0 ? summarizeJsonShape(value[0]).type : undefined,
+		};
+	}
+	if (isPlainObject(value)) {
+		const keys = Object.keys(value);
+		return {
+			type: 'object',
+			keys,
+			topLevelKeys: keys,
+			itemCount: Array.isArray(value.items) ? value.items.length : undefined,
+		};
+	}
+	return { type: value === null ? 'null' : typeof value };
+}
+
+function restMatrixResultFindings(result) {
+	const budget = result.budget || {};
+	const findings = [];
+	const subject = `${result.method} ${result.normalizedUrl}`;
+	const expectedStatus = budget.expectedStatus ?? budget.status;
+	if (expectedStatus !== undefined) {
+		const expectedStatuses = Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus];
+		if (!expectedStatuses.includes(result.status)) {
+			findings.push(createWordPressBudgetFinding({
+				code: 'wordpress.rest_matrix.expected_status',
+				message: `REST matrix endpoint returned status ${result.status}`,
+				actual: result.status,
+				expected: expectedStatuses.join(','),
+				unit: 'status',
+				subject,
+				data: { phase: 'rest-matrix', method: result.method, normalizedPath: result.normalizedPath, queryString: result.queryString, threshold: expectedStatuses },
+			}));
+		}
+	}
+	if (typeof budget.maxBytes === 'number' && result.responseBytes > budget.maxBytes) {
+		findings.push(createWordPressBudgetFinding({
+			code: 'wordpress.rest_matrix.max_bytes',
+			message: `REST matrix endpoint exceeded ${budget.maxBytes} byte budget`,
+			actual: result.responseBytes,
+			expected: budget.maxBytes,
+			unit: 'bytes',
+			subject,
+			data: { phase: 'rest-matrix', method: result.method, normalizedPath: result.normalizedPath, queryString: result.queryString, status: result.status, durationMs: result.durationMs, threshold: budget.maxBytes },
+		}));
+	}
+	if (typeof budget.maxMs === 'number' && result.durationMs > budget.maxMs) {
+		findings.push(createWordPressBudgetFinding({
+			code: 'wordpress.rest_matrix.max_ms',
+			message: `REST matrix endpoint exceeded ${budget.maxMs}ms duration budget`,
+			actual: result.durationMs,
+			expected: budget.maxMs,
+			unit: 'ms',
+			subject,
+			data: { phase: 'rest-matrix', method: result.method, normalizedPath: result.normalizedPath, queryString: result.queryString, status: result.status, threshold: budget.maxMs },
+		}));
+	}
+	if (typeof budget.maxItemCount === 'number' && typeof result.itemCount === 'number' && result.itemCount > budget.maxItemCount) {
+		findings.push(createWordPressBudgetFinding({
+			code: 'wordpress.rest_matrix.max_item_count',
+			message: `REST matrix endpoint exceeded ${budget.maxItemCount} item budget`,
+			actual: result.itemCount,
+			expected: budget.maxItemCount,
+			unit: 'items',
+			subject,
+			data: { phase: 'rest-matrix', method: result.method, normalizedPath: result.normalizedPath, queryString: result.queryString, status: result.status, threshold: budget.maxItemCount },
+		}));
+	}
+	return findings;
+}
+
+async function executeWordPressRestMatrixRequest({ page, baseUrl, endpoint, headers = {} }) {
+	const normalizedUrl = joinRestPathAndParams(endpoint.path, endpoint.params);
+	const url = resolveWordPressUrl(baseUrl, normalizedUrl.startsWith('/wp-json/') ? normalizedUrl : `/wp-json${normalizedUrl.startsWith('/') ? '' : '/'}${normalizedUrl}`);
+	const requestHeaders = { accept: 'application/json', ...headers, ...endpoint.headers };
+	const body = endpoint.body === undefined || endpoint.body === null ? undefined : JSON.stringify(endpoint.body);
+	if (body !== undefined && !requestHeaders['content-type'] && !requestHeaders['Content-Type']) {
+		requestHeaders['content-type'] = 'application/json';
+	}
+
+	if (page && typeof page.evaluate === 'function') {
+		return page.evaluate(async ({ url: requestUrl, method, requestHeaders: browserHeaders, body: requestBody }) => {
+			const started = performance.now();
+			const response = await fetch(requestUrl, {
+				method,
+				headers: browserHeaders,
+				body: requestBody,
+				credentials: 'same-origin',
+			});
+			const text = await response.text();
+			return {
+				status: response.status,
+				durationMs: Math.round(performance.now() - started),
+				contentType: response.headers.get('content-type') || '',
+				bodyText: text,
+			};
+		}, { url, method: endpoint.method, requestHeaders, body });
+	}
+
+	if (typeof fetch !== 'function') {
+		throw new TypeError('profileWordPressRestMatrix requires page.evaluate() or global fetch()');
+	}
+	const started = Date.now();
+	const response = await fetch(url, { method: endpoint.method, headers: requestHeaders, body });
+	return {
+		status: response.status,
+		durationMs: Date.now() - started,
+		contentType: response.headers.get('content-type') || '',
+		bodyText: await response.text(),
+	};
+}
+
+async function profileWordPressRestMatrix(input = {}) {
+	if (!input || typeof input !== 'object') {
+		throw new TypeError('profileWordPressRestMatrix requires an input object');
+	}
+	const endpoints = Array.isArray(input.restMatrix) ? input.restMatrix : input.endpoints;
+	if (!Array.isArray(endpoints)) {
+		throw new TypeError('profileWordPressRestMatrix requires restMatrix or endpoints array');
+	}
+	const normalizedEndpoints = endpoints.map(normalizeRestMatrixEndpoint);
+	const results = [];
+	for (const endpoint of normalizedEndpoints) {
+		const user = endpoint.user || input.user || 'default-admin';
+		if (typeof input.authenticateAs === 'function') {
+			await input.authenticateAs(user, { page: input.page, endpoint });
+		}
+		const response = await executeWordPressRestMatrixRequest({
+			page: input.page,
+			baseUrl: input.baseUrl,
+			endpoint,
+			headers: input.headers || {},
+		});
+		let parsed;
+		try {
+			parsed = response.bodyText ? JSON.parse(response.bodyText) : undefined;
+		} catch {
+			parsed = undefined;
+		}
+		const shape = summarizeJsonShape(parsed);
+		const responseBytes = estimatePayloadBytes(response.bodyText || '');
+		const normalizedUrl = joinRestPathAndParams(endpoint.path, endpoint.params);
+		const result = {
+			id: endpoint.id,
+			label: endpoint.label,
+			user,
+			method: endpoint.method,
+			path: endpoint.path,
+			normalizedUrl,
+			normalizedPath: restRoutePath(normalizedUrl),
+			queryString: restRouteQuery(normalizedUrl),
+			status: response.status,
+			durationMs: round(response.durationMs),
+			responseBytes,
+			contentType: response.contentType,
+			jsonShape: shape,
+			topLevelKeys: shape.topLevelKeys || [],
+			itemCount: shape.itemCount,
+			budget: endpoint.budget,
+		};
+		result.findings = restMatrixResultFindings(result);
+		results.push(result);
+	}
+	const findings = results.flatMap((result) => result.findings);
+	return {
+		user: input.user || 'default-admin',
+		count: results.length,
+		findings,
+		results,
+	};
+}
+
+function formatWordPressRestMatrixMarkdownReport(matrix, options = {}) {
+	const results = Array.isArray(matrix?.results) ? matrix.results : [];
+	const limit = options.limit || 50;
+	const lines = [
+		'## WordPress REST endpoint matrix',
+		'',
+		`- Endpoints checked: ${results.length}`,
+		`- Budget findings: ${(matrix?.findings || []).length}`,
+		'',
+		'| Endpoint | Status | Duration | Bytes | Shape | Findings |',
+		'|---|---:|---:|---:|---|---:|',
+	];
+	for (const result of results.slice(0, limit)) {
+		const shape = result.jsonShape?.type === 'object'
+			? `object(${(result.topLevelKeys || []).slice(0, 6).join(', ')})`
+			: result.jsonShape?.type === 'array'
+				? `array(${result.itemCount || 0})`
+				: result.jsonShape?.type || 'unknown';
+		lines.push(`| \`${result.method} ${result.normalizedUrl}\` | ${result.status} | ${result.durationMs}ms | ${result.responseBytes} | ${shape} | ${(result.findings || []).length} |`);
+	}
+	return lines.join('\n');
 }
 
 function classifyWordPressRestPreloadOpportunity(row) {
@@ -1389,6 +1838,7 @@ function diagnoseWordPressPageProfile(profile, options = {}) {
 	const thresholds = { ...DEFAULT_DIAGNOSIS_THRESHOLDS, ...(options.thresholds || {}) };
 	const resources = Array.isArray(profile.resources?.resources) ? profile.resources.resources : [];
 	const browserMetrics = options.browserMetrics || {};
+	const budgets = options.budgets || profile.budgets || {};
 	const networkRequests = Array.isArray(options.networkRequests) ? options.networkRequests.map(normalizeNetworkRequest) : [];
 	const readyMetric = browserMetrics[`${browserMetricName(profile.id)}_ready_ms`];
 	const readyAbsoluteMs = typeof readyMetric === 'number' ? readyMetric : undefined;
@@ -1409,6 +1859,10 @@ function diagnoseWordPressPageProfile(profile, options = {}) {
 	const byKind = aggregateResourcesByKind(resources);
 	const byFamily = aggregateResourcesByFamily(resources);
 	const heavyFamilies = byFamily.filter((group) => group.transferSize >= thresholds.assetBytes).slice(0, 10);
+	const restPayloadBudgets = evaluateWordPressRestPayloadBudgets(profile.restWaterfall, budgets, {
+		phase: 'page-profile',
+		subject: profile.id || profile.path || 'WordPress page profile',
+	});
 
 	if (profile.readyMs >= thresholds.readyMs) {
 		addFinding(findings, 'info', 'slow-ready', `Page reached readiness in ${round(profile.readyMs)}ms`, {
@@ -1450,6 +1904,7 @@ function diagnoseWordPressPageProfile(profile, options = {}) {
 			heavyFamilies,
 		});
 	}
+	findings.push(...restPayloadBudgets.findings);
 
 	return {
 		thresholds,
@@ -1468,6 +1923,7 @@ function diagnoseWordPressPageProfile(profile, options = {}) {
 			byFamily: byFamily.slice(0, 20),
 			heavyFamilies,
 		},
+		restPayloadBudgets,
 		lateResources: lateResources.slice(0, 20),
 		restAfterReady: restAfterReady.slice(0, 20),
 		failedRequests: failedRequests.slice(0, 20),
@@ -1545,10 +2001,14 @@ async function profileWordPressPage(input) {
 		readyMs,
 		resources: resourceSummary,
 		restWaterfall,
+		budgets: {
+			...(input.budgets || {}),
+			...(spec.budgets || {}),
+		},
 		correlation,
 	};
 
-	return { ...profile, diagnosis: diagnoseWordPressPageProfile(profile) };
+	return { ...profile, diagnosis: diagnoseWordPressPageProfile(profile, { budgets: profile.budgets }) };
 }
 
 async function profileWordPressPages(input) {
@@ -1586,12 +2046,16 @@ module.exports = {
 	collectWordPressRestPreloads,
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
+	evaluateWordPressRestPayloadBudgets,
 	formatWordPressPerformanceGateReport,
+	formatWordPressRestMatrixMarkdownReport,
 	formatWordPressRestNetworkDiffMarkdownReport,
+	formatWordPressRestPayloadBudgetMarkdownReport,
 	formatWordPressRestWaterfallMarkdownReport,
 	installWordPressRestInstrumentation,
 	normalizePageManifest,
 	normalizePageSpec,
+	profileWordPressRestMatrix,
 	resourceFamily,
 	profileWordPressPage,
 	profileWordPressPages,
