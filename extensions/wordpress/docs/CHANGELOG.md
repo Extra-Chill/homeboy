@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.72.0] - 2026-05-12
+
+### Added
+- support opaque runner workspace aliases
+
 ## [2.71.1] - 2026-05-12
 
 ### Fixed
