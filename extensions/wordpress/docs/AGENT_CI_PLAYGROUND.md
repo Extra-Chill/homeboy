@@ -161,6 +161,11 @@ only the natural task request. Hidden mode enables runner-owned change capture b
 default; set `runner_workspace.capture_changes: false` only when a consumer wants
 hidden prompt behavior without post-run workspace publication.
 
+`artifact_export_config` writes bundle-file artifacts such as agent daily memory
+back to the target repository. Full job artifact JSON is noisier and is disabled
+by default; set `artifact_export_config: '{"include_job_artifacts":true}'` for
+deep sandbox runs that need committed job metadata beside the bundle.
+
 `provider_plugin` lets callers replace the OpenAI provider preset without
 changing the workload. The reusable workflow checks out the configured plugin,
 passes the configured register function to `datamachine-agent-workload.php`, and

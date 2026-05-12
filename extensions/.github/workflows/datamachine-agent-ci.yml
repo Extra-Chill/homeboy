@@ -119,7 +119,7 @@ name: Data Machine Agent CI (reusable)
         type: string
         default: ""
       artifact_export_config:
-        description: JSON config for exporting job artifacts back to the target repo. Empty object uses the reusable workflow defaults.
+        description: JSON config for exporting bundle-file artifacts back to the target repo. Set include_job_artifacts true to also commit full job artifact JSON.
         type: string
         default: "{}"
       comment_pr_summary:
@@ -738,6 +738,7 @@ jobs:
                 only_when_no_pr: true,
                 repo: $targetRepo,
                 path_prefix: $bundlePathInRepo,
+                include_job_artifacts: false,
                 branch_template: "agent-artifacts/{agent_slug}-{run_id}-{provider}-{model}-{job_id}",
                 commit_message_template: "chore: persist {type} artifact",
                 pr_title_template: "Persist agent run artifacts",
