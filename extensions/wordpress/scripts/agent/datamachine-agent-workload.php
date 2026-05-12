@@ -440,6 +440,8 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
             'agent_slug' => $agent_slug,
             'run_id'     => $run_id,
             'job_id'     => $job_id,
+            'provider'   => homeboy_datamachine_agent_slug_fragment( homeboy_datamachine_agent_scalar( $config, 'provider', 'provider' ) ),
+            'model'      => homeboy_datamachine_agent_slug_fragment( homeboy_datamachine_agent_scalar( $config, 'model', 'model' ) ),
         );
         $branch_template = (string) ( $export_config['branch_template'] ?? '' );
         $attached_to_pr  = false;
