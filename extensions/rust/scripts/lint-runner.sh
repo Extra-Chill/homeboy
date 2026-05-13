@@ -19,6 +19,7 @@ set -euo pipefail
 #   HOMEBOY_STEP            — comma-separated steps to run (fmt, clippy)
 #   HOMEBOY_SKIP            — comma-separated steps to skip
 #   HOMEBOY_DEBUG           — if "1", show debug output
+#   HOMEBOY_FIX_RESULTS_FILE — JSON sidecar receiving applied fix records
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/lib/resolve-context.sh}"
@@ -48,6 +49,63 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "PROJECT_PATH=${PROJECT_PATH}"
 fi
 
+FIX_RESULTS_JSON="[]"
+
+capture_rust_file_hashes() {
+    if ! git -C "${PROJECT_PATH}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        return 0
+    fi
+
+    git -C "${PROJECT_PATH}" ls-files '*.rs' | while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        if [ -f "${PROJECT_PATH}/${file}" ]; then
+            printf '%s\t%s\n' "$file" "$(shasum -a 256 "${PROJECT_PATH}/${file}" | cut -d ' ' -f 1)"
+        fi
+    done | sort
+}
+
+append_fix_results_for_changes() {
+    local rule="$1"
+    local action="$2"
+    local before_file="$3"
+    local after_file
+    after_file="$(mktemp)"
+    capture_rust_file_hashes > "$after_file"
+
+    local changed_files
+    changed_files="$(awk -F '\t' '
+        NR == FNR { before[$1] = $2; next }
+        !($1 in before) || before[$1] != $2 { print $1 }
+    ' "$before_file" "$after_file")"
+    rm -f "$after_file"
+
+    if [ -z "$changed_files" ]; then
+        return 0
+    fi
+
+    FIX_RESULTS_JSON="$(CHANGED_FILES="$changed_files" python3 -c '
+import json
+import os
+import sys
+
+results = json.loads(sys.argv[1])
+rule = sys.argv[2]
+action = sys.argv[3]
+for file in os.environ.get("CHANGED_FILES", "").splitlines():
+    if file:
+        results.append({"file": file, "rule": rule, "action": action})
+print(json.dumps(results))
+' "$FIX_RESULTS_JSON" "$rule" "$action" 2>/dev/null || printf '%s' "$FIX_RESULTS_JSON")"
+}
+
+write_fix_results_sidecar() {
+    if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ] && [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ]; then
+        printf '%s\n' "$FIX_RESULTS_JSON" > "${HOMEBOY_FIX_RESULTS_FILE}"
+    fi
+}
+
+trap write_fix_results_sidecar EXIT
+
 # Verify this is a Rust project
 if [ ! -f "${PROJECT_PATH}/Cargo.toml" ]; then
     echo "Error: No Cargo.toml found at ${PROJECT_PATH}"
@@ -62,20 +120,25 @@ if should_run_step "fmt"; then
     if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         echo ""
         echo "Running cargo fmt (fix mode)..."
+        FMT_BEFORE="$(mktemp)"
+        capture_rust_file_hashes > "$FMT_BEFORE"
         set +e
         FMT_OUTPUT=$(cargo fmt --manifest-path "${PROJECT_PATH}/Cargo.toml" 2>&1)
         FMT_EXIT=$?
         set -e
 
         if [ $FMT_EXIT -eq 0 ]; then
+            append_fix_results_for_changes "rustfmt" "format" "$FMT_BEFORE"
             echo "cargo fmt: applied formatting fixes"
         else
+            rm -f "$FMT_BEFORE"
             echo "cargo fmt failed:"
             echo "$FMT_OUTPUT"
             FAILED_STEP="cargo fmt"
             FAILURE_OUTPUT="$FMT_OUTPUT"
             exit 1
         fi
+        rm -f "$FMT_BEFORE"
     else
         # Determine whether to scope fmt to changed files only.
         # When HOMEBOY_CHANGED_SINCE is set (CI), only check files the PR
@@ -191,6 +254,11 @@ if should_run_step "clippy"; then
     fi
 
     CLIPPY_TMPFILE=$(mktemp)
+    CLIPPY_BEFORE=""
+    if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
+        CLIPPY_BEFORE="$(mktemp)"
+        capture_rust_file_hashes > "$CLIPPY_BEFORE"
+    fi
 
     set +e
     cargo "${CLIPPY_ARGS[@]}" 2>&1 | tee "$CLIPPY_TMPFILE"
@@ -243,8 +311,15 @@ if should_run_step "clippy"; then
     fi
 
     if [ $CLIPPY_EXIT -eq 0 ]; then
+        if [ -n "$CLIPPY_BEFORE" ]; then
+            append_fix_results_for_changes "clippy" "rewrite" "$CLIPPY_BEFORE"
+            rm -f "$CLIPPY_BEFORE"
+        fi
         echo "cargo clippy: passed"
     else
+        if [ -n "$CLIPPY_BEFORE" ]; then
+            rm -f "$CLIPPY_BEFORE"
+        fi
         if [ "${HOMEBOY_SUMMARY_MODE:-}" = "1" ]; then
             WARNING_COUNT=$(echo "$CLIPPY_OUTPUT" | grep -c "^warning\[" || true)
             ERROR_COUNT=$(echo "$CLIPPY_OUTPUT" | grep -c "^error\[" || true)
@@ -268,6 +343,8 @@ if should_run_step "fix"; then
     if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         echo ""
         echo "Running cargo fix (compiler warnings)..."
+        FIX_BEFORE="$(mktemp)"
+        capture_rust_file_hashes > "$FIX_BEFORE"
 
         set +e
         FIX_OUTPUT=$(cargo fix \
@@ -278,8 +355,10 @@ if should_run_step "fix"; then
         set -e
 
         if [ $FIX_EXIT -eq 0 ]; then
+            append_fix_results_for_changes "cargo_fix" "rewrite" "$FIX_BEFORE"
             echo "cargo fix: applied compiler warning fixes"
         else
+            append_fix_results_for_changes "cargo_fix" "rewrite" "$FIX_BEFORE"
             # cargo fix failure is non-fatal in fix-only mode — some warnings
             # can't be auto-fixed (e.g., dead_code on pub items).
             echo "cargo fix: exited non-zero (${FIX_EXIT}), continuing"
@@ -288,6 +367,7 @@ if should_run_step "fix"; then
                 echo "$FIX_OUTPUT"
             fi
         fi
+        rm -f "$FIX_BEFORE"
     else
         echo ""
         echo "Skipping cargo fix (only runs in fix-only mode)"
