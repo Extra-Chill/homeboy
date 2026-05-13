@@ -60,7 +60,7 @@ function normalizeReadySpec(ready) {
 	}
 
 	const normalized = { ...ready };
-	if (!normalized.state && !normalized.selector && !normalized.frame && !normalized.frameSelector && !normalized.function) {
+	if (!normalized.state && !normalized.selector && !normalized.frame && !normalized.frameSelector && !normalized.function && !normalized.frameFunction) {
 		normalized.state = 'domcontentloaded';
 	}
 	return normalized;
@@ -1522,6 +1522,13 @@ async function waitForPageReady(page, ready, options = {}) {
 				timeout,
 			});
 			record('frameSelectorMs');
+		}
+		if (spec.frameFunction) {
+			if (typeof frame.waitForFunction !== 'function') {
+				throw new TypeError('ready.frameFunction requires frame.waitForFunction()');
+			}
+			await frame.waitForFunction(spec.frameFunction, spec.frameFunctionArg, { timeout });
+			record('frameFunctionMs');
 		}
 	}
 
