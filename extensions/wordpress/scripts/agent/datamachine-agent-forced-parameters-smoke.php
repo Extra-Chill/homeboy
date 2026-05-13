@@ -90,14 +90,32 @@ namespace {
     putenv(
         'HOMEBOY_DATAMACHINE_AGENT_CONFIG=' . wp_json_encode(
             array(
-                'dry_run'    => true,
-                'agent_slug' => 'forced-parameters-smoke-agent',
-                'flow_slug'  => 'forced-parameters-smoke-flow',
+                'dry_run'     => true,
+                'bundle_path' => __DIR__,
+                'agent_slug'  => 'forced-parameters-smoke-agent',
+                'flow_slug'   => 'forced-parameters-smoke-flow',
+                'prompt'      => 'Dry-run the fingerprint smoke test.',
             )
         )
     );
 
-    require __DIR__ . '/datamachine-agent-workload.php';
+    $dry_run_result = require __DIR__ . '/datamachine-agent-workload.php';
+
+    $fingerprints = is_array( $dry_run_result ) ? ( $dry_run_result['metadata']['fingerprints'] ?? array() ) : array();
+    if ( empty( $fingerprints['prompt']['sha256'] ) ) {
+        fwrite( STDERR, "Expected dry-run result to include a prompt fingerprint.\n" );
+        exit( 1 );
+    }
+
+    if ( empty( $fingerprints['bundle']['sha256'] ) || empty( $fingerprints['bundle']['file_count'] ) ) {
+        fwrite( STDERR, "Expected dry-run result to include a bundle fingerprint.\n" );
+        exit( 1 );
+    }
+
+    if ( empty( $fingerprints['tool_policy']['sha256'] ) ) {
+        fwrite( STDERR, "Expected dry-run result to include a tool-policy fingerprint.\n" );
+        exit( 1 );
+    }
 
     $recorder = new Homeboy_Datamachine_Agent_Tool_Recorder();
     $result   = $recorder->handle_tool_call(

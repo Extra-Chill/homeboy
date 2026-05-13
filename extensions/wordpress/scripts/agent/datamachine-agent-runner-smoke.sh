@@ -82,8 +82,16 @@ bootstrap_value=$(jq -r "$scenario | .metadata.bootstrap_value // \"missing\"" "
 bundle_repo=$(jq -r "$scenario | .metadata.bundle_repo // \"missing\"" "$RESULTS_TMPFILE")
 bundle_ref=$(jq -r "$scenario | .metadata.bundle_ref // \"missing\"" "$RESULTS_TMPFILE")
 bundle_path=$(jq -r "$scenario | .metadata.bundle_path // \"missing\"" "$RESULTS_TMPFILE")
+prompt_sha=$(jq -r "$scenario | .metadata.fingerprints.prompt.sha256 // \"missing\"" "$RESULTS_TMPFILE")
+bundle_sha=$(jq -r "$scenario | .metadata.fingerprints.bundle.sha256 // \"missing\"" "$RESULTS_TMPFILE")
+tool_policy_sha=$(jq -r "$scenario | .metadata.fingerprints.tool_policy.sha256 // \"missing\"" "$RESULTS_TMPFILE")
 if [ "$provider" != "example-provider" ] || [ "$model" != "example-model" ]; then
     echo "ERROR: provider/model metadata missing (provider=$provider model=$model)" >&2
+    cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+if [ "$prompt_sha" = "missing" ] || [ -z "$prompt_sha" ] || [ "$bundle_sha" = "missing" ] || [ -z "$bundle_sha" ] || [ "$tool_policy_sha" = "missing" ] || [ -z "$tool_policy_sha" ]; then
+    echo "ERROR: fingerprint metadata missing (prompt=$prompt_sha bundle=$bundle_sha tool_policy=$tool_policy_sha)" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
 fi

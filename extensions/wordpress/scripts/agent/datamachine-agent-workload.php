@@ -45,6 +45,126 @@ if ( ! function_exists( 'homeboy_datamachine_agent_scalar' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_fingerprints' ) ) {
+    function homeboy_datamachine_agent_stable_value( $value ) {
+        if ( ! is_array( $value ) ) {
+            return $value;
+        }
+
+        $keys = array_keys( $value );
+        if ( $keys !== range( 0, count( $value ) - 1 ) ) {
+            ksort( $value );
+        }
+
+        foreach ( $value as $key => $child ) {
+            $value[ $key ] = homeboy_datamachine_agent_stable_value( $child );
+        }
+
+        return $value;
+    }
+
+    function homeboy_datamachine_agent_json_sha256( $value ): string {
+        return hash( 'sha256', wp_json_encode( homeboy_datamachine_agent_stable_value( $value ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
+    }
+
+    function homeboy_datamachine_agent_prompt_fingerprint( string $prompt ): array {
+        return array(
+            'sha256' => '' !== $prompt ? hash( 'sha256', $prompt ) : '',
+            'bytes'  => strlen( $prompt ),
+        );
+    }
+
+    function homeboy_datamachine_agent_bundle_fingerprint( string $bundle_path, array $config ): array {
+        $fingerprint = array_filter(
+            array(
+                'path'         => $bundle_path,
+                'repo'         => homeboy_datamachine_agent_scalar( $config, 'bundle_repo' ),
+                'ref'          => homeboy_datamachine_agent_scalar( $config, 'bundle_ref' ),
+                'path_in_repo' => homeboy_datamachine_agent_scalar( $config, 'bundle_path_in_repo' ),
+            ),
+            static fn( $value ) => '' !== $value
+        );
+
+        if ( '' === $bundle_path || ! is_dir( $bundle_path ) ) {
+            return $fingerprint;
+        }
+
+        $files = array();
+        $hash  = hash_init( 'sha256' );
+        $bytes = 0;
+
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator( $bundle_path, FilesystemIterator::SKIP_DOTS )
+        );
+        foreach ( $iterator as $file ) {
+            if ( ! $file instanceof SplFileInfo || ! $file->isFile() ) {
+                continue;
+            }
+
+            $path = $file->getPathname();
+            if ( preg_match( '#/(?:\.git|node_modules|vendor)/#', $path ) ) {
+                continue;
+            }
+            if ( ! preg_match( '/\.(?:json|md|txt|php)$/i', $path ) ) {
+                continue;
+            }
+
+            $relative = ltrim( str_replace( '\\', '/', substr( $path, strlen( rtrim( $bundle_path, DIRECTORY_SEPARATOR ) ) ) ), '/' );
+            $content  = file_get_contents( $path );
+            if ( false === $content ) {
+                continue;
+            }
+
+            $file_hash = hash( 'sha256', $content );
+            $file_size = strlen( $content );
+            $files[]   = array(
+                'path'   => $relative,
+                'sha256' => $file_hash,
+                'bytes'  => $file_size,
+            );
+            $bytes    += $file_size;
+        }
+
+        usort( $files, static fn( array $a, array $b ): int => strcmp( $a['path'], $b['path'] ) );
+        foreach ( $files as $file ) {
+            hash_update( $hash, $file['path'] . "\0" . $file['sha256'] . "\0" . $file['bytes'] . "\0" );
+        }
+
+        $fingerprint['sha256']     = hash_final( $hash );
+        $fingerprint['file_count'] = count( $files );
+        $fingerprint['bytes']      = $bytes;
+        $fingerprint['files']      = array_slice( $files, 0, 200 );
+
+        return $fingerprint;
+    }
+
+    function homeboy_datamachine_agent_tool_policy_fingerprint( array $config ): array {
+        $policy = array(
+            'required_abilities'     => $config['required_abilities'] ?? array(),
+            'ability_tools'          => $config['ability_tools'] ?? array(),
+            'tool_recorders'         => $config['tool_recorders'] ?? array(),
+            'pipeline_step_patches'  => $config['pipeline_step_patches'] ?? array(),
+            'flow_step_patches'      => $config['flow_step_patches'] ?? array(),
+            'runner_workspace'       => $config['runner_workspace'] ?? array(),
+            'success_requires_pr'    => ! empty( $config['success_requires_pr'] ),
+            'success_completion_outcomes' => $config['success_completion_outcomes'] ?? array(),
+        );
+
+        return array(
+            'sha256' => homeboy_datamachine_agent_json_sha256( $policy ),
+            'policy' => homeboy_datamachine_agent_stable_value( $policy ),
+        );
+    }
+
+    function homeboy_datamachine_agent_fingerprints( array $config, string $prompt, string $bundle_path ): array {
+        return array(
+            'prompt'     => homeboy_datamachine_agent_prompt_fingerprint( $prompt ),
+            'bundle'     => homeboy_datamachine_agent_bundle_fingerprint( $bundle_path, $config ),
+            'tool_policy' => homeboy_datamachine_agent_tool_policy_fingerprint( $config ),
+        );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_path_value' ) ) {
     function homeboy_datamachine_agent_path_value( array $sources, string $path ) {
         $parts = array_filter( explode( '.', $path ), static fn( $part ) => '' !== $part );
@@ -1841,6 +1961,7 @@ if ( ! empty( $config['dry_run'] ) ) {
             'flow_slug'           => homeboy_datamachine_agent_scalar( $config, 'flow_slug' ),
             'provider'            => homeboy_datamachine_agent_scalar( $config, 'provider', 'openai' ),
             'model'               => homeboy_datamachine_agent_scalar( $config, 'model', 'gpt-5.5' ),
+            'fingerprints'        => homeboy_datamachine_agent_fingerprints( $config, homeboy_datamachine_agent_scalar( $config, 'prompt' ), homeboy_datamachine_agent_scalar( $config, 'bundle_path' ) ),
         )
     );
 }
@@ -1861,6 +1982,7 @@ $metadata = array(
     'target_repo'   => homeboy_datamachine_agent_scalar( $config, 'target_repo' ),
     'provider'      => homeboy_datamachine_agent_scalar( $config, 'provider', 'openai' ),
     'model'         => homeboy_datamachine_agent_scalar( $config, 'model', 'gpt-5.5' ),
+    'fingerprints'  => homeboy_datamachine_agent_fingerprints( $config, $prompt, $bundle_path ),
     'bundle_exists' => '' !== $bundle_path && is_dir( $bundle_path ),
 );
 $execute_workflow_path = homeboy_datamachine_agent_scalar( $config, 'execute_workflow_path' );
