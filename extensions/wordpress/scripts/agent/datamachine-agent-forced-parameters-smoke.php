@@ -117,6 +117,17 @@ namespace {
         exit( 1 );
     }
 
+    $eval_artifact = is_array( $dry_run_result ) ? ( $dry_run_result['metadata']['eval_artifact'] ?? array() ) : array();
+    if ( 'homeboy.agent_eval_result' !== ( $eval_artifact['schema_name'] ?? '' ) ) {
+        fwrite( STDERR, "Expected dry-run result to include canonical eval artifact schema.\n" );
+        exit( 1 );
+    }
+
+    if ( 'forced-parameters-smoke-agent' !== ( $eval_artifact['agent']['slug'] ?? '' ) ) {
+        fwrite( STDERR, "Expected eval artifact to identify the agent slug.\n" );
+        exit( 1 );
+    }
+
     $recorder = new Homeboy_Datamachine_Agent_Tool_Recorder();
     $result   = $recorder->handle_tool_call(
         array(

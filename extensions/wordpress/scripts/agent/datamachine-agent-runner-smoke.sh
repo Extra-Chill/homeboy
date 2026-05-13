@@ -85,6 +85,9 @@ bundle_path=$(jq -r "$scenario | .metadata.bundle_path // \"missing\"" "$RESULTS
 prompt_sha=$(jq -r "$scenario | .metadata.fingerprints.prompt.sha256 // \"missing\"" "$RESULTS_TMPFILE")
 bundle_sha=$(jq -r "$scenario | .metadata.fingerprints.bundle.sha256 // \"missing\"" "$RESULTS_TMPFILE")
 tool_policy_sha=$(jq -r "$scenario | .metadata.fingerprints.tool_policy.sha256 // \"missing\"" "$RESULTS_TMPFILE")
+eval_schema=$(jq -r "$scenario | .metadata.eval_artifact.schema_name // \"missing\"" "$RESULTS_TMPFILE")
+eval_agent=$(jq -r "$scenario | .metadata.eval_artifact.agent.slug // \"missing\"" "$RESULTS_TMPFILE")
+eval_prompt_sha=$(jq -r "$scenario | .metadata.eval_artifact.prompt.sha256 // \"missing\"" "$RESULTS_TMPFILE")
 if [ "$provider" != "example-provider" ] || [ "$model" != "example-model" ]; then
     echo "ERROR: provider/model metadata missing (provider=$provider model=$model)" >&2
     cat "$RESULTS_TMPFILE" >&2
@@ -92,6 +95,11 @@ if [ "$provider" != "example-provider" ] || [ "$model" != "example-model" ]; the
 fi
 if [ "$prompt_sha" = "missing" ] || [ -z "$prompt_sha" ] || [ "$bundle_sha" = "missing" ] || [ -z "$bundle_sha" ] || [ "$tool_policy_sha" = "missing" ] || [ -z "$tool_policy_sha" ]; then
     echo "ERROR: fingerprint metadata missing (prompt=$prompt_sha bundle=$bundle_sha tool_policy=$tool_policy_sha)" >&2
+    cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+if [ "$eval_schema" != "homeboy.agent_eval_result" ] || [ "$eval_agent" != "example-agent" ] || [ "$eval_prompt_sha" = "missing" ] || [ -z "$eval_prompt_sha" ]; then
+    echo "ERROR: canonical eval artifact missing (schema=$eval_schema agent=$eval_agent prompt_sha=$eval_prompt_sha)" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
 fi

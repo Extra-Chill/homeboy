@@ -13,10 +13,115 @@ use DataMachine\Core\Database\Pipelines\Pipelines;
 use DataMachine\Core\JobArtifacts;
 use DataMachine\Core\PluginSettings;
 
+if ( ! function_exists( 'homeboy_datamachine_agent_eval_artifact' ) ) {
+    function homeboy_datamachine_agent_eval_artifact( array $metrics, array $metadata, ?string $error = null ): array {
+        $engine_data = is_array( $metadata['engine_data'] ?? null ) ? $metadata['engine_data'] : array();
+        $grade       = is_array( $metadata['grade'] ?? null ) ? $metadata['grade'] : ( is_array( $engine_data['grade'] ?? null ) ? $engine_data['grade'] : array() );
+        $workspace   = is_array( $metadata['runner_workspace'] ?? null ) ? $metadata['runner_workspace'] : array();
+        $capture     = is_array( $metadata['runner_workspace_capture'] ?? null ) ? $metadata['runner_workspace_capture'] : array();
+        $transcript  = is_array( $metadata['transcript_artifacts'] ?? null ) ? $metadata['transcript_artifacts'] : array();
+        $exports     = is_array( $metadata['job_artifact_exports'] ?? null ) ? $metadata['job_artifact_exports'] : array();
+
+        $failure_reasons = array();
+        if ( is_array( $metadata['failure_reasons'] ?? null ) ) {
+            $failure_reasons = array_values( array_filter( array_map( 'strval', $metadata['failure_reasons'] ) ) );
+        }
+        if ( null !== $error && empty( $failure_reasons ) ) {
+            $failure_reasons[] = 'runner_error';
+        }
+
+        $prompt = (string) ( $metadata['prompt'] ?? '' );
+
+        return array(
+            'schema_version'  => 1,
+            'schema_name'     => 'homeboy.agent_eval_result',
+            'run'             => array_filter(
+                array(
+                    'job_id'         => (int) ( $metadata['job_id'] ?? 0 ),
+                    'job_status'     => (string) ( $metadata['job_status'] ?? '' ),
+                    'success_status' => (string) ( $metadata['success_status'] ?? '' ),
+                    'error'          => null !== $error ? $error : (string) ( $metadata['error_message'] ?? '' ),
+                ),
+                static fn( $value ) => '' !== $value && 0 !== $value && null !== $value
+            ),
+            'subject'         => array_filter(
+                array(
+                    'target_repo' => (string) ( $metadata['target_repo'] ?? '' ),
+                    'bundle_path' => (string) ( $metadata['bundle_path'] ?? '' ),
+                    'flow_slug'   => (string) ( $metadata['flow_slug'] ?? '' ),
+                ),
+                static fn( $value ) => '' !== $value
+            ),
+            'agent'           => array_filter(
+                array(
+                    'slug' => (string) ( $metadata['agent_slug'] ?? '' ),
+                    'id'   => (int) ( $metadata['agent_id'] ?? 0 ),
+                ),
+                static fn( $value ) => '' !== $value && 0 !== $value
+            ),
+            'model'           => array_filter(
+                array(
+                    'provider' => (string) ( $metadata['provider'] ?? '' ),
+                    'model'    => (string) ( $metadata['model'] ?? '' ),
+                ),
+                static fn( $value ) => '' !== $value
+            ),
+            'prompt'          => array_filter(
+                array(
+                    'sha256' => '' !== $prompt ? hash( 'sha256', $prompt ) : '',
+                    'bytes'  => strlen( $prompt ),
+                ),
+                static fn( $value ) => '' !== $value && 0 !== $value
+            ),
+            'runtime'         => array_filter(
+                array(
+                    'job_id'                   => (int) ( $metadata['job_id'] ?? 0 ),
+                    'pipeline_id'              => (int) ( $metadata['pipeline_id'] ?? 0 ),
+                    'flow_id'                  => (int) ( $metadata['flow_id'] ?? 0 ),
+                    'transcript_session_id'    => (string) ( $metadata['transcript_session_id'] ?? '' ),
+                    'completion_outcome_satisfied' => (bool) ( $metadata['completion_outcome_satisfied'] ?? false ),
+                ),
+                static fn( $value ) => '' !== $value && 0 !== $value && false !== $value
+            ),
+            'workspace'       => array_filter(
+                array(
+                    'provisioned' => ! empty( $workspace ),
+                    'captured'    => ! empty( $capture ),
+                    'changed'     => ! empty( $capture['changed'] ),
+                    'handle'      => (string) ( $workspace['handle'] ?? $capture['status']['handle'] ?? '' ),
+                    'branch'      => (string) ( $workspace['branch'] ?? $capture['status']['branch'] ?? '' ),
+                ),
+                static fn( $value ) => '' !== $value && false !== $value
+            ),
+            'transcript'      => array_filter(
+                array(
+                    'session_id' => (string) ( $transcript['session_id'] ?? $metadata['transcript_session_id'] ?? '' ),
+                    'json'       => (string) ( $transcript['json'] ?? '' ),
+                    'summary'    => (string) ( $transcript['summary'] ?? '' ),
+                ),
+                static fn( $value ) => '' !== $value
+            ),
+            'grade'           => $grade,
+            'metrics'         => $metrics,
+            'failure_reasons' => $failure_reasons,
+            'artifacts'       => array_filter(
+                array(
+                    'job_artifact_exports' => $exports,
+                    'fallback_pull_request' => is_array( $metadata['fallback_pull_request'] ?? null ) ? $metadata['fallback_pull_request'] : array(),
+                )
+            ),
+        );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_result' ) ) {
     function homeboy_datamachine_agent_result( array $metrics, array $metadata, ?string $error = null ): array {
         if ( null !== $error ) {
             $metadata['error'] = $error;
+        }
+
+        if ( ! isset( $metadata['eval_artifact'] ) ) {
+            $metadata['eval_artifact'] = homeboy_datamachine_agent_eval_artifact( $metrics, $metadata, $error );
         }
 
         return array(
@@ -1961,6 +2066,7 @@ if ( ! empty( $config['dry_run'] ) ) {
             'flow_slug'           => homeboy_datamachine_agent_scalar( $config, 'flow_slug' ),
             'provider'            => homeboy_datamachine_agent_scalar( $config, 'provider', 'openai' ),
             'model'               => homeboy_datamachine_agent_scalar( $config, 'model', 'gpt-5.5' ),
+            'prompt'              => homeboy_datamachine_agent_scalar( $config, 'prompt' ),
             'fingerprints'        => homeboy_datamachine_agent_fingerprints( $config, homeboy_datamachine_agent_scalar( $config, 'prompt' ), homeboy_datamachine_agent_scalar( $config, 'bundle_path' ) ),
         )
     );
@@ -1982,6 +2088,7 @@ $metadata = array(
     'target_repo'   => homeboy_datamachine_agent_scalar( $config, 'target_repo' ),
     'provider'      => homeboy_datamachine_agent_scalar( $config, 'provider', 'openai' ),
     'model'         => homeboy_datamachine_agent_scalar( $config, 'model', 'gpt-5.5' ),
+    'prompt'        => $prompt,
     'fingerprints'  => homeboy_datamachine_agent_fingerprints( $config, $prompt, $bundle_path ),
     'bundle_exists' => '' !== $bundle_path && is_dir( $bundle_path ),
 );
