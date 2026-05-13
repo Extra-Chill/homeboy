@@ -403,6 +403,14 @@ Supported fields:
 - `tags`, `metadata`, and `limits`: copied into the BenchResults scenario
   envelope for reports, filtering, and downstream eval tooling.
 
+Data Machine agent workloads also evaluate known general rules against available
+runner evidence and expose the results under
+`metadata.eval_artifact.general_rule_results`. Initial executable general rules
+cover editable block failures, raw HTML/shortcode failures, speculative plugin
+packaging metadata, unsupported plugin author metadata, docs-standards failures
+when evidence is attached, and production-build parity when buildable asset paths
+changed.
+
 Relative manifest entries resolve from the component/corpus root. Relative
 references inside a manifest resolve from the manifest file's directory. Inline
 manifest objects resolve relative paths from the component root.

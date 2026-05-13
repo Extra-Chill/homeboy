@@ -578,6 +578,121 @@ function pg_bench_merge_workload_payload($payload, array &$metrics, array &$arti
     pg_bench_apply_grader_payload($payload, $metrics, $metadata);
 }
 
+function pg_bench_normalized_string_list($value): array {
+    if (!is_array($value) || !pg_bench_is_list($value)) {
+        return [];
+    }
+
+    $items = [];
+    foreach ($value as $item) {
+        if (is_scalar($item) && trim((string) $item) !== '') {
+            $items[] = trim((string) $item);
+        }
+    }
+
+    return array_values(array_unique($items));
+}
+
+function pg_bench_general_rule_result(string $id, string $status, string $message, array $failure_reasons = [], array $evidence = []): array {
+    return array_filter([
+        'id' => $id,
+        'status' => $status,
+        'passed' => $status === 'passed',
+        'message' => $message,
+        'failure_reasons' => pg_bench_normalized_string_list($failure_reasons),
+        'evidence' => $evidence,
+    ], static fn($value) => $value !== [] && $value !== '');
+}
+
+function pg_bench_matched_failure_reasons(array $failure_reasons, array $watched): array {
+    return array_values(array_intersect($failure_reasons, $watched));
+}
+
+function pg_bench_asset_paths(array $paths): array {
+    return array_values(array_filter($paths, static function (string $path): bool {
+        return (bool) preg_match('/\.(css|scss|sass|less|js|jsx|ts|tsx|mjs|cjs)$/i', $path) || basename($path) === 'theme.json';
+    }));
+}
+
+function pg_bench_evaluate_general_rules(array &$metadata): void {
+    $general_rules = pg_bench_normalized_string_list($metadata['general_rules'] ?? []);
+    if (empty($general_rules)) {
+        return;
+    }
+
+    $failure_reasons = pg_bench_normalized_string_list($metadata['failure_reasons'] ?? []);
+    $capture = is_array($metadata['runner_workspace_capture'] ?? null) ? $metadata['runner_workspace_capture'] : [];
+    $status = is_array($capture['status'] ?? null) ? $capture['status'] : [];
+    $changed_paths = pg_bench_normalized_string_list($status['files'] ?? []);
+    $results = [];
+
+    foreach ($general_rules as $rule) {
+        if ($rule === 'wordpress_editable_blocks') {
+            $matched = pg_bench_matched_failure_reasons($failure_reasons, ['missing_block_markup', 'missing_required_blocks', 'invalid_block', 'raw_html_or_fallback_block', 'shortcode_markup']);
+            $results[] = empty($matched)
+                ? pg_bench_general_rule_result($rule, 'passed', 'No editable-block structure failures were reported.')
+                : pg_bench_general_rule_result($rule, 'failed', 'Editable-block structure failures were reported.', $matched);
+            continue;
+        }
+
+        if ($rule === 'no_raw_html_or_shortcodes') {
+            $matched = pg_bench_matched_failure_reasons($failure_reasons, ['raw_html_or_fallback_block', 'shortcode_markup']);
+            $results[] = empty($matched)
+                ? pg_bench_general_rule_result($rule, 'passed', 'No raw HTML, fallback block, or shortcode failures were reported.')
+                : pg_bench_general_rule_result($rule, 'failed', 'Raw HTML, fallback block, or shortcode failures were reported.', $matched);
+            continue;
+        }
+
+        if ($rule === 'no_speculative_plugin_packaging') {
+            $matched = pg_bench_matched_failure_reasons($failure_reasons, ['speculative_plugin_packaging_metadata']);
+            $results[] = empty($matched)
+                ? pg_bench_general_rule_result($rule, 'passed', 'No speculative plugin packaging metadata failures were reported.')
+                : pg_bench_general_rule_result($rule, 'failed', 'Speculative plugin packaging metadata was reported.', $matched);
+            continue;
+        }
+
+        if ($rule === 'supported_plugin_author_metadata') {
+            $matched = pg_bench_matched_failure_reasons($failure_reasons, ['unsupported_plugin_author']);
+            $results[] = empty($matched)
+                ? pg_bench_general_rule_result($rule, 'passed', 'No unsupported plugin author metadata failures were reported.')
+                : pg_bench_general_rule_result($rule, 'failed', 'Unsupported plugin author metadata was reported.', $matched);
+            continue;
+        }
+
+        if ($rule === 'wordpress_docs_standards') {
+            $matched = pg_bench_matched_failure_reasons($failure_reasons, ['wordpress_docs_standards_violation', 'missing_phpdoc', 'invalid_phpdoc_format']);
+            $results[] = empty($matched)
+                ? pg_bench_general_rule_result($rule, 'not_evaluated', 'No WordPress docs-standards evidence was attached to this run.')
+                : pg_bench_general_rule_result($rule, 'failed', 'WordPress docs-standards failures were reported.', $matched);
+            continue;
+        }
+
+        if ($rule === 'production_build_when_assets_change') {
+            $asset_paths = pg_bench_asset_paths($changed_paths);
+            $results[] = empty($asset_paths)
+                ? pg_bench_general_rule_result($rule, 'passed', 'No buildable asset paths changed.', [], ['changed_asset_paths' => []])
+                : pg_bench_general_rule_result($rule, 'failed', 'Buildable asset paths changed, but no production build evidence was attached to this run.', ['production_build_not_run'], ['changed_asset_paths' => $asset_paths]);
+            continue;
+        }
+
+        $results[] = pg_bench_general_rule_result($rule, 'not_evaluated', 'No executable evaluator is registered for this general rule.');
+    }
+
+    $metadata['general_rule_results'] = $results;
+    foreach ($results as $result) {
+        if (($result['status'] ?? '') !== 'failed') {
+            continue;
+        }
+        $failure_reasons = array_merge($failure_reasons, pg_bench_normalized_string_list($result['failure_reasons'] ?? []));
+    }
+    $metadata['failure_reasons'] = array_values(array_unique($failure_reasons));
+
+    if (isset($metadata['eval_artifact']) && is_array($metadata['eval_artifact'])) {
+        $metadata['eval_artifact']['general_rule_results'] = $results;
+        $metadata['eval_artifact']['failure_reasons'] = $metadata['failure_reasons'];
+    }
+}
+
 function pg_bench_step_is_grader(array $step): bool {
     return (isset($step['grader']) && $step['grader'] === true)
         || (isset($step['role']) && is_scalar($step['role']) && (string) $step['role'] === 'grader');
@@ -950,6 +1065,8 @@ function pg_bench_run_configured_workload(array $workload, string $plugin_path):
         }
         pg_bench_merge_workload_payload($result, $metrics, $artifacts, $metadata);
     }
+
+    pg_bench_evaluate_general_rules($metadata);
 
     return [
         'metrics' => $metrics,

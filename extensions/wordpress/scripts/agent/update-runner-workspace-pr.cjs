@@ -86,6 +86,7 @@ const engineData = metadata.engine_data || {};
 const runnerCapture = metadata.runner_workspace_capture || {};
 const runnerStatus = runnerCapture.status || {};
 const grade = scenario.grade || metadata.grade || engineData.grade || {};
+const evalArtifact = metadata.eval_artifact || {};
 const staticTemplateValues = artifactExport.pr_template_values || {};
 const taskId = staticTemplateValues.task_id || config.task_id || config.workload_id || scenarioId;
 const taskLabel = staticTemplateValues.task_label || config.task_label || config.workload_label || taskId;
@@ -117,6 +118,14 @@ const checkRows = Array.isArray(grade.checks) ? grade.checks.map((check) => [
   scalar(check.max_score),
   check.message || '',
 ]) : [];
+
+const generalRuleRows = Array.isArray(evalArtifact.general_rule_results)
+  ? evalArtifact.general_rule_results.map((rule) => [
+    rule.id || '',
+    rule.status || '',
+    rule.message || '',
+  ])
+  : [];
 
 const toolRows = Array.isArray(engineData.tool_execution_summary) ? engineData.tool_execution_summary.map((tool) => [
   scalar(tool.turn_count),
@@ -154,6 +163,7 @@ const values = {
   changed_file_count: scalar(runnerStatus.dirty || (Array.isArray(runnerStatus.files) ? runnerStatus.files.length : '')),
   result_table: markdownTable(['Field', 'Value'], resultRows),
   checks_table: markdownTable(['Check', 'Passed', 'Score', 'Max', 'Message'], checkRows),
+  general_rules_table: markdownTable(['Rule', 'Status', 'Message'], generalRuleRows),
   tools_table: markdownTable(['Turn', 'Tool', 'Success'], toolRows),
   links_table: markdownTable(['Artifact', 'Location'], linkRows),
   paths: writtenPaths.length ? `- \`${writtenPaths.join('`\n- `')}\`` : '_None recorded._',
