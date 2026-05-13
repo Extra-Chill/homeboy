@@ -95,6 +95,7 @@
 		B27446E0A3706D997A75D1E9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A690A4DC66BE109010668691 /* ContentView.swift */; };
 		B9C42108AC64D21BAEEE580A /* DeployableComponent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */; };
 		BA03F27144E7C71BE3BC30E4 /* APIAuthWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 807865404822DFF3A4755240 /* APIAuthWorkspaceView.swift */; };
+		BAEDE5ABE49EBE42C7C703DC /* RunHistoryViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B73247BD443AB4A6932529E4 /* RunHistoryViewModel.swift */; };
 		C24FBE4BE4FE4BA046D565C3 /* RemotePathResolver+WordPress.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFBA996DE0C810FC22480A51 /* RemotePathResolver+WordPress.swift */; };
 		C6F738277B8D48B8F03655CA /* bandcamp_scraper.cpython-314.pyc in Resources */ = {isa = PBXBuildFile; fileRef = 75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */; };
 		C727FE57ACE75A3152D4C972 /* NativeDataTable.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2800F57FE83EEBB76CC1F1A /* NativeDataTable.swift */; };
@@ -113,6 +114,7 @@
 		E832787BA1F926FB3A085E09 /* InlineErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943FB329E82EA8D3985C41BE /* InlineErrorView.swift */; };
 		E8A0E0A1E7364CFEB6EB48AF /* SchemaResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */; };
 		EC7E0C50096E39206C199118 /* QualityViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BBAE3837D9DF6634A72AAB1 /* QualityViewModel.swift */; };
+		EC9244E3C614561638C57AB7 /* RunHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AE68C48FE619E6E7F8BB5F1 /* RunHistoryView.swift */; };
 		EEA581470DC8B48027F54228 /* InlineWarningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */; };
 		F34BB35C6C33E774792043ED /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83B2C9499D9E9A17D32109EF /* SettingsView.swift */; };
 		FB914712293D43F2D7D80F80 /* CreateProjectSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */; };
@@ -140,6 +142,7 @@
 		3A80F92FC849ACD9591EDEFE /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		3AC2128B1137A2702EEC2F55 /* ExtensionConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionConsoleView.swift; sourceTree = "<group>"; };
 		3ACB611363480EC1ED86A127 /* ExtensionInputsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionInputsView.swift; sourceTree = "<group>"; };
+		3AE68C48FE619E6E7F8BB5F1 /* RunHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunHistoryView.swift; sourceTree = "<group>"; };
 		3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchemaResolver.swift; sourceTree = "<group>"; };
 		3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConfig.swift; sourceTree = "<group>"; };
 		3D06A62D2DDC840DC6A12CC7 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
@@ -197,6 +200,7 @@
 		B6676A7C26F7EE42CD5B9E7A /* ConfigurationObserving.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationObserving.swift; sourceTree = "<group>"; };
 		B6A9C1C6E1C766FEF2D21DE5 /* BackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupService.swift; sourceTree = "<group>"; };
 		B709FB776FF5A95CAE18A7D2 /* QualityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityView.swift; sourceTree = "<group>"; };
+		B73247BD443AB4A6932529E4 /* RunHistoryViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunHistoryViewModel.swift; sourceTree = "<group>"; };
 		B91594B5A5CCE7AE78D16BD3 /* QueryEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryEditorView.swift; sourceTree = "<group>"; };
 		BA88D343E94C4C34E1069813 /* CodeTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeTextView.swift; sourceTree = "<group>"; };
 		BB0EEE1B29B6CBCC9B7AE92D /* RemotePathResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePathResolver.swift; sourceTree = "<group>"; };
@@ -267,6 +271,15 @@
 				AD23DCF3987518BDD613AA7A /* SSHService.swift */,
 			);
 			path = SSH;
+			sourceTree = "<group>";
+		};
+		38FA3F3D4C5F5FD7C14C524A /* RunHistory */ = {
+			isa = PBXGroup;
+			children = (
+				3AE68C48FE619E6E7F8BB5F1 /* RunHistoryView.swift */,
+				B73247BD443AB4A6932529E4 /* RunHistoryViewModel.swift */,
+			);
+			path = RunHistory;
 			sourceTree = "<group>";
 		};
 		437AB78A7C7E8B4AD7DFAB36 /* Extensions */ = {
@@ -406,6 +419,7 @@
 				8007D7D3CCEF3F80C36AA686 /* Components */,
 				48CA5756F2D78ADA9FCD0AFD /* Extensions */,
 				144F0E432A914DE9F141CEFA /* Rigs */,
+				38FA3F3D4C5F5FD7C14C524A /* RunHistory */,
 				F08C0BC0AC87CDDCAA5955CF /* Settings */,
 				941D61AD6DA0DA2420DB13B8 /* BenchView.swift */,
 				3A80F92FC849ACD9591EDEFE /* LoginView.swift */,
@@ -808,6 +822,8 @@
 				465D0E037B7E2705A578EAF2 /* RemotePathResolver.swift in Sources */,
 				04CC8776681CF107919B5B76 /* RigsView.swift in Sources */,
 				2FA2E2EB6635082599CF1172 /* RigsViewModel.swift in Sources */,
+				EC9244E3C614561638C57AB7 /* RunHistoryView.swift in Sources */,
+				BAEDE5ABE49EBE42C7C703DC /* RunHistoryViewModel.swift in Sources */,
 				58C9903BC07607162259D792 /* SSHKeyManager.swift in Sources */,
 				71419F89166E98CC7C4A3A98 /* SSHService.swift in Sources */,
 				E8A0E0A1E7364CFEB6EB48AF /* SchemaResolver.swift in Sources */,
