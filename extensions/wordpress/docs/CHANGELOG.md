@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.80.0] - 2026-05-13
+
+### Added
+- diagnose REST preload misses
+
 ## [2.79.0] - 2026-05-13
 
 ### Added
