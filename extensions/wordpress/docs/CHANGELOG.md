@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.83.0] - 2026-05-13
+
+### Added
+- attribute REST request callers
+
 ## [2.82.0] - 2026-05-13
 
 ### Added
