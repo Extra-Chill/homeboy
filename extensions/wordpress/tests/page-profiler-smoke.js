@@ -332,6 +332,13 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 		preloads: [{ path: '/wp/v2/posts?per_page=-1', method: 'GET' }],
 	});
 	assert.equal(directPreloadDiagnostics.rows[0].reasons.includes('fetch-all-per-page-mismatch'), true);
+	const exactMissDiagnostics = diagnoseWordPressRestPreloadMisses({
+		networkRows: [{ url: 'https://example.test/wp-json/wp/v2/taxonomies?_locale=user&context=view', method: 'GET' }],
+		preloads: [{ path: '/wp/v2/taxonomies?_locale=user&context=view', method: 'GET' }],
+		preloadChecks: [{ path: '/wp/v2/taxonomies?_locale=user&context=view', method: 'GET', hit: false, nextUrl: '/wp/v2/taxonomies?_locale=user&context=view' }],
+	});
+	assert.equal(exactMissDiagnostics.rows[0].primaryReason, 'exact-preload-check-missed');
+	assert.equal(exactMissDiagnostics.rows[0].evidence.exactPreloadChecks[0].hit, false);
 	const payloadBudgetResult = diagnoseWordPressPageProfile({
 		id: 'payload-budget',
 		readyMs: 500,
