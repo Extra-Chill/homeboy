@@ -50,7 +50,7 @@ struct ExtensionManifest: Codable, Identifiable {
     var defaultPinnedLogs: [String]? { platform?.defaultPinnedLogs }
 
     /// Database config (from platform group)
-    var database: DatabaseConfig? { platform?.database }
+    var database: ExtensionDatabaseConfig? { platform?.database }
 
     /// Discovery config (from platform group)
     var discovery: DiscoveryConfig? { platform?.discovery }
@@ -346,7 +346,7 @@ struct PlatformConfig: Codable {
     let configSchema: [String: ConfigSchemaItem]?
     let defaultPinnedFiles: [String]?
     let defaultPinnedLogs: [String]?
-    let database: DatabaseConfig?
+    let database: ExtensionDatabaseConfig?
     let discovery: DiscoveryConfig?
     let commands: [PlatformCommand]?
 }
@@ -360,7 +360,7 @@ struct ConfigSchemaItem: Codable {
 }
 
 /// Database configuration for platform extensions
-struct DatabaseConfig: Codable {
+struct ExtensionDatabaseConfig: Codable {
     let tables: [DatabaseTableConfig]?
     let views: [DatabaseViewConfig]?
 }

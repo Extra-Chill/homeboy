@@ -227,7 +227,7 @@ struct ProjectConfiguration: Codable, Identifiable {
         self.serverId = config.serverId
         self.basePath = config.basePath
         self.tablePrefix = config.tablePrefix
-        self.extensions = []  // CLI doesn't provide extensions in config
+        self.extensions = config.extensions.keys.sorted()
 
         // Convert CLI remote files (generate UUIDs since CLI doesn't provide them)
         self.remoteFiles = RemoteFileConfig(

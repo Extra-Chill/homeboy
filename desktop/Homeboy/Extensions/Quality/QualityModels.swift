@@ -137,3 +137,40 @@ struct QualityTriageRepo: Decodable {
     let provider: String
     let url: String?
 }
+
+struct AuditOutput: Decodable {
+    let command: String?
+    let componentId: String?
+    let passed: Bool?
+    let status: String?
+    let findings: [AuditFinding]?
+    let summary: JSONValue?
+}
+
+struct AuditFinding: Decodable, Identifiable {
+    let rule: String?
+    let message: String
+    let file: String?
+    let line: Int?
+    let severity: String?
+
+    var id: String { [rule, file, line.map(String.init), message].compactMap { $0 }.joined(separator: ":") }
+}
+
+struct RefactorPlanOutput: Decodable {
+    let command: String?
+    let componentId: String?
+    let plan: JSONValue?
+    let findings: [AuditFinding]?
+    let summary: JSONValue?
+}
+
+struct RefactorResult: Decodable {
+    let command: String?
+    let componentId: String?
+    let success: Bool?
+    let changed: [String]?
+    let filesChanged: [String]?
+    let summary: JSONValue?
+    let result: JSONValue?
+}

@@ -13,7 +13,7 @@ struct ExtensionSetupView: View {
                     ProgressView()
                         .scaleEffect(1.5)
                     
-                    Text("Setting up \(extension.name)...")
+                    Text("Setting up \(currentExtension.name)...")
                         .font(.headline)
                     
                     Text("Installing Python dependencies and Playwright browsers")
@@ -44,7 +44,7 @@ struct ExtensionSetupView: View {
                         .frame(maxWidth: 400)
                     
                     // Dependencies list
-                    if let dependencies = extension.manifest.runtime?.dependencies, !dependencies.isEmpty {
+                    if let dependencies = currentExtension.manifest.runtime?.dependencies, !dependencies.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Dependencies:")
                                 .font(.caption)
@@ -58,7 +58,7 @@ struct ExtensionSetupView: View {
                         .cornerRadius(8)
                     }
                     
-                    if let browsers = extension.manifest.runtime?.playwrightBrowsers, !browsers.isEmpty {
+                    if let browsers = currentExtension.manifest.runtime?.playwrightBrowsers, !browsers.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Playwright Browsers:")
                                 .font(.caption)
@@ -73,7 +73,7 @@ struct ExtensionSetupView: View {
                     }
                     
                     Button {
-                        viewModel.setup(extension: extension)
+                        viewModel.setup(extension: currentExtension)
                     } label: {
                         HStack {
                             Image(systemName: "arrow.down.circle")

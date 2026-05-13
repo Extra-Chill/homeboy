@@ -9,7 +9,7 @@ struct ExtensionResultsView: View {
     @State private var sortDescriptor: DataTableSortDescriptor<IndexedRow>?
     
     private var columnNames: [String] {
-        extension.manifest.output?.schema.items?.keys.sorted() ?? []
+        currentExtension.manifest.output?.schema.items?.keys.sorted() ?? []
     }
     
     var body: some View {
@@ -39,7 +39,7 @@ struct ExtensionResultsView: View {
             
             Spacer()
             
-            if extension.manifest.output?.selectable == true {
+            if currentExtension.manifest.output?.selectable == true {
                 Text("\(viewModel.selectedRows.count) selected")
                     .font(.caption)
                     .foregroundColor(.secondary)

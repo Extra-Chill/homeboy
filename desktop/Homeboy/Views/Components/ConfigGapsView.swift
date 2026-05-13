@@ -63,7 +63,7 @@ struct ConfigGapsView: View {
             }
         }
         .padding()
-        .background(Color(.systemBackground))
+        .background(Color(nsColor: .windowBackgroundColor))
         .cornerRadius(8)
         .shadow(radius: 1)
     }
@@ -112,7 +112,7 @@ struct ConfigGapRow: View {
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color(.systemGray6))
+                        .background(Color(nsColor: .controlBackgroundColor))
                         .cornerRadius(4)
                 }
 
@@ -159,7 +159,7 @@ struct ConfigGapRow: View {
             }
         }
         .padding()
-        .background(Color(.secondarySystemBackground))
+        .background(Color(nsColor: .controlBackgroundColor))
         .cornerRadius(8)
         .opacity(isFixed ? 0.7 : 1.0)
     }
