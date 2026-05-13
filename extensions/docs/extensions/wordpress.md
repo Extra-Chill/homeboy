@@ -397,6 +397,9 @@ Supported fields:
   loop. The supported step types are still `php`, `ability`, and `wp-cli`.
 - `grader` or `grader_file`: PHP file appended after `run`, so grading happens
   after the action loop.
+- `rules`, `general_rules`, `task_rules`, and `probes`: copied into scenario
+  metadata so eval corpora can declare reusable policy and zero-weight
+  behavioral probes separately from grader reward math.
 - `tags`, `metadata`, and `limits`: copied into the BenchResults scenario
   envelope for reports, filtering, and downstream eval tooling.
 

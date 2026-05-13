@@ -99,6 +99,15 @@ if [ "$prompt" != "Create a page containing valid navigation block markup." ] ||
 fi
 echo "✓ prompt file, grader file, and limits metadata emitted"
 
+general_rule=$(jq -r "$scenario | .metadata.general_rules[0] // \"missing\"" "$RESULTS_TMPFILE")
+task_rule=$(jq -r "$scenario | .metadata.task_rules[0] // \"missing\"" "$RESULTS_TMPFILE")
+probe=$(jq -r "$scenario | .metadata.probes.behavioral_fingerprints[0].id // \"missing\"" "$RESULTS_TMPFILE")
+if [ "$general_rule" != "wordpress_editable_blocks" ] || [ "$task_rule" != "navigation_block_markup" ] || [ "$probe" != "block_shape_fingerprint" ]; then
+    echo "ERROR: manifest rule/probe metadata did not round-trip" >&2
+    exit 1
+fi
+echo "✓ rule and probe metadata emitted"
+
 tag=$(jq -r "$scenario | .tags[0] // \"missing\"" "$RESULTS_TMPFILE")
 if [ "$tag" != "blocks" ]; then
     echo "ERROR: expected first tag to be blocks, got $tag" >&2
