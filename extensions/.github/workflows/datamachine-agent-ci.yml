@@ -122,6 +122,22 @@ name: Data Machine Agent CI (reusable)
         description: JSON config for exporting bundle-file artifacts back to the target repo. Set include_job_artifacts true to also commit full job artifact JSON.
         type: string
         default: "{}"
+      rules:
+        description: JSON object describing eval rule policy for the task. Preserved in metadata.eval_artifact.rules.
+        type: string
+        default: "{}"
+      general_rules:
+        description: JSON array of reusable eval rule IDs that apply to the task.
+        type: string
+        default: "[]"
+      task_rules:
+        description: JSON array of task-specific eval rule IDs that apply to the task.
+        type: string
+        default: "[]"
+      probes:
+        description: JSON object of zero-weight behavioral probes to preserve in eval metadata.
+        type: string
+        default: "{}"
       comment_pr_summary:
         type: boolean
         default: false
@@ -535,6 +551,10 @@ jobs:
           STEP_BUDGET: ${{ inputs.step_budget }}
           TIME_BUDGET_MS: ${{ inputs.time_budget_ms }}
           ARTIFACT_EXPORT_CONFIG: ${{ inputs.artifact_export_config }}
+          RULES: ${{ inputs.rules }}
+          GENERAL_RULES: ${{ inputs.general_rules }}
+          TASK_RULES: ${{ inputs.task_rules }}
+          PROBES: ${{ inputs.probes }}
           DRY_RUN: ${{ inputs.dry_run }}
           EXTRA_WP_CONFIG_DEFINES: ${{ inputs.extra_wp_config_defines }}
           EXTRA_PLAYGROUND_FILE_MOUNTS: ${{ inputs.extra_playground_file_mounts }}
@@ -631,6 +651,10 @@ jobs:
           flow_step_patches_json="$(validate_json_input flow_step_patches array "$FLOW_STEP_PATCHES")"
           runner_workspace_json="$(validate_json_input runner_workspace object "$RUNNER_WORKSPACE_CONFIG")"
           fallback_pull_request_json="$(validate_json_input fallback_pull_request object "$FALLBACK_PULL_REQUEST")"
+          rules_json="$(validate_json_input rules object "$RULES")"
+          general_rules_json="$(validate_json_input general_rules array "$GENERAL_RULES")"
+          task_rules_json="$(validate_json_input task_rules array "$TASK_RULES")"
+          probes_json="$(validate_json_input probes object "$PROBES")"
           provider_register_function="$(jq -r '.register_function // ""' <<< "$provider_plugin_json")"
           provider_credentials_json="$(jq -c '.credentials // {}' <<< "$provider_plugin_json")"
           provider_bench_env_json="{}"
@@ -691,6 +715,10 @@ jobs:
             --argjson flowStepPatches "$flow_step_patches_json" \
             --argjson runnerWorkspace "$runner_workspace_json" \
             --argjson fallbackPullRequest "$fallback_pull_request_json" \
+            --argjson rules "$rules_json" \
+            --argjson generalRules "$general_rules_json" \
+            --argjson taskRules "$task_rules_json" \
+            --argjson probes "$probes_json" \
             '{
               component_id: "datamachine-agent-ci-driver",
               component_path: $componentPath,
@@ -737,6 +765,10 @@ jobs:
               flow_step_patches: $flowStepPatches,
               runner_workspace: $runnerWorkspace,
               fallback_pull_request: $fallbackPullRequest,
+              rules: $rules,
+              general_rules: $generalRules,
+              task_rules: $taskRules,
+              probes: $probes,
               execute_workflow_path: $executeWorkflowPath,
               success_requires_pr: $successRequiresPr,
               success_completion_outcomes: $successCompletionOutcomes,

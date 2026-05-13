@@ -104,6 +104,14 @@ if ( ! function_exists( 'homeboy_datamachine_agent_eval_artifact' ) ) {
             'grade'           => $grade,
             'metrics'         => $metrics,
             'failure_reasons' => $failure_reasons,
+            'rules'           => array_filter(
+                array(
+                    'general'       => is_array( $metadata['general_rules'] ?? null ) ? $metadata['general_rules'] : array(),
+                    'task_specific' => is_array( $metadata['task_rules'] ?? null ) ? $metadata['task_rules'] : array(),
+                    'all'           => is_array( $metadata['rules'] ?? null ) ? $metadata['rules'] : array(),
+                )
+            ),
+            'probes'          => is_array( $metadata['probes'] ?? null ) ? $metadata['probes'] : array(),
             'artifacts'       => array_filter(
                 array(
                     'job_artifact_exports' => $exports,
@@ -2091,6 +2099,10 @@ $metadata = array(
     'prompt'        => $prompt,
     'fingerprints'  => homeboy_datamachine_agent_fingerprints( $config, $prompt, $bundle_path ),
     'bundle_exists' => '' !== $bundle_path && is_dir( $bundle_path ),
+    'rules'         => is_array( $config['rules'] ?? null ) ? $config['rules'] : array(),
+    'general_rules' => is_array( $config['general_rules'] ?? null ) ? $config['general_rules'] : array(),
+    'task_rules'    => is_array( $config['task_rules'] ?? null ) ? $config['task_rules'] : array(),
+    'probes'        => is_array( $config['probes'] ?? null ) ? $config['probes'] : array(),
 );
 $execute_workflow_path = homeboy_datamachine_agent_scalar( $config, 'execute_workflow_path' );
 

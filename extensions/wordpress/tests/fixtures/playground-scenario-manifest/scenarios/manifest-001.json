@@ -5,6 +5,18 @@
   "blueprint": "blueprint.json",
   "grader": "grader.php",
   "tags": ["blocks", "markup", "medium"],
+  "rules": {
+    "general": ["wordpress_editable_blocks"],
+    "task_specific": ["navigation_block_markup"]
+  },
+  "probes": {
+    "behavioral_fingerprints": [
+      {
+        "id": "block_shape_fingerprint",
+        "reward_weight": 0
+      }
+    ]
+  },
   "limits": {
     "max_turns": 8,
     "step_budget": 12,

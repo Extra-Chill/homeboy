@@ -270,7 +270,11 @@ homeboy_playground_compile_scenario_manifests() {
                     prompt_file: $promptFile,
                     blueprint_file: $blueprintFile,
                     grader_file: $graderFile,
-                    limits: ($manifest.limits // {})
+                    limits: ($manifest.limits // {}),
+                    rules: ($manifest.rules // {}),
+                    general_rules: ($manifest.general_rules // $manifest.rules.general // []),
+                    task_rules: ($manifest.task_rules // $manifest.rules.task_specific // []),
+                    probes: ($manifest.probes // {})
                 })
             }
             | if .label == null then del(.label) else . end

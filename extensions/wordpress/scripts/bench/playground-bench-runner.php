@@ -433,7 +433,7 @@ function pg_bench_normalize_grade_check($check, int $index): array {
         'max_score' => $max_score,
     ];
 
-    foreach (['message', 'details', 'expected', 'actual'] as $field) {
+    foreach (['message', 'details', 'expected', 'actual', 'failure_reason'] as $field) {
         if (isset($check[$field]) && is_scalar($check[$field])) {
             $normalized[$field] = (string) $check[$field];
         }
@@ -483,11 +483,21 @@ function pg_bench_normalize_grader_payload(array $payload): ?array {
         $normalized_grade['failure'] = array_intersect_key($grade['failure'], array_flip(['type', 'message']));
     }
 
+    $failure_reasons = [];
+    if (isset($payload['failure_reasons']) && is_array($payload['failure_reasons']) && pg_bench_is_list($payload['failure_reasons'])) {
+        foreach ($payload['failure_reasons'] as $reason) {
+            if (is_scalar($reason) && trim((string) $reason) !== '') {
+                $failure_reasons[] = trim((string) $reason);
+            }
+        }
+    }
+
     return [
         'success' => $success,
         'reward' => $reward,
         'done' => $done,
         'grade' => $normalized_grade,
+        'failure_reasons' => array_values(array_unique($failure_reasons)),
     ];
 }
 
@@ -507,6 +517,7 @@ function pg_bench_apply_grader_payload(array $payload, array &$metrics, array &$
     $metadata['reward'] = $normalized['reward'];
     $metadata['done'] = $normalized['done'];
     $metadata['grade'] = $normalized['grade'];
+    $metadata['failure_reasons'] = $normalized['failure_reasons'];
 }
 
 function pg_bench_workload_tags($value): array {
