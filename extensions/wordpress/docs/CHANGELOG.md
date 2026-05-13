@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.77.1] - 2026-05-13
+
+### Fixed
+- support block theme builds
+
 ## [2.77.0] - 2026-05-13
 
 ### Added
