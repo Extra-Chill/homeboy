@@ -104,6 +104,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_eval_artifact' ) ) {
             'grade'           => $grade,
             'metrics'         => $metrics,
             'failure_reasons' => $failure_reasons,
+            'general_rule_results' => is_array( $metadata['general_rule_results'] ?? null ) ? $metadata['general_rule_results'] : array(),
             'rules'           => array_filter(
                 array(
                     'general'       => is_array( $metadata['general_rules'] ?? null ) ? $metadata['general_rules'] : array(),
@@ -119,6 +120,141 @@ if ( ! function_exists( 'homeboy_datamachine_agent_eval_artifact' ) ) {
                 )
             ),
         );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_normalized_list' ) ) {
+    function homeboy_datamachine_agent_normalized_list( $value ): array {
+        if ( ! is_array( $value ) ) {
+            return array();
+        }
+
+        return array_values(
+            array_unique(
+                array_filter(
+                    array_map(
+                        static fn( $item ) => is_scalar( $item ) ? trim( (string) $item ) : '',
+                        $value
+                    ),
+                    static fn( string $item ) => '' !== $item
+                )
+            )
+        );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_rule_result' ) ) {
+    function homeboy_datamachine_agent_rule_result( string $id, string $status, string $message, array $failure_reasons = array(), array $evidence = array() ): array {
+        return array_filter(
+            array(
+                'id'              => $id,
+                'status'          => $status,
+                'passed'          => 'passed' === $status,
+                'message'         => $message,
+                'failure_reasons' => homeboy_datamachine_agent_normalized_list( $failure_reasons ),
+                'evidence'        => $evidence,
+            ),
+            static fn( $value ) => array() !== $value && '' !== $value
+        );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_rule_matches_failures' ) ) {
+    function homeboy_datamachine_agent_rule_matches_failures( array $failure_reasons, array $watched_reasons ): array {
+        return array_values( array_intersect( $failure_reasons, $watched_reasons ) );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_asset_paths' ) ) {
+    function homeboy_datamachine_agent_asset_paths( array $paths ): array {
+        return array_values(
+            array_filter(
+                $paths,
+                static function ( string $path ): bool {
+                    return (bool) preg_match( '/\.(css|scss|sass|less|js|jsx|ts|tsx|mjs|cjs)$/i', $path ) || 'theme.json' === basename( $path );
+                }
+            )
+        );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_evaluate_general_rules' ) ) {
+    function homeboy_datamachine_agent_evaluate_general_rules( array $metadata, array $config ): array {
+        $general_rules = homeboy_datamachine_agent_normalized_list( $metadata['general_rules'] ?? $config['general_rules'] ?? array() );
+        if ( empty( $general_rules ) ) {
+            return array();
+        }
+
+        $failure_reasons = homeboy_datamachine_agent_normalized_list( $metadata['failure_reasons'] ?? array() );
+        $capture         = is_array( $metadata['runner_workspace_capture'] ?? null ) ? $metadata['runner_workspace_capture'] : array();
+        $status          = is_array( $capture['status'] ?? null ) ? $capture['status'] : array();
+        $changed_paths   = homeboy_datamachine_agent_normalized_list( $status['files'] ?? array() );
+        $results         = array();
+
+        foreach ( $general_rules as $rule ) {
+            if ( 'wordpress_editable_blocks' === $rule ) {
+                $matched = homeboy_datamachine_agent_rule_matches_failures(
+                    $failure_reasons,
+                    array( 'missing_block_markup', 'missing_required_blocks', 'invalid_block', 'raw_html_or_fallback_block', 'shortcode_markup' )
+                );
+                $results[] = empty( $matched )
+                    ? homeboy_datamachine_agent_rule_result( $rule, 'passed', 'No editable-block structure failures were reported.' )
+                    : homeboy_datamachine_agent_rule_result( $rule, 'failed', 'Editable-block structure failures were reported.', $matched );
+                continue;
+            }
+
+            if ( 'no_raw_html_or_shortcodes' === $rule ) {
+                $matched = homeboy_datamachine_agent_rule_matches_failures( $failure_reasons, array( 'raw_html_or_fallback_block', 'shortcode_markup' ) );
+                $results[] = empty( $matched )
+                    ? homeboy_datamachine_agent_rule_result( $rule, 'passed', 'No raw HTML, fallback block, or shortcode failures were reported.' )
+                    : homeboy_datamachine_agent_rule_result( $rule, 'failed', 'Raw HTML, fallback block, or shortcode failures were reported.', $matched );
+                continue;
+            }
+
+            if ( 'no_speculative_plugin_packaging' === $rule ) {
+                $matched = homeboy_datamachine_agent_rule_matches_failures( $failure_reasons, array( 'speculative_plugin_packaging_metadata' ) );
+                $results[] = empty( $matched )
+                    ? homeboy_datamachine_agent_rule_result( $rule, 'passed', 'No speculative plugin packaging metadata failures were reported.' )
+                    : homeboy_datamachine_agent_rule_result( $rule, 'failed', 'Speculative plugin packaging metadata was reported.', $matched );
+                continue;
+            }
+
+            if ( 'supported_plugin_author_metadata' === $rule ) {
+                $matched = homeboy_datamachine_agent_rule_matches_failures( $failure_reasons, array( 'unsupported_plugin_author' ) );
+                $results[] = empty( $matched )
+                    ? homeboy_datamachine_agent_rule_result( $rule, 'passed', 'No unsupported plugin author metadata failures were reported.' )
+                    : homeboy_datamachine_agent_rule_result( $rule, 'failed', 'Unsupported plugin author metadata was reported.', $matched );
+                continue;
+            }
+
+            if ( 'wordpress_docs_standards' === $rule ) {
+                $matched = homeboy_datamachine_agent_rule_matches_failures( $failure_reasons, array( 'wordpress_docs_standards_violation', 'missing_phpdoc', 'invalid_phpdoc_format' ) );
+                $results[] = empty( $matched )
+                    ? homeboy_datamachine_agent_rule_result( $rule, 'not_evaluated', 'No WordPress docs-standards evidence was attached to this run.' )
+                    : homeboy_datamachine_agent_rule_result( $rule, 'failed', 'WordPress docs-standards failures were reported.', $matched );
+                continue;
+            }
+
+            if ( 'production_build_when_assets_change' === $rule ) {
+                $asset_paths = homeboy_datamachine_agent_asset_paths( $changed_paths );
+                if ( empty( $asset_paths ) ) {
+                    $results[] = homeboy_datamachine_agent_rule_result( $rule, 'passed', 'No buildable asset paths changed.', array(), array( 'changed_asset_paths' => array() ) );
+                } else {
+                    $results[] = homeboy_datamachine_agent_rule_result(
+                        $rule,
+                        'failed',
+                        'Buildable asset paths changed, but no production build evidence was attached to this run.',
+                        array( 'production_build_not_run' ),
+                        array( 'changed_asset_paths' => $asset_paths )
+                    );
+                }
+                continue;
+            }
+
+            $results[] = homeboy_datamachine_agent_rule_result( $rule, 'not_evaluated', 'No executable evaluator is registered for this general rule.' );
+        }
+
+        return $results;
     }
 }
 
@@ -2373,6 +2509,18 @@ $metadata += array(
     'file_written'          => $file_written,
     'job_artifact_exports'    => $job_artifact_exports,
 );
+
+$metadata['general_rule_results'] = homeboy_datamachine_agent_evaluate_general_rules( $metadata, $config );
+$general_rule_failures = array();
+foreach ( $metadata['general_rule_results'] as $rule_result ) {
+    if ( ! is_array( $rule_result ) || 'failed' !== (string) ( $rule_result['status'] ?? '' ) ) {
+        continue;
+    }
+    $general_rule_failures = array_merge( $general_rule_failures, homeboy_datamachine_agent_normalized_list( $rule_result['failure_reasons'] ?? array() ) );
+}
+if ( ! empty( $general_rule_failures ) ) {
+    $metadata['failure_reasons'] = array_values( array_unique( array_merge( homeboy_datamachine_agent_normalized_list( $metadata['failure_reasons'] ?? array() ), $general_rule_failures ) ) );
+}
 
 if ( ! empty( $runner_workspace_capture['enabled'] ) && ! empty( $runner_workspace_capture['error'] ) && empty( $runner_workspace_capture['changed'] ) ) {
     return homeboy_datamachine_agent_result( array( 'runner_workspace_captured' => 0 ), $metadata, (string) $runner_workspace_capture['error'] );
