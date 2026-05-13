@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.79.0] - 2026-05-13
+
+### Added
+- evaluate general rule results
+
 ## [2.78.0] - 2026-05-13
 
 ### Added
