@@ -342,10 +342,12 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.equal(exactMissDiagnostics.rows[0].serverDeclarationSuggestions[0].declaration, "'/wp/v2/taxonomies?_locale=user&context=view'");
 	const optionsDeclarationDiagnostics = diagnoseWordPressRestPreloadMisses({
 		networkRows: [{ url: 'https://example.test/wp-json/wp/v2/settings?_locale=user', method: 'OPTIONS' }],
-		apiFetchAttempts: [{ source: 'apiFetch', path: '/wp/v2/settings', method: 'OPTIONS' }],
-		preloadChecks: [{ path: '/wp/v2/settings', method: 'OPTIONS', hit: false, nextUrl: '/wp/v2/settings' }],
+		apiFetchAttempts: [{ source: 'apiFetch', path: '/wp/v2/settings', method: 'OPTIONS', stackFrames: ['at canUser (core-data/resolvers.js:704:21)'] }],
+		preloadChecks: [{ path: '/wp/v2/settings', method: 'OPTIONS', hit: false, nextUrl: '/wp/v2/settings', stackFrames: ['at createPreloadingMiddleware (api-fetch/preloading.js:45:10)'] }],
 	});
 	assert.equal(optionsDeclarationDiagnostics.rows[0].serverDeclarationSuggestions[0].declaration, "array( '/wp/v2/settings', 'OPTIONS' )");
+	assert.equal(optionsDeclarationDiagnostics.rows[0].attribution.apiFetchPreMiddleware[0].caller, 'at canUser (core-data/resolvers.js:704:21)');
+	assert.equal(optionsDeclarationDiagnostics.rows[0].attribution.preloadChecks[0].caller, 'at createPreloadingMiddleware (api-fetch/preloading.js:45:10)');
 	const payloadBudgetResult = diagnoseWordPressPageProfile({
 		id: 'payload-budget',
 		readyMs: 500,

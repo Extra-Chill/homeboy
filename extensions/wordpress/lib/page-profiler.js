@@ -261,6 +261,8 @@ function compactRestRows(rows) {
 		hit: row.hit,
 		nextUrl: row.nextUrl || undefined,
 		payloadBytes: row.payloadBytes,
+		caller: row.caller,
+		stackFrames: row.stackFrames,
 	}));
 }
 
@@ -376,6 +378,7 @@ function normalizeRestPreloadList(value) {
 
 function normalizeApiFetchAttempt(row) {
 	const url = normalizeRestUrl(row?.url || row?.path || row?.route || '');
+	const stackFrames = Array.isArray(row?.stackFrames) ? row.stackFrames.filter((frame) => typeof frame === 'string' && frame.trim()).slice(0, 8) : [];
 	return {
 		source: row?.source || 'apiFetch',
 		url,
@@ -395,11 +398,14 @@ function normalizeApiFetchAttempt(row) {
 		responseBodySample: row?.responseBodySample,
 		responseBodySampleTruncated: Boolean(row?.responseBodySampleTruncated),
 		responseBodySampleError: row?.responseBodySampleError,
+		caller: row?.caller || stackFrames[0],
+		stackFrames,
 	};
 }
 
 function normalizeRestPreloadCheck(row) {
 	const url = normalizeRestUrl(row?.url || row?.path || row?.route || '');
+	const stackFrames = Array.isArray(row?.stackFrames) ? row.stackFrames.filter((frame) => typeof frame === 'string' && frame.trim()).slice(0, 8) : [];
 	return {
 		source: row?.source || 'preload-check',
 		url,
@@ -411,6 +417,8 @@ function normalizeRestPreloadCheck(row) {
 		hit: Boolean(row?.hit),
 		failed: Boolean(row?.failed),
 		error: row?.error,
+		caller: row?.caller || stackFrames[0],
+		stackFrames,
 	};
 }
 
@@ -502,6 +510,24 @@ async function installWordPressRestInstrumentation(page) {
 			const value = String(url || '');
 			return value.includes('/wp-json/') || /^\/[A-Za-z0-9_-]+\/v\d+(?:\/|$)/.test(value) || value.includes('rest_route=');
 		};
+		const captureStackFrames = () => {
+			const stack = new Error().stack;
+			if (typeof stack !== 'string') {
+				return [];
+			}
+			return stack
+				.split('\n')
+				.map((line) => line.trim())
+				.filter(Boolean)
+				.filter((line) => !/^Error\b/.test(line))
+				.filter((line) => !line.includes('captureStackFrames'))
+				.filter((line) => !line.includes('__homeboyWordPressRestProbe'))
+				.filter((line) => !line.includes('record ('))
+				.filter((line) => !line.includes('wrappedFetch'))
+				.filter((line) => !line.includes('wrappedApiFetch'))
+				.filter((line) => !line.includes('wrappedNext'))
+				.slice(0, 8);
+		};
 		const responseSampleBytes = 4096;
 		const attachResponseSample = async (entry, response) => {
 			if (!entry || !response || typeof response.clone !== 'function') {
@@ -562,7 +588,9 @@ async function installWordPressRestInstrumentation(page) {
 				url,
 				method: (input?.method || init?.method || 'GET').toUpperCase(),
 				startedAtMs: performance.now() - probe.startedAt,
+				stackFrames: captureStackFrames(),
 			};
+			entry.caller = entry.stackFrames[0];
 			probe.attempts.push(entry);
 			return entry;
 		};
@@ -598,8 +626,12 @@ async function installWordPressRestInstrumentation(page) {
 							url: checkUrl,
 							method: (options?.method || 'GET').toUpperCase(),
 							startedAtMs: performance.now() - probe.startedAt,
+							stackFrames: captureStackFrames(),
 						}
 						: null;
+					if (check) {
+						check.caller = check.stackFrames[0];
+					}
 					let nextCalled = false;
 					const wrappedNext = (nextOptions) => {
 						nextCalled = true;
@@ -1097,6 +1129,8 @@ function diagnoseWordPressRestPreloadMisses(input = {}) {
 				method: attempt.method,
 				status: attempt.status,
 				durationMs: attempt.durationMs,
+				caller: attempt.caller,
+				stackFrames: attempt.stackFrames,
 			})),
 			attribution,
 			serverDeclarationSuggestions,
