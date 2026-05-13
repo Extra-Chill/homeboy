@@ -20,13 +20,13 @@ struct ExtensionInputsView: View {
                 }
             }
             
-            ForEach(extension.manifest.inputs ?? []) { input in
+            ForEach(currentExtension.manifest.inputs ?? []) { input in
                 inputField(for: input)
             }
             
             HStack {
                 Button {
-                    viewModel.run(extension: extension)
+                    viewModel.run(extension: currentExtension)
                 } label: {
                     HStack {
                         if viewModel.isRunning {

@@ -31,7 +31,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
     
     /// Whether this extension is a CLI extension with subtarget support
     var isCLIExtension: Bool {
-        extension?.manifest.runtime?.type == .cli
+        currentExtension?.manifest.runtime?.type == .cli
     }
     
     /// Whether the current project has subtargets (for showing site selector)
@@ -70,14 +70,14 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
     }
     
     /// Initialize input values from extension manifest
-    func initializeInputValues(from extension: LoadedExtension) {
+    func initializeInputValues(from currentExtension: LoadedExtension) {
         // Set default network site for CLI extensions
-        if extension.manifest.runtime?.type == .cli {
-            selectedNetworkSite = extension.manifest.runtime?.defaultSite ?? "main"
+        if currentExtension.manifest.runtime?.type == .cli {
+            selectedNetworkSite = currentExtension.manifest.runtime?.defaultSite ?? "main"
         }
         
         // Set default input values
-        for input in extension.manifest.inputs ?? [] {
+        for input in currentExtension.manifest.inputs ?? [] {
             if let defaultValue = input.default {
                 inputValues[input.id] = defaultValue.stringValue
             } else {
@@ -88,7 +88,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
     
     // MARK: - Extension Execution
     
-    func run(extension: LoadedExtension) {
+    func run(extension currentExtension: LoadedExtension) {
         guard !isRunning && !isSettingUp else { return }
         
         consoleOutput = ""
@@ -100,7 +100,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
         
         Task {
             await ExtensionManager.shared.runExtension(
-                extensionId: extension.id,
+                extensionId: currentExtension.id,
                 inputs: inputValues,
                 onOutput: { [weak self] line in
                     Task { @MainActor in
@@ -110,7 +110,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
             )
 
             let output = parseScriptOutput(from: consoleOutput)
-            handleRunResult(output, extension: extension)
+            handleRunResult(output, extension: currentExtension)
         }
     }
     
@@ -137,7 +137,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
         }
     }
 
-    private func handleRunResult(_ result: Result<ScriptOutput, Error>, extension: LoadedExtension) {
+    private func handleRunResult(_ result: Result<ScriptOutput, Error>, extension currentExtension: LoadedExtension) {
         isRunning = false
         
         switch result {
@@ -145,7 +145,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
             if output.success {
                 results = output.results ?? []
                 // Auto-select all rows if selectable
-                if extension.manifest.output?.selectable == true {
+                if currentExtension.manifest.output?.selectable == true {
                     selectedRows = Set(results.indices)
                 }
                 if let errors = output.errors, !errors.isEmpty {
@@ -170,7 +170,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
     
     // MARK: - Extension Setup
     
-    func setup(extension: LoadedExtension) {
+    func setup(extension currentExtension: LoadedExtension) {
         guard !isSettingUp && !isRunning else { return }
         
         isSettingUp = true
@@ -179,8 +179,8 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
         
         Task {
             do {
-                try await ExtensionManager.shared.setupExtension(extensionId: extension.id)
-                ExtensionManager.shared.updateExtensionState(extensionId: extension.id, state: .ready)
+                try await ExtensionManager.shared.setupExtension(extensionId: currentExtension.id)
+                ExtensionManager.shared.updateExtensionState(extensionId: currentExtension.id, state: .ready)
             } catch {
                 self.error = error.toDisplayableError(source: "Extension: \(extensionId)")
             }
@@ -216,21 +216,23 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
     
     // MARK: - Actions
     
-    func performAction(_ action: ActionConfig, extension: LoadedExtension) async {
+    func performAction(_ action: ActionConfig, extension currentExtension: LoadedExtension) async {
         isPerformingAction = true
         actionResult = nil
         
         switch action.type {
         case .builtin:
-            performBuiltinAction(action, extension: extension)
+            performBuiltinAction(action, extension: currentExtension)
         case .api:
-            await performAPIAction(action, extension: extension)
+            await performAPIAction(action, extension: currentExtension)
+        case .command:
+            actionResult = "Command actions are not implemented in the desktop runner yet."
         }
         
         isPerformingAction = false
     }
     
-    private func performBuiltinAction(_ action: ActionConfig, extension: LoadedExtension) {
+    private func performBuiltinAction(_ action: ActionConfig, extension currentExtension: LoadedExtension) {
         guard let builtin = action.builtin else { return }
         
         switch builtin {
@@ -243,7 +245,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
             actionResult = "Copied \(values.count) values to clipboard"
             
         case .exportCsv:
-            exportToCsv(extension: extension)
+            exportToCsv(extension: currentExtension)
             
         case .copyJson:
             let encoder = JSONEncoder()
@@ -257,10 +259,10 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
         }
     }
     
-    private func exportToCsv(extension: LoadedExtension) {
+    private func exportToCsv(extension currentExtension: LoadedExtension) {
         guard !results.isEmpty else { return }
         
-        let columns = extension.manifest.output?.schema.items?.keys.sorted() ?? []
+        let columns = currentExtension.manifest.output?.schema.items?.keys.sorted() ?? []
         guard !columns.isEmpty else { return }
         
         var csv = columns.joined(separator: ",") + "\n"
@@ -278,7 +280,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
         // Show save panel
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.commaSeparatedText]
-        panel.nameFieldStringValue = "\(extension.id)-export.csv"
+        panel.nameFieldStringValue = "\(currentExtension.id)-export.csv"
         
         if panel.runModal() == .OK, let url = panel.url {
             do {
@@ -290,7 +292,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
         }
     }
     
-    private func performAPIAction(_ action: ActionConfig, extension: LoadedExtension) async {
+    private func performAPIAction(_ action: ActionConfig, extension currentExtension: LoadedExtension) async {
         guard let endpoint = action.endpoint,
               let method = action.method else {
             error = AppError("Invalid API action configuration", source: "Extension: \(extensionId)")
@@ -316,7 +318,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
         var payload: [String: Any] = [:]
         if let payloadTemplate = action.payload {
             for (key, value) in payloadTemplate {
-                payload[key] = interpolateValue(value, extension: extension)
+                payload[key] = interpolateValue(value, extension: currentExtension)
             }
         }
         
@@ -360,7 +362,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
     }
     
     /// Interpolates template values like {{selected}} and {{settings.key}}
-    private func interpolateValue(_ value: PayloadValue, extension: LoadedExtension) -> Any {
+    private func interpolateValue(_ value: PayloadValue, extension currentExtension: LoadedExtension) -> Any {
         switch value {
         case .string(let template):
             if template == "{{selected}}" {
@@ -404,7 +406,7 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
     // MARK: - Console
     
     func copyConsoleOutput() {
-        let extensionName = extension?.name ?? extensionId
+        let extensionName = currentExtension?.name ?? extensionId
         ConsoleOutput(consoleOutput, source: "Extension: \(extensionName)").copyToClipboard()
     }
     

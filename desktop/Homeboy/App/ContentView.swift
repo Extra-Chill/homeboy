@@ -45,6 +45,26 @@ enum CoreTool: String, CaseIterable, Identifiable {
         case .settings: return "gear"
         }
     }
+
+    func isAvailable(for project: ProjectConfiguration?) -> Bool {
+        guard let project else { return self == .settings }
+
+        let hasComponents = !project.componentIds.isEmpty || !project.components.isEmpty
+        let hasRemoteTarget = project.serverId?.isEmpty == false && project.basePath?.isEmpty == false
+
+        switch self {
+        case .settings:
+            return true
+        case .deployer, .bench, .runHistory, .release, .rigs, .stackManager, .git, .quality:
+            return hasComponents
+        case .remoteFileEditor, .remoteLogViewer:
+            return hasRemoteTarget
+        case .databaseBrowser:
+            return project.isWordPress || !project.database.name.isEmpty
+        case .apiAuth:
+            return project.api.enabled || project.isWordPress
+        }
+    }
 }
 
 struct ContentView: View {
@@ -62,13 +82,34 @@ struct ContentView: View {
                     detailView
                 }
             } else {
-                // Placeholder while waiting for project creation sheet
-                Color.clear
+                ContentUnavailableView(
+                    configManager.needsProjectCreation ? "No Homeboy Projects" : "Loading Homeboy Project",
+                    systemImage: configManager.needsProjectCreation ? "folder.badge.plus" : "hourglass",
+                    description: Text(
+                        configManager.needsProjectCreation
+                            ? "Create a project to start using Homeboy Desktop."
+                            : "Reading project configuration from the Homeboy CLI."
+                    )
+                )
             }
         }
         .sheet(isPresented: $configManager.needsProjectCreation) {
             CreateProjectSheet(isFirstProject: true)
         }
+        .onChange(of: configManager.activeProject?.id) { _, _ in
+            ensureSelectedItemIsAvailable()
+        }
+    }
+
+    private func ensureSelectedItemIsAvailable() {
+        guard case .coreTool(let tool) = selectedItem,
+              !tool.isAvailable(for: configManager.activeProject) else {
+            return
+        }
+
+        selectedItem = CoreTool.allCases.first { $0 != .settings && $0.isAvailable(for: configManager.activeProject) }
+            .map(NavigationItem.coreTool)
+            ?? .coreTool(.settings)
     }
     
     /// Views are kept mounted in a ZStack to preserve state (including running processes)

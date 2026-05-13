@@ -306,8 +306,8 @@ struct AddEditComponentSheet: View {
             localPath: localPath,
             remotePath: remotePath,
             buildArtifact: buildArtifact.isEmpty ? nil : buildArtifact,
-            versionTargets: versionTargets,
-            buildCommand: nil
+            buildCommand: nil,
+            versionTargets: versionTargets
         )
 
         Task {

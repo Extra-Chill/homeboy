@@ -8,7 +8,7 @@ struct ExtensionActionsBar: View {
     
     var body: some View {
         HStack {
-            ForEach(extension.manifest.actions ?? []) { action in
+            ForEach(currentExtension.manifest.actions ?? []) { action in
                 actionButton(for: action)
             }
             
@@ -33,7 +33,7 @@ struct ExtensionActionsBar: View {
         
         Button {
             Task {
-                await viewModel.performAction(action, extension: extension)
+                await viewModel.performAction(action, extension: currentExtension)
             }
         } label: {
             HStack(spacing: 4) {
@@ -54,7 +54,7 @@ struct ExtensionActionsBar: View {
         }
         
         // Check row selection for selectable outputs
-        if extension.manifest.output?.selectable == true && viewModel.selectedRows.isEmpty {
+        if currentExtension.manifest.output?.selectable == true && viewModel.selectedRows.isEmpty {
             return (false, "Select rows first")
         }
         

@@ -47,27 +47,27 @@ struct SidebarView: View {
                                 .help("Manage extensions in Settings")
                         }
                     } else {
-                        ForEach(extensionManager.extensions) { extension in
+                        ForEach(extensionManager.extensions) { loadedExtension in
                             HStack {
-                                Label(extension.name, systemImage: extension.icon)
-                                    .foregroundColor(extension.isDisabled ? .secondary : .primary)
+                                Label(loadedExtension.name, systemImage: loadedExtension.icon)
+                                    .foregroundColor(loadedExtension.isDisabled ? .secondary : .primary)
 
                                 Spacer()
 
                                 // Status indicator
-                                if extension.isDisabled {
+                                if loadedExtension.isDisabled {
                                     Image(systemName: "exclamationmark.triangle.fill")
                                         .foregroundColor(.gray)
                                         .font(.caption)
                                         .contextMenu {
                                             Button("Copy Warning") {
                                                 AppWarning(
-                                                    "Missing requirements: \(extension.missingComponents.joined(separator: ", "))",
-                                                    source: "Extension: \(extension.name)"
+                                                    "Missing requirements: \(loadedExtension.missingComponents.joined(separator: ", "))",
+                                                    source: "Extension: \(loadedExtension.name)"
                                                 ).copyToClipboard()
                                             }
                                         }
-                                } else if extension.state == .needsSetup {
+                                } else if loadedExtension.state == .needsSetup {
                                     Image(systemName: "exclamationmark.circle.fill")
                                         .foregroundColor(.orange)
                                         .font(.caption)
@@ -75,14 +75,14 @@ struct SidebarView: View {
                                             Button("Copy Warning") {
                                                 AppWarning(
                                                     "Setup Required",
-                                                    source: "Extension: \(extension.name)"
+                                                    source: "Extension: \(loadedExtension.name)"
                                                 ).copyToClipboard()
                                             }
                                         }
                                 }
                             }
-                            .tag(NavigationItem.extensionItem(extension.id))
-                            .help(extension.isDisabled ? "Requires: \(extension.missingComponents.joined(separator: ", "))" : extension.name)
+                            .tag(NavigationItem.extensionItem(loadedExtension.id))
+                            .help(loadedExtension.isDisabled ? "Requires: \(loadedExtension.missingComponents.joined(separator: ", "))" : loadedExtension.name)
                         }
                     }
                 } header: {
@@ -117,13 +117,34 @@ struct SidebarView: View {
                 }
             }
         }
+        .onChange(of: config.activeProject?.id) { _, _ in
+            ensureSelectionIsVisible()
+        }
+        .onChange(of: extensionManager.extensions.map(\.id)) { _, _ in
+            ensureSelectionIsVisible()
+        }
+    }
+
+    private func ensureSelectionIsVisible() {
+        switch selectedItem {
+        case .coreTool(let tool):
+            if !coreTools.contains(tool), tool != .settings {
+                selectedItem = coreTools.first.map(NavigationItem.coreTool) ?? .coreTool(.settings)
+            }
+        case .extensionItem(let id):
+            if !extensionManager.extensions.contains(where: { $0.id == id }) {
+                selectedItem = coreTools.first.map(NavigationItem.coreTool) ?? .coreTool(.settings)
+            }
+        case nil:
+            selectedItem = coreTools.first.map(NavigationItem.coreTool) ?? .coreTool(.settings)
+        }
     }
     
     /// Core tools to display in the sidebar.
     /// All tools are universal - Database Browser shows config prompt if not configured.
     /// Settings is shown in a separate section below.
     private var coreTools: [CoreTool] {
-        CoreTool.allCases.filter { $0 != .settings }
+        CoreTool.allCases.filter { $0 != .settings && $0.isAvailable(for: config.activeProject) }
     }
 }
 

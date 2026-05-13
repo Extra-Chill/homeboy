@@ -40,17 +40,17 @@ struct ExtensionContainerView: View {
     }
     
     @ViewBuilder
-    private func extensionContent(_ extension: LoadedExtension) -> some View {
+    private func extensionContent(_ currentExtension: LoadedExtension) -> some View {
         VStack(spacing: 0) {
             // Header
-            ExtensionHeaderView(extension: extension, viewModel: viewModel)
+            ExtensionHeaderView(currentExtension: currentExtension, viewModel: viewModel)
             
             Divider()
             
             // Main content based on extension state
-            switch extension.state {
+            switch currentExtension.state {
             case .needsSetup:
-                ExtensionSetupView(extension: extension, viewModel: viewModel)
+                ExtensionSetupView(currentExtension: currentExtension, viewModel: viewModel)
                 
             case .installing:
                 VStack {
@@ -68,7 +68,7 @@ struct ExtensionContainerView: View {
                     )
                     CopyButton.warning(
                         "Missing requirements: \(requirements.joined(separator: ", "))",
-                        source: "Extension: \(extension.name)"
+                        source: "Extension: \(currentExtension.name)"
                     )
                 }
                 
@@ -79,14 +79,14 @@ struct ExtensionContainerView: View {
                         systemImage: "exclamationmark.triangle",
                         description: Text(message)
                     )
-                    CopyButton.error(message, source: "Extension: \(extension.name)")
+                    CopyButton.error(message, source: "Extension: \(currentExtension.name)")
                 }
                 
             case .ready:
-                if let _ = extension.manifest.runtime {
-                    ExtensionReadyView(extension: extension, viewModel: viewModel)
+                if let _ = currentExtension.manifest.runtime {
+                    ExtensionReadyView(currentExtension: currentExtension, viewModel: viewModel)
                 } else {
-                    PlatformExtensionView(extension: extension)
+                    PlatformExtensionView(currentExtension: currentExtension)
                 }
             }
         }
@@ -103,7 +103,7 @@ struct PlatformExtensionView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Actions grid
-            if let actions = extension.manifest.actions, !actions.isEmpty {
+            if let actions = currentExtension.manifest.actions, !actions.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Actions")
                         .font(.headline)
@@ -172,7 +172,7 @@ struct PlatformExtensionView: View {
         defer { isRunning = false }
         
         do {
-            let args = ["extension", "action", extension.id, action.id]
+            let args = ["extension", "action", currentExtension.id, action.id]
             let response = try await CLIBridge.shared.execute(args)
             actionOutput += "$ \(command)\n\(response.output)\n\n"
         } catch {
@@ -189,14 +189,14 @@ struct ExtensionHeaderView: View {
     
     var body: some View {
         HStack {
-            Image(systemName: extension.icon)
+            Image(systemName: currentExtension.icon)
                 .font(.title2)
                 .foregroundColor(.accentColor)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text(extension.name)
+                Text(currentExtension.name)
                     .font(.headline)
-                Text(extension.manifest.description)
+                Text(currentExtension.manifest.description)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -227,7 +227,7 @@ struct ExtensionReadyView: View {
             // Left side: Inputs + Console
             VStack(spacing: 0) {
                 // Input form
-                ExtensionInputsView(extension: extension, viewModel: viewModel)
+                ExtensionInputsView(currentExtension: currentExtension, viewModel: viewModel)
                 
                 Divider()
                 
@@ -255,13 +255,13 @@ struct ExtensionReadyView: View {
             .frame(minWidth: 300)
             
             // Right side: Results (if table display)
-            if extension.manifest.output?.display == .table && !viewModel.results.isEmpty {
+            if currentExtension.manifest.output?.display == .table && !viewModel.results.isEmpty {
                 VStack(spacing: 0) {
-                    ExtensionResultsView(extension: extension, viewModel: viewModel)
+                    ExtensionResultsView(currentExtension: currentExtension, viewModel: viewModel)
                     
                     Divider()
                     
-                    ExtensionActionsBar(extension: extension, viewModel: viewModel)
+                    ExtensionActionsBar(currentExtension: currentExtension, viewModel: viewModel)
                 }
                 .frame(minWidth: 400)
             }

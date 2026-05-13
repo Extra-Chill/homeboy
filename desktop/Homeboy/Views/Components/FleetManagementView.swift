@@ -226,13 +226,13 @@ struct FleetCreateSheet: View {
             Form {
                 Section("Fleet Details") {
                     TextField("ID", text: $id)
-                        .textInputAutocapitalization(.never)
+                        .textFieldStyle(.roundedBorder)
                     TextField("Description (optional)", text: $description)
                 }
 
                 Section("Projects") {
                     TextField("Project IDs (comma-separated)", text: $projectIds)
-                        .textInputAutocapitalization(.never)
+                        .textFieldStyle(.roundedBorder)
                 }
 
                 if let error = errorMessage {
@@ -243,7 +243,6 @@ struct FleetCreateSheet: View {
                 }
             }
             .navigationTitle("New Fleet")
-            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }

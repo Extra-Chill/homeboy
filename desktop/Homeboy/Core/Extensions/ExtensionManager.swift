@@ -98,7 +98,12 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
         error = nil
 
         do {
-            let response = try await CLIBridge.shared.execute(["extension", "list"])
+            var args = ["extension", "list"]
+            if let projectId = ConfigurationManager.shared.activeProject?.id {
+                args.append(contentsOf: ["--project", projectId])
+            }
+
+            let response = try await CLIBridge.shared.execute(args)
             let result = try response.decodeResponse(CLIExtensionListData.self)
 
             guard result.success, let data = result.data else {
@@ -120,8 +125,8 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
             // Load manifests from CLI-reported paths
             var loadedExtensions: [LoadedExtension] = []
             for entry in visibleEntries {
-                if let extension = loadManifest(from: entry) {
-                    loadedExtensions.append(extension)
+                if let loadedExtension = loadManifest(from: entry) {
+                    loadedExtensions.append(loadedExtension)
                 }
             }
 
