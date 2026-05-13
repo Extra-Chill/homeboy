@@ -119,6 +119,39 @@ assert_contains "${SOURCE_BODY}" '- `homeboy.json` audit baseline metadata was r
 assert_contains "${SOURCE_BODY}" '- Workflow run: https://github.com/Extra-Chill/homeboy-action/actions/runs/12345' "verification includes workflow run"
 assert_not_contains "${SOURCE_BODY}" 'file(s) fixed via' "source report omits generic old summary"
 
+FALLBACK_OUTPUT_DIR="${TMP_DIR}/fallback-output"
+mkdir -p "${FALLBACK_OUTPUT_DIR}"
+cat > "${FALLBACK_OUTPUT_DIR}/fix.json" <<'JSON'
+{
+  "data": {
+    "command": "refactor.sources",
+    "applied": true,
+    "changed_files": [
+      "src/core/code_audit/duplication.rs",
+      "src/core/code_audit/requested_detectors.rs"
+    ],
+    "collected_edits": []
+  }
+}
+JSON
+
+FALLBACK_REPORT="$(extract_fix_report_from_output "${FALLBACK_OUTPUT_DIR}")"
+BODY_CAPTURE="${TMP_DIR}/fallback-create.md"
+export BODY_CAPTURE
+export HOMEBOY_PR_MODE="create"
+export AUTOFIX_FILE_COUNT="2"
+export AUTOFIX_CHANGED_FILES=$'src/core/code_audit/duplication.rs\nsrc/core/code_audit/requested_detectors.rs'
+export AUTOFIX_REPORT="${FALLBACK_REPORT}"
+
+bash "${ROOT}/scripts/autofix/open-autofix-pr.sh" >/tmp/homeboy-action-test-fallback.log
+FALLBACK_BODY="$(<"${BODY_CAPTURE}")"
+
+assert_contains "${FALLBACK_REPORT}" $'source_change\t2\tsrc/core/code_audit/duplication.rs, src/core/code_audit/requested_detectors.rs' "fallback report classifies refactor.sources changed files"
+assert_contains "${FALLBACK_BODY}" 'Applied autofix changes to **2** source files.' "fallback summary treats source changes as fixes"
+assert_contains "${FALLBACK_BODY}" '| `source_change` | 2 | `src/core/code_audit/duplication.rs` `src/core/code_audit/requested_detectors.rs` |' "fallback table includes changed source files"
+assert_not_contains "${FALLBACK_BODY}" 'No source fixes were reported by the autofix output.' "fallback avoids false no-source-fixes summary"
+assert_not_contains "${FALLBACK_BODY}" 'changed outside the reported source-fix set' "fallback does not misclassify source files as other changes"
+
 BODY_CAPTURE="${TMP_DIR}/baseline-create.md"
 export BODY_CAPTURE
 export AUTOFIX_FILE_COUNT="1"

@@ -150,7 +150,8 @@ extract_fix_details_from_output() {
         "broken_doc_reference": "Broken doc references fixed",
         "missing_import": "Missing imports added",
         "namespace_mismatch": "Namespace mismatches fixed",
-        "directory_sprawl": "Directory sprawl reduced"
+        "directory_sprawl": "Directory sprawl reduced",
+        "source_change": "Source files changed"
       }[.] // .;
 
     # Collect insertions with normalized category (FixResult format)
@@ -170,8 +171,18 @@ extract_fix_details_from_output() {
     # Collect decompose plans (FixResult format — structural decompose operations)
     [.[].decompose_plans // [] | .[] | {cat: .source_finding, file}] as $decompose |
 
-    # Combine all sources and group by category
-    ($insertions + $new_files + $proposals + $collected_edits + $decompose) | group_by(.cat) |
+    ($insertions + $new_files + $proposals + $collected_edits + $decompose) as $structured |
+
+    # RefactorSourceRun can report applied changed_files without collected_edits
+    # when an extension applies fixes but does not emit the fix-results sidecar.
+    [ .[] | select((.command // "") == "refactor.sources" and (.applied // false)) |
+      (.changed_files // [])[] | {cat: "source_change", file: .}
+    ] as $source_changes |
+
+    # Prefer precise structured rows. Fall back to changed_files only when the
+    # source run would otherwise look like a metadata-only change.
+    (if ($structured | length) > 0 then $structured else $source_changes end) |
+    group_by(.cat) |
     map({
       cat: .[0].cat,
       count: length,
@@ -222,7 +233,12 @@ extract_fix_report_from_output() {
     [.[].collected_edits // [] | .[] | {cat: .rule_id, file}] as $collected_edits |
     [.[].decompose_plans // [] | .[] | {cat: .source_finding, file}] as $decompose |
 
-    ($insertions + $new_files + $proposals + $collected_edits + $decompose) |
+    ($insertions + $new_files + $proposals + $collected_edits + $decompose) as $structured |
+    [ .[] | select((.command // "") == "refactor.sources" and (.applied // false)) |
+      (.changed_files // [])[] | {cat: "source_change", file: .}
+    ] as $source_changes |
+
+    (if ($structured | length) > 0 then $structured else $source_changes end) |
     group_by(.cat) |
     map({
       cat: .[0].cat,
@@ -414,7 +430,13 @@ build_autofix_pr_body() {
     if [ "${row_count}" = "1" ]; then
       local only_type
       only_type="$(printf '%s\n' "${AUTOFIX_REPORT}" | awk -F '\t' 'NF >= 1 { print $1; exit }')"
-      printf -- '- Fixed **%s** `%s` %s.\n' "${total_fixes}" "${only_type}" "${label}"
+      if [ "${only_type}" = "source_change" ]; then
+        local source_label="source file"
+        [ "${total_fixes}" = "1" ] || source_label="source files"
+        printf -- '- Applied autofix changes to **%s** %s.\n' "${total_fixes}" "${source_label}"
+      else
+        printf -- '- Fixed **%s** `%s` %s.\n' "${total_fixes}" "${only_type}" "${label}"
+      fi
     else
       printf -- '- Fixed **%s** source %s across **%s** finding types.\n' "${total_fixes}" "${label}" "${row_count}"
     fi
