@@ -1485,9 +1485,15 @@ async function collectBrowserResourceTimings(page, options = {}) {
 async function waitForPageReady(page, ready, options = {}) {
 	const spec = normalizeReadySpec(ready);
 	const timeout = spec.timeout || options.timeout || 120000;
+	const startedAt = typeof options.startedAt === 'number' ? options.startedAt : Date.now();
+	const readiness = {};
+	const record = (key) => {
+		readiness[key] = Date.now() - startedAt;
+	};
 
 	if (spec.state && typeof page.waitForLoadState === 'function') {
 		await page.waitForLoadState(spec.state, { timeout });
+		record('loadStateMs');
 	}
 
 	if (spec.selector) {
@@ -1495,6 +1501,7 @@ async function waitForPageReady(page, ready, options = {}) {
 			state: spec.selectorState || 'visible',
 			timeout,
 		});
+		record('selectorMs');
 	}
 
 	if (spec.frame || spec.frameSelector) {
@@ -1507,12 +1514,14 @@ async function waitForPageReady(page, ready, options = {}) {
 		}
 		if (spec.frameState && typeof frame.waitForLoadState === 'function') {
 			await frame.waitForLoadState(spec.frameState, { timeout });
+			record('frameLoadStateMs');
 		}
 		if (spec.frameSelector) {
 			await frame.waitForSelector(spec.frameSelector, {
 				state: spec.frameSelectorState || 'visible',
 				timeout,
 			});
+			record('frameSelectorMs');
 		}
 	}
 
@@ -1521,7 +1530,11 @@ async function waitForPageReady(page, ready, options = {}) {
 			throw new TypeError('ready.function requires page.waitForFunction()');
 		}
 		await page.waitForFunction(spec.function, spec.functionArg, { timeout });
+		record('functionMs');
 	}
+
+	readiness.readyMs = Date.now() - startedAt;
+	return readiness;
 }
 
 function summarizeResourceTimings(entries) {
@@ -2354,16 +2367,20 @@ async function profileWordPressPage(input) {
 		waitUntil: spec.gotoWaitUntil || 'commit',
 		timeout: spec.timeout || 120000,
 	});
+	const commitMs = Date.now() - started;
 	if (typeof mark === 'function') {
 		await mark(`${spec.id}_commit`);
 	}
 
-	await waitForPageReady(page, spec.ready, { timeout: spec.timeout || 120000 });
+	const readiness = {
+		commitMs,
+		...await waitForPageReady(page, spec.ready, { timeout: spec.timeout || 120000, startedAt: started }),
+	};
 	if (typeof mark === 'function') {
 		await mark(`${spec.id}_ready`);
 	}
 
-	const readyMs = Date.now() - started;
+	const readyMs = readiness.readyMs;
 	const initialResources = await collectBrowserResourceTimings(page, spec.resources || {}).catch(() => []);
 	let interactionActions = [];
 	if (Array.isArray(input.interactions)) {
@@ -2429,6 +2446,7 @@ async function profileWordPressPage(input) {
 		path: new URL(url).pathname + new URL(url).search,
 		status: response && typeof response.status === 'function' ? response.status() : 0,
 		readyMs,
+		readiness,
 		resources: resourceSummary,
 		initialResources: initialResourceSummary,
 		interactions,

@@ -510,6 +510,10 @@ async function main() {
 
 	assert.equal(result.id, 'site-editor');
 	assert.equal(result.status, 200);
+	assert.equal(typeof result.readiness.commitMs, 'number');
+	assert.equal(typeof result.readiness.selectorMs, 'number');
+	assert.equal(typeof result.readiness.frameSelectorMs, 'number');
+	assert.equal(result.readyMs, result.readiness.readyMs);
 	assert.equal(result.resources.restCount, 2);
 	assert.equal(result.initialResources.restCount, 2);
 	assert.equal(result.interactions.actions.length, 6);
