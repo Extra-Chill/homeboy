@@ -193,6 +193,49 @@ function restWaterfallKey(row) {
 	return `${normalizeRestMethod(row?.method)} ${normalizeRestWaterfallUrl(row?.url || row?.path || row?.normalizedUrl)}`;
 }
 
+function restWaterfallUrlWithoutQueryParam(url, param) {
+	const normalized = normalizeRestUrl(url);
+	const queryIndex = normalized.indexOf('?');
+	if (queryIndex < 0) {
+		return normalized;
+	}
+	const base = normalized.slice(0, queryIndex);
+	const params = new URLSearchParams(normalized.slice(queryIndex + 1));
+	params.delete(param);
+	const query = params.toString();
+	return query ? `${base}?${query}` : base;
+}
+
+function restWaterfallUrlWithQueryParam(url, param, value) {
+	const normalized = normalizeRestUrl(url);
+	const queryIndex = normalized.indexOf('?');
+	const base = queryIndex >= 0 ? normalized.slice(0, queryIndex) : normalized;
+	const params = new URLSearchParams(queryIndex >= 0 ? normalized.slice(queryIndex + 1) : '');
+	params.set(param, value);
+	return `${base}?${params.toString()}`;
+}
+
+function restWaterfallUrlHasQueryParam(url, param) {
+	const normalized = normalizeRestUrl(url);
+	const queryIndex = normalized.indexOf('?');
+	if (queryIndex < 0) {
+		return false;
+	}
+	return new URLSearchParams(normalized.slice(queryIndex + 1)).has(param);
+}
+
+function restDiagnosticKey(method, url) {
+	return `${normalizeRestMethod(method)} ${normalizeRestUrl(url)}`;
+}
+
+function restDiagnosticKeyWithoutQueryParam(row, param) {
+	return restDiagnosticKey(row?.method, restWaterfallUrlWithoutQueryParam(row?.url || row?.path || row?.normalizedUrl, param));
+}
+
+function restDiagnosticKeyWithQueryParam(row, param, value) {
+	return restDiagnosticKey(row?.method, restWaterfallUrlWithQueryParam(row?.url || row?.path || row?.normalizedUrl, param, value));
+}
+
 function restRoutePath(url) {
 	return normalizeRestWaterfallUrl(url).split('?', 1)[0];
 }
@@ -370,6 +413,8 @@ async function installWordPressRestInstrumentation(page) {
 		const probe = window.__homeboyWordPressRestProbe = {
 			installed: true,
 			attempts: [],
+			preloads: [],
+			preloadChecks: [],
 			samplePromises: [],
 			startedAt: performance.now(),
 		};
@@ -466,6 +511,111 @@ async function installWordPressRestInstrumentation(page) {
 			probe.attempts.push(entry);
 			return entry;
 		};
+		const flattenPreloadedData = (preloadedData) => {
+			if (!preloadedData || typeof preloadedData !== 'object') {
+				return [];
+			}
+			const rows = [];
+			for (const [path, data] of Object.entries(preloadedData)) {
+				if (path === 'OPTIONS' && data && typeof data === 'object') {
+					for (const [optionsPath, optionsData] of Object.entries(data)) {
+						rows.push({ method: 'OPTIONS', path: optionsPath, body: optionsData?.body });
+					}
+					continue;
+				}
+				rows.push({ method: 'GET', path, body: data?.body });
+			}
+			return rows;
+		};
+		const wrapPreloadingFactory = (apiFetch) => {
+			if (typeof apiFetch?.createPreloadingMiddleware !== 'function' || apiFetch.createPreloadingMiddleware.__homeboyRestProbeWrapped) {
+				return;
+			}
+			const originalCreatePreloadingMiddleware = apiFetch.createPreloadingMiddleware.bind(apiFetch);
+			const wrappedCreatePreloadingMiddleware = (preloadedData) => {
+				probe.preloads.push(...flattenPreloadedData(preloadedData));
+				const middleware = originalCreatePreloadingMiddleware(preloadedData);
+				return async (options, next) => {
+					const checkUrl = normalizePath(options);
+					const check = isRest(checkUrl)
+						? {
+							source: 'preload-check',
+							url: checkUrl,
+							method: (options?.method || 'GET').toUpperCase(),
+							startedAtMs: performance.now() - probe.startedAt,
+						}
+						: null;
+					let nextCalled = false;
+					const wrappedNext = (nextOptions) => {
+						nextCalled = true;
+						if (check) {
+							check.nextUrl = normalizePath(nextOptions || options);
+						}
+						return next(nextOptions);
+					};
+					try {
+						const result = await middleware(options, wrappedNext);
+						if (check) {
+							check.hit = !nextCalled;
+							check.resolvedAtMs = performance.now() - probe.startedAt;
+							check.durationMs = check.resolvedAtMs - check.startedAtMs;
+							probe.preloadChecks.push(check);
+						}
+						return result;
+					} catch (error) {
+						if (check) {
+							check.failed = true;
+							check.error = error?.message || String(error);
+							check.hit = !nextCalled;
+							check.resolvedAtMs = performance.now() - probe.startedAt;
+							check.durationMs = check.resolvedAtMs - check.startedAtMs;
+							probe.preloadChecks.push(check);
+						}
+						throw error;
+					}
+				};
+			};
+			wrappedCreatePreloadingMiddleware.__homeboyRestProbeWrapped = true;
+			apiFetch.createPreloadingMiddleware = wrappedCreatePreloadingMiddleware;
+		};
+		const installApiFetchTrap = (wpObject) => {
+			if (!wpObject || typeof wpObject !== 'object' || wpObject.__homeboyRestProbeApiFetchTrap) {
+				return;
+			}
+			let currentApiFetch = wpObject.apiFetch;
+			try {
+				Object.defineProperty(wpObject, 'apiFetch', {
+					configurable: true,
+					get() {
+						return currentApiFetch;
+					},
+					set(value) {
+						currentApiFetch = value;
+						wrapPreloadingFactory(currentApiFetch);
+					},
+				});
+				wpObject.__homeboyRestProbeApiFetchTrap = true;
+				wrapPreloadingFactory(currentApiFetch);
+			} catch {
+				// Some environments may expose wp/apiFetch through non-configurable properties.
+			}
+		};
+		let currentWp = window.wp;
+		try {
+			Object.defineProperty(window, 'wp', {
+				configurable: true,
+				get() {
+					return currentWp;
+				},
+				set(value) {
+					currentWp = value;
+					installApiFetchTrap(currentWp);
+				},
+			});
+			installApiFetchTrap(currentWp);
+		} catch {
+			installApiFetchTrap(window.wp);
+		}
 
 		if (typeof window.fetch === 'function' && !window.fetch.__homeboyRestProbeWrapped) {
 			const originalFetch = window.fetch.bind(window);
@@ -499,6 +649,7 @@ async function installWordPressRestInstrumentation(page) {
 			if (typeof apiFetch !== 'function' || apiFetch.__homeboyRestProbeWrapped) {
 				return Boolean(apiFetch?.__homeboyRestProbeWrapped);
 			}
+			wrapPreloadingFactory(apiFetch);
 			const wrappedApiFetch = async (options = {}) => {
 				const entry = record('apiFetch', options, options);
 				try {
@@ -523,6 +674,7 @@ async function installWordPressRestInstrumentation(page) {
 			for (const key of Object.keys(apiFetch)) {
 				wrappedApiFetch[key] = apiFetch[key];
 			}
+			wrapPreloadingFactory(wrappedApiFetch);
 			wrappedApiFetch.__homeboyRestProbeWrapped = true;
 			window.wp.apiFetch = wrappedApiFetch;
 			return true;
@@ -676,6 +828,13 @@ function summarizeWordPressRestWaterfall(input = {}) {
 	const usedPreloadRows = preloads.filter((preload) => clientKeys.has(restKey(preload)));
 	const unusedPreloadRows = preloads.filter((preload) => !clientKeys.has(restKey(preload)));
 	const networkRows = rows.filter((row) => row.networkMatched);
+	const preloadedOrCacheRows = rows.filter((row) => row.source === 'preloaded-or-cache');
+	const preloadDiagnostics = diagnoseWordPressRestPreloadMisses({
+		networkRows,
+		preloads,
+		preloadedOrCacheRows,
+		apiFetchAttempts,
+	});
 	const preloadPayloadBytes = preloads.reduce((total, preload) => total + (preload.payloadBytes || 0), 0);
 	const counts = {
 		total: rows.length,
@@ -709,8 +868,121 @@ function summarizeWordPressRestWaterfall(input = {}) {
 		usedPreloadRows,
 		unusedPreloadRows,
 		remainingRestNetworkRows: networkRows,
-		preloadedOrCacheRows: rows.filter((row) => row.source === 'preloaded-or-cache'),
+		preloadedOrCacheRows,
 		afterReadyRows: rows.filter((row) => row.afterReady),
+		preloadDiagnostics,
+	};
+}
+
+function diagnoseWordPressRestPreloadMisses(input = {}) {
+	const networkRows = Array.isArray(input.networkRows) ? input.networkRows.map(normalizeRestNetworkRequest).filter((row) => row.url) : [];
+	const preloads = Array.isArray(input.preloads) ? input.preloads.map(normalizeRestPreload).filter((row) => row.url) : normalizeRestPreloadList(input.preloads);
+	const preloadedOrCacheRows = Array.isArray(input.preloadedOrCacheRows) ? input.preloadedOrCacheRows.map(normalizeApiFetchAttempt).filter((row) => row.url) : [];
+	const apiFetchAttempts = Array.isArray(input.apiFetchAttempts) ? input.apiFetchAttempts.map(normalizeApiFetchAttempt).filter((row) => row.url) : [];
+
+	const preloadsByExactKey = new Map();
+	const preloadsByLocaleFreeKey = new Map();
+	const preloadsByFetchAllKey = new Map();
+	const preloadedRowsByExactKey = new Map();
+	const preloadedRowsByLocaleFreeKey = new Map();
+	const apiFetchByExactKey = new Map();
+
+	const addToMap = (map, key, row) => {
+		if (!key) {
+			return;
+		}
+		if (!map.has(key)) {
+			map.set(key, []);
+		}
+		map.get(key).push(row);
+	};
+
+	for (const preload of preloads) {
+		addToMap(preloadsByExactKey, restKey(preload), preload);
+		addToMap(preloadsByLocaleFreeKey, restDiagnosticKeyWithoutQueryParam(preload, '_locale'), preload);
+		if (restRouteQuery(preload.url).includes('per_page=-1')) {
+			addToMap(preloadsByFetchAllKey, restDiagnosticKeyWithQueryParam(preload, 'per_page', '100'), preload);
+		}
+	}
+
+	for (const row of preloadedOrCacheRows) {
+		addToMap(preloadedRowsByExactKey, restKey(row), row);
+		addToMap(preloadedRowsByLocaleFreeKey, restDiagnosticKeyWithoutQueryParam(row, '_locale'), row);
+		if (restRouteQuery(row.url).includes('per_page=-1')) {
+			addToMap(preloadedRowsByLocaleFreeKey, restDiagnosticKeyWithQueryParam(row, 'per_page', '100'), row);
+		}
+	}
+
+	for (const attempt of apiFetchAttempts) {
+		addToMap(apiFetchByExactKey, restKey(attempt), attempt);
+	}
+
+	const rows = networkRows.map((row) => {
+		const exactKey = restKey(row);
+		const localeFreeKey = restDiagnosticKeyWithoutQueryParam(row, '_locale');
+		const fetchAllKey = restDiagnosticKeyWithQueryParam(row, 'per_page', '-1');
+		const reasons = [];
+		const evidence = {};
+
+		const exactPreloads = preloadsByExactKey.get(exactKey) || [];
+		const exactPreloadedRows = preloadedRowsByExactKey.get(exactKey) || [];
+		const localeFreePreloads = preloadsByLocaleFreeKey.get(localeFreeKey) || [];
+		const localeFreePreloadedRows = preloadedRowsByLocaleFreeKey.get(localeFreeKey) || [];
+		const fetchAllPreloads = preloadsByExactKey.get(fetchAllKey) || preloadsByFetchAllKey.get(exactKey) || preloadsByFetchAllKey.get(localeFreeKey) || [];
+
+		if (exactPreloads.length > 0) {
+			reasons.push('exact-preload-still-networked');
+			evidence.exactPreloads = exactPreloads.map((preload) => preload.url);
+		}
+		if (exactPreloadedRows.length > 0) {
+			reasons.push('duplicate-or-single-use-consumed');
+			evidence.exactPreloadedOrCacheRows = exactPreloadedRows.map((preload) => preload.url);
+		}
+		if ((localeFreePreloads.length > 0 || fetchAllPreloads.length > 0) && exactPreloads.length === 0 && restWaterfallUrlHasQueryParam(row.url, '_locale')) {
+			reasons.push('locale-query-mismatch');
+			evidence.localeFreePreloads = localeFreePreloads.map((preload) => preload.url);
+		}
+		if (localeFreePreloadedRows.length > 0 && exactPreloadedRows.length === 0) {
+			reasons.push('locale-query-mismatch-after-preload-hit');
+			evidence.localeFreePreloadedOrCacheRows = localeFreePreloadedRows.map((preload) => preload.url);
+		}
+		if (fetchAllPreloads.length > 0) {
+			reasons.push('fetch-all-per-page-mismatch');
+			evidence.fetchAllPreloads = fetchAllPreloads.map((preload) => preload.url);
+		}
+
+		if (reasons.length === 0) {
+			reasons.push('no-matching-preload');
+		}
+
+		return {
+			url: row.url,
+			method: row.method,
+			status: row.status,
+			durationMs: row.durationMs,
+			reasons,
+			primaryReason: reasons[0],
+			apiFetchAttempts: (apiFetchByExactKey.get(exactKey) || []).map((attempt) => ({
+				url: attempt.url,
+				method: attempt.method,
+				status: attempt.status,
+				durationMs: attempt.durationMs,
+			})),
+			evidence,
+		};
+	});
+
+	const countsByReason = {};
+	for (const row of rows) {
+		for (const reason of row.reasons) {
+			countsByReason[reason] = (countsByReason[reason] || 0) + 1;
+		}
+	}
+
+	return {
+		count: rows.length,
+		countsByReason,
+		rows,
 	};
 }
 
@@ -2509,6 +2781,7 @@ module.exports = {
 	collectWordPressRestPreloads,
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
+	diagnoseWordPressRestPreloadMisses,
 	evaluateWordPressRestPayloadBudgets,
 	buildWordPressAdminPageSweepSummary,
 	formatWordPressAdminPageSweepMarkdownReport,

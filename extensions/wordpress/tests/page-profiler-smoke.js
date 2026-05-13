@@ -17,6 +17,7 @@ const {
 	compareWordPressRestNetworkWaterfalls,
 	compareWordPressRestWaterfalls,
 	diagnoseWordPressPageProfile,
+	diagnoseWordPressRestPreloadMisses,
 	formatWordPressAdminPageSweepMarkdownReport,
 	formatWordPressPerformanceGateReport,
 	formatWordPressRestMatrixMarkdownReport,
@@ -301,6 +302,36 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.equal(candidateWaterfall.metrics.unused_preload_count, 1);
 	assert.equal(candidateWaterfall.metrics.preload_payload_bytes, 267);
 	assert.equal(candidateWaterfall.metrics.remaining_rest_network_count, 1);
+	const preloadMissWaterfall = summarizeWordPressRestWaterfall({
+		restPreloads: [
+			{ path: '/wp/v2/settings', method: 'OPTIONS', body: { ok: true } },
+			{ path: '/wp/v2/wp_pattern_category?_fields=id%2Cname&context=view&per_page=-1', body: [] },
+			{ path: '/wp/v2/menus?context=view&per_page=-1', body: [] },
+		],
+		apiFetchAttempts: [
+			{ source: 'apiFetch', path: '/wp/v2/settings', method: 'OPTIONS', startedAtMs: 10, durationMs: 1 },
+			{ source: 'apiFetch', path: '/wp/v2/settings?_locale=user', method: 'OPTIONS', startedAtMs: 20, durationMs: 100, status: 200 },
+			{ source: 'apiFetch', path: '/wp/v2/wp_pattern_category?_fields=id%2Cname&_locale=user&context=view&per_page=100', method: 'GET', startedAtMs: 30, durationMs: 100, status: 200 },
+			{ source: 'apiFetch', path: '/wp/v2/menus?_locale=user&context=view&per_page=100', method: 'GET', startedAtMs: 40, durationMs: 100, status: 200 },
+			{ source: 'apiFetch', path: '/wp/v2/users/me?_locale=user', method: 'GET', startedAtMs: 50, durationMs: 100, status: 200 },
+		],
+		networkRequests: [
+			{ url: 'https://example.test/wp-json/wp/v2/settings?_locale=user', method: 'OPTIONS', status: 200, start_ms: 20, duration_ms: 100 },
+			{ url: 'https://example.test/wp-json/wp/v2/wp_pattern_category?_fields=id%2Cname&_locale=user&context=view&per_page=100', method: 'GET', status: 200, start_ms: 30, duration_ms: 100 },
+			{ url: 'https://example.test/wp-json/wp/v2/menus?_locale=user&context=view&per_page=100', method: 'GET', status: 200, start_ms: 40, duration_ms: 100 },
+			{ url: 'https://example.test/wp-json/wp/v2/users/me?_locale=user', method: 'GET', status: 200, start_ms: 50, duration_ms: 100 },
+		],
+	});
+	assert.equal(preloadMissWaterfall.preloadDiagnostics.count, 4);
+	assert.equal(preloadMissWaterfall.preloadDiagnostics.countsByReason['locale-query-mismatch'], 3);
+	assert.equal(preloadMissWaterfall.preloadDiagnostics.countsByReason['fetch-all-per-page-mismatch'], 2);
+	assert.equal(preloadMissWaterfall.preloadDiagnostics.countsByReason['locale-query-mismatch-after-preload-hit'], 1);
+	assert.equal(preloadMissWaterfall.preloadDiagnostics.countsByReason['no-matching-preload'], 1);
+	const directPreloadDiagnostics = diagnoseWordPressRestPreloadMisses({
+		networkRows: [{ url: 'https://example.test/wp-json/wp/v2/posts?_locale=user&per_page=100', method: 'GET' }],
+		preloads: [{ path: '/wp/v2/posts?per_page=-1', method: 'GET' }],
+	});
+	assert.equal(directPreloadDiagnostics.rows[0].reasons.includes('fetch-all-per-page-mismatch'), true);
 	const payloadBudgetResult = diagnoseWordPressPageProfile({
 		id: 'payload-budget',
 		readyMs: 500,
