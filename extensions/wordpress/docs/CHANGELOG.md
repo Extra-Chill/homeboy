@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.76.0] - 2026-05-13
+
+### Added
+- fingerprint agent eval inputs
+- support frame readiness functions
+- expose phased page readiness
+
 ## [2.75.6] - 2026-05-12
 
 ### Fixed
