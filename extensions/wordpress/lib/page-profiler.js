@@ -236,6 +236,45 @@ function restDiagnosticKeyWithQueryParam(row, param, value) {
 	return restDiagnosticKey(row?.method, restWaterfallUrlWithQueryParam(row?.url || row?.path || row?.normalizedUrl, param, value));
 }
 
+function quotePhpString(value) {
+	return `'${String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+}
+
+function phpPreloadDeclaration(method, url) {
+	const normalizedMethod = normalizeRestMethod(method);
+	const normalizedUrl = normalizeRestUrl(url);
+	if (!normalizedUrl) {
+		return '';
+	}
+	if (normalizedMethod === 'GET') {
+		return quotePhpString(normalizedUrl);
+	}
+	return `array( ${quotePhpString(normalizedUrl)}, ${quotePhpString(normalizedMethod)} )`;
+}
+
+function compactRestRows(rows) {
+	return rows.map((row) => ({
+		url: row.url,
+		method: row.method,
+		status: row.status,
+		durationMs: row.durationMs,
+		hit: row.hit,
+		nextUrl: row.nextUrl || undefined,
+		payloadBytes: row.payloadBytes,
+	}));
+}
+
+function uniquePreloadSuggestions(suggestions) {
+	const seen = new Set();
+	return suggestions.filter((suggestion) => {
+		if (!suggestion?.declaration || seen.has(suggestion.declaration)) {
+			return false;
+		}
+		seen.add(suggestion.declaration);
+		return true;
+	});
+}
+
 function restRoutePath(url) {
 	return normalizeRestWaterfallUrl(url).split('?', 1)[0];
 }
@@ -914,6 +953,7 @@ function diagnoseWordPressRestPreloadMisses(input = {}) {
 	const preloadedRowsByExactKey = new Map();
 	const preloadedRowsByLocaleFreeKey = new Map();
 	const apiFetchByExactKey = new Map();
+	const apiFetchByLocaleFreeKey = new Map();
 	const preloadChecksByExactKey = new Map();
 	const preloadChecksByLocaleFreeKey = new Map();
 
@@ -945,6 +985,7 @@ function diagnoseWordPressRestPreloadMisses(input = {}) {
 
 	for (const attempt of apiFetchAttempts) {
 		addToMap(apiFetchByExactKey, restKey(attempt), attempt);
+		addToMap(apiFetchByLocaleFreeKey, restDiagnosticKeyWithoutQueryParam(attempt, '_locale'), attempt);
 	}
 
 	for (const check of preloadChecks) {
@@ -966,6 +1007,40 @@ function diagnoseWordPressRestPreloadMisses(input = {}) {
 		const fetchAllPreloads = preloadsByExactKey.get(fetchAllKey) || preloadsByFetchAllKey.get(exactKey) || preloadsByFetchAllKey.get(localeFreeKey) || [];
 		const exactPreloadChecks = preloadChecksByExactKey.get(exactKey) || [];
 		const localeFreePreloadChecks = preloadChecksByLocaleFreeKey.get(localeFreeKey) || [];
+		const exactApiFetchAttempts = apiFetchByExactKey.get(exactKey) || [];
+		const localeFreeApiFetchAttempts = apiFetchByLocaleFreeKey.get(localeFreeKey) || [];
+		const serverDeclarationSuggestions = uniquePreloadSuggestions([
+			...localeFreePreloadChecks.map((check) => ({
+				reason: 'api-fetch-pre-middleware-key',
+				url: check.url,
+				method: check.method,
+				declaration: phpPreloadDeclaration(check.method, check.url),
+			})),
+			...localeFreeApiFetchAttempts.filter((attempt) => attempt.source === 'apiFetch').map((attempt) => ({
+				reason: 'api-fetch-pre-middleware-key',
+				url: attempt.url,
+				method: attempt.method,
+				declaration: phpPreloadDeclaration(attempt.method, attempt.url),
+			})),
+			{
+				reason: 'visible-network-url',
+				url: row.url,
+				method: row.method,
+				declaration: phpPreloadDeclaration(row.method, row.url),
+			},
+		]);
+		const attribution = {
+			visibleNetwork: {
+				url: row.url,
+				method: row.method,
+				status: row.status,
+				durationMs: row.durationMs,
+			},
+			apiFetchPreMiddleware: compactRestRows(localeFreeApiFetchAttempts.filter((attempt) => attempt.source === 'apiFetch')),
+			preloadChecks: compactRestRows([...exactPreloadChecks, ...localeFreePreloadChecks]),
+			preloadPayloadEntries: compactRestRows([...exactPreloads, ...localeFreePreloads, ...fetchAllPreloads]),
+			serverDeclarationSuggestions,
+		};
 
 		if (exactPreloads.length > 0) {
 			reasons.push(exactPreloadChecks.some((check) => check.hit === false) ? 'exact-preload-check-missed' : 'exact-preload-still-networked');
@@ -1017,12 +1092,14 @@ function diagnoseWordPressRestPreloadMisses(input = {}) {
 			durationMs: row.durationMs,
 			reasons,
 			primaryReason: reasons[0],
-			apiFetchAttempts: (apiFetchByExactKey.get(exactKey) || []).map((attempt) => ({
+			apiFetchAttempts: exactApiFetchAttempts.map((attempt) => ({
 				url: attempt.url,
 				method: attempt.method,
 				status: attempt.status,
 				durationMs: attempt.durationMs,
 			})),
+			attribution,
+			serverDeclarationSuggestions,
 			evidence,
 		};
 	});

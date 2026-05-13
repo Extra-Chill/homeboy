@@ -339,6 +339,13 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	});
 	assert.equal(exactMissDiagnostics.rows[0].primaryReason, 'exact-preload-check-missed');
 	assert.equal(exactMissDiagnostics.rows[0].evidence.exactPreloadChecks[0].hit, false);
+	assert.equal(exactMissDiagnostics.rows[0].serverDeclarationSuggestions[0].declaration, "'/wp/v2/taxonomies?_locale=user&context=view'");
+	const optionsDeclarationDiagnostics = diagnoseWordPressRestPreloadMisses({
+		networkRows: [{ url: 'https://example.test/wp-json/wp/v2/settings?_locale=user', method: 'OPTIONS' }],
+		apiFetchAttempts: [{ source: 'apiFetch', path: '/wp/v2/settings', method: 'OPTIONS' }],
+		preloadChecks: [{ path: '/wp/v2/settings', method: 'OPTIONS', hit: false, nextUrl: '/wp/v2/settings' }],
+	});
+	assert.equal(optionsDeclarationDiagnostics.rows[0].serverDeclarationSuggestions[0].declaration, "array( '/wp/v2/settings', 'OPTIONS' )");
 	const payloadBudgetResult = diagnoseWordPressPageProfile({
 		id: 'payload-budget',
 		readyMs: 500,
