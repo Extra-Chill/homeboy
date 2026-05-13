@@ -533,8 +533,15 @@ validate_build() {
         fi
 
     elif [ "$PROJECT_TYPE" = "theme" ]; then
-        # Theme validation: Check for essential files
-        local required_files=("index.php" "style.css")
+        # Theme validation: classic themes need index.php; block themes use
+        # templates/index.html as the fallback template.
+        local required_files=("style.css")
+        if [ -f "$staging_dir/theme.json" ]; then
+            required_files+=("templates/index.html")
+        else
+            required_files+=("index.php")
+        fi
+
         local missing_files=()
 
         for file in "${required_files[@]}"; do
