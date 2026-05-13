@@ -50,6 +50,10 @@ class FakeFrame {
 	async waitForSelector(selector) {
 		this.calls.push(['frame.waitForSelector', selector]);
 	}
+
+	async waitForFunction(fn) {
+		this.calls.push(['frame.waitForFunction', typeof fn]);
+	}
 }
 
 class FakePage {
@@ -174,7 +178,7 @@ const manifest = normalizePageManifest({
 		{
 			id: 'site-editor',
 			path: '/wp-admin/site-editor.php',
-			ready: { selector: 'iframe[name="editor-canvas"]', frameName: 'editor-canvas', frameSelector: '[data-block]' },
+			ready: { selector: 'iframe[name="editor-canvas"]', frameName: 'editor-canvas', frameSelector: '[data-block]', frameFunction: () => true },
 			interactions: [
 				{ name: 'open_admin', clickRole: { role: 'button', name: 'Admin' } },
 				{ waitForSelector: '.datamachine-jobs-admin-modal' },
@@ -510,6 +514,11 @@ async function main() {
 
 	assert.equal(result.id, 'site-editor');
 	assert.equal(result.status, 200);
+	assert.equal(typeof result.readiness.commitMs, 'number');
+	assert.equal(typeof result.readiness.selectorMs, 'number');
+	assert.equal(typeof result.readiness.frameSelectorMs, 'number');
+	assert.equal(typeof result.readiness.frameFunctionMs, 'number');
+	assert.equal(result.readyMs, result.readiness.readyMs);
 	assert.equal(result.resources.restCount, 2);
 	assert.equal(result.initialResources.restCount, 2);
 	assert.equal(result.interactions.actions.length, 6);
@@ -517,6 +526,7 @@ async function main() {
 	assert.equal(result.interactionRestWaterfall.counts.total, 2);
 	assert.equal(result.correlation.correlated.length, 1);
 	assert.equal(page.calls.some((call) => call[0] === 'frame.waitForSelector' && call[1] === '[data-block]'), true);
+	assert.equal(page.calls.some((call) => call[0] === 'frame.waitForFunction'), true);
 	assert.equal(page.calls.some((call) => call[0] === 'getByRole' && call[1] === 'button' && call[2] === 'Admin'), true);
 	assert.equal(page.calls.some((call) => call[0] === 'locator.selectOption' && call[2]?.index === 1), true);
 
