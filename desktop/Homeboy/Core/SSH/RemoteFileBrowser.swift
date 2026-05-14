@@ -33,6 +33,14 @@ class RemoteFileBrowser: ObservableObject {
     private var projectId: String
     private var startingPath: String?
     private let cli = HomeboyCLI.shared
+    private var requestGeneration = 0
+    private var activeListRequest: FileListRequest?
+
+    private struct FileListRequest: Equatable {
+        let generation: Int
+        let projectId: String
+        let path: String
+    }
 
     /// Initialize with a project ID and optional starting path
     init(projectId: String, startingPath: String? = nil) {
@@ -51,6 +59,8 @@ class RemoteFileBrowser: ObservableObject {
 
     /// Reconnect with new project context
     func reconnect(projectId: String, startingPath: String?) async {
+        requestGeneration += 1
+        activeListRequest = nil
         self.projectId = projectId
         self.startingPath = startingPath
         await connect()
@@ -63,11 +73,15 @@ class RemoteFileBrowser: ObservableObject {
 
     /// Navigate to a specific path
     func goToPath(_ path: String) async {
+        requestGeneration += 1
+        let request = FileListRequest(generation: requestGeneration, projectId: projectId, path: path)
+        activeListRequest = request
         isLoading = true
         error = nil
 
         do {
-            let output = try await cli.fileList(projectId: projectId, path: path)
+            let output = try await cli.fileList(projectId: request.projectId, path: request.path)
+            guard activeListRequest == request else { return }
             currentPath = path
             entries = (output.entries ?? []).map { entry in
                 RemoteFileEntry(
@@ -84,10 +98,13 @@ class RemoteFileBrowser: ObservableObject {
                 pathHistory.append(path)
             }
         } catch {
+            guard activeListRequest == request else { return }
             self.error = error.toDisplayableError(source: "Remote File Browser", path: path)
         }
 
-        isLoading = false
+        if activeListRequest == request {
+            isLoading = false
+        }
     }
     
     /// Navigate to parent directory

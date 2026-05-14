@@ -8,6 +8,7 @@ func runFileLogDBContractTests(testDir: String, fixturesDir: String, decoder: JS
     try testRemoteFileEditorPinCommandShape(testDir: testDir)
     try testRemoteFileEditorModelAndPathShape(testDir: testDir)
     try testRemoteFileAndLogPinnedReloadReconciliation(testDir: testDir)
+    try testRemoteFileBrowserStaleRequestGuard(testDir: testDir)
 }
 
 func testDbDescribe(fixturesDir: String, decoder: JSONDecoder) throws {
@@ -85,19 +86,19 @@ func testRemoteFileAndLogPinnedReloadReconciliation(testDir: String) throws {
     let logSource = try String(contentsOf: logViewModelPath, encoding: .utf8)
 
     guard fileSource.contains("reconcilePinnedFiles()") else {
-        throw NSError(domain: "ContractTest", code: 83,
+        throw NSError(domain: "ContractTest", code: 89,
             userInfo: [NSLocalizedDescriptionKey: "RemoteFileEditorViewModel does not reconcile pinned files on config reload"])
     }
     print("[PASS] Remote File Editor uses a pinned-file reconcile path")
 
     guard logSource.contains("reconcilePinnedLogs()") else {
-        throw NSError(domain: "ContractTest", code: 84,
+        throw NSError(domain: "ContractTest", code: 90,
             userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewerViewModel does not reconcile pinned logs on config reload"])
     }
     print("[PASS] Remote Log Viewer uses a pinned-log reconcile path")
 
     guard fileSource.contains("openFiles[index].isPinned = pinnedByPath[openFiles[index].path] != nil") else {
-        throw NSError(domain: "ContractTest", code: 85,
+        throw NSError(domain: "ContractTest", code: 91,
             userInfo: [NSLocalizedDescriptionKey: "Remote File Editor reconcile path does not update existing file pin state"])
     }
     print("[PASS] Existing file tabs keep their tab identity while pin state changes")
@@ -105,21 +106,21 @@ func testRemoteFileAndLogPinnedReloadReconciliation(testDir: String) throws {
     guard logSource.contains("openLogs[index].isPinned = true")
         && logSource.contains("openLogs[index].tailLines = max(1, pinned.tailLines)")
         && logSource.contains("openLogs[index].isPinned = false") else {
-        throw NSError(domain: "ContractTest", code: 86,
+        throw NSError(domain: "ContractTest", code: 92,
             userInfo: [NSLocalizedDescriptionKey: "Remote Log Viewer reconcile path does not update existing log pin metadata"])
     }
     print("[PASS] Existing log tabs keep their tab identity while pin metadata changes")
 
     guard fileSource.contains("openFiles.append(OpenFile(from: pinned))")
         && logSource.contains("openLogs.append(OpenLog(from: pinned))") else {
-        throw NSError(domain: "ContractTest", code: 87,
+        throw NSError(domain: "ContractTest", code: 93,
             userInfo: [NSLocalizedDescriptionKey: "Pinned reload reconciliation does not append newly pinned tabs"])
     }
     print("[PASS] Newly pinned files and logs are appended without replacing temporary tabs")
 
     guard fileSource.contains("openFiles = config.remoteFiles.pinnedFiles.map")
         && logSource.contains("openLogs = config.remoteLogs.pinnedLogs.map") else {
-        throw NSError(domain: "ContractTest", code: 88,
+        throw NSError(domain: "ContractTest", code: 94,
             userInfo: [NSLocalizedDescriptionKey: "Project-switch pinned tab reset loaders are missing"])
     }
     print("[PASS] Project-switch full reset loaders remain available")
@@ -245,6 +246,25 @@ func testRemoteFileEditorModelAndPathShape(testDir: String) throws {
     }
     print("[PASS] View model centralizes relative path conversion")
 
+    guard viewModelSource.contains("var canRefreshSelectedFile: Bool")
+        && viewModelSource.contains("return !selectedFile.hasUnsavedChanges && !isLoading && !isSaving") else {
+        throw NSError(domain: "ContractTest", code: 83,
+            userInfo: [NSLocalizedDescriptionKey: "Remote File Editor does not disable refresh while the selected file has unsaved changes"])
+    }
+    print("[PASS] Refresh availability excludes unsaved selected files")
+
+    guard viewModelSource.contains("guard !openFiles[index].hasUnsavedChanges else { return }") else {
+        throw NSError(domain: "ContractTest", code: 84,
+            userInfo: [NSLocalizedDescriptionKey: "Remote File Editor refresh path can still overwrite unsaved selected file content"])
+    }
+    print("[PASS] Fetch path refuses to overwrite unsaved selected file content")
+
+    guard viewSource.contains(".disabled(!viewModel.canRefreshSelectedFile)") else {
+        throw NSError(domain: "ContractTest", code: 85,
+            userInfo: [NSLocalizedDescriptionKey: "Remote File Editor refresh button is not bound to refresh safety state"])
+    }
+    print("[PASS] Refresh button is bound to refresh safety state")
+
     guard viewModelSource.contains("openFiles[index].fileSize = oldFile.fileSize") else {
         throw NSError(domain: "ContractTest", code: 81,
             userInfo: [NSLocalizedDescriptionKey: "RemoteFileEditor rename path does not preserve fileSize"])
@@ -256,6 +276,72 @@ func testRemoteFileEditorModelAndPathShape(testDir: String) throws {
             userInfo: [NSLocalizedDescriptionKey: "Remote File Editor still contains duplicated prefix-drop path conversion"])
     }
     print("[PASS] Duplicated prefix-drop path conversion is absent")
+
+    print("")
+}
+
+func testRemoteFileBrowserStaleRequestGuard(testDir: String) throws {
+    print("Test: Remote File Browser stale request guard")
+    print("---------------------------------------------")
+
+    let browserPath = URL(fileURLWithPath: testDir)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Homeboy/Core/SSH/RemoteFileBrowser.swift")
+    let browserSource = try String(contentsOf: browserPath, encoding: .utf8)
+    let goToPathSource = try sourceSlice(
+        browserSource,
+        from: "func goToPath(_ path: String) async {",
+        to: "    /// Navigate to parent directory"
+    )
+
+    try assertContains(
+        browserSource,
+        "private var requestGeneration = 0",
+        message: "RemoteFileBrowser does not track file-list request generations"
+    )
+    print("[PASS] Browser tracks request generations")
+
+    try assertContains(
+        browserSource,
+        "private var activeListRequest: FileListRequest?",
+        message: "RemoteFileBrowser does not retain the active file-list request identity"
+    )
+    print("[PASS] Browser retains active request identity")
+
+    try assertContains(
+        browserSource,
+        "activeListRequest = nil",
+        message: "RemoteFileBrowser reconnect does not invalidate in-flight file-list requests"
+    )
+    print("[PASS] Reconnect invalidates in-flight requests")
+
+    try assertContains(
+        goToPathSource,
+        "let request = FileListRequest(generation: requestGeneration, projectId: projectId, path: path)",
+        message: "goToPath does not capture generation, project, and path before awaiting file list"
+    )
+    print("[PASS] Navigation captures generation/project/path")
+
+    try assertContains(
+        goToPathSource,
+        "guard activeListRequest == request else { return }\n            currentPath = path",
+        message: "goToPath can still apply stale file-list entries after a newer request wins"
+    )
+    print("[PASS] Stale success results are discarded before mutating entries")
+
+    try assertContains(
+        goToPathSource,
+        "guard activeListRequest == request else { return }\n            self.error = error.toDisplayableError",
+        message: "goToPath can still show stale errors after a newer request wins"
+    )
+    print("[PASS] Stale errors are discarded")
+
+    try assertContains(
+        goToPathSource,
+        "if activeListRequest == request {\n            isLoading = false\n        }",
+        message: "goToPath can still clear loading state for a newer in-flight request"
+    )
+    print("[PASS] Loading state is cleared only by the active request")
 
     print("")
 }
