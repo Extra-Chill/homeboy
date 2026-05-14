@@ -74,29 +74,39 @@ func testRemoteLogViewerPinCommandShape(testDir: String) throws {
     print("Test: Remote Log Viewer pin command shape")
     print("-----------------------------------------")
 
-    let sourcePath = URL(fileURLWithPath: testDir)
+    let viewModelPath = URL(fileURLWithPath: testDir)
         .deletingLastPathComponent()
         .appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/RemoteLogViewerViewModel.swift")
+    let cliPath = URL(fileURLWithPath: testDir)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Homeboy/Core/CLI/HomeboyCLI+LogCommands.swift")
 
-    let source = try String(contentsOf: sourcePath, encoding: .utf8)
-    let currentPinCommand = #"["project", "pin", "add", "--type", "log", "--tail", String(log.tailLines), projectId, log.path]"#
-    let currentTailUpdateCommand = #"["project", "pin", "add", "--type", "log", "--tail", String(lines), projectId, log.path]"#
+    let viewModelSource = try String(contentsOf: viewModelPath, encoding: .utf8)
+    let cliSource = try String(contentsOf: cliPath, encoding: .utf8)
+    let currentPinCommand = #"["project", "pin", "add", "--type", "log", "--tail", String(tailLines), projectId, path]"#
+    let currentTailUpdateCommand = #"["project", "pin", "add", "--type", "log", "--tail", String(tailLines), projectId, path]"#
     let oldPositionalFirstCommand = #"["project", "pin", "add", projectId, log.path, "--type", "log", "--tail"#
 
-    guard source.contains(currentPinCommand) else {
+    guard cliSource.contains(currentPinCommand) else {
         throw NSError(domain: "ContractTest", code: 70,
-            userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewer pin command does not use current homeboy project pin add syntax"])
+            userInfo: [NSLocalizedDescriptionKey: "Log CLI wrapper pin command does not use current homeboy project pin add syntax"])
     }
     print("[PASS] Pin command puts --type/--tail before project/path")
 
-    guard source.contains(currentTailUpdateCommand) else {
+    guard cliSource.contains(currentTailUpdateCommand) else {
         throw NSError(domain: "ContractTest", code: 71,
-            userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewer tail update command does not preserve current pin syntax"])
+            userInfo: [NSLocalizedDescriptionKey: "Log CLI wrapper tail update command does not preserve current pin syntax"])
     }
     print("[PASS] Tail-line update command preserves --tail before project/path")
 
-    guard !source.contains(oldPositionalFirstCommand) else {
+    guard !viewModelSource.contains("[\"project\", \"pin\"") else {
         throw NSError(domain: "ContractTest", code: 72,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewerViewModel still builds raw project pin commands instead of using HomeboyCLI wrappers"])
+    }
+    print("[PASS] View model uses typed HomeboyCLI log pin wrappers")
+
+    guard !cliSource.contains(oldPositionalFirstCommand) else {
+        throw NSError(domain: "ContractTest", code: 73,
             userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewer still contains old positional-first project pin add syntax"])
     }
     print("[PASS] Old positional-first log pin syntax is absent")

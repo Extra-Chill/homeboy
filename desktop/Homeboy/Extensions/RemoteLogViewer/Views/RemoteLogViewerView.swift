@@ -38,12 +38,7 @@ struct RemoteLogViewerView: View {
     // MARK: - Open Log from Browser
     
     private func openLogFromBrowser(_ path: String) {
-        // Convert absolute path to relative from basePath
-        let basePath = ConfigurationManager.shared.safeActiveProject.basePath ?? ""
-        let relativePath = path.hasPrefix(basePath)
-            ? String(path.dropFirst(basePath.count + 1))
-            : path
-        viewModel.openLog(path: relativePath)
+        viewModel.openLogFromBrowser(path: path)
     }
     
     // MARK: - Log Viewer Content

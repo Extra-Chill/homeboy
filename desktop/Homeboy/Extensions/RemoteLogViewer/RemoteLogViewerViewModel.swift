@@ -1,52 +1,6 @@
 import AppKit
 import Combine
 import Foundation
-import SwiftUI
-
-/// Represents an open log tab in the Remote Log Viewer
-struct OpenLog: PinnableTabItem, Equatable {
-    let id: UUID
-    let path: String           // Relative path from basePath
-    var isPinned: Bool
-    var content: String = ""
-    var fileExists: Bool = true
-    var lastFetched: Date?
-    var tailLines: Int
-
-    var displayName: String {
-        URL(fileURLWithPath: path).lastPathComponent
-    }
-
-    init(id: UUID = UUID(), path: String, isPinned: Bool, tailLines: Int = 100) {
-        self.id = id
-        self.path = path
-        self.isPinned = isPinned
-        self.tailLines = tailLines
-    }
-
-    init(from pinned: PinnedRemoteLog) {
-        self.id = pinned.id
-        self.path = pinned.path
-        self.isPinned = true
-        self.tailLines = pinned.tailLines
-    }
-}
-
-// MARK: - CLI Response Types
-
-/// Response from `logs list --json`
-private struct LogsListResponse: Decodable {
-    let label: String
-    let path: String
-    let tailLines: Int
-}
-
-/// Response from `logs clear --json`
-private struct LogsClearResponse: Decodable {
-    let success: Bool
-    let path: String
-    let label: String
-}
 
 @MainActor
 class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
@@ -63,7 +17,7 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
 
     // MARK: - CLI Bridge
 
-    private let cli = CLIBridge.shared
+    private let cli = HomeboyCLI.shared
 
     private var projectId: String {
         ConfigurationManager.shared.safeActiveProject.id
@@ -71,7 +25,7 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
 
     // MARK: - Tail Options
 
-    static let tailOptions = [50, 100, 500, 1000, 0]  // 0 = All
+    static let tailOptions = [50, 100, 500, 1000]
 
     // MARK: - Computed Properties
 
@@ -102,11 +56,7 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
             selectedLogId = nil
             error = nil
             loadPinnedLogs()
-            if selectedLogId != nil {
-                Task {
-                    await fetchSelectedLog()
-                }
-            }
+            Task { await fetchSelectedLog() }
         case .projectModified(_, let fields):
             // Reload pinned logs if remoteLogs changed
             if fields.contains(.remoteLogs) {
@@ -139,30 +89,33 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         }
 
         isLoading = true
+        defer { isLoading = false }
         error = nil
 
         let log = openLogs[index]
 
         do {
-            let output = try await HomeboyCLI.shared.logsShow(
+            let output = try await cli.logsShow(
                 projectId: projectId,
                 path: log.path,
-                lines: log.tailLines > 0 ? log.tailLines : nil
+                lines: log.tailLines
             )
 
+            guard let currentIndex = openLogs.firstIndex(where: { $0.id == log.id }) else { return }
             if let logData = output.log {
-                openLogs[index].content = logData.content
-                openLogs[index].fileExists = true
-                openLogs[index].lastFetched = Date()
+                openLogs[currentIndex].content = logData.content
+                openLogs[currentIndex].fileExists = true
+                openLogs[currentIndex].lastFetched = Date()
             } else {
-                openLogs[index].fileExists = false
-                openLogs[index].content = ""
+                openLogs[currentIndex].fileExists = false
+                openLogs[currentIndex].content = ""
             }
         } catch let cliError as CLIBridgeError {
+            guard let currentIndex = openLogs.firstIndex(where: { $0.id == log.id }) else { return }
             if let structuredError = cliError.cliError,
                structuredError.code == "file_not_found" {
-                openLogs[index].fileExists = false
-                openLogs[index].content = ""
+                openLogs[currentIndex].fileExists = false
+                openLogs[currentIndex].content = ""
             } else {
                 self.error = cliError.cliError ?? AppError(cliError.localizedDescription, source: "Log Viewer", path: log.displayName)
             }
@@ -170,7 +123,6 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
             self.error = error.toDisplayableError(source: "Log Viewer", path: log.displayName)
         }
 
-        isLoading = false
     }
 
     /// Clears the currently selected log file via CLI
@@ -182,19 +134,20 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         }
 
         isLoading = true
+        defer { isLoading = false }
         error = nil
 
         let log = openLogs[index]
 
         do {
-            _ = try await HomeboyCLI.shared.logsClear(projectId: projectId, path: log.path)
-            openLogs[index].content = ""
-            openLogs[index].lastFetched = Date()
+            _ = try await cli.logsClear(projectId: projectId, path: log.path)
+            guard let currentIndex = openLogs.firstIndex(where: { $0.id == log.id }) else { return }
+            openLogs[currentIndex].content = ""
+            openLogs[currentIndex].lastFetched = Date()
         } catch {
             self.error = error.toDisplayableError(source: "Log Viewer", path: log.displayName)
         }
 
-        isLoading = false
     }
     
     // MARK: - Tab Management
@@ -236,10 +189,15 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         guard let index = openLogs.firstIndex(where: { $0.id == id }) else { return }
         
         let log = openLogs[index]
-        
-        // If pinned, unpin first
+
         if log.isPinned {
-            unpinLog(id)
+            Task {
+                do {
+                    try await unpinLog(path: log.path)
+                } catch {
+                    self.error = AppError("Failed to unpin log: \(error.localizedDescription)", source: "Log Viewer")
+                }
+            }
         }
         
         openLogs.remove(at: index)
@@ -255,36 +213,25 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
     /// Updates tail lines for the selected log
     func setTailLines(_ lines: Int) {
         guard let index = selectedLogIndex else { return }
+        let tailLines = max(1, lines)
         let oldLines = openLogs[index].tailLines
-        openLogs[index].tailLines = lines
+        openLogs[index].tailLines = tailLines
 
         // If pinned, update config via CLI (remove and re-add with new tail lines)
         if openLogs[index].isPinned && cli.isInstalled {
             let log = openLogs[index]
             Task {
                 do {
-                    // Remove old pin
-                    let removeArgs = ["project", "pin", "remove", projectId, log.path, "--type", "log"]
-                    let removeResponse = try await cli.execute(removeArgs, timeout: 30)
-
-                    if removeResponse.success {
-                        // Re-add with new tail lines
-                        let addArgs = ["project", "pin", "add", "--type", "log", "--tail", String(lines), projectId, log.path]
-                        let addResponse = try await cli.execute(addArgs, timeout: 30)
-
-                        if !addResponse.success {
-                            // Rollback local state
-                            openLogs[index].tailLines = oldLines
-                            self.error = AppError("Failed to update tail lines: \(addResponse.errorOutput)", source: "Log Viewer")
-                        }
-                    } else {
-                        // Rollback local state
-                        openLogs[index].tailLines = oldLines
-                        self.error = AppError("Failed to update tail lines: \(removeResponse.errorOutput)", source: "Log Viewer")
-                    }
+                    _ = try await cli.logPinUpdateTail(
+                        projectId: projectId,
+                        path: log.path,
+                        tailLines: tailLines,
+                        previousTailLines: oldLines
+                    )
                 } catch {
-                    // Rollback local state
-                    openLogs[index].tailLines = oldLines
+                    if let currentIndex = openLogs.firstIndex(where: { $0.id == log.id }) {
+                        openLogs[currentIndex].tailLines = oldLines
+                    }
                     self.error = AppError("Failed to update tail lines: \(error.localizedDescription)", source: "Log Viewer")
                 }
             }
@@ -310,14 +257,9 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
 
         Task {
             do {
-                // homeboy project pin add --type log --tail <lines> <project> <path>
-                let args = ["project", "pin", "add", "--type", "log", "--tail", String(log.tailLines), projectId, log.path]
-                let response = try await cli.execute(args, timeout: 30)
-
-                if response.success {
-                    openLogs[index].isPinned = true
-                } else {
-                    self.error = AppError("Failed to pin log: \(response.errorOutput)", source: "Log Viewer")
+                _ = try await cli.logPinAdd(projectId: projectId, path: log.path, tailLines: log.tailLines)
+                if let currentIndex = openLogs.firstIndex(where: { $0.id == log.id }) {
+                    openLogs[currentIndex].isPinned = true
                 }
             } catch {
                 self.error = AppError("Failed to pin log: \(error.localizedDescription)", source: "Log Viewer")
@@ -337,14 +279,9 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
 
         Task {
             do {
-                // homeboy project pin remove <project> <path> --type log --json
-                let args = ["project", "pin", "remove", projectId, log.path, "--type", "log"]
-                let response = try await cli.execute(args, timeout: 30)
-
-                if response.success {
-                    openLogs[index].isPinned = false
-                } else {
-                    self.error = AppError("Failed to unpin log: \(response.errorOutput)", source: "Log Viewer")
+                _ = try await unpinLog(path: log.path)
+                if let currentIndex = openLogs.firstIndex(where: { $0.id == log.id }) {
+                    openLogs[currentIndex].isPinned = false
                 }
             } catch {
                 self.error = AppError("Failed to unpin log: \(error.localizedDescription)", source: "Log Viewer")
@@ -359,6 +296,35 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         guard let log = selectedLog else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(log.content, forType: .string)
+    }
+
+    func openLogFromBrowser(path: String) {
+        openLog(path: relativeLogPath(for: path))
+    }
+
+    private func unpinLog(path: String) async throws {
+        _ = try await cli.logPinRemove(projectId: projectId, path: path)
+    }
+
+    private func relativeLogPath(for path: String) -> String {
+        guard path.hasPrefix("/") else { return path }
+
+        guard let basePath = ConfigurationManager.shared.safeActiveProject.basePath,
+              !basePath.isEmpty else {
+            return path
+        }
+
+        let normalizedBase = URL(fileURLWithPath: basePath).standardizedFileURL.path
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard normalizedPath == normalizedBase || normalizedPath.hasPrefix(normalizedBase + "/") else {
+            return path
+        }
+
+        if normalizedPath == normalizedBase {
+            return URL(fileURLWithPath: normalizedPath).lastPathComponent
+        }
+
+        return String(normalizedPath.dropFirst(normalizedBase.count + 1))
     }
     
     func lastFetchedFormatted(for log: OpenLog) -> String {
