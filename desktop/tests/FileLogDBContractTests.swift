@@ -190,6 +190,25 @@ func testRemoteFileEditorModelAndPathShape(testDir: String) throws {
     }
     print("[PASS] View model centralizes relative path conversion")
 
+    guard viewModelSource.contains("var canRefreshSelectedFile: Bool")
+        && viewModelSource.contains("return !selectedFile.hasUnsavedChanges && !isLoading && !isSaving") else {
+        throw NSError(domain: "ContractTest", code: 83,
+            userInfo: [NSLocalizedDescriptionKey: "Remote File Editor does not disable refresh while the selected file has unsaved changes"])
+    }
+    print("[PASS] Refresh availability excludes unsaved selected files")
+
+    guard viewModelSource.contains("guard !openFiles[index].hasUnsavedChanges else { return }") else {
+        throw NSError(domain: "ContractTest", code: 84,
+            userInfo: [NSLocalizedDescriptionKey: "Remote File Editor refresh path can still overwrite unsaved selected file content"])
+    }
+    print("[PASS] Fetch path refuses to overwrite unsaved selected file content")
+
+    guard viewSource.contains(".disabled(!viewModel.canRefreshSelectedFile)") else {
+        throw NSError(domain: "ContractTest", code: 85,
+            userInfo: [NSLocalizedDescriptionKey: "Remote File Editor refresh button is not bound to refresh safety state"])
+    }
+    print("[PASS] Refresh button is bound to refresh safety state")
+
     guard viewModelSource.contains("openFiles[index].fileSize = oldFile.fileSize") else {
         throw NSError(domain: "ContractTest", code: 81,
             userInfo: [NSLocalizedDescriptionKey: "RemoteFileEditor rename path does not preserve fileSize"])
