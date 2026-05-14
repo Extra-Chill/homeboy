@@ -134,7 +134,7 @@ struct RemoteLogViewerView: View {
                 set: { viewModel.setTailLines($0) }
             )) {
                 ForEach(RemoteLogViewerViewModel.tailOptions, id: \.self) { count in
-                    Text(count == 0 ? "All" : "\(count)").tag(count)
+                    Text("\(count)").tag(count)
                 }
             }
             .frame(width: 100)
