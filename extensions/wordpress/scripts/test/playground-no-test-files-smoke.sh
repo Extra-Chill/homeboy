@@ -113,6 +113,7 @@ cat > "${PLUGIN_PATH}/composer.json" <<'JSON'
 }
 JSON
 COMPOSER_CALLS_FILE="${TMPDIR}/composer-calls.log"
+rm -rf "${PLUGIN_PATH}/tests"
 set +e
 composer_output=$(HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" HOMEBOY_COMPONENT_PATH="$PLUGIN_PATH" HOMEBOY_COMPONENT_ID="example" HOMEBOY_COMPOSER_CALLS_FILE="$COMPOSER_CALLS_FILE" bash "$RUNNER" 2>&1)
 composer_status=$?
@@ -123,12 +124,14 @@ if [ "$composer_status" -ne 0 ]; then
     echo "$composer_output" >&2
     exit 1
 fi
-assert_contains "$composer_output" "NO PHPUNIT TEST FILES DISCOVERED"
 assert_contains "$composer_output" "Running Composer test script..."
+assert_contains "$composer_output" "Plugin: example (${PLUGIN_PATH})"
 assert_contains "$composer_output" "Backend: composer-script"
 assert_contains "$composer_output" "Composer smoke script ran"
+assert_not_contains "$composer_output" "PLUGIN_SLUG: unbound variable"
 assert_contains "$(cat "$COMPOSER_CALLS_FILE")" "composer:${PLUGIN_PATH}:test"
 rm -f "${PLUGIN_PATH}/composer.json"
+mkdir -p "${PLUGIN_PATH}/tests"
 
 touch "${PLUGIN_PATH}/phpunit.xml.dist"
 rm -f "$RESULTS_FILE"

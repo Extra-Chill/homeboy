@@ -179,6 +179,18 @@ if [ ! -f "$PLAYGROUND_CLI" ]; then
     exit 1
 fi
 
+# PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
+# mount the component-under-test. When homeboy core tells us the canonical
+# component id (HOMEBOY_COMPONENT_ID), use it — basename($PLUGIN_PATH)
+# breaks for git-worktree checkouts (`<repo>@<branch-slug>`) and any
+# workspace where the on-disk directory name diverges from the canonical
+# slug. See bench-runner-playground.sh for the full rationale.
+if [ -n "${COMPONENT_ID:-}" ]; then
+    PLUGIN_SLUG="$COMPONENT_ID"
+else
+    PLUGIN_SLUG="$(basename "$PLUGIN_PATH")"
+fi
+
 component_has_composer_test_script() {
     [ -f "${PLUGIN_PATH}/composer.json" ] || return 1
 
@@ -322,17 +334,6 @@ if [ -n "$SELECTED_TEST_FILE" ]; then
 fi
 SELECTED_TEST_FILE_B64=$(printf '%s' "$SELECTED_TEST_FILE_REL" | base64 | tr -d '\n')
 
-# PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
-# mount the component-under-test. When homeboy core tells us the canonical
-# component id (HOMEBOY_COMPONENT_ID), use it — basename($PLUGIN_PATH)
-# breaks for git-worktree checkouts (`<repo>@<branch-slug>`) and any
-# workspace where the on-disk directory name diverges from the canonical
-# slug. See bench-runner-playground.sh for the full rationale.
-if [ -n "${COMPONENT_ID:-}" ]; then
-    PLUGIN_SLUG="$COMPONENT_ID"
-else
-    PLUGIN_SLUG="$(basename "$PLUGIN_PATH")"
-fi
 MOUNT_ARGS=()
 
 MOUNT_ARGS+=("--mount" "${PLUGIN_PATH}:/wordpress/wp-content/plugins/${PLUGIN_SLUG}")
