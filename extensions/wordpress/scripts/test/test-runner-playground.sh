@@ -84,6 +84,22 @@ if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; t
     source "$WRITE_TEST_RESULTS_HELPER"
 fi
 
+# PLUGIN_SLUG is the wp-content/plugins/ path segment Playground uses to
+# mount the component-under-test. When homeboy core tells us the canonical
+# component id (HOMEBOY_COMPONENT_ID), use it — basename($PLUGIN_PATH)
+# breaks for git-worktree checkouts (`<repo>@<branch-slug>`) and any
+# workspace where the on-disk directory name diverges from the canonical
+# slug. See bench-runner-playground.sh for the full rationale.
+#
+# Defined here (before the TEST_DIR check) so the composer-test fallback
+# path — which fires when a component has composer.json scripts.test but
+# no tests/ dir — can reference PLUGIN_SLUG without tripping `set -u`.
+if [ -n "${COMPONENT_ID:-}" ]; then
+    PLUGIN_SLUG="$COMPONENT_ID"
+else
+    PLUGIN_SLUG="$(basename "$PLUGIN_PATH")"
+fi
+
 write_phpunit_discovery_result() {
     local status="$1"
     local partial="$2"
