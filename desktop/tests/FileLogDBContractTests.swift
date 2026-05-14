@@ -6,6 +6,7 @@ func runFileLogDBContractTests(testDir: String, fixturesDir: String, decoder: JS
     try testDbDescribe(fixturesDir: fixturesDir, decoder: decoder)
     try testRemoteLogViewerPinCommandShape(testDir: testDir)
     try testRemoteFileEditorPinCommandShape(testDir: testDir)
+    try testRemoteFileEditorModelAndPathShape(testDir: testDir)
 }
 
 func testDbDescribe(fixturesDir: String, decoder: JSONDecoder) throws {
@@ -148,6 +149,58 @@ func testRemoteFileEditorPinCommandShape(testDir: String) throws {
             userInfo: [NSLocalizedDescriptionKey: "RemoteFileEditorViewModel still builds raw project pin commands instead of using HomeboyCLI wrappers"])
     }
     print("[PASS] View model uses typed HomeboyCLI file pin wrappers")
+
+    print("")
+}
+
+func testRemoteFileEditorModelAndPathShape(testDir: String) throws {
+    print("Test: Remote File Editor model and path shape")
+    print("---------------------------------------------")
+
+    let root = URL(fileURLWithPath: testDir).deletingLastPathComponent()
+    let modelPath = root.appendingPathComponent("Homeboy/Models/RemoteFileModels.swift")
+    let viewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteFileEditor/RemoteFileEditorViewModel.swift")
+    let viewPath = root.appendingPathComponent("Homeboy/Extensions/RemoteFileEditor/Views/RemoteFileEditorView.swift")
+
+    let modelSource = try String(contentsOf: modelPath, encoding: .utf8)
+    let viewModelSource = try String(contentsOf: viewModelPath, encoding: .utf8)
+    let viewSource = try String(contentsOf: viewPath, encoding: .utf8)
+
+    guard modelSource.contains("struct OpenFile: PinnableTabItem, Equatable") else {
+        throw NSError(domain: "ContractTest", code: 77,
+            userInfo: [NSLocalizedDescriptionKey: "OpenFile model is not defined in Homeboy/Models/RemoteFileModels.swift"])
+    }
+    print("[PASS] OpenFile lives in shared model file")
+
+    guard !viewModelSource.contains("struct OpenFile") else {
+        throw NSError(domain: "ContractTest", code: 78,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteFileEditorViewModel still owns the OpenFile model"])
+    }
+    print("[PASS] View model no longer owns OpenFile")
+
+    guard viewSource.contains("viewModel.openFileFromBrowser(path: path)") else {
+        throw NSError(domain: "ContractTest", code: 79,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteFileEditorView still normalizes browser paths locally"])
+    }
+    print("[PASS] Browser path normalization is delegated to the view model")
+
+    guard viewModelSource.contains("private func relativeFilePath(for path: String) -> String") else {
+        throw NSError(domain: "ContractTest", code: 80,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteFileEditorViewModel does not expose a centralized relative path helper"])
+    }
+    print("[PASS] View model centralizes relative path conversion")
+
+    guard viewModelSource.contains("openFiles[index].fileSize = oldFile.fileSize") else {
+        throw NSError(domain: "ContractTest", code: 81,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteFileEditor rename path does not preserve fileSize"])
+    }
+    print("[PASS] Rename preserves file size metadata")
+
+    guard !viewModelSource.contains("dropFirst(base.count") && !viewSource.contains("dropFirst(basePath.count") else {
+        throw NSError(domain: "ContractTest", code: 82,
+            userInfo: [NSLocalizedDescriptionKey: "Remote File Editor still contains duplicated prefix-drop path conversion"])
+    }
+    print("[PASS] Duplicated prefix-drop path conversion is absent")
 
     print("")
 }

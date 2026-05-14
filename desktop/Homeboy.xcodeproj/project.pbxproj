@@ -36,6 +36,7 @@
 		34FF9AD0FE0BE2ADE1F07752 /* SiteListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21391AE5E442FFA2A2843821 /* SiteListView.swift */; };
 		36E2AEA91D720BC0FCE5D660 /* DeployerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E103FB783F1B8F1CF84750F4 /* DeployerView.swift */; };
 		38D566E59E85DF4E4D14C48F /* RemoteFileBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */; };
+		3AE96B334740E1FD5BF12CE8 /* RemoteFileModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F5E37F5EBA99C37980EFA58 /* RemoteFileModels.swift */; };
 		3CBF41346F060E438864152C /* AppError.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59036A328B5EEE5B0D5DF9C /* AppError.swift */; };
 		3D5278E44CF446DC733DFDF7 /* ConsoleOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FDE17265BB36CD42258798 /* ConsoleOutput.swift */; };
 		4118594C23453F57B04D3C16 /* CommandBrowserViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE4CFBBE215C9D3D1250C8EF /* CommandBrowserViewModel.swift */; };
@@ -175,6 +176,7 @@
 		670327C19CE0F089CFF35DD1 /* LogTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogTextView.swift; sourceTree = "<group>"; };
 		6BBAE3837D9DF6634A72AAB1 /* QualityViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityViewModel.swift; sourceTree = "<group>"; };
 		6C195A8A1462489E882BC187 /* DisplayableError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayableError.swift; sourceTree = "<group>"; };
+		6F5E37F5EBA99C37980EFA58 /* RemoteFileModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileModels.swift; sourceTree = "<group>"; };
 		70AE598B819DE3CDD73692D4 /* RemoteFileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorView.swift; sourceTree = "<group>"; };
 		75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */ = {isa = PBXFileReference; path = "bandcamp_scraper.cpython-314.pyc"; sourceTree = "<group>"; };
 		7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorView.swift; sourceTree = "<group>"; };
@@ -333,6 +335,7 @@
 			isa = PBXGroup;
 			children = (
 				0075D42A490CE7EF713A874F /* CommandBrowserEntry.swift */,
+				6F5E37F5EBA99C37980EFA58 /* RemoteFileModels.swift */,
 				3A497C117547FCCCA5F2408D /* RemoteLogModels.swift */,
 			);
 			path = Models;
@@ -866,6 +869,7 @@
 				1AEFFA5D377D403DDA560237 /* RemoteFileEditorView.swift in Sources */,
 				79F089B7341476178AB41022 /* RemoteFileEditorViewModel.swift in Sources */,
 				72D058E4C987B44B3C2FE75F /* RemoteFileEntry.swift in Sources */,
+				3AE96B334740E1FD5BF12CE8 /* RemoteFileModels.swift in Sources */,
 				64D23F8D70421EFD7A51BEF2 /* RemoteLogModels.swift in Sources */,
 				339E905F86E47CF88C0386B8 /* RemoteLogViewerView.swift in Sources */,
 				180E9CC06D913B4F8B55A58A /* RemoteLogViewerViewModel.swift in Sources */,

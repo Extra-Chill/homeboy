@@ -75,12 +75,7 @@ struct RemoteFileEditorView: View {
     // MARK: - Open File from Browser
     
     private func openFileFromBrowser(_ path: String) {
-        // Convert absolute path to relative from basePath
-        let basePath = ConfigurationManager.shared.safeActiveProject.basePath ?? ""
-        let relativePath = path.hasPrefix(basePath)
-            ? String(path.dropFirst(basePath.count + 1))
-            : path
-        viewModel.openFile(path: relativePath)
+        viewModel.openFileFromBrowser(path: path)
     }
     
     // MARK: - Editor Content
