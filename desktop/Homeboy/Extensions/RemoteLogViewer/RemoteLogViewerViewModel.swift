@@ -60,7 +60,7 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         case .projectModified(_, let fields):
             // Reload pinned logs if remoteLogs changed
             if fields.contains(.remoteLogs) {
-                loadPinnedLogs()
+                reconcilePinnedLogs()
             }
         default:
             break
@@ -74,6 +74,31 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
 
         // Select first log if available
         if let first = openLogs.first {
+            selectedLogId = first.id
+        }
+    }
+
+    private func reconcilePinnedLogs() {
+        let pinnedLogs = ConfigurationManager.shared.safeActiveProject.remoteLogs.pinnedLogs
+        var pinnedByPath: [String: PinnedRemoteLog] = [:]
+        for pinned in pinnedLogs {
+            pinnedByPath[pinned.path] = pinned
+        }
+
+        for index in openLogs.indices {
+            if let pinned = pinnedByPath[openLogs[index].path] {
+                openLogs[index].isPinned = true
+                openLogs[index].tailLines = max(1, pinned.tailLines)
+            } else {
+                openLogs[index].isPinned = false
+            }
+        }
+
+        for pinned in pinnedLogs where !openLogs.contains(where: { $0.path == pinned.path }) {
+            openLogs.append(OpenLog(from: pinned))
+        }
+
+        if selectedLogId == nil, let first = openLogs.first {
             selectedLogId = first.id
         }
     }

@@ -7,6 +7,7 @@ func runFileLogDBContractTests(testDir: String, fixturesDir: String, decoder: JS
     try testRemoteLogViewerPinCommandShape(testDir: testDir)
     try testRemoteFileEditorPinCommandShape(testDir: testDir)
     try testRemoteFileEditorModelAndPathShape(testDir: testDir)
+    try testRemoteFileAndLogPinnedReloadReconciliation(testDir: testDir)
 }
 
 func testDbDescribe(fixturesDir: String, decoder: JSONDecoder) throws {
@@ -69,6 +70,60 @@ func testDbDescribe(fixturesDir: String, decoder: JSONDecoder) throws {
     for table in tables {
         print("    - \(table.Name) (\(table.Rows ?? "?") rows)")
     }
+    print("")
+}
+
+func testRemoteFileAndLogPinnedReloadReconciliation(testDir: String) throws {
+    print("Test: Remote File/Log pinned reload reconciliation")
+    print("--------------------------------------------------")
+
+    let root = URL(fileURLWithPath: testDir).deletingLastPathComponent()
+    let fileViewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteFileEditor/RemoteFileEditorViewModel.swift")
+    let logViewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/RemoteLogViewerViewModel.swift")
+
+    let fileSource = try String(contentsOf: fileViewModelPath, encoding: .utf8)
+    let logSource = try String(contentsOf: logViewModelPath, encoding: .utf8)
+
+    guard fileSource.contains("reconcilePinnedFiles()") else {
+        throw NSError(domain: "ContractTest", code: 83,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteFileEditorViewModel does not reconcile pinned files on config reload"])
+    }
+    print("[PASS] Remote File Editor uses a pinned-file reconcile path")
+
+    guard logSource.contains("reconcilePinnedLogs()") else {
+        throw NSError(domain: "ContractTest", code: 84,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewerViewModel does not reconcile pinned logs on config reload"])
+    }
+    print("[PASS] Remote Log Viewer uses a pinned-log reconcile path")
+
+    guard fileSource.contains("openFiles[index].isPinned = pinnedByPath[openFiles[index].path] != nil") else {
+        throw NSError(domain: "ContractTest", code: 85,
+            userInfo: [NSLocalizedDescriptionKey: "Remote File Editor reconcile path does not update existing file pin state"])
+    }
+    print("[PASS] Existing file tabs keep their tab identity while pin state changes")
+
+    guard logSource.contains("openLogs[index].isPinned = true")
+        && logSource.contains("openLogs[index].tailLines = max(1, pinned.tailLines)")
+        && logSource.contains("openLogs[index].isPinned = false") else {
+        throw NSError(domain: "ContractTest", code: 86,
+            userInfo: [NSLocalizedDescriptionKey: "Remote Log Viewer reconcile path does not update existing log pin metadata"])
+    }
+    print("[PASS] Existing log tabs keep their tab identity while pin metadata changes")
+
+    guard fileSource.contains("openFiles.append(OpenFile(from: pinned))")
+        && logSource.contains("openLogs.append(OpenLog(from: pinned))") else {
+        throw NSError(domain: "ContractTest", code: 87,
+            userInfo: [NSLocalizedDescriptionKey: "Pinned reload reconciliation does not append newly pinned tabs"])
+    }
+    print("[PASS] Newly pinned files and logs are appended without replacing temporary tabs")
+
+    guard fileSource.contains("openFiles = config.remoteFiles.pinnedFiles.map")
+        && logSource.contains("openLogs = config.remoteLogs.pinnedLogs.map") else {
+        throw NSError(domain: "ContractTest", code: 88,
+            userInfo: [NSLocalizedDescriptionKey: "Project-switch pinned tab reset loaders are missing"])
+    }
+    print("[PASS] Project-switch full reset loaders remain available")
+
     print("")
 }
 
