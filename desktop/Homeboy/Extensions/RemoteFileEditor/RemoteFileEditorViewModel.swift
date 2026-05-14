@@ -48,6 +48,11 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
         return openFiles.firstIndex { $0.id == id }
     }
 
+    var canRefreshSelectedFile: Bool {
+        guard let selectedFile else { return false }
+        return !selectedFile.hasUnsavedChanges && !isLoading && !isSaving
+    }
+
     // MARK: - Initialization
 
     init(browser: RemoteFileBrowser? = nil) {
@@ -104,6 +109,7 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
     /// Fetches the currently selected file from the server via CLI
     func fetchSelectedFile() async {
         guard let index = selectedFileIndex else { return }
+        guard !openFiles[index].hasUnsavedChanges else { return }
         guard cli.isInstalled else {
             error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "File Editor")
             return

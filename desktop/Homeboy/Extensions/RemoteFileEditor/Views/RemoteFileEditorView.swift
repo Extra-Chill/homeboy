@@ -190,7 +190,7 @@ struct RemoteFileEditorView: View {
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
-            .disabled(viewModel.isLoading || viewModel.isSaving)
+            .disabled(!viewModel.canRefreshSelectedFile)
             
             Spacer()
             
