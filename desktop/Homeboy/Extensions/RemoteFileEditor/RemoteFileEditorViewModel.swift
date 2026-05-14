@@ -87,7 +87,7 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
         case .projectModified(_, let fields):
             // Reload pinned files if remoteFiles changed
             if fields.contains(.remoteFiles) {
-                loadPinnedFiles()
+                reconcilePinnedFiles()
             }
         default:
             break
@@ -100,6 +100,26 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
         // Select first file if available
         if let first = openFiles.first {
+            selectedFileId = first.id
+        }
+    }
+
+    private func reconcilePinnedFiles() {
+        let pinnedFiles = ConfigurationManager.shared.safeActiveProject.remoteFiles.pinnedFiles
+        var pinnedByPath: [String: PinnedRemoteFile] = [:]
+        for pinned in pinnedFiles {
+            pinnedByPath[pinned.path] = pinned
+        }
+
+        for index in openFiles.indices {
+            openFiles[index].isPinned = pinnedByPath[openFiles[index].path] != nil
+        }
+
+        for pinned in pinnedFiles where !openFiles.contains(where: { $0.path == pinned.path }) {
+            openFiles.append(OpenFile(from: pinned))
+        }
+
+        if selectedFileId == nil, let first = openFiles.first {
             selectedFileId = first.id
         }
     }
