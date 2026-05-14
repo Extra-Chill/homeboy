@@ -236,13 +236,31 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
         
         let file = openFiles[index]
         
-        // If pinned, just unpin instead of closing
         if file.isPinned {
-            unpinFile(id)
+            guard cli.isInstalled else {
+                error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "File Editor")
+                return
+            }
+
+            Task {
+                do {
+                    _ = try await cli.filePinRemove(projectId: projectId, path: file.path)
+                    closeOpenFileTab(id)
+                } catch {
+                    self.error = AppError("Failed to unpin file: \(error.localizedDescription)", source: "File Editor")
+                }
+            }
+            return
         }
-        
+
+        closeOpenFileTab(id)
+    }
+
+    private func closeOpenFileTab(_ id: UUID) {
+        guard let index = openFiles.firstIndex(where: { $0.id == id }) else { return }
+
         openFiles.remove(at: index)
-        
+
         // Select another tab if needed
         if selectedFileId == id {
             selectedFileId = openFiles.first?.id

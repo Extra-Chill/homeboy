@@ -191,17 +191,30 @@ class RemoteLogViewerViewModel: ObservableObject, ConfigurationObserving {
         let log = openLogs[index]
 
         if log.isPinned {
+            guard cli.isInstalled else {
+                error = AppError("Homeboy CLI is not installed. Install via Settings → CLI.", source: "Log Viewer")
+                return
+            }
+
             Task {
                 do {
                     try await unpinLog(path: log.path)
+                    closeOpenLogTab(id)
                 } catch {
                     self.error = AppError("Failed to unpin log: \(error.localizedDescription)", source: "Log Viewer")
                 }
             }
+            return
         }
-        
+
+        closeOpenLogTab(id)
+    }
+
+    private func closeOpenLogTab(_ id: UUID) {
+        guard let index = openLogs.firstIndex(where: { $0.id == id }) else { return }
+
         openLogs.remove(at: index)
-        
+
         // Select another tab if needed
         if selectedLogId == id {
             selectedLogId = openLogs.first?.id
