@@ -248,6 +248,33 @@ struct LogsOutput: Decodable {
     let searchResult: LogSearchResult?
 }
 
+struct ProjectPinReportOutput: Decodable {
+    let command: String
+    let id: String?
+    let pin: ProjectPinOutput?
+}
+
+struct ProjectPinOutput: Decodable {
+    let action: String
+    let projectId: String
+    let type: String
+    let items: [ProjectPinListItem]?
+    let added: ProjectPinChange?
+    let removed: ProjectPinChange?
+}
+
+struct ProjectPinListItem: Decodable {
+    let path: String
+    let label: String?
+    let displayName: String
+    let tailLines: Int?
+}
+
+struct ProjectPinChange: Decodable {
+    let path: String
+    let type: String
+}
+
 // MARK: - File Search Types
 
 struct FileFindOutput: Decodable {
