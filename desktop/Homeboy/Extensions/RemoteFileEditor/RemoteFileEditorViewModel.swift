@@ -40,26 +40,6 @@ struct OpenFile: PinnableTabItem, Equatable {
     }
 }
 
-// MARK: - CLI Response Types
-
-private struct CLIResponse<T: Decodable>: Decodable {
-    let success: Bool
-    let data: T?
-}
-
-/// Response from `file read --json`
-private struct FileReadResponse: Decodable {
-    let path: String
-    let size: Int64?
-    let content: String
-}
-
-/// Response from `file write --json`
-private struct FileWriteResponse: Decodable {
-    let path: String
-    let bytesWritten: Int
-}
-
 @MainActor
 class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
@@ -87,7 +67,7 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
     // MARK: - CLI Bridge
 
-    private let cli = CLIBridge.shared
+    private let cli = HomeboyCLI.shared
 
     private var projectId: String {
         ConfigurationManager.shared.safeActiveProject.id
@@ -167,44 +147,35 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
         }
 
         isLoading = true
+        defer { isLoading = false }
         error = nil
 
         let file = openFiles[index]
 
         do {
-            // homeboy file read <project> <path> --json
-            let args = ["file", "read", projectId, file.path]
-            let response = try await cli.execute(args, timeout: 60)
-
-            if response.success {
-                // Parse JSON response through CLIResponse wrapper
-                let decoder = JSONDecoder()
-                decoder.keyDecodingStrategy = .convertFromSnakeCase
-                if let data = response.output.data(using: .utf8),
-                   let wrapper = try? decoder.decode(CLIResponse<FileReadResponse>.self, from: data),
-                   let fileContent = wrapper.data {
-                    openFiles[index].content = fileContent.content
-                    openFiles[index].originalContent = fileContent.content
-                    openFiles[index].fileSize = fileContent.size
-                    openFiles[index].fileExists = true
-                    openFiles[index].lastFetched = Date()
-                }
+            let output = try await cli.fileRead(projectId: projectId, path: file.path)
+            guard let currentIndex = openFiles.firstIndex(where: { $0.id == file.id }) else { return }
+            if let content = output.content {
+                openFiles[currentIndex].content = content
+                openFiles[currentIndex].originalContent = content
+                openFiles[currentIndex].fileSize = output.size
+                openFiles[currentIndex].fileExists = true
+                openFiles[currentIndex].lastFetched = Date()
+            }
+        } catch let cliError as CLIBridgeError {
+            guard let currentIndex = openFiles.firstIndex(where: { $0.id == file.id }) else { return }
+            if let structuredError = cliError.cliError,
+               structuredError.code == "file_not_found" {
+                openFiles[currentIndex].fileExists = false
+                openFiles[currentIndex].content = ""
+                openFiles[currentIndex].originalContent = ""
+                openFiles[currentIndex].fileSize = nil
             } else {
-                // Check if error indicates file not found
-                if response.errorOutput.contains("not found") || response.errorOutput.contains("No such file") {
-                    openFiles[index].fileExists = false
-                    openFiles[index].content = ""
-                    openFiles[index].originalContent = ""
-                    openFiles[index].fileSize = nil
-                } else {
-                    self.error = AppError(response.errorOutput, source: "File Editor", path: file.displayName)
-                }
+                self.error = cliError.cliError ?? AppError(cliError.localizedDescription, source: "File Editor", path: file.displayName)
             }
         } catch {
             self.error = error.toDisplayableError(source: "File Editor", path: file.displayName)
         }
-
-        isLoading = false
     }
 
     /// Saves the currently selected file to the server via CLI
@@ -216,28 +187,21 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
         }
 
         isSaving = true
+        defer { isSaving = false }
         error = nil
 
         let file = openFiles[index]
 
         do {
-            // homeboy file write <project> <path> --json (content via stdin)
-            let args = ["file", "write", projectId, file.path]
-            let response = try await cli.executeWithStdin(args, stdin: file.content, timeout: 60)
-
-            if response.success {
-                // Update state
-                openFiles[index].originalContent = file.content
-                openFiles[index].fileExists = true
-                openFiles[index].lastFetched = Date()
-            } else {
-                self.error = AppError("Failed to save: \(response.errorOutput)", source: "File Editor", path: file.displayName)
+            _ = try await cli.fileWrite(projectId: projectId, path: file.path, content: file.content)
+            if let currentIndex = openFiles.firstIndex(where: { $0.id == file.id }) {
+                openFiles[currentIndex].originalContent = file.content
+                openFiles[currentIndex].fileExists = true
+                openFiles[currentIndex].lastFetched = Date()
             }
         } catch {
             self.error = AppError("Failed to save: \(error.localizedDescription)", source: "File Editor", path: file.displayName)
         }
-
-        isSaving = false
     }
     
     // MARK: - Tab Management
@@ -326,14 +290,9 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
         Task {
             do {
-                // homeboy project pin add <project> <path> --type file --json
-                let args = ["project", "pin", "add", projectId, file.path, "--type", "file"]
-                let response = try await cli.execute(args, timeout: 30)
-
-                if response.success {
-                    openFiles[index].isPinned = true
-                } else {
-                    self.error = AppError("Failed to pin file: \(response.errorOutput)", source: "File Editor")
+                _ = try await cli.filePinAdd(projectId: projectId, path: file.path)
+                if let currentIndex = openFiles.firstIndex(where: { $0.id == file.id }) {
+                    openFiles[currentIndex].isPinned = true
                 }
             } catch {
                 self.error = AppError("Failed to pin file: \(error.localizedDescription)", source: "File Editor")
@@ -353,14 +312,9 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
         Task {
             do {
-                // homeboy project pin remove <project> <path> --type file --json
-                let args = ["project", "pin", "remove", projectId, file.path, "--type", "file"]
-                let response = try await cli.execute(args, timeout: 30)
-
-                if response.success {
-                    openFiles[index].isPinned = false
-                } else {
-                    self.error = AppError("Failed to unpin file: \(response.errorOutput)", source: "File Editor")
+                _ = try await cli.filePinRemove(projectId: projectId, path: file.path)
+                if let currentIndex = openFiles.firstIndex(where: { $0.id == file.id }) {
+                    openFiles[currentIndex].isPinned = false
                 }
             } catch {
                 self.error = AppError("Failed to unpin file: \(error.localizedDescription)", source: "File Editor")
@@ -440,15 +394,7 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
             if oldFile.isPinned && cli.isInstalled {
                 Task {
                     do {
-                        // Remove old pin
-                        let removeArgs = ["project", "pin", "remove", projectId, oldRelative, "--type", "file"]
-                        let removeResponse = try await cli.execute(removeArgs, timeout: 30)
-
-                        if removeResponse.success {
-                            // Add new pin
-                            let addArgs = ["project", "pin", "add", projectId, newRelative, "--type", "file"]
-                            _ = try await cli.execute(addArgs, timeout: 30)
-                        }
+                        _ = try await cli.filePinUpdatePath(projectId: projectId, oldPath: oldRelative, newPath: newRelative)
                     } catch {
                         // Non-critical error - file is still renamed locally
                     }

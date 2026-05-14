@@ -97,6 +97,7 @@
 		A79AD1D6F7DD14F02410D120 /* LogTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 670327C19CE0F089CFF35DD1 /* LogTextView.swift */; };
 		AB378FCB8518F6BED6EEFB6F /* DisplayableError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C195A8A1462489E882BC187 /* DisplayableError.swift */; };
 		B1BC5D62A38657148E674B80 /* ExtensionConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AC2128B1137A2702EEC2F55 /* ExtensionConsoleView.swift */; };
+		B1E8E656BDC1765CCF41A683 /* HomeboyCLI+ProjectPinCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FC07381EEBE0370CD636213 /* HomeboyCLI+ProjectPinCommands.swift */; };
 		B23886AC41FD2A725383EF45 /* ExtensionManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BA9BAC48CD6CC681F9FD2C5 /* ExtensionManifest.swift */; };
 		B27446E0A3706D997A75D1E9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A690A4DC66BE109010668691 /* ContentView.swift */; };
 		B6AC1E19666E9FC9AF76D431 /* CommandBrowserCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19D0AC4BB8035D3A38DF8F83 /* CommandBrowserCatalog.swift */; };
@@ -178,6 +179,7 @@
 		75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */ = {isa = PBXFileReference; path = "bandcamp_scraper.cpython-314.pyc"; sourceTree = "<group>"; };
 		7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorView.swift; sourceTree = "<group>"; };
 		7E6E41FFC96012F3C390C094 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
+		7FC07381EEBE0370CD636213 /* HomeboyCLI+ProjectPinCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+ProjectPinCommands.swift"; sourceTree = "<group>"; };
 		807865404822DFF3A4755240 /* APIAuthWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIAuthWorkspaceView.swift; sourceTree = "<group>"; };
 		811079398986364AA0E0542A /* CLIVersionChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIVersionChecker.swift; sourceTree = "<group>"; };
 		830D15DCC64EB9AF17F822E0 /* ComponentsSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComponentsSettingsTab.swift; sourceTree = "<group>"; };
@@ -423,6 +425,7 @@
 				C3B52F387CC902FB445FC922 /* HomeboyCLI+CommandBrowserCommands.swift */,
 				4B800E302E25370AFEB2EAA7 /* HomeboyCLI+FileDatabaseCommands.swift */,
 				9CB4FFA7533765478562751F /* HomeboyCLI+LogCommands.swift */,
+				7FC07381EEBE0370CD636213 /* HomeboyCLI+ProjectPinCommands.swift */,
 				BC23AFFAB50FD8AFD042E644 /* HomeboyCLI+QualityCommands.swift */,
 				0DD2E86E7655D2ED45CB0E31 /* HomeboyCLI+RigBenchReleaseCommands.swift */,
 				BFAF5103FCB24063514E519F /* HomeboyCLI+RunCommands.swift */,
@@ -835,6 +838,7 @@
 				D5421FF656190A21F439C40A /* HomeboyCLI+CommandBrowserCommands.swift in Sources */,
 				7B4A55712A56BDD9EE21F504 /* HomeboyCLI+FileDatabaseCommands.swift in Sources */,
 				A744C6D0692C0EF9B142E839 /* HomeboyCLI+LogCommands.swift in Sources */,
+				B1E8E656BDC1765CCF41A683 /* HomeboyCLI+ProjectPinCommands.swift in Sources */,
 				A40B645FCF64C59E6F1EC4FC /* HomeboyCLI+QualityCommands.swift in Sources */,
 				46238C2E19607D4410D23FA2 /* HomeboyCLI+RigBenchReleaseCommands.swift in Sources */,
 				19F0A3B40B6B6BA59A201C7F /* HomeboyCLI+RunCommands.swift in Sources */,

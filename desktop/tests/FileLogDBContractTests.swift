@@ -5,6 +5,7 @@ import Foundation
 func runFileLogDBContractTests(testDir: String, fixturesDir: String, decoder: JSONDecoder) throws {
     try testDbDescribe(fixturesDir: fixturesDir, decoder: decoder)
     try testRemoteLogViewerPinCommandShape(testDir: testDir)
+    try testRemoteFileEditorPinCommandShape(testDir: testDir)
 }
 
 func testDbDescribe(fixturesDir: String, decoder: JSONDecoder) throws {
@@ -79,7 +80,7 @@ func testRemoteLogViewerPinCommandShape(testDir: String) throws {
         .appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/RemoteLogViewerViewModel.swift")
     let cliPath = URL(fileURLWithPath: testDir)
         .deletingLastPathComponent()
-        .appendingPathComponent("Homeboy/Core/CLI/HomeboyCLI+LogCommands.swift")
+        .appendingPathComponent("Homeboy/Core/CLI/HomeboyCLI+ProjectPinCommands.swift")
 
     let viewModelSource = try String(contentsOf: viewModelPath, encoding: .utf8)
     let cliSource = try String(contentsOf: cliPath, encoding: .utf8)
@@ -110,6 +111,43 @@ func testRemoteLogViewerPinCommandShape(testDir: String) throws {
             userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewer still contains old positional-first project pin add syntax"])
     }
     print("[PASS] Old positional-first log pin syntax is absent")
+
+    print("")
+}
+
+func testRemoteFileEditorPinCommandShape(testDir: String) throws {
+    print("Test: Remote File Editor pin command shape")
+    print("------------------------------------------")
+
+    let viewModelPath = URL(fileURLWithPath: testDir)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Homeboy/Extensions/RemoteFileEditor/RemoteFileEditorViewModel.swift")
+    let cliPath = URL(fileURLWithPath: testDir)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Homeboy/Core/CLI/HomeboyCLI+ProjectPinCommands.swift")
+
+    let viewModelSource = try String(contentsOf: viewModelPath, encoding: .utf8)
+    let cliSource = try String(contentsOf: cliPath, encoding: .utf8)
+    let currentAddCommand = #"["project", "pin", "add", projectId, path, "--type", "file"]"#
+    let currentRemoveCommand = #"["project", "pin", "remove", projectId, path, "--type", "file"]"#
+
+    guard cliSource.contains(currentAddCommand) else {
+        throw NSError(domain: "ContractTest", code: 74,
+            userInfo: [NSLocalizedDescriptionKey: "File CLI wrapper pin command does not use current homeboy project pin add syntax"])
+    }
+    print("[PASS] File pin command uses current add syntax")
+
+    guard cliSource.contains(currentRemoveCommand) else {
+        throw NSError(domain: "ContractTest", code: 75,
+            userInfo: [NSLocalizedDescriptionKey: "File CLI wrapper unpin command does not use current homeboy project pin remove syntax"])
+    }
+    print("[PASS] File unpin command uses current remove syntax")
+
+    guard !viewModelSource.contains("[\"project\", \"pin\"") else {
+        throw NSError(domain: "ContractTest", code: 76,
+            userInfo: [NSLocalizedDescriptionKey: "RemoteFileEditorViewModel still builds raw project pin commands instead of using HomeboyCLI wrappers"])
+    }
+    print("[PASS] View model uses typed HomeboyCLI file pin wrappers")
 
     print("")
 }
