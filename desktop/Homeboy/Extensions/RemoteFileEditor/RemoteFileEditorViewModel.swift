@@ -3,43 +3,6 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// Represents an open file tab in the Remote File Editor
-struct OpenFile: PinnableTabItem, Equatable {
-    let id: UUID
-    let path: String           // Relative path from basePath
-    var isPinned: Bool
-    var content: String = ""
-    var originalContent: String = ""
-    var fileExists: Bool = true
-    var lastFetched: Date?
-    var fileSize: Int64?       // Size in bytes
-
-    var displayName: String {
-        URL(fileURLWithPath: path).lastPathComponent
-    }
-
-    var hasUnsavedChanges: Bool {
-        content != originalContent
-    }
-
-    var formattedSize: String {
-        guard let size = fileSize else { return "" }
-        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
-    }
-
-    init(id: UUID = UUID(), path: String, isPinned: Bool) {
-        self.id = id
-        self.path = path
-        self.isPinned = isPinned
-    }
-
-    init(from pinned: PinnedRemoteFile) {
-        self.id = pinned.id
-        self.path = pinned.path
-        self.isPinned = true
-    }
-}
-
 @MainActor
 class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
@@ -237,6 +200,10 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
             await fetchSelectedFile()
         }
     }
+
+    func openFileFromBrowser(path: String) {
+        openFile(path: relativeFilePath(for: path))
+    }
     
     /// Attempts to close a file tab
     func closeFile(_ id: UUID) {
@@ -352,14 +319,7 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
     /// Handle a file being deleted from the sidebar - close its tab if open
     func handleFileDeleted(_ path: String) {
-        // Convert absolute path to relative if needed
-        let basePath = ConfigurationManager.shared.safeActiveProject.basePath
-        let relativePath: String
-        if let base = basePath, path.hasPrefix(base) {
-            relativePath = String(path.dropFirst(base.count + 1))
-        } else {
-            relativePath = path
-        }
+        let relativePath = relativeFilePath(for: path)
 
         if let file = openFiles.first(where: { $0.path == relativePath }) {
             performClose(file.id)
@@ -368,18 +328,8 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
 
     /// Handle a file being renamed from the sidebar - update the tab if open
     func handleFileRenamed(from oldPath: String, to newPath: String) {
-        // Convert absolute paths to relative if needed
-        let basePath = ConfigurationManager.shared.safeActiveProject.basePath
-        let oldRelative: String
-        let newRelative: String
-
-        if let base = basePath {
-            oldRelative = oldPath.hasPrefix(base) ? String(oldPath.dropFirst(base.count + 1)) : oldPath
-            newRelative = newPath.hasPrefix(base) ? String(newPath.dropFirst(base.count + 1)) : newPath
-        } else {
-            oldRelative = oldPath
-            newRelative = newPath
-        }
+        let oldRelative = relativeFilePath(for: oldPath)
+        let newRelative = relativeFilePath(for: newPath)
 
         if let index = openFiles.firstIndex(where: { $0.path == oldRelative }) {
             // Update the file path
@@ -389,6 +339,7 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
             openFiles[index].originalContent = oldFile.originalContent
             openFiles[index].fileExists = oldFile.fileExists
             openFiles[index].lastFetched = oldFile.lastFetched
+            openFiles[index].fileSize = oldFile.fileSize
 
             // Update pinned files via CLI if this was pinned
             if oldFile.isPinned && cli.isInstalled {
@@ -401,6 +352,27 @@ class RemoteFileEditorViewModel: ObservableObject, ConfigurationObserving {
                 }
             }
         }
+    }
+
+    private func relativeFilePath(for path: String) -> String {
+        guard path.hasPrefix("/") else { return path }
+
+        guard let basePath = ConfigurationManager.shared.safeActiveProject.basePath,
+              !basePath.isEmpty else {
+            return path
+        }
+
+        let normalizedBase = URL(fileURLWithPath: basePath).standardizedFileURL.path
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard normalizedPath == normalizedBase || normalizedPath.hasPrefix(normalizedBase + "/") else {
+            return path
+        }
+
+        if normalizedPath == normalizedBase {
+            return URL(fileURLWithPath: normalizedPath).lastPathComponent
+        }
+
+        return String(normalizedPath.dropFirst(normalizedBase.count + 1))
     }
     
     // MARK: - Utility
