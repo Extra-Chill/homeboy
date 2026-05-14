@@ -23,5 +23,10 @@ assert_contains "$MANIFEST" '"remote_path": "wp-content/plugins/{{dir_name}}"'
 assert_contains "$MANIFEST" '"file": "style.css"'
 assert_contains "$MANIFEST" '"text": "Theme Name:"'
 assert_contains "$MANIFEST" '"remote_path": "wp-content/themes/{{dir_name}}"'
+assert_contains "$MANIFEST" '"path_roots"'
+assert_contains "$MANIFEST" '"path_prefix": "wp-content/"'
+assert_contains "$MANIFEST" '"root": "wp_content"'
+assert_contains "$MANIFEST" '"strip_prefix": true'
+assert_contains "$MANIFEST" '"detect_command": "wp eval '\''echo WP_CONTENT_DIR;'\''"'
 
 echo "wordpress remote path inference smoke passed"

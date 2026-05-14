@@ -141,6 +141,14 @@
       "/wp-content/themes",
       "/wp-content/mu-plugins"
     ],
+    "path_roots": [
+      {
+        "path_prefix": "wp-content/",
+        "root": "wp_content",
+        "strip_prefix": true,
+        "detect_command": "wp eval 'echo WP_CONTENT_DIR;'"
+      }
+    ],
     "owner_hints": [
       {
         "path_contains": "wp-content/",
