@@ -1,6 +1,10 @@
 # Homeboy CLI Parity Matrix
 
 This matrix maps the current `homeboy` CLI command surface to Homeboy Desktop support.
+Desktop now has two layers of CLI parity:
+
+- **Guided workflow UI** for common command families with safer forms, previews, and focused output.
+- **Command Browser** for full command-surface discoverability, help output, copyable invocations, and explicit raw CLI execution.
 
 Source of truth checked for this pass: `homeboy --help` plus focused help for the workspace commands from the installed CLI on 2026-04-27, and the current desktop `main` branch.
 
@@ -10,7 +14,7 @@ Source of truth checked for this pass: `homeboy --help` plus focused help for th
 - **read-only UI**: the desktop app exposes inspection/status output only; mutating commands stay in the CLI.
 - **partial/stale**: a desktop surface exists, but some wrappers or models still need cleanup.
 - **intentionally CLI-only**: the command is terminal/operator-shaped and should not get desktop UI without a stronger product need.
-- **missing workflow**: no meaningful desktop surface exists yet.
+- **missing workflow**: no guided workflow exists yet; use the Command Browser or CLI for the raw command.
 
 ## Matrix
 
@@ -26,7 +30,7 @@ Source of truth checked for this pass: `homeboy --help` plus focused help for th
 | `homeboy file` | supported first-pass UI | Remote file editor in `Homeboy/Extensions/RemoteFileEditor/`; file wrappers in `Homeboy/Core/CLI/HomeboyCLI+WorkspaceCommands.swift`. | Core list/read/write/delete/rename/search workflows exist. Keep destructive operations guarded. | Matrix only |
 | `homeboy fleet` | partial/stale | Fleet relationships in settings/config models and `FleetManagementView`. | Basic configuration exists; fleet status/check/exec style operations are still CLI-shaped unless a dashboard is designed. | Matrix only |
 | `homeboy logs` | supported first-pass UI | Remote log viewer in `Homeboy/Extensions/RemoteLogViewer/`; log wrappers in `Homeboy/Core/CLI/HomeboyCLI+WorkspaceCommands.swift`. | Core log viewing/search exists. Pinning remains scoped to log/file workflows. | Matrix only |
-| `homeboy transfer` | missing workflow | No dedicated transfer workflow. | Keep out of File Editor for now. If needed, add a focused local/server transfer sheet with dry-run output. | Matrix only |
+| `homeboy transfer` | missing workflow | No dedicated transfer workflow. | Keep out of File Editor for now. If the command returns to the installed CLI surface, Command Browser will expose it from `homeboy --help`. | Matrix only |
 | `homeboy triage` | supported first-pass UI | Quality workspace `Run Triage` action; `qualityTriage()` wrapper. | `triage component` is surfaced. Project/fleet/rig/workspace triage plus filters (`--mine`, labels, failing checks, drilldown) remain CLI-only. | Matrix only |
 | `homeboy deploy` | supported first-pass UI | Deployer tool in `Homeboy/Extensions/Deployer/`. | Deploy remains its own guarded write workflow. Release/build planning is now separate from deployment. | Matrix only |
 | `homeboy component` | supported first-pass UI | Component settings UI and models; wrappers in `Homeboy/Core/CLI/HomeboyCLI+WorkspaceCommands.swift`. | Usable for normal component config. Bulk/JSON-pointer style edits stay CLI-only. | Matrix only |
@@ -37,7 +41,7 @@ Source of truth checked for this pass: `homeboy --help` plus focused help for th
 | `homeboy docs` | intentionally CLI-only | Static docs live under `docs/`; no in-app docs browser. | Keep command docs in CLI/browser docs. Contextual help panes can be added later without wrapping `homeboy docs`. | Matrix only |
 | `homeboy changelog` | intentionally CLI-only | No changelog UI. | Changelog generation/inspection stays CLI-only. Release planning can link to `changes`/`release --dry-run` output instead. | Matrix only |
 | `homeboy git` | read-only UI | Git workspace in `Homeboy/Extensions/GitOperations/`; `gitStatus()` wrapper plus GitHub issue/PR navigation. | Read-only `git status` is supported. `commit`, `push`, `pull`, `rebase`, `cherry-pick`, `tag`, `issue`, and `pr` writes stay CLI-only until confirmation UX exists. | Matrix only |
-| `homeboy issues` | missing workflow | No issue reconciliation UI. | Could belong in Quality or Git/GitHub later. No active desktop tracker until the workflow is designed. | Matrix only |
+| `homeboy issues` | missing workflow | Command Browser exposes the raw command surface; no issue reconciliation workflow. | Could belong in Quality or Git/GitHub later. No active desktop tracker until the workflow is designed. | Matrix only |
 | `homeboy version` | supported first-pass UI | Release workspace reads `version show` in `ReleaseWorkflowViewModel`. | Read-only version inspection is supported. `version bump` aliases release execution and remains CLI-only. | Matrix only |
 | `homeboy build` | supported first-pass UI | Release workspace `Build` action calls `homeboy build`; deployer still has deployment-specific build handling. | Component build is supported from release planning. Bulk/project build modes remain CLI-only. | Matrix only |
 | `homeboy validate` | supported first-pass UI | Quality workspace validation stage. | Direct non-mutating validation is supported. No advanced workflow beyond component/path selection. | Matrix only |
@@ -62,6 +66,7 @@ The workspace PR wave closed the old missing-workflow trackers for Bench, Rigs, 
 
 | Area | Shipped desktop surface | Intentional boundary |
 |---|---|---|
+| Commands | `CommandBrowserView` lists the CLI command catalog, shows command help, copies invocations, and runs explicit `homeboy ...` commands through the CLI bridge. | Guided workflow tabs remain the safer path for common operations; Command Browser is the escape hatch for raw CLI parity. |
 | Bench | `BenchView` lists scenarios and runs benchmarks. | Baseline/ratchet, rig comparison, multi-run/concurrency, and settings overrides remain CLI-only. |
 | Rigs | `RigsView` lists specs, shows status/check output, and confirms `up`/`down`. | Rig package install/update, sources management, stack sync, and app launcher lifecycle remain CLI-only. |
 | Stacks | `StackManagerView` lists specs, shows status, and runs read-only inspection. | Stack mutation/materialization commands remain CLI-only. |
@@ -72,9 +77,9 @@ The workspace PR wave closed the old missing-workflow trackers for Bench, Rigs, 
 
 ## Still-Missing Desktop Workflows
 
-- `homeboy transfer` has no desktop workflow.
-- `homeboy issues` has no desktop workflow.
-- `homeboy undo` has wrappers but no visible workflow.
+- `homeboy transfer` has no guided desktop workflow.
+- `homeboy issues` has no guided desktop workflow beyond the Command Browser.
+- `homeboy undo` has wrappers and Command Browser access, but no workflow-owned undo surface.
 - Advanced stack/rig/bench/release/git/API mutation flows are intentionally CLI-only until the app has specific confirmation UX for each risk profile.
 
 ## Upstream Audit Detector False-Positive History

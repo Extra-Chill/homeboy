@@ -12,6 +12,7 @@ enum NavigationItem: Hashable {
 /// Database Browser is shown if project type supports it.
 /// Settings is shown in a separate section.
 enum CoreTool: String, CaseIterable, Identifiable {
+    case commandBrowser = "Commands"
     case deployer = "Deployer"
     case bench = "Bench"
     case runHistory = "Run History"
@@ -30,6 +31,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
     
     var icon: String {
         switch self {
+        case .commandBrowser: return "terminal"
         case .deployer: return "arrow.up.to.line"
         case .bench: return "speedometer"
         case .runHistory: return "clock.arrow.circlepath"
@@ -53,6 +55,8 @@ enum CoreTool: String, CaseIterable, Identifiable {
         let hasRemoteTarget = project.serverId?.isEmpty == false && project.basePath?.isEmpty == false
 
         switch self {
+        case .commandBrowser:
+            return true
         case .settings:
             return true
         case .deployer, .bench, .runHistory, .release, .rigs, .stackManager, .git, .quality:
@@ -118,6 +122,8 @@ struct ContentView: View {
     private var detailView: some View {
         ZStack {
             // Core tools - kept mounted to preserve state
+            CommandBrowserView()
+                .opacity(selectedItem == .coreTool(.commandBrowser) ? 1 : 0)
             DeployerView()
                 .opacity(selectedItem == .coreTool(.deployer) ? 1 : 0)
             BenchView()

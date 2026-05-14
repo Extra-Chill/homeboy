@@ -1,0 +1,546 @@
+import AppKit
+import SwiftUI
+
+struct CommandBrowserEntry: Identifiable, Hashable {
+    enum Scope: String {
+        case global = "Global"
+        case project = "Project"
+        case component = "Component"
+        case rig = "Rig"
+        case stack = "Stack"
+        case server = "Server"
+    }
+
+    enum Risk: String {
+        case readOnly = "Read-only"
+        case guardedWrites = "Guarded writes"
+        case mutating = "Mutating"
+        case operatorOnly = "Operator"
+    }
+
+    enum DesktopCoverage: String {
+        case workflow = "Workflow UI"
+        case partial = "Partial UI"
+        case readOnly = "Read-only UI"
+        case cliOnly = "CLI-only"
+    }
+
+    let command: String
+    let summary: String
+    let scope: Scope
+    let risk: Risk
+    let coverage: DesktopCoverage
+    let workflow: CoreTool?
+
+    var id: String { command }
+    var invocation: String { "homeboy \(command)" }
+
+    func withSummary(_ summary: String) -> CommandBrowserEntry {
+        CommandBrowserEntry(
+            command: command,
+            summary: summary,
+            scope: scope,
+            risk: risk,
+            coverage: coverage,
+            workflow: workflow
+        )
+    }
+}
+
+@MainActor
+final class CommandBrowserViewModel: ObservableObject {
+    @Published var commands = CommandBrowserViewModel.catalog
+    @Published var selectedCommand: CommandBrowserEntry? = CommandBrowserViewModel.catalog.first
+    @Published var filter = ""
+    @Published var helpOutput = ""
+    @Published var runOutput = ""
+    @Published var commandInput = "homeboy --help"
+    @Published var isLoadingHelp = false
+    @Published var isRunning = false
+    @Published var error: (any DisplayableError)?
+
+    var filteredCommands: [CommandBrowserEntry] {
+        let query = filter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return commands }
+        return commands.filter { entry in
+            entry.command.lowercased().contains(query)
+                || entry.summary.lowercased().contains(query)
+                || entry.scope.rawValue.lowercased().contains(query)
+                || entry.coverage.rawValue.lowercased().contains(query)
+        }
+    }
+
+    func select(_ command: CommandBrowserEntry) {
+        selectedCommand = command
+        commandInput = command.invocation + " --help"
+        loadHelp(for: command)
+    }
+
+    func loadInitialHelp() {
+        if helpOutput.isEmpty {
+            Task {
+                await refreshCatalogFromCLI()
+                if let selectedCommand {
+                    loadHelp(for: selectedCommand)
+                }
+            }
+        }
+    }
+
+    private func refreshCatalogFromCLI() async {
+        guard HomeboyCLI.shared.isInstalled else { return }
+
+        do {
+            let response = try await CLIBridge.shared.execute(["--help"], timeout: 30)
+            let discovered = Self.commands(fromHelp: response.output)
+            guard !discovered.isEmpty else { return }
+
+            let metadata = Dictionary(uniqueKeysWithValues: Self.catalog.map { ($0.command, $0) })
+            commands = discovered.map { command, summary in
+                (metadata[command] ?? Self.fallbackEntry(command: command, summary: summary)).withSummary(summary)
+            }
+            .sorted { $0.command < $1.command }
+
+            if let selectedCommand, commands.contains(where: { $0.id == selectedCommand.id }) {
+                self.selectedCommand = commands.first { $0.id == selectedCommand.id }
+            } else {
+                selectedCommand = commands.first
+                commandInput = selectedCommand.map { $0.invocation + " --help" } ?? "homeboy --help"
+            }
+        } catch {
+            self.error = error.toDisplayableError(source: "Commands")
+        }
+    }
+
+    func loadHelp(for command: CommandBrowserEntry) {
+        guard HomeboyCLI.shared.isInstalled else {
+            error = AppError("Homeboy CLI is not installed. Install via Settings -> CLI.", source: "Commands")
+            return
+        }
+
+        isLoadingHelp = true
+        error = nil
+
+        Task {
+            do {
+                let response = try await CLIBridge.shared.execute([command.command, "--help"], timeout: 30)
+                helpOutput = response.output.isEmpty ? response.errorOutput : response.output
+            } catch {
+                self.error = error.toDisplayableError(source: "Commands")
+                helpOutput = error.localizedDescription
+            }
+
+            isLoadingHelp = false
+        }
+    }
+
+    func copyCurrentCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(commandInput, forType: .string)
+    }
+
+    func runCommandInput() {
+        guard HomeboyCLI.shared.isInstalled else {
+            error = AppError("Homeboy CLI is not installed. Install via Settings -> CLI.", source: "Commands")
+            return
+        }
+
+        let parsed = parseCommandLine(commandInput)
+        guard let first = parsed.first, first == "homeboy" else {
+            error = AppError("Commands must start with `homeboy`.", source: "Commands")
+            return
+        }
+
+        isRunning = true
+        error = nil
+        runOutput = "> \(commandInput)\n"
+
+        Task {
+            do {
+                let response = try await CLIBridge.shared.execute(Array(parsed.dropFirst()), timeout: 300)
+                appendRunOutput(response.output)
+                appendRunOutput(response.errorOutput)
+                appendRunOutput("exit \(response.exitCode)")
+            } catch {
+                self.error = error.toDisplayableError(source: "Commands")
+                appendRunOutput(error.localizedDescription)
+            }
+
+            isRunning = false
+        }
+    }
+
+    private func appendRunOutput(_ text: String) {
+        guard !text.isEmpty else { return }
+        if !runOutput.isEmpty && !runOutput.hasSuffix("\n") {
+            runOutput += "\n"
+        }
+        runOutput += text
+        if !runOutput.hasSuffix("\n") {
+            runOutput += "\n"
+        }
+    }
+
+    private func parseCommandLine(_ input: String) -> [String] {
+        var args: [String] = []
+        var current = ""
+        var quote: Character?
+        var isEscaped = false
+
+        for character in input {
+            if isEscaped {
+                current.append(character)
+                isEscaped = false
+                continue
+            }
+
+            if character == "\\" {
+                isEscaped = true
+                continue
+            }
+
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(character)
+                }
+                continue
+            }
+
+            if character == "\"" || character == "'" {
+                quote = character
+                continue
+            }
+
+            if character.isWhitespace {
+                if !current.isEmpty {
+                    args.append(current)
+                    current = ""
+                }
+                continue
+            }
+
+            current.append(character)
+        }
+
+        if !current.isEmpty {
+            args.append(current)
+        }
+
+        return args
+    }
+
+    private static func commands(fromHelp output: String) -> [(command: String, summary: String)] {
+        var isInCommands = false
+        var commands: [(String, String)] = []
+
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "Commands:" {
+                isInCommands = true
+                continue
+            }
+            if trimmed == "Options:" {
+                break
+            }
+            guard isInCommands, !trimmed.isEmpty, !trimmed.hasPrefix("-") else { continue }
+
+            let parts = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard let command = parts.first else { continue }
+            commands.append((String(command), parts.count > 1 ? String(parts[1]) : ""))
+        }
+
+        return commands
+    }
+
+    private static func fallbackEntry(command: String, summary: String) -> CommandBrowserEntry {
+        CommandBrowserEntry(
+            command: command,
+            summary: summary,
+            scope: .global,
+            risk: .operatorOnly,
+            coverage: .cliOnly,
+            workflow: nil
+        )
+    }
+
+    static let catalog: [CommandBrowserEntry] = [
+        .init(command: "project", summary: "Manage project/target configuration", scope: .project, risk: .guardedWrites, coverage: .workflow, workflow: .settings),
+        .init(command: "ssh", summary: "Open SSH sessions for configured servers", scope: .server, risk: .operatorOnly, coverage: .partial, workflow: nil),
+        .init(command: "server", summary: "Manage SSH server records", scope: .server, risk: .guardedWrites, coverage: .workflow, workflow: .settings),
+        .init(command: "test", summary: "Run component tests", scope: .component, risk: .readOnly, coverage: .workflow, workflow: .quality),
+        .init(command: "bench", summary: "Run performance benchmarks", scope: .component, risk: .readOnly, coverage: .workflow, workflow: .bench),
+        .init(command: "trace", summary: "Capture behavioral traces", scope: .component, risk: .readOnly, coverage: .cliOnly, workflow: nil),
+        .init(command: "observe", summary: "Persist passive observation evidence", scope: .global, risk: .readOnly, coverage: .cliOnly, workflow: nil),
+        .init(command: "lint", summary: "Run component lint checks", scope: .component, risk: .readOnly, coverage: .workflow, workflow: .quality),
+        .init(command: "db", summary: "Inspect and operate on databases", scope: .project, risk: .guardedWrites, coverage: .workflow, workflow: .databaseBrowser),
+        .init(command: "deps", summary: "Manage component dependencies", scope: .component, risk: .mutating, coverage: .cliOnly, workflow: nil),
+        .init(command: "doctor", summary: "Run local diagnostics", scope: .global, risk: .readOnly, coverage: .cliOnly, workflow: nil),
+        .init(command: "file", summary: "Read and edit remote files", scope: .project, risk: .guardedWrites, coverage: .workflow, workflow: .remoteFileEditor),
+        .init(command: "fleet", summary: "Manage groups of projects", scope: .project, risk: .guardedWrites, coverage: .partial, workflow: nil),
+        .init(command: "logs", summary: "View remote logs", scope: .project, risk: .readOnly, coverage: .workflow, workflow: .remoteLogViewer),
+        .init(command: "triage", summary: "Summarize project/component attention", scope: .global, risk: .readOnly, coverage: .workflow, workflow: .quality),
+        .init(command: "deploy", summary: "Deploy components to targets", scope: .project, risk: .mutating, coverage: .workflow, workflow: .deployer),
+        .init(command: "component", summary: "Manage standalone component records", scope: .component, risk: .guardedWrites, coverage: .workflow, workflow: .settings),
+        .init(command: "config", summary: "Manage raw Homeboy configuration", scope: .global, risk: .mutating, coverage: .cliOnly, workflow: nil),
+        .init(command: "daemon", summary: "Run the local HTTP API daemon", scope: .global, risk: .operatorOnly, coverage: .cliOnly, workflow: nil),
+        .init(command: "extension", summary: "Install, setup, and run CLI extensions", scope: .global, risk: .guardedWrites, coverage: .workflow, workflow: .settings),
+        .init(command: "status", summary: "Show actionable workspace status", scope: .global, risk: .readOnly, coverage: .workflow, workflow: nil),
+        .init(command: "docs", summary: "Display CLI documentation", scope: .global, risk: .readOnly, coverage: .cliOnly, workflow: nil),
+        .init(command: "changelog", summary: "Inspect generated changelog data", scope: .component, risk: .readOnly, coverage: .cliOnly, workflow: nil),
+        .init(command: "git", summary: "Run git workflows for components", scope: .component, risk: .mutating, coverage: .readOnly, workflow: .git),
+        .init(command: "issues", summary: "Reconcile findings with issue trackers", scope: .component, risk: .guardedWrites, coverage: .cliOnly, workflow: nil),
+        .init(command: "version", summary: "Inspect or plan component versions", scope: .component, risk: .guardedWrites, coverage: .workflow, workflow: .release),
+        .init(command: "build", summary: "Build a component", scope: .component, risk: .readOnly, coverage: .workflow, workflow: .release),
+        .init(command: "changes", summary: "Show changes since the release baseline", scope: .component, risk: .readOnly, coverage: .workflow, workflow: .release),
+        .init(command: "release", summary: "Plan or run release workflows", scope: .component, risk: .mutating, coverage: .readOnly, workflow: .release),
+        .init(command: "review", summary: "Run scoped audit/lint/test review", scope: .component, risk: .readOnly, coverage: .workflow, workflow: .quality),
+        .init(command: "audit", summary: "Detect architectural drift", scope: .component, risk: .readOnly, coverage: .workflow, workflow: .quality),
+        .init(command: "refactor", summary: "Run structural refactoring helpers", scope: .component, risk: .mutating, coverage: .partial, workflow: nil),
+        .init(command: "rig", summary: "Manage reproducible local dev environments", scope: .rig, risk: .mutating, coverage: .workflow, workflow: .rigs),
+        .init(command: "runs", summary: "Inspect persisted run history and artifacts", scope: .global, risk: .readOnly, coverage: .workflow, workflow: .runHistory),
+        .init(command: "self", summary: "Inspect the active Homeboy binary", scope: .global, risk: .readOnly, coverage: .cliOnly, workflow: nil),
+        .init(command: "stack", summary: "Manage combined-fixes branch stacks", scope: .stack, risk: .mutating, coverage: .readOnly, workflow: .stackManager),
+        .init(command: "undo", summary: "Undo recent Homeboy write operations", scope: .global, risk: .mutating, coverage: .partial, workflow: nil),
+        .init(command: "auth", summary: "Authenticate with a project API", scope: .project, risk: .guardedWrites, coverage: .workflow, workflow: .apiAuth),
+        .init(command: "api", summary: "Make API requests to a project", scope: .project, risk: .guardedWrites, coverage: .readOnly, workflow: .apiAuth),
+        .init(command: "upgrade", summary: "Upgrade Homeboy CLI", scope: .global, risk: .mutating, coverage: .workflow, workflow: .settings),
+        .init(command: "list", summary: "List available commands", scope: .global, risk: .readOnly, coverage: .cliOnly, workflow: nil),
+        .init(command: "cargo", summary: "Run Cargo through Homeboy", scope: .component, risk: .operatorOnly, coverage: .cliOnly, workflow: nil),
+        .init(command: "wp", summary: "Run WP-CLI against WordPress targets", scope: .project, risk: .operatorOnly, coverage: .cliOnly, workflow: nil)
+    ]
+}
+
+struct CommandBrowserView: View {
+    @StateObject private var viewModel = CommandBrowserViewModel()
+    @State private var selectedCommandID: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+
+            HSplitView {
+                commandList
+                    .frame(minWidth: 300, idealWidth: 360, maxWidth: 440)
+                commandDetail
+                    .frame(minWidth: 620)
+            }
+        }
+        .frame(minWidth: 960, minHeight: 640)
+        .onAppear {
+            selectedCommandID = viewModel.selectedCommand?.id
+            viewModel.loadInitialHelp()
+        }
+        .onChange(of: selectedCommandID) { _, newValue in
+            guard let newValue,
+                  let command = viewModel.commands.first(where: { $0.id == newValue }) else { return }
+            viewModel.select(command)
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Commands")
+                    .font(.title2.bold())
+                Text("GUI wrapper for the Homeboy CLI command surface")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            if viewModel.isLoadingHelp || viewModel.isRunning {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
+        .padding()
+    }
+
+    private var commandList: some View {
+        VStack(spacing: 0) {
+            TextField("Filter commands", text: $viewModel.filter)
+                .textFieldStyle(.roundedBorder)
+                .padding()
+
+            List(selection: $selectedCommandID) {
+                ForEach(viewModel.filteredCommands) { command in
+                    CommandRow(command: command)
+                        .tag(command.id)
+                }
+            }
+            .listStyle(.sidebar)
+        }
+    }
+
+    private var commandDetail: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let command = viewModel.selectedCommand {
+                    commandHeader(command)
+
+                    if let error = viewModel.error {
+                        InlineErrorView(error)
+                    }
+
+                    commandRunner(command)
+                    helpSection
+                    outputSection
+                } else {
+                    ContentUnavailableView(
+                        "Select a Command",
+                        systemImage: "terminal",
+                        description: Text("Choose a Homeboy CLI command to inspect its help and run explicit invocations.")
+                    )
+                }
+            }
+            .padding()
+        }
+    }
+
+    private func commandHeader(_ command: CommandBrowserEntry) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(command.invocation)
+                .font(.largeTitle.bold().monospaced())
+                .textSelection(.enabled)
+            Text(command.summary)
+                .foregroundColor(.secondary)
+            HStack(spacing: 8) {
+                badge(command.scope.rawValue, color: .blue)
+                badge(command.risk.rawValue, color: riskColor(command.risk))
+                badge(command.coverage.rawValue, color: coverageColor(command.coverage))
+            }
+        }
+    }
+
+    private func commandRunner(_ command: CommandBrowserEntry) -> some View {
+        GroupBox("Invocation") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Edit the exact CLI command before running. Existing workflow tabs remain the safer path for guided operations.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                TextField("homeboy ...", text: $viewModel.commandInput)
+                    .font(.system(.body, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+
+                HStack {
+                    Button {
+                        viewModel.commandInput = command.invocation + " --help"
+                        viewModel.loadHelp(for: command)
+                    } label: {
+                        Label("Load Help", systemImage: "questionmark.circle")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        viewModel.copyCurrentCommand()
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        viewModel.runCommandInput()
+                    } label: {
+                        Label("Run", systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(viewModel.isRunning)
+
+                    Spacer()
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var helpSection: some View {
+        GroupBox("CLI Help") {
+            if viewModel.helpOutput.isEmpty {
+                Text("Help output will appear here.")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                CopyableTextView(console: viewModel.helpOutput, source: "Commands", maxHeight: 260)
+            }
+        }
+    }
+
+    private var outputSection: some View {
+        GroupBox("Run Output") {
+            if viewModel.runOutput.isEmpty {
+                Text("Run output will appear here.")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                CopyableTextView(console: viewModel.runOutput, source: "Commands", maxHeight: 320)
+            }
+        }
+    }
+
+    private func badge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption.bold())
+            .foregroundColor(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.12))
+            .cornerRadius(6)
+    }
+
+    private func riskColor(_ risk: CommandBrowserEntry.Risk) -> Color {
+        switch risk {
+        case .readOnly: return .green
+        case .guardedWrites: return .orange
+        case .mutating: return .red
+        case .operatorOnly: return .purple
+        }
+    }
+
+    private func coverageColor(_ coverage: CommandBrowserEntry.DesktopCoverage) -> Color {
+        switch coverage {
+        case .workflow: return .green
+        case .partial: return .orange
+        case .readOnly: return .blue
+        case .cliOnly: return .secondary
+        }
+    }
+}
+
+private struct CommandRow: View {
+    let command: CommandBrowserEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(command.command)
+                    .font(.headline.monospaced())
+                Spacer()
+                Text(command.coverage.rawValue)
+                    .font(.caption2.bold())
+                    .foregroundColor(.secondary)
+            }
+
+            Text(command.summary)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+
+            HStack(spacing: 8) {
+                Text(command.scope.rawValue)
+                Text(command.risk.rawValue)
+            }
+            .font(.caption2)
+            .foregroundColor(.secondary)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+#Preview {
+    CommandBrowserView()
+}
