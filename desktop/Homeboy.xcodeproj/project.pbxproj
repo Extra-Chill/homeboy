@@ -85,6 +85,7 @@
 		9EB8E162236E90FFB9585AC9 /* QualityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B709FB776FF5A95CAE18A7D2 /* QualityView.swift */; };
 		A051F697BD41C8D9A5298333 /* DataTableColumn.swift in Sources */ = {isa = PBXBuildFile; fileRef = C503C8896286EA38288A139F /* DataTableColumn.swift */; };
 		A182CEC738D74B3D10F1BA6B /* QueryEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B91594B5A5CCE7AE78D16BD3 /* QueryEditorView.swift */; };
+		A1F7848D131CBFFFEEB239D8 /* CommandBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCD4DD433928D5A580EB66C8 /* CommandBrowserView.swift */; };
 		A28E717B2C7B1A41C6CF37F1 /* DatabaseBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B07DC101287321035F10830F /* DatabaseBrowserView.swift */; };
 		A34392C1F77DDF4B0B386D8C /* DataTableConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = F915FEEAF97ADD6EAADF6E4A /* DataTableConstants.swift */; };
 		A40B645FCF64C59E6F1EC4FC /* HomeboyCLI+QualityCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC23AFFAB50FD8AFD042E644 /* HomeboyCLI+QualityCommands.swift */; };
@@ -205,6 +206,7 @@
 		BA88D343E94C4C34E1069813 /* CodeTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeTextView.swift; sourceTree = "<group>"; };
 		BB0EEE1B29B6CBCC9B7AE92D /* RemotePathResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePathResolver.swift; sourceTree = "<group>"; };
 		BC23AFFAB50FD8AFD042E644 /* HomeboyCLI+QualityCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+QualityCommands.swift"; sourceTree = "<group>"; };
+		BCD4DD433928D5A580EB66C8 /* CommandBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandBrowserView.swift; sourceTree = "<group>"; };
 		BE9B567AD7EF6AEAFF4650E3 /* SSHKeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHKeyManager.swift; sourceTree = "<group>"; };
 		BFAF5103FCB24063514E519F /* HomeboyCLI+RunCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+RunCommands.swift"; sourceTree = "<group>"; };
 		BFEA6E42C1D9292B10447CDA /* HomeboyApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyApp.swift; sourceTree = "<group>"; };
@@ -416,6 +418,7 @@
 		7CD7DF7C95F543DB47F1055F /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				92301854AF9D7FCE0328DB48 /* CommandBrowser */,
 				8007D7D3CCEF3F80C36AA686 /* Components */,
 				48CA5756F2D78ADA9FCD0AFD /* Extensions */,
 				144F0E432A914DE9F141CEFA /* Rigs */,
@@ -497,6 +500,14 @@
 				2DE44D1E578B8119641FCA42 /* SSH */,
 			);
 			path = Core;
+			sourceTree = "<group>";
+		};
+		92301854AF9D7FCE0328DB48 /* CommandBrowser */ = {
+			isa = PBXGroup;
+			children = (
+				BCD4DD433928D5A580EB66C8 /* CommandBrowserView.swift */,
+			);
+			path = CommandBrowser;
 			sourceTree = "<group>";
 		};
 		951F19759C5A27A308A4C3E9 /* Copyable */ = {
@@ -744,6 +755,7 @@
 				761826050ADDBB5E4B00E1AC /* CLIVersionChecker.swift in Sources */,
 				CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */,
 				807E4729F90F95A12FAB99B7 /* CollapsibleSplitView.swift in Sources */,
+				A1F7848D131CBFFFEEB239D8 /* CommandBrowserView.swift in Sources */,
 				9CD0D78AD51869E4BCA3363C /* ComponentConfiguration.swift in Sources */,
 				8D62AD324E3C99747FA53FCB /* ComponentsSettingsTab.swift in Sources */,
 				E450CA4C790C609575070F05 /* ConfigGapsView.swift in Sources */,
