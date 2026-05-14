@@ -222,6 +222,7 @@ struct FileOutput: Decodable {
     let recursive: Bool?
     let entries: [FileListEntry]?
     let content: String?
+    let size: Int64?
     let bytesWritten: Int?
     let exitCode: Int32?
     let success: Bool?
