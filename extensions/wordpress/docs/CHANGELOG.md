@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.84.1] - 2026-05-14
+
+### Fixed
+- define PLUGIN_SLUG early so composer-test fallback works without tests/ dir
+- initialize playground plugin slug before composer fallback
+
 ## [2.84.0] - 2026-05-14
 
 ### Added
