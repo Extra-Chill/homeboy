@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.84.0] - 2026-05-14
+
+### Added
+- declare content deploy path root
+
 ## [2.83.0] - 2026-05-13
 
 ### Added
