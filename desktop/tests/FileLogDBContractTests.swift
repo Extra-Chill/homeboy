@@ -8,6 +8,8 @@ func runFileLogDBContractTests(testDir: String, fixturesDir: String, decoder: JS
     try testRemoteFileEditorPinCommandShape(testDir: testDir)
     try testRemoteFileEditorModelAndPathShape(testDir: testDir)
     try testRemoteFileBrowserStaleRequestGuard(testDir: testDir)
+    try testPinnedTabClosePreservesVisibleStateUntilUnpinSucceeds(testDir: testDir)
+    try testRemoteLogTailPickerOnlyShowsSupportedCounts(testDir: testDir)
 }
 
 func testDbDescribe(fixturesDir: String, decoder: JSONDecoder) throws {
@@ -287,6 +289,70 @@ func testRemoteFileBrowserStaleRequestGuard(testDir: String) throws {
         message: "goToPath can still clear loading state for a newer in-flight request"
     )
     print("[PASS] Loading state is cleared only by the active request")
+
+    print("")
+}
+
+func testPinnedTabClosePreservesVisibleStateUntilUnpinSucceeds(testDir: String) throws {
+    print("Test: Pinned tab close preserves visible state")
+    print("------------------------------------------------")
+
+    let root = URL(fileURLWithPath: testDir).deletingLastPathComponent()
+    let fileViewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteFileEditor/RemoteFileEditorViewModel.swift")
+    let logViewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/RemoteLogViewerViewModel.swift")
+
+    let fileSource = try String(contentsOf: fileViewModelPath, encoding: .utf8)
+    let logSource = try String(contentsOf: logViewModelPath, encoding: .utf8)
+
+    guard fileSource.contains("_ = try await cli.filePinRemove(projectId: projectId, path: file.path)\n                    closeOpenFileTab(id)") else {
+        throw NSError(domain: "ContractTest", code: 86,
+            userInfo: [NSLocalizedDescriptionKey: "Remote File close does not wait for pinned unpin before removing the tab"])
+    }
+    print("[PASS] Pinned file close removes the tab only after unpin succeeds")
+
+    guard fileSource.contains("Failed to unpin file:") else {
+        throw NSError(domain: "ContractTest", code: 87,
+            userInfo: [NSLocalizedDescriptionKey: "Remote File close does not surface pinned unpin failures"])
+    }
+    print("[PASS] Pinned file close surfaces unpin failure")
+
+    guard logSource.contains("try await unpinLog(path: log.path)\n                    closeOpenLogTab(id)") else {
+        throw NSError(domain: "ContractTest", code: 88,
+            userInfo: [NSLocalizedDescriptionKey: "Remote Log close does not wait for pinned unpin before removing the tab"])
+    }
+    print("[PASS] Pinned log close removes the tab only after unpin succeeds")
+
+    guard logSource.contains("Failed to unpin log:") else {
+        throw NSError(domain: "ContractTest", code: 89,
+            userInfo: [NSLocalizedDescriptionKey: "Remote Log close does not surface pinned unpin failures"])
+    }
+    print("[PASS] Pinned log close surfaces unpin failure")
+
+    print("")
+}
+
+func testRemoteLogTailPickerOnlyShowsSupportedCounts(testDir: String) throws {
+    print("Test: Remote Log tail picker supported counts")
+    print("------------------------------------------------")
+
+    let root = URL(fileURLWithPath: testDir).deletingLastPathComponent()
+    let viewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/RemoteLogViewerViewModel.swift")
+    let viewPath = root.appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/Views/RemoteLogViewerView.swift")
+
+    let viewModelSource = try String(contentsOf: viewModelPath, encoding: .utf8)
+    let viewSource = try String(contentsOf: viewPath, encoding: .utf8)
+
+    guard viewModelSource.contains("static let tailOptions = [50, 100, 500, 1000]") else {
+        throw NSError(domain: "ContractTest", code: 90,
+            userInfo: [NSLocalizedDescriptionKey: "Remote Log tail options changed without updating this contract"])
+    }
+    print("[PASS] Tail options contain only explicit line counts")
+
+    guard !viewSource.contains("count == 0 ? \"All\"") else {
+        throw NSError(domain: "ContractTest", code: 91,
+            userInfo: [NSLocalizedDescriptionKey: "Remote Log tail picker still contains dead All display branch"])
+    }
+    print("[PASS] Tail picker does not render unsupported All option")
 
     print("")
 }
