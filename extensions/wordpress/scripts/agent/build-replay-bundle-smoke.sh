@@ -6,32 +6,49 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-replay-results.XXXXXX.json")
 CONFIG_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-replay-config.XXXXXX.json")
 BUNDLE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-replay-bundles.XXXXXX")
+TRANSCRIPT_FILE="$BUNDLE_DIR/session-transcript.jsonl"
 cleanup() {
-    rm -f "$RESULTS_TMPFILE" "$CONFIG_TMPFILE"
-    rm -rf "$BUNDLE_DIR"
+	rm -f "$RESULTS_TMPFILE" "$CONFIG_TMPFILE"
+	rm -rf "$BUNDLE_DIR"
 }
 trap cleanup EXIT
 
-jq -n '{
-    component_id: "example-plugin",
-    iterations: 1,
-    scenarios: [
-        {
-            id: "agent-failure",
-            source: "config",
-            metrics: { config_present_mean: 1 },
-            artifacts: {
-                transcript_json: { path: "transcripts/session.json", kind: "json" }
-            },
-            metadata: {
-                provider: "openai",
-                model: "gpt-example",
-                job_status: "failed",
-                error: "grader failed",
-                github_token: "should-not-leak"
-            }
-        }
-    ]
+printf '%s\n' '{"role":"user","content":"Run the task."}' > "$TRANSCRIPT_FILE"
+
+jq -n --arg transcriptFile "$TRANSCRIPT_FILE" '{
+	component_id: "example-plugin",
+	iterations: 1,
+	scenarios: [
+		{
+			id: "agent-failure",
+			source: "config",
+			metrics: { config_present_mean: 1 },
+			artifacts: {
+				transcript_json: { path: $transcriptFile, kind: "jsonl" }
+			},
+			metadata: {
+				provider: "openai",
+				model: "gpt-example",
+				job_status: "failed",
+				error: "grader failed",
+				tool_audit_events: [
+					{
+						schema_version: 1,
+						type: "tool_call",
+						turn_count: 1,
+						tool_name: "client/search_docs",
+						tool_source: "client",
+						parameters_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						parameters_redacted: true,
+						success: true,
+						result_status: "success",
+						result_sha256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+					}
+				],
+				github_token: "should-not-leak"
+			}
+		}
+	]
 }' > "$RESULTS_TMPFILE"
 
 jq -n '{
@@ -84,9 +101,25 @@ fi
 
 final_state_available=$(jq -r '.final_state.available' "$BUNDLE_PATH")
 if [ "$final_state_available" != "false" ]; then
-    echo "ERROR: expected final_state.available=false" >&2
-    cat "$BUNDLE_PATH" >&2
-    exit 1
+	echo "ERROR: expected final_state.available=false" >&2
+	cat "$BUNDLE_PATH" >&2
+	exit 1
+fi
+
+sealed_status=$(jq -r '.sealed_eval_artifact.status' "$BUNDLE_PATH")
+tool_audit_count=$(jq -r '.sealed_eval_artifact.replay.tool_audit_event_count' "$BUNDLE_PATH")
+transcript_hash=$(jq -r '.sealed_eval_artifact.hashes.artifact_hashes.transcript_json.sha256 // "missing"' "$BUNDLE_PATH")
+envelope_hash=$(jq -r '.sealed_eval_artifact.hashes.envelope // "missing"' "$BUNDLE_PATH")
+missing_seams=$(jq -r '.sealed_eval_artifact.integration_seams | join(",")' "$BUNDLE_PATH")
+if [ "$sealed_status" != "ready_for_replay" ] || [ "$tool_audit_count" != "1" ] || [ "$transcript_hash" = "missing" ] || [ "$envelope_hash" = "missing" ]; then
+	echo "ERROR: sealed eval artifact envelope incomplete" >&2
+	cat "$BUNDLE_PATH" >&2
+	exit 1
+fi
+if [[ "$missing_seams" != *"datamachine_provenance"* ]] || [[ "$missing_seams" != *"datamachine_code_policy_attestation"* ]]; then
+	echo "ERROR: expected missing provenance/policy seams to remain explicit" >&2
+	cat "$BUNDLE_PATH" >&2
+	exit 1
 fi
 
 echo "✓ replay bundle smoke test PASSED"

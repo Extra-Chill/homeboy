@@ -95,6 +95,20 @@ namespace {
                 'agent_slug'  => 'forced-parameters-smoke-agent',
                 'flow_slug'   => 'forced-parameters-smoke-flow',
                 'prompt'      => 'Dry-run the fingerprint smoke test.',
+                'tool_audit_events' => array(
+                    array(
+                        'schema_version'      => 1,
+                        'type'                => 'tool_call',
+                        'turn_count'          => 1,
+                        'tool_name'           => 'client/search_docs',
+                        'tool_source'         => 'client',
+                        'parameters_sha256'   => 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'parameters_redacted' => true,
+                        'success'             => true,
+                        'result_status'       => 'success',
+                        'result_sha256'       => 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    ),
+                ),
             )
         )
     );
@@ -125,6 +139,17 @@ namespace {
 
     if ( 'forced-parameters-smoke-agent' !== ( $eval_artifact['agent']['slug'] ?? '' ) ) {
         fwrite( STDERR, "Expected eval artifact to identify the agent slug.\n" );
+        exit( 1 );
+    }
+
+    if ( 1 !== ( $eval_artifact['replay']['tool_audit_event_count'] ?? 0 ) ) {
+        fwrite( STDERR, "Expected eval artifact to include Agents API tool audit events.\n" );
+        exit( 1 );
+    }
+
+    $integration_seams = $eval_artifact['attestation']['integration_seams'] ?? array();
+    if ( ! in_array( 'datamachine_provenance', $integration_seams, true ) || ! in_array( 'datamachine_code_policy_attestation', $integration_seams, true ) ) {
+        fwrite( STDERR, "Expected eval artifact to expose missing provenance and policy attestation seams.\n" );
         exit( 1 );
     }
 
