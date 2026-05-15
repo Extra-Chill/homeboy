@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.85.2] - 2026-05-15
+
+### Fixed
+- pass wp cli globals before commands
+
 ## [2.85.0] - 2026-05-15
 
 ### Added
