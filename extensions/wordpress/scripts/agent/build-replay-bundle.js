@@ -7,6 +7,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const SECRET_KEY_PATTERN = /(secret|token|password|passwd|authorization|cookie|nonce|api[_-]?key|access[_-]?key|private[_-]?key|github[_-]?token|openai[_-]?api[_-]?key)/i;
 
@@ -64,6 +65,39 @@ function compactObject(entries) {
 	return Object.fromEntries(Object.entries(entries).filter(([, value]) => value !== undefined && value !== null && value !== ''));
 }
 
+function stableValue(value) {
+	if (Array.isArray(value)) {
+		return value.map((entry) => stableValue(entry));
+	}
+	if (value && typeof value === 'object') {
+		return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+	}
+	return value;
+}
+
+function sha256Buffer(buffer) {
+	return `sha256:${crypto.createHash('sha256').update(buffer).digest('hex')}`;
+}
+
+function sha256Json(value) {
+	return sha256Buffer(Buffer.from(JSON.stringify(stableValue(value)), 'utf8'));
+}
+
+function fileSha256(filePath) {
+	return sha256Buffer(fs.readFileSync(filePath));
+}
+
+function isRemoteReference(referencePath) {
+	return /^https?:\/\//i.test(String(referencePath || ''));
+}
+
+function resolveLocalArtifactPath(referencePath, resultsPath) {
+	if (!referencePath || path.isAbsolute(referencePath) || isRemoteReference(referencePath)) {
+		return referencePath || '';
+	}
+	return path.resolve(path.dirname(resultsPath), referencePath);
+}
+
 function resolveReviewUrl(config, scenario) {
 	const metadata = scenario.metadata && typeof scenario.metadata === 'object' ? scenario.metadata : {};
 	return metadata.playground_review_url || metadata.review_url || config.playground_review_url || config.review_url || null;
@@ -96,13 +130,175 @@ function transcriptReferences(config, scenario) {
 	return references;
 }
 
-function buildBundle(results, scenario, config, bundlePath) {
+function artifactReferences(scenario, config, bundlePath) {
+	const artifacts = scenario.artifacts && typeof scenario.artifacts === 'object' ? scenario.artifacts : {};
+	const references = [];
+
+	for (const [name, artifact] of Object.entries(artifacts)) {
+		if (artifact && typeof artifact === 'object' && artifact.path) {
+			references.push({ name, path: artifact.path, kind: artifact.kind || 'artifact', required: /transcript|episode|replay|grade/i.test(name) });
+		}
+	}
+
+	const metadata = scenario.metadata && typeof scenario.metadata === 'object' ? scenario.metadata : {};
+	for (const [name, referencePath] of Object.entries({
+		transcript_json: metadata.transcript_json,
+		transcript_summary: metadata.transcript_summary,
+		action_log: metadata.action_log,
+	})) {
+		if (referencePath) {
+			references.push({ name, path: referencePath, kind: 'metadata', required: /transcript|action/.test(name) });
+		}
+	}
+
+	if (config.transcript_dir) {
+		references.push({ name: 'transcript_dir', path: config.transcript_dir, kind: 'directory', required: false });
+	}
+	if (bundlePath) {
+		references.push({ name: 'replay_bundle', path: bundlePath, kind: 'json', required: false });
+	}
+
+	return references;
+}
+
+function hashArtifactReferences(references, resultsPath) {
+	const hashes = {};
+	const issues = [];
+	for (const reference of references) {
+		if (!reference.path) {
+			continue;
+		}
+		const normalizedPath = String(reference.path);
+		if (isRemoteReference(normalizedPath)) {
+			if (reference.required) {
+				issues.push({ type: 'remote_required_artifact', name: reference.name, path: normalizedPath });
+			}
+			continue;
+		}
+
+		const localPath = resolveLocalArtifactPath(normalizedPath, resultsPath);
+		if (!fs.existsSync(localPath) || !fs.statSync(localPath).isFile()) {
+			if (reference.required) {
+				issues.push({ type: 'missing_required_artifact', name: reference.name, path: normalizedPath });
+			}
+			continue;
+		}
+
+		hashes[reference.name] = {
+			path: normalizedPath,
+			sha256: fileSha256(localPath),
+			bytes: fs.statSync(localPath).size,
+		};
+	}
+
+	return { hashes, issues };
+}
+
+function normalizeToolAuditEvents(metadata) {
+	const evalArtifact = metadata.eval_artifact && typeof metadata.eval_artifact === 'object' ? metadata.eval_artifact : {};
+	const replay = evalArtifact.replay && typeof evalArtifact.replay === 'object' ? evalArtifact.replay : {};
+	const candidates = [metadata.tool_audit_events, replay.tool_audit_events];
+	const events = candidates.find((entry) => Array.isArray(entry)) || [];
+
+	return events.filter((event) => event && typeof event === 'object').map((event, index) => compactObject({
+		schema_version: event.schema_version || 1,
+		type: event.type || 'tool_call',
+		step_index: index,
+		actor: event.actor || 'agent',
+		turn_count: event.turn_count,
+		tool_name: event.tool_name,
+		tool_source: event.tool_source,
+		parameters_sha256: event.parameters_sha256,
+		parameters_redacted: event.parameters_redacted !== false,
+		success: event.success === true,
+		result_status: event.result_status || (event.success === true ? 'success' : 'error'),
+		result_sha256: event.result_sha256,
+		error_type: event.error_type,
+	}));
+}
+
+function buildSealedEnvelope(results, scenario, config, bundlePath, artifactIntegrity) {
+	const metadata = scenario.metadata && typeof scenario.metadata === 'object' ? scenario.metadata : {};
+	const evalArtifact = metadata.eval_artifact && typeof metadata.eval_artifact === 'object' ? metadata.eval_artifact : {};
+	const fingerprints = metadata.fingerprints && typeof metadata.fingerprints === 'object' ? metadata.fingerprints : {};
+	const toolAuditEvents = normalizeToolAuditEvents(metadata);
+	const missingSeams = [];
+	const attestation = evalArtifact.attestation && typeof evalArtifact.attestation === 'object' ? evalArtifact.attestation : {};
+	const existingSeams = Array.isArray(attestation.integration_seams) ? attestation.integration_seams : [];
+	missingSeams.push(...existingSeams);
+	if (!attestation.datamachine_provenance || Object.keys(attestation.datamachine_provenance).length === 0) {
+		missingSeams.push('datamachine_provenance');
+	}
+	if (!attestation.datamachine_code_policy_attestation || Object.keys(attestation.datamachine_code_policy_attestation).length === 0) {
+		missingSeams.push('datamachine_code_policy_attestation');
+	}
+	if (toolAuditEvents.length === 0) {
+		missingSeams.push('agents_api_tool_audit_events');
+	}
+	const workflowRunUrl = metadata.workflow_run_url || (evalArtifact.run && evalArtifact.run.workflow_run_url) || (
+		process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
+			? `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+			: ''
+	);
+
+	return redact({
+		schema_name: 'homeboy.sealed_eval_artifact',
+		schema_version: 1,
+		generated_at: new Date().toISOString(),
+		status: artifactIntegrity.issues.length === 0 && toolAuditEvents.length > 0 ? 'ready_for_replay' : 'incomplete',
+		runner: compactObject({
+			ref: process.env.GITHUB_SHA || config.runner_ref || metadata.runner_ref,
+			workflow_run_url: workflowRunUrl,
+			job_id: process.env.GITHUB_JOB || config.github_job,
+		}),
+		run: compactObject({
+			job_id: metadata.job_id || (evalArtifact.run && evalArtifact.run.job_id),
+			job_status: metadata.job_status || (evalArtifact.run && evalArtifact.run.job_status),
+			success_status: metadata.success_status || (evalArtifact.run && evalArtifact.run.success_status),
+		}),
+		task: compactObject({
+			id: metadata.task_id || config.task_id || config.workload_id || scenario.id,
+			label: metadata.task_label || config.task_label || config.workload_label || scenario.label,
+		}),
+		model: compactObject({
+			provider: config.provider || metadata.provider,
+			model: config.model || metadata.model,
+		}),
+		hashes: compactObject({
+			prompt: fingerprints.prompt || (evalArtifact.hashes && evalArtifact.hashes.prompt) || (config.prompt ? { sha256: `sha256:${crypto.createHash('sha256').update(config.prompt).digest('hex')}`, bytes: Buffer.byteLength(config.prompt) } : undefined),
+			bundle: fingerprints.bundle || (evalArtifact.hashes && evalArtifact.hashes.bundle),
+			tool_policy: fingerprints.tool_policy || (evalArtifact.hashes && evalArtifact.hashes.tool_policy),
+			reset: config.reset_hash || metadata.reset_hash || undefined,
+			artifact_hashes: artifactIntegrity.hashes,
+		}),
+		grade: evalArtifact.grade || metadata.grade || {},
+		failure_reasons: evalArtifact.failure_reasons || metadata.failure_reasons || [],
+		termination: evalArtifact.termination || compactObject({ state: metadata.job_status, truncated: metadata.truncated === true }),
+		replay: {
+			format: 'jsonl',
+			tool_audit_events_source: 'Agents API result.tool_audit_events',
+			tool_audit_event_count: toolAuditEvents.length,
+			tool_audit_events: toolAuditEvents,
+		},
+		artifacts: {
+			references: artifactReferences(scenario, config, bundlePath),
+			hashes: artifactIntegrity.hashes,
+			issues: artifactIntegrity.issues,
+		},
+		integration_seams: Array.from(new Set(missingSeams.filter(Boolean))),
+	});
+}
+
+function buildBundle(results, scenario, config, bundlePath, resultsPath) {
 	const metadata = scenario.metadata && typeof scenario.metadata === 'object' ? scenario.metadata : {};
 	const reviewUrl = resolveReviewUrl(config, scenario);
+	const references = artifactReferences(scenario, config, bundlePath);
+	const artifactIntegrity = hashArtifactReferences(references, resultsPath);
 
 	return redact({
 		schema_version: 1,
 		generated_at: new Date().toISOString(),
+		sealed_eval_artifact: buildSealedEnvelope(results, scenario, config, bundlePath, artifactIntegrity),
 		scenario_id: scenario.id,
 		component_id: results.component_id || results.component,
 		replay_bundle_path: bundlePath,
@@ -201,7 +397,10 @@ function main() {
 	const filename = `${safeId(args.scenario)}-replay-bundle.json`;
 	const bundlePath = path.join(args.outputDir, filename);
 	const relativeBundlePath = path.relative(path.dirname(args.results), bundlePath) || filename;
-	const bundle = buildBundle(results, scenario, config, relativeBundlePath);
+	const bundle = buildBundle(results, scenario, config, relativeBundlePath, args.results);
+	if (bundle.sealed_eval_artifact && bundle.sealed_eval_artifact.hashes) {
+		bundle.sealed_eval_artifact.hashes.envelope = sha256Json(bundle.sealed_eval_artifact);
+	}
 	fs.writeFileSync(bundlePath, `${JSON.stringify(bundle, null, 2)}\n`);
 
 	if (args.updateResults) {
