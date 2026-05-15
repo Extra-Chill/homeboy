@@ -130,7 +130,7 @@ function transcriptReferences(config, scenario) {
 	return references;
 }
 
-function artifactReferences(scenario, config, bundlePath) {
+function artifactReferences(scenario, config, bundlePath, episodeJsonlPath = '') {
 	const artifacts = scenario.artifacts && typeof scenario.artifacts === 'object' ? scenario.artifacts : {};
 	const references = [];
 
@@ -156,6 +156,9 @@ function artifactReferences(scenario, config, bundlePath) {
 	}
 	if (bundlePath) {
 		references.push({ name: 'replay_bundle', path: bundlePath, kind: 'json', required: false });
+	}
+	if (episodeJsonlPath) {
+		references.push({ name: 'episode_jsonl', path: episodeJsonlPath, kind: 'jsonl', required: true });
 	}
 
 	return references;
@@ -205,10 +208,11 @@ function normalizeToolAuditEvents(metadata) {
 		type: event.type || 'tool_call',
 		step_index: index,
 		actor: event.actor || 'agent',
+		observation_channels: Array.isArray(event.observation_channels) ? event.observation_channels : undefined,
 		turn_count: event.turn_count,
-		tool_name: event.tool_name,
+		tool_name: event.tool_name || event.action_name,
 		tool_source: event.tool_source,
-		parameters_sha256: event.parameters_sha256,
+		parameters_sha256: event.parameters_sha256 || event.args_sha256,
 		parameters_redacted: event.parameters_redacted !== false,
 		success: event.success === true,
 		result_status: event.result_status || (event.success === true ? 'success' : 'error'),
@@ -217,7 +221,93 @@ function normalizeToolAuditEvents(metadata) {
 	}));
 }
 
-function buildSealedEnvelope(results, scenario, config, bundlePath, artifactIntegrity) {
+function replaySharedMetadata(scenario, config, metadata, evalArtifact) {
+	const fingerprints = metadata.fingerprints && typeof metadata.fingerprints === 'object' ? metadata.fingerprints : {};
+	const evalHashes = evalArtifact.hashes && typeof evalArtifact.hashes === 'object' ? evalArtifact.hashes : {};
+	const toolPolicy = {
+		required_abilities: config.required_abilities || [],
+		ability_tools: config.ability_tools || [],
+		tool_recorders: config.tool_recorders || [],
+		pipeline_step_patches: config.pipeline_step_patches || [],
+		flow_step_patches: config.flow_step_patches || [],
+		runner_workspace: config.runner_workspace || {},
+		success_requires_pr: config.success_requires_pr === true,
+		success_completion_outcomes: config.success_completion_outcomes || [],
+	};
+
+	return compactObject({
+		scenario_id: scenario.id,
+		task_id: metadata.task_id || config.task_id || config.workload_id || scenario.id,
+		job_id: metadata.job_id || (evalArtifact.run && evalArtifact.run.job_id),
+		reset_hash: config.reset_hash || metadata.reset_hash,
+		prompt_sha256: (fingerprints.prompt && fingerprints.prompt.sha256) || (evalHashes.prompt && evalHashes.prompt.sha256) || (config.prompt ? sha256Buffer(Buffer.from(config.prompt, 'utf8')) : undefined),
+		bundle_sha256: (fingerprints.bundle && fingerprints.bundle.sha256) || (evalHashes.bundle && evalHashes.bundle.sha256),
+		tool_policy_sha256: (fingerprints.tool_policy && fingerprints.tool_policy.sha256) || (evalHashes.tool_policy && evalHashes.tool_policy.sha256) || sha256Json(toolPolicy),
+	});
+}
+
+function replayObservationChannels(metadata, config) {
+	const channels = metadata.observation_channels || config.observation_channels || [];
+	return Array.isArray(channels) ? channels.filter((channel) => typeof channel === 'string' && channel.length > 0) : [];
+}
+
+function buildEpisodeRows(scenario, config) {
+	const metadata = scenario.metadata && typeof scenario.metadata === 'object' ? scenario.metadata : {};
+	const evalArtifact = metadata.eval_artifact && typeof metadata.eval_artifact === 'object' ? metadata.eval_artifact : {};
+	const toolAuditEvents = normalizeToolAuditEvents(metadata);
+	const shared = replaySharedMetadata(scenario, config, metadata, evalArtifact);
+	const observationChannels = replayObservationChannels(metadata, config);
+	const rows = [];
+
+	for (const event of toolAuditEvents) {
+		rows.push(redact(compactObject({
+			schema_name: 'homeboy.agent_episode_step',
+			schema_version: 1,
+			step_index: rows.length,
+			row_type: 'action',
+			actor: event.actor || 'agent',
+			observation_channels: event.observation_channels || observationChannels,
+			action_name: event.tool_name,
+			tool_name: event.tool_name,
+			tool_source: event.tool_source,
+			args_sha256: event.parameters_sha256,
+			args_redacted: event.parameters_redacted !== false,
+			result_status: event.result_status || (event.success === true ? 'success' : 'error'),
+			result_sha256: event.result_sha256,
+			error_type: event.error_type,
+			shared,
+		})));
+	}
+
+	const grade = evalArtifact.grade || metadata.grade || {};
+	const failureReasons = evalArtifact.failure_reasons || metadata.failure_reasons || [];
+	const reward = metadata.reward ?? metadata.score ?? (grade.reward ?? grade.score);
+	rows.push(redact(compactObject({
+		schema_name: 'homeboy.agent_episode_step',
+		schema_version: 1,
+		step_index: rows.length,
+		row_type: 'grader',
+		actor: 'grader',
+		terminal: true,
+		observation_channels: ['grader'],
+		action_name: 'terminal_grader',
+		result_status: metadata.job_status || (evalArtifact.run && evalArtifact.run.job_status) || 'unknown',
+		reward,
+		failure_reasons: Array.isArray(failureReasons) ? failureReasons : [],
+		grade,
+		shared,
+	})));
+
+	return rows;
+}
+
+function writeEpisodeJsonl(filePath, scenario, config) {
+	const rows = buildEpisodeRows(scenario, config);
+	fs.writeFileSync(filePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`);
+	return rows;
+}
+
+function buildSealedEnvelope(results, scenario, config, bundlePath, artifactIntegrity, episodeJsonlPath, episodeRows) {
 	const metadata = scenario.metadata && typeof scenario.metadata === 'object' ? scenario.metadata : {};
 	const evalArtifact = metadata.eval_artifact && typeof metadata.eval_artifact === 'object' ? metadata.eval_artifact : {};
 	const fingerprints = metadata.fingerprints && typeof metadata.fingerprints === 'object' ? metadata.fingerprints : {};
@@ -276,12 +366,14 @@ function buildSealedEnvelope(results, scenario, config, bundlePath, artifactInte
 		termination: evalArtifact.termination || compactObject({ state: metadata.job_status, truncated: metadata.truncated === true }),
 		replay: {
 			format: 'jsonl',
+			episode_jsonl: episodeJsonlPath,
+			episode_row_count: episodeRows.length,
 			tool_audit_events_source: 'Agents API result.tool_audit_events',
 			tool_audit_event_count: toolAuditEvents.length,
 			tool_audit_events: toolAuditEvents,
 		},
 		artifacts: {
-			references: artifactReferences(scenario, config, bundlePath),
+			references: artifactReferences(scenario, config, bundlePath, episodeJsonlPath),
 			hashes: artifactIntegrity.hashes,
 			issues: artifactIntegrity.issues,
 		},
@@ -289,16 +381,16 @@ function buildSealedEnvelope(results, scenario, config, bundlePath, artifactInte
 	});
 }
 
-function buildBundle(results, scenario, config, bundlePath, resultsPath) {
+function buildBundle(results, scenario, config, bundlePath, resultsPath, episodeJsonlPath, episodeRows) {
 	const metadata = scenario.metadata && typeof scenario.metadata === 'object' ? scenario.metadata : {};
 	const reviewUrl = resolveReviewUrl(config, scenario);
-	const references = artifactReferences(scenario, config, bundlePath);
+	const references = artifactReferences(scenario, config, bundlePath, episodeJsonlPath);
 	const artifactIntegrity = hashArtifactReferences(references, resultsPath);
 
 	return redact({
 		schema_version: 1,
 		generated_at: new Date().toISOString(),
-		sealed_eval_artifact: buildSealedEnvelope(results, scenario, config, bundlePath, artifactIntegrity),
+		sealed_eval_artifact: buildSealedEnvelope(results, scenario, config, bundlePath, artifactIntegrity, episodeJsonlPath, episodeRows),
 		scenario_id: scenario.id,
 		component_id: results.component_id || results.component,
 		replay_bundle_path: bundlePath,
@@ -344,7 +436,7 @@ function buildBundle(results, scenario, config, bundlePath, resultsPath) {
 	});
 }
 
-function attachBundle(results, scenarioId, relativeBundlePath, reviewUrl) {
+function attachBundle(results, scenarioId, relativeBundlePath, episodeJsonlPath, reviewUrl) {
 	return {
 		...results,
 		scenarios: (results.scenarios || []).map((scenario) => {
@@ -355,6 +447,11 @@ function attachBundle(results, scenarioId, relativeBundlePath, reviewUrl) {
 				...scenario,
 				artifacts: {
 					...(scenario.artifacts || {}),
+					episode_jsonl: {
+						path: episodeJsonlPath,
+						kind: 'jsonl',
+						label: 'Episode JSONL',
+					},
 					replay_bundle: {
 						path: relativeBundlePath,
 						kind: 'json',
@@ -395,16 +492,20 @@ function main() {
 
 	fs.mkdirSync(args.outputDir, { recursive: true });
 	const filename = `${safeId(args.scenario)}-replay-bundle.json`;
+	const episodeFilename = `${safeId(args.scenario)}-episode.jsonl`;
 	const bundlePath = path.join(args.outputDir, filename);
+	const episodePath = path.join(args.outputDir, episodeFilename);
 	const relativeBundlePath = path.relative(path.dirname(args.results), bundlePath) || filename;
-	const bundle = buildBundle(results, scenario, config, relativeBundlePath, args.results);
+	const relativeEpisodePath = path.relative(path.dirname(args.results), episodePath) || episodeFilename;
+	const episodeRows = writeEpisodeJsonl(episodePath, scenario, config);
+	const bundle = buildBundle(results, scenario, config, relativeBundlePath, args.results, relativeEpisodePath, episodeRows);
 	if (bundle.sealed_eval_artifact && bundle.sealed_eval_artifact.hashes) {
 		bundle.sealed_eval_artifact.hashes.envelope = sha256Json(bundle.sealed_eval_artifact);
 	}
 	fs.writeFileSync(bundlePath, `${JSON.stringify(bundle, null, 2)}\n`);
 
 	if (args.updateResults) {
-		const updated = attachBundle(results, args.scenario, relativeBundlePath, resolveReviewUrl(config, scenario));
+		const updated = attachBundle(results, args.scenario, relativeBundlePath, relativeEpisodePath, resolveReviewUrl(config, scenario));
 		fs.writeFileSync(args.results, `${JSON.stringify(updated, null, 2)}\n`);
 	}
 

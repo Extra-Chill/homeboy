@@ -74,9 +74,14 @@ node "$SCRIPT_DIR/build-replay-bundle.js" \
     --update-results >/dev/null
 
 BUNDLE_PATH="$BUNDLE_DIR/agent-failure-replay-bundle.json"
+EPISODE_PATH="$BUNDLE_DIR/agent-failure-episode.jsonl"
 if [ ! -s "$BUNDLE_PATH" ]; then
     echo "ERROR: replay bundle was not written" >&2
     exit 1
+fi
+if [ ! -s "$EPISODE_PATH" ]; then
+	echo "ERROR: episode JSONL was not written" >&2
+	exit 1
 fi
 
 if grep -q 'should-not-leak' "$BUNDLE_PATH"; then
@@ -86,8 +91,9 @@ if grep -q 'should-not-leak' "$BUNDLE_PATH"; then
 fi
 
 artifact_path=$(jq -r '.scenarios[] | select(.id == "agent-failure") | .artifacts.replay_bundle.path // "missing"' "$RESULTS_TMPFILE")
-if [ "$artifact_path" = "missing" ]; then
-    echo "ERROR: replay bundle artifact was not attached to results" >&2
+episode_path=$(jq -r '.scenarios[] | select(.id == "agent-failure") | .artifacts.episode_jsonl.path // "missing"' "$RESULTS_TMPFILE")
+if [ "$artifact_path" = "missing" ] || [ "$episode_path" = "missing" ]; then
+    echo "ERROR: replay artifacts were not attached to results" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
 fi
@@ -108,12 +114,22 @@ fi
 
 sealed_status=$(jq -r '.sealed_eval_artifact.status' "$BUNDLE_PATH")
 tool_audit_count=$(jq -r '.sealed_eval_artifact.replay.tool_audit_event_count' "$BUNDLE_PATH")
+episode_row_count=$(jq -r '.sealed_eval_artifact.replay.episode_row_count' "$BUNDLE_PATH")
 transcript_hash=$(jq -r '.sealed_eval_artifact.hashes.artifact_hashes.transcript_json.sha256 // "missing"' "$BUNDLE_PATH")
+episode_hash=$(jq -r '.sealed_eval_artifact.hashes.artifact_hashes.episode_jsonl.sha256 // "missing"' "$BUNDLE_PATH")
 envelope_hash=$(jq -r '.sealed_eval_artifact.hashes.envelope // "missing"' "$BUNDLE_PATH")
 missing_seams=$(jq -r '.sealed_eval_artifact.integration_seams | join(",")' "$BUNDLE_PATH")
-if [ "$sealed_status" != "ready_for_replay" ] || [ "$tool_audit_count" != "1" ] || [ "$transcript_hash" = "missing" ] || [ "$envelope_hash" = "missing" ]; then
+if [ "$sealed_status" != "ready_for_replay" ] || [ "$tool_audit_count" != "1" ] || [ "$episode_row_count" != "2" ] || [ "$transcript_hash" = "missing" ] || [ "$episode_hash" = "missing" ] || [ "$envelope_hash" = "missing" ]; then
 	echo "ERROR: sealed eval artifact envelope incomplete" >&2
 	cat "$BUNDLE_PATH" >&2
+	exit 1
+fi
+action_row=$(jq -r 'select(.row_type == "action") | .action_name + " " + .args_sha256 + " " + .result_status' "$EPISODE_PATH")
+grader_row=$(jq -r 'select(.row_type == "grader") | .actor + " " + (.terminal|tostring) + " " + .result_status' "$EPISODE_PATH")
+shared_policy_hash=$(jq -r 'select(.row_type == "action") | .shared.tool_policy_sha256 // "missing"' "$EPISODE_PATH")
+if [ "$action_row" != "client/search_docs sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa success" ] || [ "$grader_row" != "grader true failed" ] || [ "$shared_policy_hash" = "missing" ]; then
+	echo "ERROR: episode JSONL rows incomplete" >&2
+	cat "$EPISODE_PATH" >&2
 	exit 1
 fi
 if [[ "$missing_seams" != *"datamachine_provenance"* ]] || [[ "$missing_seams" != *"datamachine_code_policy_attestation"* ]]; then
