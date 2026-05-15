@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "2.85.0",
+  "version": "2.85.1",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -745,7 +745,7 @@
   "cli": {
     "tool": "wp",
     "display_name": "WP-CLI",
-    "command_template": "{{cliPath}} {{args}} --path={{sitePath}} --url={{domain}}",
+    "command_template": "{{cliPath}} --path={{sitePath}} --url={{domain}} {{args}}",
     "working_dir_template": "{{sitePath}}",
     "default_cli_path": "wp",
     "settings_flags": {
