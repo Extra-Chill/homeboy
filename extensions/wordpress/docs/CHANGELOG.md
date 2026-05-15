@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.86.1] - 2026-05-15
+
+### Fixed
+- prefer app token for agent GitHub writes
+
 ## [2.86.0] - 2026-05-15
 
 ### Added
