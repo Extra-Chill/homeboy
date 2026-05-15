@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.86.0] - 2026-05-15
+
+### Added
+- export non-workspace episode replay JSONL
+
 ## [2.85.2] - 2026-05-15
 
 ### Fixed
