@@ -1,5 +1,48 @@
 # Data Machine Agent CI reusable workflow
 
+## Actions Run Once
+
+`actions-run-once.yml` is a reusable idempotency gate for workflows that must
+process one evidence packet exactly once. Call it in `check` mode before the
+expensive job, then call it in `mark` mode after validation and fan-out reach
+the point that must not repeat.
+
+Use a stable evidence key built from the caller domain, such as
+`source_repo/source_pr/source_head_sha/site_slug/fanout_kind`. The workflow
+normalizes the key to a GitHub Actions cache marker and returns `should_run`.
+Pair the caller workflow with a concurrency group derived from the same key so
+parallel events cannot both pass the check before the marker is saved.
+
+```yaml
+jobs:
+  preflight:
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/actions-run-once.yml@main
+    with:
+      mode: check
+      idempotency_key: static-validation/${{ github.repository }}/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ matrix.site }}
+
+  validate:
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./validate-and-dispatch-fanout
+
+  mark:
+    needs: validate
+    if: always() && needs.preflight.outputs.should_run == 'true'
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/actions-run-once.yml@main
+    with:
+      mode: mark
+      idempotency_key: static-validation/${{ github.repository }}/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ matrix.site }}
+```
+
+`mark` should run only after the evidence has been consumed or fan-out has been
+scheduled. If the caller wants failed validations to be retryable, mark only on
+success. If the caller wants one validation attempt per immutable evidence key,
+mark with `if: always()` after the validation job starts producing reviewer
+evidence.
+
 `datamachine-agent-ci.yml` wraps the common GitHub Actions shape for running a
 Data Machine agent bundle in WordPress Playground. Consumers provide bundle and
 flow identifiers, a prompt, and optional output projections. By default the

@@ -1,0 +1,125 @@
+# Reusable idempotency gate for GitHub Actions workflows.
+#
+# Consumers call this workflow in `check` mode before expensive validation or
+# agent fan-out, then call it again in `mark` mode after the work reaches the
+# point that must not repeat. Pair the caller workflow with a concurrency group
+# using the same logical key so parallel runs for the same evidence cannot both
+# pass the preflight before the marker is saved.
+name: Actions Run Once (reusable)
+
+'on':
+  workflow_call:
+    inputs:
+      idempotency_key:
+        description: Logical evidence key, for example repo/pr/head-sha/site/fanout-kind.
+        type: string
+        required: true
+      mode:
+        description: "check returns should_run; mark saves the marker for this key."
+        type: string
+        default: check
+      marker_prefix:
+        description: Stable prefix for the cache marker namespace.
+        type: string
+        default: homeboy-run-once
+      marker_path:
+        description: Path used for the cache marker payload.
+        type: string
+        default: .homeboy-run-once-marker
+    outputs:
+      should_run:
+        description: true when no marker exists for the key.
+        value: ${{ jobs.run-once.outputs.should_run }}
+      marker_exists:
+        description: true when a marker already exists for the key.
+        value: ${{ jobs.run-once.outputs.marker_exists }}
+      marker_key:
+        description: Normalized cache marker key.
+        value: ${{ jobs.run-once.outputs.marker_key }}
+
+jobs:
+  run-once:
+    name: Run-once ${{ inputs.mode }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    outputs:
+      should_run: ${{ steps.result.outputs.should_run }}
+      marker_exists: ${{ steps.result.outputs.marker_exists }}
+      marker_key: ${{ steps.normalize.outputs.marker_key }}
+    steps:
+      - name: Validate mode
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            check|mark) ;;
+            *)
+              echo "mode must be 'check' or 'mark' (got '$MODE')." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Normalize marker key
+        id: normalize
+        shell: bash
+        env:
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          MARKER_PREFIX: ${{ inputs.marker_prefix }}
+          MARKER_PATH: ${{ inputs.marker_path }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          digest=$(printf '%s' "$IDEMPOTENCY_KEY" | sha256sum | awk '{ print $1 }')
+          marker_key="${MARKER_PREFIX}-${digest}"
+          mkdir -p "$(dirname "$MARKER_PATH")"
+          jq -nc \
+            --arg key "$IDEMPOTENCY_KEY" \
+            --arg marker_key "$marker_key" \
+            --arg mode "$MODE" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{idempotency_key:$key, marker_key:$marker_key, mode:$mode, run_id:$run_id, run_attempt:$run_attempt}' \
+            > "$MARKER_PATH"
+          echo "marker_key=$marker_key" >> "$GITHUB_OUTPUT"
+
+      - name: Check marker
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ inputs.marker_path }}
+          key: ${{ steps.normalize.outputs.marker_key }}
+          lookup-only: true
+
+      - name: Save marker
+        if: inputs.mode == 'mark' && steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ inputs.marker_path }}
+          key: ${{ steps.normalize.outputs.marker_key }}
+
+      - name: Set outputs
+        id: result
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          marker_exists=false
+          should_run=true
+
+          if [ "$CACHE_HIT" = "true" ]; then
+            marker_exists=true
+            should_run=false
+          fi
+
+          if [ "$MODE" = "mark" ]; then
+            should_run=false
+          fi
+
+          echo "marker_exists=$marker_exists" >> "$GITHUB_OUTPUT"
+          echo "should_run=$should_run" >> "$GITHUB_OUTPUT"
