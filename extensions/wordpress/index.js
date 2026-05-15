@@ -5,4 +5,5 @@ module.exports = {
 	...require('./lib/request-profiler'),
 	...require('./lib/page-profiler'),
 	...require('./lib/timing-correlator'),
+	...require('./lib/agent-terminal-actions'),
 };
