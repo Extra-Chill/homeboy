@@ -2095,16 +2095,6 @@ if ( ! function_exists( 'homeboy_datamachine_agent_configure_settings' ) ) {
             $allowed_repos = is_array( $config['allowed_repos'] ?? null ) ? $config['allowed_repos'] : array( $target_repo );
             $profile_id    = homeboy_datamachine_agent_scalar( $config, 'github_profile_id', 'homeboy-agent-ci' );
             $profiles      = array();
-            if ( '' !== $github_repository_token ) {
-                $profiles[] = array(
-                    'id'            => $profile_id . '-repository',
-                    'label'         => 'Homeboy agent CI repository token',
-                    'mode'          => 'pat',
-                    'pat'           => $github_repository_token,
-                    'default_repo'  => $target_repo,
-                    'allowed_repos' => array( $target_repo ),
-                );
-            }
             if ( '' !== $github_token ) {
                 $profiles[] = array(
                     'id'            => $profile_id,
@@ -2113,6 +2103,16 @@ if ( ! function_exists( 'homeboy_datamachine_agent_configure_settings' ) ) {
                     'pat'           => $github_token,
                     'default_repo'  => $target_repo,
                     'allowed_repos' => array_values( array_unique( array_filter( array_map( 'strval', $allowed_repos ) ) ) ),
+                );
+            }
+            if ( '' !== $github_repository_token ) {
+                $profiles[] = array(
+                    'id'            => $profile_id . '-repository',
+                    'label'         => 'Homeboy agent CI repository token',
+                    'mode'          => 'pat',
+                    'pat'           => $github_repository_token,
+                    'default_repo'  => $target_repo,
+                    'allowed_repos' => array( $target_repo ),
                 );
             }
             $settings['github_credential_profiles'] = $profiles;

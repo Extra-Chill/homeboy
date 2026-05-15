@@ -620,12 +620,12 @@ namespace {
     );
     $datamachine_settings = $GLOBALS['homeboy_datamachine_agent_fake_options']['datamachine_settings'] ?? array();
     $github_profiles = $datamachine_settings['github_credential_profiles'] ?? array();
-    if ( 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) || array( 'owner/repo' ) !== ( $github_profiles[0]['allowed_repos'] ?? array() ) ) {
-        fwrite( STDERR, "Expected repository token profile to be first and scoped to the target repo.\n" );
+    if ( 'app-token' !== ( $github_profiles[0]['pat'] ?? '' ) || array( 'owner/repo', 'owner/other' ) !== ( $github_profiles[0]['allowed_repos'] ?? array() ) ) {
+        fwrite( STDERR, "Expected app token profile to be first and preserve cross-repo allowed repositories.\n" );
         exit( 1 );
     }
-    if ( 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'owner/repo', 'owner/other' ) !== ( $github_profiles[1]['allowed_repos'] ?? array() ) ) {
-        fwrite( STDERR, "Expected app token profile to preserve cross-repo allowed repositories.\n" );
+    if ( 'repository-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'owner/repo' ) !== ( $github_profiles[1]['allowed_repos'] ?? array() ) ) {
+        fwrite( STDERR, "Expected repository token profile to remain available as a target-repo fallback.\n" );
         exit( 1 );
     }
 
