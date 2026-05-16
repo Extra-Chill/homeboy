@@ -1064,6 +1064,30 @@ struct RunsArtifactsOutput: Decodable {
     let artifacts: [RunArtifact]
 }
 
+struct RunsArtifactSyncOutput: Decodable {
+    let command: String
+    let runId: String
+    let artifacts: [RunArtifactSyncItem]
+}
+
+struct RunArtifactSyncItem: Decodable, Identifiable {
+    let id: String
+    let pathToken: String
+    let runId: String
+    let kind: String
+    let artifactType: String
+    let downloadPath: String
+    let sha256: String?
+    let sizeBytes: Int64?
+    let mime: String?
+    let createdAt: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id, pathToken, runId, kind, downloadPath, sha256, sizeBytes, mime, createdAt
+        case artifactType = "type"
+    }
+}
+
 struct RunsFindingsOutput: Decodable {
     let command: String
     let runId: String
@@ -1285,4 +1309,247 @@ struct ConfigGapDetail: Decodable, Identifiable {
     let command: String
     
     var id: String { "\(componentId).\(field)" }
+}
+
+// MARK: - Homeboy Lab Runner Models
+
+struct RunnerListOutput: Decodable {
+    let command: String
+    let entities: [HomeboyRunner]
+}
+
+struct RunnerShowOutput: Decodable {
+    let command: String
+    let id: String?
+    let entity: HomeboyRunner?
+}
+
+struct RunnerConnectionOutput: Decodable {
+    let command: String
+    let id: String?
+    let extra: RunnerExtra?
+}
+
+struct RunnerExtra: Decodable {
+    let connection: RunnerConnection?
+}
+
+struct RunnerConnection: Decodable {
+    let action: String
+    let runnerId: String
+    let connected: Bool?
+    let disconnected: Bool?
+    let localUrl: String?
+    let remoteDaemonAddress: String?
+    let tunnelPid: Int?
+    let remoteDaemonPid: Int?
+    let homeboyVersion: String?
+    let sessionPath: String?
+    let failureKind: String?
+    let failureMessage: String?
+    let session: RunnerSession?
+}
+
+struct RunnerSession: Decodable {
+    let runnerId: String
+    let serverId: String?
+    let remoteDaemonAddress: String
+    let localPort: Int
+    let localUrl: String
+    let tunnelPid: Int?
+    let remoteDaemonPid: Int?
+    let homeboyVersion: String
+    let connectedAt: String
+}
+
+struct HomeboyRunner: Decodable, Identifiable {
+    let id: String
+    let kind: String
+    let serverId: String?
+    let workspaceRoot: String?
+    let homeboyPath: String?
+    let daemon: Bool
+    let concurrencyLimit: Int?
+    let artifactPolicy: String?
+    let env: [String: JSONValue]
+    let resources: [String: JSONValue]
+
+    static let localDefault = HomeboyRunner(
+        id: "local",
+        kind: "local",
+        serverId: nil,
+        workspaceRoot: nil,
+        homeboyPath: nil,
+        daemon: false,
+        concurrencyLimit: nil,
+        artifactPolicy: nil,
+        env: [:],
+        resources: [:]
+    )
+}
+
+struct RunnerDoctorOutput: Decodable {
+    let command: String
+    let runnerId: String
+    let runner: RunnerTargetSummary
+    let status: String
+    let capabilities: RunnerCapabilities
+    let resources: RunnerResources
+    let checks: [RunnerCheck]
+}
+
+struct RunnerTargetSummary: Decodable {
+    let targetType: String
+    let registry: RunnerRegistrySummary?
+    let server: RunnerServerSummary?
+
+    private enum CodingKeys: String, CodingKey {
+        case targetType = "type"
+        case registry
+        case server
+    }
+}
+
+struct RunnerRegistrySummary: Decodable {
+    let id: String
+    let kind: String
+}
+
+struct RunnerServerSummary: Decodable {
+    let id: String
+    let host: String
+    let user: String
+    let port: Int
+    let isLocalhost: Bool
+}
+
+struct RunnerCapabilities: Decodable {
+    let localExecution: Bool
+    let sshExecution: Bool
+    let git: Bool
+    let githubCli: Bool
+    let node: Bool
+    let npm: Bool
+    let pnpm: Bool
+    let php: Bool
+    let composer: Bool
+    let docker: Bool
+    let playwright: Bool
+    let browserReady: Bool
+    let workspaceWritable: Bool
+    let artifactStoreAvailable: Bool
+}
+
+struct RunnerResources: Decodable {
+    let homeboy: RunnerHomeboyProbe
+    let system: RunnerSystemProbe
+    let cpu: RunnerCPUProbe
+    let memory: RunnerMemoryProbe?
+    let disk: RunnerDiskProbe?
+    let workspaceRoot: String
+    let artifactRoot: String
+    let tools: [String: RunnerToolProbe]
+}
+
+struct RunnerHomeboyProbe: Decodable {
+    let version: String
+    let path: String?
+}
+
+struct RunnerSystemProbe: Decodable {
+    let os: String
+    let arch: String
+    let kernel: String?
+}
+
+struct RunnerCPUProbe: Decodable {
+    let count: Int
+}
+
+struct RunnerMemoryProbe: Decodable {
+    let totalMb: Int64
+    let availableMb: Int64?
+}
+
+struct RunnerDiskProbe: Decodable {
+    let path: String
+    let totalMb: Int64
+    let availableMb: Int64
+}
+
+struct RunnerToolProbe: Decodable {
+    let available: Bool
+    let path: String?
+    let version: String?
+    let error: String?
+}
+
+struct RunnerCheck: Decodable, Identifiable {
+    let id: String
+    let status: String
+    let message: String
+    let remediation: String?
+    let details: [String: String]
+}
+
+struct DaemonEnvelope<T: Decodable>: Decodable {
+    let success: Bool
+    let data: T?
+}
+
+struct DaemonAPIResponse<T: Decodable>: Decodable {
+    let status: Int
+    let endpoint: String
+    let body: T
+}
+
+struct DaemonJobsOutput: Decodable {
+    let command: String
+    let jobs: [DaemonJob]
+}
+
+struct DaemonJobOutput: Decodable {
+    let command: String
+    let job: DaemonJob
+}
+
+struct DaemonJobEventsOutput: Decodable {
+    let command: String
+    let jobId: String
+    let events: [DaemonJobEvent]
+}
+
+struct DaemonJobEnqueueOutput: Decodable {
+    let command: String
+    let job: DaemonJob
+    let poll: DaemonJobPoll
+    let request: JSONValue
+}
+
+struct DaemonJobPoll: Decodable {
+    let job: String
+    let events: String
+}
+
+struct DaemonJob: Decodable, Identifiable {
+    let id: String
+    let operation: String
+    let status: String
+    let createdAtMs: UInt64
+    let updatedAtMs: UInt64
+    let startedAtMs: UInt64?
+    let finishedAtMs: UInt64?
+    let eventCount: Int
+    let staleReason: String?
+}
+
+struct DaemonJobEvent: Decodable, Identifiable {
+    let sequence: UInt64
+    let jobId: String
+    let kind: String
+    let timestampMs: UInt64
+    let message: String?
+    let data: JSONValue?
+
+    var id: String { "\(jobId):\(sequence)" }
 }

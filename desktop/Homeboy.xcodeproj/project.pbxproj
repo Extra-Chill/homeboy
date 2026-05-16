@@ -26,6 +26,7 @@
 		27D41F217F00E3A8171BEC63 /* AppWarning.swift in Sources */ = {isa = PBXBuildFile; fileRef = C489D03946456721B73D70EA /* AppWarning.swift */; };
 		29AC5918A42B81DE1D250360 /* ContentContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC77F3DE919D687C5088735B /* ContentContext.swift */; };
 		2A0D8EC80F531D2458B4F000 /* DatabaseSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99F53066BAD2365203BC1A21 /* DatabaseSettingsTab.swift */; };
+		2B66E2C66072EA7F119F138A /* HomeboyLabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2734F8A242983E0642DBD72B /* HomeboyLabView.swift */; };
 		2BDBF9B46483155A6701C845 /* ConfigurationChangeType.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4847DDB6175D9E32C423C8C /* ConfigurationChangeType.swift */; };
 		2FA2E2EB6635082599CF1172 /* RigsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35595CC7BEFD826A8FE56039 /* RigsViewModel.swift */; };
 		306DE99757A1BBA6E328A8FF /* HomeboyCLI+WorkspaceCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = A087DAB3F4E912476EC93E01 /* HomeboyCLI+WorkspaceCommands.swift */; };
@@ -50,6 +51,7 @@
 		58782E3C2B83E467318758D3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E134C3E1AFDFB8B9C3BFA989 /* Assets.xcassets */; };
 		58C9903BC07607162259D792 /* SSHKeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE9B567AD7EF6AEAFF4650E3 /* SSHKeyManager.swift */; };
 		59B9942920AA8A82C6687BA1 /* ExtensionActionsBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F84CD4544E216646E96957DA /* ExtensionActionsBar.swift */; };
+		5A062EFBFD4AC1A479B90C02 /* HomeboyCLI+RunnerCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E87D23CDA0D3B452F3CB752 /* HomeboyCLI+RunnerCommands.swift */; };
 		5A7E75D51012C3ED36EA7853 /* CLIExtensionTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = E32E869268148C1260D05F85 /* CLIExtensionTypes.swift */; };
 		5A9B1A9B7984F57035A97D82 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D06A62D2DDC840DC6A12CC7 /* KeychainService.swift */; };
 		5B3425AA6A8A9C4C9EF5E29F /* FileBrowserSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD70F8136E9691D7528CB581 /* FileBrowserSidebarView.swift */; };
@@ -94,6 +96,7 @@
 		A34392C1F77DDF4B0B386D8C /* DataTableConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = F915FEEAF97ADD6EAADF6E4A /* DataTableConstants.swift */; };
 		A387D3BAF65EFBE5A44AA37C /* CommandBrowserEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0075D42A490CE7EF713A874F /* CommandBrowserEntry.swift */; };
 		A40B645FCF64C59E6F1EC4FC /* HomeboyCLI+QualityCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC23AFFAB50FD8AFD042E644 /* HomeboyCLI+QualityCommands.swift */; };
+		A6C1285910873B6C02B4CE79 /* HomeboyDaemonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C1F6860A60F30A9D01D6E9A /* HomeboyDaemonClient.swift */; };
 		A744C6D0692C0EF9B142E839 /* HomeboyCLI+LogCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CB4FFA7533765478562751F /* HomeboyCLI+LogCommands.swift */; };
 		A79AD1D6F7DD14F02410D120 /* LogTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 670327C19CE0F089CFF35DD1 /* LogTextView.swift */; };
 		AB378FCB8518F6BED6EEFB6F /* DisplayableError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C195A8A1462489E882BC187 /* DisplayableError.swift */; };
@@ -127,6 +130,7 @@
 		EC9244E3C614561638C57AB7 /* RunHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AE68C48FE619E6E7F8BB5F1 /* RunHistoryView.swift */; };
 		EEA581470DC8B48027F54228 /* InlineWarningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */; };
 		F34BB35C6C33E774792043ED /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83B2C9499D9E9A17D32109EF /* SettingsView.swift */; };
+		FA9088059644CB053678418A /* HomeboyLabViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53E7EFDB7496ED01FDCCC77B /* HomeboyLabViewModel.swift */; };
 		FB914712293D43F2D7D80F80 /* CreateProjectSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */; };
 		FDC7A36317A54E1EE4486D4A /* GitOperationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FC13102738FFBE2F5695F78 /* GitOperationsView.swift */; };
 		FE865BA85263630F8BF6A608 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB2507DAC42BC6CDA2DF39CE /* AuthManager.swift */; };
@@ -142,8 +146,10 @@
 		13F8D60E3516F29F554438A0 /* VersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionParser.swift; sourceTree = "<group>"; };
 		14349D465EC79FD6D1D8C70C /* DatabaseTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseTypes.swift; sourceTree = "<group>"; };
 		19D0AC4BB8035D3A38DF8F83 /* CommandBrowserCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandBrowserCatalog.swift; sourceTree = "<group>"; };
+		1C1F6860A60F30A9D01D6E9A /* HomeboyDaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyDaemonClient.swift; sourceTree = "<group>"; };
 		20129FFBFEEBA4948B8DA194 /* WarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WarningView.swift; sourceTree = "<group>"; };
 		21391AE5E442FFA2A2843821 /* SiteListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SiteListView.swift; sourceTree = "<group>"; };
+		2734F8A242983E0642DBD72B /* HomeboyLabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyLabView.swift; sourceTree = "<group>"; };
 		2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileBrowser.swift; sourceTree = "<group>"; };
 		2FC13102738FFBE2F5695F78 /* GitOperationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitOperationsView.swift; sourceTree = "<group>"; };
 		3320B46DC4876237EA4C9ACE /* GitOperationsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitOperationsViewModel.swift; sourceTree = "<group>"; };
@@ -168,7 +174,9 @@
 		4C3C30739F765981B37603DD /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		4ED098FFBF749CD6DD355B1B /* CollapsibleSplitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollapsibleSplitView.swift; sourceTree = "<group>"; };
 		514BD1BE8868C181AD9401CF /* LogContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogContentView.swift; sourceTree = "<group>"; };
+		53E7EFDB7496ED01FDCCC77B /* HomeboyLabViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyLabViewModel.swift; sourceTree = "<group>"; };
 		5BA9BAC48CD6CC681F9FD2C5 /* ExtensionManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionManifest.swift; sourceTree = "<group>"; };
+		5E87D23CDA0D3B452F3CB752 /* HomeboyCLI+RunnerCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+RunnerCommands.swift"; sourceTree = "<group>"; };
 		60913533AA72054F3D79625C /* ArtifactVersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactVersionParser.swift; sourceTree = "<group>"; };
 		61EC8F9095C4AC67383B9F4A /* ConfigGapsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigGapsView.swift; sourceTree = "<group>"; };
 		64DFC1DFC648B2D106BA5361 /* ExtensionsSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionsSettingsTab.swift; sourceTree = "<group>"; };
@@ -413,6 +421,7 @@
 			children = (
 				A7A27F9F448DAC4DF35613F9 /* APIClient.swift */,
 				3A6FE3DEAD139D529B6724D8 /* APITypes.swift */,
+				1C1F6860A60F30A9D01D6E9A /* HomeboyDaemonClient.swift */,
 			);
 			path = API;
 			sourceTree = "<group>";
@@ -432,6 +441,7 @@
 				BC23AFFAB50FD8AFD042E644 /* HomeboyCLI+QualityCommands.swift */,
 				0DD2E86E7655D2ED45CB0E31 /* HomeboyCLI+RigBenchReleaseCommands.swift */,
 				BFAF5103FCB24063514E519F /* HomeboyCLI+RunCommands.swift */,
+				5E87D23CDA0D3B452F3CB752 /* HomeboyCLI+RunnerCommands.swift */,
 				DA7F7ED4B0D0B46D19BF8438 /* HomeboyCLI+StackCommands.swift */,
 				A087DAB3F4E912476EC93E01 /* HomeboyCLI+WorkspaceCommands.swift */,
 				D8D33E39732C375690D3AC46 /* HomeboyCLIModels.swift */,
@@ -455,6 +465,7 @@
 				92301854AF9D7FCE0328DB48 /* CommandBrowser */,
 				8007D7D3CCEF3F80C36AA686 /* Components */,
 				48CA5756F2D78ADA9FCD0AFD /* Extensions */,
+				8ED6A8EAFE27B075CDD8C830 /* Lab */,
 				144F0E432A914DE9F141CEFA /* Rigs */,
 				38FA3F3D4C5F5FD7C14C524A /* RunHistory */,
 				F08C0BC0AC87CDDCAA5955CF /* Settings */,
@@ -510,6 +521,15 @@
 				20129FFBFEEBA4948B8DA194 /* WarningView.swift */,
 			);
 			path = Components;
+			sourceTree = "<group>";
+		};
+		8ED6A8EAFE27B075CDD8C830 /* Lab */ = {
+			isa = PBXGroup;
+			children = (
+				2734F8A242983E0642DBD72B /* HomeboyLabView.swift */,
+				53E7EFDB7496ED01FDCCC77B /* HomeboyLabViewModel.swift */,
+			);
+			path = Lab;
 			sourceTree = "<group>";
 		};
 		9035A8A5FC0007090577B120 /* Quality */ = {
@@ -845,10 +865,14 @@
 				A40B645FCF64C59E6F1EC4FC /* HomeboyCLI+QualityCommands.swift in Sources */,
 				46238C2E19607D4410D23FA2 /* HomeboyCLI+RigBenchReleaseCommands.swift in Sources */,
 				19F0A3B40B6B6BA59A201C7F /* HomeboyCLI+RunCommands.swift in Sources */,
+				5A062EFBFD4AC1A479B90C02 /* HomeboyCLI+RunnerCommands.swift in Sources */,
 				6861D39F7EB9C8E226731A6A /* HomeboyCLI+StackCommands.swift in Sources */,
 				306DE99757A1BBA6E328A8FF /* HomeboyCLI+WorkspaceCommands.swift in Sources */,
 				278021F9D228BBDA95267231 /* HomeboyCLI.swift in Sources */,
 				CC892914AFEB03C734959003 /* HomeboyCLIModels.swift in Sources */,
+				A6C1285910873B6C02B4CE79 /* HomeboyDaemonClient.swift in Sources */,
+				2B66E2C66072EA7F119F138A /* HomeboyLabView.swift in Sources */,
+				FA9088059644CB053678418A /* HomeboyLabViewModel.swift in Sources */,
 				E832787BA1F926FB3A085E09 /* InlineErrorView.swift in Sources */,
 				EEA581470DC8B48027F54228 /* InlineWarningView.swift in Sources */,
 				5BDE52F8E2A18B1F50AD060A /* JSONValue.swift in Sources */,
