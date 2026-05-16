@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.5.4] - 2026-05-16
+
+### Fixed
+- ignore stale PR command results after merge
+
 ## [2.5.3] - 2026-05-13
 
 ### Fixed
