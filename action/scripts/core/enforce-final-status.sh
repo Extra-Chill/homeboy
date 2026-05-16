@@ -20,17 +20,16 @@ validate_results_json() {
   fi
 }
 
+if [ "${PR_ACTIVE:-}" = "false" ]; then
+  echo "PR was merged or closed before final enforcement — ignoring stale command results"
+  exit 0
+fi
+
 validate_results_json "Quality command" "${RESULTS:-}"
 validate_results_json "Operations command" "${OPERATIONS_RESULTS}"
 
 if [ -z "${RESULTS:-}" ] || [ "${RESULTS}" = "{}" ]; then
   HAS_QUALITY_COMMANDS=false
-
-  # If the PR was merged/closed before commands ran, empty results are expected
-  if [ "${PR_ACTIVE:-}" = "false" ]; then
-    echo "PR was merged or closed before commands ran — nothing to enforce"
-    exit 0
-  fi
 
   # If there are no quality commands, empty quality results are expected.
   COMMANDS="${COMMANDS:-}"

@@ -637,6 +637,24 @@ runs:
         RUN_GROUP_PREFIX: homeboy
       run: bash ${{ github.action_path }}/scripts/operations/run-operations.sh
 
+    # Re-check PR state just before enforcement/reporting. A PR can merge while
+    # quality commands are still running, and merged/closed PR runs should not
+    # fail as zombie CI after the branch is already gone.
+    - name: Check final PR state
+      id: final-pr-state
+      if: always() && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
+        if ! pr_is_active; then
+          echo "::warning::PR #${PR_NUMBER} is no longer open (merged or closed) — skipping final enforcement"
+          echo "active=false" >> "${GITHUB_OUTPUT}"
+        else
+          echo "active=true" >> "${GITHUB_OUTPUT}"
+        fi
+
     - name: Enforce final status
       id: enforce-status
       if: always()
@@ -645,12 +663,12 @@ runs:
         RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         OPERATIONS_RESULTS: ${{ steps.run-operations.outputs.results }}
-        PR_ACTIVE: ${{ steps.check-pr-state.outputs.active }}
+        PR_ACTIVE: ${{ steps.final-pr-state.outputs.active || steps.check-pr-state.outputs.active }}
       run: bash ${{ github.action_path }}/scripts/core/enforce-final-status.sh
 
     - name: Evaluate PR policy
       id: pr-policy
-      if: github.event_name == 'pull_request' && steps.check-pr-state.outputs.active != 'false' && inputs.pr-policy != ''
+      if: github.event_name == 'pull_request' && steps.final-pr-state.outputs.active != 'false' && inputs.pr-policy != ''
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token || github.token }}
@@ -665,7 +683,7 @@ runs:
       run: bash ${{ github.action_path }}/scripts/pr/policy-gate.sh
 
     - name: Post PR comment
-      if: always() && github.event_name == 'pull_request' && steps.check-pr-state.outputs.active != 'false' && inputs.pr-comment != 'false'
+      if: always() && github.event_name == 'pull_request' && steps.final-pr-state.outputs.active != 'false' && inputs.pr-comment != 'false'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token }}

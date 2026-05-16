@@ -30,6 +30,12 @@ assert_exit 1 "malformed quality results fail closed" \
 assert_exit 1 "failing quality results fail" \
   env RESULTS='{"test":"fail"}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
+assert_exit 0 "closed PR ignores stale failing quality results" \
+  env RESULTS='{"test":"fail"}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
+
+assert_exit 0 "closed PR ignores malformed stale results" \
+  env RESULTS='{"test":"fail"}}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
+
 assert_exit 0 "passing quality results pass" \
   env RESULTS='{"test":"pass"}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
