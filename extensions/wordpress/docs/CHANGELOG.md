@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.87.0] - 2026-05-16
+
+### Added
+- bridge agent terminal actions into Datamachine
+- add host terminal actions
+
 ## [2.86.1] - 2026-05-15
 
 ### Fixed
