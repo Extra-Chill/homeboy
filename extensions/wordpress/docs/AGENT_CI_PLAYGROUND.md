@@ -120,6 +120,10 @@ The runner converts the agent config into a single Playground bench workload:
   status/diff, commits, pushes, and opens or reuses a fallback PR after the run.
 - `ability_tools` can expose additional WordPress abilities as tools during the
   agent run.
+- Host-side terminal actions are available through the WordPress extension's
+  `agent-terminal-actions` helper for runner-owned tools that must execute like a
+  real shell command. A `wp_cli` action runs `wp ...` through `bash -lc` with the
+  runtime root as the command boundary and returns exit code, stdout, and stderr.
 - `pipeline_step_patches` and `flow_step_patches` can adjust imported bundle
   step configuration before execution.
 - `fallback_pull_request` can open a PR when files were written but the agent did

@@ -1760,6 +1760,79 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
     }
 }
 
+if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
+    class Homeboy_Datamachine_Agent_Terminal_Tool {
+        public function handle_tool_call( array $parameters, array $tool_def = array() ): array {
+            $url   = rtrim( (string) ( $tool_def['terminal_action_url'] ?? getenv( 'HOMEBOY_TERMINAL_ACTION_URL' ) ), '/' );
+            $token = (string) ( $tool_def['terminal_action_token'] ?? getenv( 'HOMEBOY_TERMINAL_ACTION_TOKEN' ) );
+
+            if ( '' === $url || '' === $token ) {
+                return array(
+                    'success'   => false,
+                    'tool_name' => (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' ),
+                    'error'     => 'Terminal action server is not configured.',
+                );
+            }
+
+            $command = trim( (string) ( $parameters['command'] ?? '' ) );
+            if ( '' === $command ) {
+                return array(
+                    'success'   => false,
+                    'tool_name' => (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' ),
+                    'error'     => 'command is required.',
+                );
+            }
+
+            $action = array_filter(
+                array(
+                    'type'       => (string) ( $tool_def['terminal_action_type'] ?? 'wp_cli' ),
+                    'command'    => $command,
+                    'timeout_ms' => isset( $parameters['timeout_ms'] ) ? (int) $parameters['timeout_ms'] : null,
+                    'cwd'        => isset( $parameters['cwd'] ) ? (string) $parameters['cwd'] : null,
+                ),
+                static fn( $value ) => null !== $value && '' !== $value
+            );
+
+            $response = wp_remote_post(
+                $url . '/execute',
+                array(
+                    'timeout' => max( 1, (int) ceil( ( (int) ( $action['timeout_ms'] ?? 30000 ) + 5000 ) / 1000 ) ),
+                    'headers' => array(
+                        'Authorization' => 'Bearer ' . $token,
+                        'Content-Type'  => 'application/json',
+                    ),
+                    'body'    => wp_json_encode( $action ),
+                )
+            );
+
+            if ( is_wp_error( $response ) ) {
+                return array(
+                    'success'   => false,
+                    'tool_name' => (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' ),
+                    'error'     => $response->get_error_message(),
+                );
+            }
+
+            $status = (int) wp_remote_retrieve_response_code( $response );
+            $body   = (string) wp_remote_retrieve_body( $response );
+            $result = json_decode( $body, true );
+            if ( ! is_array( $result ) ) {
+                return array(
+                    'success'   => false,
+                    'tool_name' => (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' ),
+                    'error'     => 'Terminal action server returned invalid JSON.',
+                    'status'    => $status,
+                    'body'      => $body,
+                );
+            }
+
+            $result['tool_name'] = (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' );
+            $result['status']    = $status;
+            return $result;
+        }
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_register_tool_recorders' ) ) {
     function homeboy_datamachine_agent_register_tool_recorders( array $config ): void {
         $ability_tools = is_array( $config['ability_tools'] ?? null ) ? $config['ability_tools'] : array();
@@ -1829,6 +1902,48 @@ if ( ! function_exists( 'homeboy_datamachine_agent_register_tool_recorders' ) ) 
                     $tools[ $tool_name ]['homeboy_record']             = is_array( $recorder['record'] ?? null ) ? $recorder['record'] : array();
                     $tools[ $tool_name ]['homeboy_forced_parameters'] = is_array( $recorder['forced_parameters'] ?? null ) ? $recorder['forced_parameters'] : array();
                 }
+
+                return $tools;
+            },
+            100,
+            1
+        );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_register_terminal_tools' ) ) {
+    function homeboy_datamachine_agent_register_terminal_tools( array $config ): void {
+        if ( empty( $config['enable_terminal_actions'] ) && empty( $config['enable_wp_cli_tool'] ) ) {
+            return;
+        }
+
+        $terminal_url   = homeboy_datamachine_agent_scalar( $config, 'terminal_action_url' );
+        $terminal_token = homeboy_datamachine_agent_scalar( $config, 'terminal_action_token' );
+        $tool_name      = homeboy_datamachine_agent_scalar( $config, 'wp_cli_tool_name', 'run_wp_cli' );
+
+        add_filter(
+            'datamachine_resolved_tools',
+            static function ( array $tools ) use ( $terminal_url, $terminal_token, $tool_name ): array {
+                $tools[ $tool_name ] = array(
+                    'class'                 => 'Homeboy_Datamachine_Agent_Terminal_Tool',
+                    'method'                => 'handle_tool_call',
+                    'tool_name'             => $tool_name,
+                    'description'           => 'Run a real WP-CLI command through the host terminal against the disposable WordPress runtime. Returns exit code, stdout, and stderr.',
+                    'terminal_action_type'  => 'wp_cli',
+                    'terminal_action_url'   => $terminal_url,
+                    'terminal_action_token' => $terminal_token,
+                    'parameters'            => array(
+                        'command'    => array(
+                            'type'        => 'string',
+                            'required'    => true,
+                            'description' => 'WP-CLI command to run. You may include or omit the leading `wp`.',
+                        ),
+                        'timeout_ms' => array(
+                            'type'        => 'integer',
+                            'description' => 'Maximum command runtime in milliseconds.',
+                        ),
+                    ),
+                );
 
                 return $tools;
             },
@@ -2395,6 +2510,7 @@ foreach ( array( Agents::class, Pipelines::class, Flows::class, Jobs::class ) as
 }
 
 $settings = homeboy_datamachine_agent_configure_settings( $config );
+homeboy_datamachine_agent_register_terminal_tools( $config );
 homeboy_datamachine_agent_register_tool_recorders( $config );
 
 $agents = new Agents();
