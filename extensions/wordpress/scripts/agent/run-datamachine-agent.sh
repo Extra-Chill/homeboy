@@ -49,7 +49,11 @@ if [ ! -f "$WORKLOAD_PATH" ]; then
 fi
 
 RUNTIME_DIR=""
+TERMINAL_SERVER_PID=""
 cleanup() {
+    if [ -n "$TERMINAL_SERVER_PID" ]; then
+        kill "$TERMINAL_SERVER_PID" >/dev/null 2>&1 || true
+    fi
     if [ -n "$RUNTIME_DIR" ]; then
         rm -rf "$RUNTIME_DIR"
     fi
@@ -168,6 +172,45 @@ WORKLOAD_ID=$(jq -r '.workload_id // "datamachine-agent"' "$CONFIG_PATH")
 WORKLOAD_LABEL=$(jq -r '.workload_label // "Run Data Machine agent"' "$CONFIG_PATH")
 PLAYGROUND_WORDPRESS_VERSION=$(jq -r '.playground_wordpress_version // "7.0"' "$CONFIG_PATH")
 BENCH_WARMUP_ITERATIONS=$(jq -r '.bench_warmup_iterations // 0' "$CONFIG_PATH")
+ENABLE_TERMINAL_ACTIONS=$(jq -r 'if (.enable_terminal_actions // .enable_wp_cli_tool // false) then "1" else "0" end' <<<"$CONFIG_JSON")
+if [ "$ENABLE_TERMINAL_ACTIONS" = "1" ]; then
+    if [ -z "$RUNTIME_DIR" ]; then
+        RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-datamachine-agent-runtime.XXXXXX")
+    fi
+    TERMINAL_READY_FILE="$RUNTIME_DIR/terminal-action-server.json"
+    TERMINAL_TOKEN="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+    node "$SCRIPT_DIR/terminal-action-server.js" \
+        --runtime-root "$COMPONENT_PATH" \
+        --ready-file "$TERMINAL_READY_FILE" \
+        --token "$TERMINAL_TOKEN" \
+        >"$RUNTIME_DIR/terminal-action-server.log" 2>&1 &
+    TERMINAL_SERVER_PID=$!
+    for _ in $(seq 1 100); do
+        if [ -s "$TERMINAL_READY_FILE" ]; then
+            break
+        fi
+        if ! kill -0 "$TERMINAL_SERVER_PID" >/dev/null 2>&1; then
+            echo "ERROR: terminal action server exited before becoming ready" >&2
+            cat "$RUNTIME_DIR/terminal-action-server.log" >&2 || true
+            exit 1
+        fi
+        sleep 0.1
+    done
+    if [ ! -s "$TERMINAL_READY_FILE" ]; then
+        echo "ERROR: terminal action server did not become ready" >&2
+        cat "$RUNTIME_DIR/terminal-action-server.log" >&2 || true
+        exit 1
+    fi
+    TERMINAL_URL=$(jq -r '.url' "$TERMINAL_READY_FILE")
+    CONFIG_JSON=$(jq -c \
+        --arg terminalUrl "$TERMINAL_URL" \
+        --arg terminalToken "$TERMINAL_TOKEN" \
+        '. + {
+            enable_terminal_actions: true,
+            terminal_action_url: $terminalUrl,
+            terminal_action_token: $terminalToken
+        }' <<<"$CONFIG_JSON")
+fi
 
 SETTINGS_JSON=$(jq -nc \
     --arg workloadPath "$WORKLOAD_PLAYGROUND_PATH" \
@@ -206,6 +249,11 @@ HOMEBOY_COMPONENT_PATH="$COMPONENT_PATH" \
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
     bash "$EXTENSION_PATH/scripts/bench/bench-runner.sh"
+
+if [ -n "$TERMINAL_SERVER_PID" ]; then
+    kill "$TERMINAL_SERVER_PID" >/dev/null 2>&1 || true
+    TERMINAL_SERVER_PID=""
+fi
 
 if [ "$PRINT_RESULTS" = "1" ]; then
     cat "$RESULTS_FILE"
