@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.88.0] - 2026-05-16
+
+### Added
+- allow Datamachine agent CI without directives
+
 ## [2.87.0] - 2026-05-16
 
 ### Added
