@@ -20,10 +20,10 @@ set -euo pipefail
 INPUT=$(cat)
 
 # Extract content from JSON — use python3 for reliable JSON parsing
-CONTENT=$(printf '%s' "$INPUT" | python3 -c "
-import json, sys, re, hashlib
+CONTENT=$(INPUT_JSON="$INPUT" python3 <<'PY'
+import json, sys, re, hashlib, os
 
-data = json.load(sys.stdin)
+data = json.loads(os.environ['INPUT_JSON'])
 content = data['content']
 file_path = data['file_path']
 
@@ -520,6 +520,72 @@ for line_num, line in enumerate(lines, 1):
                     })
                 break
 
+# --- Aggregate construction facts ---
+# Rust-specific syntax recognition lives in the Rust extension. Homeboy core
+# consumes these as generic aggregate construction facts.
+def to_snake_case(name):
+    out = []
+    for i, ch in enumerate(name):
+        if ch.isupper():
+            if i > 0:
+                out.append('_')
+            out.append(ch.lower())
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+def is_canonical_constructor(method, type_name):
+    if method in {'new', 'builder', 'default'}:
+        return True
+    if method.startswith(('from_', 'for_', 'with_')):
+        return True
+    snake_type = to_snake_case(type_name)
+    return method in {f'build_{snake_type}', f'create_{snake_type}'}
+
+aggregate_construction_seams = []
+seen_seams = set()
+for fn in functions:
+    if fn.is_test or fn.is_test_helper or not fn.impl_type:
+        continue
+    if is_canonical_constructor(fn.name, fn.impl_type):
+        key = (fn.impl_type, fn.name)
+        if key in seen_seams:
+            continue
+        seen_seams.add(key)
+        aggregate_construction_seams.append({
+            'type_name': fn.impl_type,
+            'method': fn.name,
+            'line': fn.line_num,
+        })
+
+aggregate_literals = []
+seen_literals = set()
+literal_pattern = re.compile(r'\b([A-Z][A-Za-z0-9_]*)\s*\{([^{};]*)\}', re.S)
+definition_before_pattern = re.compile(r'(?:struct|enum|impl|trait|type|use)\s+$')
+for m in literal_pattern.finditer(content):
+    type_name_literal = m.group(1)
+    before = content[:m.start()]
+    if definition_before_pattern.search(before[-80:]):
+        continue
+    body = m.group(2)
+    fields = []
+    for field_match in re.finditer(r'\b([a-z_][A-Za-z0-9_]*)\s*:', body):
+        field = field_match.group(1)
+        if field not in fields:
+            fields.append(field)
+    if len(fields) < 2:
+        continue
+    line = before.count('\n') + 1
+    key = (type_name_literal, tuple(fields), line)
+    if key in seen_literals:
+        continue
+    seen_literals.add(key)
+    aggregate_literals.append({
+        'type_name': type_name_literal,
+        'fields': fields,
+        'line': line,
+    })
+
 result = {
     'methods': methods,
     'type_name': type_name,
@@ -536,9 +602,12 @@ result = {
     'dead_code_markers': dead_code_markers,
     'internal_calls': internal_calls,
     'public_api': public_api,
+    'aggregate_literals': aggregate_literals,
+    'aggregate_construction_seams': aggregate_construction_seams,
 }
 
 print(json.dumps(result))
-")
+PY
+)
 
 echo "$CONTENT"
