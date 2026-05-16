@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.88.1] - 2026-05-16
+
+### Fixed
+- accept completion outcome agent runs
+
 ## [2.88.0] - 2026-05-16
 
 ### Added
