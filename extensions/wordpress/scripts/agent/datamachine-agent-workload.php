@@ -1953,6 +1953,16 @@ if ( ! function_exists( 'homeboy_datamachine_agent_register_terminal_tools' ) ) 
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_register_directive_controls' ) ) {
+    function homeboy_datamachine_agent_register_directive_controls( array $config ): void {
+        if ( empty( $config['disable_datamachine_directives'] ) ) {
+            return;
+        }
+
+        add_filter( 'datamachine_directives_enabled', '__return_false', 100, 3 );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_array_merge_recursive_distinct' ) ) {
     function homeboy_datamachine_agent_array_merge_recursive_distinct( array $base, array $patch ): array {
         foreach ( $patch as $key => $value ) {
@@ -2510,6 +2520,7 @@ foreach ( array( Agents::class, Pipelines::class, Flows::class, Jobs::class ) as
 }
 
 $settings = homeboy_datamachine_agent_configure_settings( $config );
+homeboy_datamachine_agent_register_directive_controls( $config );
 homeboy_datamachine_agent_register_terminal_tools( $config );
 homeboy_datamachine_agent_register_tool_recorders( $config );
 
