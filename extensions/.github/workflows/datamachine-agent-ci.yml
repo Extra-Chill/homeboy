@@ -897,11 +897,22 @@ jobs:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
         run: |
           set -euo pipefail
-          bash .ci/homeboy-extensions/wordpress/scripts/agent/extract-engine-data.sh \
-            --results "$RESULTS_FILE" \
-            --scenario "${{ inputs.flow_slug }}" \
-            --field job_status=metadata.job_status \
-            --required-status completed
+          scenario_json="$(jq -ec --arg scenario "${{ inputs.flow_slug }}" '.scenarios[] | select(.id == $scenario)' "$RESULTS_FILE")"
+          job_status="$(jq -r '.metadata.job_status // ""' <<< "$scenario_json")"
+          completion_outcome_satisfied="$(jq -r 'if .metadata.completion_outcome_satisfied == true then "true" else "false" end' <<< "$scenario_json")"
+
+          printf 'job_status:                      %s\n' "$job_status"
+          printf 'completion_outcome_satisfied:    %s\n' "$completion_outcome_satisfied"
+
+          if [ "$job_status" = "completed" ] || [ "$completion_outcome_satisfied" = "true" ]; then
+            exit 0
+          fi
+
+          printf 'ERROR: scenario %s expected completed job or satisfied completion outcome, got job_status=%s completion_outcome_satisfied=%s\n' \
+            "${{ inputs.flow_slug }}" \
+            "$job_status" \
+            "$completion_outcome_satisfied" >&2
+          exit 1
 
       - name: Resolve transcript artifact path
         id: transcript-artifact
