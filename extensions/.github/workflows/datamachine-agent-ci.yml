@@ -201,6 +201,13 @@ name: Data Machine Agent CI (reusable)
           imported agent runs with daily memory storage on. Default false.
         type: boolean
         default: false
+      disable_datamachine_directives:
+        description: |
+          When true, disables Data Machine's directive stack before agent
+          requests are assembled. Use for eval/training runs where benchmark
+          prompts must not inherit runner system context.
+        type: boolean
+        default: false
       extra_required_abilities:
         description: |
           JSON array of additional ability slugs the runner must assert are
@@ -561,6 +568,7 @@ jobs:
           WORKLOAD_RUN_BEFORE: ${{ inputs.workload_run_before }}
           WORKLOAD_RUN_AFTER: ${{ inputs.workload_run_after }}
           DAILY_MEMORY_ENABLED: ${{ inputs.daily_memory_enabled }}
+          DISABLE_DATAMACHINE_DIRECTIVES: ${{ inputs.disable_datamachine_directives }}
           EXTRA_REQUIRED_ABILITIES: ${{ inputs.extra_required_abilities }}
           ALLOWED_REPOS: ${{ inputs.allowed_repos }}
           ENGINE_KEY: ${{ inputs.engine_key }}
@@ -707,6 +715,7 @@ jobs:
             --argjson workloadRunBefore "$workload_run_before_json" \
             --argjson workloadRunAfter "$workload_run_after_json" \
             --argjson dailyMemoryEnabled "$DAILY_MEMORY_ENABLED" \
+            --argjson disableDatamachineDirectives "$DISABLE_DATAMACHINE_DIRECTIVES" \
             --argjson extraRequiredAbilities "$extra_required_abilities_json" \
             --argjson allowedRepos "$allowed_repos_json" \
             --argjson abilityTools "$ability_tools_json" \
@@ -791,7 +800,7 @@ jobs:
                 GITHUB_RUN_ID: $githubRunId,
                 GITHUB_RUN_ATTEMPT: $githubRunAttempt
               } + $providerBenchEnv)
-            } + (if $dailyMemoryEnabled then {daily_memory_enabled: true} else {} end)' > "$config_path"
+            } + (if $dailyMemoryEnabled then {daily_memory_enabled: true} else {} end) + (if $disableDatamachineDirectives then {disable_datamachine_directives: true} else {} end)' > "$config_path"
           printf 'config_path=%s\n' "$config_path" >> "$GITHUB_OUTPUT"
           printf 'transcript_host_dir=%s\n' "$transcript_host_dir" >> "$GITHUB_OUTPUT"
 
