@@ -134,6 +134,10 @@ namespace {
 		fwrite( STDERR, "Expected reusable workflow config to require import-agent for execute-workflow runs.\n" );
 		exit( 1 );
 	}
+	if ( ! str_contains( $workflow_source, 'completion_outcome_satisfied="$(jq -r' ) || ! str_contains( $workflow_source, '[ "$job_status" = "completed" ] || [ "$completion_outcome_satisfied" = "true" ]' ) ) {
+		fwrite( STDERR, "Expected reusable workflow success assertion to accept satisfied completion outcomes.\n" );
+		exit( 1 );
+	}
 
 	$jobs = new \DataMachine\Core\Database\Jobs\Jobs();
     $summary = homeboy_datamachine_agent_drain_child_jobs( 101, array(), $jobs );
