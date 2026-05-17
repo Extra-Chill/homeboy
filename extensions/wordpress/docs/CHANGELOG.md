@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.90.0] - 2026-05-17
+
+### Added
+- mirror release ZIP to a CORS-friendly branch
+
 ## [2.89.0] - 2026-05-17
 
 ### Added
