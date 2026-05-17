@@ -916,5 +916,27 @@
       "default": "",
       "description": "Optional pass-through for wp-playground-cli --wordpress-install-mode. Leave empty unless a bench needs a non-default Playground install policy; bench_site_mode chooses the normal default for fresh versus installed runs."
     }
+  ],
+  "actions": [
+    {
+      "id": "release.package",
+      "label": "Build WordPress plugin/theme ZIP",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/package.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.publish",
+      "label": "Upload release ZIP to GitHub Release assets",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/publish.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    }
   ]
 }
