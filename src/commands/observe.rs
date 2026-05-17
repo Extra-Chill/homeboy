@@ -121,16 +121,16 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
         "run_dir": run_dir.path(),
     });
 
-    let run = store.start_run(NewRunRecord {
-        kind: "observe".to_string(),
-        component_id: Some(component_id.clone()),
-        command: Some(command),
-        cwd: Some(component_path.to_string_lossy().to_string()),
-        homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        git_sha: short_head_revision_at(&component_path),
-        rig_id: None,
-        metadata_json: initial_metadata,
-    })?;
+    let run = store.start_run(
+        NewRunRecord::builder("observe")
+            .component_id(component_id.clone())
+            .command(command)
+            .cwd_path(&component_path)
+            .current_homeboy_version()
+            .git_sha(short_head_revision_at(&component_path))
+            .metadata(initial_metadata)
+            .build(),
+    )?;
 
     let mut status = RunStatus::Pass;
     let observe_result = collect_timeline(&args);

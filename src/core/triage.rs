@@ -312,40 +312,39 @@ impl TriageObservation {
             .status()
             .map(|status| status.path)
             .unwrap_or_else(|_| "<unavailable>".to_string());
+        let cwd = std::env::current_dir().ok();
         let run = store
-            .start_run(NewRunRecord {
-                kind: "triage".to_string(),
-                component_id: Some(component_id),
-                command: Some(triage_command(target)),
-                cwd: std::env::current_dir()
-                    .ok()
-                    .map(|path| path.to_string_lossy().to_string()),
-                homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                git_sha: None,
-                rig_id: match target {
-                    TriageTarget::Rig(id) => Some(id.clone()),
-                    _ => None,
-                },
-                metadata_json: serde_json::json!({
-                    "target": {
-                        "kind": target.kind_name(),
-                        "id": target.id(),
-                    },
-                    "options": {
-                        "include_issues": options.include_issues,
-                        "include_prs": options.include_prs,
-                        "mine": options.mine,
-                        "assigned": options.assigned,
-                        "labels": options.labels,
-                        "needs_review": options.needs_review,
-                        "failing_checks": options.failing_checks,
-                        "drilldown": options.drilldown,
-                        "issue_numbers": options.issue_numbers,
-                        "stale_days": options.stale_days,
-                        "limit": options.limit,
-                    }
-                }),
-            })
+            .start_run(
+                NewRunRecord::builder("triage")
+                    .component_id(component_id)
+                    .command(triage_command(target))
+                    .optional_cwd_path(cwd.as_deref())
+                    .current_homeboy_version()
+                    .optional_rig_id(match target {
+                        TriageTarget::Rig(id) => Some(id.clone()),
+                        _ => None,
+                    })
+                    .metadata(serde_json::json!({
+                        "target": {
+                            "kind": target.kind_name(),
+                            "id": target.id(),
+                        },
+                        "options": {
+                            "include_issues": options.include_issues,
+                            "include_prs": options.include_prs,
+                            "mine": options.mine,
+                            "assigned": options.assigned,
+                            "labels": options.labels,
+                            "needs_review": options.needs_review,
+                            "failing_checks": options.failing_checks,
+                            "drilldown": options.drilldown,
+                            "issue_numbers": options.issue_numbers,
+                            "stale_days": options.stale_days,
+                            "limit": options.limit,
+                        }
+                    }))
+                    .build(),
+            )
             .ok()?;
 
         Some(Self {

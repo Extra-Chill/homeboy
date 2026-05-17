@@ -38,6 +38,11 @@ impl NewRunRecordBuilder {
         self
     }
 
+    pub fn optional_cwd_path(mut self, path: Option<&Path>) -> Self {
+        self.record.cwd = path.map(|path| path.to_string_lossy().to_string());
+        self
+    }
+
     pub fn current_homeboy_version(mut self) -> Self {
         self.record.homeboy_version = Some(env!("CARGO_PKG_VERSION").to_string());
         self
@@ -102,6 +107,15 @@ mod tests {
     fn test_cwd_path() {
         let record = NewRunRecord::builder("lint")
             .cwd_path(Path::new("/tmp/homeboy"))
+            .build();
+
+        assert_eq!(record.cwd.as_deref(), Some("/tmp/homeboy"));
+    }
+
+    #[test]
+    fn test_optional_cwd_path() {
+        let record = NewRunRecord::builder("triage")
+            .optional_cwd_path(Some(Path::new("/tmp/homeboy")))
             .build();
 
         assert_eq!(record.cwd.as_deref(), Some("/tmp/homeboy"));

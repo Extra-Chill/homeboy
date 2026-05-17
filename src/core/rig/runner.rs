@@ -524,19 +524,17 @@ struct RigRunObserver {
 impl RigRunObserver {
     fn start(rig: &RigSpec, command: &str) -> Option<Self> {
         let store = ObservationStore::open_initialized().ok()?;
+        let cwd = std::env::current_dir().ok();
         let run = store
-            .start_run(NewRunRecord {
-                kind: "rig".to_string(),
-                component_id: None,
-                command: Some(format!("rig.{command}")),
-                cwd: std::env::current_dir()
-                    .ok()
-                    .map(|path| path.to_string_lossy().to_string()),
-                homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                git_sha: None,
-                rig_id: Some(rig.id.clone()),
-                metadata_json: rig_observation_metadata(rig, command, None, None, None),
-            })
+            .start_run(
+                NewRunRecord::builder("rig")
+                    .command(format!("rig.{command}"))
+                    .optional_cwd_path(cwd.as_deref())
+                    .current_homeboy_version()
+                    .rig_id(rig.id.clone())
+                    .metadata(rig_observation_metadata(rig, command, None, None, None))
+                    .build(),
+            )
             .ok()?;
 
         Some(Self {
