@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.89.0] - 2026-05-17
+
+### Added
+- add release.package and release.publish actions
+
 ## [2.88.1] - 2026-05-16
 
 ### Fixed
