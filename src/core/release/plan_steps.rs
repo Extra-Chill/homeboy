@@ -186,6 +186,8 @@ pub(super) fn build_release_steps(
     let mut steps = Vec::new();
     let publish_targets = get_publish_targets(extensions);
 
+    add_release_extension_diagnostics(component, extensions, &publish_targets, options, warnings);
+
     if !publish_targets.is_empty() && !has_package_capability(extensions) {
         warnings.push(
             "Publish targets derived from extensions but no extension provides 'release.package'. \
@@ -349,6 +351,55 @@ pub(super) fn build_release_steps(
     Ok(steps)
 }
 
+fn add_release_extension_diagnostics(
+    component: &Component,
+    extensions: &[ExtensionManifest],
+    publish_targets: &[String],
+    options: &ReleaseOptions,
+    warnings: &mut Vec<String>,
+) {
+    if options.skip_publish || !publish_targets.is_empty() {
+        return;
+    }
+
+    let Some(configured) = component.extensions.as_ref() else {
+        return;
+    };
+    if configured.is_empty() {
+        return;
+    }
+
+    let mut configured_ids: Vec<String> = configured.keys().cloned().collect();
+    configured_ids.sort();
+    if !configured_ids.iter().any(|id| id == "wordpress") && !has_package_capability(extensions) {
+        return;
+    }
+
+    let loaded = extensions
+        .iter()
+        .map(|extension| {
+            let mut action_ids: Vec<&str> = extension
+                .actions
+                .iter()
+                .map(|action| action.id.as_str())
+                .collect();
+            action_ids.sort_unstable();
+            format!("{} [{}]", extension.id, action_ids.join(", "))
+        })
+        .collect::<Vec<_>>();
+
+    warnings.push(format!(
+        "Release publish planning found configured extensions ({}) but no extension provides \
+         'release.publish'. Loaded extension actions: {}.",
+        configured_ids.join(", "),
+        if loaded.is_empty() {
+            "none".to_string()
+        } else {
+            loaded.join("; ")
+        }
+    ));
+}
+
 fn build_changelog_steps(
     changelog_plan: &ReleaseChangelogPlan,
     current_version: &str,
@@ -403,7 +454,8 @@ fn string_array_config(key: &str, values: &[String]) -> StepConfig {
 #[cfg(test)]
 mod tests {
     use super::{build_preflight_steps, build_release_steps, github_release_applies};
-    use crate::component::Component;
+    use crate::component::{Component, ScopedExtensionConfig};
+    use crate::extension::ExtensionManifest;
     use crate::plan::PlanStepStatus;
     use crate::release::types::{
         ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleaseSemverRecommendation,
@@ -793,6 +845,54 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("release_plan")
         );
+    }
+
+    #[test]
+    fn release_plan_warns_when_configured_extensions_have_no_publish_action() {
+        let mut component = fixture_component();
+        component.extensions = Some(std::collections::HashMap::from([(
+            "wordpress".to_string(),
+            ScopedExtensionConfig::default(),
+        )]));
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "WordPress",
+            "version": "1.0.0",
+            "actions": [
+                {
+                    "id": "release.package",
+                    "label": "Package release",
+                    "type": "command",
+                    "command": "true"
+                }
+            ]
+        }))
+        .expect("extension manifest");
+        extension.id = "wordpress".to_string();
+        let mut warnings = Vec::new();
+        let mut hints = Vec::new();
+        let options = ReleaseOptions {
+            bump_type: "patch".to_string(),
+            ..Default::default()
+        };
+
+        let _steps = build_release_steps(
+            &component,
+            &[extension],
+            "1.0.0",
+            "1.0.1",
+            &fixture_changelog_plan(),
+            &options,
+            None,
+            &mut warnings,
+            &mut hints,
+        )
+        .expect("steps");
+
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("configured extensions (wordpress)")
+                && warning.contains("release.package")
+                && warning.contains("no extension provides 'release.publish'")
+        }));
     }
 
     #[test]
