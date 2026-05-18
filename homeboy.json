@@ -1,5 +1,13 @@
 {
   "auto_cleanup": false,
+  "autofix_verify": {
+    "command": "cargo",
+    "args": [
+      "check",
+      "--release"
+    ],
+    "timeout_secs": 300
+  },
   "baselines": {
     "audit": {
       "context_id": "homeboy",

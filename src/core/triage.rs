@@ -793,6 +793,7 @@ fn parse_github_parent_repo(raw: &str) -> std::result::Result<Option<GitHubRepo>
     let parsed: RawRepoParent = serde_json::from_str(raw.trim()).map_err(|e| e.to_string())?;
     Ok(if parsed.is_fork {
         parsed.parent.map(|parent| GitHubRepo {
+            host: "github.com".to_string(),
             owner: parent.owner.login,
             repo: parent.name,
         })
@@ -2550,6 +2551,7 @@ mod tests {
             assert_eq!(repo.owner, "chubes4");
             assert_eq!(repo.repo, "wordpress-playground");
             Ok(Some(GitHubRepo {
+                host: "github.com".to_string(),
                 owner: "WordPress".to_string(),
                 repo: "wordpress-playground".to_string(),
             }))

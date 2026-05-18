@@ -179,6 +179,7 @@ fn validate_github_remote_url_field(component: &Value, field: &str) -> Result<()
         Some(vec![
             "Use https://github.com/<owner>/<repo>.git".to_string(),
             "Or use git@github.com:<owner>/<repo>.git".to_string(),
+            "GitHub Enterprise hosts such as github.a8c.com are also supported".to_string(),
         ]),
     ))
 }
@@ -568,5 +569,22 @@ mod tests {
             json.get("triage_remote_url").and_then(|v| v.as_str()),
             Some("git@github.com:Extra-Chill/homeboy.git")
         );
+    }
+
+    #[test]
+    fn write_accepts_github_enterprise_remote_urls() {
+        let dir = TempDir::new().expect("temp dir");
+        let mut component = Component::new(
+            "test-comp".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            String::new(),
+            None,
+        );
+        component.remote_url = Some("git@github.a8c.com:Automattic/intelligence.git".to_string());
+        component.triage_remote_url =
+            Some("https://github.a8c.com/Automattic/intelligence.git".to_string());
+
+        write_portable_config(dir.path(), &component)
+            .expect("GitHub Enterprise remotes should be valid");
     }
 }
