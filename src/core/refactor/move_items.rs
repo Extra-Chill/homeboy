@@ -12,17 +12,17 @@
 //!   `homeboy refactor move --item "has_import" --from src/code_audit/conventions.rs --to src/code_audit/import_matching.rs`
 
 mod extension_integration;
-mod item_kind;
-mod move_options;
 mod types;
 mod whole_file_move;
 
 pub use super::resolve_root;
-pub(crate) use extension_integration::*;
-pub use item_kind::*;
-pub use move_options::*;
-pub use types::*;
-pub use whole_file_move::*;
+pub(crate) use extension_integration::core_parse_items;
+pub use types::{
+    ImportRewrite, ItemKind, ModuleIndexEntry, MoveFileResult, MoveOptions, MoveResult, MovedItem,
+};
+pub use whole_file_move::move_file;
+
+use extension_integration::find_refactor_extension;
 
 use std::path::{Path, PathBuf};
 

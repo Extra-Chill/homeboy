@@ -11,7 +11,9 @@ pub use helpers::{
     run_upgrade_with_method,
 };
 pub use planning::resolve_binary_on_path;
-pub use types::*;
+pub use types::{
+    ExtensionUpgradeEntry, InstallMethod, ProjectMigrationEntry, UpgradeResult, VersionCheck,
+};
 pub use validation::check_for_updates;
 
 impl InstallMethod {
