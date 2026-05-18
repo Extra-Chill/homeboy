@@ -13,6 +13,10 @@ pub(super) fn validate_release_worktree(
     options: &ReleaseOptions,
     version_info: &ComponentVersionInfo,
 ) -> Result<Option<serde_json::Value>> {
+    if options.pipeline.head && options.pipeline.from_artifacts.is_some() {
+        return Ok(None);
+    }
+
     let uncommitted = crate::core::git::get_uncommitted_changes(&component.local_path)?;
     if !uncommitted.has_changes {
         return Ok(None);
@@ -256,6 +260,34 @@ mod tests {
             .and_then(|value| value.as_array())
             .expect("details should include dirty files");
         assert_eq!(files[0].as_str(), Some("src.rs"));
+    }
+
+    #[test]
+    fn head_release_artifacts_skip_release_worktree_validation() {
+        let temp = git_repo();
+        let dir = temp.path();
+        std::fs::write(dir.join("CHANGELOG.md"), "# Changelog\n").unwrap();
+        std::fs::write(dir.join("manifest.toml"), "version = \"1.0.0\"\n").unwrap();
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
+        std::fs::create_dir(dir.join("artifacts")).unwrap();
+        std::fs::write(dir.join("artifacts/release.zip"), "fixture\n").unwrap();
+
+        let details = validate_release_worktree(
+            &git_component(dir),
+            &ReleaseOptions {
+                pipeline: crate::core::release::types::ReleasePipelineOptions {
+                    head: true,
+                    from_artifacts: Some("artifacts".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &version_info(dir),
+        )
+        .expect("head artifact releases should allow artifact directories");
+
+        assert!(details.is_none());
     }
 
     #[test]
