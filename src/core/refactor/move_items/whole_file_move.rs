@@ -6,10 +6,8 @@ use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use crate::core::engine::symbol_graph::module_path_from_file;
 use crate::core::Result;
 
-use super::{
-    core_parse_items, ext_parse_items, ext_rewrite_caller_imports, find_refactor_extension,
-    ImportRewrite, MoveFileResult,
-};
+use super::extension_integration::{core_parse_items, find_refactor_extension};
+use super::{ext_parse_items, ext_rewrite_caller_imports, ImportRewrite, MoveFileResult};
 
 /// Move an entire module file to a new location, rewriting all imports.
 ///
