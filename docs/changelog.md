@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.187.0] - 2026-05-18
+
+### Added
+- finish pipeline from tagged head
+- attach state.artifacts to github.release output
+
+### Changed
+- make git reexports explicit
+- make changelog reexports explicit
+- report core agnostic baseline debt
+- make version reexports explicit
+- make server reexports explicit
+- require explicit core paths
+- guard core command boundary
+- decouple HTTP analysis jobs from commands
+
+### Fixed
+- skip package during self-release prepare
+- fail release command on failed steps
+- exclude homeboy build artifacts from scans
+- include dirty files in test drift diffs
+- keep release diagnostics extension agnostic
+- guard runner doctor Unix probes
+
 ## [0.186.12] - 2026-05-18
 
 ### Changed
