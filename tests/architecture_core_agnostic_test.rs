@@ -102,6 +102,18 @@ fn server_root_does_not_wildcard_reexport_private_modules() {
 }
 
 #[test]
+fn release_version_root_does_not_wildcard_reexport_private_modules() {
+    let source = source_file("src/core/release/version.rs");
+
+    assert!(
+        !source.contains("pub use default_pattern_for_file::*")
+            && !source.contains("pub use types::*")
+            && !source.contains("pub use version::*"),
+        "src/core/release/version.rs must explicitly name the version APIs it re-exports"
+    );
+}
+
+#[test]
 fn validate_and_format_writes_do_not_select_ecosystem_commands() {
     let files = [
         "src/core/engine/validate_write.rs",
