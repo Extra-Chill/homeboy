@@ -216,7 +216,7 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
         module_path="${module_path#tests/}"      # strip leading tests/
         module_path="${module_path%.rs}"          # strip .rs extension
         module_path="${module_path%/mod}"         # strip /mod suffix
-        module_path="${module_path//\//::\:}"     # replace / with ::
+        module_path="${module_path//\//::}"       # replace / with ::
         if [ -n "$module_path" ]; then
             SCOPE_FILTER_ARGS+=("$module_path")
         fi
@@ -289,5 +289,10 @@ if [ "$TOTAL_PASSED" -eq 0 ]; then
         echo ""
         echo "Found ${TEST_FILE_COUNT} test files but no tests were executed."
         echo "This may indicate a configuration issue."
+        if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
+            FAILED_STEP="cargo test"
+            FAILURE_REPLAY_MODE="none"
+            exit 1
+        fi
     fi
 fi
