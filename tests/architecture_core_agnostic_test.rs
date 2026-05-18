@@ -114,6 +114,27 @@ fn release_version_root_does_not_wildcard_reexport_private_modules() {
 }
 
 #[test]
+fn release_changelog_roots_do_not_wildcard_reexport_private_modules() {
+    let roots = [
+        "src/core/release/changelog/mod.rs",
+        "src/core/release/changelog/sections.rs",
+    ];
+
+    for root in roots {
+        let source = source_file(root);
+        assert!(
+            !source.contains("pub use bulk::*")
+                && !source.contains("pub use io::*")
+                && !source.contains("pub use sections::*")
+                && !source.contains("pub use settings::*")
+                && !source.contains("pub use normalize_heading_label::*")
+                && !source.contains("pub use unreleased::*"),
+            "{root} must explicitly name the changelog APIs it re-exports"
+        );
+    }
+}
+
+#[test]
 fn validate_and_format_writes_do_not_select_ecosystem_commands() {
     let files = [
         "src/core/engine/validate_write.rs",
