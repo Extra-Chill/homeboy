@@ -550,6 +550,14 @@ namespace {
         fwrite( STDERR, "Expected job artifact export to open a runner-owned PR.\n" );
         exit( 1 );
     }
+    if ( 'https://github.com/owner/repo/pull/988' !== ( $job_artifact_export['engine_data']['review_agent']['pr_url'] ?? '' ) ) {
+        fwrite( STDERR, "Expected artifact PR export to record a slug-scoped PR URL in engine data.\n" );
+        exit( 1 );
+    }
+    if ( ! homeboy_datamachine_agent_pr_opened( $job_artifact_export['engine_data'] ?? array(), array( 'tool_results_key' => 'github_tool_results' ) ) ) {
+        fwrite( STDERR, "Expected artifact PR export to record a generic PR tool result.\n" );
+        exit( 1 );
+    }
     if ( 'bundles/task-runner/run-artifacts/review-flow/job-42/job-artifacts.json' !== ( $artifact_export_calls[0]['input']['file_path'] ?? null ) ) {
         fwrite( STDERR, "Expected Data Machine job artifact payload to be written as reviewable JSON.\n" );
         exit( 1 );
