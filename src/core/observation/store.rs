@@ -1587,15 +1587,13 @@ mod api_coverage_tests {
             let run = store.start_run(new_run("trace")).expect("start");
 
             let trace_run = store
-                .record_trace_run(NewTraceRunRecord {
-                    run_id: run.id.clone(),
-                    component_id: "studio".to_string(),
-                    rig_id: Some("studio-rig".to_string()),
-                    scenario_id: "create-site".to_string(),
-                    status: "pass".to_string(),
-                    baseline_status: Some("pass".to_string()),
-                    metadata_json: serde_json::json!({ "span_count": 1 }),
-                })
+                .record_trace_run(
+                    NewTraceRunRecord::builder(&run.id, "studio", "create-site", "pass")
+                        .trace_rig_id(Some("studio-rig"))
+                        .baseline_status(Some("pass"))
+                        .metadata(serde_json::json!({ "span_count": 1 }))
+                        .build(),
+                )
                 .expect("trace run");
 
             assert_eq!(trace_run.run_id, run.id);

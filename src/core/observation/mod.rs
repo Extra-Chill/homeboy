@@ -18,8 +18,9 @@ pub use records::{
     finding_records_from_annotation_file, finding_records_from_annotations_dir,
     finding_records_from_audit, finding_records_from_lint, AnnotationFindingRecord, ArtifactRecord,
     FindingListFilter, FindingRecord, NewFindingRecord, NewRunRecord, NewRunRecordBuilder,
-    NewTraceRunRecord, NewTraceSpanRecord, NewTriageItemRecord, RunListFilter, RunRecord,
-    RunStatus, TraceRunRecord, TraceSpanRecord, TriageItemRecord, TriagePullRequestSignals,
+    NewTraceRunRecord, NewTraceRunRecordBuilder, NewTraceSpanRecord, NewTriageItemRecord,
+    RunListFilter, RunRecord, RunStatus, TraceRunRecord, TraceSpanRecord, TriageItemRecord,
+    TriagePullRequestSignals,
 };
 pub use store::{ObservationDbStatus, ObservationStore, CURRENT_SCHEMA_VERSION};
 pub use timeline::{

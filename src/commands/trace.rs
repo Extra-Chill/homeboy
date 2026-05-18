@@ -1310,16 +1310,19 @@ fn persist_trace_workflow_result(
     let run_status = trace_run_status(workflow);
     let baseline_status = baseline_status(workflow);
     let results = workflow.results.as_ref();
-    let _ = observation.store.record_trace_run(NewTraceRunRecord {
-        run_id: observation.run_id.clone(),
-        component_id: observation.component_id.clone(),
-        rig_id: observation.rig_id.clone(),
-        scenario_id: results
-            .map(|results| results.scenario_id.clone())
-            .unwrap_or_else(|| observation.scenario_id.clone()),
-        status: run_status.as_str().to_string(),
-        baseline_status: baseline_status.clone(),
-        metadata_json: serde_json::json!({
+    let trace_scenario_id = results
+        .map(|results| results.scenario_id.clone())
+        .unwrap_or_else(|| observation.scenario_id.clone());
+    let _ = observation.store.record_trace_run(
+        NewTraceRunRecord::builder(
+            &observation.run_id,
+            &observation.component_id,
+            trace_scenario_id,
+            run_status.as_str(),
+        )
+        .trace_rig_id(observation.rig_id.as_deref())
+        .baseline_status(baseline_status.as_deref())
+        .metadata(serde_json::json!({
             "status": &workflow.status,
             "exit_code": workflow.exit_code,
             "summary": results.and_then(|results| results.summary.clone()),
@@ -1332,8 +1335,9 @@ fn persist_trace_workflow_result(
             "assertion_count": results.map(|results| results.assertions.len()).unwrap_or(0),
             "artifact_count": results.map(|results| results.artifacts.len()).unwrap_or(0),
             "span_count": results.map(|results| results.span_results.len()).unwrap_or(0),
-        }),
-    });
+        }))
+        .build(),
+    );
 
     if let Some(results) = results {
         for span in &results.span_results {
@@ -1374,15 +1378,17 @@ fn persist_trace_workflow_error(
             "details": &error.details,
         }
     });
-    let _ = observation.store.record_trace_run(NewTraceRunRecord {
-        run_id: observation.run_id.clone(),
-        component_id: observation.component_id.clone(),
-        rig_id: observation.rig_id.clone(),
-        scenario_id: observation.scenario_id.clone(),
-        status: RunStatus::Error.as_str().to_string(),
-        baseline_status: None,
-        metadata_json: error_metadata.clone(),
-    });
+    let _ = observation.store.record_trace_run(
+        NewTraceRunRecord::builder(
+            &observation.run_id,
+            &observation.component_id,
+            &observation.scenario_id,
+            RunStatus::Error.as_str(),
+        )
+        .trace_rig_id(observation.rig_id.as_deref())
+        .metadata(error_metadata.clone())
+        .build(),
+    );
     record_trace_artifacts(&observation.store, &observation.run_id, run_dir, None);
     let _ =
         observation
