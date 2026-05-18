@@ -221,11 +221,16 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
         # Convert file path to Rust module path for cargo test filtering
         # e.g., src/commands/audit.rs → commands::audit
         #        src/utils/baseline.rs → utils::baseline
-        #        tests/integration.rs  → integration
+        #        tests/core/foo_test.rs with src/core/foo.rs → core::foo::foo_test
         module_path="${test_file#src/}"          # strip leading src/
         module_path="${module_path#tests/}"      # strip leading tests/
         module_path="${module_path%.rs}"          # strip .rs extension
         module_path="${module_path%/mod}"         # strip /mod suffix
+        test_module="${module_path##*/}"
+        source_module="${module_path%_test}"
+        if [[ "$test_file" == tests/*_test.rs ]] && { [ -f "${PROJECT_PATH}/src/${source_module}.rs" ] || [ -f "${PROJECT_PATH}/src/${source_module}/mod.rs" ]; }; then
+            module_path="${source_module}::${test_module}"
+        fi
         module_path="${module_path//\//::}"       # replace / with ::
         if [ -n "$module_path" ]; then
             SCOPE_FILTER_ARGS+=("$module_path")
