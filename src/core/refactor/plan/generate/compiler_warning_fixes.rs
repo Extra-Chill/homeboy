@@ -1,25 +1,26 @@
 //! Auto-fix compiler warnings using machine-applicable suggestions from the compiler.
 //!
-//! Runs `cargo check --message-format=json` to get structured warnings with fix
-//! suggestions, then converts them to Fix objects that the refactor pipeline applies.
-//!
-//! Supported warnings:
-//! - `unused_imports`: remove the import line
-//! - `unused_mut`: remove the `mut` keyword
-//! - `unused_assignments`: remove the assignment
-//! - `dead_code`: remove the function/method (line-range removal)
+//! Runs extension-owned compiler warning fix scripts, then converts their generic
+//! fix envelopes to Fix objects that the refactor pipeline applies.
 
 use std::path::Path;
 
 use super::{tagged_line_replacement, tagged_range_removal};
 use crate::core::code_audit::{AuditFinding, CodeAuditResult};
+use crate::core::extension::{
+    extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
+    CompilerWarningContract, ExtensionManifest,
+};
 use crate::core::refactor::auto::{Fix, RefactorPrimitive, SkippedFile};
 
 /// A machine-applicable fix suggestion from the compiler.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct CompilerSuggestion {
     /// Warning code (e.g., "unused_imports", "dead_code").
+    #[serde(default)]
     code: String,
+    /// Generic edit kind: line_removal or line_replacement.
+    kind: String,
     /// Relative file path.
     file: String,
     /// 1-indexed start line of the span to replace.
@@ -34,7 +35,13 @@ struct CompilerSuggestion {
     message: String,
 }
 
-/// Generate fixes for compiler warnings by running `cargo check` and parsing suggestions.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CompilerFixEnvelope {
+    #[serde(default)]
+    fixes: Vec<CompilerSuggestion>,
+}
+
+/// Generate fixes for compiler warnings by running extension-owned fix scripts.
 pub(crate) fn generate_compiler_warning_fixes(
     result: &CodeAuditResult,
     root: &Path,
@@ -52,65 +59,79 @@ pub(crate) fn generate_compiler_warning_fixes(
         return;
     }
 
-    // Don't run cargo check if not a Rust project.
-    if !root.join("Cargo.toml").exists() {
-        return;
-    }
-
-    let suggestions = match run_cargo_check_for_suggestions(root) {
-        Ok(s) => s,
-        Err(e) => {
-            skipped.push(SkippedFile {
-                file: String::new(),
-                reason: format!("Failed to run cargo check for fix suggestions: {}", e),
-            });
-            return;
-        }
-    };
+    let suggestions =
+        extensions_for_compiler_warning_contract(root, CompilerWarningContract::Fixes)
+            .into_iter()
+            .flat_map(|extension| {
+                run_compiler_warning_fixes_script(&extension, root, result, skipped)
+            })
+            .collect::<Vec<_>>();
 
     for suggestion in suggestions {
-        let fix = match suggestion.code.as_str() {
-            // For unused_imports: the compiler suggests removing the full line(s).
-            // Use FunctionRemoval for line-range deletion.
-            "unused_imports" => build_line_removal_fix(&suggestion),
-
-            // For unused_mut, unused_assignments: use LineReplacement.
-            "unused_mut" | "unused_variables" | "unused_assignments" => {
-                build_line_replacement_fix(&suggestion)
-            }
-
-            // dead_code: use FunctionRemoval for the span range.
-            // Skip functions inside #[cfg(test)] modules — these are test helpers
-            // (e.g., make_fingerprint, make_rule) that may appear unused to the
-            // compiler in isolation but are called by test functions. Deleting them
-            // breaks the tests that depend on them.
-            "dead_code" => {
+        let fix = match suggestion.kind.as_str() {
+            "line_removal" => {
                 if is_inside_test_module(root, &suggestion) {
                     continue;
                 }
                 build_line_removal_fix(&suggestion)
             }
-
-            // Other warnings with suggestions: use LineReplacement if single-line.
-            _ => {
-                if suggestion.line_start == suggestion.line_end {
-                    build_line_replacement_fix(&suggestion)
-                } else {
-                    // Multi-line replacement without specific handler — skip.
-                    skipped.push(SkippedFile {
-                        file: suggestion.file.clone(),
-                        reason: format!(
-                            "No fixer for multi-line {} warning at line {}",
-                            suggestion.code, suggestion.line_start
-                        ),
-                    });
-                    continue;
-                }
+            "line_replacement" => build_line_replacement_fix(&suggestion),
+            other => {
+                skipped.push(SkippedFile {
+                    file: suggestion.file.clone(),
+                    reason: format!(
+                        "Unknown compiler warning fix kind '{}' at line {}",
+                        other, suggestion.line_start
+                    ),
+                });
+                continue;
             }
         };
 
         fixes.push(fix);
     }
+}
+
+fn run_compiler_warning_fixes_script(
+    extension: &ExtensionManifest,
+    root: &Path,
+    result: &CodeAuditResult,
+    skipped: &mut Vec<SkippedFile>,
+) -> Vec<CompilerSuggestion> {
+    let input = serde_json::json!({
+        "root": root,
+        "findings": result.findings,
+    });
+
+    let stdout = match run_compiler_warning_contract_script(
+        extension,
+        CompilerWarningContract::Fixes,
+        root,
+        &input,
+    ) {
+        Ok(Some(stdout)) => stdout,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            skipped.push(SkippedFile {
+                file: String::new(),
+                reason: error,
+            });
+            return Vec::new();
+        }
+    };
+
+    serde_json::from_str::<CompilerFixEnvelope>(&stdout)
+        .map(|envelope| envelope.fixes)
+        .unwrap_or_else(|e| {
+            skipped.push(SkippedFile {
+                file: String::new(),
+                reason: format!(
+                    "Invalid compiler warning fix output for extension '{}': {}",
+                    extension.id, e
+                ),
+            });
+            Vec::new()
+        })
 }
 
 /// Build a Fix that removes lines (for unused imports, dead code).
@@ -207,189 +228,16 @@ fn is_inside_test_module(root: &Path, suggestion: &CompilerSuggestion) -> bool {
     false
 }
 
-/// Run `cargo check --message-format=json` and extract machine-applicable suggestions.
-fn run_cargo_check_for_suggestions(root: &Path) -> Result<Vec<CompilerSuggestion>, String> {
-    let output = std::process::Command::new("cargo")
-        .args(["check", "--message-format=json"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("Failed to run cargo check: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_suggestions(&stdout, root))
-}
-
-/// Parse cargo JSON output for machine-applicable suggestions.
-fn parse_suggestions(stdout: &str, root: &Path) -> Vec<CompilerSuggestion> {
-    let root_str = root.to_string_lossy();
-    let mut suggestions = Vec::new();
-
-    for line in stdout.lines() {
-        let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-
-        if msg.get("reason").and_then(|v| v.as_str()) != Some("compiler-message") {
-            continue;
-        }
-
-        let Some(message) = msg.get("message") else {
-            continue;
-        };
-
-        if message.get("level").and_then(|v| v.as_str()) != Some("warning") {
-            continue;
-        }
-
-        let code = message
-            .get("code")
-            .and_then(|c| c.get("code"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        let text = message
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        // Look for machine-applicable suggestions in children.
-        for child in message
-            .get("children")
-            .and_then(|c| c.as_array())
-            .into_iter()
-            .flatten()
-        {
-            for span in child
-                .get("spans")
-                .and_then(|s| s.as_array())
-                .into_iter()
-                .flatten()
-            {
-                let Some(replacement) = span.get("suggested_replacement").and_then(|r| r.as_str())
-                else {
-                    continue;
-                };
-
-                let file_name = span
-                    .get("file_name")
-                    .and_then(|f| f.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                // Make path relative to root.
-                let relative = file_name
-                    .strip_prefix(&*root_str)
-                    .map(|s| s.trim_start_matches('/').to_string())
-                    .unwrap_or(file_name);
-
-                // Skip external files.
-                if relative.is_empty() || relative.starts_with('/') || relative.contains("/.cargo/")
-                {
-                    continue;
-                }
-
-                let line_start =
-                    span.get("line_start").and_then(|l| l.as_u64()).unwrap_or(1) as usize;
-                let line_end = span
-                    .get("line_end")
-                    .and_then(|l| l.as_u64())
-                    .unwrap_or(line_start as u64) as usize;
-
-                // Extract the original text from the span for LineReplacement matching.
-                let original_text = span
-                    .get("text")
-                    .and_then(|t| t.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|t| t.get("text"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                // For single-line replacements, extract just the portion being replaced.
-                let col_start = span
-                    .get("column_start")
-                    .and_then(|c| c.as_u64())
-                    .unwrap_or(1) as usize;
-                let col_end = span
-                    .get("column_end")
-                    .and_then(|c| c.as_u64())
-                    .unwrap_or(col_start as u64) as usize;
-
-                let old_text = if line_start == line_end && !original_text.is_empty() {
-                    // Extract just the replaced portion from the line.
-                    let start = col_start.saturating_sub(1);
-                    let end = col_end.saturating_sub(1);
-                    if start < original_text.len() && end <= original_text.len() {
-                        original_text[start..end].to_string()
-                    } else {
-                        original_text.clone()
-                    }
-                } else {
-                    original_text
-                };
-
-                suggestions.push(CompilerSuggestion {
-                    code: code.clone(),
-                    file: relative,
-                    line_start,
-                    line_end,
-                    original_text: old_text,
-                    replacement: replacement.to_string(),
-                    message: text.clone(),
-                });
-            }
-        }
-    }
-
-    // Deduplicate.
-    suggestions
-        .sort_by(|a, b| (&a.file, a.line_start, &a.code).cmp(&(&b.file, b.line_start, &b.code)));
-    suggestions
-        .dedup_by(|a, b| a.file == b.file && a.line_start == b.line_start && a.code == b.code);
-
-    suggestions
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::refactor::InsertionKind;
 
     #[test]
-    fn parse_suggestions_extracts_unused_import() {
-        let json_line = r#"{"reason":"compiler-message","package_id":"foo 0.1.0","message":{"rendered":"warning: unused import","level":"warning","code":{"code":"unused_imports","explanation":null},"message":"unused import: `std::collections::HashMap`","spans":[{"file_name":"src/lib.rs","byte_start":0,"byte_end":31,"line_start":1,"line_end":2,"column_start":1,"column_end":1,"is_primary":true,"text":[{"text":"use std::collections::HashMap;","highlight_start":1,"highlight_end":31}]}],"children":[{"message":"remove the whole `use` item","code":null,"level":"help","spans":[{"file_name":"src/lib.rs","byte_start":0,"byte_end":31,"line_start":1,"line_end":2,"column_start":1,"column_end":1,"is_primary":true,"text":[{"text":"use std::collections::HashMap;","highlight_start":1,"highlight_end":31}],"suggested_replacement":""}],"children":[],"rendered":null}]}}"#;
-
-        let root = Path::new("/project");
-        let suggestions = parse_suggestions(json_line, root);
-
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].code, "unused_imports");
-        assert_eq!(suggestions[0].file, "src/lib.rs");
-        assert_eq!(suggestions[0].line_start, 1);
-        assert_eq!(suggestions[0].replacement, "");
-    }
-
-    #[test]
-    fn parse_suggestions_extracts_unused_mut() {
-        let json_line = r#"{"reason":"compiler-message","package_id":"foo 0.1.0","message":{"rendered":"warning: unused mut","level":"warning","code":{"code":"unused_mut","explanation":null},"message":"variable does not need to be mutable","spans":[{"file_name":"src/lib.rs","byte_start":90,"byte_end":94,"line_start":6,"line_end":6,"column_start":9,"column_end":13,"is_primary":true,"text":[{"text":"    let mut x = 5;","highlight_start":9,"highlight_end":13}]}],"children":[{"message":"remove this `mut`","code":null,"level":"help","spans":[{"file_name":"src/lib.rs","byte_start":90,"byte_end":94,"line_start":6,"line_end":6,"column_start":9,"column_end":13,"is_primary":true,"text":[{"text":"    let mut x = 5;","highlight_start":9,"highlight_end":13}],"suggested_replacement":""}],"children":[],"rendered":null}]}}"#;
-
-        let root = Path::new("/project");
-        let suggestions = parse_suggestions(json_line, root);
-
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].code, "unused_mut");
-        assert_eq!(suggestions[0].file, "src/lib.rs");
-        assert_eq!(suggestions[0].line_start, 6);
-        assert_eq!(suggestions[0].original_text, "mut ");
-        assert_eq!(suggestions[0].replacement, "");
-    }
-
-    #[test]
     fn build_line_removal_fix_creates_function_removal() {
         let suggestion = CompilerSuggestion {
             code: "unused_imports".to_string(),
+            kind: "line_removal".to_string(),
             file: "src/lib.rs".to_string(),
             line_start: 1,
             line_end: 1,
@@ -415,6 +263,7 @@ mod tests {
     fn build_line_replacement_fix_creates_replacement() {
         let suggestion = CompilerSuggestion {
             code: "unused_mut".to_string(),
+            kind: "line_replacement".to_string(),
             file: "src/lib.rs".to_string(),
             line_start: 6,
             line_end: 6,
@@ -462,6 +311,7 @@ mod tests {
         // Line 8 is inside the test module (make_fingerprint)
         let suggestion_inside = CompilerSuggestion {
             code: "dead_code".to_string(),
+            kind: "line_removal".to_string(),
             file: "src/lib.rs".to_string(),
             line_start: 8,
             line_end: 10,
@@ -477,6 +327,7 @@ mod tests {
         // Line 2 is outside the test module (public_function)
         let suggestion_outside = CompilerSuggestion {
             code: "dead_code".to_string(),
+            kind: "line_removal".to_string(),
             file: "src/lib.rs".to_string(),
             line_start: 2,
             line_end: 2,
@@ -509,6 +360,7 @@ mod helpers {
 
         let suggestion = CompilerSuggestion {
             code: "dead_code".to_string(),
+            kind: "line_removal".to_string(),
             file: "src/lib.rs".to_string(),
             line_start: 3,
             line_end: 5,

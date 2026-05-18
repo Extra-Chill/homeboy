@@ -137,10 +137,6 @@ const TERMS: &[Term] = &[
 const BASELINE: &[ViolationKey] = &[
     ViolationKey {
         path: "src/commands/component.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/commands/component.rs",
         term: "wordpress",
     },
     ViolationKey {
@@ -184,32 +180,8 @@ const BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/compiler_warnings.rs",
-        term: "Cargo.toml",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/compiler_warnings.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/compiler_warnings.rs",
-        term: "go vet",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/conventions.rs",
-        term: "cargo",
-    },
-    ViolationKey {
         path: "src/core/code_audit/conventions.rs",
         term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/core_fingerprint.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/core_fingerprint.rs",
-        term: "rust",
     },
     ViolationKey {
         path: "src/core/code_audit/dead_code.rs",
@@ -306,34 +278,6 @@ const BASELINE: &[ViolationKey] = &[
     ViolationKey {
         path: "src/core/component/mod.rs",
         term: "npm",
-    },
-    ViolationKey {
-        path: "src/core/context/mod.rs",
-        term: "Cargo.toml",
-    },
-    ViolationKey {
-        path: "src/core/context/mod.rs",
-        term: "functions.php",
-    },
-    ViolationKey {
-        path: "src/core/context/mod.rs",
-        term: "nodejs",
-    },
-    ViolationKey {
-        path: "src/core/context/mod.rs",
-        term: "package.json",
-    },
-    ViolationKey {
-        path: "src/core/context/mod.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/context/mod.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/context/mod.rs",
-        term: "style.css",
     },
     ViolationKey {
         path: "src/core/context/mod.rs",
@@ -572,14 +516,6 @@ const BASELINE: &[ViolationKey] = &[
         term: "rust",
     },
     ViolationKey {
-        path: "src/core/refactor/plan/generate/compiler_warning_fixes.rs",
-        term: "Cargo.toml",
-    },
-    ViolationKey {
-        path: "src/core/refactor/plan/generate/compiler_warning_fixes.rs",
-        term: "cargo",
-    },
-    ViolationKey {
         path: "src/core/refactor/plan/generate/duplicate_fixes.rs",
         term: "php",
     },
@@ -665,7 +601,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 182;
+const BASELINE_OCCURRENCES: usize = 161;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {

@@ -7,6 +7,10 @@ fn extension_capability_owns_labels_and_scripts() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
+        "scripts": {
+            "compiler_warnings": "compiler-warnings.sh",
+            "compiler_warning_fixes": "compiler-warning-fixes.sh"
+        },
         "runtime": { "runtimes": { "node": { "version": "24" } } },
         "lint": { "extension_script": "lint.sh" },
         "test": {
@@ -36,6 +40,14 @@ fn extension_capability_owns_labels_and_scripts() {
             .and_then(|test| test.result_parse.as_ref())
             .map(|spec| spec.rules.len()),
         Some(1)
+    );
+    assert_eq!(
+        manifest.compiler_warnings_script(),
+        Some("compiler-warnings.sh")
+    );
+    assert_eq!(
+        manifest.compiler_warning_fixes_script(),
+        Some("compiler-warning-fixes.sh")
     );
 
     for (capability, label, script, requires_script) in [
