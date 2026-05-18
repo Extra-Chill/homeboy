@@ -2,9 +2,10 @@ mod normalize_heading_label;
 mod types;
 mod unreleased;
 
-pub use normalize_heading_label::*;
-pub(crate) use types::*;
-pub use unreleased::*;
+pub use normalize_heading_label::{extract_last_release_snapshot, get_latest_finalized_version};
+use normalize_heading_label::{is_matching_next_section_heading, validate_section_content};
+use types::SectionContentStatus;
+pub use unreleased::{count_unreleased_entries, get_unreleased_entries};
 
 use chrono::Local;
 
