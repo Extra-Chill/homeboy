@@ -375,7 +375,9 @@ fn add_release_extension_diagnostics(
 
     let mut configured_ids: Vec<String> = configured.keys().cloned().collect();
     configured_ids.sort();
-    if !configured_ids.iter().any(|id| id == "wordpress") && !has_package_capability(extensions) {
+    if !configured_extension_has_release_actions(&configured_ids, extensions)
+        && !has_package_capability(extensions)
+    {
         return;
     }
 
@@ -402,6 +404,19 @@ fn add_release_extension_diagnostics(
             loaded.join("; ")
         }
     ));
+}
+
+fn configured_extension_has_release_actions(
+    configured_ids: &[String],
+    extensions: &[ExtensionManifest],
+) -> bool {
+    extensions.iter().any(|extension| {
+        configured_ids.iter().any(|id| id == &extension.id)
+            && extension
+                .actions
+                .iter()
+                .any(|action| action.id.starts_with("release."))
+    })
 }
 
 fn build_changelog_steps(
