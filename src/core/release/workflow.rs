@@ -13,6 +13,24 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         return run_recover(&input);
     }
 
+    if input.pipeline.from_artifacts.is_some() && !input.pipeline.head {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            "--from-artifacts requires --head",
+            input.pipeline.from_artifacts.clone(),
+            None,
+        ));
+    }
+
+    if input.pipeline.head && input.bump_override.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "bump",
+            "--head uses the version already present at HEAD and cannot be combined with --bump",
+            input.bump_override.clone(),
+            None,
+        ));
+    }
+
     let component = load_component(
         &input.component_id,
         &ReleaseOptions {
@@ -22,7 +40,11 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     )?;
 
     let monorepo = git::MonorepoContext::detect(&component.local_path, &input.component_id);
-    let resolved_bump = resolve_bump(&component.local_path, monorepo.as_ref())?;
+    let resolved_bump = if input.pipeline.head {
+        None
+    } else {
+        resolve_bump(&component.local_path, monorepo.as_ref())?
+    };
     let (auto_bump_type, releasable_count) = resolved_bump
         .clone()
         .unwrap_or_else(|| ("none".to_string(), 0));
@@ -30,7 +52,9 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     let has_breaking_commits = auto_bump_type == "major";
 
     // Resolve the effective bump type: --bump overrides auto-detection.
-    let bump_type = if let Some(ref override_value) = input.bump_override {
+    let bump_type = if input.pipeline.head {
+        "head".to_string()
+    } else if let Some(ref override_value) = input.bump_override {
         // Check if it's an explicit version string (e.g. "2.0.0")
         let is_explicit_version = override_value.contains('.');
 
@@ -114,8 +138,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         dry_run: input.dry_run,
         path_override: input.path_override,
         skip_checks: input.skip_checks,
-        skip_publish: input.skip_publish,
-        deploy: input.deploy,
+        pipeline: input.pipeline.clone(),
         skip_github_release: input.skip_github_release,
         git_identity: input.git_identity.clone(),
         bump_policy: ReleaseBumpPolicyOptions {
@@ -127,11 +150,16 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
 
     if options.dry_run {
         let plan = super::plan(&input.component_id, &options)?;
-        let new_version = extract_new_version_from_plan(&plan);
+        let new_version = if input.pipeline.head {
+            current_component_version(&component)?
+        } else {
+            extract_new_version_from_plan(&plan)
+        };
         let tag = new_version
             .as_ref()
             .map(|v| format_tag(v, monorepo.as_ref()));
         let deployment = input
+            .pipeline
             .deploy
             .then(|| super::deployment::plan_deployment(&input.component_id));
 
@@ -155,7 +183,11 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     let (plan, run_result) = super::pipeline::run_with_plan(&input.component_id, &options)?;
     display_release_summary(&run_result);
 
-    let new_version = extract_new_version_from_run(&run_result);
+    let new_version = if input.pipeline.head {
+        current_component_version(&component)?
+    } else {
+        extract_new_version_from_run(&run_result)
+    };
     let tag = new_version
         .as_ref()
         .map(|v| format_tag(v, monorepo.as_ref()));
@@ -207,6 +239,12 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         },
         exit_code,
     ))
+}
+
+fn current_component_version(
+    component: &crate::core::component::Component,
+) -> Result<Option<String>> {
+    super::version::read_component_version(component).map(|info| Some(info.version))
 }
 
 fn resolve_bump(
@@ -569,12 +607,11 @@ pub fn run_batch(
             component_id: component_id.clone(),
             path_override: None,
             dry_run: input_template.dry_run,
-            deploy: input_template.deploy,
             recover: input_template.recover,
             skip_checks: input_template.skip_checks,
             bump_override: input_template.bump_override.clone(),
             force_lower_bump: input_template.force_lower_bump,
-            skip_publish: input_template.skip_publish,
+            pipeline: input_template.pipeline.clone(),
             skip_github_release: input_template.skip_github_release,
             git_identity: input_template.git_identity.clone(),
         };

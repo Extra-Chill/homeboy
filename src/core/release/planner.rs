@@ -25,32 +25,45 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     let mut v = ValidationCollector::new();
 
     let monorepo = git::MonorepoContext::detect(&component.local_path, component_id);
-    let semver_recommendation =
-        build_semver_recommendation(&component, &options.bump_type, monorepo.as_ref())?;
+    let semver_recommendation = if options.pipeline.head {
+        None
+    } else {
+        build_semver_recommendation(&component, &options.bump_type, monorepo.as_ref())?
+    };
 
-    if let Some(skip_plan) = release_skip_plan(component_id, options, semver_recommendation.clone())
-    {
-        return Ok(skip_plan);
+    if !options.pipeline.head {
+        if let Some(skip_plan) =
+            release_skip_plan(component_id, options, semver_recommendation.clone())
+        {
+            return Ok(skip_plan);
+        }
     }
 
-    let pending_entries = v
-        .capture(
+    let pending_entries = if options.pipeline.head {
+        Default::default()
+    } else {
+        v.capture(
             generate_changelog_entries(&component, component_id, options, monorepo.as_ref()),
             "commits",
         )
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
 
     let version_info = v.capture(version::read_component_version(&component), "version");
     let new_version = if let Some(ref info) = version_info {
-        match version::increment_version(&info.version, &options.bump_type) {
-            Some(ver) => Some(ver),
-            None => {
-                v.push(
-                    "version",
-                    &format!("Invalid version format: {}", info.version),
-                    None,
-                );
-                None
+        if options.pipeline.head {
+            Some(info.version.clone())
+        } else {
+            match version::increment_version(&info.version, &options.bump_type) {
+                Some(ver) => Some(ver),
+                None => {
+                    v.push(
+                        "version",
+                        &format!("Invalid version format: {}", info.version),
+                        None,
+                    );
+                    None
+                }
             }
         }
     } else {

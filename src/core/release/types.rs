@@ -201,6 +201,23 @@ pub struct ReleaseState {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReleasePipelineOptions {
+    /// Skip publish/package steps (version bump + tag + push only).
+    /// Use when CI handles publishing after the tag is pushed.
+    #[serde(default)]
+    pub skip_publish: bool,
+    /// Finish a release whose version commit and tag already exist at HEAD.
+    #[serde(default)]
+    pub head: bool,
+    /// Existing release artifacts to inventory instead of running release.package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_artifacts: Option<String>,
+    /// Deploy after release — defers artifact cleanup until after deployment.
+    #[serde(default)]
+    pub deploy: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReleaseOptions {
     pub bump_type: String,
     pub dry_run: bool,
@@ -210,13 +227,8 @@ pub struct ReleaseOptions {
     /// Skip lint/test code quality checks before release.
     #[serde(default)]
     pub skip_checks: bool,
-    /// Skip publish/package steps (version bump + tag + push only).
-    /// Use when CI handles publishing after the tag is pushed.
-    #[serde(default)]
-    pub skip_publish: bool,
-    /// Deploy after release — defers artifact cleanup until after deployment.
-    #[serde(default)]
-    pub deploy: bool,
+    #[serde(default, flatten)]
+    pub pipeline: ReleasePipelineOptions,
     /// Skip the GitHub Release creation step (tag + notes on github.com).
     /// Use when another pipeline (CI, semantic-release, etc.) already owns that step.
     #[serde(default)]
@@ -256,8 +268,6 @@ pub struct ReleaseCommandInput {
     #[serde(default)]
     pub dry_run: bool,
     #[serde(default)]
-    pub deploy: bool,
-    #[serde(default)]
     pub recover: bool,
     #[serde(default)]
     pub skip_checks: bool,
@@ -268,8 +278,8 @@ pub struct ReleaseCommandInput {
     /// Permit a keyword bump lower than the commit-derived recommendation.
     #[serde(default)]
     pub force_lower_bump: bool,
-    #[serde(default)]
-    pub skip_publish: bool,
+    #[serde(default, flatten)]
+    pub pipeline: ReleasePipelineOptions,
     /// Skip the GitHub Release creation step (tag + notes on github.com).
     #[serde(default)]
     pub skip_github_release: bool,

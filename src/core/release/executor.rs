@@ -22,6 +22,7 @@ use crate::core::release::{changelog as release_changelog, version};
 use super::types::{ReleaseArtifact, ReleaseState, ReleaseStepResult, ReleaseStepStatus};
 use super::utils::{extract_latest_notes, parse_release_artifacts};
 
+pub(crate) mod artifacts;
 pub(crate) mod changelog;
 pub(crate) mod prepare;
 
