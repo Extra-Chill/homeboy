@@ -901,23 +901,102 @@ pub(crate) fn run_github_release(
         ));
     }
 
+    // Collect artifact paths from state. Populated by release.package
+    // (or any other extension action that emits artifact metadata into
+    // ReleaseState::artifacts). Passing these to `gh release create` or
+    // `gh release upload --clobber` attaches them to the Release in a
+    // single API call — keeping the github.release step responsible for
+    // the full Release lifecycle (entry + assets) instead of requiring a
+    // separate publish.<target> step.
+    let artifact_paths: Vec<String> = state
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.path.clone())
+        .collect();
+    let has_artifacts = !artifact_paths.is_empty();
+
     let repo_flag = format!("{}/{}", github.owner, github.repo);
     if gh_release_exists(&tag, &repo_flag) {
+        // Release entry already exists (idempotent retry, or release
+        // created out of band). When the release has no artifacts to
+        // attach, skip — there is nothing to update. When artifacts are
+        // present, upload them with --clobber so retries keep the latest
+        // build attached without duplicating the GitHub Release entry.
+        if !has_artifacts {
+            log_status!(
+                "release",
+                "GitHub Release {} already exists for {} — skipping (idempotent)",
+                tag,
+                repo_flag
+            );
+            return Ok(step_success(
+                "github.release",
+                "github.release",
+                Some(serde_json::json!({
+                    "skipped": true,
+                    "reason": "release-already-exists",
+                    "tag": tag,
+                    "owner": github.owner,
+                    "repo": github.repo,
+                })),
+                Vec::new(),
+            ));
+        }
+
         log_status!(
             "release",
-            "GitHub Release {} already exists for {} — skipping (idempotent)",
+            "GitHub Release {} already exists for {} — uploading {} artifact(s) with --clobber",
             tag,
-            repo_flag
+            repo_flag,
+            artifact_paths.len()
         );
+
+        let mut upload_args: Vec<&str> = vec!["release", "upload", &tag];
+        for path in &artifact_paths {
+            upload_args.push(path);
+        }
+        upload_args.extend_from_slice(&["--clobber", "-R", &repo_flag]);
+
+        let upload_output = std::process::Command::new("gh")
+            .args(&upload_args)
+            .output()
+            .map_err(|e| {
+                Error::internal_io(
+                    format!("Failed to invoke gh: {}", e),
+                    Some("gh release upload".to_string()),
+                )
+            })?;
+
+        if !upload_output.status.success() {
+            let stderr = String::from_utf8_lossy(&upload_output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&upload_output.stdout).to_string();
+            log_status!("release", "⚠ `gh release upload` failed: {}", stderr.trim());
+            return Ok(step_success(
+                "github.release",
+                "github.release",
+                Some(serde_json::json!({
+                    "skipped": true,
+                    "reason": "gh-upload-failed",
+                    "tag": tag,
+                    "owner": github.owner,
+                    "repo": github.repo,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "artifact_count": artifact_paths.len(),
+                })),
+                Vec::new(),
+            ));
+        }
+
         return Ok(step_success(
             "github.release",
             "github.release",
             Some(serde_json::json!({
-                "skipped": true,
-                "reason": "release-already-exists",
+                "action": "github.release.upload",
                 "tag": tag,
                 "owner": github.owner,
                 "repo": github.repo,
+                "artifact_count": artifact_paths.len(),
             })),
             Vec::new(),
         ));
@@ -938,29 +1017,38 @@ pub(crate) fn run_github_release(
         )
     })?;
 
+    let notes_path_str = notes_path.to_str().ok_or_else(|| {
+        Error::internal_unexpected("github.release: notes-file path is not valid UTF-8".to_string())
+    })?;
+
     log_status!(
         "release",
-        "Creating GitHub Release {} on {}...",
+        "Creating GitHub Release {} on {} with {} artifact(s)...",
         tag,
-        repo_flag
+        repo_flag,
+        artifact_paths.len()
     );
 
+    // Build args dynamically so we can append artifact paths as positional
+    // arguments — `gh release create <tag> [files...]` attaches each file
+    // as a Release asset in the same API call.
+    let mut create_args: Vec<&str> = vec![
+        "release",
+        "create",
+        &tag,
+        "--title",
+        &tag,
+        "--notes-file",
+        notes_path_str,
+        "-R",
+        &repo_flag,
+    ];
+    for path in &artifact_paths {
+        create_args.push(path);
+    }
+
     let output = std::process::Command::new("gh")
-        .args([
-            "release",
-            "create",
-            &tag,
-            "--title",
-            &tag,
-            "--notes-file",
-            notes_path.to_str().ok_or_else(|| {
-                Error::internal_unexpected(
-                    "github.release: notes-file path is not valid UTF-8".to_string(),
-                )
-            })?,
-            "-R",
-            &repo_flag,
-        ])
+        .args(&create_args)
         .output()
         .map_err(|e| {
             Error::internal_io(
@@ -1004,6 +1092,7 @@ pub(crate) fn run_github_release(
             "owner": github.owner,
             "repo": github.repo,
             "url": url,
+            "artifact_count": artifact_paths.len(),
         })),
         Vec::new(),
     ))
