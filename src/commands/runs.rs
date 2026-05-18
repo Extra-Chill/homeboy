@@ -114,6 +114,7 @@ pub enum RunsOutput {
     Show(RunsShowOutput),
     Artifacts(RunsArtifactsOutput),
     ArtifactGet(RunsArtifactGetOutput),
+    ArtifactCleanupDownloads(RunsArtifactCleanupDownloadsOutput),
     Findings(RunsFindingsOutput),
     Finding(RunsFindingOutput),
     LatestFinding(RunsLatestFindingOutput),
@@ -156,6 +157,8 @@ pub struct RunsArtifactArgs {
 enum RunsArtifactCommand {
     /// Copy a recorded file artifact to a local path
     Get(RunsArtifactGetArgs),
+    /// Plan or delete locally cached runner artifact downloads
+    CleanupDownloads(RunsArtifactCleanupDownloadsArgs),
 }
 
 #[derive(Args, Clone)]
@@ -178,6 +181,31 @@ pub struct RunsArtifactGetOutput {
     pub content_type: Option<String>,
     pub size_bytes: Option<i64>,
     pub sha256: Option<String>,
+}
+
+#[derive(Args, Clone, Default)]
+pub struct RunsArtifactCleanupDownloadsArgs {
+    /// Delete the planned cached downloads. Without this flag, only reports the plan.
+    #[arg(long)]
+    pub apply: bool,
+    /// Limit cleanup to one runner id under the local runner artifact cache.
+    #[arg(long)]
+    pub runner: Option<String>,
+    /// Limit cleanup to one run id. Requires --runner.
+    #[arg(long)]
+    pub run_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactCleanupDownloadsOutput {
+    pub command: &'static str,
+    pub dry_run: bool,
+    pub root: String,
+    pub removed: bool,
+    pub file_count: usize,
+    pub directory_count: usize,
+    pub size_bytes: u64,
+    pub paths: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -320,6 +348,7 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
 fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
     match args.command {
         RunsArtifactCommand::Get(args) => artifact_get(args),
+        RunsArtifactCommand::CleanupDownloads(args) => remote_artifact::cleanup_downloads(args),
     }
 }
 

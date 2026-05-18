@@ -71,6 +71,11 @@ pub fn set_artifact_root_override(path: Option<std::path::PathBuf>) {
     paths::set_artifact_root_override(path);
 }
 
+/// Resolve the artifact root used for copied/downloaded run artifacts.
+pub fn artifact_root() -> Result<std::path::PathBuf> {
+    paths::artifact_root()
+}
+
 /// Resolve a remote path against an optional project base path.
 pub fn join_remote_path(base_path: Option<&str>, path: &str) -> Result<String> {
     paths::join_remote_path(base_path, path)
