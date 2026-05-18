@@ -1,0 +1,216 @@
+use super::*;
+use crate::core::component::{Component, ScopedExtensionConfig};
+use std::collections::HashMap;
+
+#[test]
+fn extension_capability_owns_labels_and_scripts() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "runtime": { "runtimes": { "node": { "version": "24" } } },
+        "lint": { "extension_script": "lint.sh" },
+        "test": {
+            "extension_script": "test.sh",
+            "result_parse": {
+                "rules": [{ "pattern": "Tests: (\\d+)", "field": "total" }]
+            }
+        },
+        "build": { "extension_script": "build.sh" },
+        "bench": { "extension_script": "bench.sh" },
+        "trace": { "extension_script": "trace.sh" }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        manifest
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.runtimes.get("node"))
+            .map(|runtime| runtime.version.as_str()),
+        Some("24")
+    );
+    assert_eq!(
+        manifest
+            .test
+            .as_ref()
+            .and_then(|test| test.result_parse.as_ref())
+            .map(|spec| spec.rules.len()),
+        Some(1)
+    );
+
+    for (capability, label, script, requires_script) in [
+        (ExtensionCapability::Lint, "lint", "lint.sh", true),
+        (ExtensionCapability::Test, "test", "test.sh", true),
+        (ExtensionCapability::Build, "build", "build.sh", false),
+        (ExtensionCapability::Bench, "bench", "bench.sh", true),
+        (ExtensionCapability::Trace, "trace", "trace.sh", true),
+    ] {
+        assert_eq!(capability.label(), label);
+        assert!(capability.has_manifest_support(&manifest));
+        assert_eq!(capability.script_path(&manifest), Some(script));
+        assert_eq!(capability.requires_script(), requires_script);
+    }
+}
+
+#[test]
+fn manifest_parses_declared_structured_sidecar_schema_versions() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "lint": {
+            "extension_script": "lint.sh",
+            "findings_schema_version": "1"
+        },
+        "test": {
+            "extension_script": "test.sh",
+            "results_schema_version": "1",
+            "failures_schema_version": "1"
+        },
+        "annotations_schema_version": "1"
+    }))
+    .unwrap();
+
+    assert_eq!(manifest.lint_findings_schema_version(), Some("1"));
+    assert_eq!(manifest.test_results_schema_version(), Some("1"));
+    assert_eq!(manifest.test_failures_schema_version(), Some("1"));
+
+    let sidecars = manifest.structured_sidecars();
+    assert_eq!(sidecars.len(), 4);
+    assert_eq!(sidecars[0].name, "lint.findings");
+    assert_eq!(sidecars[0].path, "lint-findings.json");
+    assert_eq!(sidecars[1].name, "test.results");
+    assert_eq!(sidecars[1].path, "test-results.json");
+    assert_eq!(sidecars[2].name, "test.failures");
+    assert_eq!(sidecars[2].path, "test-failures.json");
+    assert_eq!(sidecars[3].name, "annotations");
+    assert_eq!(sidecars[3].path, "annotations");
+}
+
+#[test]
+fn missing_sidecar_declarations_preserve_legacy_behavior() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "lint": { "extension_script": "lint.sh" },
+        "test": { "extension_script": "test.sh" }
+    }))
+    .unwrap();
+
+    assert_eq!(manifest.lint_findings_schema_version(), None);
+    assert_eq!(manifest.test_results_schema_version(), None);
+    assert_eq!(manifest.test_failures_schema_version(), None);
+    assert!(manifest.structured_sidecars().is_empty());
+}
+
+#[test]
+fn validate_required_extensions_passes_with_no_modules() {
+    let comp = Component {
+        id: "test-component".to_string(),
+        ..Default::default()
+    };
+    assert!(validate_required_extensions(&comp).is_ok());
+}
+
+#[test]
+fn validate_required_extensions_passes_with_empty_modules() {
+    let comp = Component {
+        id: "test-component".to_string(),
+        extensions: Some(HashMap::new()),
+        ..Default::default()
+    };
+    assert!(validate_required_extensions(&comp).is_ok());
+}
+
+#[test]
+fn validate_required_extensions_fails_with_missing_module() {
+    let mut extensions = HashMap::new();
+    extensions.insert(
+        "nonexistent-extension-abc123".to_string(),
+        ScopedExtensionConfig::default(),
+    );
+    let comp = Component {
+        id: "test-component".to_string(),
+        extensions: Some(extensions),
+        ..Default::default()
+    };
+    let err = validate_required_extensions(&comp).unwrap_err();
+    assert_eq!(err.code, crate::core::error::ErrorCode::ExtensionNotFound);
+    assert!(err.message.contains("nonexistent-extension-abc123"));
+    assert!(err.message.contains("test-component"));
+    // Should have install hint + browse hint
+    assert!(err.hints.len() >= 2);
+    assert!(err
+        .hints
+        .iter()
+        .any(|h| h.message.contains("homeboy extension install")));
+    assert!(err
+        .hints
+        .iter()
+        .any(|h| h.message.contains("homeboy-extensions")));
+}
+
+#[test]
+fn validate_required_extensions_reports_all_missing() {
+    let mut extensions = HashMap::new();
+    extensions.insert(
+        "missing-mod-a".to_string(),
+        ScopedExtensionConfig::default(),
+    );
+    extensions.insert(
+        "missing-mod-b".to_string(),
+        ScopedExtensionConfig::default(),
+    );
+    let comp = Component {
+        id: "multi-dep".to_string(),
+        extensions: Some(extensions),
+        ..Default::default()
+    };
+    let err = validate_required_extensions(&comp).unwrap_err();
+    // Error should mention both missing extensions
+    assert!(err.message.contains("missing-mod-a"));
+    assert!(err.message.contains("missing-mod-b"));
+    // Should have install hint for each + browse hint
+    assert!(err.hints.len() >= 3);
+}
+
+#[test]
+fn extension_guidance_hints_point_to_supported_paths() {
+    let comp = Component {
+        id: "plain-package".to_string(),
+        ..Default::default()
+    };
+
+    let hints = extension_guidance_hints(&comp, Some(ExtensionCapability::Build));
+
+    assert!(hints
+        .iter()
+        .any(|hint| { hint.contains("homeboy component set plain-package --extension") }));
+    assert!(hints
+        .iter()
+        .any(|hint| { hint.contains("component-level `build_command` is not supported") }));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains("homeboy extension list")));
+}
+
+#[test]
+fn test_should_run() {
+    let filter = RunnerStepFilter {
+        step: Some("lint,test".to_string()),
+        skip: Some("test".to_string()),
+    };
+    assert!(filter.should_run("lint"));
+    assert!(!filter.should_run("test"));
+    assert!(!filter.should_run("deploy"));
+}
+
+#[test]
+fn test_to_env_pairs() {
+    let filter = RunnerStepFilter {
+        step: Some("a".to_string()),
+        skip: Some("b".to_string()),
+    };
+    let env = filter.to_env_pairs();
+    assert!(env.iter().any(|(k, v)| k == "HOMEBOY_STEP" && v == "a"));
+    assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "b"));
+}
