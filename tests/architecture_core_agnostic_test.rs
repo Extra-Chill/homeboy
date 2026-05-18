@@ -135,6 +135,21 @@ fn release_changelog_roots_do_not_wildcard_reexport_private_modules() {
 }
 
 #[test]
+fn git_root_does_not_wildcard_reexport_private_modules() {
+    let source = source_file("src/core/git/mod.rs");
+
+    assert!(
+        !source.contains("pub use changes::*")
+            && !source.contains("pub use commits::*")
+            && !source.contains("pub use github::*")
+            && !source.contains("pub use operations::*")
+            && !source.contains("pub use pr_policy::*")
+            && !source.contains("pub use primitives::*"),
+        "src/core/git/mod.rs must explicitly name the git APIs it re-exports"
+    );
+}
+
+#[test]
 fn validate_and_format_writes_do_not_select_ecosystem_commands() {
     let files = [
         "src/core/engine/validate_write.rs",
