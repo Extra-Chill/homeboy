@@ -104,7 +104,7 @@ fn response_output(method: &str, url: &str, response: Response) -> Result<HttpRe
     let status = response.status().as_u16();
     let headers = response_headers(response.headers());
     let text = response.text().map_err(http::http_error)?;
-    let body = serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text));
+    let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
 
     Ok(HttpRequestOutput {
         method: method.to_string(),

@@ -1299,7 +1299,8 @@ fn corpus_common_calls(sequences: &[MethodCallSequence]) -> HashSet<String> {
 
     method_counts
         .into_iter()
-        .filter_map(|(call, count)| (count >= count_floor).then(|| call.to_string()))
+        .filter(|&(_call, count)| count >= count_floor)
+        .map(|(call, _count)| call.to_string())
         .collect()
 }
 

@@ -148,9 +148,8 @@ fn keychain_variable_names(project: &project::Project) -> Vec<String> {
         .map(|auth| {
             auth.variables
                 .iter()
-                .filter_map(|(name, source)| {
-                    (source.source == "keychain").then(|| name.to_string())
-                })
+                .filter(|&(_name, source)| source.source == "keychain")
+                .map(|(name, _source)| name.to_string())
                 .collect()
         })
         .unwrap_or_default()
