@@ -62,14 +62,25 @@ pub(super) fn build_preflight_steps(
     options: &ReleaseOptions,
     semver_recommendation: Option<&ReleaseSemverRecommendation>,
 ) -> Vec<PlanStep> {
-    let mut steps = vec![
+    let default_branch_step = if options.pipeline.head {
+        disabled_step(
+            "preflight.default_branch",
+            "preflight.default_branch",
+            "Validate default branch",
+            string_config("reason", "head-release"),
+        )
+    } else {
         ready_step(
             "preflight.default_branch",
             "preflight.default_branch",
             "Validate default branch",
             vec![],
             StepConfig::new(),
-        ),
+        )
+    };
+
+    let mut steps = vec![
+        default_branch_step,
         ready_step(
             "preflight.working_tree",
             "preflight.working_tree",
@@ -709,6 +720,33 @@ mod tests {
                 Some("--skip-checks")
             );
         }
+    }
+
+    #[test]
+    fn head_release_preflight_skips_default_branch_check() {
+        let options = ReleaseOptions {
+            bump_type: "head".to_string(),
+            pipeline: ReleasePipelineOptions {
+                head: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let steps = build_preflight_steps(&options, None);
+        let default_branch = steps
+            .iter()
+            .find(|step| step.id == "preflight.default_branch")
+            .expect("default branch step");
+
+        assert_eq!(default_branch.status, PlanStepStatus::Disabled);
+        assert_eq!(
+            default_branch
+                .inputs
+                .get("reason")
+                .and_then(|value| value.as_str()),
+            Some("head-release")
+        );
     }
 
     #[test]
