@@ -5,7 +5,7 @@ use super::version;
 
 /// Validate that all extensions declared in a component's `extensions` field are installed.
 ///
-/// If `component.extensions` contains keys like `{"wordpress": {}}`, those extensions
+/// If `component.extensions` contains linked extension IDs, those extensions
 /// are implicitly required. Returns an actionable error with install commands
 /// when any are missing.
 pub fn validate_required_extensions(component: &crate::core::component::Component) -> Result<()> {

@@ -665,7 +665,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 183;
+const BASELINE_OCCURRENCES: usize = 182;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
