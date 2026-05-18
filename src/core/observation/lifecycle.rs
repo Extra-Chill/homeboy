@@ -145,16 +145,15 @@ mod tests {
     use std::fs;
 
     fn run_record() -> NewRunRecord {
-        NewRunRecord {
-            kind: "test".to_string(),
-            component_id: Some("homeboy".to_string()),
-            command: Some("homeboy test homeboy".to_string()),
-            cwd: Some("/tmp/homeboy".to_string()),
-            homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            git_sha: Some("abc123".to_string()),
-            rig_id: Some("studio".to_string()),
-            metadata_json: serde_json::json!({ "status": "running" }),
-        }
+        NewRunRecord::builder("test")
+            .component_id("homeboy")
+            .command("homeboy test homeboy")
+            .cwd_path(std::path::Path::new("/tmp/homeboy"))
+            .current_homeboy_version()
+            .git_sha(Some("abc123".to_string()))
+            .rig_id("studio")
+            .metadata(serde_json::json!({ "status": "running" }))
+            .build()
     }
 
     fn active_observation() -> ActiveObservation {

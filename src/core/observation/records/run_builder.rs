@@ -48,6 +48,11 @@ impl NewRunRecordBuilder {
         self
     }
 
+    pub fn homeboy_version(mut self, homeboy_version: impl Into<String>) -> Self {
+        self.record.homeboy_version = Some(homeboy_version.into());
+        self
+    }
+
     pub fn git_sha(mut self, git_sha: Option<String>) -> Self {
         self.record.git_sha = git_sha;
         self
@@ -131,6 +136,15 @@ mod tests {
             record.homeboy_version.as_deref(),
             Some(env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[test]
+    fn test_homeboy_version() {
+        let record = NewRunRecord::builder("lint")
+            .homeboy_version("test-version")
+            .build();
+
+        assert_eq!(record.homeboy_version.as_deref(), Some("test-version"));
     }
 
     #[test]
