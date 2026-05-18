@@ -25,13 +25,13 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     let mut v = ValidationCollector::new();
 
     let monorepo = git::MonorepoContext::detect(&component.local_path, component_id);
-    let semver_recommendation = if options.head {
+    let semver_recommendation = if options.pipeline.head {
         None
     } else {
         build_semver_recommendation(&component, &options.bump_type, monorepo.as_ref())?
     };
 
-    if !options.head {
+    if !options.pipeline.head {
         if let Some(skip_plan) =
             release_skip_plan(component_id, options, semver_recommendation.clone())
         {
@@ -39,7 +39,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         }
     }
 
-    let pending_entries = if options.head {
+    let pending_entries = if options.pipeline.head {
         Default::default()
     } else {
         v.capture(
@@ -51,7 +51,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
 
     let version_info = v.capture(version::read_component_version(&component), "version");
     let new_version = if let Some(ref info) = version_info {
-        if options.head {
+        if options.pipeline.head {
             Some(info.version.clone())
         } else {
             match version::increment_version(&info.version, &options.bump_type) {

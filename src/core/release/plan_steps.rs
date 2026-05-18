@@ -112,7 +112,7 @@ pub(super) fn build_preflight_steps(
 
     steps.extend(build_quality_steps(options));
 
-    if !options.head {
+    if !options.pipeline.head {
         steps.push(ready_step(
             "preflight.changelog_bootstrap",
             "preflight.changelog_bootstrap",
@@ -192,7 +192,7 @@ pub(super) fn build_release_steps(
 
     add_release_extension_diagnostics(component, extensions, &publish_targets, options, warnings);
 
-    if options.head {
+    if options.pipeline.head {
         return Ok(build_head_release_steps(
             component,
             extensions,
@@ -254,7 +254,7 @@ pub(super) fn build_release_steps(
         StepConfig::new(),
     ));
 
-    let tag_needs = if !publish_targets.is_empty() && !options.skip_publish {
+    let tag_needs = if !publish_targets.is_empty() && !options.pipeline.skip_publish {
         steps.push(ready_step(
             "package",
             "package",
@@ -298,7 +298,7 @@ pub(super) fn build_release_steps(
     }
 
     let mut publish_step_ids: Vec<String> = Vec::new();
-    if !publish_targets.is_empty() && !options.skip_publish {
+    if !publish_targets.is_empty() && !options.pipeline.skip_publish {
         for target in &publish_targets {
             let step_id = format!("publish.{}", target);
             publish_step_ids.push(step_id.clone());
@@ -311,7 +311,7 @@ pub(super) fn build_release_steps(
             ));
         }
 
-        if !options.deploy {
+        if !options.pipeline.deploy {
             steps.push(ready_step(
                 "cleanup",
                 "cleanup",
@@ -320,7 +320,7 @@ pub(super) fn build_release_steps(
                 StepConfig::new(),
             ));
         }
-    } else if options.skip_publish && !publish_targets.is_empty() {
+    } else if options.pipeline.skip_publish && !publish_targets.is_empty() {
         log_status!("release", "Skipping publish/package steps (--skip-publish)");
     }
 
@@ -329,8 +329,8 @@ pub(super) fn build_release_steps(
         crate::core::engine::hooks::events::POST_RELEASE,
     );
     if !post_release_hooks.is_empty() {
-        let post_release_needs = if !options.skip_publish && !publish_targets.is_empty() {
-            if options.deploy {
+        let post_release_needs = if !options.pipeline.skip_publish && !publish_targets.is_empty() {
+            if options.pipeline.deploy {
                 publish_step_ids.clone()
             } else {
                 vec!["cleanup".to_string()]
@@ -348,10 +348,10 @@ pub(super) fn build_release_steps(
         ));
     }
 
-    if options.deploy {
+    if options.pipeline.deploy {
         let deploy_needs = if !post_release_hooks.is_empty() {
             vec!["post_release".to_string()]
-        } else if !options.skip_publish && !publish_step_ids.is_empty() {
+        } else if !options.pipeline.skip_publish && !publish_step_ids.is_empty() {
             publish_step_ids
         } else {
             vec!["git.push".to_string()]
@@ -382,8 +382,8 @@ fn build_head_release_steps(
     let mut artifact_need = "preflight.remote_sync".to_string();
 
     if !publish_targets.is_empty()
-        && !options.skip_publish
-        && options.from_artifacts.is_none()
+        && !options.pipeline.skip_publish
+        && options.pipeline.from_artifacts.is_none()
         && !has_package_capability(extensions)
     {
         warnings.push(
@@ -393,8 +393,8 @@ fn build_head_release_steps(
         );
     }
 
-    if !options.skip_publish {
-        if let Some(dir) = options.from_artifacts.as_ref() {
+    if !options.pipeline.skip_publish {
+        if let Some(dir) = options.pipeline.from_artifacts.as_ref() {
             steps.push(ready_step(
                 "artifacts.inventory",
                 "artifacts.inventory",
@@ -413,7 +413,7 @@ fn build_head_release_steps(
             ));
             artifact_need = "package".to_string();
         }
-    } else if options.skip_publish && !publish_targets.is_empty() {
+    } else if options.pipeline.skip_publish && !publish_targets.is_empty() {
         log_status!("release", "Skipping publish/package steps (--skip-publish)");
     }
 
@@ -432,7 +432,7 @@ fn build_head_release_steps(
     }
 
     let mut publish_step_ids: Vec<String> = Vec::new();
-    if !publish_targets.is_empty() && !options.skip_publish {
+    if !publish_targets.is_empty() && !options.pipeline.skip_publish {
         for target in publish_targets {
             let step_id = format!("publish.{}", target);
             publish_step_ids.push(step_id.clone());
@@ -445,7 +445,7 @@ fn build_head_release_steps(
             ));
         }
 
-        if !options.deploy {
+        if !options.pipeline.deploy {
             steps.push(ready_step(
                 "cleanup",
                 "cleanup",
@@ -461,8 +461,8 @@ fn build_head_release_steps(
         crate::core::engine::hooks::events::POST_RELEASE,
     );
     if !post_release_hooks.is_empty() {
-        let post_release_needs = if !options.skip_publish && !publish_targets.is_empty() {
-            if options.deploy {
+        let post_release_needs = if !options.pipeline.skip_publish && !publish_targets.is_empty() {
+            if options.pipeline.deploy {
                 publish_step_ids.clone()
             } else {
                 vec!["cleanup".to_string()]
@@ -482,10 +482,10 @@ fn build_head_release_steps(
         ));
     }
 
-    if options.deploy {
+    if options.pipeline.deploy {
         let deploy_needs = if !post_release_hooks.is_empty() {
             vec!["post_release".to_string()]
-        } else if !options.skip_publish && !publish_step_ids.is_empty() {
+        } else if !options.pipeline.skip_publish && !publish_step_ids.is_empty() {
             publish_step_ids
         } else if !options.skip_github_release && github_release_applies(component) {
             vec!["github.release".to_string()]
@@ -512,7 +512,7 @@ fn add_release_extension_diagnostics(
     options: &ReleaseOptions,
     warnings: &mut Vec<String>,
 ) {
-    if options.skip_publish || !publish_targets.is_empty() {
+    if options.pipeline.skip_publish || !publish_targets.is_empty() {
         return;
     }
 
@@ -612,7 +612,8 @@ mod tests {
     use crate::core::extension::ExtensionManifest;
     use crate::core::plan::PlanStepStatus;
     use crate::core::release::types::{
-        ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleaseSemverRecommendation,
+        ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleasePipelineOptions,
+        ReleaseSemverRecommendation,
     };
 
     #[test]
@@ -970,7 +971,10 @@ mod tests {
         let mut hints = Vec::new();
         let options = ReleaseOptions {
             bump_type: "patch".to_string(),
-            deploy: true,
+            pipeline: ReleasePipelineOptions {
+                deploy: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1023,8 +1027,11 @@ mod tests {
         let mut hints = Vec::new();
         let options = ReleaseOptions {
             bump_type: "head".to_string(),
-            head: true,
-            from_artifacts: Some("artifacts".to_string()),
+            pipeline: ReleasePipelineOptions {
+                head: true,
+                from_artifacts: Some("artifacts".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 

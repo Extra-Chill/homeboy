@@ -81,7 +81,7 @@ fn initial_release_state(
     component_id: &str,
     options: &ReleaseOptions,
 ) -> Result<ReleaseState> {
-    if !options.head {
+    if !options.pipeline.head {
         return Ok(ReleaseState::default());
     }
 

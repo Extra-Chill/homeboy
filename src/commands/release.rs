@@ -4,7 +4,9 @@ use serde::Serialize;
 use homeboy::core::component;
 use homeboy::core::deploy::{self, ReleaseStateStatus};
 use homeboy::core::project;
-use homeboy::core::release::{self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult};
+use homeboy::core::release::{
+    self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleasePipelineOptions,
+};
 
 use super::utils::args::{DryRunArgs, HiddenJsonArgs};
 use super::CmdResult;
@@ -100,6 +102,17 @@ pub enum ReleaseCommandOutput {
     Batch(BatchReleaseOutput),
 }
 
+impl ReleaseArgs {
+    fn pipeline_options(&self) -> ReleasePipelineOptions {
+        ReleasePipelineOptions {
+            deploy: self.deploy,
+            skip_publish: self.skip_publish,
+            head: self.head,
+            from_artifacts: self.from_artifacts.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 impl ReleaseArgs {
     /// Construct ReleaseArgs programmatically for tests and internal callers.
@@ -154,14 +167,11 @@ pub fn run(
             component_id: component_id.clone(),
             path_override: args.path.clone(),
             dry_run: args.dry_run_args.dry_run,
-            deploy: args.deploy,
             recover: args.recover,
-            head: args.head,
-            from_artifacts: args.from_artifacts.clone(),
             skip_checks: args.skip_checks,
             bump_override: bump_override.clone(),
             force_lower_bump: args.force_lower_bump,
-            skip_publish: args.skip_publish,
+            pipeline: args.pipeline_options(),
             skip_github_release: args.no_github_release,
             git_identity: args.git_identity.clone(),
         })?;
@@ -210,14 +220,16 @@ pub fn run(
         component_id: String::new(), // overridden per component
         path_override: None,
         dry_run: args.dry_run_args.dry_run,
-        deploy: args.deploy,
         recover: false,
-        head: false,
-        from_artifacts: None,
         skip_checks: args.skip_checks,
         bump_override,
         force_lower_bump: args.force_lower_bump,
-        skip_publish: args.skip_publish,
+        pipeline: ReleasePipelineOptions {
+            deploy: args.deploy,
+            skip_publish: args.skip_publish,
+            head: false,
+            from_artifacts: None,
+        },
         skip_github_release: args.no_github_release,
         git_identity: args.git_identity.clone(),
     };
