@@ -1341,20 +1341,23 @@ fn persist_trace_workflow_result(
 
     if let Some(results) = results {
         for span in &results.span_results {
-            let _ = observation.store.record_trace_span(NewTraceSpanRecord {
-                run_id: observation.run_id.clone(),
-                span_id: span.id.clone(),
-                status: format!("{:?}", span.status).to_ascii_lowercase(),
-                duration_ms: span.duration_ms.map(|value| value as f64),
-                from_event: Some(span.from.clone()),
-                to_event: Some(span.to.clone()),
-                metadata_json: serde_json::json!({
+            let _ = observation.store.record_trace_span(
+                NewTraceSpanRecord::builder(
+                    &observation.run_id,
+                    &span.id,
+                    format!("{:?}", span.status).to_ascii_lowercase(),
+                )
+                .duration_ms(span.duration_ms.map(|value| value as f64))
+                .from_event(Some(&span.from))
+                .to_event(Some(&span.to))
+                .metadata(serde_json::json!({
                     "from_t_ms": span.from_t_ms,
                     "to_t_ms": span.to_t_ms,
                     "missing": span.missing,
                     "message": &span.message,
-                }),
-            });
+                }))
+                .build(),
+            );
         }
     }
 
