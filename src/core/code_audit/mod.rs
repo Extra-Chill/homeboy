@@ -1010,7 +1010,7 @@ fn audit_internal(
     }
 
     // Phase 4l: Compiler warnings (dead code, unused imports, unused variables)
-    // Runs cargo check / tsc / go vet and parses warnings into findings.
+    // Runs extension-owned warning scripts and maps their output to findings.
     let compiler_findings = if plan.run_compiler_warnings {
         compiler_warnings::run(root)
     } else {

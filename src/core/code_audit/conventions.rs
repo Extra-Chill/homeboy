@@ -172,7 +172,7 @@ pub enum AuditFinding {
     /// Documentation exists but references stale paths that have moved.
     StaleDocReference,
     /// Compiler warning (dead code, unused import, unused variable, etc).
-    /// Detected by running the language compiler/checker (cargo check, tsc, etc).
+    /// Detected by running an extension-owned language compiler/checker script.
     CompilerWarning,
     /// Wrapper file is missing an explicit declaration of what it wraps.
     /// Detected by tracing calls in the wrapper to infer the implementation target.
