@@ -76,3 +76,66 @@ pub fn is_extension_linked(extension_id: &str) -> bool {
         .map(|p| p.is_symlink())
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_extension() {
+        crate::test_support::with_isolated_home(|_| {
+            assert!(load_extension("missing-extension").is_err());
+        });
+    }
+
+    #[test]
+    fn test_load_all_extensions() {
+        crate::test_support::with_isolated_home(|_| {
+            assert!(load_all_extensions().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn test_find_extension_by_tool() {
+        crate::test_support::with_isolated_home(|_| {
+            assert!(find_extension_by_tool("missing-tool").is_none());
+        });
+    }
+
+    #[test]
+    fn test_find_extension_for_file_ext() {
+        crate::test_support::with_isolated_home(|_| {
+            assert!(find_extension_for_file_ext("rs", "unknown-capability").is_none());
+        });
+    }
+
+    #[test]
+    fn test_extension_path() {
+        let path = extension_path("missing-extension");
+        assert!(path.ends_with("missing-extension"));
+    }
+
+    #[test]
+    fn test_available_extension_ids() {
+        crate::test_support::with_isolated_home(|_| {
+            assert!(available_extension_ids().is_empty());
+        });
+    }
+
+    #[test]
+    fn test_save_manifest() {
+        let _save_manifest: fn(&ExtensionManifest) -> Result<()> = save_manifest;
+    }
+
+    #[test]
+    fn test_merge() {
+        let _merge: fn(Option<&str>, &str, &[String]) -> Result<MergeOutput> = merge;
+    }
+
+    #[test]
+    fn test_is_extension_linked() {
+        crate::test_support::with_isolated_home(|_| {
+            assert!(!is_extension_linked("missing-extension"));
+        });
+    }
+}

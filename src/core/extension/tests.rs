@@ -174,6 +174,15 @@ fn validate_required_extensions_reports_all_missing() {
 }
 
 #[test]
+fn test_validate_extension_requirements() {
+    let comp = Component {
+        id: "test-component".to_string(),
+        ..Default::default()
+    };
+    assert!(validate_extension_requirements(&comp).is_ok());
+}
+
+#[test]
 fn extension_guidance_hints_point_to_supported_paths() {
     let comp = Component {
         id: "plain-package".to_string(),
@@ -194,7 +203,7 @@ fn extension_guidance_hints_point_to_supported_paths() {
 }
 
 #[test]
-fn test_should_run() {
+fn runner_step_filter_applies_step_and_skip() {
     let filter = RunnerStepFilter {
         step: Some("lint,test".to_string()),
         skip: Some("test".to_string()),
@@ -205,7 +214,7 @@ fn test_should_run() {
 }
 
 #[test]
-fn test_to_env_pairs() {
+fn runner_step_filter_exports_env_pairs() {
     let filter = RunnerStepFilter {
         step: Some("a".to_string()),
         skip: Some("b".to_string()),

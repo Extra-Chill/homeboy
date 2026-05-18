@@ -184,3 +184,39 @@ pub fn extension_provides_build(component: &crate::core::component::Component) -
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::component::Component;
+
+    #[test]
+    fn test_validate_required_extensions() {
+        let component = Component {
+            id: "plain".to_string(),
+            ..Default::default()
+        };
+
+        assert!(validate_required_extensions(&component).is_ok());
+    }
+
+    #[test]
+    fn test_validate_extension_requirements() {
+        let component = Component {
+            id: "plain".to_string(),
+            ..Default::default()
+        };
+
+        assert!(validate_extension_requirements(&component).is_ok());
+    }
+
+    #[test]
+    fn test_extension_provides_build() {
+        let component = Component {
+            id: "plain".to_string(),
+            ..Default::default()
+        };
+
+        assert!(!extension_provides_build(&component));
+    }
+}

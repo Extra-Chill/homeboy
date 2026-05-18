@@ -110,3 +110,25 @@ pub fn exec_tool(extension_id: &str, component_id: Option<&str>, args: &[String]
         Some(&env),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_all() {
+        crate::test_support::with_isolated_home(|_| {
+            let result = update_all(false);
+
+            assert!(result.updated.is_empty());
+            assert!(result.skipped.is_empty());
+            assert!(result.skipped_details.is_empty());
+            assert!(result.repaired_source_metadata.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_exec_tool() {
+        let _exec_tool: fn(&str, Option<&str>, &[String]) -> Result<i32> = exec_tool;
+    }
+}

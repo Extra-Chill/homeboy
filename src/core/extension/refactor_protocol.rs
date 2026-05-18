@@ -132,3 +132,39 @@ pub struct RewrittenImport {
     /// Whether the path changed.
     pub changed: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_refactor_script() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "Example",
+            "version": "0.0.0"
+        }))
+        .unwrap();
+        assert!(run_refactor_script(&manifest, &serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn test_parsed_item_from_grammar_item() {
+        let item = crate::core::extension::grammar_items::GrammarItem {
+            name: "run".to_string(),
+            kind: "function".to_string(),
+            start_line: 3,
+            end_line: 7,
+            source: "fn run() {}".to_string(),
+            visibility: "pub".to_string(),
+        };
+
+        let parsed = ParsedItem::from(item);
+
+        assert_eq!(parsed.name, "run");
+        assert_eq!(parsed.kind, "function");
+        assert_eq!(parsed.start_line, 3);
+        assert_eq!(parsed.end_line, 7);
+        assert_eq!(parsed.source, "fn run() {}");
+        assert_eq!(parsed.visibility, "pub");
+    }
+}
