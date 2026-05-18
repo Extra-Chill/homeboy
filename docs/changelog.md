@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.186.12] - 2026-05-18
+
+### Changed
+- add trace span record builder
+
+### Fixed
+- support GitHub Enterprise release remotes
+
 ## [0.186.11] - 2026-05-18
 
 ### Changed
