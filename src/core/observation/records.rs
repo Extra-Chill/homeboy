@@ -7,10 +7,12 @@ use crate::extension::lint::LintFinding;
 
 mod run_builder;
 mod run_status;
+mod trace_run_builder;
 mod triage_items;
 
 pub use run_builder::NewRunRecordBuilder;
 pub use run_status::RunStatus;
+pub use trace_run_builder::NewTraceRunRecordBuilder;
 pub use triage_items::{NewTriageItemRecord, TriageItemRecord, TriagePullRequestSignals};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -351,6 +353,17 @@ pub struct NewTraceRunRecord {
     pub status: String,
     pub baseline_status: Option<String>,
     pub metadata_json: serde_json::Value,
+}
+
+impl NewTraceRunRecord {
+    pub fn builder(
+        run_id: impl Into<String>,
+        component_id: impl Into<String>,
+        scenario_id: impl Into<String>,
+        status: impl Into<String>,
+    ) -> NewTraceRunRecordBuilder {
+        NewTraceRunRecordBuilder::new(run_id, component_id, scenario_id, status)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
