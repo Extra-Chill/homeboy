@@ -589,7 +589,7 @@ jobs:
           rm -f artifacts/*-dist-manifest.json
 
       - name: Finish Homeboy release pipeline at tag
-        run: cargo run --release -- release homeboy --head --from-artifacts artifacts --skip-checks
+        run: cargo run --release --bin homeboy -- release homeboy --head --from-artifacts artifacts --skip-checks
 
   publish-homebrew-formula:
     needs:
