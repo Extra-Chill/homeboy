@@ -198,19 +198,18 @@ fn sample_finding(run_id: &str, rule: &str, file: &str) -> NewFindingRecord {
 }
 
 fn sample_run(kind: &str, component_id: &str) -> NewRunRecord {
-    NewRunRecord {
-        kind: kind.to_string(),
-        component_id: Some(component_id.to_string()),
-        command: Some(format!("homeboy {kind} {component_id}")),
-        cwd: Some("/tmp/homeboy-fixture".to_string()),
-        homeboy_version: Some("test-version".to_string()),
-        git_sha: Some("abc123".to_string()),
-        rig_id: Some("studio".to_string()),
-        metadata_json: serde_json::json!({
+    NewRunRecord::builder(kind)
+        .component_id(component_id)
+        .command(format!("homeboy {kind} {component_id}"))
+        .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+        .homeboy_version("test-version")
+        .git_sha(Some("abc123".to_string()))
+        .rig_id("studio")
+        .metadata(serde_json::json!({
             "scenario": "fixture",
             "attempt": 1,
-        }),
-    }
+        }))
+        .build()
 }
 
 #[test]

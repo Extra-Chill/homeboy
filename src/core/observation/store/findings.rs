@@ -257,16 +257,12 @@ mod tests {
     }
 
     fn new_run() -> NewRunRecord {
-        NewRunRecord {
-            kind: "lint".to_string(),
-            component_id: Some("homeboy".to_string()),
-            command: Some("homeboy lint".to_string()),
-            cwd: Some("/tmp/homeboy".to_string()),
-            homeboy_version: Some("test".to_string()),
-            git_sha: None,
-            rig_id: None,
-            metadata_json: serde_json::json!({}),
-        }
+        NewRunRecord::builder("lint")
+            .component_id("homeboy")
+            .command("homeboy lint")
+            .cwd_path(std::path::Path::new("/tmp/homeboy"))
+            .homeboy_version("test")
+            .build()
     }
 
     fn new_finding(run_id: &str, rule: &str) -> NewFindingRecord {

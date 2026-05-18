@@ -184,16 +184,16 @@ fn routes_registered_artifact_downloads_and_sync_manifest() {
     let home_path = std::path::PathBuf::from(std::env::var("HOME").expect("home"));
     let store = ObservationStore::open_initialized().expect("store");
     let run = store
-        .start_run(NewRunRecord {
-            kind: "bench".to_string(),
-            component_id: Some("homeboy".to_string()),
-            command: Some("homeboy bench".to_string()),
-            cwd: Some("/tmp/homeboy-fixture".to_string()),
-            homeboy_version: Some("test-version".to_string()),
-            git_sha: Some("abc123".to_string()),
-            rig_id: Some("studio".to_string()),
-            metadata_json: serde_json::json!({}),
-        })
+        .start_run(
+            NewRunRecord::builder("bench")
+                .component_id("homeboy")
+                .command("homeboy bench")
+                .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+                .homeboy_version("test-version")
+                .git_sha(Some("abc123".to_string()))
+                .rig_id("studio")
+                .build(),
+        )
         .expect("run");
     let artifact_path = home_path.join("bench-results.json");
     std::fs::write(&artifact_path, br#"{"ok":true}"#).expect("artifact");
