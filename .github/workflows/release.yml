@@ -589,7 +589,10 @@ jobs:
           rm -f artifacts/*-dist-manifest.json
 
       - name: Finish Homeboy release pipeline at tag
-        run: cargo run --release --bin homeboy -- release homeboy --head --from-artifacts artifacts --skip-checks
+        run: |
+          cargo build --release --bin homeboy
+          ./target/release/homeboy extension install-for-component --path . --source https://github.com/Extra-Chill/homeboy-extensions
+          ./target/release/homeboy release homeboy --head --from-artifacts artifacts --skip-checks
 
   publish-homebrew-formula:
     needs:
