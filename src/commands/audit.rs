@@ -152,16 +152,16 @@ fn start_audit_observation(
     let path = Path::new(source_path);
     let metadata = audit_observation_initial_metadata(source_path, args);
     let run = store
-        .start_run(NewRunRecord {
-            kind: "audit".to_string(),
-            component_id: Some(component_id.to_string()),
-            command: Some(audit_observation_command(component_id, args)),
-            cwd: Some(source_path.to_string()),
-            homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            git_sha: short_head_revision_at(path),
-            rig_id: None,
-            metadata_json: metadata.clone(),
-        })
+        .start_run(
+            NewRunRecord::builder("audit")
+                .component_id(component_id)
+                .command(audit_observation_command(component_id, args))
+                .cwd_path(path)
+                .current_homeboy_version()
+                .git_sha(short_head_revision_at(path))
+                .metadata(metadata.clone())
+                .build(),
+        )
         .ok()?;
 
     Some(AuditObservation {

@@ -436,38 +436,38 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::Result<TraceRunExecution> {
         .clone()
         .unwrap_or_else(|| ctx.component.local_path.clone());
     let observation = ObservationStore::open_initialized().ok().and_then(|store| {
+        let cwd = std::env::current_dir().ok();
         store
-            .start_run(NewRunRecord {
-                kind: "trace".to_string(),
-                component_id: Some(ctx.component_id.clone()),
-                command: Some(std::env::args().collect::<Vec<_>>().join(" ")),
-                cwd: std::env::current_dir()
-                    .ok()
-                    .map(|path| path.to_string_lossy().to_string()),
-                homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                git_sha: homeboy::git::short_head_revision_at(Path::new(
-                    &component_path_for_observation,
-                )),
-                rig_id: rig_id.clone(),
-                metadata_json: serde_json::json!({
-                    "scenario_id": scenario_id,
-                    "component_path": component_path_for_observation,
-                    "requested_overlays": requested_overlays,
-                    "requested_variants": requested_variants,
-                    "span_definitions": span_definitions.clone(),
-                    "phase_preset": args.phase_preset.clone(),
-                    "phase_milestones": args.phases.clone().into_iter().map(|phase| {
-                        serde_json::json!({ "label": phase.label, "key": phase.key })
-                    }).collect::<Vec<_>>(),
-                    "baseline": {
-                        "baseline": args.baseline_args.baseline,
-                        "ignore_baseline": args.baseline_args.ignore_baseline,
-                        "ratchet": args.baseline_args.ratchet,
-                        "regression_threshold_percent": args.regression_threshold,
-                        "regression_min_delta_ms": args.regression_min_delta_ms
-                    }
-                }),
-            })
+            .start_run(
+                NewRunRecord::builder("trace")
+                    .component_id(ctx.component_id.clone())
+                    .command(std::env::args().collect::<Vec<_>>().join(" "))
+                    .optional_cwd_path(cwd.as_deref())
+                    .current_homeboy_version()
+                    .git_sha(homeboy::git::short_head_revision_at(Path::new(
+                        &component_path_for_observation,
+                    )))
+                    .optional_rig_id(rig_id.clone())
+                    .metadata(serde_json::json!({
+                        "scenario_id": scenario_id,
+                        "component_path": component_path_for_observation,
+                        "requested_overlays": requested_overlays,
+                        "requested_variants": requested_variants,
+                        "span_definitions": span_definitions.clone(),
+                        "phase_preset": args.phase_preset.clone(),
+                        "phase_milestones": args.phases.clone().into_iter().map(|phase| {
+                            serde_json::json!({ "label": phase.label, "key": phase.key })
+                        }).collect::<Vec<_>>(),
+                        "baseline": {
+                            "baseline": args.baseline_args.baseline,
+                            "ignore_baseline": args.baseline_args.ignore_baseline,
+                            "ratchet": args.baseline_args.ratchet,
+                            "regression_threshold_percent": args.regression_threshold,
+                            "regression_min_delta_ms": args.regression_min_delta_ms
+                        }
+                    }))
+                    .build(),
+            )
             .ok()
             .map(|run| ActiveTraceObservation {
                 store,
