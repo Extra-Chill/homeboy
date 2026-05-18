@@ -4,7 +4,7 @@ use clap::Args;
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::observation::{ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::observation::{ObservationStore, RunListFilter, RunRecord};
 
 use crate::commands::CmdResult;
 
@@ -212,7 +212,7 @@ fn scalar_metadata_label(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
 
-    use homeboy::observation::{NewRunRecord, RunStatus};
+    use homeboy::core::observation::{NewRunRecord, RunStatus};
     use homeboy::test_support::with_isolated_home;
 
     struct XdgGuard(Option<String>);

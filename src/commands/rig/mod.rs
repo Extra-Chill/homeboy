@@ -7,7 +7,7 @@ pub use output::RigCommandOutput;
 
 use clap::{Args, Subcommand};
 
-use homeboy::rig;
+use homeboy::core::rig;
 
 use self::output::{
     RigAppOutput, RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledStackSummary,
@@ -191,7 +191,7 @@ fn list() -> CmdResult<RigCommandOutput> {
                 pipelines,
             })
         })
-        .collect::<homeboy::Result<Vec<_>>>()?;
+        .collect::<homeboy::core::Result<Vec<_>>>()?;
 
     Ok((
         RigCommandOutput::List(RigListOutput {
@@ -240,7 +240,7 @@ fn install(source: &str, id: Option<&str>, all: bool) -> CmdResult<RigCommandOut
 fn update(rig_id: Option<&str>, all: bool) -> CmdResult<RigCommandOutput> {
     let report = match (rig_id, all) {
         (Some(_), true) => {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "rig_id",
                 "Pass either a rig ID or --all, not both",
                 rig_id.map(str::to_string),
@@ -250,7 +250,7 @@ fn update(rig_id: Option<&str>, all: bool) -> CmdResult<RigCommandOutput> {
         (Some(id), false) => rig::update_source_for_rig(id)?,
         (None, true) => rig::update_all_sources()?,
         (None, false) => {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "rig_id",
                 "Pass a rig ID or --all",
                 None,

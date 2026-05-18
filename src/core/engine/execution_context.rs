@@ -11,9 +11,9 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::component::{self, Component, ScopedExtensionConfig};
-use crate::error::{Error, ErrorCode, Result};
-use crate::extension::{self, ExtensionCapability};
+use crate::core::component::{self, Component, ScopedExtensionConfig};
+use crate::core::error::{Error, ErrorCode, Result};
+use crate::core::extension::{self, ExtensionCapability};
 
 /// Unified execution context for extension-backed commands.
 ///

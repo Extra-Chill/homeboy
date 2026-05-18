@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use super::expand::expand_vars;
 use super::spec::{AppLauncherPlatform, AppLauncherPreflight, RigSpec};
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 mod bundle;
 

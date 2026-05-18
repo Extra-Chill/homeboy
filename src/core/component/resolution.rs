@@ -1,5 +1,5 @@
-use crate::component::{discover_from_portable, inventory, load, Component};
-use crate::error::{Error, Result};
+use crate::core::component::{discover_from_portable, inventory, load, Component};
+use crate::core::error::{Error, Result};
 use std::path::{Path, PathBuf};
 
 pub fn resolve_artifact(component: &Component) -> Option<String> {
@@ -9,7 +9,7 @@ pub fn resolve_artifact(component: &Component) -> Option<String> {
 
     if let Some(ref extensions) = component.extensions {
         for extension_id in extensions.keys() {
-            if let Ok(manifest) = crate::extension::load_extension(extension_id) {
+            if let Ok(manifest) = crate::core::extension::load_extension(extension_id) {
                 if let Some(ref build) = manifest.build {
                     if let Some(ref pattern) = build.artifact_pattern {
                         let resolved = pattern
@@ -208,10 +208,10 @@ pub fn resolve(id: Option<&str>) -> Result<Component> {
 pub fn resolve_effective(
     id: Option<&str>,
     path_override: Option<&str>,
-    project: Option<&crate::project::Project>,
+    project: Option<&crate::core::project::Project>,
 ) -> Result<Component> {
     if let (Some(project), Some(id)) = (project, id) {
-        let mut component = crate::project::resolve_project_component(project, id)?;
+        let mut component = crate::core::project::resolve_project_component(project, id)?;
         if let Some(path) = path_override {
             component.local_path = path.to_string();
         }
@@ -277,7 +277,7 @@ pub fn resolve_effective(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::ScopedExtensionConfig;
+    use crate::core::component::ScopedExtensionConfig;
     use std::collections::HashMap;
     use std::fs;
     use std::sync::{Mutex, OnceLock};

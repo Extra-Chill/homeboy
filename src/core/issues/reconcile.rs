@@ -449,7 +449,7 @@ impl IssueGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::FindingConfidence;
+    use crate::core::code_audit::FindingConfidence;
 
     fn group(category: &str, count: usize) -> IssueGroup {
         IssueGroup {

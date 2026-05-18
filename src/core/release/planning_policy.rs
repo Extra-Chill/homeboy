@@ -1,4 +1,4 @@
-use crate::plan::PlanStep;
+use crate::core::plan::PlanStep;
 
 use super::types::{ReleaseOptions, ReleasePlan, ReleaseSemverRecommendation};
 
@@ -54,8 +54,8 @@ fn skipped_release_plan(
 #[cfg(test)]
 mod tests {
     use super::release_skip_plan;
-    use crate::plan::PlanStepStatus;
-    use crate::release::types::{
+    use crate::core::plan::PlanStepStatus;
+    use crate::core::release::types::{
         ReleaseBumpPolicyOptions, ReleaseOptions, ReleaseSemverRecommendation,
     };
 

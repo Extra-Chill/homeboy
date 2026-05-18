@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 pub(crate) fn run_git(path: &str, args: &[&str]) -> Result<std::process::Output> {
     Command::new("git")

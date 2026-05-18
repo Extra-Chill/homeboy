@@ -2,20 +2,20 @@ use clap::Args;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use homeboy::component::{Component, ScopedExtensionConfig};
-use homeboy::engine::baseline::BaselineFlags;
-use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::engine::run_dir::RunDir;
-use homeboy::extension::trace as extension_trace;
-use homeboy::extension::trace::{
+use homeboy::core::component::{Component, ScopedExtensionConfig};
+use homeboy::core::engine::baseline::BaselineFlags;
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::engine::run_dir::RunDir;
+use homeboy::core::extension::trace as extension_trace;
+use homeboy::core::extension::trace::{
     TraceAttachment, TraceCommandOutput, TraceListWorkflowArgs, TraceOverlayRequest,
     TraceRunWorkflowArgs, TraceRunnerInputs, TraceSpanDefinition,
 };
-use homeboy::extension::ExtensionCapability;
-use homeboy::observation::{
+use homeboy::core::extension::ExtensionCapability;
+use homeboy::core::observation::{
     NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord, ObservationStore, RunStatus,
 };
-use homeboy::rig::{self, RigSpec};
+use homeboy::core::rig::{self, RigSpec};
 
 use super::utils::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
@@ -219,14 +219,17 @@ pub fn run_json_with_output_artifact(
     args: TraceArgs,
     _global: &GlobalArgs,
 ) -> (
-    homeboy::Result<serde_json::Value>,
+    homeboy::core::Result<serde_json::Value>,
     i32,
-    Option<homeboy::Result<serde_json::Value>>,
+    Option<homeboy::core::Result<serde_json::Value>>,
 ) {
     crate::commands::utils::tty::status("homeboy is working...");
     let output_to_json = |output: TraceCommandOutput| {
         serde_json::to_value(output).map_err(|err| {
-            homeboy::Error::internal_json(err.to_string(), Some("serialize response".to_string()))
+            homeboy::core::Error::internal_json(
+                err.to_string(),
+                Some("serialize response".to_string()),
+            )
         })
     };
     match run_outputs(args) {
@@ -265,7 +268,7 @@ fn run_outputs(args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<TraceCo
     }
 
     if args.compare_after.is_some() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "AFTER_JSON",
             "extra positional argument is only supported by `homeboy trace compare before.json after.json`",
             None,
@@ -274,7 +277,7 @@ fn run_outputs(args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<TraceCo
     }
 
     if args.repeat == 0 {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "--repeat",
             "repeat must be at least 1",
             None,
@@ -316,7 +319,7 @@ fn run_overlay_locks(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
         }
         Some("cleanup") => {
             if !args.stale {
-                return Err(homeboy::Error::validation_invalid_argument(
+                return Err(homeboy::core::Error::validation_invalid_argument(
                     "--stale",
                     "trace overlay lock cleanup requires --stale",
                     None,
@@ -327,13 +330,13 @@ fn run_overlay_locks(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
             let output = overlay_locks_output(result.removed);
             Ok((TraceCommandOutput::OverlayLocks(output), 0))
         }
-        Some(other) => Err(homeboy::Error::validation_invalid_argument(
+        Some(other) => Err(homeboy::core::Error::validation_invalid_argument(
             "overlay-locks",
             format!("unsupported trace overlay-locks command `{other}`"),
             None,
             Some(vec!["list".to_string(), "cleanup --stale".to_string()]),
         )),
-        None => Err(homeboy::Error::validation_missing_argument(vec![
+        None => Err(homeboy::core::Error::validation_missing_argument(vec![
             "overlay-locks command".to_string(),
         ])),
     }
@@ -364,9 +367,9 @@ fn overlay_locks_output(
     }
 }
 
-pub(super) fn required_trace_scenario(args: &TraceArgs) -> homeboy::Result<String> {
+pub(super) fn required_trace_scenario(args: &TraceArgs) -> homeboy::core::Result<String> {
     args.scenario.clone().ok_or_else(|| {
-        homeboy::Error::validation_missing_argument(vec!["trace scenario".to_string()])
+        homeboy::core::Error::validation_missing_argument(vec!["trace scenario".to_string()])
     })
 }
 
@@ -376,7 +379,7 @@ struct TraceRunExecution {
     rig_state: Option<rig::RigStateSnapshot>,
 }
 
-fn execute_trace_run(args: TraceArgs) -> homeboy::Result<TraceRunExecution> {
+fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution> {
     let scenario = required_trace_scenario(&args)?;
     let rig_context = load_rig_context(args.rig.as_deref())?;
     let effective_id = resolve_component_id(&args.comp, rig_context.as_ref().map(|c| &c.rig_spec))?;
@@ -444,7 +447,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::Result<TraceRunExecution> {
                     .command(std::env::args().collect::<Vec<_>>().join(" "))
                     .optional_cwd_path(cwd.as_deref())
                     .current_homeboy_version()
-                    .git_sha(homeboy::git::short_head_revision_at(Path::new(
+                    .git_sha(homeboy::core::git::short_head_revision_at(Path::new(
                         &component_path_for_observation,
                     )))
                     .optional_rig_id(rig_id.clone())
@@ -606,7 +609,7 @@ fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                 }
                 let artifact_path = execution
                     .run_dir
-                    .step_file(homeboy::engine::run_dir::files::TRACE_RESULTS)
+                    .step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS)
                     .to_string_lossy()
                     .to_string();
                 let mut seen_span_ids = BTreeSet::new();
@@ -756,12 +759,12 @@ fn focus_aggregate_spans(
         .collect()
 }
 
-fn trace_scenario(args: &TraceArgs) -> homeboy::Result<&str> {
+fn trace_scenario(args: &TraceArgs) -> homeboy::core::Result<&str> {
     args.scenario_arg
         .as_deref()
         .or(args.scenario.as_deref())
         .ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "scenario",
                 "trace requires a scenario positional argument or --scenario",
                 None,
@@ -772,11 +775,13 @@ fn trace_scenario(args: &TraceArgs) -> homeboy::Result<&str> {
 
 const DEFAULT_TRACE_PHASE_PRESET: &str = "default";
 
-fn cli_span_definitions_for_args(args: &TraceArgs) -> homeboy::Result<Vec<TraceSpanDefinition>> {
+fn cli_span_definitions_for_args(
+    args: &TraceArgs,
+) -> homeboy::core::Result<Vec<TraceSpanDefinition>> {
     let mut definitions = args.spans.clone();
     let phase_definitions =
         extension_trace::spans::phase_span_definitions(&args.phases).map_err(|message| {
-            homeboy::Error::validation_invalid_argument("--phase", message, None, None)
+            homeboy::core::Error::validation_invalid_argument("--phase", message, None, None)
         })?;
     definitions.extend(phase_definitions);
     Ok(definitions)
@@ -787,7 +792,7 @@ fn span_definitions_for_args(
     rig_context: Option<&TraceRigContext>,
     extension_id: Option<&str>,
     use_default_preset: bool,
-) -> homeboy::Result<Vec<TraceSpanDefinition>> {
+) -> homeboy::core::Result<Vec<TraceSpanDefinition>> {
     let mut definitions = cli_span_definitions_for_args(args)?;
     let Some(preset_name) = args.phase_preset.as_deref().or_else(|| {
         if use_default_preset {
@@ -802,7 +807,7 @@ fn span_definitions_for_args(
     let preset_phases = trace_phase_preset_for_args(args, rig_context, extension_id, preset_name)?;
     let phase_definitions = extension_trace::spans::phase_span_definitions(&preset_phases)
         .map_err(|message| {
-            homeboy::Error::validation_invalid_argument("--phase-preset", message, None, None)
+            homeboy::core::Error::validation_invalid_argument("--phase-preset", message, None, None)
         })?;
     definitions.extend(phase_definitions);
     Ok(definitions)
@@ -837,10 +842,10 @@ fn trace_phase_preset_for_args(
     rig_context: Option<&TraceRigContext>,
     extension_id: Option<&str>,
     preset_name: &str,
-) -> homeboy::Result<Vec<extension_trace::spans::TracePhaseMilestone>> {
+) -> homeboy::core::Result<Vec<extension_trace::spans::TracePhaseMilestone>> {
     let scenario = trace_scenario(args)?;
     let context = rig_context.ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "--phase-preset",
             "phase presets require --rig so Homeboy can read rig/workload metadata",
             None,
@@ -848,7 +853,7 @@ fn trace_phase_preset_for_args(
         )
     })?;
     let extension_id = extension_id.ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "--phase-preset",
             "phase presets require a resolved trace extension",
             None,
@@ -868,7 +873,7 @@ fn trace_phase_preset_for_args(
     let phases = workload
         .and_then(|workload| workload.trace_phase_preset(preset_name))
         .ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "--phase-preset",
                 format!(
                     "trace phase preset '{}' is not declared for scenario '{}'",
@@ -883,7 +888,12 @@ fn trace_phase_preset_for_args(
         .iter()
         .map(|phase| {
             extension_trace::spans::parse_phase_milestone(phase).map_err(|message| {
-                homeboy::Error::validation_invalid_argument("--phase-preset", message, None, None)
+                homeboy::core::Error::validation_invalid_argument(
+                    "--phase-preset",
+                    message,
+                    None,
+                    None,
+                )
             })
         })
         .collect()
@@ -973,14 +983,14 @@ struct TraceRigContext {
     rig_config_root: Option<PathBuf>,
 }
 
-fn load_rig_context(rig_id: Option<&str>) -> homeboy::Result<Option<TraceRigContext>> {
+fn load_rig_context(rig_id: Option<&str>) -> homeboy::core::Result<Option<TraceRigContext>> {
     let Some(rig_id) = rig_id else {
         return Ok(None);
     };
     let spec = rig::load(rig_id)?;
     let package_root =
         rig::read_source_metadata(&spec.id).map(|metadata| PathBuf::from(metadata.package_path));
-    let config_root = homeboy::paths::rig_config(&spec.id)
+    let config_root = crate::core::paths::rig_config(&spec.id)
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf));
     Ok(Some(TraceRigContext {
@@ -996,7 +1006,7 @@ fn resolve_trace_execution_context(
     settings: Vec<(String, String)>,
     settings_json: Vec<(String, serde_json::Value)>,
     component_override: Option<Component>,
-) -> homeboy::Result<execution_context::ExecutionContext> {
+) -> homeboy::core::Result<execution_context::ExecutionContext> {
     match execution_context::resolve_with_component(
         &ResolveOptions::with_capability_and_json(
             effective_id,
@@ -1023,11 +1033,11 @@ fn trace_overlays_for_args(
     rig_context: Option<&TraceRigContext>,
     component_id: &str,
     component_path: &str,
-) -> homeboy::Result<Vec<TraceOverlayRequest>> {
+) -> homeboy::core::Result<Vec<TraceOverlayRequest>> {
     let mut overlays = Vec::new();
     if !args.variants.is_empty() {
         let context = rig_context.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "--variant",
                 "trace variants require --rig so Homeboy can read rig/workload metadata",
                 None,
@@ -1039,7 +1049,7 @@ fn trace_overlays_for_args(
         let available = variants.keys().cloned().collect::<Vec<_>>();
         for name in &args.variants {
             let variant = variants.get(name).ok_or_else(|| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "--variant",
                     format!(
                         "unknown trace variant '{}' for component '{}' and scenario '{}'",
@@ -1078,7 +1088,7 @@ fn trace_overlays_for_args(
     Ok(overlays)
 }
 
-pub(super) fn validate_trace_variants_for_args(args: &TraceArgs) -> homeboy::Result<()> {
+pub(super) fn validate_trace_variants_for_args(args: &TraceArgs) -> homeboy::core::Result<()> {
     if args.variants.is_empty() {
         return Ok(());
     }
@@ -1106,7 +1116,7 @@ fn trace_variant_overlay_requests(
     variant_name: &str,
     variant: &rig::TraceVariantSpec,
     default_component_id: &str,
-) -> homeboy::Result<Vec<TraceOverlayRequest>> {
+) -> homeboy::core::Result<Vec<TraceOverlayRequest>> {
     let mut requests = Vec::new();
     if let Some(overlay) = variant.overlay.as_deref() {
         let component_id = variant.component.as_deref().unwrap_or(default_component_id);
@@ -1133,9 +1143,9 @@ fn trace_overlay_request_for_component(
     variant_name: &str,
     component_id: &str,
     overlay: &str,
-) -> homeboy::Result<TraceOverlayRequest> {
+) -> homeboy::core::Result<TraceOverlayRequest> {
     let component_path = rig_component_path(&context.rig_spec, component_id).ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "--variant",
             format!(
                 "trace variant '{}' overlay references unknown component '{}'",
@@ -1220,7 +1230,7 @@ fn run_rig_workload_preflight(
     spec: &RigSpec,
     extension_id: Option<&str>,
     kind: rig::RigWorkloadKind,
-) -> homeboy::Result<()> {
+) -> homeboy::core::Result<()> {
     let groups =
         extension_id.and_then(|id| rig::check_groups_for_extension_workloads(spec, kind, id));
     let check = match groups {
@@ -1228,7 +1238,7 @@ fn run_rig_workload_preflight(
         None => rig::run_check(spec)?,
     };
     if !check.success {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "--rig",
             format!(
                 "rig '{}' check failed; fix the rig before running trace",
@@ -1244,7 +1254,7 @@ fn run_rig_workload_preflight(
 fn resolve_component_id(
     comp: &PositionalComponentArgs,
     rig_spec: Option<&RigSpec>,
-) -> homeboy::Result<String> {
+) -> homeboy::core::Result<String> {
     if let Some(id) = comp.id() {
         return Ok(id.to_string());
     }
@@ -1252,7 +1262,7 @@ fn resolve_component_id(
         if spec.components.len() == 1 {
             return Ok(spec.components.keys().next().unwrap().clone());
         }
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "component",
             format!(
                 "rig '{}' has multiple components; pass the component id to trace",
@@ -1267,7 +1277,10 @@ fn resolve_component_id(
 
 fn rig_component_path(spec: &RigSpec, component_id: &str) -> Option<String> {
     let component = spec.components.get(component_id)?;
-    Some(homeboy::rig::expand::expand_vars(spec, &component.path))
+    Some(homeboy::core::rig::expand::expand_vars(
+        spec,
+        &component.path,
+    ))
 }
 
 fn rig_component_for_trace(spec: &RigSpec, component_id: &str) -> Option<Component> {
@@ -1372,7 +1385,7 @@ fn persist_trace_workflow_result(
 fn persist_trace_workflow_error(
     observation: &ActiveTraceObservation,
     run_dir: &RunDir,
-    error: &homeboy::Error,
+    error: &homeboy::core::Error,
 ) {
     let error_metadata = serde_json::json!({
         "error": {

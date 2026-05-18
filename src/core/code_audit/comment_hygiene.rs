@@ -177,8 +177,8 @@ fn normalized_comment(comment: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::Language;
-    use crate::code_audit::fingerprint::FileFingerprint;
+    use crate::core::code_audit::conventions::Language;
+    use crate::core::code_audit::fingerprint::FileFingerprint;
 
     fn make_fp(path: &str, lang: Language, content: &str) -> FileFingerprint {
         FileFingerprint {

@@ -1,7 +1,7 @@
 //! Reusable keychain-backed auth profiles for generic HTTP requests.
 
-use crate::error::{Error, ErrorCode, Result};
-use crate::keychain;
+use crate::core::error::{Error, ErrorCode, Result};
+use crate::core::keychain;
 use base64::Engine;
 use serde::Serialize;
 

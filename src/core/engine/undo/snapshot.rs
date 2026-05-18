@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use super::entry::FileStateEntry;
-use crate::Result;
+use crate::core::Result;
 
 /// Maximum number of snapshots to keep. Oldest are expired on save.
 const MAX_SNAPSHOTS: usize = 20;
@@ -153,7 +153,7 @@ impl UndoSnapshot {
 /// Save a snapshot to a specific directory. Used internally and by tests.
 fn save_to_dir(snap: UndoSnapshot, base_dir: &Path) -> Result<String> {
     if snap.entries.is_empty() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "undo",
             "No files to snapshot",
             None,
@@ -165,7 +165,7 @@ fn save_to_dir(snap: UndoSnapshot, base_dir: &Path) -> Result<String> {
     let snapshot_dir = base_dir.join(&id);
     let files_dir = snapshot_dir.join("files");
     std::fs::create_dir_all(&files_dir).map_err(|e| {
-        crate::Error::internal_unexpected(format!("Failed to create snapshot dir: {}", e))
+        crate::core::Error::internal_unexpected(format!("Failed to create snapshot dir: {}", e))
     })?;
 
     // Write file contents
@@ -176,7 +176,7 @@ fn save_to_dir(snap: UndoSnapshot, base_dir: &Path) -> Result<String> {
             std::fs::create_dir_all(parent).ok();
         }
         std::fs::write(&dest, content).map_err(|e| {
-            crate::Error::internal_unexpected(format!(
+            crate::core::Error::internal_unexpected(format!(
                 "Failed to write snapshot file {}: {}",
                 relative_path, e
             ))
@@ -193,11 +193,11 @@ fn save_to_dir(snap: UndoSnapshot, base_dir: &Path) -> Result<String> {
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| {
-        crate::Error::internal_unexpected(format!("Failed to serialize manifest: {}", e))
+        crate::core::Error::internal_unexpected(format!("Failed to serialize manifest: {}", e))
     })?;
 
     std::fs::write(snapshot_dir.join("manifest.json"), manifest_json).map_err(|e| {
-        crate::Error::internal_unexpected(format!("Failed to write manifest: {}", e))
+        crate::core::Error::internal_unexpected(format!("Failed to write manifest: {}", e))
     })?;
 
     log_status!(
@@ -307,7 +307,7 @@ fn list_snapshots_in(base_dir: &Path) -> Result<Vec<SnapshotSummary>> {
 
     let mut entries: Vec<_> = std::fs::read_dir(base_dir)
         .map_err(|e| {
-            crate::Error::internal_unexpected(format!("Failed to read snapshots dir: {}", e))
+            crate::core::Error::internal_unexpected(format!("Failed to read snapshots dir: {}", e))
         })?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
@@ -343,7 +343,7 @@ pub fn delete_snapshot(snapshot_id: &str) -> Result<()> {
 fn delete_snapshot_in(snapshot_id: &str, base_dir: &Path) -> Result<()> {
     let snapshot_dir = base_dir.join(snapshot_id);
     if !snapshot_dir.exists() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "snapshot_id",
             format!("Snapshot '{}' not found", snapshot_id),
             None,
@@ -352,7 +352,7 @@ fn delete_snapshot_in(snapshot_id: &str, base_dir: &Path) -> Result<()> {
     }
 
     std::fs::remove_dir_all(&snapshot_dir).map_err(|e| {
-        crate::Error::internal_unexpected(format!("Failed to delete snapshot: {}", e))
+        crate::core::Error::internal_unexpected(format!("Failed to delete snapshot: {}", e))
     })?;
 
     log_status!("undo", "Deleted snapshot {}", snapshot_id);
@@ -392,14 +392,14 @@ fn now_unix() -> u64 {
 
 fn latest_snapshot_id_in(base_dir: &Path) -> Result<String> {
     if !base_dir.exists() {
-        return Err(crate::Error::internal_unexpected(
+        return Err(crate::core::Error::internal_unexpected(
             "No undo snapshots available. Run a --write operation first.",
         ));
     }
 
     let mut entries: Vec<_> = std::fs::read_dir(base_dir)
         .map_err(|e| {
-            crate::Error::internal_unexpected(format!("Failed to read snapshots dir: {}", e))
+            crate::core::Error::internal_unexpected(format!("Failed to read snapshots dir: {}", e))
         })?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
@@ -411,7 +411,7 @@ fn latest_snapshot_id_in(base_dir: &Path) -> Result<String> {
         .first()
         .map(|e| e.file_name().to_string_lossy().to_string())
         .ok_or_else(|| {
-            crate::Error::internal_unexpected(
+            crate::core::Error::internal_unexpected(
                 "No undo snapshots available. Run a --write operation first.",
             )
         })
@@ -420,10 +420,11 @@ fn latest_snapshot_id_in(base_dir: &Path) -> Result<String> {
 fn load_manifest(snapshot_dir: &Path) -> Result<SnapshotManifest> {
     let manifest_path = snapshot_dir.join("manifest.json");
     let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        crate::Error::internal_unexpected(format!("Failed to read manifest: {}", e))
+        crate::core::Error::internal_unexpected(format!("Failed to read manifest: {}", e))
     })?;
-    serde_json::from_str(&content)
-        .map_err(|e| crate::Error::internal_unexpected(format!("Failed to parse manifest: {}", e)))
+    serde_json::from_str(&content).map_err(|e| {
+        crate::core::Error::internal_unexpected(format!("Failed to parse manifest: {}", e))
+    })
 }
 
 /// Convert a path like "src/core/fixer.rs" to a safe filename for snapshot storage.
@@ -517,7 +518,7 @@ mod tests {
     }
 
     /// Save a snapshot to a test-isolated snapshot directory.
-    fn save_isolated(snap: UndoSnapshot, snap_dir: &Path) -> crate::Result<String> {
+    fn save_isolated(snap: UndoSnapshot, snap_dir: &Path) -> crate::core::Result<String> {
         save_to_dir(snap, snap_dir)
     }
 

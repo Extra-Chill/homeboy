@@ -11,7 +11,7 @@ use super::fingerprint::FileFingerprint;
 use super::import_matching::has_import_with_context;
 use super::naming::{detect_naming_suffix, suffix_matches};
 use super::signatures::{compute_signature_skeleton, tokenize_signature};
-use crate::component::AuditConfig;
+use crate::core::component::AuditConfig;
 
 const GENERIC_UTILITY_SUFFIXES: &[&str] = &[
     "Base",

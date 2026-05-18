@@ -4,8 +4,8 @@ use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
 
-use crate::error::{Error, Result};
-use crate::observation::{ArtifactRecord, ObservationStore};
+use crate::core::error::{Error, Result};
+use crate::core::observation::{ArtifactRecord, ObservationStore};
 
 use super::{error_response, HttpResponse};
 
@@ -223,7 +223,7 @@ fn sanitize_header_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observation::NewRunRecord;
+    use crate::core::observation::NewRunRecord;
     use crate::test_support::HomeGuard;
 
     #[test]

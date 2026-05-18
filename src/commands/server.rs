@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::server::{self, Server, ServerSessionConfig, SshClient};
-use homeboy::{EntityCrudOutput, MergeOutput};
+use homeboy::core::server::{self, Server, ServerSessionConfig, SshClient};
+use homeboy::core::{EntityCrudOutput, MergeOutput};
 
 use super::{CmdResult, DynamicSetArgs};
 
@@ -158,7 +158,7 @@ pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
                 spec
             } else {
                 let id = id.ok_or_else(|| {
-                    homeboy::Error::validation_invalid_argument(
+                    homeboy::core::Error::validation_invalid_argument(
                         "id",
                         "Missing required argument: id",
                         None,
@@ -167,7 +167,7 @@ pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
                 })?;
 
                 let host = host.ok_or_else(|| {
-                    homeboy::Error::validation_invalid_argument(
+                    homeboy::core::Error::validation_invalid_argument(
                         "host",
                         "Missing required argument: --host",
                         None,
@@ -176,7 +176,7 @@ pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
                 })?;
 
                 let user = user.ok_or_else(|| {
-                    homeboy::Error::validation_invalid_argument(
+                    homeboy::core::Error::validation_invalid_argument(
                         "user",
                         "Missing required argument: --user",
                         None,
@@ -196,11 +196,11 @@ pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
                     env: std::collections::HashMap::new(),
                 };
 
-                homeboy::config::to_json_string(&new_server)?
+                homeboy::core::config::to_json_string(&new_server)?
             };
 
             match server::create(&json_spec, skip_existing)? {
-                homeboy::CreateOutput::Single(result) => Ok((
+                homeboy::core::CreateOutput::Single(result) => Ok((
                     ServerOutput {
                         command: "server.create".to_string(),
                         id: Some(result.id),
@@ -210,7 +210,7 @@ pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
                     },
                     0,
                 )),
-                homeboy::CreateOutput::Bulk(summary) => {
+                homeboy::core::CreateOutput::Bulk(summary) => {
                     let exit_code = summary.exit_code();
                     Ok((
                         ServerOutput {
@@ -313,7 +313,7 @@ fn show(server_id: &str) -> CmdResult<ServerOutput> {
 
 fn set(args: DynamicSetArgs) -> CmdResult<ServerOutput> {
     let merged = super::merge_dynamic_args(&args)?.ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "spec",
             "Provide JSON spec, --json flag, --base64 flag, or --key value flags",
             None,

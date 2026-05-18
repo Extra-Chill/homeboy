@@ -6,7 +6,7 @@ use std::path::Path;
 use super::conventions::Language;
 use super::fingerprint::{fingerprint_content, normalize_convention_tags, FileFingerprint};
 use super::walker::{is_test_path, walk_source_files_snapshot};
-use crate::component::AuditConfig;
+use crate::core::component::AuditConfig;
 
 type DiscoveryGroupKey = (String, Language, bool, Vec<String>);
 
@@ -313,7 +313,7 @@ mod tests {
             ..Default::default()
         };
         let audit_config = AuditConfig {
-            convention_tag_globs: vec![crate::component::ConventionTagGlob {
+            convention_tag_globs: vec![crate::core::component::ConventionTagGlob {
                 tag: "component:generated".to_string(),
                 globs: vec!["src/generated/*".to_string()],
             }],

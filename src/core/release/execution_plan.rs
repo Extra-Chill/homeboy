@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use crate::error::Result;
-use crate::plan::PlanStep;
+use crate::core::error::Result;
+use crate::core::plan::PlanStep;
 
 use super::context::{load_component, resolve_extensions};
 use super::execution_dispatch::{
@@ -78,8 +78,8 @@ mod tests {
     use super::{
         build_initial_preflight_plan, execute_plan_steps, initial_executable_preflight_ids,
     };
-    use crate::plan::PlanStepStatus;
-    use crate::release::types::ReleaseOptions;
+    use crate::core::plan::PlanStepStatus;
+    use crate::core::release::types::ReleaseOptions;
     use std::collections::HashSet;
 
     #[test]

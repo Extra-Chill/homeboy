@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
-use homeboy::engine::shell;
-use homeboy::server::{self, Server};
-use homeboy::server::{resolve_context, SshClient, SshResolveArgs};
+use homeboy::core::engine::shell;
+use homeboy::core::server::{self, Server};
+use homeboy::core::server::{resolve_context, SshClient, SshResolveArgs};
 use serde::Serialize;
 
 use super::CmdResult;
@@ -120,7 +120,7 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
             if !args.command.is_empty() {
                 // Non-interactive: capture output for JSON response
                 let cmd = effective_command.as_deref().ok_or_else(|| {
-                    homeboy::Error::internal_unexpected(
+                    homeboy::core::Error::internal_unexpected(
                         "No command resolved for non-interactive SSH execution".to_string(),
                     )
                 })?;

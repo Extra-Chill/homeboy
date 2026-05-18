@@ -4,8 +4,8 @@
 //! the field serializes — consumers (rig spec authors, downstream
 //! tooling) read this directly off disk.
 
-use crate::extension::bench::BenchGateOp;
-use crate::rig::spec::{BenchMetricGateCondition, BenchSpec, RigSpec, WorkloadSpec};
+use crate::core::extension::bench::BenchGateOp;
+use crate::core::rig::spec::{BenchMetricGateCondition, BenchSpec, RigSpec, WorkloadSpec};
 
 /// Parses a minimal RigSpec JSON via serde and returns the embedded
 /// `BenchSpec` (or panics).

@@ -2,7 +2,7 @@
 
 use regex::Regex;
 
-use crate::component::CoreBoundaryLeakConfig;
+use crate::core::component::CoreBoundaryLeakConfig;
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
@@ -124,7 +124,7 @@ fn enclosing_context(content: &str, line_index: usize) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::Language;
+    use crate::core::code_audit::Language;
 
     fn rust_fp(path: &str, content: &str) -> FileFingerprint {
         FileFingerprint {

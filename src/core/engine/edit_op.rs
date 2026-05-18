@@ -25,7 +25,7 @@
 //! executes them against the filesystem. Manual refactor commands (propagate,
 //! transform) produce `EditOp` directly.
 
-use crate::code_audit::AuditFinding;
+use crate::core::code_audit::AuditFinding;
 use crate::core::refactor::auto::{Insertion, InsertionKind, RefactorPrimitive};
 
 /// Atomic file edit operation.
@@ -381,7 +381,7 @@ pub fn transform_result_to_edit_ops(
 // ============================================================================
 
 /// Translate a `FileRename` into a `TaggedEditOp`.
-pub fn file_rename_to_edit_op(rename: &crate::refactor::FileRename) -> TaggedEditOp {
+pub fn file_rename_to_edit_op(rename: &crate::core::refactor::FileRename) -> TaggedEditOp {
     TaggedEditOp {
         op: EditOp::MoveFile {
             from: rename.from.clone(),
@@ -399,7 +399,9 @@ pub fn file_rename_to_edit_op(rename: &crate::refactor::FileRename) -> TaggedEdi
 /// Only converts file/directory renames (→ `MoveFile`), not content edits.
 /// Content edits operate at whole-file granularity and are applied directly
 /// by the rename engine.
-pub fn rename_file_moves_to_edit_ops(result: &crate::refactor::RenameResult) -> Vec<TaggedEditOp> {
+pub fn rename_file_moves_to_edit_ops(
+    result: &crate::core::refactor::RenameResult,
+) -> Vec<TaggedEditOp> {
     result
         .file_renames
         .iter()
@@ -413,7 +415,7 @@ pub fn rename_file_moves_to_edit_ops(result: &crate::refactor::RenameResult) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::AuditFinding;
+    use crate::core::code_audit::AuditFinding;
     use crate::core::refactor::auto::{Fix, Insertion, InsertionKind, RefactorPrimitive};
 
     fn test_insertion(kind: InsertionKind) -> Insertion {

@@ -6,10 +6,10 @@ pub mod report;
 pub mod run;
 pub mod workflow;
 
-use crate::component::Component;
-use crate::extension::test::drift::DriftOptions;
-use crate::extension::{ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
-use crate::git;
+use crate::core::component::Component;
+use crate::core::extension::test::drift::DriftOptions;
+use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
+use crate::core::git;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -46,8 +46,8 @@ pub use workflow::{
 
 pub fn resolve_test_command(
     component: &Component,
-) -> crate::error::Result<ExtensionExecutionContext> {
-    crate::extension::resolve_execution_context(component, ExtensionCapability::Test)
+) -> crate::core::error::Result<ExtensionExecutionContext> {
+    crate::core::extension::resolve_execution_context(component, ExtensionCapability::Test)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -59,8 +59,8 @@ pub fn build_test_runner(
     coverage_enabled: bool,
     coverage_min: Option<f64>,
     changed_test_files: Option<&[String]>,
-    run_dir: &crate::engine::run_dir::RunDir,
-) -> crate::Result<ExtensionRunner> {
+    run_dir: &crate::core::engine::run_dir::RunDir,
+) -> crate::core::Result<ExtensionRunner> {
     let resolved = resolve_test_command(component)?;
 
     let mut runner = ExtensionRunner::for_context(resolved)
@@ -95,12 +95,12 @@ fn component_source_path(component: &Component) -> PathBuf {
 pub fn resolve_drift_options(
     component: &Component,
     since: &str,
-) -> crate::error::Result<DriftOptions> {
+) -> crate::core::error::Result<DriftOptions> {
     let source_path = component_source_path(component);
 
     if let Some(extensions) = &component.extensions {
         for extension_id in extensions.keys() {
-            let manifest = crate::extension::load_extension(extension_id)?;
+            let manifest = crate::core::extension::load_extension(extension_id)?;
             if let Some(config) = manifest.test_drift() {
                 return Ok(DriftOptions::from_config(
                     &source_path,
@@ -124,7 +124,7 @@ pub fn resolve_drift_options(
 pub fn compute_changed_test_files(
     component: &Component,
     git_ref: &str,
-) -> crate::error::Result<Vec<String>> {
+) -> crate::core::error::Result<Vec<String>> {
     let source_path = component_source_path(component);
 
     let changed_files = git::get_files_changed_since(&source_path.to_string_lossy(), git_ref)?;
@@ -135,7 +135,7 @@ pub fn compute_changed_test_files(
     let mut selected: BTreeSet<String> = BTreeSet::new();
 
     for file in &changed_files {
-        if crate::code_audit::is_test_path(file) {
+        if crate::core::code_audit::is_test_path(file) {
             selected.insert(file.clone());
         }
     }
@@ -154,7 +154,7 @@ pub fn compute_changed_test_files(
 pub fn compute_changed_test_scope(
     component: &Component,
     git_ref: &str,
-) -> crate::error::Result<TestScopeOutput> {
+) -> crate::core::error::Result<TestScopeOutput> {
     let selected_files = compute_changed_test_files(component, git_ref)?;
 
     Ok(TestScopeOutput {
@@ -168,7 +168,7 @@ pub fn compute_changed_test_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::TestDriftConfig;
+    use crate::core::extension::TestDriftConfig;
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;

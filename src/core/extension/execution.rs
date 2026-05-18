@@ -1,13 +1,13 @@
-use crate::component::{self, Component};
-use crate::engine::command::CapturedOutput;
-use crate::engine::local_files;
-use crate::engine::shell;
-use crate::engine::{template, validation};
-use crate::error::{Error, Result};
-use crate::project::{self, Project};
-use crate::rig::toolchain;
-use crate::server::http::ApiClient;
-use crate::server::{
+use crate::core::component::{self, Component};
+use crate::core::engine::command::CapturedOutput;
+use crate::core::engine::local_files;
+use crate::core::engine::shell;
+use crate::core::engine::{template, validation};
+use crate::core::error::{Error, Result};
+use crate::core::project::{self, Project};
+use crate::core::rig::toolchain;
+use crate::core::server::http::ApiClient;
+use crate::core::server::{
     execute_local_command_in_dir, execute_local_command_interactive,
     execute_local_command_passthrough, execute_local_command_stderr_passthrough, CommandOutput,
 };
@@ -255,7 +255,7 @@ pub(crate) fn execute_action(
                 .and_then(|proj| proj.base_path.clone());
 
             let working_dir =
-                crate::engine::text::json_path_str(&payload, &["release", "local_path"]).unwrap_or(extension_path);
+                crate::core::engine::text::json_path_str(&payload, &["release", "local_path"]).unwrap_or(extension_path);
 
             let execution = execute_extension_command(
                 command_template,
@@ -451,7 +451,7 @@ pub(crate) fn build_settings_json_from_manifest(
         }
     }
 
-    crate::config::to_json_string(&settings)
+    crate::core::config::to_json_string(&settings)
 }
 
 pub(crate) fn validate_capability_script_exists(
@@ -995,7 +995,7 @@ pub fn is_extension_compatible(extension: &ExtensionManifest, project: Option<&P
     // Required components must be linked to the project (if project context exists)
     if let Some(project) = project {
         for component in &requires.components {
-            if !crate::project::has_component(project, component) {
+            if !crate::core::project::has_component(project, component) {
                 return false;
             }
         }

@@ -11,7 +11,7 @@ pub struct ActiveObservation {
 }
 
 impl ActiveObservation {
-    pub fn start(record: NewRunRecord) -> crate::Result<Self> {
+    pub fn start(record: NewRunRecord) -> crate::core::Result<Self> {
         let store = ObservationStore::open_initialized()?;
         let initial_metadata = record.metadata_json.clone();
         let run = store.start_run(record)?;
@@ -140,7 +140,7 @@ fn pid_is_running(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observation::FindingListFilter;
+    use crate::core::observation::FindingListFilter;
     use crate::test_support::with_isolated_home;
     use std::fs;
 

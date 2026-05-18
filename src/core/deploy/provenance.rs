@@ -3,9 +3,9 @@
 //! Provides tag-gap detection so `build` and `deploy` can warn about
 //! unreleased commits ahead of the latest tag.
 
-use crate::component::Component;
-use crate::engine::command;
-use crate::git;
+use crate::core::component::Component;
+use crate::core::engine::command;
+use crate::core::git;
 
 /// Information about the HEAD-vs-tag gap for a component.
 #[derive(Debug, Clone)]

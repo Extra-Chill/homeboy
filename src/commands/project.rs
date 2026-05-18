@@ -2,7 +2,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use std::path::Path;
 
 use super::CmdResult;
-use homeboy::project::{self};
+use homeboy::core::project::{self};
 
 #[derive(Args)]
 pub struct ProjectArgs {
@@ -205,7 +205,7 @@ enum ProjectPinType {
     Log,
 }
 
-pub type ProjectOutput = homeboy::project::ProjectReportOutput;
+pub type ProjectOutput = homeboy::core::project::ProjectReportOutput;
 
 pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ProjectOutput> {
     match args.command {
@@ -224,7 +224,7 @@ pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 spec
             } else {
                 let id = id.ok_or_else(|| {
-                    homeboy::Error::validation_invalid_argument(
+                    homeboy::core::Error::validation_invalid_argument(
                         "id",
                         "Missing required argument: id",
                         None,
@@ -241,7 +241,7 @@ pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                     ..Default::default()
                 };
 
-                homeboy::config::serialize_with_id(&new_project, &id)?
+                homeboy::core::config::serialize_with_id(&new_project, &id)?
             };
 
             Ok(project::build_create_output(project::create(
@@ -256,7 +256,7 @@ pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             json,
         } => {
             let json_spec = json.or(spec).ok_or_else(|| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "spec",
                     "Provide JSON spec or use --json flag",
                     None,
@@ -290,7 +290,7 @@ fn show(project_id: &str) -> CmdResult<ProjectOutput> {
 
 fn set(args: super::DynamicSetArgs) -> CmdResult<ProjectOutput> {
     let merged = super::merge_dynamic_args(&args)?.ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "spec",
             "Provide JSON spec, --json flag, --base64 flag, or --key value flags",
             None,
@@ -388,7 +388,7 @@ fn components_clear(project_id: &str) -> CmdResult<ProjectOutput> {
 fn write_project_components_response(
     project_id: &str,
     action: &str,
-    components: homeboy::project::ProjectComponentsOutput,
+    components: homeboy::core::project::ProjectComponentsOutput,
 ) -> (ProjectOutput, i32) {
     (
         project::build_components_output(project_id, action, components),

@@ -4,7 +4,7 @@ use regex::{Captures, Regex};
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
-use crate::component::{AuditConfig, RequestedDetectorRule, RequestedDetectorRuleBody};
+use crate::core::component::{AuditConfig, RequestedDetectorRule, RequestedDetectorRuleBody};
 
 use super::comment_blocks;
 use super::conventions::{AuditFinding, Language};

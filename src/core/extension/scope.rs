@@ -1,6 +1,6 @@
-use crate::component::Component;
-use crate::error::{Error, Result};
-use crate::project::Project;
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
+use crate::core::project::Project;
 use std::collections::HashMap;
 
 use super::load_extension;
@@ -61,7 +61,7 @@ impl ExtensionScope {
 
         // Required components must be linked to the project
         for required in &requires.components {
-            if !crate::project::has_component(project, required) {
+            if !crate::core::project::has_component(project, required) {
                 return Err(Error::validation_invalid_argument(
                     "project.componentIds",
                     format!(
@@ -94,7 +94,7 @@ impl ExtensionScope {
 
         let matching_component_ids: Vec<String> = required_components
             .iter()
-            .filter(|required_id| crate::project::has_component(project, required_id))
+            .filter(|required_id| crate::core::project::has_component(project, required_id))
             .cloned()
             .collect();
 

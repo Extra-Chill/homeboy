@@ -10,7 +10,7 @@ use clap::{Arg, ArgAction, Args, Command, CommandFactory};
 use std::path::PathBuf;
 
 use crate::cli_surface::Cli;
-use homeboy::component::{self, Component};
+use homeboy::core::component::{self, Component};
 
 /// Normalize version command arguments.
 pub(crate) fn normalize_version_show(args: Vec<String>) -> Vec<String> {
@@ -297,11 +297,11 @@ pub struct ComponentArgs {
 
 #[allow(dead_code)]
 impl ComponentArgs {
-    pub fn resolve(&self) -> homeboy::Result<Component> {
+    pub fn resolve(&self) -> homeboy::core::Result<Component> {
         component::resolve_effective(self.component.as_deref(), self.path.as_deref(), None)
     }
 
-    pub fn resolve_root(&self) -> homeboy::Result<PathBuf> {
+    pub fn resolve_root(&self) -> homeboy::core::Result<PathBuf> {
         if let Some(ref p) = self.path {
             Ok(PathBuf::from(p))
         } else {
@@ -310,9 +310,9 @@ impl ComponentArgs {
         }
     }
 
-    pub fn load(&self) -> homeboy::Result<Component> {
+    pub fn load(&self) -> homeboy::core::Result<Component> {
         let id = self.component.as_deref().ok_or_else(|| {
-            homeboy::Error::validation_missing_argument(vec!["component".to_string()])
+            homeboy::core::Error::validation_missing_argument(vec!["component".to_string()])
         })?;
         component::resolve_effective(Some(id), self.path.as_deref(), None)
     }
@@ -345,7 +345,7 @@ pub struct ExtensionOverrideArgs {
 
 #[allow(dead_code)]
 impl PositionalComponentArgs {
-    pub fn load(&self) -> homeboy::Result<Component> {
+    pub fn load(&self) -> homeboy::core::Result<Component> {
         component::resolve_effective(self.component.as_deref(), self.path.as_deref(), None)
     }
 
@@ -355,7 +355,7 @@ impl PositionalComponentArgs {
 
     /// Resolve the component ID, falling back to CWD auto-discovery.
     /// Returns the effective component ID string for display/logging.
-    pub fn resolve_id(&self) -> homeboy::Result<String> {
+    pub fn resolve_id(&self) -> homeboy::core::Result<String> {
         if let Some(ref id) = self.component {
             return Ok(id.clone());
         }

@@ -1,7 +1,7 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::deploy::{
+use homeboy::core::deploy::{
     self, ComponentDeployResult, DeployConfig, DeploySummary, MultiDeploySummary,
     ProjectDeployResult,
 };
@@ -114,7 +114,7 @@ pub fn run(
 ) -> CmdResult<DeployCommandOutput> {
     // Fleet deploy
     if let Some(ref fleet_id) = args.fleet {
-        let fl = homeboy::fleet::load(fleet_id)?;
+        let fl = homeboy::core::fleet::load(fleet_id)?;
         let (component_ids, config) = resolve_multi_args(&args)?;
         return run_multi_output(&fl.project_ids, &component_ids, &config, &args);
     }
@@ -184,13 +184,13 @@ pub fn run(
 
 // === Argument resolution helpers ===
 
-fn resolve_shared_component_ids(args: &DeployArgs) -> homeboy::Result<Vec<String>> {
+fn resolve_shared_component_ids(args: &DeployArgs) -> homeboy::core::Result<Vec<String>> {
     if let Some(ref comps) = args.component {
         Ok(comps.clone())
     } else if let Some(ref target) = args.target_id {
         Ok(vec![target.clone()])
     } else {
-        Err(homeboy::Error::validation_invalid_argument(
+        Err(homeboy::core::Error::validation_invalid_argument(
             "component",
             "At least one component ID is required when using --shared",
             None,
@@ -199,7 +199,7 @@ fn resolve_shared_component_ids(args: &DeployArgs) -> homeboy::Result<Vec<String
     }
 }
 
-fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::Result<(String, Vec<String>)> {
+fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::core::Result<(String, Vec<String>)> {
     match (&args.project, &args.component, &args.target_id) {
         (Some(proj), Some(comps), _) => Ok((proj.clone(), comps.clone())),
 
@@ -216,7 +216,7 @@ fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::Result<(String, V
                 || args.check
                 || args.json.is_some();
             if comps.is_empty() && !has_selector_flag {
-                return Err(homeboy::Error::validation_invalid_argument(
+                return Err(homeboy::core::Error::validation_invalid_argument(
                     "input",
                     "Provide component IDs with --project, or add --all/--outdated/--check",
                     None,
@@ -228,7 +228,7 @@ fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::Result<(String, V
         }
 
         (None, Some(comps), target) => {
-            let projects = homeboy::project::list_ids().unwrap_or_default();
+            let projects = homeboy::core::project::list_ids().unwrap_or_default();
 
             if let Some(first) = target {
                 if projects.contains(first) {
@@ -238,7 +238,7 @@ fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::Result<(String, V
 
             match infer_project_for_components(comps) {
                 Some(proj) => Ok((proj, comps.clone())),
-                None => Err(homeboy::Error::validation_invalid_argument(
+                None => Err(homeboy::core::Error::validation_invalid_argument(
                     "project_id",
                     "Could not infer project. Use --project flag or provide project as first argument.",
                     None,
@@ -248,7 +248,7 @@ fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::Result<(String, V
         }
 
         (None, None, Some(target)) => resolve_project_components(target, &args.component_ids),
-        (None, None, None) => Err(homeboy::Error::validation_invalid_argument(
+        (None, None, None) => Err(homeboy::core::Error::validation_invalid_argument(
             "input",
             "Provide component ID, project ID with --all, or use flags",
             None,
@@ -257,7 +257,7 @@ fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::Result<(String, V
     }
 }
 
-fn resolve_multi_args(args: &DeployArgs) -> homeboy::Result<(Vec<String>, DeployConfig)> {
+fn resolve_multi_args(args: &DeployArgs) -> homeboy::core::Result<(Vec<String>, DeployConfig)> {
     let mut component_ids: Vec<String> = Vec::new();
     if let Some(ref target) = args.target_id {
         component_ids.push(target.clone());

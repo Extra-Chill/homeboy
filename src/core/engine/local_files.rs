@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 /// Entry returned from directory listing
 #[derive(Debug, Clone)]
@@ -128,7 +128,7 @@ pub fn local() -> LocalFs {
 
 /// Ensure all app directories exist
 pub fn ensure_app_dirs() -> Result<()> {
-    use crate::paths;
+    use crate::core::paths;
 
     let dirs = [
         paths::homeboy()?,

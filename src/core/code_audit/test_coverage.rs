@@ -24,7 +24,7 @@ use super::test_mapping::{
     build_source_name_index, partition_fingerprints, source_to_test_path, test_to_source_path,
 };
 use super::test_vacuity::{find_vacuous_test_methods, rust_crate_name};
-use crate::extension::TestMappingConfig;
+use crate::core::extension::TestMappingConfig;
 
 /// Analyze test coverage gaps given source fingerprints and a test mapping config.
 ///
@@ -791,7 +791,7 @@ fn is_rust_behavior_scenario_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::Language;
+    use crate::core::code_audit::conventions::Language;
 
     fn make_config() -> TestMappingConfig {
         TestMappingConfig {
@@ -1190,7 +1190,7 @@ fn test_chat_tools() {
             "tests/deploy_test.rs",
             vec!["test_parse_bulk_component_ids_supports_json_array"],
             r##"
-                use homeboy::deploy::parse_bulk_component_ids;
+                use homeboy::core::deploy::parse_bulk_component_ids;
 
                 #[test]
                 fn test_parse_bulk_component_ids_supports_json_array() {

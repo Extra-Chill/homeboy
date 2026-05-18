@@ -1,5 +1,5 @@
-use crate::component::{self, Component};
-use crate::project;
+use crate::core::component::{self, Component};
+use crate::core::project;
 
 pub(super) const DEFAULT_NEXT_SECTION_LABEL: &str = "Unreleased";
 pub(super) const DEFAULT_NEXT_SECTION_ALIASES: &[&str] = &["Unreleased", "Next"];

@@ -4,15 +4,15 @@
 //! produce domain-specific result types. This module provides the unified output
 //! envelope and builder functions that assemble results into command-ready output.
 
-use crate::extension::test::{
+use crate::core::extension::test::{
     CoverageOutput, DriftReport, TestAnalysis, TestBaselineComparison, TestCounts, TestScopeOutput,
     TestSummaryOutput,
 };
-use crate::extension::{
+use crate::core::extension::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
 };
-use crate::refactor::AppliedRefactor;
+use crate::core::refactor::AppliedRefactor;
 use serde::Serialize;
 
 use super::run::{RawTestOutput, TestRunWorkflowResult};

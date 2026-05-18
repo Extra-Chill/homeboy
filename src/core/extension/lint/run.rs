@@ -4,15 +4,15 @@
 //! Mirrors `core/extension/test/run.rs` — the command layer provides CLI args,
 //! this module owns all business logic and returns a structured result.
 
-use crate::component::Component;
-use crate::engine::baseline::BaselineFlags;
-use crate::engine::run_dir::{self, RunDir};
-use crate::engine::shell;
-use crate::extension::lint::baseline::{self as lint_baseline, LintFinding};
-use crate::extension::lint::build_lint_runner;
-use crate::extension::{self, ExtensionCapability, LintChangedFileRoute};
-use crate::git;
-use crate::refactor::AppliedRefactor;
+use crate::core::component::Component;
+use crate::core::engine::baseline::BaselineFlags;
+use crate::core::engine::run_dir::{self, RunDir};
+use crate::core::engine::shell;
+use crate::core::extension::lint::baseline::{self as lint_baseline, LintFinding};
+use crate::core::extension::lint::build_lint_runner;
+use crate::core::extension::{self, ExtensionCapability, LintChangedFileRoute};
+use crate::core::git;
+use crate::core::refactor::AppliedRefactor;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -76,7 +76,7 @@ pub fn run_main_lint_workflow(
     source_path: &PathBuf,
     args: LintRunWorkflowArgs,
     run_dir: &RunDir,
-) -> crate::Result<LintRunWorkflowResult> {
+) -> crate::core::Result<LintRunWorkflowResult> {
     let scoped_runs = resolve_scoped_lint_runs(component, &args)?;
 
     // Early exit if changed-file mode produced no files
@@ -361,7 +361,7 @@ fn run_scoped_lint_runs(
     args: &LintRunWorkflowArgs,
     run_dir: &RunDir,
     runs: &[ScopedLintRun],
-) -> crate::Result<extension::RunnerOutput> {
+) -> crate::core::Result<extension::RunnerOutput> {
     let mut success = true;
     let mut exit_code = 0;
 
@@ -412,7 +412,7 @@ pub fn run_self_check_lint_workflow(
     source_path: &Path,
     component_label: String,
     json_summary: bool,
-) -> crate::Result<LintRunWorkflowResult> {
+) -> crate::core::Result<LintRunWorkflowResult> {
     let output = extension::self_check::run_self_checks_with_passthrough(
         component,
         ExtensionCapability::Lint,
@@ -451,7 +451,7 @@ pub fn run_self_check_lint_workflow(
 fn resolve_scoped_lint_runs(
     component: &Component,
     args: &LintRunWorkflowArgs,
-) -> crate::Result<Option<Vec<ScopedLintRun>>> {
+) -> crate::core::Result<Option<Vec<ScopedLintRun>>> {
     if args.changed_only {
         let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
         let mut changed_files: Vec<String> = Vec::new();
@@ -568,7 +568,7 @@ fn process_baseline(
     source_path: &PathBuf,
     args: &LintRunWorkflowArgs,
     lint_findings: &[LintFinding],
-) -> crate::Result<(Option<lint_baseline::BaselineComparison>, Option<i32>)> {
+) -> crate::core::Result<(Option<lint_baseline::BaselineComparison>, Option<i32>)> {
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
 
@@ -612,8 +612,8 @@ fn process_baseline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::SelfCheckConfig;
-    use crate::engine::baseline::BaselineFlags;
+    use crate::core::component::SelfCheckConfig;
+    use crate::core::engine::baseline::BaselineFlags;
 
     fn component(root: &str) -> Component {
         Component::new(
@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn lint_config_deserializes_changed_file_routes() {
-        let config: crate::extension::LintConfig = serde_json::from_str(
+        let config: crate::core::extension::LintConfig = serde_json::from_str(
             r#"{
                 "extension_script": "scripts/lint.sh",
                 "changed_file_routes": [

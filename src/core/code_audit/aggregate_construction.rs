@@ -20,8 +20,10 @@ pub(super) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
 
 fn detect_direct_aggregate_construction(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let mut seams_by_type: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut literals_by_type: BTreeMap<String, Vec<(&str, &crate::extension::AggregateLiteral)>> =
-        BTreeMap::new();
+    let mut literals_by_type: BTreeMap<
+        String,
+        Vec<(&str, &crate::core::extension::AggregateLiteral)>,
+    > = BTreeMap::new();
 
     for fp in fingerprints {
         if super::walker::is_test_path(&fp.relative_path) {
@@ -130,7 +132,7 @@ fn detect_direct_aggregate_construction(fingerprints: &[&FileFingerprint]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::{AggregateConstructionSeam, AggregateLiteral};
+    use crate::core::extension::{AggregateConstructionSeam, AggregateLiteral};
 
     fn file(
         path: &str,

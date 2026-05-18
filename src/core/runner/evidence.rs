@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use base64::Engine;
 use serde_json::{json, Value};
 
-use crate::api_jobs::{Job, JobEvent, JobStatus};
-use crate::error::{Error, Result};
-use crate::observation::{ArtifactRecord, ObservationStore, RunRecord};
-use crate::paths;
+use crate::core::api_jobs::{Job, JobEvent, JobStatus};
+use crate::core::error::{Error, Result};
+use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
+use crate::core::paths;
 
 use super::execution::daemon_api_get;
 use super::Runner;
@@ -489,7 +489,7 @@ fn decode_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::RunnerKind;
+    use crate::core::runner::RunnerKind;
     use uuid::Uuid;
 
     fn ssh_runner() -> Runner {

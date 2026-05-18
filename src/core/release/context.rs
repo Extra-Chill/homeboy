@@ -1,6 +1,6 @@
-use crate::component::{self, Component};
-use crate::error::{Error, Result};
-use crate::extension::{self, ExtensionManifest};
+use crate::core::component::{self, Component};
+use crate::core::error::{Error, Result};
+use crate::core::extension::{self, ExtensionManifest};
 
 use super::types::ReleaseOptions;
 
@@ -30,8 +30,8 @@ pub(super) fn resolve_extensions(component: &Component) -> Result<Vec<ExtensionM
 #[cfg(test)]
 mod tests {
     use super::{load_component, resolve_extensions};
-    use crate::component::Component;
-    use crate::release::types::ReleaseOptions;
+    use crate::core::component::Component;
+    use crate::core::release::types::ReleaseOptions;
 
     #[test]
     fn test_load_component() {

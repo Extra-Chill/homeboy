@@ -1,4 +1,4 @@
-use crate::deploy::{self, DeployConfig};
+use crate::core::deploy::{self, DeployConfig};
 
 use super::types::{
     ReleaseDeploymentResult, ReleaseDeploymentSummary, ReleaseProjectDeployResult, ReleaseRun,
@@ -170,7 +170,7 @@ fn cleanup_release_artifacts(local_path: &str) {
 #[cfg(test)]
 mod tests {
     use super::{extract_deployment_from_run, plan_deployment};
-    use crate::release::types::{
+    use crate::core::release::types::{
         ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
     };
 

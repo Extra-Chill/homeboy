@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
-use crate::component::Component;
-use crate::error::{Error, Result};
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
 
 /// Framework-neutral shared directory names that typically contain sibling components.
 const GENERIC_PROTECTED_PATH_SUFFIXES: &[&str] =
@@ -97,7 +97,7 @@ fn component_extension_policies(component: &Component) -> Vec<ExtensionDeployPol
 }
 
 fn extension_deploy_policy(extension_id: &str) -> Option<ExtensionDeployPolicy> {
-    let path = crate::paths::extension_manifest(extension_id).ok()?;
+    let path = crate::core::paths::extension_manifest(extension_id).ok()?;
     let raw = std::fs::read_to_string(path).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&raw).ok()?;
     serde_json::from_value(manifest.get("deploy")?.clone()).ok()
@@ -106,12 +106,14 @@ fn extension_deploy_policy(extension_id: &str) -> Option<ExtensionDeployPolicy> 
 #[cfg(test)]
 mod tests {
     use super::{owner_hint_for_path, protected_path_suffixes, validate_deploy_target};
-    use crate::component::{Component, ScopedExtensionConfig};
+    use crate::core::component::{Component, ScopedExtensionConfig};
     use crate::test_support::with_isolated_home;
     use std::collections::HashMap;
 
     fn write_extension_fixture(id: &str, deploy_json: &str) {
-        let dir = crate::paths::extensions().expect("extensions dir").join(id);
+        let dir = crate::core::paths::extensions()
+            .expect("extensions dir")
+            .join(id);
         std::fs::create_dir_all(&dir).expect("extension dir");
         std::fs::write(
             dir.join(format!("{}.json", id)),

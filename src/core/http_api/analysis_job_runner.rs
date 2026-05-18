@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AnalysisJobRunOutput {

@@ -18,11 +18,11 @@ pub use transfer::*;
 
 use std::collections::HashMap;
 
-use crate::config::{self, ConfigEntity};
-use crate::error::{Error, Result};
-use crate::output::{CreateOutput, MergeOutput, RemoveResult};
-use crate::paths;
-use crate::project;
+use crate::core::config::{self, ConfigEntity};
+use crate::core::error::{Error, Result};
+use crate::core::output::{CreateOutput, MergeOutput, RemoveResult};
+use crate::core::paths;
+use crate::core::project;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

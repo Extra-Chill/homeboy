@@ -1,9 +1,9 @@
 use clap::Args;
-use homeboy::build;
-use homeboy::component;
-use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::extension::ExtensionCapability;
-use homeboy::project;
+use homeboy::core::build;
+use homeboy::core::component;
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::extension::ExtensionCapability;
+use homeboy::core::project;
 
 use crate::commands::utils::resolve::resolve_project_components;
 use crate::commands::CmdResult;
@@ -53,7 +53,7 @@ pub fn run(
     }
 
     let target_id = args.target_id.as_ref().ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "input",
             "Provide component ID, project ID with --all, or JSON spec",
             None,
@@ -67,7 +67,7 @@ pub fn run(
     // --all mode: build all components in project
     if args.all {
         let proj = project::load(target_id).map_err(|e| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "project_id",
                 format!("'{}' is not a valid project ID", target_id),
                 None,
@@ -80,7 +80,7 @@ pub fn run(
         })?;
 
         if proj.components.is_empty() {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "project_id",
                 format!("Project '{}' has no components configured", target_id),
                 None,
@@ -109,7 +109,7 @@ pub fn run(
             .collect();
 
         if !invalid.is_empty() {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "component_ids",
                 format!(
                     "Components not in project '{}': {}",

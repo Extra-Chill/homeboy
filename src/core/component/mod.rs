@@ -480,7 +480,7 @@ impl Component {
 
         let mut matches = HashSet::new();
         for extension_id in self.extensions.as_ref()?.keys() {
-            let Ok(extension) = crate::extension::load_extension(extension_id) else {
+            let Ok(extension) = crate::core::extension::load_extension(extension_id) else {
                 continue;
             };
 
@@ -504,7 +504,7 @@ impl Component {
 
     fn remote_path_inference_rule_matches(
         &self,
-        rule: &crate::extension::RemotePathInferenceRule,
+        rule: &crate::core::extension::RemotePathInferenceRule,
         local: &std::path::Path,
         dir_name: &str,
     ) -> bool {
@@ -538,31 +538,34 @@ impl Component {
 
     pub fn self_check_commands(
         &self,
-        capability: crate::extension::ExtensionCapability,
+        capability: crate::core::extension::ExtensionCapability,
     ) -> &[String] {
         let Some(checks) = self.self_checks.as_ref() else {
             return &[];
         };
 
         match capability {
-            crate::extension::ExtensionCapability::Lint => &checks.lint,
-            crate::extension::ExtensionCapability::Test => &checks.test,
+            crate::core::extension::ExtensionCapability::Lint => &checks.lint,
+            crate::core::extension::ExtensionCapability::Test => &checks.test,
             _ => &[],
         }
     }
 
-    pub fn has_self_check(&self, capability: crate::extension::ExtensionCapability) -> bool {
+    pub fn has_self_check(&self, capability: crate::core::extension::ExtensionCapability) -> bool {
         !self.self_check_commands(capability).is_empty()
     }
 
-    pub fn script_commands(&self, capability: crate::extension::ExtensionCapability) -> &[String] {
+    pub fn script_commands(
+        &self,
+        capability: crate::core::extension::ExtensionCapability,
+    ) -> &[String] {
         if let Some(scripts) = self.scripts.as_ref() {
             let commands = match capability {
-                crate::extension::ExtensionCapability::Lint => &scripts.lint,
-                crate::extension::ExtensionCapability::Test => &scripts.test,
-                crate::extension::ExtensionCapability::Build => &scripts.build,
-                crate::extension::ExtensionCapability::Bench => &scripts.bench,
-                crate::extension::ExtensionCapability::Trace => &scripts.trace,
+                crate::core::extension::ExtensionCapability::Lint => &scripts.lint,
+                crate::core::extension::ExtensionCapability::Test => &scripts.test,
+                crate::core::extension::ExtensionCapability::Build => &scripts.build,
+                crate::core::extension::ExtensionCapability::Bench => &scripts.bench,
+                crate::core::extension::ExtensionCapability::Trace => &scripts.trace,
             };
             if !commands.is_empty() {
                 return commands;
@@ -573,7 +576,7 @@ impl Component {
         self.self_check_commands(capability)
     }
 
-    pub fn has_script(&self, capability: crate::extension::ExtensionCapability) -> bool {
+    pub fn has_script(&self, capability: crate::core::extension::ExtensionCapability) -> bool {
         !self.script_commands(capability).is_empty()
     }
 

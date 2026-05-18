@@ -1,5 +1,5 @@
-use crate::defaults;
-use crate::error::{Error, Result};
+use crate::core::defaults;
+use crate::core::error::{Error, Result};
 use std::path::Path;
 use std::process::Command;
 
@@ -239,7 +239,7 @@ pub fn run_upgrade_with_method(
 /// Migrate all flat-file projects to directory-based layout.
 /// Best-effort — failures are logged and returned in the result.
 fn migrate_all_projects() -> Vec<ProjectMigrationEntry> {
-    let results = crate::project::migrate_all_to_directories();
+    let results = crate::core::project::migrate_all_to_directories();
 
     if results.is_empty() {
         return vec![];
@@ -271,7 +271,7 @@ fn migrate_all_projects() -> Vec<ProjectMigrationEntry> {
 /// Update all installed extensions. Best-effort — failures are logged and
 /// the extension is added to the skipped list.
 fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
-    use crate::extension;
+    use crate::core::extension;
 
     let extension_ids = extension::available_extension_ids();
     if extension_ids.is_empty() {

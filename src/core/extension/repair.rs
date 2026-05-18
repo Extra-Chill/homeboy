@@ -1,8 +1,8 @@
-use crate::config::{self, from_str};
-use crate::engine::local_files::{self, FileSystem};
-use crate::error::{Error, Result};
-use crate::git;
-use crate::paths;
+use crate::core::config::{self, from_str};
+use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::error::{Error, Result};
+use crate::core::git;
+use crate::core::paths;
 use std::path::{Path, PathBuf};
 
 use super::lifecycle::{
@@ -300,7 +300,7 @@ fn clean_replace_temp(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{relink, replace, replace_with_revision};
-    use crate::extension::{install, load_extension};
+    use crate::core::extension::{install, load_extension};
     use crate::test_support::with_isolated_home;
     use std::fs;
     use std::path::Path;

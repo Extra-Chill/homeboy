@@ -11,7 +11,7 @@
 //! command-run failure instead of a silent empty string.
 
 use super::spec::{RigResourcesSpec, RigSpec};
-use crate::expand;
+use crate::core::expand;
 use std::collections::BTreeSet;
 
 /// Expand variables + tilde in a string.

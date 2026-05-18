@@ -1,10 +1,10 @@
-use crate::component::ScopedExtensionConfig;
-use crate::config::{self, ConfigEntity};
-use crate::engine::local_files::{self, FileSystem};
-use crate::error::{Error, Result};
-use crate::output::{CreateOutput, MergeOutput, RemoveResult};
-use crate::paths;
-use crate::server;
+use crate::core::component::ScopedExtensionConfig;
+use crate::core::config::{self, ConfigEntity};
+use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::error::{Error, Result};
+use crate::core::output::{CreateOutput, MergeOutput, RemoveResult};
+use crate::core::paths;
+use crate::core::server;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -59,11 +59,11 @@ pub struct ProjectComponentOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_strategy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_deploy: Option<crate::component::GitDeployConfig>,
+    pub git_deploy: Option<crate::core::component::GitDeployConfig>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub hooks: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scopes: Option<crate::component::ScopeConfig>,
+    pub scopes: Option<crate::core::component::ScopeConfig>,
     /// Override the CLI path used by extension deploy install steps.
     /// For example, Studio sites need "studio wp" instead of the default "wp".
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -46,9 +46,9 @@
 //! workloads commonly nest a workload-id segment plus a socket filename
 //! (`<workload-id>/daemon/daemon.sock` ≈ 40 bytes) underneath.
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 #[cfg(windows)]
-use crate::paths;
+use crate::core::paths;
 use std::env;
 use std::path::{Path, PathBuf};
 

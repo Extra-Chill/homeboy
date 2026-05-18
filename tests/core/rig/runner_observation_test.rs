@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 use std::process::Command;
 
-use crate::observation::{ObservationStore, RunListFilter};
-use crate::paths;
-use crate::rig::runner::{run_check, run_up};
-use crate::rig::spec::{ComponentSpec, PipelineStep, RigSpec};
-use crate::rig::{RigSourceMetadata, RigState};
+use crate::core::observation::{ObservationStore, RunListFilter};
+use crate::core::paths;
+use crate::core::rig::runner::{run_check, run_up};
+use crate::core::rig::spec::{ComponentSpec, PipelineStep, RigSpec};
+use crate::core::rig::{RigSourceMetadata, RigState};
 use crate::test_support::with_isolated_home;
 
 fn observation_spec(id: &str) -> RigSpec {
@@ -56,7 +56,7 @@ impl Drop for XdgDataHomeGuard {
     }
 }
 
-fn list_rig_runs(rig_id: &str) -> Vec<crate::observation::RunRecord> {
+fn list_rig_runs(rig_id: &str) -> Vec<crate::core::observation::RunRecord> {
     ObservationStore::open_initialized()
         .expect("observation store")
         .list_runs(RunListFilter {

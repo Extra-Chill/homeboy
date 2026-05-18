@@ -1,5 +1,5 @@
-use crate::engine::validation;
-use crate::error::Result;
+use crate::core::engine::validation;
+use crate::core::error::Result;
 
 use super::types::ReleaseArtifact;
 
@@ -48,7 +48,7 @@ pub fn parse_release_artifacts(value: &serde_json::Value) -> Result<Vec<ReleaseA
         _ => Vec::new(),
     };
 
-    use crate::error::Error;
+    use crate::core::error::Error;
     for item in items {
         let artifact = match item {
             serde_json::Value::String(path) => ReleaseArtifact {

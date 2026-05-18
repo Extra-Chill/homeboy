@@ -16,7 +16,8 @@ use std::path::Path;
 pub use claims::{Claim, ClaimConfidence, ClaimType};
 pub use verify::VerifyResult;
 
-use crate::{component, extension, is_zero};
+use crate::core::{component, extension};
+use crate::is_zero;
 
 /// A doc that needs content review due to referenced files changing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -117,7 +118,7 @@ pub struct AuditResult {
 const DEFAULT_DOC_EXCLUDES: &[&str] = &["changelog.md"];
 
 pub(crate) fn find_doc_files(docs_path: &Path, excluded_targets: &[String]) -> Vec<String> {
-    use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+    use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
     if !docs_path.exists() {
         return Vec::new();

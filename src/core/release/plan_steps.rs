@@ -1,13 +1,15 @@
-use crate::component::Component;
-use crate::extension::ExtensionManifest;
-use crate::git;
-use crate::plan::{PlanStep, PlanValues};
-use crate::quality::{build_quality_steps as build_shared_quality_steps, QualityPlanOptions};
-use crate::release::pipeline_capabilities::{
+use crate::core::component::Component;
+use crate::core::extension::ExtensionManifest;
+use crate::core::git;
+use crate::core::plan::{PlanStep, PlanValues};
+use crate::core::quality::{build_quality_steps as build_shared_quality_steps, QualityPlanOptions};
+use crate::core::release::pipeline_capabilities::{
     get_publish_targets, has_package_capability, has_prepare_capability,
 };
-use crate::release::types::{ReleaseChangelogPlan, ReleaseOptions, ReleaseSemverRecommendation};
-use crate::Result;
+use crate::core::release::types::{
+    ReleaseChangelogPlan, ReleaseOptions, ReleaseSemverRecommendation,
+};
+use crate::core::Result;
 
 type StepConfig = PlanValues;
 
@@ -19,14 +21,14 @@ type StepConfig = PlanValues;
 /// through cleanly — the step simply isn't added to the plan.
 pub(super) fn github_release_applies(component: &Component) -> bool {
     let remote_url = component.remote_url.clone().or_else(|| {
-        crate::deploy::release_download::detect_remote_url(std::path::Path::new(
+        crate::core::deploy::release_download::detect_remote_url(std::path::Path::new(
             &component.local_path,
         ))
     });
 
     remote_url
         .as_deref()
-        .and_then(crate::deploy::release_download::parse_github_url)
+        .and_then(crate::core::deploy::release_download::parse_github_url)
         .is_some()
 }
 
@@ -308,8 +310,10 @@ pub(super) fn build_release_steps(
         log_status!("release", "Skipping publish/package steps (--skip-publish)");
     }
 
-    let post_release_hooks =
-        crate::engine::hooks::resolve_hooks(component, crate::engine::hooks::events::POST_RELEASE);
+    let post_release_hooks = crate::core::engine::hooks::resolve_hooks(
+        component,
+        crate::core::engine::hooks::events::POST_RELEASE,
+    );
     if !post_release_hooks.is_empty() {
         let post_release_needs = if !options.skip_publish && !publish_targets.is_empty() {
             if options.deploy {
@@ -454,10 +458,10 @@ fn string_array_config(key: &str, values: &[String]) -> StepConfig {
 #[cfg(test)]
 mod tests {
     use super::{build_preflight_steps, build_release_steps, github_release_applies};
-    use crate::component::{Component, ScopedExtensionConfig};
-    use crate::extension::ExtensionManifest;
-    use crate::plan::PlanStepStatus;
-    use crate::release::types::{
+    use crate::core::component::{Component, ScopedExtensionConfig};
+    use crate::core::extension::ExtensionManifest;
+    use crate::core::plan::PlanStepStatus;
+    use crate::core::release::types::{
         ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleaseSemverRecommendation,
     };
 

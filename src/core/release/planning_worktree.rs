@@ -1,8 +1,8 @@
-use crate::component::Component;
-use crate::error::{Error, Result};
-use crate::git::UncommittedChanges;
-use crate::release::changelog;
-use crate::release::version::ComponentVersionInfo;
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
+use crate::core::git::UncommittedChanges;
+use crate::core::release::changelog;
+use crate::core::release::version::ComponentVersionInfo;
 
 use super::types::ReleaseOptions;
 
@@ -13,7 +13,7 @@ pub(super) fn validate_release_worktree(
     options: &ReleaseOptions,
     version_info: &ComponentVersionInfo,
 ) -> Result<Option<serde_json::Value>> {
-    let uncommitted = crate::git::get_uncommitted_changes(&component.local_path)?;
+    let uncommitted = crate::core::git::get_uncommitted_changes(&component.local_path)?;
     if !uncommitted.has_changes {
         return Ok(None);
     }
@@ -66,7 +66,7 @@ pub(super) fn validate_release_worktree(
 /// Stage 0 fail-fast: refuse to run release work when the working tree has
 /// unexplained dirty files before lint/test/build can drown out the real error.
 pub(super) fn validate_working_tree_fail_fast(component: &Component) -> Result<()> {
-    let uncommitted = crate::git::get_uncommitted_changes(&component.local_path)?;
+    let uncommitted = crate::core::git::get_uncommitted_changes(&component.local_path)?;
     if !uncommitted.has_changes {
         return Ok(());
     }
@@ -172,10 +172,10 @@ mod tests {
         filter_homeboy_managed, get_release_allowed_files, get_unexpected_uncommitted_files,
         is_homeboy_managed_path, validate_release_worktree, validate_working_tree_fail_fast,
     };
-    use crate::component::Component;
-    use crate::git::UncommittedChanges;
-    use crate::release::types::ReleaseOptions;
-    use crate::release::version::{ComponentVersionInfo, VersionTargetInfo};
+    use crate::core::component::Component;
+    use crate::core::git::UncommittedChanges;
+    use crate::core::release::types::ReleaseOptions;
+    use crate::core::release::version::{ComponentVersionInfo, VersionTargetInfo};
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new("git")

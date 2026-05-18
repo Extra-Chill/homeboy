@@ -2,10 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::error::Error;
-use crate::plan::{HomeboyPlan, PlanKind};
-use crate::rig::spec::{ComponentSpec, RigSpec};
-use crate::stack::{GitRef, StackPrEntry, StackSpec, SyncOutput, SyncPreview};
+use crate::core::error::Error;
+use crate::core::plan::{HomeboyPlan, PlanKind};
+use crate::core::rig::spec::{ComponentSpec, RigSpec};
+use crate::core::stack::{GitRef, StackPrEntry, StackSpec, SyncOutput, SyncPreview};
 
 use super::{plan_stack_sync, run_component_sync, run_sync_with, validate_component_stack_path};
 

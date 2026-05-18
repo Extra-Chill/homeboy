@@ -73,7 +73,7 @@ fn dedupe(items: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{Component, ScopeConfig};
+    use crate::core::component::{Component, ScopeConfig};
 
     #[test]
     fn merges_default_and_command_specific_excludes() {

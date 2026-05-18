@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use super::expand::expand_vars;
 use super::spec::RigSpec;
-use crate::error::{ErrorCode, Result};
-use crate::stack::{self, StackSpec, SyncOutput};
+use crate::core::error::{ErrorCode, Result};
+use crate::core::stack::{self, StackSpec, SyncOutput};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RigStackPlanEntry {
@@ -79,7 +79,7 @@ pub fn run_component_sync(
     dry_run: bool,
 ) -> Result<RigStackSyncEntry> {
     let component = rig.components.get(component_id).ok_or_else(|| {
-        crate::Error::rig_pipeline_failed(
+        crate::core::Error::rig_pipeline_failed(
             &rig.id,
             "stack",
             format!(
@@ -89,7 +89,7 @@ pub fn run_component_sync(
         )
     })?;
     let stack_id = component.stack.as_ref().ok_or_else(|| {
-        crate::Error::rig_pipeline_failed(
+        crate::core::Error::rig_pipeline_failed(
             &rig.id,
             "stack",
             format!("component '{}' does not declare a stack", component_id),
@@ -107,7 +107,7 @@ pub fn run_component_sync(
         return Ok(entry);
     }
 
-    Err(crate::Error::rig_pipeline_failed(
+    Err(crate::core::Error::rig_pipeline_failed(
         &rig.id,
         "stack",
         format!(
@@ -207,7 +207,7 @@ pub(crate) fn validate_component_stack_path(
     stack_spec: &StackSpec,
 ) -> Result<()> {
     let component = rig.components.get(component_id).ok_or_else(|| {
-        crate::Error::rig_pipeline_failed(
+        crate::core::Error::rig_pipeline_failed(
             &rig.id,
             "stack",
             format!(
@@ -223,7 +223,7 @@ pub(crate) fn validate_component_stack_path(
         return Ok(());
     }
 
-    Err(crate::Error::rig_pipeline_failed(
+    Err(crate::core::Error::rig_pipeline_failed(
         &rig.id,
         "stack",
         format!(

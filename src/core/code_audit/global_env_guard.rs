@@ -196,7 +196,7 @@ impl Drop for HomeGuard {
         let runner = rust_fp(
             "tests/core/rig/runner_test.rs",
             r#"
-use crate::rig::test_support::with_isolated_home;
+use crate::core::rig::test_support::with_isolated_home;
 "#,
         );
 

@@ -16,15 +16,15 @@ pub fn require_tty_for_interactive() -> bool {
     is_stdin_tty() && is_stdout_tty()
 }
 
-pub fn prompt(message: &str) -> homeboy::Result<String> {
+pub fn prompt(message: &str) -> homeboy::core::Result<String> {
     eprint!("{}", message);
     io::stderr().flush().ok();
 
     let stdin = io::stdin();
     let mut line = String::new();
     stdin.lock().read_line(&mut line).map_err(|e| {
-        homeboy::Error::new(
-            homeboy::ErrorCode::InternalIoError,
+        homeboy::core::Error::new(
+            homeboy::core::ErrorCode::InternalIoError,
             format!("Failed to read input: {}", e),
             serde_json::Value::Null,
         )
@@ -33,7 +33,7 @@ pub fn prompt(message: &str) -> homeboy::Result<String> {
     Ok(line.trim().to_string())
 }
 
-pub fn prompt_password(message: &str) -> homeboy::Result<String> {
+pub fn prompt_password(message: &str) -> homeboy::core::Result<String> {
     prompt(message)
 }
 

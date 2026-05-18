@@ -2,9 +2,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::component::Component;
-use crate::error::{Error, Result};
-use crate::project::{load, resolve_project_components, Project, ProjectComponentAttachment};
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
+use crate::core::project::{load, resolve_project_components, Project, ProjectComponentAttachment};
 
 use super::{
     attach_discovered_component_path, clear_component_attachments, project_component_ids,
@@ -25,7 +25,7 @@ pub fn list_components(project_id: &str) -> Result<ProjectComponentsOutput> {
 }
 
 pub fn set_components(project_id: &str, json_spec: &str) -> Result<ProjectComponentsOutput> {
-    let raw = crate::config::read_json_spec_to_string(json_spec)?;
+    let raw = crate::core::config::read_json_spec_to_string(json_spec)?;
     let attachments: Vec<ProjectComponentAttachment> = serde_json::from_str(&raw).map_err(|e| {
         Error::validation_invalid_json(
             e,

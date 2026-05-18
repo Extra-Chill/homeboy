@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::rig::spec::RigResourcesSpec;
-use crate::rig::state::{
+use crate::core::rig::spec::RigResourcesSpec;
+use crate::core::rig::state::{
     ComponentSnapshot, MaterializedRigState, RigState, RigStateSnapshot, ServiceState,
     SharedPathState,
 };

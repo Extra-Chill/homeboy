@@ -226,7 +226,7 @@ fn is_control_keyword(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::Language;
+    use crate::core::code_audit::conventions::Language;
 
     fn fingerprint(path: &str, content: &str) -> FileFingerprint {
         FileFingerprint {

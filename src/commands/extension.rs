@@ -1,11 +1,11 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::extension::{
+use homeboy::core::extension::{
     self, extension_ready_status, is_extension_linked, load_extension, run_setup, ExtensionSummary,
     UpdateEntry,
 };
-use homeboy::project::{self, Project};
+use homeboy::core::project::{self, Project};
 use std::path::Path;
 
 use crate::commands::CmdResult;
@@ -232,7 +232,7 @@ pub enum ExtensionOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none", flatten)]
-        output: Option<homeboy::engine::command::CapturedOutput>,
+        output: Option<homeboy::core::engine::command::CapturedOutput>,
     },
     #[serde(rename = "extension.setup")]
     Setup { extension_id: String },
@@ -273,13 +273,13 @@ pub enum ExtensionOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         git_root: Option<String>,
         #[serde(flatten)]
-        source_update: homeboy::extension::ExtensionSourceUpdate,
+        source_update: homeboy::core::extension::ExtensionSourceUpdate,
         #[serde(skip_serializing_if = "Option::is_none")]
         old_version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         new_version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        repaired_source_metadata: Option<homeboy::extension::SourceMetadataRepair>,
+        repaired_source_metadata: Option<homeboy::core::extension::SourceMetadataRepair>,
     },
     #[serde(rename = "extension.update_all")]
     UpdateAll {
@@ -309,10 +309,10 @@ pub enum ExtensionOutput {
     Exec {
         extension_id: String,
         #[serde(skip_serializing_if = "Option::is_none", flatten)]
-        output: Option<homeboy::engine::command::CapturedOutput>,
+        output: Option<homeboy::core::engine::command::CapturedOutput>,
     },
     #[serde(rename = "extension.set")]
-    SetBatch { batch: homeboy::BatchResult },
+    SetBatch { batch: homeboy::core::BatchResult },
 }
 
 #[derive(Serialize)]
@@ -330,7 +330,7 @@ pub struct ExtensionDetail {
     pub source_url: Option<String>,
     pub runtime: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_requirements: Option<homeboy::extension::RuntimeRequirementsConfig>,
+    pub runtime_requirements: Option<homeboy::core::extension::RuntimeRequirementsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_setup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -349,11 +349,11 @@ pub struct ExtensionDetail {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionDetail>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub inputs: Vec<homeboy::extension::InputConfig>,
+    pub inputs: Vec<homeboy::core::extension::InputConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub settings: Vec<homeboy::extension::SettingConfig>,
+    pub settings: Vec<homeboy::core::extension::SettingConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub structured_sidecars: Vec<homeboy::extension::StructuredSidecarDeclaration>,
+    pub structured_sidecars: Vec<homeboy::core::extension::StructuredSidecarDeclaration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<RequiresDetail>,
 }
@@ -381,11 +381,11 @@ pub struct ActionDetail {
     pub id: String,
     pub label: String,
     #[serde(rename = "type")]
-    pub action_type: homeboy::extension::ActionType,
+    pub action_type: homeboy::core::extension::ActionType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<homeboy::extension::HttpMethod>,
+    pub method: Option<homeboy::core::extension::HttpMethod>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
@@ -450,7 +450,7 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
         components: r.components.clone(),
     });
 
-    let source_revision = homeboy::extension::read_source_revision(&extension.id);
+    let source_revision = homeboy::core::extension::read_source_revision(&extension.id);
 
     let detail = ExtensionDetail {
         id: extension.id.clone(),
@@ -497,7 +497,7 @@ fn run_extension(
     step: Option<String>,
     skip: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    use homeboy::extension::{ExtensionExecutionMode, ExtensionStepFilter};
+    use homeboy::core::extension::{ExtensionExecutionMode, ExtensionStepFilter};
 
     let mode = if no_stream {
         ExtensionExecutionMode::Captured
@@ -509,7 +509,7 @@ fn run_extension(
 
     let filter = ExtensionStepFilter { step, skip };
 
-    let result = homeboy::extension::run_extension(
+    let result = homeboy::core::extension::run_extension(
         extension_id,
         project.as_deref(),
         component.as_deref(),
@@ -536,8 +536,11 @@ fn install_extension(
     replace: bool,
 ) -> CmdResult<ExtensionOutput> {
     if replace {
-        let result =
-            homeboy::extension::replace_with_revision(source, id.as_deref(), revision.as_deref())?;
+        let result = homeboy::core::extension::replace_with_revision(
+            source,
+            id.as_deref(),
+            revision.as_deref(),
+        )?;
         return Ok((
             ExtensionOutput::Replace {
                 extension_id: result.extension_id,
@@ -551,8 +554,11 @@ fn install_extension(
         ));
     }
 
-    let result =
-        homeboy::extension::install_with_revision(source, id.as_deref(), revision.as_deref())?;
+    let result = homeboy::core::extension::install_with_revision(
+        source,
+        id.as_deref(),
+        revision.as_deref(),
+    )?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -568,7 +574,7 @@ fn install_extension(
 }
 
 fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutput> {
-    let result = homeboy::extension::relink(extension_id, source)?;
+    let result = homeboy::core::extension::relink(extension_id, source)?;
 
     Ok((
         ExtensionOutput::Replace {
@@ -585,7 +591,7 @@ fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutp
 
 fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
     let component = resolve_install_component(path)?;
-    let result = homeboy::extension::install_for_component(&component, source)?;
+    let result = homeboy::core::extension::install_for_component(&component, source)?;
 
     let installed = result
         .installed
@@ -609,19 +615,23 @@ fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<Extensio
     ))
 }
 
-fn resolve_install_component(path: Option<&str>) -> homeboy::Result<homeboy::component::Component> {
+fn resolve_install_component(
+    path: Option<&str>,
+) -> homeboy::core::Result<homeboy::core::component::Component> {
     if let Some(path) = path {
-        return homeboy::component::discover_from_portable(Path::new(path)).ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
-                "path",
-                format!("No homeboy.json found at {}", path),
-                Some(path.to_string()),
-                None,
-            )
-        });
+        return homeboy::core::component::discover_from_portable(Path::new(path)).ok_or_else(
+            || {
+                homeboy::core::Error::validation_invalid_argument(
+                    "path",
+                    format!("No homeboy.json found at {}", path),
+                    Some(path.to_string()),
+                    None,
+                )
+            },
+        );
     }
 
-    homeboy::component::resolve(None)
+    homeboy::core::component::resolve(None)
 }
 
 fn update_extension(
@@ -634,7 +644,7 @@ fn update_extension(
     }
 
     let extension_id = extension_id.ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "extension_id",
             "Provide a extension ID or use --all to update all extensions",
             None,
@@ -687,7 +697,7 @@ fn update_all_extensions(force: bool) -> CmdResult<ExtensionOutput> {
 
 fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
     let was_linked = is_extension_linked(extension_id);
-    let path = homeboy::extension::uninstall(extension_id)?;
+    let path = homeboy::core::extension::uninstall(extension_id)?;
 
     Ok((
         ExtensionOutput::Uninstall {
@@ -716,7 +726,7 @@ fn run_action(
     project_id: Option<String>,
     data: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    let response = homeboy::extension::run_action(
+    let response = homeboy::core::extension::run_action(
         extension_id,
         action_id,
         project_id.as_deref(),
@@ -739,15 +749,15 @@ fn set_extension(
     json: &str,
     replace_fields: &[String],
 ) -> CmdResult<ExtensionOutput> {
-    match homeboy::extension::merge(extension_id, json, replace_fields)? {
-        homeboy::MergeOutput::Single(result) => Ok((
+    match homeboy::core::extension::merge(extension_id, json, replace_fields)? {
+        homeboy::core::MergeOutput::Single(result) => Ok((
             ExtensionOutput::Set {
                 extension_id: result.id,
                 updated_fields: result.updated_fields,
             },
             0,
         )),
-        homeboy::MergeOutput::Bulk(batch) => {
+        homeboy::core::MergeOutput::Bulk(batch) => {
             let exit_code = batch.exit_code();
             Ok((ExtensionOutput::SetBatch { batch }, exit_code))
         }

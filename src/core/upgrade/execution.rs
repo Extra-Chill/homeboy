@@ -1,5 +1,5 @@
-use crate::defaults;
-use crate::error::{Error, Result};
+use crate::core::defaults;
+use crate::core::error::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

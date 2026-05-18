@@ -1,9 +1,9 @@
 use serde::Serialize;
 
-use crate::engine::local_files;
-use crate::engine::output_parse::{Aggregate, DeriveRule, ParseRule, ParseSpec};
-use crate::extension::test::analyze::{TestAnalysis, TestAnalysisInput};
-use crate::extension::test::TestCounts;
+use crate::core::engine::local_files;
+use crate::core::engine::output_parse::{Aggregate, DeriveRule, ParseRule, ParseSpec};
+use crate::core::extension::test::analyze::{TestAnalysis, TestAnalysisInput};
+use crate::core::extension::test::TestCounts;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CoverageOutput {

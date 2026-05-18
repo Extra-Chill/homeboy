@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use homeboy::observation::ArtifactRecord;
-use homeboy::runner;
+use homeboy::core::observation::ArtifactRecord;
+use homeboy::core::runner;
 
 use super::{CmdResult, RunsArtifactGetOutput, RunsOutput};
 

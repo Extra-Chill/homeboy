@@ -1,4 +1,4 @@
-use crate::plan::{HomeboyPlan, PlanKind, PlanStep};
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QualityPlanOptions {
@@ -149,7 +149,7 @@ fn step_id(prefix: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{build_quality_plan, build_quality_steps, QualityPlanOptions};
-    use crate::plan::{PlanKind, PlanStepStatus};
+    use crate::core::plan::{PlanKind, PlanStepStatus};
 
     #[test]
     fn test_release_preflight() {

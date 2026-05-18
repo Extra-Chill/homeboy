@@ -24,7 +24,7 @@
 //! point into the run dir, so extension scripts that use the old vars
 //! continue working. New scripts can use `HOMEBOY_RUN_DIR` directly.
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 use std::path::{Path, PathBuf};
 
 /// Well-known filenames for step outputs within a run directory.

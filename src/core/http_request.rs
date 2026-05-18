@@ -1,5 +1,5 @@
-use crate::error::{Error, Result};
-use crate::server::{auth_profiles, http};
+use crate::core::error::{Error, Result};
+use crate::core::server::{auth_profiles, http};
 use reqwest::blocking::Response;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Method;
@@ -128,7 +128,7 @@ fn response_headers(headers: &HeaderMap) -> BTreeMap<String, Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ErrorCode;
+    use crate::core::ErrorCode;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;

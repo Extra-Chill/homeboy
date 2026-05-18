@@ -1,5 +1,5 @@
-use crate::code_audit::AuditFinding;
-use crate::refactor::auto::{FixPolicy, FixResult, Insertion, NewFile, PolicySummary};
+use crate::core::code_audit::AuditFinding;
+use crate::core::refactor::auto::{FixPolicy, FixResult, Insertion, NewFile, PolicySummary};
 
 fn finding_allowed(finding: &AuditFinding, policy: &FixPolicy) -> bool {
     let included = policy
@@ -147,7 +147,7 @@ pub fn apply_fix_policy(result: &mut FixResult, write: bool, policy: &FixPolicy)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::refactor::auto::{Fix, FixResult, InsertionKind};
+    use crate::core::refactor::auto::{Fix, FixResult, InsertionKind};
 
     fn insertion(finding: AuditFinding) -> Insertion {
         Insertion {

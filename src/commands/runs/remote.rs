@@ -1,5 +1,5 @@
-use homeboy::runner;
-use homeboy::Error;
+use homeboy::core::runner;
+use homeboy::core::Error;
 
 use super::{CmdResult, RunsListArgs, RunsListOutput, RunsOutput};
 

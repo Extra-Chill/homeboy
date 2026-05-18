@@ -11,7 +11,7 @@
 //! from the spec. The cherry-pick orchestration after that decision is
 //! the same machinery `apply` uses (already tested in `apply_test.rs`).
 
-use crate::stack::sync::{is_droppable, sync_would_mutate, PrMeta};
+use crate::core::stack::sync::{is_droppable, sync_would_mutate, PrMeta};
 use std::fs;
 
 mod support;

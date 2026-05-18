@@ -8,8 +8,8 @@ use std::path::Path;
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use crate::extension::{self, ExtensionManifest};
+use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::extension::{self, ExtensionManifest};
 
 #[path = "test_quality.rs"]
 mod test_quality;
@@ -362,7 +362,7 @@ JSON
             name: "Test Extension".to_string(),
             version: "0.1.0".to_string(),
             provides: None,
-            scripts: Some(crate::extension::ScriptsConfig {
+            scripts: Some(crate::core::extension::ScriptsConfig {
                 topology: Some(script_rel.to_string()),
                 ..Default::default()
             }),

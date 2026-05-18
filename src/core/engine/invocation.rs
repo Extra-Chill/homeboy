@@ -1,8 +1,8 @@
 //! Per-child workload invocation isolation.
 
-use crate::engine::run_dir::RunDir;
-use crate::error::{Error, Result};
-use crate::paths;
+use crate::core::engine::run_dir::RunDir;
+use crate::core::error::{Error, Result};
+use crate::core::paths;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -506,7 +506,7 @@ mod invocation_test;
 #[cfg(test)]
 mod audit_coverage_tests {
     use super::*;
-    use crate::engine::run_dir::RunDir;
+    use crate::core::engine::run_dir::RunDir;
     use crate::test_support::with_isolated_home;
 
     #[test]

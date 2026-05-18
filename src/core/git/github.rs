@@ -23,9 +23,9 @@ use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
 
-use crate::component;
-use crate::deploy::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
-use crate::error::{Error, Result};
+use crate::core::component;
+use crate::core::deploy::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
+use crate::core::error::{Error, Result};
 
 use super::resolve_target;
 

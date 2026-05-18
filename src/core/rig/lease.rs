@@ -14,8 +14,8 @@ mod lock;
 use super::expand::expand_resources;
 use super::spec::{RigResourcesSpec, RigSpec};
 use super::state::now_rfc3339;
-use crate::error::{Error, Result, RigResourceConflictInfo};
-use crate::paths;
+use crate::core::error::{Error, Result, RigResourceConflictInfo};
+use crate::core::paths;
 use lock::LeaseIndexLock;
 
 /// On-disk lease held by one active mutating rig command.

@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-use crate::error::{Error, Result};
-use crate::expand;
-use crate::paths;
+use crate::core::error::{Error, Result};
+use crate::core::expand;
+use crate::core::paths;
 
 /// A stack: the spec for one combined-fixes branch.
 #[derive(Debug, Clone, Serialize, Deserialize)]

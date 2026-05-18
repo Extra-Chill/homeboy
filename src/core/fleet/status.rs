@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use crate::deploy::{self, DeployConfig, ReleaseStateStatus};
-use crate::project;
-use crate::server::health::{self, ServerHealth};
-use crate::version;
+use crate::core::deploy::{self, DeployConfig, ReleaseStateStatus};
+use crate::core::project;
+use crate::core::release::version;
+use crate::core::server::health::{self, ServerHealth};
 use serde::Serialize;
 
 // ============================================================================
@@ -112,7 +112,7 @@ pub fn collect_status(
     fleet_id: &str,
     cached: bool,
     health_only: bool,
-) -> crate::Result<FleetStatusResult> {
+) -> crate::core::Result<FleetStatusResult> {
     let fl = super::load(fleet_id)?;
 
     if cached {
@@ -211,7 +211,7 @@ pub fn collect_status(
 }
 
 /// Collect cached status (local versions only, no SSH).
-fn collect_cached_status(project_ids: &[String]) -> crate::Result<FleetStatusResult> {
+fn collect_cached_status(project_ids: &[String]) -> crate::core::Result<FleetStatusResult> {
     let mut project_statuses = Vec::new();
     let mut summary = FleetStatusSummary::default();
     summary.projects.total = project_ids.len() as u32;

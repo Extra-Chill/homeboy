@@ -29,7 +29,7 @@ mod field_patterns_data_contracts {
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};

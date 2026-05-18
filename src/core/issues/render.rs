@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::code_audit::FindingConfidence;
+use crate::core::code_audit::FindingConfidence;
 
 /// Canonical input shape consumed by `homeboy issues reconcile`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,13 +54,13 @@ pub fn build_findings_from_native_output(
     command: &str,
     output: Value,
     context: &IssueRenderContext,
-) -> crate::Result<ReconcileFindingsInput> {
+) -> crate::core::Result<ReconcileFindingsInput> {
     let data = output.get("data").unwrap_or(&output);
     match command {
         "audit" => Ok(render_audit(data, context)),
         "lint" => Ok(render_lint(data, context)),
         "test" => Ok(render_test(data, context)),
-        other => Err(crate::Error::validation_invalid_argument(
+        other => Err(crate::core::Error::validation_invalid_argument(
             "command",
             format!("Unsupported native issue output command `{}`", other),
             None,

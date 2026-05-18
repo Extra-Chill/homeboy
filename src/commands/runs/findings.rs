@@ -1,8 +1,8 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::observation::{FindingListFilter, FindingRecord, ObservationStore};
-use homeboy::Error;
+use homeboy::core::observation::{FindingListFilter, FindingRecord, ObservationStore};
+use homeboy::core::Error;
 
 use crate::commands::{
     runs::{
@@ -143,7 +143,7 @@ pub fn latest_finding(args: RunsLatestFindingArgs) -> CmdResult<RunsOutput> {
     ))
 }
 
-fn require_run(store: &ObservationStore, run_id: &str) -> homeboy::Result<()> {
+fn require_run(store: &ObservationStore, run_id: &str) -> homeboy::core::Result<()> {
     if store.get_run(run_id)?.is_some() {
         return Ok(());
     }

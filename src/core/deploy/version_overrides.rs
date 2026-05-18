@@ -2,18 +2,18 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::permissions;
-use crate::component::Component;
-use crate::engine::hooks::{self, HookFailureMode};
-use crate::engine::shell;
-use crate::engine::template::{render_map, TemplateVars};
-use crate::error::{Error, Result};
-use crate::extension::{
+use crate::core::component::Component;
+use crate::core::engine::hooks::{self, HookFailureMode};
+use crate::core::engine::shell;
+use crate::core::engine::template::{render_map, TemplateVars};
+use crate::core::error::{Error, Result};
+use crate::core::extension::{
     load_all_extensions, DeployOverride, DeployVerification, ExtensionManifest,
 };
-use crate::paths as base_path;
-use crate::project::Project;
-use crate::server::SshClient;
-use crate::version;
+use crate::core::paths as base_path;
+use crate::core::project::Project;
+use crate::core::release::version;
+use crate::core::server::SshClient;
 
 use super::path_roots::resolve_effective_remote_path;
 use super::transfer::scp_file;

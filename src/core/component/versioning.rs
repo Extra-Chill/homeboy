@@ -1,5 +1,5 @@
-use crate::component::VersionTarget;
-use crate::error::{Error, Result};
+use crate::core::component::VersionTarget;
+use crate::core::error::{Error, Result};
 use regex::Regex;
 
 /// Check if adding a new version target would conflict with existing targets.
@@ -34,7 +34,7 @@ pub fn validate_version_pattern(pattern: &str) -> Result<()> {
         ));
     }
 
-    let re = Regex::new(&crate::engine::text::ensure_multiline(pattern)).map_err(|e| {
+    let re = Regex::new(&crate::core::engine::text::ensure_multiline(pattern)).map_err(|e| {
         Error::validation_invalid_argument(
             "version_target.pattern",
             format!("Invalid regex pattern '{}': {}", pattern, e),

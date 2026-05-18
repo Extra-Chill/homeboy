@@ -1,7 +1,9 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::project::logs::{self, LogContent, LogEntry, LogSearchResult, PinnedLogsContent};
+use homeboy::core::project::logs::{
+    self, LogContent, LogEntry, LogSearchResult, PinnedLogsContent,
+};
 
 use crate::commands::CmdResult;
 
@@ -189,7 +191,7 @@ fn show(
 
 fn show_pinned(project_id: &str, lines: u32, follow: bool, local: bool) -> CmdResult<LogsOutput> {
     if follow {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "follow",
             "Cannot follow multiple pinned logs. Specify a log path to follow.",
             None,

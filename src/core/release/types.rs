@@ -2,8 +2,8 @@ use serde::ser::Error as SerializeError;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
 use crate::is_zero_u32;
-use crate::plan::{HomeboyPlan, PlanKind, PlanStep};
 
 /// Ordered release plan shared by dry-run output and release execution.
 ///
@@ -145,7 +145,7 @@ pub struct ReleaseStepResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hints: Vec<crate::error::Hint>,
+    pub hints: Vec<crate::core::error::Hint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,7 +197,7 @@ pub struct ReleaseState {
     pub tag: Option<String>,
     pub notes: Option<String>,
     pub artifacts: Vec<ReleaseArtifact>,
-    pub changelog_validation: Option<crate::version::ChangelogValidationResult>,
+    pub changelog_validation: Option<crate::core::release::version::ChangelogValidationResult>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -297,7 +297,7 @@ pub struct ReleaseProjectDeployResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_result: Option<crate::deploy::ComponentDeployResult>,
+    pub component_result: Option<crate::core::deploy::ComponentDeployResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

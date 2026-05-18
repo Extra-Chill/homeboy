@@ -1,4 +1,4 @@
-use homeboy::extension::lint::baseline::{self as lint_baseline, LintFinding};
+use homeboy::core::extension::lint::baseline::{self as lint_baseline, LintFinding};
 use std::path::Path;
 
 #[test]

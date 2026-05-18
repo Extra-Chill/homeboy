@@ -1,5 +1,5 @@
-use crate::deploy::{self, DeployConfig};
-use crate::server::health::{self, ServerHealth};
+use crate::core::deploy::{self, DeployConfig};
+use crate::core::server::health::{self, ServerHealth};
 
 #[derive(Debug, Clone)]
 pub struct ProjectComponentStatus {

@@ -82,13 +82,13 @@ pub(crate) fn stderr_tail(stderr: &str) -> String {
 
 // Extension loader functions
 
-use crate::component::Component;
-use crate::config;
-use crate::engine::run_dir::RunDir;
-use crate::error::Result;
-use crate::error::{Error, ErrorCode};
-use crate::output::MergeOutput;
-use crate::paths;
+use crate::core::component::Component;
+use crate::core::config;
+use crate::core::engine::run_dir::RunDir;
+use crate::core::error::Result;
+use crate::core::error::{Error, ErrorCode};
+use crate::core::output::MergeOutput;
+use crate::core::paths;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -231,7 +231,7 @@ pub struct ScenarioRunnerOptions<'a> {
     pub artifact_env: Option<(&'a str, &'a Path)>,
     pub list_only_env: Option<(&'a str, bool)>,
     pub extra_workloads_env: Option<(&'a str, &'a [PathBuf], &'a str)>,
-    pub invocation_requirements: crate::engine::invocation::InvocationRequirements,
+    pub invocation_requirements: crate::core::engine::invocation::InvocationRequirements,
 }
 
 pub fn build_scenario_runner(options: ScenarioRunnerOptions<'_>) -> Result<ExtensionRunner> {
@@ -370,7 +370,7 @@ fn capability_ambiguous_error(
 
 fn linked_extensions(
     component: &Component,
-) -> Result<&HashMap<String, crate::component::ScopedExtensionConfig>> {
+) -> Result<&HashMap<String, crate::core::component::ScopedExtensionConfig>> {
     component
         .extensions
         .as_ref()
@@ -490,7 +490,7 @@ pub fn resolve_execution_context(
 ///   "implements": ["SomeTrait"],
 ///   "registrations": [],
 ///   "namespace": null,
-///   "imports": ["crate::error::Result"]
+///   "imports": ["crate::core::error::Result"]
 /// }
 /// ```
 pub fn run_fingerprint_script(
@@ -784,8 +784,8 @@ pub struct ParsedItem {
     pub visibility: String,
 }
 
-impl From<crate::extension::grammar_items::GrammarItem> for ParsedItem {
-    fn from(gi: crate::extension::grammar_items::GrammarItem) -> Self {
+impl From<crate::core::extension::grammar_items::GrammarItem> for ParsedItem {
+    fn from(gi: crate::core::extension::grammar_items::GrammarItem) -> Self {
         Self {
             name: gi.name,
             kind: gi.kind,
@@ -898,7 +898,7 @@ pub struct ActionSummary {
 ///
 /// Aggregates ready status, compatibility, linked status, CLI info, actions,
 /// and runtime details into a single summary per extension.
-pub fn list_summaries(project: Option<&crate::project::Project>) -> Vec<ExtensionSummary> {
+pub fn list_summaries(project: Option<&crate::core::project::Project>) -> Vec<ExtensionSummary> {
     let extensions = load_all_extensions().unwrap_or_default();
 
     extensions
@@ -1033,7 +1033,7 @@ pub fn update_all(force: bool) -> UpdateAllResult {
 /// resolves the working directory from an optional component, and runs
 /// the command interactively.
 pub fn exec_tool(extension_id: &str, component_id: Option<&str>, args: &[String]) -> Result<i32> {
-    use crate::server::execute_local_command_interactive;
+    use crate::core::server::execute_local_command_interactive;
 
     let extension = load_extension(extension_id)?;
     let ext_path = extension
@@ -1043,7 +1043,7 @@ pub fn exec_tool(extension_id: &str, component_id: Option<&str>, args: &[String]
 
     // Resolve working directory
     let working_dir = if let Some(cid) = component_id {
-        let comp = crate::component::load(cid)?;
+        let comp = crate::core::component::load(cid)?;
         comp.local_path.clone()
     } else {
         std::env::current_dir()
@@ -1091,7 +1091,7 @@ pub fn is_extension_linked(extension_id: &str) -> bool {
 /// If `component.extensions` contains keys like `{"wordpress": {}}`, those extensions
 /// are implicitly required. Returns an actionable error with install commands
 /// when any are missing.
-pub fn validate_required_extensions(component: &crate::component::Component) -> Result<()> {
+pub fn validate_required_extensions(component: &crate::core::component::Component) -> Result<()> {
     let extensions = match &component.extensions {
         Some(m) if !m.is_empty() => m,
         _ => return Ok(()),
@@ -1133,8 +1133,8 @@ pub fn validate_required_extensions(component: &crate::component::Component) -> 
         )
     };
 
-    let mut err = crate::error::Error::new(
-        crate::error::ErrorCode::ExtensionNotFound,
+    let mut err = crate::core::error::Error::new(
+        crate::core::error::ErrorCode::ExtensionNotFound,
         message,
         serde_json::json!({
             "component_id": component.id,
@@ -1158,7 +1158,9 @@ pub fn validate_required_extensions(component: &crate::component::Component) -> 
 /// and satisfy the declared version constraints.
 ///
 /// Returns an actionable error listing every unsatisfied requirement with install/update hints.
-pub fn validate_extension_requirements(component: &crate::component::Component) -> Result<()> {
+pub fn validate_extension_requirements(
+    component: &crate::core::component::Component,
+) -> Result<()> {
     let extensions = match &component.extensions {
         Some(e) if !e.is_empty() => e,
         _ => return Ok(()),
@@ -1233,8 +1235,8 @@ pub fn validate_extension_requirements(component: &crate::component::Component) 
         )
     };
 
-    let mut err = crate::error::Error::new(
-        crate::error::ErrorCode::ExtensionNotFound,
+    let mut err = crate::core::error::Error::new(
+        crate::core::error::ErrorCode::ExtensionNotFound,
         message,
         serde_json::json!({
             "component_id": component.id,
@@ -1250,7 +1252,7 @@ pub fn validate_extension_requirements(component: &crate::component::Component) 
 }
 
 /// Check if any of the component's linked extensions provide build configuration.
-pub fn extension_provides_build(component: &crate::component::Component) -> bool {
+pub fn extension_provides_build(component: &crate::core::component::Component) -> bool {
     let extensions = match &component.extensions {
         Some(m) => m,
         None => return false,
@@ -1269,7 +1271,7 @@ pub fn extension_provides_build(component: &crate::component::Component) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{Component, ScopedExtensionConfig};
+    use crate::core::component::{Component, ScopedExtensionConfig};
     use std::collections::HashMap;
 
     #[test]
@@ -1404,7 +1406,7 @@ mod tests {
             ..Default::default()
         };
         let err = validate_required_extensions(&comp).unwrap_err();
-        assert_eq!(err.code, crate::error::ErrorCode::ExtensionNotFound);
+        assert_eq!(err.code, crate::core::error::ErrorCode::ExtensionNotFound);
         assert!(err.message.contains("nonexistent-extension-abc123"));
         assert!(err.message.contains("test-component"));
         // Should have install hint + browse hint

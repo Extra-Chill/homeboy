@@ -21,8 +21,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::baseline::{self as generic, BaselineConfig};
-use crate::error::Result;
+use crate::core::engine::baseline::{self as generic, BaselineConfig};
+use crate::core::error::Result;
 
 use super::metrics::{resolve_metric_policies, MetricDelta};
 use super::parsing::{BenchResults, BenchScenario};

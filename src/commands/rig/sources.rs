@@ -1,5 +1,5 @@
 use clap::Subcommand;
-use homeboy::rig;
+use homeboy::core::rig;
 
 use super::output::{RigSourcesOutput, RigSourcesReport};
 use super::RigCommandOutput;

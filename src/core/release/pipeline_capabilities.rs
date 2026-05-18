@@ -1,4 +1,4 @@
-use crate::extension::ExtensionManifest;
+use crate::core::extension::ExtensionManifest;
 
 /// Derive publish targets from extensions that have `release.publish` action.
 pub(super) fn get_publish_targets(extensions: &[ExtensionManifest]) -> Vec<String> {
@@ -26,7 +26,7 @@ pub(super) fn has_prepare_capability(extensions: &[ExtensionManifest]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{get_publish_targets, has_package_capability, has_prepare_capability};
-    use crate::extension::ExtensionManifest;
+    use crate::core::extension::ExtensionManifest;
 
     fn extension(id: &str, actions: &[&str]) -> ExtensionManifest {
         let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({

@@ -1,5 +1,5 @@
 use clap::ValueEnum;
-use homeboy::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
+use homeboy::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

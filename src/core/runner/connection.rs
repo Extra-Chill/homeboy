@@ -7,10 +7,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::engine::shell;
-use crate::error::{Error, Result};
-use crate::paths;
-use crate::server::{self, Server, ServerAuthMode, SshClient};
+use crate::core::engine::shell;
+use crate::core::error::{Error, Result};
+use crate::core::paths;
+use crate::core::server::{self, Server, ServerAuthMode, SshClient};
 
 use super::{load, Runner, RunnerKind};
 
@@ -561,7 +561,7 @@ fn failed_connect(
     )
 }
 
-fn command_failure_message(prefix: &str, output: &crate::server::CommandOutput) -> String {
+fn command_failure_message(prefix: &str, output: &crate::core::server::CommandOutput) -> String {
     format!(
         "{} (exit {}): stdout={}, stderr={}",
         prefix,
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn connect_reports_local_runner_as_unsupported() {
         test_support::with_isolated_home(|_| {
-            crate::runner::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+            crate::core::runner::create(r#"{"id":"lab-local","kind":"local"}"#, false)
                 .expect("create runner");
 
             let (report, exit_code) = connect("lab-local").expect("connect report");
@@ -675,7 +675,7 @@ mod tests {
     #[test]
     fn disconnect_removes_existing_session_file() {
         test_support::with_isolated_home(|_| {
-            crate::runner::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+            crate::core::runner::create(r#"{"id":"lab-local","kind":"local"}"#, false)
                 .expect("create runner");
             let session = RunnerSession {
                 runner_id: "lab-local".to_string(),

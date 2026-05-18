@@ -22,8 +22,8 @@ use super::spec::{
 use super::stack as rig_stack;
 use super::state::{now_rfc3339, RigState, SharedPathState};
 use super::toolchain;
-use crate::component::Component;
-use crate::error::{Error, Result};
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
 
 /// Result of one pipeline step.
 #[derive(Debug, Clone, Serialize)]
@@ -350,11 +350,11 @@ fn resolve_rig_component(rig: &RigSpec, component_id: &str) -> Result<Component>
 
 fn run_build_step(rig: &RigSpec, component_id: &str) -> Result<()> {
     let component = resolve_rig_component(rig, component_id)?;
-    let (result, exit_code) = crate::build::run_component(&component)?;
+    let (result, exit_code) = crate::core::build::run_component(&component)?;
 
     if exit_code != 0 {
         let detail = match &result {
-            crate::build::BuildResult::Single(output) => {
+            crate::core::build::BuildResult::Single(output) => {
                 let tail = output
                     .output
                     .stderr
@@ -372,7 +372,7 @@ fn run_build_step(rig: &RigSpec, component_id: &str) -> Result<()> {
                     format!("exit {} — {}", exit_code, tail)
                 }
             }
-            crate::build::BuildResult::Bulk(_) => format!("exit {}", exit_code),
+            crate::core::build::BuildResult::Bulk(_) => format!("exit {}", exit_code),
         };
         return Err(Error::rig_pipeline_failed(
             &rig.id,
@@ -416,7 +416,7 @@ fn run_git_step(rig: &RigSpec, component_id: &str, op: GitOp, extra_args: &[Stri
     }
     let arg_refs: Vec<&str> = full_args.iter().map(String::as_str).collect();
 
-    let output = crate::git::execute_git_for_release(&path, &arg_refs).map_err(|e| {
+    let output = crate::core::git::execute_git_for_release(&path, &arg_refs).map_err(|e| {
         Error::rig_pipeline_failed(
             &rig.id,
             "git",
@@ -448,18 +448,20 @@ fn run_git_step(rig: &RigSpec, component_id: &str, op: GitOp, extra_args: &[Stri
 }
 
 fn fail_if_git_index_unmerged(rig: &RigSpec, path: &str, completed_args: &[String]) -> Result<()> {
-    let output =
-        crate::git::execute_git_for_release(path, &["diff", "--name-only", "--diff-filter=U"])
-            .map_err(|e| {
-                Error::rig_pipeline_failed(
-                    &rig.id,
-                    "git",
-                    format!(
-                        "spawn `git diff --name-only --diff-filter=U` in {}: {}",
-                        path, e
-                    ),
-                )
-            })?;
+    let output = crate::core::git::execute_git_for_release(
+        path,
+        &["diff", "--name-only", "--diff-filter=U"],
+    )
+    .map_err(|e| {
+        Error::rig_pipeline_failed(
+            &rig.id,
+            "git",
+            format!(
+                "spawn `git diff --name-only --diff-filter=U` in {}: {}",
+                path, e
+            ),
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

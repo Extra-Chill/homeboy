@@ -2,10 +2,10 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::collections::HashMap;
 
-use homeboy::server::auth::{
+use homeboy::core::server::auth::{
     self, AuthStatus, GetResult, LoginResult, LogoutResult, RemoveResult, SetResult,
 };
-use homeboy::server::auth_profiles::{
+use homeboy::core::server::auth_profiles::{
     self, ProfileRemoveResult, ProfileSetResult, ProfileStatusResult,
 };
 

@@ -26,12 +26,12 @@ pub use whole_file_move::*;
 
 use std::path::{Path, PathBuf};
 
+use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use crate::core::engine::symbol_graph::module_path_from_file;
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use crate::extension::{
+use crate::core::extension::{
     self, AdjustedItem, ExtensionManifest, ParsedItem, RelatedTests, ResolvedImports,
 };
-use crate::Result;
+use crate::core::Result;
 
 impl ItemKind {
     fn from_str(s: &str) -> Self {
@@ -205,7 +205,7 @@ pub fn move_items_with_options(
         .is_some_and(|ext| ext == "inc");
 
     if !from_path.is_file() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "from",
             format!("Source file does not exist: {}", from),
             None,
@@ -213,8 +213,9 @@ pub fn move_items_with_options(
         ));
     }
 
-    let content = std::fs::read_to_string(&from_path)
-        .map_err(|e| crate::Error::internal_io(e.to_string(), Some(format!("read {}", from))))?;
+    let content = std::fs::read_to_string(&from_path).map_err(|e| {
+        crate::core::Error::internal_io(e.to_string(), Some(format!("read {}", from)))
+    })?;
 
     // Try to find a refactor-capable extension for this file type
     let ext = find_refactor_extension(from);
@@ -244,7 +245,7 @@ pub fn move_items_with_options(
 
     if all_items.is_empty() && ext.is_some() {
         // Extension returned nothing — might be a script error
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "from",
             format!("No items found in {}", from),
             None,
@@ -253,7 +254,7 @@ pub fn move_items_with_options(
             ]),
         ));
     } else if all_items.is_empty() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "from",
             format!("No refactor extension available for {} and no items could be parsed", from),
             None,
@@ -278,7 +279,7 @@ pub fn move_items_with_options(
 
     if !missing.is_empty() {
         let available: Vec<&str> = all_items.iter().map(|i| i.name.as_str()).collect();
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "item",
             format!("Item(s) not found in {}: {}", from, missing.join(", ")),
             None,
@@ -605,23 +606,27 @@ pub fn move_items_with_options(
         // Create parent directory if needed
         if let Some(parent) = to_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                crate::Error::internal_io(e.to_string(), Some(format!("create dir for {}", to)))
+                crate::core::Error::internal_io(
+                    e.to_string(),
+                    Some(format!("create dir for {}", to)),
+                )
             })?;
         }
 
         // Write destination
-        std::fs::write(&to_path, &final_dest)
-            .map_err(|e| crate::Error::internal_io(e.to_string(), Some(format!("write {}", to))))?;
+        std::fs::write(&to_path, &final_dest).map_err(|e| {
+            crate::core::Error::internal_io(e.to_string(), Some(format!("write {}", to)))
+        })?;
 
         // Write modified source
         std::fs::write(&from_path, &modified_source).map_err(|e| {
-            crate::Error::internal_io(e.to_string(), Some(format!("write {}", from)))
+            crate::core::Error::internal_io(e.to_string(), Some(format!("write {}", from)))
         })?;
 
         // Apply caller import rewrites
         for (file_path, rewrites) in &caller_rewrites {
             let file_content = std::fs::read_to_string(file_path).map_err(|e| {
-                crate::Error::internal_io(
+                crate::core::Error::internal_io(
                     e.to_string(),
                     Some(format!("read {}", file_path.display())),
                 )
@@ -643,7 +648,7 @@ pub fn move_items_with_options(
             };
 
             std::fs::write(file_path, &modified).map_err(|e| {
-                crate::Error::internal_io(
+                crate::core::Error::internal_io(
                     e.to_string(),
                     Some(format!("write {}", file_path.display())),
                 )

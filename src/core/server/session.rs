@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::ServerAuth;
 
@@ -58,7 +58,7 @@ fn expand_control_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::{ServerAuthMode, ServerSessionConfig};
+    use crate::core::server::{ServerAuthMode, ServerSessionConfig};
 
     #[test]
     fn test_from_auth() {

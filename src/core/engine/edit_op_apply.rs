@@ -9,8 +9,8 @@
 //! - `apply_edit_ops()` — filesystem entry point (read → transform → write)
 //! - `ApplyReport` / `ApplyError` — result types
 
-use crate::code_audit::conventions::Language;
-use crate::error::Result;
+use crate::core::code_audit::conventions::Language;
+use crate::core::error::Result;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -895,7 +895,7 @@ pub fn apply_edit_ops(ops: &[TaggedEditOp], root: &Path) -> Result<ApplyReport> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::Language;
+    use crate::core::code_audit::conventions::Language;
 
     #[test]
     fn resolve_anchor_at_line() {
@@ -1072,12 +1072,12 @@ mod tests {
         let op = EditOp::InsertLines {
             file: "test.rs".to_string(),
             anchor: InsertAnchor::AfterImports,
-            code: "use crate::config;".to_string(),
+            code: "use crate::core::config;".to_string(),
         };
         let result = apply_edit_ops_to_content(content, &[&op], &Language::Rust).unwrap();
-        assert!(result.contains("use crate::config;"));
+        assert!(result.contains("use crate::core::config;"));
         // The new import should appear after existing imports
-        let config_pos = result.find("use crate::config;").unwrap();
+        let config_pos = result.find("use crate::core::config;").unwrap();
         let path_pos = result.find("use std::path::Path;").unwrap();
         assert!(config_pos > path_pos);
     }
@@ -1122,12 +1122,12 @@ mod tests {
         let insert_op = EditOp::InsertLines {
             file: "test.rs".to_string(),
             anchor: InsertAnchor::AfterImports,
-            code: "use crate::config;".to_string(),
+            code: "use crate::core::config;".to_string(),
         };
         let ops: Vec<&EditOp> = vec![&replace_op, &insert_op];
         let result = apply_edit_ops_to_content(content, &ops, &Language::Rust).unwrap();
         assert!(result.contains("new_func"));
-        assert!(result.contains("use crate::config;"));
+        assert!(result.contains("use crate::core::config;"));
     }
 
     #[test]

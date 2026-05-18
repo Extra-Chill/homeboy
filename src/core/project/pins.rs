@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::{load, pin, save, unpin, PinOptions, PinType, Project};
 
@@ -363,7 +363,9 @@ fn pin_type_name(pin_type: PinType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{PinnedRemoteFile, PinnedRemoteLog, RemoteFileConfig, RemoteLogConfig};
+    use crate::core::project::{
+        PinnedRemoteFile, PinnedRemoteLog, RemoteFileConfig, RemoteLogConfig,
+    };
 
     fn project() -> Project {
         Project {

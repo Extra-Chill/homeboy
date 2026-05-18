@@ -1,5 +1,5 @@
 use super::*;
-use crate::engine::run_dir::RunDir;
+use crate::core::engine::run_dir::RunDir;
 use crate::test_support::{home_env_guard, with_isolated_home};
 
 #[test]
@@ -162,7 +162,7 @@ fn write_test_child_record(invocation_id: &str, owner_pid: u32, root_pid: u32, p
         invocation_id: invocation_id.to_string(),
         owner_pid,
         owner_started_at: None,
-        child: crate::engine::resource::ChildProcessIdentity {
+        child: crate::core::engine::resource::ChildProcessIdentity {
             root_pid,
             command_label: "sleep".to_string(),
         },

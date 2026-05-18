@@ -19,9 +19,9 @@ use super::spec::{RigSpec, ServiceKind, SymlinkSpec};
 use super::state::{
     now_rfc3339, ComponentSnapshot, MaterializedRigState, RigState, RigStateSnapshot,
 };
-use crate::engine::command::run_in_optional;
-use crate::error::{Error, Result};
-use crate::observation::{NewRunRecord, ObservationStore, RunStatus};
+use crate::core::engine::command::run_in_optional;
+use crate::core::error::{Error, Result};
+use crate::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 
 /// Report from `rig up`.
 #[derive(Debug, Clone, Serialize)]

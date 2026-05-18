@@ -1,19 +1,19 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use homeboy::component::Component;
-use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::engine::invocation::InvocationRequirements;
-use homeboy::engine::run_dir::RunDir;
-use homeboy::extension::bench as extension_bench;
-use homeboy::extension::bench::report::collect_artifacts;
-use homeboy::extension::bench::{
+use homeboy::core::component::Component;
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::engine::invocation::InvocationRequirements;
+use homeboy::core::engine::run_dir::RunDir;
+use homeboy::core::extension::bench as extension_bench;
+use homeboy::core::extension::bench::report::collect_artifacts;
+use homeboy::core::extension::bench::{
     BenchCommandOutput, BenchGate, BenchResults, BenchRunExecution, BenchRunWorkflowArgs,
     BenchRunWorkflowResult,
 };
-use homeboy::extension::ExtensionCapability;
-use homeboy::rig::lease::ActiveRigRunLease;
-use homeboy::rig::{self, BenchSpec, RigSpec, RigStateSnapshot};
+use homeboy::core::extension::ExtensionCapability;
+use homeboy::core::rig::lease::ActiveRigRunLease;
+use homeboy::core::rig::{self, BenchSpec, RigSpec, RigStateSnapshot};
 
 use super::observation::{self, BenchObservationStart};
 use super::{BenchRunArgs, CmdResult};
@@ -26,7 +26,7 @@ struct RigBenchContext {
     _lease: Option<ActiveRigRunLease>,
 }
 
-fn prepare_rig_bench_context(rig_id: &str) -> homeboy::Result<RigBenchContext> {
+fn prepare_rig_bench_context(rig_id: &str) -> homeboy::core::Result<RigBenchContext> {
     let spec = rig::load(rig_id)?;
     let lease = rig::lease::acquire_active_run_lease(&spec, "bench")?;
     let snapshot = rig::snapshot_state(&spec);
@@ -58,7 +58,7 @@ fn rig_bench_components(spec: &RigSpec) -> Vec<String> {
 pub(super) fn validate_profile_available_for_rigs(
     rig_ids: &[String],
     profile: &str,
-) -> homeboy::Result<()> {
+) -> homeboy::core::Result<()> {
     let mut missing = Vec::new();
     let mut available_by_rig = Vec::new();
 
@@ -80,7 +80,7 @@ pub(super) fn validate_profile_available_for_rigs(
         .collect::<Vec<_>>()
         .join("; ");
 
-    Err(homeboy::Error::validation_invalid_argument(
+    Err(homeboy::core::Error::validation_invalid_argument(
         "profile",
         format!(
             "bench profile '{}' is not defined by rig(s): {}; available profiles: {}",
@@ -110,13 +110,13 @@ fn format_available_profiles(profiles: &[String]) -> String {
 fn selected_scenario_ids(
     args: &BenchRunArgs,
     rig_spec: Option<&RigSpec>,
-) -> homeboy::Result<Vec<String>> {
+) -> homeboy::core::Result<Vec<String>> {
     let Some(profile) = &args.profile else {
         return Ok(args.scenario_ids.clone());
     };
 
     let Some(spec) = rig_spec else {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "profile",
             "--profile requires --rig because profiles are declared in rig specs",
             Some(profile.clone()),
@@ -126,7 +126,7 @@ fn selected_scenario_ids(
 
     let Some(scenario_ids) = spec.bench_profiles.get(profile) else {
         let available = available_profile_names(spec);
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "profile",
             format!(
                 "unknown bench profile '{}' for rig '{}'; available profiles: {}",
@@ -452,7 +452,7 @@ fn run_component_with_rig_context(
     }
 
     let run_dir = RunDir::create()?;
-    let resource_run = homeboy::engine::resource::ResourceSummaryRun::start(Some(format!(
+    let resource_run = homeboy::core::engine::resource::ResourceSummaryRun::start(Some(format!(
         "bench {}",
         effective_id
     )));
@@ -487,7 +487,7 @@ fn run_component_with_rig_context(
                 runs: args.runs,
                 concurrency: args.concurrency,
             },
-            baseline_flags: homeboy::engine::baseline::BaselineFlags {
+            baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
                 baseline: args.baseline_args.baseline,
                 ignore_baseline: args.baseline_args.ignore_baseline,
                 ratchet: args.baseline_args.ratchet,
@@ -557,7 +557,10 @@ fn rig_workload_runtime_inputs(
     )
 }
 
-fn run_rig_workload_preflight(spec: &RigSpec, extension_id: Option<&str>) -> homeboy::Result<()> {
+fn run_rig_workload_preflight(
+    spec: &RigSpec,
+    extension_id: Option<&str>,
+) -> homeboy::core::Result<()> {
     let groups = extension_id.and_then(|id| {
         rig::check_groups_for_extension_workloads(spec, rig::RigWorkloadKind::Bench, id)
     });
@@ -566,7 +569,7 @@ fn run_rig_workload_preflight(spec: &RigSpec, extension_id: Option<&str>) -> hom
         None => rig::run_check(spec)?,
     };
     if !check.success {
-        return Err(homeboy::Error::rig_pipeline_failed(
+        return Err(homeboy::core::Error::rig_pipeline_failed(
             &spec.id,
             "check",
             "rig check failed; refusing to run bench against an unhealthy rig",
@@ -702,12 +705,12 @@ mod tests {
         assert_eq!(scenario_gates.len(), 2);
         assert!(scenario_gates.iter().any(|gate| {
             gate.metric == "native_block_quality_pass"
-                && gate.op == homeboy::extension::bench::BenchGateOp::Eq
+                && gate.op == homeboy::core::extension::bench::BenchGateOp::Eq
                 && gate.value == 1.0
         }));
         assert!(scenario_gates.iter().any(|gate| {
             gate.metric == "tool_error_count"
-                && gate.op == homeboy::extension::bench::BenchGateOp::Lte
+                && gate.op == homeboy::core::extension::bench::BenchGateOp::Lte
                 && gate.value == 0.0
         }));
     }

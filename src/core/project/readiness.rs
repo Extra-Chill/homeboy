@@ -1,4 +1,4 @@
-use crate::component;
+use crate::core::component;
 
 use super::Project;
 
@@ -12,7 +12,7 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
                 project.id
             ));
         }
-        Some(sid) if !crate::server::exists(sid) => {
+        Some(sid) if !crate::core::server::exists(sid) => {
             blockers.push(format!(
                 "Server '{}' not found - create with: homeboy server set {} '{{\"host\": \"...\", \"user\": \"...\"}}'",
                 sid, sid

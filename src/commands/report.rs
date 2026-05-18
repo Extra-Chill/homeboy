@@ -95,7 +95,7 @@ pub fn run(args: ReportArgs, _global: &super::GlobalArgs) -> CmdResult<ReportOut
     }
 }
 
-pub fn render_failure_digest_from_args(args: &FailureDigestArgs) -> homeboy::Result<String> {
+pub fn render_failure_digest_from_args(args: &FailureDigestArgs) -> homeboy::core::Result<String> {
     let results = read_json_spec_value(&args.results, "results")?;
     let tooling = match args.tooling_json.as_deref() {
         Some(spec) => read_json_spec_value(spec, "tooling_json")?,
@@ -156,16 +156,16 @@ pub fn render_failure_digest(context: &FailureDigestContext) -> String {
     out
 }
 
-fn read_json_spec_value(spec: &str, context: &str) -> homeboy::Result<Value> {
+fn read_json_spec_value(spec: &str, context: &str) -> homeboy::core::Result<Value> {
     let raw = if Path::new(spec).exists() {
         std::fs::read_to_string(spec).map_err(|e| {
-            homeboy::Error::internal_unexpected(format!("Failed to read {}: {}", spec, e))
+            homeboy::core::Error::internal_unexpected(format!("Failed to read {}: {}", spec, e))
         })?
     } else {
-        homeboy::config::read_json_spec_to_string(spec)?
+        homeboy::core::config::read_json_spec_to_string(spec)?
     };
     serde_json::from_str(&raw).map_err(|e| {
-        homeboy::Error::validation_invalid_json(e, Some(context.to_string()), Some(raw))
+        homeboy::core::Error::validation_invalid_json(e, Some(context.to_string()), Some(raw))
     })
 }
 

@@ -4,11 +4,11 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::api_jobs::{Job, JobEvent, JobStatus};
-use crate::engine::shell;
-use crate::error::{Error, Result};
-use crate::server::{self, SshClient};
-use crate::source_snapshot::SourceSnapshot;
+use crate::core::api_jobs::{Job, JobEvent, JobStatus};
+use crate::core::engine::shell;
+use crate::core::error::{Error, Result};
+use crate::core::server::{self, SshClient};
+use crate::core::source_snapshot::SourceSnapshot;
 
 use super::evidence::mirror_daemon_evidence;
 use super::{load, status, Runner, RunnerKind};
@@ -267,7 +267,7 @@ fn result_event_data(events: &[JobEvent]) -> Option<Value> {
     events
         .iter()
         .rev()
-        .find(|event| matches!(event.kind, crate::api_jobs::JobEventKind::Result))
+        .find(|event| matches!(event.kind, crate::core::api_jobs::JobEventKind::Result))
         .and_then(|event| event.data.clone())
 }
 

@@ -1,9 +1,9 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::fleet::{self, Fleet, FleetComponentDrift, FleetStatusResult};
-use homeboy::project::Project;
-use homeboy::EntityCrudOutput;
+use homeboy::core::fleet::{self, Fleet, FleetComponentDrift, FleetStatusResult};
+use homeboy::core::project::Project;
+use homeboy::core::EntityCrudOutput;
 
 use super::{CmdResult, DynamicSetArgs};
 
@@ -135,13 +135,13 @@ pub struct FleetExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<FleetStatusResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub check: Option<Vec<homeboy::fleet::FleetProjectCheck>>,
+    pub check: Option<Vec<homeboy::core::fleet::FleetProjectCheck>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<homeboy::fleet::FleetCheckSummary>,
+    pub summary: Option<homeboy::core::fleet::FleetCheckSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exec: Option<Vec<homeboy::fleet::FleetExecProjectResult>>,
+    pub exec: Option<Vec<homeboy::core::fleet::FleetExecProjectResult>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exec_summary: Option<homeboy::fleet::FleetExecSummary>,
+    pub exec_summary: Option<homeboy::core::fleet::FleetExecSummary>,
 }
 
 pub type FleetOutput = EntityCrudOutput<Fleet, FleetExtra>;
@@ -184,18 +184,18 @@ fn create(
 ) -> CmdResult<FleetOutput> {
     // Validate projects exist
     for pid in &project_ids {
-        if !homeboy::project::exists(pid) {
-            return Err(homeboy::Error::project_not_found(pid, vec![]));
+        if !homeboy::core::project::exists(pid) {
+            return Err(homeboy::core::Error::project_not_found(pid, vec![]));
         }
     }
 
     let mut new_fleet = Fleet::new(id.to_string(), project_ids);
     new_fleet.description = description;
 
-    let json_spec = homeboy::config::to_json_string(&new_fleet)?;
+    let json_spec = homeboy::core::config::to_json_string(&new_fleet)?;
 
     match fleet::create(&json_spec, false)? {
-        homeboy::CreateOutput::Single(result) => Ok((
+        homeboy::core::CreateOutput::Single(result) => Ok((
             FleetOutput {
                 command: "fleet.create".to_string(),
                 id: Some(result.id),
@@ -204,7 +204,7 @@ fn create(
             },
             0,
         )),
-        homeboy::CreateOutput::Bulk(_) => Err(homeboy::Error::internal_unexpected(
+        homeboy::core::CreateOutput::Bulk(_) => Err(homeboy::core::Error::internal_unexpected(
             "Unexpected bulk result for single fleet".to_string(),
         )),
     }
@@ -226,7 +226,7 @@ fn show(id: &str) -> CmdResult<FleetOutput> {
 
 fn set(args: DynamicSetArgs) -> CmdResult<FleetOutput> {
     let merged = super::merge_dynamic_args(&args)?.ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "spec",
             "Provide JSON spec, --json flag, --base64 flag, or --key value flags",
             None,
@@ -236,7 +236,7 @@ fn set(args: DynamicSetArgs) -> CmdResult<FleetOutput> {
     let (json_string, replace_fields) = super::finalize_set_spec(&merged, &args.replace)?;
 
     match fleet::merge(args.id.as_deref(), &json_string, &replace_fields)? {
-        homeboy::MergeOutput::Single(result) => {
+        homeboy::core::MergeOutput::Single(result) => {
             let fl = fleet::load(&result.id)?;
             Ok((
                 FleetOutput {
@@ -249,7 +249,7 @@ fn set(args: DynamicSetArgs) -> CmdResult<FleetOutput> {
                 0,
             ))
         }
-        homeboy::MergeOutput::Bulk(_) => Err(homeboy::Error::internal_unexpected(
+        homeboy::core::MergeOutput::Bulk(_) => Err(homeboy::core::Error::internal_unexpected(
             "Unexpected bulk result for single fleet".to_string(),
         )),
     }

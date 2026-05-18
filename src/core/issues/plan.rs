@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::code_audit::FindingConfidence;
-use crate::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
+use crate::core::code_audit::FindingConfidence;
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 
 /// One row of incoming findings: "command produced N findings of category X
 /// for component Y." This is the input grain reconcile reasons over.

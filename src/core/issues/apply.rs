@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::plan::{ReconcileAction, ReconcilePlan, ReconcilePlanCounts};
 use super::tracker::{CloseReason, Tracker};

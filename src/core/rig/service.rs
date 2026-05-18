@@ -18,7 +18,7 @@
 //! returns `RigServiceFailed` so the crate still builds everywhere.
 
 use super::spec::{DiscoverSpec, RigSpec};
-use crate::error::Result;
+use crate::core::error::Result;
 
 /// Live status of a service as seen at probe time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,8 +107,8 @@ mod platform {
     use super::super::spec::{RigSpec, ServiceKind, ServiceSpec};
     use super::super::state::{now_rfc3339, ServiceState};
     use super::ServiceStatus;
-    use crate::error::{Error, Result};
-    use crate::paths;
+    use crate::core::error::{Error, Result};
+    use crate::core::paths;
 
     pub fn start(rig: &RigSpec, service_id: &str) -> Result<u32> {
         let spec = rig.services.get(service_id).ok_or_else(|| {
@@ -544,7 +544,7 @@ mod platform {
     //! reason instead of a compile error.
     use super::super::spec::RigSpec;
     use super::ServiceStatus;
-    use crate::error::{Error, Result};
+    use crate::core::error::{Error, Result};
 
     const UNSUPPORTED: &str = "rig services are not supported on this platform (Unix only)";
 

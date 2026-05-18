@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::code_audit::walker;
 use crate::core::code_audit::fingerprint::{self, FileFingerprint};
+use crate::core::code_audit::walker;
 use crate::core::engine::symbol_graph;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

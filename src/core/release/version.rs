@@ -6,14 +6,14 @@ pub use default_pattern_for_file::*;
 pub use types::*;
 pub use version::*;
 
-use crate::component::{self, Component, VersionTarget};
-use crate::config::{from_str, set_json_pointer, to_string_pretty};
-use crate::engine::hooks::{self, HookFailureMode};
-use crate::engine::local_files::{self, FileSystem};
-use crate::engine::text;
-use crate::error::{Error, Result};
-use crate::extension::ExtensionManifest;
-use crate::release::changelog;
+use crate::core::component::{self, Component, VersionTarget};
+use crate::core::config::{from_str, set_json_pointer, to_string_pretty};
+use crate::core::engine::hooks::{self, HookFailureMode};
+use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::engine::text;
+use crate::core::error::{Error, Result};
+use crate::core::extension::ExtensionManifest;
+use crate::core::release::changelog;
 use serde_json::Value;
 use std::path::Path;
 
@@ -500,7 +500,7 @@ pub(crate) fn bump_component_version_with_changelog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::Component;
+    use crate::core::component::Component;
     use regex::Regex;
     use std::fs;
 

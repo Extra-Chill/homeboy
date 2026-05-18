@@ -1,5 +1,5 @@
 use clap::Args;
-use homeboy::upgrade;
+use homeboy::core::upgrade;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -40,7 +40,7 @@ pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     if args.check {
         let result = upgrade::check_for_updates()?;
         let json = serde_json::to_value(result)
-            .map_err(|e| homeboy::Error::internal_json(e.to_string(), None))?;
+            .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
         return Ok((json, 0));
     }
 
@@ -52,7 +52,7 @@ pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
             "cargo" => Ok(upgrade::InstallMethod::Cargo),
             "source" => Ok(upgrade::InstallMethod::Source),
             "binary" => Ok(upgrade::InstallMethod::Binary),
-            other => Err(homeboy::Error::validation_invalid_argument(
+            other => Err(homeboy::core::Error::validation_invalid_argument(
                 "method",
                 format!("Unknown method: {}", other),
                 Some(other.to_string()),
@@ -68,7 +68,7 @@ pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         args.source_path.as_deref(),
     )?;
     let json = serde_json::to_value(&result)
-        .map_err(|e| homeboy::Error::internal_json(e.to_string(), None))?;
+        .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
 
     // If upgrade succeeded and restart is needed, do it
     if result.upgraded && result.restart_required && !args.no_restart {

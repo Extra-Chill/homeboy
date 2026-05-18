@@ -1,6 +1,6 @@
 //! Bench runner failure diagnostic enrichment.
 
-use crate::extension::stderr_tail;
+use crate::core::extension::stderr_tail;
 
 use super::run::BenchRunWorkflowArgs;
 
@@ -85,8 +85,8 @@ fn text_after<'a>(text: &'a str, start: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::baseline::BaselineFlags;
-    use crate::extension::bench::parsing::BenchRunExecution;
+    use crate::core::engine::baseline::BaselineFlags;
+    use crate::core::extension::bench::parsing::BenchRunExecution;
 
     #[test]
     fn test_bench_failure_stderr_tail() {
@@ -145,7 +145,8 @@ mod tests {
             rig_id: Some("studio-bfb".to_string()),
             shared_state: None,
             extra_workloads: Vec::new(),
-            invocation_requirements: crate::engine::invocation::InvocationRequirements::default(),
+            invocation_requirements:
+                crate::core::engine::invocation::InvocationRequirements::default(),
         }
     }
 }

@@ -14,8 +14,8 @@ use std::time::Duration;
 use super::expand::expand_vars;
 use super::service::discover_newest_for_spec;
 use super::spec::{CheckSpec, NewerThanSpec, RigSpec, TimeSource};
-use crate::error::{Error, Result};
-use crate::http_probe;
+use crate::core::error::{Error, Result};
+use crate::core::http_probe;
 
 /// Run a check against the current rig state. Err on fail.
 pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {

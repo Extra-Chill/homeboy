@@ -1,7 +1,7 @@
 //! version — extracted from version.rs.
 
-use crate::component::Component;
-use crate::engine::text;
+use crate::core::component::Component;
+use crate::core::engine::text;
 
 use super::read_local_version;
 

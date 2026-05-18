@@ -4,8 +4,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use homeboy::daemon::{self, DaemonStartResult, DaemonStatus, DaemonStopResult};
-use homeboy::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
+use homeboy::core::daemon::{self, DaemonStartResult, DaemonStatus, DaemonStopResult};
+use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
 
 use super::CmdResult;
 
@@ -70,7 +70,7 @@ fn start(addr: &str) -> CmdResult<DaemonOutput> {
     daemon::parse_bind_addr(addr)?;
 
     let exe = std::env::current_exe().map_err(|e| {
-        homeboy::Error::internal_io(
+        homeboy::core::Error::internal_io(
             e.to_string(),
             Some("resolve current executable".to_string()),
         )
@@ -82,7 +82,7 @@ fn start(addr: &str) -> CmdResult<DaemonOutput> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| {
-            homeboy::Error::internal_io(e.to_string(), Some("spawn daemon".to_string()))
+            homeboy::core::Error::internal_io(e.to_string(), Some("spawn daemon".to_string()))
         })?;
     let pid = child.id();
 
@@ -103,7 +103,7 @@ fn start(addr: &str) -> CmdResult<DaemonOutput> {
         }
 
         if Instant::now() >= deadline {
-            return Err(homeboy::Error::internal_unexpected(format!(
+            return Err(homeboy::core::Error::internal_unexpected(format!(
                 "daemon process {} did not publish state before timeout",
                 pid
             )));
@@ -117,9 +117,9 @@ fn start(addr: &str) -> CmdResult<DaemonOutput> {
 struct CommandAnalysisJobRunner;
 
 impl AnalysisJobRunner for CommandAnalysisJobRunner {
-    fn run_analysis_job(&self, argv: Vec<String>) -> homeboy::Result<AnalysisJobRunOutput> {
+    fn run_analysis_job(&self, argv: Vec<String>) -> homeboy::core::Result<AnalysisJobRunOutput> {
         let cli = crate::cli_surface::Cli::try_parse_from(argv).map_err(|error| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "body",
                 error.to_string(),
                 None,

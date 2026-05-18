@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 use std::env;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -111,7 +111,7 @@ pub fn artifact_root() -> Result<PathBuf> {
         }
     }
 
-    if let Some(path) = crate::defaults::load_config().artifact_root {
+    if let Some(path) = crate::core::defaults::load_config().artifact_root {
         if !path.trim().is_empty() {
             return Ok(expand_path(PathBuf::from(path)));
         }
@@ -377,9 +377,9 @@ mod tests {
     fn artifact_root_uses_configured_value() {
         with_isolated_home(|home| {
             let configured = home.path().join("custom-artifacts");
-            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+            crate::core::defaults::save_config(&crate::core::defaults::HomeboyConfig {
                 artifact_root: Some(configured.to_string_lossy().to_string()),
-                ..crate::defaults::HomeboyConfig::default()
+                ..crate::core::defaults::HomeboyConfig::default()
             })
             .expect("save config");
 
@@ -392,9 +392,9 @@ mod tests {
         with_isolated_home(|home| {
             let configured = home.path().join("config-artifacts");
             let env_root = home.path().join("env-artifacts");
-            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+            crate::core::defaults::save_config(&crate::core::defaults::HomeboyConfig {
                 artifact_root: Some(configured.to_string_lossy().to_string()),
-                ..crate::defaults::HomeboyConfig::default()
+                ..crate::core::defaults::HomeboyConfig::default()
             })
             .expect("save config");
             std::env::set_var("HOMEBOY_ARTIFACT_ROOT", &env_root);

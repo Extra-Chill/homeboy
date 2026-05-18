@@ -252,7 +252,7 @@ fn mean_body_similarity(members: &[&ClassShape], shape: &[(String, String)]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::Language;
+    use crate::core::code_audit::conventions::Language;
 
     fn make_class(
         path: &str,

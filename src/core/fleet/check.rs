@@ -1,5 +1,5 @@
-use crate::deploy::{self, DeployConfig};
-use crate::project;
+use crate::core::deploy::{self, DeployConfig};
+use crate::core::project;
 use serde::Serialize;
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -32,7 +32,7 @@ pub struct FleetCheckSummary {
 pub fn collect_check(
     fleet_id: &str,
     only_outdated: bool,
-) -> crate::Result<(Vec<FleetProjectCheck>, FleetCheckSummary, i32)> {
+) -> crate::core::Result<(Vec<FleetProjectCheck>, FleetCheckSummary, i32)> {
     let fl = super::load(fleet_id)?;
     let mut project_checks = Vec::new();
     let mut summary = FleetCheckSummary {

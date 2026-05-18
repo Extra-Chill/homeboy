@@ -15,7 +15,7 @@
 
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::core::error::Result;
 
 use super::git::run_git;
 use super::pr_meta::fetch_pr_meta;

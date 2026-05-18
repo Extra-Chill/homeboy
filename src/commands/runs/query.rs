@@ -13,8 +13,8 @@ use clap::{Args, ValueEnum};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::observation::{ObservationStore, RunListFilter};
-use homeboy::Error;
+use homeboy::core::observation::{ObservationStore, RunListFilter};
+use homeboy::core::Error;
 
 use super::common::{
     compile_jsonpath, distribution_share, eval_jsonpath, load_artifact_rows, ArtifactJsonRow,
@@ -121,7 +121,7 @@ pub fn runs_query(args: RunsQueryArgs) -> CmdResult<RunsOutput> {
         .select
         .iter()
         .map(|expr| compile_jsonpath(expr).map(|p| (expr.clone(), p)))
-        .collect::<homeboy::Result<Vec<_>>>()?;
+        .collect::<homeboy::core::Result<Vec<_>>>()?;
     let group_path = args
         .group_by
         .as_deref()
@@ -303,7 +303,7 @@ mod tests {
 
     fn sample_row(run_id: &str, kind: &str, json: Value) -> ArtifactJsonRow {
         ArtifactJsonRow {
-            run: homeboy::observation::RunRecord {
+            run: homeboy::core::observation::RunRecord {
                 id: run_id.into(),
                 kind: "gh-actions".into(),
                 component_id: Some("homeboy".into()),

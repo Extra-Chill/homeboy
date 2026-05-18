@@ -1,6 +1,6 @@
 //! Tests for shared token expansion helpers.
 
-use crate::expand::{expand_tokens, expand_with_tilde};
+use crate::core::expand::{expand_tokens, expand_with_tilde};
 
 #[test]
 fn test_expand_tokens() {

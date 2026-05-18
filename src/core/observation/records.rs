@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
-use crate::code_audit::{self, report::finding_kind_key};
-use crate::extension::lint::LintFinding;
+use crate::core::code_audit::{self, report::finding_kind_key};
+use crate::core::extension::lint::LintFinding;
 
 mod run_builder;
 mod run_status;
@@ -211,7 +211,7 @@ fn audit_severity_key(severity: &code_audit::Severity) -> String {
 pub fn finding_records_from_annotations_dir(
     run_id: &str,
     annotations_dir: &Path,
-) -> crate::error::Result<Vec<NewFindingRecord>> {
+) -> crate::core::error::Result<Vec<NewFindingRecord>> {
     if !annotations_dir.exists() {
         return Ok(Vec::new());
     }
@@ -233,8 +233,8 @@ pub fn finding_records_from_annotations_dir(
     Ok(records)
 }
 
-fn annotation_dir_error(action: &str, path: &Path, error: std::io::Error) -> crate::Error {
-    crate::Error::internal_io(
+fn annotation_dir_error(action: &str, path: &Path, error: std::io::Error) -> crate::core::Error {
+    crate::core::Error::internal_io(
         format!(
             "Failed to {} annotations dir {}: {}",
             action,
@@ -248,13 +248,13 @@ fn annotation_dir_error(action: &str, path: &Path, error: std::io::Error) -> cra
 pub fn finding_records_from_annotation_file(
     run_id: &str,
     path: &Path,
-) -> crate::error::Result<Vec<NewFindingRecord>> {
+) -> crate::core::error::Result<Vec<NewFindingRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
 
     let content = std::fs::read_to_string(path).map_err(|e| {
-        crate::Error::internal_io(
+        crate::core::Error::internal_io(
             format!("Failed to read annotations file {}: {}", path.display(), e),
             Some("observation.findings.annotations".to_string()),
         )
@@ -265,7 +265,7 @@ pub fn finding_records_from_annotation_file(
 
     let annotations: Vec<AnnotationFindingRecord> =
         serde_json::from_str(&content).map_err(|e| {
-            crate::Error::internal_io(
+            crate::core::Error::internal_io(
                 format!("Malformed annotations JSON in {}: {}", path.display(), e),
                 Some("observation.findings.annotations".to_string()),
             )

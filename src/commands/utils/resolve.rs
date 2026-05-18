@@ -1,6 +1,6 @@
 //! Project/component argument resolution helpers for CLI commands.
 
-use homeboy::{component, project, Error, Result};
+use homeboy::core::{component, project, Error, Result};
 
 pub fn resolve_project_components(first: &str, rest: &[String]) -> Result<(String, Vec<String>)> {
     let projects = project::list_ids().unwrap_or_default();

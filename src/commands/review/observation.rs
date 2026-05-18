@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use homeboy::git::short_head_revision_at;
-use homeboy::observation::{merge_metadata, ActiveObservation, NewRunRecord, RunStatus};
-use homeboy::ObservationOutputMetadata;
+use homeboy::core::git::short_head_revision_at;
+use homeboy::core::observation::{merge_metadata, ActiveObservation, NewRunRecord, RunStatus};
+use homeboy::core::ObservationOutputMetadata;
 
 use super::{artifact_command, ReviewArgs, ReviewCommandOutput, ReviewStage};
 
@@ -68,7 +68,7 @@ pub(super) fn finish_success(
     observation.0.finish(status, Some(metadata));
 }
 
-pub(super) fn finish_error(observation: Option<ReviewObservation>, error: &homeboy::Error) {
+pub(super) fn finish_error(observation: Option<ReviewObservation>, error: &homeboy::core::Error) {
     let Some(observation) = observation else {
         return;
     };
@@ -205,9 +205,9 @@ mod tests {
 
     #[test]
     fn finish_metadata_captures_aggregate_and_linkable_stages() {
-        use homeboy::code_audit::AuditCommandOutput;
-        use homeboy::extension::lint::LintCommandOutput;
-        use homeboy::extension::test::TestCommandOutput;
+        use homeboy::core::code_audit::AuditCommandOutput;
+        use homeboy::core::extension::lint::LintCommandOutput;
+        use homeboy::core::extension::test::TestCommandOutput;
 
         let initial = serde_json::json!({
             "schema": "homeboy/review-observation/v1",
@@ -257,8 +257,8 @@ mod tests {
         );
         let output = ReviewCommandOutput {
             command: "review".to_string(),
-            plan: homeboy::quality::build_quality_plan(
-                homeboy::quality::QualityPlanOptions::review("homeboy"),
+            plan: homeboy::core::quality::build_quality_plan(
+                homeboy::core::quality::QualityPlanOptions::review("homeboy"),
             ),
             observation: None,
             artifact,

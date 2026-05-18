@@ -31,8 +31,8 @@
 use serde::Serialize;
 use std::collections::HashSet;
 
-use crate::error::{Error, Result};
-use crate::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
+use crate::core::error::{Error, Result};
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 
 use super::apply::{
     checkout_force, cherry_pick, ensure_head_remote, fetch_remote_branch, fetch_sha, AppliedPr,

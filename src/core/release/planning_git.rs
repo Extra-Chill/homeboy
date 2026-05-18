@@ -1,7 +1,7 @@
-use crate::component::Component;
-use crate::engine::command;
-use crate::error::{Error, Result};
-use crate::git;
+use crate::core::component::Component;
+use crate::core::engine::command;
+use crate::core::error::{Error, Result};
+use crate::core::git;
 
 /// Fetch from remote and fast-forward if behind.
 ///
@@ -69,7 +69,7 @@ pub(super) fn validate_default_branch(component: &Component) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{validate_default_branch, validate_remote_sync};
-    use crate::component::Component;
+    use crate::core::component::Component;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new("git")

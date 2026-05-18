@@ -6,13 +6,13 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
-use crate::context::require_project_base_path;
-use crate::engine::executor::execute_for_project;
-use crate::engine::template::{render_map, TemplateVars};
-use crate::engine::text;
-use crate::extension::{load_all_extensions, DatabaseCliConfig};
-use crate::project::{self, Project};
-use crate::{Error, Result};
+use crate::core::context::require_project_base_path;
+use crate::core::engine::executor::execute_for_project;
+use crate::core::engine::template::{render_map, TemplateVars};
+use crate::core::engine::text;
+use crate::core::extension::{load_all_extensions, DatabaseCliConfig};
+use crate::core::project::{self, Project};
+use crate::core::{Error, Result};
 
 #[derive(Serialize, Clone)]
 pub struct DbResult {

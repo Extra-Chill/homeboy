@@ -1,5 +1,5 @@
-use crate::component::{self, Component};
-use crate::{Error, Result};
+use crate::core::component::{self, Component};
+use crate::core::{Error, Result};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};

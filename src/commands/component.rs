@@ -4,9 +4,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use homeboy::component::{self, Component};
-use homeboy::project::{self, Project};
-use homeboy::EntityCrudOutput;
+use homeboy::core::component::{self, Component};
+use homeboy::core::project::{self, Project};
+use homeboy::core::EntityCrudOutput;
 
 use super::{CmdResult, DynamicSetArgs};
 
@@ -190,7 +190,7 @@ pub fn run(
             project,
         } => {
             if json.is_some() || skip_existing {
-                return Err(homeboy::Error::validation_invalid_argument(
+                return Err(homeboy::core::Error::validation_invalid_argument(
                     "component.create",
                     "component create now initializes repo-owned homeboy.json from flags; JSON bulk create is legacy and no longer supported here",
                     None,
@@ -202,7 +202,7 @@ pub fn run(
             }
 
             let local_path = local_path.ok_or_else(|| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "local_path",
                     "Missing required argument: --local-path",
                     None,
@@ -221,10 +221,10 @@ pub fn run(
                 Component::new(id.clone(), local_path.clone(), remote_path, build_artifact);
 
             new_component.version_targets = if let Some(json_spec) = version_targets_json {
-                let raw = homeboy::config::read_json_spec_to_string(&json_spec)?;
-                serde_json::from_str::<Vec<homeboy::component::VersionTarget>>(&raw)
+                let raw = homeboy::core::config::read_json_spec_to_string(&json_spec)?;
+                serde_json::from_str::<Vec<homeboy::core::component::VersionTarget>>(&raw)
                     .map_err(|e| {
-                        homeboy::Error::validation_invalid_json(
+                        homeboy::core::Error::validation_invalid_json(
                             e,
                             Some("parse version targets JSON".to_string()),
                             Some(raw.chars().take(200).collect::<String>()),
@@ -242,7 +242,7 @@ pub fn run(
             // the actual changelog location on disk so generated homeboy.json
             // files don't ship with a path that doesn't exist. (#1128)
             new_component.changelog_target = changelog_target.or_else(|| {
-                homeboy::release::changelog::discover_changelog_relative_path(repo_path)
+                homeboy::core::release::changelog::discover_changelog_relative_path(repo_path)
             });
 
             if !extensions.is_empty() {
@@ -259,7 +259,7 @@ pub fn run(
             // discoverable by ID from any directory (#1131). This is a
             // lightweight pointer file in ~/.config/homeboy/components/<id>.json.
             if let Err(e) =
-                homeboy::component::inventory::write_standalone_registration(&new_component)
+                homeboy::core::component::inventory::write_standalone_registration(&new_component)
             {
                 eprintln!("Warning: could not write standalone registration: {}", e);
             }
@@ -365,7 +365,7 @@ fn reconcile(id: &str, apply: bool) -> CmdResult<ComponentOutput> {
             command: "component.reconcile".to_string(),
             id: Some(id.to_string()),
             entity: Some(serde_json::to_value(&report).map_err(|error| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "component.reconcile",
                     "Failed to serialize reconcile report",
                     Some(error.to_string()),
@@ -406,7 +406,10 @@ fn suggest_project_for_path(local_path: &str) -> Option<String> {
     None
 }
 
-fn derive_component_id_for_create(repo_path: &Path, local_path: &str) -> homeboy::Result<String> {
+fn derive_component_id_for_create(
+    repo_path: &Path,
+    local_path: &str,
+) -> homeboy::core::Result<String> {
     if repo_path.join("homeboy.json").exists() {
         return component::infer_portable_component_id(repo_path);
     }
@@ -415,7 +418,7 @@ fn derive_component_id_for_create(repo_path: &Path, local_path: &str) -> homeboy
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "local_path",
                 "Could not derive component ID from local path",
                 Some(local_path.to_string()),
@@ -423,7 +426,7 @@ fn derive_component_id_for_create(repo_path: &Path, local_path: &str) -> homeboy
             )
         })?;
 
-    homeboy::engine::identifier::slugify_id(dir_name, "component_id")
+    homeboy::core::engine::identifier::slugify_id(dir_name, "component_id")
 }
 
 fn show(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
@@ -432,7 +435,7 @@ fn show(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
         (_, Some(dir)) => {
             let dir_path = std::path::Path::new(dir);
             component::resolve_effective(id, Some(dir), None).map_err(|_| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "path",
                     format!(
                         "No homeboy.json found at {} and no registered component matches",
@@ -450,12 +453,12 @@ fn show(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
         (Some(comp_id), None) => component::load(comp_id).map_err(|e| e.with_contextual_hint())?,
         // Neither: try CWD discovery
         (None, None) => component::resolve_effective(None, None, None).map_err(|_| {
-            homeboy::Error::validation_missing_argument(vec!["id or --path".to_string()])
+            homeboy::core::Error::validation_missing_argument(vec!["id or --path".to_string()])
         })?,
     };
 
     let resolved_id = component.id.clone();
-    let drift_files = homeboy::component::drift::drift_file_paths(&component);
+    let drift_files = homeboy::core::component::drift::drift_file_paths(&component);
 
     Ok((
         ComponentOutput {
@@ -463,7 +466,7 @@ fn show(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
             id: Some(resolved_id.clone()),
             entity: Some({
                 let mut value = serde_json::to_value(&component).map_err(|error| {
-                    homeboy::Error::validation_invalid_argument(
+                    homeboy::core::Error::validation_invalid_argument(
                         "component",
                         "Failed to serialize component",
                         Some(error.to_string()),
@@ -513,7 +516,7 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
         (None, Some(dir)) => {
             let dir_path = Path::new(dir);
             component::portable::discover_from_portable(dir_path).ok_or_else(|| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "path",
                     format!("No homeboy.json found at {}", dir_path.display()),
                     None,
@@ -529,7 +532,7 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
             .map_err(|e| e.with_contextual_hint())?,
         // Neither: try CWD discovery
         (None, None) => component::resolve_effective(None, None, None).map_err(|_| {
-            homeboy::Error::validation_missing_argument(vec!["id or --path".to_string()])
+            homeboy::core::Error::validation_missing_argument(vec!["id or --path".to_string()])
         })?,
     };
 
@@ -552,7 +555,7 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(ext_obj) = json.get("extensions").and_then(|e| e.get(ext_id.as_str())) {
                     if let Ok(requirements) = serde_json::from_value::<
-                        homeboy::extension::RuntimeRequirementsConfig,
+                        homeboy::core::extension::RuntimeRequirementsConfig,
                     >(ext_obj.clone())
                     {
                         apply_component_runtime_requirements(
@@ -568,7 +571,7 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
     }
 
     let extension = if let Some(ref ext_id) = extension_id {
-        homeboy::extension::load_extension(ext_id).ok()
+        homeboy::core::extension::load_extension(ext_id).ok()
     } else {
         None
     };
@@ -593,7 +596,7 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
     };
 
     let entity = serde_json::to_value(&env_output).map_err(|error| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "component",
             "Failed to serialize env output",
             Some(error.to_string()),
@@ -613,15 +616,15 @@ fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
 }
 
 fn run_component_env_detector(
-    extension: &homeboy::extension::ExtensionManifest,
+    extension: &homeboy::core::extension::ExtensionManifest,
     component_path: &Path,
-) -> homeboy::Result<Option<homeboy::extension::RuntimeRequirementsConfig>> {
+) -> homeboy::core::Result<Option<homeboy::core::extension::RuntimeRequirementsConfig>> {
     let Some(component_env) = extension.component_env.as_ref() else {
         return Ok(None);
     };
 
     let extension_path = extension.extension_path.as_ref().ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "extension",
             "Extension manifest is missing extension_path",
             Some(extension.id.clone()),
@@ -630,7 +633,7 @@ fn run_component_env_detector(
     })?;
     let script_path = Path::new(extension_path).join(&component_env.detect_script);
     if !script_path.exists() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "extension",
             format!(
                 "Extension '{}' component env detector is missing {}",
@@ -642,15 +645,15 @@ fn run_component_env_detector(
         ));
     }
 
-    let command = homeboy::engine::shell::quote_path(&script_path.to_string_lossy());
-    let output = homeboy::server::execute_local_command_in_dir(
+    let command = homeboy::core::engine::shell::quote_path(&script_path.to_string_lossy());
+    let output = homeboy::core::server::execute_local_command_in_dir(
         &command,
         Some(&component_path.to_string_lossy()),
         None,
     );
 
     if !output.success {
-        return Err(homeboy::Error::internal_io(
+        return Err(homeboy::core::Error::internal_io(
             format!(
                 "Component env detector for extension '{}' failed with exit code {}",
                 extension.id, output.exit_code
@@ -664,23 +667,24 @@ fn run_component_env_detector(
         return Ok(None);
     }
 
-    let detected = serde_json::from_str::<homeboy::extension::RuntimeRequirementsConfig>(trimmed)
-        .map_err(|error| {
-        homeboy::Error::validation_invalid_json(
-            error,
-            Some(format!(
-                "parse component env detector output for extension '{}'",
-                extension.id
-            )),
-            Some(trimmed.chars().take(200).collect()),
-        )
-    })?;
+    let detected =
+        serde_json::from_str::<homeboy::core::extension::RuntimeRequirementsConfig>(trimmed)
+            .map_err(|error| {
+                homeboy::core::Error::validation_invalid_json(
+                    error,
+                    Some(format!(
+                        "parse component env detector output for extension '{}'",
+                        extension.id
+                    )),
+                    Some(trimmed.chars().take(200).collect()),
+                )
+            })?;
 
     Ok(Some(detected))
 }
 
 fn apply_component_env_detector_output(
-    detected: homeboy::extension::RuntimeRequirementsConfig,
+    detected: homeboy::core::extension::RuntimeRequirementsConfig,
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
 ) {
     apply_component_runtime_requirements(detected, runtimes, "component", true);
@@ -688,7 +692,7 @@ fn apply_component_env_detector_output(
 
 fn apply_extension_runtime_requirements(
     extension_id: &str,
-    runtime: &homeboy::extension::RuntimeRequirementsConfig,
+    runtime: &homeboy::core::extension::RuntimeRequirementsConfig,
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
 ) {
     let source = format!("extension:{}", extension_id);
@@ -696,7 +700,7 @@ fn apply_extension_runtime_requirements(
 }
 
 fn apply_component_runtime_requirements(
-    requirements: homeboy::extension::RuntimeRequirementsConfig,
+    requirements: homeboy::core::extension::RuntimeRequirementsConfig,
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
     source: &str,
     overwrite: bool,
@@ -761,7 +765,7 @@ fn set(
     // Check if there's any input at all
     let has_dynamic = args.json_spec()?.is_some() || !args.effective_extra().is_empty();
     if !has_dynamic && !flags.has_any() && version_targets.is_empty() && extensions.is_empty() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "spec",
             "Provide a flag (e.g., --local-path), --json spec, --base64, --key value, --version-target, or --extension",
             None,
@@ -783,7 +787,7 @@ fn set(
         if let serde_json::Value::Object(ref mut obj) = merged {
             obj.insert("version_targets".to_string(), serde_json::json!(parsed));
         } else {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "spec",
                 "Merged spec must be a JSON object",
                 None,
@@ -809,7 +813,7 @@ fn set(
     let (json_string, replace_fields) = super::finalize_set_spec(&merged, &args.replace)?;
 
     match component::merge(args.id.as_deref(), &json_string, &replace_fields)? {
-        homeboy::MergeOutput::Single(result) => {
+        homeboy::core::MergeOutput::Single(result) => {
             let comp = component::load(&result.id)?;
             Ok((
                 ComponentOutput {
@@ -818,7 +822,7 @@ fn set(
                     updated_fields: result.updated_fields,
                     entity: Some({
                         let mut value = serde_json::to_value(&comp).map_err(|error| {
-                            homeboy::Error::validation_invalid_argument(
+                            homeboy::core::Error::validation_invalid_argument(
                                 "component",
                                 "Failed to serialize component",
                                 Some(error.to_string()),
@@ -835,7 +839,7 @@ fn set(
                 0,
             ))
         }
-        homeboy::MergeOutput::Bulk(summary) => {
+        homeboy::core::MergeOutput::Bulk(summary) => {
             let exit_code = summary.exit_code();
             Ok((
                 ComponentOutput {
@@ -868,10 +872,10 @@ fn add_version_target(id: &str, file: &str, pattern: &str) -> CmdResult<Componen
         }]
     });
 
-    let json_string = homeboy::config::to_json_string(&version_target)?;
+    let json_string = homeboy::core::config::to_json_string(&version_target)?;
 
     match component::merge(Some(id), &json_string, &[])? {
-        homeboy::MergeOutput::Single(result) => {
+        homeboy::core::MergeOutput::Single(result) => {
             let comp = component::load(&result.id)?;
             Ok((
                 ComponentOutput {
@@ -880,7 +884,7 @@ fn add_version_target(id: &str, file: &str, pattern: &str) -> CmdResult<Componen
                     updated_fields: result.updated_fields,
                     entity: Some({
                         let mut value = serde_json::to_value(&comp).map_err(|error| {
-                            homeboy::Error::validation_invalid_argument(
+                            homeboy::core::Error::validation_invalid_argument(
                                 "component",
                                 "Failed to serialize component",
                                 Some(error.to_string()),
@@ -897,7 +901,7 @@ fn add_version_target(id: &str, file: &str, pattern: &str) -> CmdResult<Componen
                 0,
             ))
         }
-        homeboy::MergeOutput::Bulk(_) => Err(homeboy::Error::internal_unexpected(
+        homeboy::core::MergeOutput::Bulk(_) => Err(homeboy::core::Error::internal_unexpected(
             "Unexpected bulk result for single component".to_string(),
         )),
     }
@@ -927,7 +931,7 @@ fn rename(id: &str, new_id: &str) -> CmdResult<ComponentOutput> {
             updated_fields: vec!["id".to_string()],
             entity: Some({
                 let mut value = serde_json::to_value(&component).map_err(|error| {
-                    homeboy::Error::validation_invalid_argument(
+                    homeboy::core::Error::validation_invalid_argument(
                         "component",
                         "Failed to serialize component",
                         Some(error.to_string()),
@@ -950,7 +954,7 @@ fn list() -> CmdResult<ComponentOutput> {
         .into_iter()
         .map(|component| {
             let mut value = serde_json::to_value(&component).map_err(|error| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "component",
                     "Failed to serialize component",
                     Some(error.to_string()),
@@ -966,7 +970,7 @@ fn list() -> CmdResult<ComponentOutput> {
             }
             Ok(value)
         })
-        .collect::<homeboy::Result<Vec<Value>>>()?;
+        .collect::<homeboy::core::Result<Vec<Value>>>()?;
 
     Ok((
         ComponentOutput {
@@ -1128,7 +1132,7 @@ mod tests {
 
     #[test]
     fn extension_runtime_requirements_fill_missing_component_versions() {
-        let runtime: homeboy::extension::RuntimeRequirementsConfig =
+        let runtime: homeboy::core::extension::RuntimeRequirementsConfig =
             serde_json::from_value(serde_json::json!({
                 "runtimes": {
                     "node": { "version": "24" },
@@ -1166,7 +1170,7 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&script, perms).expect("chmod detector");
 
-        let mut extension: homeboy::extension::ExtensionManifest =
+        let mut extension: homeboy::core::extension::ExtensionManifest =
             serde_json::from_value(serde_json::json!({
                 "name": "Demo",
                 "version": "1.0.0",
@@ -1186,7 +1190,7 @@ mod tests {
 
     #[test]
     fn runtime_requirements_accept_generic_and_legacy_shapes() {
-        let generic: homeboy::extension::RuntimeRequirementsConfig =
+        let generic: homeboy::core::extension::RuntimeRequirementsConfig =
             serde_json::from_value(serde_json::json!({
                 "runtimes": {
                     "python": { "version": "3.12" },
@@ -1198,7 +1202,7 @@ mod tests {
         assert_eq!(generic.runtimes["python"].version, "3.12");
         assert_eq!(generic.runtimes["ruby"].version, "3.3");
 
-        let legacy: homeboy::extension::RuntimeRequirementsConfig =
+        let legacy: homeboy::core::extension::RuntimeRequirementsConfig =
             serde_json::from_value(serde_json::json!({ "php": "8.2", "node": "22" }))
                 .expect("legacy requirements");
 
@@ -1208,7 +1212,7 @@ mod tests {
 
     #[test]
     fn component_env_detector_output_overrides_component_values_before_runtime_defaults() {
-        let runtime: homeboy::extension::RuntimeRequirementsConfig =
+        let runtime: homeboy::core::extension::RuntimeRequirementsConfig =
             serde_json::from_value(serde_json::json!({
                 "runtimes": {
                     "node": { "version": "24" },
@@ -1250,7 +1254,7 @@ mod tests {
 
     #[test]
     fn component_versions_win_over_extension_runtime_requirements() {
-        let runtime: homeboy::extension::RuntimeRequirementsConfig =
+        let runtime: homeboy::core::extension::RuntimeRequirementsConfig =
             serde_json::from_value(serde_json::json!({
                 "runtimes": {
                     "node": { "version": "24" },

@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use crate::component::Component;
-use crate::engine::invocation::{InvocationGuard, InvocationRequirements};
-use crate::engine::run_dir::RunDir;
-use crate::error::{Error, Result};
-use crate::extension::{exec_context, ExtensionCapability, RunnerOutput};
+use crate::core::component::Component;
+use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
+use crate::core::engine::run_dir::RunDir;
+use crate::core::error::{Error, Result};
+use crate::core::extension::{exec_context, ExtensionCapability, RunnerOutput};
 
 #[derive(Debug, Clone)]
 pub struct ComponentScriptOutput {
@@ -175,7 +175,7 @@ fn command_with_args(command: &str, script_args: &[String]) -> String {
     format!(
         "{} {}",
         command,
-        crate::engine::shell::quote_args(script_args)
+        crate::core::engine::shell::quote_args(script_args)
     )
 }
 

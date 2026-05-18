@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 
-use homeboy::http_request::{self, HttpRequestInput, HttpRequestOutput};
+use homeboy::core::http_request::{self, HttpRequestInput, HttpRequestOutput};
 
 use super::{parse_key_val, CmdResult, GlobalArgs};
 

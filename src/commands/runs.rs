@@ -22,8 +22,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
-use homeboy::Error;
+use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::Error;
 
 use super::{CmdResult, GlobalArgs};
 use bundle::{
@@ -427,7 +427,7 @@ pub fn bench_history(
         .filter(|run| scenario_id.is_none_or(|scenario| run_contains_scenario(run, scenario)))
         .take(limit.max(1) as usize)
         .map(|run| run_detail(&store, run))
-        .collect::<homeboy::Result<Vec<_>>>()?;
+        .collect::<homeboy::core::Result<Vec<_>>>()?;
 
     Ok((
         RunsOutput::BenchHistory(BenchHistoryOutput {
@@ -498,7 +498,7 @@ pub fn bench_compare(from_run_id: &str, to_run_id: &str) -> CmdResult<RunsOutput
     ))
 }
 
-fn require_run(store: &ObservationStore, run_id: &str) -> homeboy::Result<RunRecord> {
+fn require_run(store: &ObservationStore, run_id: &str) -> homeboy::core::Result<RunRecord> {
     store.get_run(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
@@ -509,7 +509,7 @@ fn require_run(store: &ObservationStore, run_id: &str) -> homeboy::Result<RunRec
     })
 }
 
-fn require_kind(run: &RunRecord, expected: &str) -> homeboy::Result<()> {
+fn require_kind(run: &RunRecord, expected: &str) -> homeboy::core::Result<()> {
     if run.kind == expected {
         return Ok(());
     }
@@ -524,7 +524,7 @@ fn require_kind(run: &RunRecord, expected: &str) -> homeboy::Result<()> {
     ))
 }
 
-fn run_detail(store: &ObservationStore, run: RunRecord) -> homeboy::Result<RunDetail> {
+fn run_detail(store: &ObservationStore, run: RunRecord) -> homeboy::core::Result<RunDetail> {
     let artifacts = store.list_artifacts(&run.id)?;
     Ok(RunDetail {
         summary: run_summary(run.clone()),
@@ -622,7 +622,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    use homeboy::observation::{
+    use homeboy::core::observation::{
         FindingListFilter, FindingRecord, NewFindingRecord, NewRunRecord, NewTraceSpanRecord,
         RunRecord, RunStatus, TraceSpanRecord,
     };

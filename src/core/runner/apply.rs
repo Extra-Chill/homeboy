@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
-use crate::source_snapshot::SourceSnapshot;
+use crate::core::error::{Error, Result};
+use crate::core::source_snapshot::SourceSnapshot;
 
 #[derive(Debug, Clone)]
 pub struct RunnerWorkspaceApplyOptions {
@@ -292,7 +292,7 @@ fn safe_join(root: &Path, relative: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source_snapshot::SourceSnapshot;
+    use crate::core::source_snapshot::SourceSnapshot;
 
     #[test]
     fn test_apply_workspace_patch() {

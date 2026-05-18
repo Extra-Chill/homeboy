@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::engine::run_dir::RunDir;
-use crate::error::{Error, Result};
+use crate::core::engine::run_dir::RunDir;
+use crate::core::error::{Error, Result};
 
 use super::overlay_lock;
 
@@ -302,7 +302,7 @@ mod tests {
     use std::fs;
     use std::process::Command;
 
-    use crate::engine::run_dir::RunDir;
+    use crate::core::engine::run_dir::RunDir;
     use crate::test_support::with_isolated_home;
 
     use super::*;

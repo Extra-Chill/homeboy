@@ -14,7 +14,7 @@ pub use primitives::*;
 
 use std::process::Command;
 
-use crate::error::Error;
+use crate::core::error::Error;
 
 fn execute_git(path: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
     Command::new("git").args(args).current_dir(path).output()
@@ -62,7 +62,7 @@ pub fn parse_git_identity(identity: Option<&str>) -> GitIdentity {
 }
 
 /// Configure git user.name and user.email in a repository.
-pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::Result<()> {
+pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::core::error::Result<()> {
     for (key, value) in [
         ("user.name", identity.name.as_str()),
         ("user.email", identity.email.as_str()),
@@ -90,7 +90,7 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::R
 ///    to the directory basename.
 /// 3. **`component_id` only** — look the component up in the registry,
 ///    use its configured `local_path`.
-/// 4. **Neither** — fall through to [`crate::component::resolve`], which
+/// 4. **Neither** — fall through to [`crate::core::component::resolve`], which
 ///    detects from CWD via the registry first, then portable
 ///    `homeboy.json` at CWD or git root. This is what makes
 ///    `homeboy git status` (and friends) work without arguments when
@@ -98,7 +98,7 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::R
 pub(crate) fn resolve_target(
     component_id: Option<&str>,
     path_override: Option<&str>,
-) -> crate::error::Result<(String, String)> {
+) -> crate::core::error::Result<(String, String)> {
     // Case 1 & 2: explicit path given.
     if let Some(path) = path_override {
         if let Some(id) = component_id {
@@ -106,12 +106,12 @@ pub(crate) fn resolve_target(
         }
         // Discover ID from path or its git root via portable homeboy.json.
         let dir = std::path::Path::new(path);
-        if let Some(comp) = crate::component::discover_from_portable(dir) {
+        if let Some(comp) = crate::core::component::discover_from_portable(dir) {
             return Ok((comp.id, path.to_string()));
         }
-        if let Some(git_root) = crate::component::resolution::detect_git_root(dir) {
+        if let Some(git_root) = crate::core::component::resolution::detect_git_root(dir) {
             if git_root != dir {
-                if let Some(comp) = crate::component::discover_from_portable(&git_root) {
+                if let Some(comp) = crate::core::component::discover_from_portable(&git_root) {
                     return Ok((comp.id, path.to_string()));
                 }
             }
@@ -128,12 +128,12 @@ pub(crate) fn resolve_target(
 
     // Case 3: ID without path — look it up in the registry.
     if let Some(id) = component_id {
-        let comp = crate::component::resolve_effective(Some(id), None, None)?;
+        let comp = crate::core::component::resolve_effective(Some(id), None, None)?;
         return Ok((id.to_string(), comp.local_path));
     }
 
     // Case 4: neither — CWD detection.
-    let comp = crate::component::resolve(None)?;
+    let comp = crate::core::component::resolve(None)?;
     Ok((comp.id, comp.local_path))
 }
 

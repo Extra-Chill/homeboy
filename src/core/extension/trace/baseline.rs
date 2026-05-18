@@ -5,8 +5,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::baseline::{self as generic, BaselineConfig};
-use crate::error::Result;
+use crate::core::engine::baseline::{self as generic, BaselineConfig};
+use crate::core::error::Result;
 
 use super::parsing::{TraceAssertion, TraceAssertionStatus, TraceResults};
 
@@ -367,7 +367,7 @@ impl generic::Fingerprintable for TraceBaselineItem<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::trace::parsing::{
+    use crate::core::extension::trace::parsing::{
         TraceAssertion, TraceSpanResult, TraceSpanStatus, TraceStatus,
     };
 

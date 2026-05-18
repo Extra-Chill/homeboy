@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::extension::bench::parsing::{BenchMetrics, BenchResults, BenchScenario};
+use crate::core::extension::bench::parsing::{BenchMetrics, BenchResults, BenchScenario};
 
 pub(crate) fn scenario_with_iterations(
     id: &str,

@@ -12,8 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::component::Component;
-use crate::error::{Error, Result};
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
 
 /// Parsed GitHub owner/repo from a remote URL.
 #[derive(Debug, Clone)]
@@ -120,7 +120,7 @@ pub fn download_release_artifact(
     let url = github.release_artifact_url(tag, artifact_name);
 
     // Create temp directory for the download
-    let tmp_dir = crate::engine::temp::runtime_temp_dir("deploy-download")?;
+    let tmp_dir = crate::core::engine::temp::runtime_temp_dir("deploy-download")?;
     let dest_path = tmp_dir.join(artifact_name);
 
     log_status!("deploy", "Downloading release artifact: {}", url);

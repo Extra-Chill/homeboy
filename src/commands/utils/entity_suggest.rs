@@ -1,7 +1,7 @@
 //! Entity suggestion utilities for unrecognized CLI subcommands.
 
-use homeboy::engine::text::levenshtein;
-use homeboy::{component, extension, project, server};
+use homeboy::core::engine::text::levenshtein;
+use homeboy::core::{component, extension, project, server};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityType {

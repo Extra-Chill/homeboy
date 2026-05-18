@@ -286,7 +286,7 @@ fn composer_json_version(root: &Path) -> Option<Version> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::CallSite;
+    use crate::core::extension::CallSite;
 
     fn make_fp(path: &str, content: &str) -> FileFingerprint {
         FileFingerprint {

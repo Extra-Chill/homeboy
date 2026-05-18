@@ -6,7 +6,7 @@
 use serde::Serialize;
 
 use crate::commands::runs::RunsOutput;
-use homeboy::rig::{self, RigResourcesSpec, RigSpec};
+use homeboy::core::rig::{self, RigResourcesSpec, RigSpec};
 
 /// Tagged union of every rig command's output. `untagged` so each variant
 /// serializes to its own shape — consumers discriminate on the `command`

@@ -170,7 +170,7 @@ fn row_to_triage_item_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Triage
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observation::NewRunRecord;
+    use crate::core::observation::NewRunRecord;
     use crate::test_support::with_isolated_home;
 
     #[test]

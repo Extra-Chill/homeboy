@@ -1,9 +1,9 @@
 //! Release planning: validate inputs and build the executable release plan.
 
-use crate::engine::validation::ValidationCollector;
-use crate::error::{Error, Result};
-use crate::git;
-use crate::version;
+use crate::core::engine::validation::ValidationCollector;
+use crate::core::error::{Error, Result};
+use crate::core::git;
+use crate::core::release::version;
 
 use super::context::{load_component, resolve_extensions};
 use super::plan_steps::{build_preflight_steps, build_release_steps};
@@ -122,7 +122,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
 #[cfg(test)]
 mod tests {
     use super::plan;
-    use crate::release::types::ReleaseOptions;
+    use crate::core::release::types::ReleaseOptions;
 
     #[test]
     fn test_plan() {
@@ -148,8 +148,8 @@ mod tests {
     /// hints survive in the resulting JSON details.
     #[test]
     fn working_tree_fail_fast_error_preserves_file_hints_through_collector() {
-        use crate::engine::validation::ValidationCollector;
-        use crate::error::Error;
+        use crate::core::engine::validation::ValidationCollector;
+        use crate::core::error::Error;
 
         let original = Error::validation_invalid_argument(
             "working_tree",

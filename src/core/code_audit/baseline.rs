@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
+use crate::core::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
 
 use super::findings::Finding;
 use super::CodeAuditResult;
@@ -182,9 +182,9 @@ pub fn load_baseline_from_ref(source_path: &str, git_ref: &str) -> Option<AuditB
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::AuditFinding;
-    use crate::code_audit::findings::{Finding, Severity};
-    use crate::code_audit::{AuditSummary, CodeAuditResult};
+    use crate::core::code_audit::conventions::AuditFinding;
+    use crate::core::code_audit::findings::{Finding, Severity};
+    use crate::core::code_audit::{AuditSummary, CodeAuditResult};
 
     fn make_finding(convention: &str, file: &str, description: &str) -> Finding {
         Finding {

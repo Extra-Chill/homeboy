@@ -12,17 +12,17 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::defaults;
-use crate::deploy::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
-use crate::error::{Error, Result};
-use crate::git::gh_probe_succeeds;
-use crate::observation::{
+use crate::core::defaults;
+use crate::core::deploy::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
+use crate::core::error::{Error, Result};
+use crate::core::git::gh_probe_succeeds;
+use crate::core::observation::{
     NewRunRecord, NewTriageItemRecord, ObservationStore, RunListFilter, RunStatus,
     TriageItemRecord, TriagePullRequestSignals,
 };
-use crate::scope::{self, Scope, ScopeComponentRef, ScopeKind, ScopeOutput};
+use crate::core::scope::{self, Scope, ScopeComponentRef, ScopeKind, ScopeOutput};
 
-pub use crate::scope::Scope as TriageTarget;
+pub use crate::core::scope::Scope as TriageTarget;
 
 #[derive(Debug, Clone, Default)]
 pub struct TriageOptions {

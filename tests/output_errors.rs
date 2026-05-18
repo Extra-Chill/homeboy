@@ -1,5 +1,5 @@
-use homeboy::error::{RemoteCommandFailedDetails, TargetDetails};
-use homeboy::Error;
+use homeboy::core::error::{RemoteCommandFailedDetails, TargetDetails};
+use homeboy::core::Error;
 
 #[test]
 fn remote_command_failed_creates_error_with_details() {

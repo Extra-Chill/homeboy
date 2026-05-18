@@ -6,7 +6,7 @@
 //! commit reachability. End-to-end reporting is verified out-of-band via
 //! the live-verify fixture spec described in the PR body.
 
-use crate::stack::status::{commit_reachable, count_revs, git_ref_exists, patch_in_base};
+use crate::core::stack::status::{commit_reachable, count_revs, git_ref_exists, patch_in_base};
 use std::fs;
 
 mod support;

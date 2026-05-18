@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use super::CmdResult;
-use homeboy::changelog::{self, ShowOutput};
+use homeboy::core::release::changelog::{self, ShowOutput};
 
 #[derive(Args)]
 pub struct ChangelogArgs {
@@ -51,7 +51,7 @@ pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
             let output = changelog::show(id)?;
             Ok((output.content, 0))
         }
-        (None, false) => Err(homeboy::Error::validation_invalid_argument(
+        (None, false) => Err(homeboy::core::Error::validation_invalid_argument(
             "command",
             "No subcommand provided. Use 'show' or --self to view Homeboy's changelog",
             None,
@@ -90,7 +90,7 @@ pub fn run(
             let output = changelog::show(id)?;
             Ok((ChangelogOutput::ShowComponent(output), 0))
         }
-        (None, false) => Err(homeboy::Error::validation_invalid_argument(
+        (None, false) => Err(homeboy::core::Error::validation_invalid_argument(
             "command",
             "No subcommand provided. Use 'show' or --self to view Homeboy's changelog",
             None,

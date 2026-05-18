@@ -1,6 +1,6 @@
 use super::*;
-use crate::api_jobs::JobStore;
-use crate::observation::{NewRunRecord, ObservationStore};
+use crate::core::api_jobs::JobStore;
+use crate::core::observation::{NewRunRecord, ObservationStore};
 use crate::test_support::HomeGuard;
 
 #[test]
@@ -392,15 +392,15 @@ fn exec_capture_patch_records_remote_delta_artifact() {
     assert!(patch_body.contains("+after"));
 }
 
-fn wait_for_job(store: &JobStore, job_id: &str) -> crate::api_jobs::Job {
+fn wait_for_job(store: &JobStore, job_id: &str) -> crate::core::api_jobs::Job {
     let id = uuid::Uuid::parse_str(job_id).expect("uuid");
     for _ in 0..100 {
         let job = store.get(id).expect("job");
         if matches!(
             job.status,
-            crate::api_jobs::JobStatus::Succeeded
-                | crate::api_jobs::JobStatus::Failed
-                | crate::api_jobs::JobStatus::Cancelled
+            crate::core::api_jobs::JobStatus::Succeeded
+                | crate::core::api_jobs::JobStatus::Failed
+                | crate::core::api_jobs::JobStatus::Cancelled
         ) {
             return job;
         }

@@ -3,8 +3,8 @@ use serde::Serialize;
 use std::path::Path;
 
 use crate::help_topics;
-use homeboy::code_audit::codebase_map;
-use homeboy::component;
+use homeboy::core::code_audit::codebase_map;
+use homeboy::core::component;
 
 use super::CmdResult;
 
@@ -98,7 +98,7 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
             write,
             output_dir,
         }) => run_map(&component_id, source_dirs, include_private, write, &output_dir),
-        None => Err(homeboy::Error::validation_invalid_argument(
+        None => Err(homeboy::core::Error::validation_invalid_argument(
             "command",
             "JSON output requires the map subcommand. Use `homeboy docs <topic>` for topic display.",
             None,

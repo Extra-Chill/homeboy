@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{self, ConfigEntity};
-use crate::error::{Error, Result};
-use crate::output::{CreateOutput, MergeOutput, RemoveResult};
-use crate::server;
+use crate::core::config::{self, ConfigEntity};
+use crate::core::error::{Error, Result};
+use crate::core::output::{CreateOutput, MergeOutput, RemoveResult};
+use crate::core::server;
 
 mod apply;
 mod connection;

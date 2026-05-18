@@ -20,8 +20,8 @@ use std::path::Path;
 
 use regex::Regex;
 
-use crate::code_audit::{AuditFinding, CodeAuditResult};
-use crate::refactor::auto::{Fix, SkippedFile};
+use crate::core::code_audit::{AuditFinding, CodeAuditResult};
+use crate::core::refactor::auto::{Fix, SkippedFile};
 
 use super::{doc_line_removal, manual_blocked, range_removal};
 
@@ -555,9 +555,9 @@ fn leading_indent(line: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::test_helpers::empty_result;
-    use crate::code_audit::{Finding, Severity};
-    use crate::refactor::auto::InsertionKind;
+    use crate::core::code_audit::test_helpers::empty_result;
+    use crate::core::code_audit::{Finding, Severity};
+    use crate::core::refactor::auto::InsertionKind;
 
     // ── classify_and_bound tests ──────────────────────────────────────
 
