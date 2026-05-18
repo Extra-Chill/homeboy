@@ -1,10 +1,11 @@
-use clap::{Args, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use homeboy::daemon::{self, DaemonStartResult, DaemonStatus, DaemonStopResult};
+use homeboy::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
 
 use super::CmdResult;
 
@@ -54,7 +55,7 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
 
 fn serve(addr: &str) -> CmdResult<DaemonOutput> {
     let parsed = daemon::parse_bind_addr(addr)?;
-    let state = daemon::serve(parsed)?;
+    let state = daemon::serve_with_analysis_runner(parsed, CommandAnalysisJobRunner)?;
     Ok((
         DaemonOutput::Serve(DaemonStartResult {
             pid: state.pid,
@@ -109,5 +110,29 @@ fn start(addr: &str) -> CmdResult<DaemonOutput> {
         }
 
         thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommandAnalysisJobRunner;
+
+impl AnalysisJobRunner for CommandAnalysisJobRunner {
+    fn run_analysis_job(&self, argv: Vec<String>) -> homeboy::Result<AnalysisJobRunOutput> {
+        let cli = crate::cli_surface::Cli::try_parse_from(argv).map_err(|error| {
+            homeboy::Error::validation_invalid_argument(
+                "body",
+                error.to_string(),
+                None,
+                Some(vec![
+                    "Use the documented JSON request body contract for this endpoint".to_string(),
+                ]),
+            )
+        })?;
+        let global = crate::commands::GlobalArgs {};
+        let (result, exit_code) = crate::commands::run_json(cli.command, &global);
+        Ok(AnalysisJobRunOutput {
+            exit_code,
+            output: result?,
+        })
     }
 }

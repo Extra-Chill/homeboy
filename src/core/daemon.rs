@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 use crate::api_jobs::JobStore;
 use crate::error::{Error, Result};
-use crate::http_api::{self, HttpMethod};
+use crate::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
 use crate::paths;
 use crate::source_snapshot::SourceSnapshot;
 
@@ -153,6 +153,13 @@ pub fn stop() -> Result<DaemonStopResult> {
 }
 
 pub fn serve(addr: SocketAddr) -> Result<DaemonState> {
+    serve_with_analysis_runner(addr, UnsupportedAnalysisJobRunner)
+}
+
+pub fn serve_with_analysis_runner<R>(addr: SocketAddr, analysis_runner: R) -> Result<DaemonState>
+where
+    R: AnalysisJobRunner,
+{
     let listener = TcpListener::bind(addr)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("bind daemon to {}", addr))))?;
     let local_addr = listener.local_addr().map_err(|e| {
@@ -164,7 +171,7 @@ pub fn serve(addr: SocketAddr) -> Result<DaemonState> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let _ = handle_connection(stream, &job_store);
+                let _ = handle_connection(stream, &job_store, analysis_runner.clone());
             }
             Err(err) => {
                 return Err(Error::internal_io(
@@ -192,6 +199,25 @@ fn route_with_job_store_and_body(
     body: Option<serde_json::Value>,
     job_store: &JobStore,
 ) -> HttpResponse {
+    route_with_job_store_and_body_and_runner(
+        method,
+        path,
+        body,
+        job_store,
+        UnsupportedAnalysisJobRunner,
+    )
+}
+
+fn route_with_job_store_and_body_and_runner<R>(
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    job_store: &JobStore,
+    analysis_runner: R,
+) -> HttpResponse
+where
+    R: AnalysisJobRunner,
+{
     match (method, path) {
         ("GET", "/health") => HttpResponse {
             status_code: 200,
@@ -238,7 +264,7 @@ fn route_with_job_store_and_body(
             body: json!({ "error": "method_not_allowed" }),
             artifact: None,
         },
-        _ => route_read_only_api(method, path, body, job_store),
+        _ => route_read_only_api(method, path, body, job_store, analysis_runner),
     }
 }
 
@@ -383,6 +409,7 @@ fn route_read_only_api(
     path: &str,
     body: Option<serde_json::Value>,
     job_store: &JobStore,
+    analysis_runner: impl AnalysisJobRunner,
 ) -> HttpResponse {
     let method = match method {
         "GET" => HttpMethod::Get,
@@ -402,13 +429,14 @@ fn route_read_only_api(
         }
     }
 
-    match http_api::handle_with_jobs(
+    match http_api::handle_with_jobs_and_runner(
         http_api::HttpApiRequest {
             method,
             path: path.to_string(),
             body,
         },
         job_store,
+        analysis_runner,
     ) {
         Ok(response) => HttpResponse {
             status_code: response.status,
@@ -470,7 +498,14 @@ fn write_state(addr: SocketAddr) -> Result<DaemonState> {
     Ok(state)
 }
 
-fn handle_connection(mut stream: TcpStream, job_store: &JobStore) -> std::io::Result<()> {
+fn handle_connection<R>(
+    mut stream: TcpStream,
+    job_store: &JobStore,
+    analysis_runner: R,
+) -> std::io::Result<()>
+where
+    R: AnalysisJobRunner,
+{
     let mut buffer = [0; 64 * 1024];
     let bytes = stream.read(&mut buffer)?;
     let request = String::from_utf8_lossy(&buffer[..bytes]);
@@ -503,7 +538,13 @@ fn handle_connection(mut stream: TcpStream, job_store: &JobStore) -> std::io::Re
             }
         }
     };
-    let response = route_with_job_store_and_body(method, path, parsed_body, job_store);
+    let response = route_with_job_store_and_body_and_runner(
+        method,
+        path,
+        parsed_body,
+        job_store,
+        analysis_runner,
+    );
     write_http_response(stream, response)
 }
 

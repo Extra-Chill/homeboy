@@ -1,10 +1,35 @@
 use homeboy::api_jobs::{JobEventKind, JobStatus, JobStore};
-use homeboy::http_api::{self, HttpApiRequest, HttpEndpoint, HttpMethod, JobReadyRunKind};
+use homeboy::http_api::{
+    self, AnalysisJobRunOutput, AnalysisJobRunner, HttpApiRequest, HttpEndpoint, HttpMethod,
+    JobReadyRunKind,
+};
 use homeboy::observation::{
     NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
 };
 
 use crate::test_support::with_isolated_home;
+
+#[derive(Debug, Clone, Copy)]
+struct FakeAnalysisJobRunner;
+
+impl AnalysisJobRunner for FakeAnalysisJobRunner {
+    fn run_analysis_job(&self, argv: Vec<String>) -> homeboy::Result<AnalysisJobRunOutput> {
+        Ok(AnalysisJobRunOutput {
+            exit_code: 0,
+            output: serde_json::json!({ "argv": argv }),
+        })
+    }
+}
+
+#[test]
+fn test_run_analysis_job() {
+    let output = FakeAnalysisJobRunner
+        .run_analysis_job(vec!["homeboy".to_string(), "lint".to_string()])
+        .expect("run analysis job");
+
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.output["argv"][1], "lint");
+}
 
 struct XdgGuard {
     prior: Option<String>,
@@ -402,7 +427,7 @@ fn job_ready_endpoint_rejects_unknown_body_fields() {
 #[test]
 fn job_ready_endpoint_preserves_background_result_events() {
     let store = JobStore::default();
-    let response = http_api::handle_with_jobs(
+    let response = http_api::handle_with_jobs_and_runner(
         HttpApiRequest {
             method: HttpMethod::Post,
             path: "/lint".to_string(),
@@ -413,6 +438,7 @@ fn job_ready_endpoint_preserves_background_result_events() {
             })),
         },
         &store,
+        FakeAnalysisJobRunner,
     )
     .expect("lint job enqueued");
     let job_id = response.body["job"]["id"].as_str().expect("job id");
@@ -436,6 +462,14 @@ fn job_ready_endpoint_preserves_background_result_events() {
     assert!(events
         .iter()
         .any(|event| { event.kind == JobEventKind::Result || event.kind == JobEventKind::Error }));
+    assert!(events.iter().any(|event| {
+        event.kind == JobEventKind::Result
+            && event.data.as_ref().is_some_and(|data| {
+                data["output"]["argv"]
+                    .as_array()
+                    .is_some_and(|argv| argv.iter().any(|arg| arg == "lint"))
+            })
+    }));
 }
 
 fn sample_run(kind: &str, component_id: &str, rig_id: &str) -> NewRunRecord {
