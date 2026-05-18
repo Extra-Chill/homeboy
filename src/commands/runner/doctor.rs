@@ -743,6 +743,7 @@ mod probes {
         })
     }
 
+    #[cfg(unix)]
     pub fn local_disk_probe(path: &Path) -> Option<DiskProbe> {
         let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes()).ok()?;
         let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -751,14 +752,19 @@ mod probes {
             return None;
         }
         let stat = unsafe { stat.assume_init() };
-        let block_size: u64 = stat.f_frsize.max(1).into();
-        let total_blocks: u64 = stat.f_blocks.into();
-        let available_blocks: u64 = stat.f_bavail.into();
+        let block_size = stat.f_frsize.max(1);
+        let total_blocks = u64::from(stat.f_blocks);
+        let available_blocks = u64::from(stat.f_bavail);
         Some(DiskProbe {
             path: common::display_path(path),
             total_mb: total_blocks.saturating_mul(block_size) / 1024 / 1024,
             available_mb: available_blocks.saturating_mul(block_size) / 1024 / 1024,
         })
+    }
+
+    #[cfg(not(unix))]
+    pub fn local_disk_probe(_path: &Path) -> Option<DiskProbe> {
+        None
     }
 
     pub fn remote_disk_probe(client: &SshClient, path: &str) -> Option<DiskProbe> {
@@ -793,12 +799,20 @@ mod probes {
         client.execute(command).success
     }
 
+    #[cfg(unix)]
     pub fn local_path_writable(path: &Path) -> bool {
         let c_path = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
             Ok(path) => path,
             Err(_) => return false,
         };
         unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+    }
+
+    #[cfg(not(unix))]
+    pub fn local_path_writable(path: &Path) -> bool {
+        fs::metadata(path)
+            .map(|metadata| !metadata.permissions().readonly())
+            .unwrap_or(false)
     }
 
     pub fn local_path_or_parent_writable(path: &Path) -> bool {
