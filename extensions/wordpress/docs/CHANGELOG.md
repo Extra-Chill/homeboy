@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.90.1] - 2026-05-18
+
+### Fixed
+- expose artifact PRs in engine data
+
 ## [2.90.0] - 2026-05-17
 
 ### Added
