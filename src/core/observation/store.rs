@@ -1323,16 +1323,15 @@ mod api_coverage_tests {
     }
 
     fn new_run(kind: &str) -> NewRunRecord {
-        NewRunRecord {
-            kind: kind.to_string(),
-            component_id: Some("homeboy".to_string()),
-            command: Some(format!("homeboy {kind}")),
-            cwd: Some("/tmp/homeboy".to_string()),
-            homeboy_version: Some("test".to_string()),
-            git_sha: Some("abc123".to_string()),
-            rig_id: Some("studio".to_string()),
-            metadata_json: serde_json::json!({ "source": "inline" }),
-        }
+        NewRunRecord::builder(kind)
+            .component_id("homeboy")
+            .command(format!("homeboy {kind}"))
+            .cwd_path(std::path::Path::new("/tmp/homeboy"))
+            .homeboy_version("test")
+            .git_sha(Some("abc123".to_string()))
+            .rig_id("studio")
+            .metadata(serde_json::json!({ "source": "inline" }))
+            .build()
     }
 
     #[test]

@@ -43,16 +43,11 @@ fn install_artifact(
     artifact_kind: &str,
 ) -> RunRecord {
     let run = store
-        .start_run(NewRunRecord {
-            kind: run_kind.to_string(),
-            component_id: Some(component.to_string()),
-            command: None,
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
-            metadata_json: serde_json::json!({}),
-        })
+        .start_run(
+            NewRunRecord::builder(run_kind)
+                .component_id(component)
+                .build(),
+        )
         .expect("start run");
     store
         .finish_run(&run.id, RunStatus::Pass, None)

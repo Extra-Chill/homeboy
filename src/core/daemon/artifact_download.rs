@@ -232,16 +232,12 @@ mod tests {
         let home_path = std::path::PathBuf::from(std::env::var("HOME").expect("home"));
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
-            .start_run(NewRunRecord {
-                kind: "runner-exec".to_string(),
-                component_id: None,
-                command: Some("homeboy runner exec".to_string()),
-                cwd: None,
-                homeboy_version: Some("test-version".to_string()),
-                git_sha: None,
-                rig_id: None,
-                metadata_json: json!({}),
-            })
+            .start_run(
+                NewRunRecord::builder("runner-exec")
+                    .command("homeboy runner exec")
+                    .homeboy_version("test-version")
+                    .build(),
+            )
             .expect("run");
         let artifact_path = home_path.join("artifact.txt");
         fs::write(&artifact_path, "artifact body").expect("artifact file");
