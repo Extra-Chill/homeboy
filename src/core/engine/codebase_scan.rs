@@ -16,6 +16,9 @@ pub const ALWAYS_SKIP_DIRS: &[&str] = &[
     "node_modules",
     "vendor",
     ".git",
+    ".homeboy-build",
+    ".homeboy-bin",
+    ".homeboy",
     ".svn",
     ".hg",
     "__pycache__",
@@ -652,10 +655,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(dir.join("node_modules"));
         let _ = std::fs::create_dir_all(dir.join("vendor"));
+        let _ = std::fs::create_dir_all(dir.join(".homeboy-build/component"));
+        let _ = std::fs::create_dir_all(dir.join(".homeboy-bin"));
+        let _ = std::fs::create_dir_all(dir.join(".homeboy/cache"));
         let _ = std::fs::create_dir_all(dir.join("src"));
 
         std::fs::write(dir.join("node_modules/lib.js"), "x").unwrap();
         std::fs::write(dir.join("vendor/lib.php"), "x").unwrap();
+        std::fs::write(dir.join(".homeboy-build/component/copied.rs"), "x").unwrap();
+        std::fs::write(dir.join(".homeboy-bin/helper.rs"), "x").unwrap();
+        std::fs::write(dir.join(".homeboy/cache/source.rs"), "x").unwrap();
         std::fs::write(dir.join("src/main.rs"), "x").unwrap();
 
         let files = walk_files(&dir, &ScanConfig::default());
@@ -667,6 +676,35 @@ mod tests {
         assert!(names.contains(&"main.rs".to_string()));
         assert!(!names.contains(&"lib.js".to_string()));
         assert!(!names.contains(&"lib.php".to_string()));
+        assert!(!names.contains(&"copied.rs".to_string()));
+        assert!(!names.contains(&"helper.rs".to_string()));
+        assert!(!names.contains(&"source.rs".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_skips_homeboy_build_copy_without_hidden_file_filter() {
+        let dir = std::env::temp_dir().join("homeboy_scan_build_copy_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(dir.join(".homeboy-build/component/src"));
+        let _ = std::fs::create_dir_all(dir.join("src"));
+
+        std::fs::write(dir.join(".homeboy-build/component/src/main.rs"), "copied\n").unwrap();
+        std::fs::write(dir.join("src/main.rs"), "source\n").unwrap();
+
+        let snapshot = CodebaseSnapshot::build(&dir, &ScanConfig::default());
+        let paths = snapshot
+            .iter()
+            .map(|(path, _)| {
+                path.strip_prefix(&dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["src/main.rs"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

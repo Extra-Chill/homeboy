@@ -10,6 +10,8 @@ const DEFAULT_SYNC_EXCLUDES: &[&str] = &[
     "node_modules/",
     "target/",
     "vendor/",
+    ".homeboy-build/",
+    ".homeboy-bin/",
     ".homeboy/",
     ".datamachine/",
     ".DS_Store",
@@ -188,6 +190,7 @@ mod tests {
 
         assert!(excludes.contains(&".git/".to_string()));
         assert!(excludes.contains(&"node_modules/".to_string()));
+        assert!(excludes.contains(&".homeboy-build/".to_string()));
         assert!(excludes.contains(&".env".to_string()));
     }
 
