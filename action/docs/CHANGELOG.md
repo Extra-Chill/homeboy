@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.6.0] - 2026-05-18
+
+### Added
+- expose release-skip-publish and release-skip-github-release
+
+### Changed
+- cover release publish defaults
+
 ## [2.5.4] - 2026-05-16
 
 ### Fixed
