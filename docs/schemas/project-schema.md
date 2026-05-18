@@ -24,7 +24,15 @@ Project configuration defines deployable environments stored in `projects/<id>.j
   "shared_tables": [],
   "table_groupings": [],
   "sub_targets": [],
+  "components": [
+    {
+      "id": "string",
+      "local_path": "string",
+      "remote_path": "string"
+    }
+  ],
   "component_groupings": [],
+  "component_overrides": {},
   "cli_path": "string",
   "tools": {},
   "extensions": {}
@@ -81,10 +89,12 @@ Project configuration defines deployable environments stored in `projects/<id>.j
   - **`member_ids`** (array): Explicit table IDs in this group
   - **`sort_order`** (number): Display sort order
 - **`sub_targets`** (array): Sub-target paths for multi-component sites
+- **`components`** (array): Project-attached component checkouts. Each entry requires `id` and `local_path`; optional `remote_path` overrides the repo-owned component `remote_path` for this project so the same component can deploy to projects with different filesystem layouts.
 - **`component_groupings`** (array): Groupings for organizing components
   - **`id`** (string): Unique grouping identifier
   - **`name`** (string): Grouping name
   - **`member_ids`** (array): Component IDs in this group
+- **`component_overrides`** (object): Per-component project overrides keyed by component ID. These remain the most-specific deploy overrides and take precedence over `components[].remote_path`.
 - **`cli_path`** (string): Project-scoped CLI path used by extension deploy install steps. On any given site the WP-CLI entrypoint is fixed (`wp`, `studio wp`, a Lando wrapper, etc.) and shared by every component deployed there, so this lives at the project layer instead of being repeated per component. Component-level `component_overrides[id].cli_path` still wins as the most-specific escape hatch. If unset, the deploy resolver auto-detects Studio sites (projects whose `base_path` is under `~/Studio/`) and defaults them to `"studio wp"`.
 - **`tools`** (object): Project-specific tool configurations
   - Keys are tool identifiers (e.g., `"newsletter"`, `"bandcamp_scraper"`)
