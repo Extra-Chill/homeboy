@@ -161,6 +161,8 @@ run_wrapper() {
   HOMEBOY_MOCK_SCENARIO="${HOMEBOY_MOCK_SCENARIO}" \
   MOCK_GIT_LOG="${MOCK_GIT_LOG}" \
   RELEASE_DRY_RUN="${RELEASE_DRY_RUN:-false}" \
+  RELEASE_SKIP_PUBLISH="${RELEASE_SKIP_PUBLISH:-false}" \
+  RELEASE_SKIP_GITHUB_RELEASE="${RELEASE_SKIP_GITHUB_RELEASE:-false}" \
   GH_TOKEN="${GH_TOKEN:-}" \
   bash "${RUN_RELEASE}"
 }
@@ -183,8 +185,8 @@ ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
 assert_contains 'mock-component' "${ARGS}" "release passes component id"
 assert_contains '--path' "${ARGS}" "release passes component path"
 assert_contains '--skip-checks' "${ARGS}" "release skips duplicate checks"
-assert_contains '--skip-publish' "${ARGS}" "release leaves publishing to tag workflow"
-assert_contains '--no-github-release' "${ARGS}" "release leaves GitHub Release creation to tag workflow"
+assert_not_contains '--skip-publish' "${ARGS}" "release runs package/publish steps by default"
+assert_not_contains '--no-github-release' "${ARGS}" "release creates GitHub Releases by default"
 assert_contains '--git-identity bot' "${ARGS}" "release delegates bot identity to homeboy"
 assert_not_contains '--dry-run' "${ARGS}" "normal release uses one non-dry-run homeboy invocation"
 assert_output_line 'x-access-token' "${HOMEBOY_AUTH_FILE}" "release exposes GitHub token username through askpass"
@@ -204,6 +206,17 @@ run_wrapper
 assert_output_line 'released=false' "${OUTPUT_FILE}" "skipped release output is false"
 assert_output_line 'skipped-reason=no-releasable-commits' "${OUTPUT_FILE}" "skipped reason comes from homeboy"
 assert_output_line 'release-bump-type=patch' "${OUTPUT_FILE}" "skipped release preserves bump type when present"
+
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+RELEASE_SKIP_PUBLISH="true"
+RELEASE_SKIP_GITHUB_RELEASE="true"
+GH_TOKEN="secret123"
+run_wrapper
+ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
+assert_contains '--skip-publish' "${ARGS}" "release can opt out of package/publish steps"
+assert_contains '--no-github-release' "${ARGS}" "release can opt out of GitHub Release creation"
+unset RELEASE_SKIP_PUBLISH RELEASE_SKIP_GITHUB_RELEASE
 
 setup_fixture
 HOMEBOY_MOCK_SCENARIO="released"
