@@ -68,6 +68,18 @@ pub(super) fn execute_release_plan_step(
             )
             .unwrap_or_else(|err| failed_result("package", "package", err)),
         )),
+        "artifacts.inventory" => {
+            let dir = step
+                .inputs
+                .get("dir")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            Ok(Some(
+                executor::run_artifact_inventory(&mut context.state, dir).unwrap_or_else(|err| {
+                    failed_result("artifacts.inventory", "artifacts.inventory", err)
+                }),
+            ))
+        }
         "git.tag" => {
             let tag_name = step
                 .inputs

@@ -40,6 +40,17 @@ pub struct ReleaseArgs {
     #[arg(long)]
     recover: bool,
 
+    /// Finish the release pipeline for an already-versioned, already-tagged HEAD.
+    /// Skips changelog/version/git mutation steps and runs package, GitHub Release,
+    /// publish, cleanup, and post-release hooks against the tag pointing at HEAD.
+    #[arg(long)]
+    head: bool,
+
+    /// Use existing release artifacts from this directory instead of running release.package.
+    /// Requires --head.
+    #[arg(long, value_name = "DIR")]
+    from_artifacts: Option<String>,
+
     /// Skip pre-release lint and test checks
     #[arg(long)]
     skip_checks: bool,
@@ -100,6 +111,8 @@ impl ReleaseArgs {
         dry_run: bool,
         deploy: bool,
         recover: bool,
+        head: bool,
+        from_artifacts: Option<String>,
         skip_checks: bool,
         skip_publish: bool,
         bump: Option<String>,
@@ -113,6 +126,8 @@ impl ReleaseArgs {
             _json: HiddenJsonArgs::default(),
             deploy,
             recover,
+            head,
+            from_artifacts,
             skip_checks,
             bump,
             force_lower_bump: false,
@@ -141,6 +156,8 @@ pub fn run(
             dry_run: args.dry_run_args.dry_run,
             deploy: args.deploy,
             recover: args.recover,
+            head: args.head,
+            from_artifacts: args.from_artifacts.clone(),
             skip_checks: args.skip_checks,
             bump_override: bump_override.clone(),
             force_lower_bump: args.force_lower_bump,
@@ -172,6 +189,22 @@ pub fn run(
             None,
         ));
     }
+    if args.head {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "head",
+            "--head is not supported for batch releases — finish one component release at a time",
+            None,
+            None,
+        ));
+    }
+    if args.from_artifacts.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "from-artifacts",
+            "--from-artifacts requires --head and is not supported for batch releases",
+            args.from_artifacts.clone(),
+            None,
+        ));
+    }
 
     let input_template = ReleaseCommandInput {
         component_id: String::new(), // overridden per component
@@ -179,6 +212,8 @@ pub fn run(
         dry_run: args.dry_run_args.dry_run,
         deploy: args.deploy,
         recover: false,
+        head: false,
+        from_artifacts: None,
         skip_checks: args.skip_checks,
         bump_override,
         force_lower_bump: args.force_lower_bump,
@@ -355,6 +390,8 @@ mod tests {
             true,
             false,
             false,
+            false,
+            None,
             false,
             false,
             None,

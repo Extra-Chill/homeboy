@@ -1,6 +1,9 @@
 use std::collections::HashSet;
+use std::path::Path;
 
-use crate::core::error::Result;
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
+use crate::core::git;
 use crate::core::plan::PlanStep;
 
 use super::context::{load_component, resolve_extensions};
@@ -52,7 +55,7 @@ pub(super) fn execute_plan_steps(
         extensions: &extensions,
         component_id,
         options,
-        state: ReleaseState::default(),
+        state: initial_release_state(&component, component_id, options)?,
         publish_failed: false,
     };
 
@@ -71,6 +74,92 @@ pub(super) fn execute_plan_steps(
     }
 
     Ok(false)
+}
+
+fn initial_release_state(
+    component: &Component,
+    component_id: &str,
+    options: &ReleaseOptions,
+) -> Result<ReleaseState> {
+    if !options.head {
+        return Ok(ReleaseState::default());
+    }
+
+    let version_info = super::version::read_component_version(component)?;
+    let monorepo = git::MonorepoContext::detect(&component.local_path, component_id);
+    let expected_tag = match monorepo.as_ref() {
+        Some(ctx) => ctx.format_tag(&version_info.version),
+        None => format!("v{}", version_info.version),
+    };
+
+    let tag = resolve_head_tag(&component.local_path, &expected_tag)?;
+    let notes = read_current_release_notes(component)?;
+
+    Ok(ReleaseState {
+        version: Some(version_info.version),
+        tag: Some(tag),
+        notes,
+        artifacts: Vec::new(),
+        changelog_validation: None,
+    })
+}
+
+fn resolve_head_tag(local_path: &str, expected_tag: &str) -> Result<String> {
+    let output = git::execute_git_for_release(local_path, &["tag", "--points-at", "HEAD"])
+        .map_err(|e| {
+            Error::internal_io(
+                format!("Failed to inspect tags pointing at HEAD: {}", e),
+                Some("git tag --points-at HEAD".to_string()),
+            )
+        })?;
+
+    let tags: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    if tags.iter().any(|tag| tag == expected_tag) {
+        return Ok(expected_tag.to_string());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "head",
+        format!(
+            "--head requires tag '{}' to point at HEAD; found: {}",
+            expected_tag,
+            if tags.is_empty() {
+                "none".to_string()
+            } else {
+                tags.join(", ")
+            }
+        ),
+        Some(expected_tag.to_string()),
+        Some(vec![
+            "Check out the release tag or push the expected tag before running `homeboy release --head`.".to_string(),
+        ]),
+    ))
+}
+
+fn read_current_release_notes(component: &Component) -> Result<Option<String>> {
+    let changelog = component
+        .changelog_target
+        .as_deref()
+        .unwrap_or("CHANGELOG.md");
+    let path = Path::new(&component.local_path).join(changelog);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        Error::internal_io(
+            format!("Failed to read changelog release notes: {}", e),
+            Some(path.display().to_string()),
+        )
+    })?;
+
+    Ok(super::utils::extract_latest_notes(&content))
 }
 
 #[cfg(test)]

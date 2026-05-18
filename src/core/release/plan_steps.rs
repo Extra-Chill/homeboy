@@ -112,13 +112,15 @@ pub(super) fn build_preflight_steps(
 
     steps.extend(build_quality_steps(options));
 
-    steps.push(ready_step(
-        "preflight.changelog_bootstrap",
-        "preflight.changelog_bootstrap",
-        "Ensure changelog exists",
-        vec!["preflight.test".to_string()],
-        StepConfig::new().bool("dry_run", options.dry_run),
-    ));
+    if !options.head {
+        steps.push(ready_step(
+            "preflight.changelog_bootstrap",
+            "preflight.changelog_bootstrap",
+            "Ensure changelog exists",
+            vec!["preflight.test".to_string()],
+            StepConfig::new().bool("dry_run", options.dry_run),
+        ));
+    }
 
     steps
 }
@@ -189,6 +191,18 @@ pub(super) fn build_release_steps(
     let publish_targets = get_publish_targets(extensions);
 
     add_release_extension_diagnostics(component, extensions, &publish_targets, options, warnings);
+
+    if options.head {
+        return Ok(build_head_release_steps(
+            component,
+            extensions,
+            new_version,
+            options,
+            monorepo,
+            &publish_targets,
+            warnings,
+        ));
+    }
 
     if !publish_targets.is_empty() && !has_package_capability(extensions) {
         warnings.push(
@@ -353,6 +367,142 @@ pub(super) fn build_release_steps(
     }
 
     Ok(steps)
+}
+
+fn build_head_release_steps(
+    component: &Component,
+    extensions: &[ExtensionManifest],
+    version: &str,
+    options: &ReleaseOptions,
+    monorepo: Option<&git::MonorepoContext>,
+    publish_targets: &[String],
+    warnings: &mut Vec<String>,
+) -> Vec<PlanStep> {
+    let mut steps = Vec::new();
+    let mut artifact_need = "preflight.remote_sync".to_string();
+
+    if !publish_targets.is_empty()
+        && !options.skip_publish
+        && options.from_artifacts.is_none()
+        && !has_package_capability(extensions)
+    {
+        warnings.push(
+            "Publish targets derived from extensions but no extension provides 'release.package'. \
+             Add an extension that provides packaging or use --from-artifacts."
+                .to_string(),
+        );
+    }
+
+    if !options.skip_publish {
+        if let Some(dir) = options.from_artifacts.as_ref() {
+            steps.push(ready_step(
+                "artifacts.inventory",
+                "artifacts.inventory",
+                "Inventory existing release artifacts",
+                vec![artifact_need.clone()],
+                string_config("dir", dir),
+            ));
+            artifact_need = "artifacts.inventory".to_string();
+        } else if has_package_capability(extensions) {
+            steps.push(ready_step(
+                "package",
+                "package",
+                "Package release artifacts",
+                vec![artifact_need.clone()],
+                StepConfig::new(),
+            ));
+            artifact_need = "package".to_string();
+        }
+    } else if options.skip_publish && !publish_targets.is_empty() {
+        log_status!("release", "Skipping publish/package steps (--skip-publish)");
+    }
+
+    if !options.skip_github_release && github_release_applies(component) {
+        let tag_name = match monorepo {
+            Some(ctx) => ctx.format_tag(version),
+            None => format!("v{}", version),
+        };
+        steps.push(ready_step(
+            "github.release",
+            "github.release",
+            "Create GitHub Release",
+            vec![artifact_need.clone()],
+            string_config("tag", tag_name),
+        ));
+    }
+
+    let mut publish_step_ids: Vec<String> = Vec::new();
+    if !publish_targets.is_empty() && !options.skip_publish {
+        for target in publish_targets {
+            let step_id = format!("publish.{}", target);
+            publish_step_ids.push(step_id.clone());
+            steps.push(ready_step(
+                &step_id,
+                &step_id,
+                format!("Publish to {}", target),
+                vec![artifact_need.clone()],
+                StepConfig::new(),
+            ));
+        }
+
+        if !options.deploy {
+            steps.push(ready_step(
+                "cleanup",
+                "cleanup",
+                "Clean up release artifacts",
+                publish_step_ids.clone(),
+                StepConfig::new(),
+            ));
+        }
+    }
+
+    let post_release_hooks = crate::core::engine::hooks::resolve_hooks(
+        component,
+        crate::core::engine::hooks::events::POST_RELEASE,
+    );
+    if !post_release_hooks.is_empty() {
+        let post_release_needs = if !options.skip_publish && !publish_targets.is_empty() {
+            if options.deploy {
+                publish_step_ids.clone()
+            } else {
+                vec!["cleanup".to_string()]
+            }
+        } else if !options.skip_github_release && github_release_applies(component) {
+            vec!["github.release".to_string()]
+        } else {
+            vec![artifact_need.clone()]
+        };
+
+        steps.push(ready_step(
+            "post_release",
+            "post_release",
+            "Run post-release hooks",
+            post_release_needs,
+            string_array_config("commands", &post_release_hooks),
+        ));
+    }
+
+    if options.deploy {
+        let deploy_needs = if !post_release_hooks.is_empty() {
+            vec!["post_release".to_string()]
+        } else if !options.skip_publish && !publish_step_ids.is_empty() {
+            publish_step_ids
+        } else if !options.skip_github_release && github_release_applies(component) {
+            vec!["github.release".to_string()]
+        } else {
+            vec![artifact_need]
+        };
+
+        steps.push(ready_step(
+            "deploy",
+            "deploy",
+            "Deploy released component",
+            deploy_needs,
+            string_config("execution", "release_plan"),
+        ));
+    }
+
+    steps
 }
 
 fn add_release_extension_diagnostics(
@@ -849,6 +999,69 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("release_plan")
         );
+    }
+
+    #[test]
+    fn head_release_plan_skips_mutation_steps_and_uses_existing_artifacts() {
+        let mut component = fixture_component();
+        component.remote_url = Some("https://github.com/Extra-Chill/homeboy.git".to_string());
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "WordPress",
+            "version": "1.0.0",
+            "actions": [
+                {
+                    "id": "release.publish",
+                    "label": "Publish release",
+                    "type": "command",
+                    "command": "true"
+                }
+            ]
+        }))
+        .expect("extension manifest");
+        extension.id = "wordpress".to_string();
+        let mut warnings = Vec::new();
+        let mut hints = Vec::new();
+        let options = ReleaseOptions {
+            bump_type: "head".to_string(),
+            head: true,
+            from_artifacts: Some("artifacts".to_string()),
+            ..Default::default()
+        };
+
+        let steps = build_release_steps(
+            &component,
+            &[extension],
+            "1.0.1",
+            "1.0.1",
+            &fixture_changelog_plan(),
+            &options,
+            None,
+            &mut warnings,
+            &mut hints,
+        )
+        .expect("steps");
+
+        let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+        assert!(!ids.contains(&"changelog.finalize"));
+        assert!(!ids.contains(&"version"));
+        assert!(!ids.contains(&"git.commit"));
+        assert!(!ids.contains(&"git.tag"));
+        assert!(!ids.contains(&"git.push"));
+        assert_eq!(
+            ids,
+            vec![
+                "artifacts.inventory",
+                "github.release",
+                "publish.wordpress",
+                "cleanup"
+            ]
+        );
+        assert_eq!(
+            steps[0].inputs.get("dir").and_then(|value| value.as_str()),
+            Some("artifacts")
+        );
+        assert_eq!(steps[1].needs, vec!["artifacts.inventory"]);
+        assert_eq!(steps[2].needs, vec!["artifacts.inventory"]);
     }
 
     #[test]

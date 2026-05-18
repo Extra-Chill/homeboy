@@ -214,6 +214,12 @@ pub struct ReleaseOptions {
     /// Use when CI handles publishing after the tag is pushed.
     #[serde(default)]
     pub skip_publish: bool,
+    /// Finish a release whose version commit and tag already exist at HEAD.
+    #[serde(default)]
+    pub head: bool,
+    /// Existing release artifacts to inventory instead of running release.package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_artifacts: Option<String>,
     /// Deploy after release — defers artifact cleanup until after deployment.
     #[serde(default)]
     pub deploy: bool,
@@ -259,6 +265,10 @@ pub struct ReleaseCommandInput {
     pub deploy: bool,
     #[serde(default)]
     pub recover: bool,
+    #[serde(default)]
+    pub head: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_artifacts: Option<String>,
     #[serde(default)]
     pub skip_checks: bool,
     /// Explicit bump override: "major", "minor", "patch", or a version string like "2.0.0".
