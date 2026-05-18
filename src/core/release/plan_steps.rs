@@ -78,16 +78,26 @@ pub(super) fn build_preflight_steps(
             StepConfig::new(),
         )
     };
-
-    let mut steps = vec![
-        default_branch_step,
+    let working_tree_step = if options.pipeline.head && options.pipeline.from_artifacts.is_some() {
+        disabled_step(
+            "preflight.working_tree",
+            "preflight.working_tree",
+            "Validate working tree",
+            string_config("reason", "head-release-artifacts"),
+        )
+    } else {
         ready_step(
             "preflight.working_tree",
             "preflight.working_tree",
             "Validate working tree",
             vec!["preflight.git_identity".to_string()],
             StepConfig::new(),
-        ),
+        )
+    };
+
+    let mut steps = vec![
+        default_branch_step,
+        working_tree_step,
         ready_step(
             "preflight.remote_sync",
             "preflight.remote_sync",
@@ -723,11 +733,12 @@ mod tests {
     }
 
     #[test]
-    fn head_release_preflight_skips_default_branch_check() {
+    fn head_release_with_artifacts_skips_branch_and_working_tree_checks() {
         let options = ReleaseOptions {
             bump_type: "head".to_string(),
             pipeline: ReleasePipelineOptions {
                 head: true,
+                from_artifacts: Some("artifacts".to_string()),
                 ..Default::default()
             },
             ..Default::default()
@@ -746,6 +757,20 @@ mod tests {
                 .get("reason")
                 .and_then(|value| value.as_str()),
             Some("head-release")
+        );
+
+        let working_tree = steps
+            .iter()
+            .find(|step| step.id == "preflight.working_tree")
+            .expect("working tree step");
+
+        assert_eq!(working_tree.status, PlanStepStatus::Disabled);
+        assert_eq!(
+            working_tree
+                .inputs
+                .get("reason")
+                .and_then(|value| value.as_str()),
+            Some("head-release-artifacts")
         );
     }
 
