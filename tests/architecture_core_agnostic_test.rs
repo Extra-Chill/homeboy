@@ -89,6 +89,19 @@ fn library_root_does_not_flatten_core_surface() {
 }
 
 #[test]
+fn server_root_does_not_wildcard_reexport_private_modules() {
+    let source = source_file("src/core/server/mod.rs");
+
+    assert!(
+        !source.contains("pub use client::*")
+            && !source.contains("pub use connection::*")
+            && !source.contains("pub use keys::*")
+            && !source.contains("pub use session::*"),
+        "src/core/server/mod.rs must explicitly name the server APIs it re-exports"
+    );
+}
+
+#[test]
 fn validate_and_format_writes_do_not_select_ecosystem_commands() {
     let files = [
         "src/core/engine/validate_write.rs",

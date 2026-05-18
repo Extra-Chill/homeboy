@@ -12,8 +12,8 @@ use crate::core::error::{Error, Result};
 use chrono::Utc;
 
 use super::{
-    ensure_control_path_parent, ManagedSshSession, ManagedSshSessionOutput, Server, ServerAuthMode,
-    ServerSessionConfig,
+    session::ensure_control_path_parent, ManagedSshSession, ManagedSshSessionOutput, Server,
+    ServerAuthMode, ServerSessionConfig,
 };
 use std::process::{Command, Stdio};
 
