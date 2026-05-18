@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.188.0] - 2026-05-18
+
+### Added
+- add compiler warning extension contracts
+
 ## [0.187.4] - 2026-05-18
 
 ### Changed
