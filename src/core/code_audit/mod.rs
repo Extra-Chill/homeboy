@@ -77,8 +77,10 @@ pub use report::AuditCommandOutput;
 pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs, AuditRunWorkflowResult};
 pub use walker::is_test_path;
 
-use crate::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus};
-use crate::{component, component::AuditConfig, is_zero, Result};
+use crate::core::component::AuditConfig;
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus};
+use crate::core::{component, Result};
+use crate::is_zero;
 
 /// Summary counts for the audit report.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -547,7 +549,7 @@ fn read_reference_paths_from_env() -> Vec<String> {
 pub fn audit_path(path: &str) -> Result<CodeAuditResult> {
     let p = Path::new(path);
     if !p.is_dir() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "path",
             format!("Not a directory: {}", path),
             None,
@@ -642,7 +644,7 @@ fn audit_config_for(component_id: &str, root: &Path) -> AuditConfig {
     if let Some(component) = &component {
         if let Some(extensions) = &component.extensions {
             for extension_id in extensions.keys() {
-                if let Ok(manifest) = crate::extension::load_extension(extension_id) {
+                if let Ok(manifest) = crate::core::extension::load_extension(extension_id) {
                     if let Some(rules) = manifest.audit_detector_rules() {
                         audit_config.merge(rules);
                     }
@@ -922,7 +924,7 @@ fn audit_internal(
         if let Ok(comp) = component::load(component_id) {
             if let Some(extensions) = &comp.extensions {
                 for ext_id in extensions.keys() {
-                    if let Ok(ext_manifest) = crate::extension::load_extension(ext_id) {
+                    if let Ok(ext_manifest) = crate::core::extension::load_extension(ext_id) {
                         if let Some(test_mapping) = ext_manifest.test_mapping() {
                             let coverage_findings = test_coverage::analyze_test_coverage(
                                 root,
@@ -1531,9 +1533,9 @@ fn detect_doc_drift(root: &Path, component_id: &str) -> Vec<Finding> {
     };
 
     let doc_excludes = if let Ok(comp) = component::load(component_id) {
-        crate::component::scope::resolve_component_scope(
+        crate::core::component::scope::resolve_component_scope(
             &comp,
-            crate::component::scope::ScopeCommand::Audit,
+            crate::core::component::scope::ScopeCommand::Audit,
         )
         .exclude
     } else {

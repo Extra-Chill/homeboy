@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::api_jobs::JobStore;
-use crate::error::{Error, Result};
-use crate::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
-use crate::paths;
-use crate::source_snapshot::SourceSnapshot;
+use crate::core::api_jobs::JobStore;
+use crate::core::error::{Error, Result};
+use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
+use crate::core::paths;
+use crate::core::source_snapshot::SourceSnapshot;
 
 mod artifact_download;
 mod patch_capture;

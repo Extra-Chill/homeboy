@@ -1,10 +1,10 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::component;
-use homeboy::deploy::{self, ReleaseStateStatus};
-use homeboy::project;
-use homeboy::release::{self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult};
+use homeboy::core::component;
+use homeboy::core::deploy::{self, ReleaseStateStatus};
+use homeboy::core::project;
+use homeboy::core::release::{self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult};
 
 use super::utils::args::{DryRunArgs, HiddenJsonArgs};
 use super::CmdResult;
@@ -157,7 +157,7 @@ pub fn run(
 
     // Multiple components: batch release
     if args.path.is_some() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "path",
             "--path is not supported for batch releases (multiple components)",
             None,
@@ -165,7 +165,7 @@ pub fn run(
         ));
     }
     if args.recover {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "recover",
             "--recover is not supported for batch releases — run recovery per-component",
             None,
@@ -211,13 +211,13 @@ pub fn run(
 fn resolve_component_ids(
     args: &ReleaseArgs,
     components: &[String],
-) -> homeboy::Result<Vec<String>> {
+) -> homeboy::core::Result<Vec<String>> {
     if let Some(ref project_id) = args.project {
         let proj = project::load(project_id)?;
         let components = project::resolve_project_components(&proj)?;
 
         if components.is_empty() {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "project",
                 format!("Project '{}' has no components attached", project_id),
                 Some(project_id.to_string()),
@@ -255,7 +255,7 @@ fn resolve_component_ids(
             } else {
                 "that need a release"
             };
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "project",
                 format!("No components {} in project '{}'", filter_desc, project_id),
                 Some(project_id.to_string()),
@@ -279,7 +279,7 @@ fn resolve_component_ids(
         // Try CWD-based component detection
         match component::resolve_effective(None, None, None) {
             Ok(comp) => Ok(vec![comp.id]),
-            Err(_) => Err(homeboy::Error::validation_missing_argument(vec![
+            Err(_) => Err(homeboy::core::Error::validation_missing_argument(vec![
                 "component ID(s), or --project <project-id>".to_string(),
             ])),
         }
@@ -294,7 +294,7 @@ struct PositionalReleaseArgs {
     bump: Option<String>,
 }
 
-fn resolve_positional_args(args: &ReleaseArgs) -> homeboy::Result<PositionalReleaseArgs> {
+fn resolve_positional_args(args: &ReleaseArgs) -> homeboy::core::Result<PositionalReleaseArgs> {
     let mut components = args.components.clone();
 
     if args.project.is_some() || components.len() < 2 {
@@ -313,7 +313,7 @@ fn resolve_positional_args(args: &ReleaseArgs) -> homeboy::Result<PositionalRele
     };
 
     if args.bump.is_some() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "bump",
             "Use either a positional bump type or --bump, not both",
             Some(bump),

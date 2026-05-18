@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use homeboy::runner::{self, Runner, RunnerKind};
-use homeboy::server::{self, Server, SshClient};
+use homeboy::core::runner::{self, Runner, RunnerKind};
+use homeboy::core::server::{self, Server, SshClient};
 use serde::Serialize;
 
 use crate::commands::CmdResult;
@@ -177,7 +177,7 @@ mod target {
         },
     }
 
-    pub fn resolve(runner_id: &str) -> homeboy::Result<RunnerTarget> {
+    pub fn resolve(runner_id: &str) -> homeboy::core::Result<RunnerTarget> {
         match runner::load(runner_id) {
             Ok(runner) => from_registry(runner_id, runner),
             Err(_) if is_local_runner_id(runner_id) => Ok(RunnerTarget::Local {
@@ -188,7 +188,7 @@ mod target {
         }
     }
 
-    fn from_registry(runner_id: &str, runner: Runner) -> homeboy::Result<RunnerTarget> {
+    fn from_registry(runner_id: &str, runner: Runner) -> homeboy::core::Result<RunnerTarget> {
         match runner.kind {
             RunnerKind::Local => Ok(RunnerTarget::Local {
                 id: runner_id.to_string(),
@@ -196,7 +196,7 @@ mod target {
             }),
             RunnerKind::Ssh => {
                 let server_id = runner.server_id.as_deref().ok_or_else(|| {
-                    homeboy::Error::validation_invalid_argument(
+                    homeboy::core::Error::validation_invalid_argument(
                         "server_id",
                         "SSH runners require server_id",
                         None,

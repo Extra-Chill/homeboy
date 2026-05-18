@@ -2,7 +2,9 @@ use clap::Args;
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::observation::{run_owner_pid, ObservationStore, RunListFilter, RunRecord, RunStatus};
+use homeboy::core::observation::{
+    run_owner_pid, ObservationStore, RunListFilter, RunRecord, RunStatus,
+};
 
 use crate::commands::runs::RunsOutput;
 use crate::commands::CmdResult;
@@ -64,7 +66,7 @@ pub fn reconcile_runs(args: RunsReconcileArgs) -> CmdResult<RunsOutput> {
 pub(super) fn reconcile_owned_stale_running_runs(
     store: &ObservationStore,
     limit: i64,
-) -> homeboy::Result<Vec<ReconciledRunSummary>> {
+) -> homeboy::core::Result<Vec<ReconciledRunSummary>> {
     reconcile_orphaned_running_runs(store, limit, false, pid_is_running)
 }
 
@@ -73,7 +75,7 @@ fn reconcile_orphaned_running_runs<F>(
     limit: i64,
     dry_run: bool,
     pid_is_alive: F,
-) -> homeboy::Result<Vec<ReconciledRunSummary>>
+) -> homeboy::core::Result<Vec<ReconciledRunSummary>>
 where
     F: Fn(u32) -> bool,
 {
@@ -118,7 +120,7 @@ where
 }
 
 pub fn running_status_note(run: &RunRecord) -> Option<String> {
-    homeboy::observation::running_status_note(run)
+    homeboy::core::observation::running_status_note(run)
 }
 
 fn with_reconcile_metadata(run: &RunRecord, owner_pid: u32, reason: &str) -> Value {
@@ -160,7 +162,7 @@ fn pid_is_running(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::observation::NewRunRecord;
+    use homeboy::core::observation::NewRunRecord;
     use homeboy::test_support::with_isolated_home;
 
     struct XdgGuard(Option<String>);

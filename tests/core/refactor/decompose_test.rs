@@ -2,8 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use homeboy::extension::ParsedItem;
-use homeboy::refactor::{self, DecomposeGroup, DecomposePlan};
+use homeboy::core::extension::ParsedItem;
+use homeboy::core::refactor::{self, DecomposeGroup, DecomposePlan};
 
 fn tmp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()

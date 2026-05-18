@@ -1,4 +1,4 @@
-use crate::code_audit::conventions::Language;
+use crate::core::code_audit::conventions::Language;
 use regex::Regex;
 
 /// Full method signature extracted from a conforming file.
@@ -86,9 +86,9 @@ fn normalize_item_name(name: &str) -> String {
 }
 
 pub(crate) fn find_parsed_item_by_name<'a>(
-    items: &'a [crate::extension::ParsedItem],
+    items: &'a [crate::core::extension::ParsedItem],
     requested_name: &str,
-) -> Option<&'a crate::extension::ParsedItem> {
+) -> Option<&'a crate::core::extension::ParsedItem> {
     if let Some(exact) = items.iter().find(|item| item.name == requested_name) {
         return Some(exact);
     }
@@ -129,20 +129,21 @@ pub(crate) fn parse_items_for_dedup(
     file_ext: &str,
     content: &str,
     file_path: &str,
-) -> Option<Vec<crate::extension::ParsedItem>> {
-    if let Some(grammar) = crate::code_audit::core_fingerprint::load_grammar_for_ext(file_ext) {
-        let items = crate::extension::grammar_items::parse_items(content, &grammar);
+) -> Option<Vec<crate::core::extension::ParsedItem>> {
+    if let Some(grammar) = crate::core::code_audit::core_fingerprint::load_grammar_for_ext(file_ext)
+    {
+        let items = crate::core::extension::grammar_items::parse_items(content, &grammar);
         if !items.is_empty() {
             return Some(
                 items
                     .into_iter()
-                    .map(crate::extension::ParsedItem::from)
+                    .map(crate::core::extension::ParsedItem::from)
                     .collect(),
             );
         }
     }
 
-    let manifest = crate::extension::find_extension_for_file_ext(file_ext, "refactor")?;
+    let manifest = crate::core::extension::find_extension_for_file_ext(file_ext, "refactor")?;
     let parse_cmd = serde_json::json!({
         "command": "parse_items",
         "file_path": file_path,
@@ -150,7 +151,7 @@ pub(crate) fn parse_items_for_dedup(
         "items": [],
     });
 
-    crate::extension::run_refactor_script(&manifest, &parse_cmd)
+    crate::core::extension::run_refactor_script(&manifest, &parse_cmd)
         .and_then(|value| value.get("items").cloned())
         .and_then(|value| serde_json::from_value(value).ok())
 }
@@ -167,11 +168,12 @@ pub(crate) fn extract_signatures_from_items(
         Language::Unknown => return Vec::new(),
     };
 
-    let Some(grammar) = crate::code_audit::core_fingerprint::load_grammar_for_ext(file_ext) else {
+    let Some(grammar) = crate::core::code_audit::core_fingerprint::load_grammar_for_ext(file_ext)
+    else {
         return Vec::new();
     };
 
-    let symbols = crate::extension::grammar::extract(content, &grammar);
+    let symbols = crate::core::extension::grammar::extract(content, &grammar);
     let lines: Vec<&str> = content.lines().collect();
 
     symbols

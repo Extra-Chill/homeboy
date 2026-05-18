@@ -1,12 +1,12 @@
 use clap::Args;
 use std::path::Path;
 
-use homeboy::code_audit::{
+use homeboy::core::code_audit::{
     self, report, run_main_audit_workflow, AuditCommandOutput, AuditRunWorkflowArgs,
 };
-use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::git::short_head_revision_at;
-use homeboy::observation::{
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::git::short_head_revision_at;
+use homeboy::core::observation::{
     finding_records_from_audit, NewRunRecord, ObservationStore, RunRecord, RunStatus,
 };
 
@@ -53,13 +53,14 @@ pub struct AuditArgs {
 fn parse_finding_kinds(
     values: &[String],
     flag: &str,
-) -> homeboy::Result<Vec<code_audit::AuditFinding>> {
+) -> homeboy::core::Result<Vec<code_audit::AuditFinding>> {
     use std::str::FromStr;
     values
         .iter()
         .map(|value| {
-            code_audit::AuditFinding::from_str(value)
-                .map_err(|msg| homeboy::Error::validation_invalid_argument(flag, msg, None, None))
+            code_audit::AuditFinding::from_str(value).map_err(|msg| {
+                homeboy::core::Error::validation_invalid_argument(flag, msg, None, None)
+            })
         })
         .collect()
 }
@@ -113,7 +114,7 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         exclude_kinds,
         only_labels: args.only,
         exclude_labels: args.exclude,
-        baseline_flags: homeboy::engine::baseline::BaselineFlags {
+        baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
             baseline: args.baseline_args.baseline,
             ignore_baseline: args.baseline_args.ignore_baseline,
             ratchet: args.baseline_args.ratchet,
@@ -199,7 +200,10 @@ fn finish_audit_observation(
         .finish_run(&observation.audit_run.id, status, Some(metadata));
 }
 
-fn finish_audit_observation_error(observation: Option<AuditObservation>, error: &homeboy::Error) {
+fn finish_audit_observation_error(
+    observation: Option<AuditObservation>,
+    error: &homeboy::core::Error,
+) {
     let Some(observation) = observation else {
         return;
     };
@@ -354,7 +358,7 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
     }
 
     // Load component to find its extensions
-    let comp = match homeboy::component::load(component_id_or_path) {
+    let comp = match homeboy::core::component::load(component_id_or_path) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -365,7 +369,7 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
     };
 
     for ext_id in extensions.keys() {
-        let ext_manifest = match homeboy::extension::load_extension(ext_id) {
+        let ext_manifest = match homeboy::core::extension::load_extension(ext_id) {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -376,7 +380,7 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
         };
 
         // Resolve script path relative to extension directory
-        let ext_path = homeboy::extension::extension_path(ext_id);
+        let ext_path = homeboy::core::extension::extension_path(ext_id);
         if !ext_path.is_dir() {
             continue;
         }
@@ -532,7 +536,7 @@ mod tests {
 
             finish_audit_observation_error(
                 Some(observation),
-                &homeboy::Error::validation_invalid_argument(
+                &homeboy::core::Error::validation_invalid_argument(
                     "fixture",
                     "simulated audit error",
                     None,
@@ -600,10 +604,10 @@ mod tests {
 
             let store = ObservationStore::open_initialized().expect("store");
             let findings = store
-                .list_findings(homeboy::observation::FindingListFilter {
+                .list_findings(homeboy::core::observation::FindingListFilter {
                     run_id: Some(run_id),
                     tool: Some("audit".to_string()),
-                    ..homeboy::observation::FindingListFilter::default()
+                    ..homeboy::core::observation::FindingListFilter::default()
                 })
                 .expect("list findings");
 

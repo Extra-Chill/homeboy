@@ -155,13 +155,13 @@ fn build_ssh_args(client: &SshClient) -> String {
 /// Execute a file transfer between local and remote paths, or between two servers.
 ///
 /// Returns `(TransferOutput, exit_code)` where exit_code is 0 on success.
-pub fn transfer(config: &TransferConfig) -> crate::Result<(TransferOutput, i32)> {
+pub fn transfer(config: &TransferConfig) -> crate::core::Result<(TransferOutput, i32)> {
     let source = parse_target(&config.source);
     let dest = parse_target(&config.destination);
 
     match (&source, &dest) {
         (TransferTarget::Local(_), TransferTarget::Local(_)) => {
-            Err(crate::Error::validation_invalid_argument(
+            Err(crate::core::Error::validation_invalid_argument(
                 "target",
                 "Both source and destination are local paths. At least one must be a remote server",
                 None,
@@ -197,7 +197,7 @@ fn run_push(
     local_path: &str,
     server_id: &str,
     remote_path: &str,
-) -> crate::Result<(TransferOutput, i32)> {
+) -> crate::core::Result<(TransferOutput, i32)> {
     let srv = super::load(server_id)?;
     let client = SshClient::from_server(&srv, server_id)?;
 
@@ -217,7 +217,7 @@ fn run_push(
     // Validate local path exists
     let local = std::path::Path::new(local_path);
     if !local.exists() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "source",
             format!("Local path does not exist: {}", local_path),
             None,
@@ -254,7 +254,7 @@ fn run_pull(
     server_id: &str,
     remote_path: &str,
     local_path: &str,
-) -> crate::Result<(TransferOutput, i32)> {
+) -> crate::core::Result<(TransferOutput, i32)> {
     let srv = super::load(server_id)?;
     let client = SshClient::from_server(&srv, server_id)?;
 
@@ -276,7 +276,7 @@ fn run_pull(
     if let Some(parent) = local.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                crate::Error::internal_io(
+                crate::core::Error::internal_io(
                     e.to_string(),
                     Some(format!("create directory {}", parent.display())),
                 )
@@ -314,7 +314,7 @@ fn run_server_to_server(
     src_path: &str,
     dst_id: &str,
     dst_path: &str,
-) -> crate::Result<(TransferOutput, i32)> {
+) -> crate::core::Result<(TransferOutput, i32)> {
     let src_server = super::load(src_id)?;
     let dst_server = super::load(dst_id)?;
 
@@ -430,7 +430,7 @@ fn run_server_to_server(
 fn execute_scp(
     scp_args: &[String],
     config: &TransferConfig,
-) -> crate::Result<(TransferOutput, i32)> {
+) -> crate::core::Result<(TransferOutput, i32)> {
     let output = Command::new("scp")
         .args(scp_args)
         .stdin(Stdio::null())
@@ -481,7 +481,7 @@ fn execute_scp(
 mod tests {
     use std::collections::HashMap;
 
-    use crate::server::{self, Server};
+    use crate::core::server::{self, Server};
     use crate::test_support::with_isolated_home;
 
     use super::{parse_target, transfer, TransferConfig, TransferTarget};

@@ -1,4 +1,4 @@
-use crate::code_audit::{AuditFinding, CodeAuditResult};
+use crate::core::code_audit::{AuditFinding, CodeAuditResult};
 use crate::core::refactor::auto::{Fix, RefactorPrimitive};
 use std::path::Path;
 

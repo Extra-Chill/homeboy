@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::component::Component;
-use crate::config;
-use crate::error::Result;
+use crate::core::component::Component;
+use crate::core::config;
+use crate::core::error::Result;
+use crate::core::paths as base_path;
+use crate::core::project::Project;
 use crate::is_zero_u32;
-use crate::paths as base_path;
-use crate::project::Project;
 
 use super::path_roots::resolve_effective_remote_path;
 
@@ -281,9 +281,9 @@ mod tests {
         parse_bulk_component_ids, ComponentDeployResult, ComponentStatus, DeployResult,
         ReleaseState, ReleaseStateStatus,
     };
-    use crate::component::{Component, ScopedExtensionConfig};
-    use crate::extension::{DeployCapability, ExtensionManifest, RemotePathRootRule};
-    use crate::project::Project;
+    use crate::core::component::{Component, ScopedExtensionConfig};
+    use crate::core::extension::{DeployCapability, ExtensionManifest, RemotePathRootRule};
+    use crate::core::project::Project;
     use crate::test_support::with_isolated_home;
     use std::collections::HashMap;
 
@@ -306,7 +306,7 @@ mod tests {
     }
 
     fn install_wordpress_extension() {
-        crate::extension::save_manifest(&ExtensionManifest {
+        crate::core::extension::save_manifest(&ExtensionManifest {
             id: "wordpress".to_string(),
             name: "WordPress".to_string(),
             version: "1.0.0".to_string(),

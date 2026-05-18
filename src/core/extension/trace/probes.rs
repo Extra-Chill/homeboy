@@ -11,7 +11,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::parsing::TraceEvent;
 

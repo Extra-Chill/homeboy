@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 
-use crate::error::{Error, Result};
-use crate::paths;
+use crate::core::error::{Error, Result};
+use crate::core::paths;
 
 use super::spec::RigResourcesSpec;
 

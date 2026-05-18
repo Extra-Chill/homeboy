@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::component;
-use homeboy::version::{read_component_version, read_version, VersionTargetInfo};
+use homeboy::core::component;
+use homeboy::core::release::version::{read_component_version, read_version, VersionTargetInfo};
 
 use super::CmdResult;
 

@@ -4,8 +4,8 @@ use clap::{Args, ValueEnum};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::observation::{ObservationStore, RunListFilter};
-use homeboy::Error;
+use homeboy::core::observation::{ObservationStore, RunListFilter};
+use homeboy::core::Error;
 
 use crate::commands::{escape_markdown_table_cell, CmdResult};
 
@@ -270,7 +270,7 @@ fn fmt_metric(value: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::observation::{NewRunRecord, RunStatus};
+    use homeboy::core::observation::{NewRunRecord, RunStatus};
     use homeboy::test_support::with_isolated_home;
 
     struct XdgGuard(Option<String>);

@@ -1,5 +1,5 @@
-use crate::code_audit::conventions::Language;
-use crate::code_audit::{AuditFinding, CodeAuditResult, DuplicateGroup};
+use crate::core::code_audit::conventions::Language;
+use crate::core::code_audit::{AuditFinding, CodeAuditResult, DuplicateGroup};
 use crate::core::refactor::auto::{Fix, InsertionKind, NewFile, SkippedFile};
 
 use regex::Regex;
@@ -320,7 +320,7 @@ pub(crate) fn generate_duplicate_function_fixes(
             .unwrap_or("");
         let language = Language::from_path(&canonical_abs);
         let use_extract_shared = matches!(language, Language::Php)
-            && !crate::code_audit::is_test_path(&group.canonical_file);
+            && !crate::core::code_audit::is_test_path(&group.canonical_file);
 
         let canonical_content = match std::fs::read_to_string(&canonical_abs) {
             Ok(content) => content,
@@ -337,7 +337,7 @@ pub(crate) fn generate_duplicate_function_fixes(
         };
 
         let manifest = if use_extract_shared {
-            crate::extension::find_extension_for_file_ext(ext, "refactor")
+            crate::core::extension::find_extension_for_file_ext(ext, "refactor")
         } else {
             None
         };
@@ -387,7 +387,7 @@ pub(crate) fn generate_duplicate_function_fixes(
             "project_root": root.to_string_lossy(),
         });
 
-        let Some(result_val) = crate::extension::run_refactor_script(&manifest, &extract_cmd)
+        let Some(result_val) = crate::core::extension::run_refactor_script(&manifest, &extract_cmd)
         else {
             generate_simple_duplicate_fixes(group, root, module_surfaces, fixes, skipped);
             continue;
@@ -588,8 +588,8 @@ fn generate_simple_duplicate_fixes(
         // Integration test files (tests/) are separate compilation units —
         // they cannot import from each other via `use crate::`. Skip fixes
         // that would generate invalid cross-crate imports.
-        if crate::code_audit::walker::is_test_path(remove_file)
-            || crate::code_audit::walker::is_test_path(&group.canonical_file)
+        if crate::core::code_audit::walker::is_test_path(remove_file)
+            || crate::core::code_audit::walker::is_test_path(&group.canonical_file)
         {
             skipped.push(SkippedFile {
                 file: remove_file.clone(),
@@ -780,7 +780,7 @@ fn extract_mod_names(content: &str) -> HashSet<String> {
 }
 
 fn scan_dir_for_reference(dir: &Path, word_re: &Regex) -> bool {
-    use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+    use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
     let config = ScanConfig {
         extensions: ExtensionFilter::Only(vec!["rs".to_string()]),

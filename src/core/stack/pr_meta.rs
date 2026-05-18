@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::spec::StackPrEntry;
 
@@ -142,8 +142,8 @@ fn nested_string_field(parsed: &serde_json::Value, key: &str, child: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ErrorCode;
     use crate::test_support::home_env_guard;
-    use crate::ErrorCode;
     use std::fs;
 
     #[cfg(unix)]

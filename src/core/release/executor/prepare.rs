@@ -1,8 +1,8 @@
-use crate::error::{Error, Result};
-use crate::extension::{self, ExtensionManifest};
+use crate::core::error::{Error, Result};
+use crate::core::extension::{self, ExtensionManifest};
 
 use super::{build_release_payload, publish_response_output, step_failed, step_success};
-use crate::release::types::{ReleaseState, ReleaseStepResult};
+use crate::core::release::types::{ReleaseState, ReleaseStepResult};
 
 /// Invoke every `release.prepare` action provided by the component's extensions.
 pub(crate) fn run_prepare(
@@ -115,7 +115,7 @@ fn extension_action_failure_message(
 #[cfg(test)]
 mod tests {
     use super::prepare_step_result;
-    use crate::release::ReleaseStepStatus;
+    use crate::core::release::ReleaseStepStatus;
 
     #[test]
     fn prepare_step_fails_when_extension_command_fails() {

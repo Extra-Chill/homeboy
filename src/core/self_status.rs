@@ -1,4 +1,4 @@
-use crate::upgrade::{self, InstallMethod};
+use crate::core::upgrade::{self, InstallMethod};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

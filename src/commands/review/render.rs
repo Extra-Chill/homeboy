@@ -17,10 +17,10 @@
 
 use std::fmt::Write as _;
 
-use homeboy::code_audit::{AuditCommandOutput, AuditFinding, Severity};
-use homeboy::extension::lint::LintCommandOutput;
-use homeboy::extension::test::{FailedTest, TestCommandOutput};
-use homeboy::top_n::top_n_by;
+use homeboy::core::code_audit::{AuditCommandOutput, AuditFinding, Severity};
+use homeboy::core::extension::lint::LintCommandOutput;
+use homeboy::core::extension::test::{FailedTest, TestCommandOutput};
+use homeboy::core::top_n::top_n_by;
 
 use super::{ReviewCommandOutput, ReviewStage};
 
@@ -338,13 +338,13 @@ fn render_failed_tests(out: &mut String, failed_tests: &[FailedTest]) {
 mod tests {
     use super::*;
 
-    use homeboy::code_audit::{
+    use homeboy::core::code_audit::{
         AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity,
     };
-    use homeboy::extension::lint::{LintCommandOutput, LintFinding};
-    use homeboy::extension::test::{FailedTest, TestCommandOutput, TestCounts};
-    use homeboy::extension::{PhaseReport, PhaseStatus, VerificationPhase};
-    use homeboy::quality::{build_quality_plan, QualityPlanOptions};
+    use homeboy::core::extension::lint::{LintCommandOutput, LintFinding};
+    use homeboy::core::extension::test::{FailedTest, TestCommandOutput, TestCounts};
+    use homeboy::core::extension::{PhaseReport, PhaseStatus, VerificationPhase};
+    use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
 
     // ── Builders for fixture envelopes ──────────────────────────────────
 
@@ -438,7 +438,7 @@ mod tests {
         let result = CodeAuditResult {
             component_id: "my-comp".to_string(),
             source_path: "/tmp/my-comp".to_string(),
-            summary: homeboy::code_audit::AuditSummary {
+            summary: homeboy::core::code_audit::AuditSummary {
                 files_scanned: 0,
                 conventions_detected: 0,
                 outliers_found: 0,

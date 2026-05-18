@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use homeboy::refactor;
+use homeboy::core::refactor;
 
 fn tmp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()

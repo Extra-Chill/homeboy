@@ -7,11 +7,11 @@
 //! Event naming convention: `pre:operation` / `post:operation`
 //! Examples: `pre:version:bump`, `post:version:bump`, `post:release`, `post:deploy`
 
-use crate::component::Component;
-use crate::engine::template;
-use crate::error::{Error, Result};
-use crate::extension;
-use crate::server::{execute_local_command_in_dir, SshClient};
+use crate::core::component::Component;
+use crate::core::engine::template;
+use crate::core::error::{Error, Result};
+use crate::core::extension;
+use crate::core::server::{execute_local_command_in_dir, SshClient};
 use serde::Serialize;
 use std::collections::HashMap;
 

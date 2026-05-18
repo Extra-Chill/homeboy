@@ -1,16 +1,16 @@
-use crate::component::Component;
-use crate::engine::baseline::BaselineFlags;
-use crate::engine::run_dir::{self, RunDir};
-use crate::extension::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
-use crate::extension::test::baseline::{self, TestBaselineComparison, TestCounts};
-use crate::extension::test::{
+use crate::core::component::Component;
+use crate::core::engine::baseline::BaselineFlags;
+use crate::core::engine::run_dir::{self, RunDir};
+use crate::core::extension::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
+use crate::core::extension::test::baseline::{self, TestBaselineComparison, TestCounts};
+use crate::core::extension::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope, parse_coverage_file,
     parse_failures_file, parse_test_results_file, parse_test_results_text,
     parse_test_results_text_with_spec, CoverageOutput, FailedTest, TestScopeOutput,
     TestSummaryOutput,
 };
-use crate::extension::{self, ExtensionCapability};
-use crate::refactor::AppliedRefactor;
+use crate::core::extension::{self, ExtensionCapability};
+use crate::core::refactor::AppliedRefactor;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -165,7 +165,7 @@ pub fn run_main_test_workflow(
     source_path: &PathBuf,
     args: TestRunWorkflowArgs,
     run_dir: &RunDir,
-) -> crate::Result<TestRunWorkflowResult> {
+) -> crate::core::Result<TestRunWorkflowResult> {
     let changed_scope = if let Some(ref git_ref) = args.changed_since {
         Some(compute_changed_test_scope(component, git_ref)?)
     } else {
@@ -221,9 +221,9 @@ pub fn run_main_test_workflow(
         }
     }
 
-    let result_parse = crate::extension::test::resolve_test_command(component)
+    let result_parse = crate::core::extension::test::resolve_test_command(component)
         .ok()
-        .and_then(|context| crate::extension::load_extension(&context.extension_id).ok())
+        .and_then(|context| crate::core::extension::load_extension(&context.extension_id).ok())
         .and_then(|extension| extension.test.and_then(|test| test.result_parse));
 
     let output = build_test_runner(
@@ -471,7 +471,7 @@ pub fn run_self_check_test_workflow(
     source_path: &Path,
     component_label: String,
     json_summary: bool,
-) -> crate::Result<TestRunWorkflowResult> {
+) -> crate::core::Result<TestRunWorkflowResult> {
     let output =
         extension::self_check::run_self_checks(component, ExtensionCapability::Test, source_path)?;
     let status = if output.success { "passed" } else { "failed" }.to_string();
@@ -515,8 +515,8 @@ pub fn run_self_check_test_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::SelfCheckConfig;
-    use crate::extension::test::TestFailure;
+    use crate::core::component::SelfCheckConfig;
+    use crate::core::extension::test::TestFailure;
 
     #[test]
     fn tail_lines_returns_full_text_when_under_limit() {

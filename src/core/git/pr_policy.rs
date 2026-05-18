@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::changes::get_dirty_files;
 use super::github::{pr_files, pr_merge, pr_view, PrMergeOptions};

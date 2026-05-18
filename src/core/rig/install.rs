@@ -5,8 +5,8 @@
 //! Installed rigs stay loadable through the existing flat rig config path by
 //! linking `~/.config/homeboy/rigs/<id>.json` to the package spec.
 
-use crate::error::{Error, Result};
-use crate::{extension, git, paths, stack};
+use crate::core::error::{Error, Result};
+use crate::core::{extension, git, paths, stack};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};

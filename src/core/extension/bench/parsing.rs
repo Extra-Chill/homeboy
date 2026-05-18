@@ -58,9 +58,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::budget::BudgetFinding;
-use crate::error::{Error, Result};
-use crate::observation::timeline::{
+use crate::core::budget::BudgetFinding;
+use crate::core::error::{Error, Result};
+use crate::core::observation::timeline::{
     reporting_timeline, summarize_spans, ObservationEvent, ObservationSpanDefinition,
     ObservationSpanResult,
 };
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(scenario.span_results.len(), 1);
         assert_eq!(
             scenario.span_results[0].status,
-            crate::observation::timeline::ObservationSpanStatus::Ok
+            crate::core::observation::timeline::ObservationSpanStatus::Ok
         );
         assert_eq!(scenario.span_results[0].duration_ms, Some(35));
     }

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-use crate::engine::local_files;
-use crate::paths;
+use crate::core::engine::local_files;
+use crate::core::paths;
 
 /// Root configuration structure for homeboy.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -354,11 +354,11 @@ pub fn load_config() -> HomeboyConfig {
 }
 
 /// Attempt to load config from homeboy.json file.
-fn load_config_from_file() -> crate::Result<HomeboyConfig> {
+fn load_config_from_file() -> crate::core::Result<HomeboyConfig> {
     let path = paths::homeboy_json()?;
 
     if !path.exists() {
-        return Err(crate::Error::internal_io(
+        return Err(crate::core::Error::internal_io(
             "homeboy.json not found",
             Some(path.display().to_string()),
         ));
@@ -367,7 +367,7 @@ fn load_config_from_file() -> crate::Result<HomeboyConfig> {
     let content = local_files::read_file(&path, &format!("read {}", path.display()))?;
 
     let config: HomeboyConfig = serde_json::from_str(&content).map_err(|e| {
-        crate::Error::validation_invalid_json(
+        crate::core::Error::validation_invalid_json(
             e,
             Some("parse homeboy.json".to_string()),
             Some(content.chars().take(200).collect::<String>()),
@@ -378,17 +378,20 @@ fn load_config_from_file() -> crate::Result<HomeboyConfig> {
 }
 
 /// Save config to homeboy.json file (creates if missing).
-pub fn save_config(config: &HomeboyConfig) -> crate::Result<()> {
+pub fn save_config(config: &HomeboyConfig) -> crate::core::Result<()> {
     let path = paths::homeboy_json()?;
 
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
-            crate::Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
+            crate::core::Error::internal_io(
+                e.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
         })?;
     }
 
-    let content = crate::config::to_string_pretty(config)?;
+    let content = crate::core::config::to_string_pretty(config)?;
 
     local_files::write_file_atomic(&path, &content, &format!("write {}", path.display()))?;
 
@@ -401,12 +404,15 @@ pub fn config_exists() -> bool {
 }
 
 /// Delete homeboy.json file (reset to defaults)
-pub fn reset_config() -> crate::Result<bool> {
+pub fn reset_config() -> crate::core::Result<bool> {
     let path = paths::homeboy_json()?;
 
     if path.exists() {
         fs::remove_file(&path).map_err(|e| {
-            crate::Error::internal_io(e.to_string(), Some(format!("delete {}", path.display())))
+            crate::core::Error::internal_io(
+                e.to_string(),
+                Some(format!("delete {}", path.display())),
+            )
         })?;
         Ok(true)
     } else {
@@ -415,7 +421,7 @@ pub fn reset_config() -> crate::Result<bool> {
 }
 
 /// Get the path to homeboy.json (for display purposes)
-pub fn config_path() -> crate::Result<String> {
+pub fn config_path() -> crate::core::Result<String> {
     Ok(paths::homeboy_json()?.display().to_string())
 }
 

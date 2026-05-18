@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::discovery::{discover_attached_component, infer_attached_component_id};
-use crate::project::{load, save, Project, ProjectComponentAttachment};
+use crate::core::project::{load, save, Project, ProjectComponentAttachment};
 
 fn component_ids_from_attachments(components: &[ProjectComponentAttachment]) -> Vec<String> {
     components

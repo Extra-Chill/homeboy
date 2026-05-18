@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use super::{tagged_line_replacement, tagged_range_removal};
-use crate::code_audit::{AuditFinding, CodeAuditResult};
+use crate::core::code_audit::{AuditFinding, CodeAuditResult};
 use crate::core::refactor::auto::{Fix, RefactorPrimitive, SkippedFile};
 
 /// A machine-applicable fix suggestion from the compiler.
@@ -355,7 +355,7 @@ fn parse_suggestions(stdout: &str, root: &Path) -> Vec<CompilerSuggestion> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::refactor::InsertionKind;
+    use crate::core::refactor::InsertionKind;
 
     #[test]
     fn parse_suggestions_extracts_unused_import() {

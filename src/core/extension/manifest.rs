@@ -1,9 +1,9 @@
-use crate::component::AuditConfig;
-use crate::config::ConfigEntity;
-use crate::engine::output_parse::ParseSpec;
-use crate::engine::run_dir;
-use crate::error::{Error, Result};
-use crate::paths;
+use crate::core::component::AuditConfig;
+use crate::core::config::ConfigEntity;
+use crate::core::engine::output_parse::ParseSpec;
+use crate::core::engine::run_dir;
+use crate::core::error::{Error, Result};
+use crate::core::paths;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -669,7 +669,7 @@ impl ExtensionManifest {
     }
 
     /// Parse the version string as semver.
-    pub fn semver(&self) -> crate::error::Result<semver::Version> {
+    pub fn semver(&self) -> crate::core::error::Result<semver::Version> {
         super::version::parse_extension_version(&self.version, &self.id)
     }
 

@@ -1,14 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use homeboy::engine::run_dir::{self, RunDir};
-use homeboy::extension::bench::report::collect_artifacts;
-use homeboy::extension::bench::{BenchResults, BenchRunWorkflowResult};
-use homeboy::git::short_head_revision_at;
-use homeboy::observation::{
+use homeboy::core::engine::run_dir::{self, RunDir};
+use homeboy::core::extension::bench::report::collect_artifacts;
+use homeboy::core::extension::bench::{BenchResults, BenchRunWorkflowResult};
+use homeboy::core::git::short_head_revision_at;
+use homeboy::core::observation::{
     finding_records_from_budget, merge_metadata, ActiveObservation, NewRunRecord, RunStatus,
 };
-use homeboy::rig::RigStateSnapshot;
+use homeboy::core::rig::RigStateSnapshot;
 
 use crate::commands::utils::resource_policy;
 
@@ -110,7 +110,7 @@ pub(super) fn history_hints(summary: &BenchObservationSummary) -> Vec<String> {
 
 pub(super) fn finish_error(
     observation: Option<BenchObservation>,
-    error: &homeboy::Error,
+    error: &homeboy::core::Error,
     run_dir: &RunDir,
 ) {
     let Some(observation) = observation else {
@@ -312,7 +312,7 @@ fn persist_bench_result_artifact_paths(
 
 fn persist_bench_artifact_path(
     observation: &BenchObservation,
-    artifact: &mut homeboy::extension::bench::BenchArtifact,
+    artifact: &mut homeboy::core::extension::bench::BenchArtifact,
     run_dir: &RunDir,
 ) {
     let Some(path) = artifact.path.as_deref() else {
@@ -392,10 +392,10 @@ fn resolve_preserved_invocation_artifact(path: &Path, run_dir: &RunDir) -> Optio
 mod tests {
     use std::fs;
 
-    use homeboy::engine::run_dir::{self, RunDir};
-    use homeboy::extension::bench::artifact::BenchArtifact;
-    use homeboy::extension::bench::{BenchResults, BenchRunWorkflowResult};
-    use homeboy::observation::ObservationStore;
+    use homeboy::core::engine::run_dir::{self, RunDir};
+    use homeboy::core::extension::bench::artifact::BenchArtifact;
+    use homeboy::core::extension::bench::{BenchResults, BenchRunWorkflowResult};
+    use homeboy::core::observation::ObservationStore;
 
     use super::*;
     use crate::commands::bench::BenchRigOrder;
@@ -848,7 +848,7 @@ mod tests {
             })
             .expect("start observation");
             let run_id = observation.run_id().to_string();
-            let error = homeboy::Error::validation_invalid_argument(
+            let error = homeboy::core::Error::validation_invalid_argument(
                 "bench",
                 "synthetic bench error",
                 None,

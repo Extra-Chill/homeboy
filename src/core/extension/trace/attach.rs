@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use crate::engine::run_dir::RunDir;
-use crate::error::{Error, Result};
-use crate::http_probe;
+use crate::core::engine::run_dir::RunDir;
+use crate::core::error::{Error, Result};
+use crate::core::http_probe;
 
 use super::parsing::{TraceArtifact, TraceEvent, TraceResults};
 

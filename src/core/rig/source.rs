@@ -1,8 +1,8 @@
 //! Installed rig source lifecycle.
 
-use crate::error::{Error, Result};
-use crate::git;
-use crate::paths;
+use crate::core::error::{Error, Result};
+use crate::core::git;
+use crate::core::paths;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

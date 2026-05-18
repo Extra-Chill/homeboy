@@ -12,7 +12,7 @@
 //! - Less: `<1.2.3`
 //! - Wildcard: `*` — any version
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 use semver::Version;
 
 /// A parsed version constraint that can check whether a given version satisfies it.

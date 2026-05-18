@@ -1,13 +1,13 @@
-use crate::code_audit::CodeAuditResult;
-use crate::component::Component;
-use crate::engine::run_dir::{self, RunDir};
-use crate::engine::undo::UndoSnapshot;
-use crate::extension;
-use crate::extension::test::compute_changed_test_files;
-use crate::git;
-use crate::refactor::auto as fixer;
-use crate::refactor::auto::{self, FixApplied, FixResultsSummary};
-use crate::Error;
+use crate::core::code_audit::CodeAuditResult;
+use crate::core::component::Component;
+use crate::core::engine::run_dir::{self, RunDir};
+use crate::core::engine::undo::UndoSnapshot;
+use crate::core::extension;
+use crate::core::extension::test::compute_changed_test_files;
+use crate::core::git;
+use crate::core::refactor::auto as fixer;
+use crate::core::refactor::auto::{self, FixApplied, FixResultsSummary};
+use crate::core::Error;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
@@ -30,8 +30,8 @@ pub struct RefactorSourceRequest {
     pub root: PathBuf,
     pub sources: Vec<String>,
     pub changed_since: Option<String>,
-    pub only: Vec<crate::code_audit::AuditFinding>,
-    pub exclude: Vec<crate::code_audit::AuditFinding>,
+    pub only: Vec<crate::core::code_audit::AuditFinding>,
+    pub exclude: Vec<crate::core::code_audit::AuditFinding>,
     pub settings: Vec<(String, String)>,
     pub lint: LintSourceOptions,
     pub test: TestSourceOptions,
@@ -90,7 +90,7 @@ pub fn run_lint_refactor(
     settings: Vec<(String, String)>,
     options: LintSourceOptions,
     write: bool,
-) -> crate::Result<RefactorSourceRun> {
+) -> crate::core::Result<RefactorSourceRun> {
     collect_refactor_sources(lint_refactor_request(
         component, root, settings, options, write,
     ))
@@ -102,7 +102,7 @@ pub fn run_test_refactor(
     settings: Vec<(String, String)>,
     options: TestSourceOptions,
     write: bool,
-) -> crate::Result<RefactorSourceRun> {
+) -> crate::core::Result<RefactorSourceRun> {
     collect_refactor_sources(build_test_refactor_request(
         component, root, settings, options, write,
     ))
@@ -147,7 +147,7 @@ pub struct RefactorSourceRun {
     /// When set, autofix was blocked by a safety guard. The pipeline
     /// short-circuited without modifying any files.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub guard_block: Option<crate::refactor::auto::guard::GuardBlock>,
+    pub guard_block: Option<crate::core::refactor::auto::guard::GuardBlock>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -229,7 +229,7 @@ struct LintFixScopeOutcome {
 
 pub fn collect_refactor_sources(
     request: RefactorSourceRequest,
-) -> crate::Result<RefactorSourceRun> {
+) -> crate::core::Result<RefactorSourceRun> {
     let sources = normalize_sources(&request.sources)?;
     let root_str = request.root.to_string_lossy().to_string();
     let original_changes = git::get_uncommitted_changes(&root_str).ok();
@@ -241,7 +241,7 @@ pub fn collect_refactor_sources(
     if request.write && !request.force && !allows_dirty_worktree_write(&request) {
         if let Some(ref changes) = original_changes {
             if changes.has_changes {
-                return Err(crate::Error::validation_invalid_argument(
+                return Err(crate::core::Error::validation_invalid_argument(
                     "write",
                     "Working tree has uncommitted changes",
                     None,
@@ -258,10 +258,10 @@ pub fn collect_refactor_sources(
     // Guards detect reverted/force-pushed bot commits and PR labels that
     // permanently disable autofix. Outside CI, guards are no-ops.
     if request.write {
-        let guard_config = crate::refactor::auto::guard::GuardConfig::from_env();
-        match crate::refactor::auto::guard::check_guards(&root_str, &guard_config) {
-            crate::refactor::auto::guard::GuardResult::Proceed => {}
-            crate::refactor::auto::guard::GuardResult::Blocked(block) => {
+        let guard_config = crate::core::refactor::auto::guard::GuardConfig::from_env();
+        match crate::core::refactor::auto::guard::check_guards(&root_str, &guard_config) {
+            crate::core::refactor::auto::guard::GuardResult::Proceed => {}
+            crate::core::refactor::auto::guard::GuardResult::Blocked(block) => {
                 eprintln!(
                     "[refactor] autofix blocked: {} (status: {})",
                     block.message(),
@@ -397,7 +397,7 @@ pub fn collect_refactor_sources(
     if applied {
         let abs_changed: Vec<PathBuf> =
             changed_files.iter().map(|f| request.root.join(f)).collect();
-        match crate::engine::format_write::format_after_write(&request.root, &abs_changed) {
+        match crate::core::engine::format_write::format_after_write(&request.root, &abs_changed) {
             Ok(fmt) => {
                 if let Some(cmd) = &fmt.command {
                     if !fmt.success {
@@ -460,7 +460,7 @@ fn allows_dirty_worktree_write(request: &RefactorSourceRequest) -> bool {
             .is_some_and(|files| !files.is_empty())
 }
 
-pub fn normalize_sources(sources: &[String]) -> crate::Result<Vec<String>> {
+pub fn normalize_sources(sources: &[String]) -> crate::core::Result<Vec<String>> {
     let lowered: Vec<String> = sources.iter().map(|source| source.to_lowercase()).collect();
 
     if lowered.iter().any(|source| source == "all") {
@@ -518,7 +518,7 @@ fn format_changed_files(root: &Path, changed_files: &[String], warnings: &mut Ve
 
     let abs_changed: Vec<PathBuf> = changed_files.iter().map(|f| root.join(f)).collect();
 
-    match crate::engine::format_write::format_after_write(root, &abs_changed) {
+    match crate::core::engine::format_write::format_after_write(root, &abs_changed) {
         Ok(fmt) => {
             if let Some(cmd) = &fmt.command {
                 if fmt.success {
@@ -713,10 +713,10 @@ fn plan_audit_stage(
     component_id: &str,
     root: &Path,
     changed_files: Option<&[String]>,
-    only: &[crate::code_audit::AuditFinding],
-    exclude: &[crate::code_audit::AuditFinding],
+    only: &[crate::core::code_audit::AuditFinding],
+    exclude: &[crate::core::code_audit::AuditFinding],
     write: bool,
-) -> crate::Result<PlannedStage> {
+) -> crate::core::Result<PlannedStage> {
     let result = if let Some(cached) = try_load_cached_audit() {
         cached
     } else if let Some(changed) = changed_files {
@@ -724,7 +724,7 @@ fn plan_audit_stage(
             CodeAuditResult {
                 component_id: component_id.to_string(),
                 source_path: root.to_string_lossy().to_string(),
-                summary: crate::code_audit::AuditSummary {
+                summary: crate::core::code_audit::AuditSummary {
                     files_scanned: 0,
                     conventions_detected: 0,
                     outliers_found: 0,
@@ -738,7 +738,7 @@ fn plan_audit_stage(
                 duplicate_groups: vec![],
             }
         } else {
-            crate::code_audit::audit_path_scoped(
+            crate::core::code_audit::audit_path_scoped(
                 component_id,
                 &root.to_string_lossy(),
                 changed,
@@ -746,7 +746,7 @@ fn plan_audit_stage(
             )?
         }
     } else {
-        crate::code_audit::audit_path_with_id(component_id, &root.to_string_lossy())?
+        crate::core::code_audit::audit_path_with_id(component_id, &root.to_string_lossy())?
     };
 
     let policy = fixer::FixPolicy {
@@ -851,7 +851,7 @@ fn plan_audit_stage(
 fn capture_release_owned_files(
     component: &Component,
     root: &Path,
-) -> crate::Result<Vec<ReleaseOwnedFileSnapshot>> {
+) -> crate::core::Result<Vec<ReleaseOwnedFileSnapshot>> {
     release_owned_file_paths(component)
         .into_iter()
         .map(|relative| {
@@ -883,7 +883,7 @@ fn capture_release_owned_files(
 fn restore_release_owned_files(
     root: &Path,
     snapshots: &[ReleaseOwnedFileSnapshot],
-) -> crate::Result<()> {
+) -> crate::core::Result<()> {
     for snapshot in snapshots {
         let path = root.join(&snapshot.relative);
         if snapshot.existed {
@@ -918,7 +918,7 @@ fn constrain_lint_fix_changes(
     before_dirty: &[String],
     after_dirty: Vec<String>,
     release_owned: &[ReleaseOwnedFileSnapshot],
-) -> crate::Result<LintFixScopeOutcome> {
+) -> crate::core::Result<LintFixScopeOutcome> {
     let before_set: HashSet<&str> = before_dirty.iter().map(|file| file.as_str()).collect();
     let release_owned_set: HashSet<&str> = release_owned
         .iter()
@@ -1012,7 +1012,7 @@ fn run_lint_stage(
     changed_files: Option<&[String]>,
     write: bool,
     run_dir: &RunDir,
-) -> crate::Result<PlannedStage> {
+) -> crate::core::Result<PlannedStage> {
     // Check for cached lint results from the quality gate.
     let cached = try_load_cached_lint();
 
@@ -1083,7 +1083,7 @@ fn run_lint_stage(
                 let content = std::fs::read_to_string(&file).ok()?;
                 let json: serde_json::Value = serde_json::from_str(&content).ok()?;
                 let data = json.get("data")?;
-                let findings: Vec<crate::extension::lint::LintFinding> =
+                let findings: Vec<crate::core::extension::lint::LintFinding> =
                     serde_json::from_value(data.get("lint_findings")?.clone()).ok()?;
                 Some(findings)
             })
@@ -1093,7 +1093,8 @@ fn run_lint_stage(
         // No cached findings — run the diagnostic pass.
         build_lint_runner()?.run()?;
 
-        crate::extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default()
+        crate::core::extension::lint::baseline::parse_findings_file(&findings_file)
+            .unwrap_or_default()
     };
 
     // ── Phase 2: Apply fixes (only when --write) ───────────────────────
@@ -1188,7 +1189,7 @@ fn run_test_stage(
     changed_test_files: Option<&[String]>,
     write: bool,
     run_dir: &RunDir,
-) -> crate::Result<PlannedStage> {
+) -> crate::core::Result<PlannedStage> {
     // Check for cached test results — if the quality gate already passed,
     // there's nothing to fix and we can skip re-running the test suite entirely.
     if let Some(CachedTestResult::Clean) = try_load_cached_test() {
@@ -1431,7 +1432,7 @@ pub fn summarize_source_totals(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{Component, VersionTarget};
+    use crate::core::component::{Component, VersionTarget};
     use std::fs;
     use std::process::Command;
     use std::sync::{Mutex, OnceLock};
@@ -1797,7 +1798,7 @@ mod tests {
             root: root.clone(),
             sources: vec!["audit".to_string()],
             changed_since: None,
-            only: vec![crate::code_audit::AuditFinding::DuplicateFunction],
+            only: vec![crate::core::code_audit::AuditFinding::DuplicateFunction],
             exclude: vec![],
             settings: vec![],
             lint: LintSourceOptions::default(),
@@ -1855,7 +1856,7 @@ mod tests {
 
     #[test]
     fn test_collect_refactor_sources() {
-        let _collect: fn(RefactorSourceRequest) -> crate::Result<RefactorSourceRun> =
+        let _collect: fn(RefactorSourceRequest) -> crate::core::Result<RefactorSourceRun> =
             collect_refactor_sources;
     }
 
@@ -1867,7 +1868,7 @@ mod tests {
             Vec<(String, String)>,
             LintSourceOptions,
             bool,
-        ) -> crate::Result<RefactorSourceRun> = run_lint_refactor;
+        ) -> crate::core::Result<RefactorSourceRun> = run_lint_refactor;
     }
 
     #[test]
@@ -1878,7 +1879,7 @@ mod tests {
             Vec<(String, String)>,
             TestSourceOptions,
             bool,
-        ) -> crate::Result<RefactorSourceRun> = run_test_refactor;
+        ) -> crate::core::Result<RefactorSourceRun> = run_test_refactor;
     }
 
     #[test]
@@ -1890,7 +1891,7 @@ mod tests {
         let audit_result = CodeAuditResult {
             component_id: "test".to_string(),
             source_path: "/tmp/test".to_string(),
-            summary: crate::code_audit::AuditSummary {
+            summary: crate::core::code_audit::AuditSummary {
                 files_scanned: 10,
                 conventions_detected: 2,
                 outliers_found: 1,
@@ -1995,8 +1996,8 @@ mod tests {
     // for edits that `--write` silently declines (cascading findings, manual-only
     // fixes). Before the fix, dry-run exit 1 + write applies nothing = stuck PR.
 
-    use crate::code_audit::AuditFinding;
-    use crate::refactor::auto::{Fix, FixResult, Insertion, InsertionKind, NewFile};
+    use crate::core::code_audit::AuditFinding;
+    use crate::core::refactor::auto::{Fix, FixResult, Insertion, InsertionKind, NewFile};
 
     fn auto_insertion() -> Insertion {
         Insertion {

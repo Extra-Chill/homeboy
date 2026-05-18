@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::component::{self, Component};
-use crate::error::{Error, Result};
-use crate::extension;
-use crate::git;
-use crate::project::{self, Project};
-use crate::server::SshClient;
-use crate::version;
+use crate::core::component::{self, Component};
+use crate::core::error::{Error, Result};
+use crate::core::extension;
+use crate::core::git;
+use crate::core::project::{self, Project};
+use crate::core::release::version;
+use crate::core::server::SshClient;
 
 use super::types::{
     ComponentStatus, DeployConfig, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
@@ -350,7 +350,7 @@ pub(super) fn load_project_components(
         match effective_artifact {
             Some(artifact) if !is_git_deploy && !is_file_deploy => {
                 let resolved_artifact =
-                    crate::paths::resolve_path_string(&loaded.local_path, &artifact);
+                    crate::core::paths::resolve_path_string(&loaded.local_path, &artifact);
                 loaded.build_artifact = Some(resolved_artifact);
                 deployable.push(loaded);
             }
@@ -384,7 +384,7 @@ pub(super) fn load_project_components(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::VersionTarget;
+    use crate::core::component::VersionTarget;
     use tempfile::TempDir;
 
     fn run_git(path: &Path, args: &[&str]) {

@@ -6,10 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::error::{Error, Result};
-use crate::observation::{ArtifactRecord, ObservationStore, RunRecord};
-use crate::paths;
-use crate::source_snapshot::SourceSnapshot;
+use crate::core::error::{Error, Result};
+use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
+use crate::core::paths;
+use crate::core::source_snapshot::SourceSnapshot;
 
 const PATCH_CAPTURE_EXCLUDES: &[&str] = &[
     ".git",

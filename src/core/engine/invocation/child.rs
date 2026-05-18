@@ -1,6 +1,6 @@
-use crate::engine::resource::ChildProcessIdentity;
-use crate::error::{Error, Result};
-use crate::paths;
+use crate::core::engine::resource::ChildProcessIdentity;
+use crate::core::error::{Error, Result};
+use crate::core::paths;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};

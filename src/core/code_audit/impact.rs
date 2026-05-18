@@ -125,7 +125,7 @@ pub(crate) fn fingerprint_from_git_ref(
     // Get file content from the git ref
     let git_spec = format!("{}:{}", git_ref, relative_path);
     let content =
-        crate::engine::command::run_in_optional(source_path, "git", &["show", &git_spec])?;
+        crate::core::engine::command::run_in_optional(source_path, "git", &["show", &git_spec])?;
 
     let ext = Path::new(relative_path).extension()?.to_str()?;
     super::fingerprint::fingerprint_extension_content(ext, relative_path, &content)
@@ -491,7 +491,7 @@ mod tests {
             imports: imports.iter().map(|s| s.to_string()).collect(),
             hooks: hooks
                 .iter()
-                .map(|(t, n)| crate::extension::HookRef {
+                .map(|(t, n)| crate::core::extension::HookRef {
                     hook_type: t.to_string(),
                     name: n.to_string(),
                 })

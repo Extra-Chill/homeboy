@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use crate::engine::local_files;
-use crate::error::{Error, Result};
+use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::engine::local_files;
+use crate::core::error::{Error, Result};
 
 // ============================================================================
 // Rule model

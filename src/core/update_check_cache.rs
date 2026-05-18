@@ -10,7 +10,7 @@
 //! and JSON schemas are owned by the callers and are intentionally not
 //! changed here so existing user caches keep working.
 
-use crate::paths;
+use crate::core::paths;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::PathBuf;

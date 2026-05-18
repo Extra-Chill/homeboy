@@ -9,10 +9,10 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::component;
-use crate::deploy::release_download::detect_remote_url;
-use crate::error::{Error, Result};
-use crate::{fleet, project, rig};
+use crate::core::component;
+use crate::core::deploy::release_download::detect_remote_url;
+use crate::core::error::{Error, Result};
+use crate::core::{fleet, project, rig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {

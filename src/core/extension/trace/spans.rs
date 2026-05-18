@@ -1,7 +1,7 @@
 //! Trace span post-processing over shared observation timeline primitives.
 
 use super::parsing::{TraceEvent, TraceResults, TraceSpanDefinition, TraceSpanResult};
-use crate::observation::timeline;
+use crate::core::observation::timeline;
 
 pub type TracePhaseMilestone = timeline::ObservationPhaseMilestone;
 
@@ -50,7 +50,7 @@ pub(crate) fn event_matches_key(event: &TraceEvent, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::trace::parsing::{TraceAssertion, TraceSpanStatus, TraceStatus};
+    use crate::core::extension::trace::parsing::{TraceAssertion, TraceSpanStatus, TraceStatus};
 
     fn event(t_ms: u64, source: &str, event: &str) -> TraceEvent {
         TraceEvent {

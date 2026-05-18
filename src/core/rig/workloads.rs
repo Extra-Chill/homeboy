@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::engine::invocation::InvocationRequirements;
+use crate::core::engine::invocation::InvocationRequirements;
 
 use super::spec::RigSpec;
 

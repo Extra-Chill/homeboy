@@ -1,5 +1,5 @@
-use crate::error::{Error, Result};
-use crate::project::Project;
+use crate::core::error::{Error, Result};
+use crate::core::project::Project;
 
 use super::discovery::discover_attached_component;
 use super::overrides::apply_component_overrides;
@@ -7,7 +7,7 @@ use super::overrides::apply_component_overrides;
 pub fn resolve_project_component(
     project: &Project,
     component_id: &str,
-) -> Result<crate::component::Component> {
+) -> Result<crate::core::component::Component> {
     let component = if let Some(attachment) = project
         .components
         .iter()
@@ -59,7 +59,9 @@ pub fn resolve_project_component(
     Ok(resolved)
 }
 
-pub fn resolve_project_components(project: &Project) -> Result<Vec<crate::component::Component>> {
+pub fn resolve_project_components(
+    project: &Project,
+) -> Result<Vec<crate::core::component::Component>> {
     project
         .components
         .iter()

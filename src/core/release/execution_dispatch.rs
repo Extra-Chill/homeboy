@@ -1,10 +1,12 @@
-use crate::component::Component;
-use crate::error::{Error, Result};
-use crate::extension::ExtensionManifest;
-use crate::git;
-use crate::plan::{PlanStep, PlanStepStatus};
-use crate::release::executor;
-use crate::release::types::{ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus};
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
+use crate::core::extension::ExtensionManifest;
+use crate::core::git;
+use crate::core::plan::{PlanStep, PlanStepStatus};
+use crate::core::release::executor;
+use crate::core::release::types::{
+    ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
+};
 
 pub(super) struct ReleaseExecutionContext<'a> {
     pub(super) component: &'a Component,
@@ -395,9 +397,9 @@ mod tests {
         execute_release_plan_step, release_step_is_plan_only, release_step_is_show_stopper,
         ReleaseExecutionContext,
     };
-    use crate::component::Component;
-    use crate::plan::PlanStep;
-    use crate::release::types::{
+    use crate::core::component::Component;
+    use crate::core::plan::PlanStep;
+    use crate::core::release::types::{
         ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
     };
 
@@ -783,7 +785,7 @@ mod tests {
 
     #[test]
     fn test_failed_result() {
-        let err = crate::error::Error::internal_unexpected("boom".to_string());
+        let err = crate::core::error::Error::internal_unexpected("boom".to_string());
 
         let result = super::failed_result("package", "package", err);
 

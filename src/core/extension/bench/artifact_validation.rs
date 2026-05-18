@@ -1,6 +1,6 @@
 //! Bench artifact contract validation.
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::artifact::BenchArtifact;
 use super::parsing::{BenchResults, BenchScenario};
@@ -134,7 +134,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::extension::bench::parsing::{BenchMetrics, BenchRunSnapshot};
+    use crate::core::extension::bench::parsing::{BenchMetrics, BenchRunSnapshot};
 
     #[test]
     fn test_validate_artifact_paths() {

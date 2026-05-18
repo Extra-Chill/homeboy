@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn trace_span_metadata_for_args(
     args: &TraceArgs,
-) -> homeboy::Result<BTreeMap<String, extension_trace::TraceSpanMetadata>> {
+) -> homeboy::core::Result<BTreeMap<String, extension_trace::TraceSpanMetadata>> {
     let Some(context) = load_rig_context(args.rig.as_deref())? else {
         return Ok(BTreeMap::new());
     };

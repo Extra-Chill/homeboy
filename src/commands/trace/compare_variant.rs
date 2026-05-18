@@ -3,9 +3,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use homeboy::extension::trace as extension_trace;
-use homeboy::extension::trace::TraceCommandOutput;
-use homeboy::rig;
+use homeboy::core::extension::trace as extension_trace;
+use homeboy::core::extension::trace::TraceCommandOutput;
+use homeboy::core::rig;
 
 use super::output::{
     aggregate_span, classification_summaries, compare_trace_aggregates_with_focus,
@@ -26,10 +26,10 @@ const TRACE_COMPARE_VARIANT_SUMMARY_FILE: &str = "summary.md";
 
 pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     let output_dir = args.output_dir.clone().ok_or_else(|| {
-        homeboy::Error::validation_missing_argument(vec!["--output-dir".to_string()])
+        homeboy::core::Error::validation_missing_argument(vec!["--output-dir".to_string()])
     })?;
     if !args.variants.is_empty() && !args.overlays.is_empty() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "--variant",
             "mixing --variant and --overlay would make stack order ambiguous; use one ordered stack source",
             None,
@@ -37,7 +37,7 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
         ));
     }
     if args.overlays.is_empty() && args.variants.is_empty() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "--overlay",
             "trace compare-variant requires at least one --overlay or --variant for the variant run",
             None,
@@ -45,7 +45,7 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
         ));
     }
     if args.keep_overlay {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "--keep-overlay",
             "trace compare-variant reuses the same component checkout and must revert overlays between runs",
             None,
@@ -109,7 +109,7 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
 
 fn run_compare_variant_pair(
     args: TraceArgs,
-) -> homeboy::Result<(
+) -> homeboy::core::Result<(
     extension_trace::TraceAggregateOutput,
     extension_trace::TraceAggregateOutput,
     Vec<extension_trace::TraceRunOrderEntryOutput>,
@@ -299,19 +299,21 @@ impl TraceCompareVariantAggregateBuilder {
     }
 }
 
-fn run_repeat_output(args: TraceArgs) -> homeboy::Result<extension_trace::TraceAggregateOutput> {
+fn run_repeat_output(
+    args: TraceArgs,
+) -> homeboy::core::Result<extension_trace::TraceAggregateOutput> {
     let (output, _exit_code) = run_repeat(args)?;
     match output {
         TraceCommandOutput::Aggregate(aggregate) => Ok(aggregate),
-        _ => Err(homeboy::Error::internal_unexpected(
+        _ => Err(homeboy::core::Error::internal_unexpected(
             "trace compare-variant expected aggregate output",
         )),
     }
 }
 
-fn create_trace_compare_variant_output_dir(output_dir: &Path) -> homeboy::Result<()> {
+fn create_trace_compare_variant_output_dir(output_dir: &Path) -> homeboy::core::Result<()> {
     std::fs::create_dir_all(output_dir).map_err(|err| {
-        homeboy::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to create trace compare-variant output directory {}: {}",
                 output_dir.display(),
@@ -322,15 +324,18 @@ fn create_trace_compare_variant_output_dir(output_dir: &Path) -> homeboy::Result
     })
 }
 
-fn write_trace_compare_variant_json<T: Serialize>(path: &Path, value: &T) -> homeboy::Result<()> {
+fn write_trace_compare_variant_json<T: Serialize>(
+    path: &Path,
+    value: &T,
+) -> homeboy::core::Result<()> {
     let json = serde_json::to_string_pretty(value).map_err(|err| {
-        homeboy::Error::internal_json(
+        homeboy::core::Error::internal_json(
             err.to_string(),
             Some(format!("serialize {}", path.display())),
         )
     })?;
     std::fs::write(path, format!("{}\n", json)).map_err(|err| {
-        homeboy::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!("Failed to write {}: {}", path.display(), err),
             Some("trace.compare_variant.write".to_string()),
         )
@@ -397,7 +402,7 @@ fn write_trace_compare_variant_summary(
     variant: &extension_trace::TraceAggregateOutput,
     compare: &extension_trace::TraceCompareOutput,
     run_order: &[extension_trace::TraceRunOrderEntryOutput],
-) -> homeboy::Result<()> {
+) -> homeboy::core::Result<()> {
     let mut out = String::new();
     out.push_str(&format!(
         "# Trace Compare Variant: `{}`\n\n",
@@ -436,7 +441,7 @@ fn write_trace_compare_variant_summary(
     push_compare_variant_span_summary(&mut out, compare);
 
     std::fs::write(path, out).map_err(|err| {
-        homeboy::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!("Failed to write {}: {}", path.display(), err),
             Some("trace.compare_variant.summary".to_string()),
         )

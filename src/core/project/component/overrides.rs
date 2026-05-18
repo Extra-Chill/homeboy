@@ -1,11 +1,11 @@
-use crate::project::{Project, ProjectComponentOverrides};
+use crate::core::project::{Project, ProjectComponentOverrides};
 
 /// Apply a single layer of component overrides to a component.
 ///
 /// Fields from the overrides are applied only when present (Some), allowing
 /// each config layer to selectively override specific settings.
 fn apply_overrides_layer(
-    component: &mut crate::component::Component,
+    component: &mut crate::core::component::Component,
     overrides: &ProjectComponentOverrides,
 ) {
     if let Some(remote_path) = &overrides.remote_path {
@@ -44,17 +44,17 @@ fn apply_overrides_layer(
 ///
 /// `cli_path` has an extra fallback step: if no explicit override at any layer
 /// sets it, the project-scoped `Project::cli_path` (or Studio auto-detect) fills
-/// it in via [`crate::project::project_cli_path`]. This makes "every component
+/// it in via [`crate::core::project::project_cli_path`]. This makes "every component
 /// on this site uses `studio wp`" a one-line project config instead of a per-
 /// component repeat. Component-level `cli_path` still wins as the most-specific
 /// escape hatch.
 pub fn apply_component_overrides(
-    component: &crate::component::Component,
+    component: &crate::core::component::Component,
     project: &Project,
-) -> crate::component::Component {
+) -> crate::core::component::Component {
     let fleet_overrides = resolve_fleet_overrides(project, &component.id);
     let project_overrides = project.component_overrides.get(&component.id);
-    let project_cli_fallback = crate::project::project_cli_path(project);
+    let project_cli_fallback = crate::core::project::project_cli_path(project);
 
     if fleet_overrides.is_none() && project_overrides.is_none() && project_cli_fallback.is_none() {
         return component.clone();
@@ -94,7 +94,7 @@ fn resolve_fleet_overrides(
     project: &Project,
     component_id: &str,
 ) -> Option<ProjectComponentOverrides> {
-    let fleets = crate::fleet::list().ok()?;
+    let fleets = crate::core::fleet::list().ok()?;
 
     for fleet in &fleets {
         if fleet.project_ids.contains(&project.id) {
@@ -110,7 +110,7 @@ fn resolve_fleet_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::Component;
+    use crate::core::component::Component;
     use std::collections::HashMap;
 
     fn base_component(id: &str) -> Component {

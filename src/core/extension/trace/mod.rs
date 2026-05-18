@@ -19,8 +19,8 @@ pub mod report;
 pub mod run;
 pub mod spans;
 
-use crate::component::Component;
-use crate::extension::{ExtensionCapability, ExtensionExecutionContext};
+use crate::core::component::Component;
+use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext};
 
 pub use attach::TraceAttachment;
 pub use overlay::TraceOverlayRequest;
@@ -50,6 +50,6 @@ pub use run::{TraceRunWorkflowArgs, TraceRunWorkflowResult, TraceRunnerInputs};
 
 pub fn resolve_trace_command(
     component: &Component,
-) -> crate::error::Result<ExtensionExecutionContext> {
-    crate::extension::resolve_execution_context(component, ExtensionCapability::Trace)
+) -> crate::core::error::Result<ExtensionExecutionContext> {
+    crate::core::extension::resolve_execution_context(component, ExtensionCapability::Trace)
 }

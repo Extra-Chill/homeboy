@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use crate::extension;
-use crate::Error;
+use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::extension;
+use crate::core::Error;
 
 // ============================================================================
 // Types
@@ -213,8 +213,8 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
 
     // Step 5: Apply edits if write mode — route through shared EditOp engine
     let applied = if config.write && !all_edits.is_empty() {
-        use crate::engine::edit_op::propagate_result_to_edit_ops;
-        use crate::engine::edit_op_apply::apply_edit_ops;
+        use crate::core::engine::edit_op::propagate_result_to_edit_ops;
+        use crate::core::engine::edit_op_apply::apply_edit_ops;
 
         // Build a temporary PropagateResult to convert edits
         let tmp_result = PropagateResult {

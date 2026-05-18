@@ -3,7 +3,7 @@ use std::path::{Component, Path};
 
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::execute_git;
 

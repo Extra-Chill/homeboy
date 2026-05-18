@@ -1,8 +1,8 @@
-use crate::component::{discover_from_portable, Component};
-use crate::engine::local_files::FileSystem;
-use crate::error::{Error, Result};
-use crate::extension;
-use crate::project;
+use crate::core::component::{discover_from_portable, Component};
+use crate::core::engine::local_files::FileSystem;
+use crate::core::error::{Error, Result};
+use crate::core::extension;
+use crate::core::project;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -64,7 +64,7 @@ pub fn inventory() -> Result<Vec<Component>> {
             if seen.insert(component.id.clone()) {
                 components.push(component);
             }
-        } else if let Some(git_root) = crate::component::resolution::detect_git_root(&cwd) {
+        } else if let Some(git_root) = crate::core::component::resolution::detect_git_root(&cwd) {
             if let Some(component) = discover_from_portable(&git_root) {
                 if seen.insert(component.id.clone()) {
                     components.push(component);
@@ -86,7 +86,7 @@ pub fn inventory() -> Result<Vec<Component>> {
 /// `homeboy.json`, the portable config is merged on top (portable config is
 /// the source of truth for version_targets, changelog_target, etc.).
 fn load_standalone_components() -> Result<Vec<Component>> {
-    let dir = crate::paths::components()?;
+    let dir = crate::core::paths::components()?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -274,7 +274,7 @@ pub fn reconcile_standalone_registration(
     id: &str,
     apply: bool,
 ) -> Result<ComponentReconcileReport> {
-    let dir = crate::paths::components()?;
+    let dir = crate::core::paths::components()?;
     let registration_path = dir.join(format!("{}.json", id));
     let content = std::fs::read_to_string(&registration_path).map_err(|e| {
         Error::validation_invalid_argument(
@@ -329,9 +329,9 @@ pub fn reconcile_standalone_registration(
                 serde_json::Value::String(discovered.clone()),
             );
         }
-        crate::component::portable::validate_component_remote_urls(&json)?;
-        let updated = crate::config::to_string_pretty(&json)?;
-        crate::engine::local_files::write_file_atomic(
+        crate::core::component::portable::validate_component_remote_urls(&json)?;
+        let updated = crate::core::config::to_string_pretty(&json)?;
+        crate::core::engine::local_files::write_file_atomic(
             &registration_path,
             &updated,
             &format!(
@@ -397,7 +397,7 @@ fn discover_reconcile_candidate(id: &str, registered_path: &Path) -> Option<Stri
 /// it into the full inventory. Returns a minimal struct with `local_path`
 /// for error messaging when the component exists on disk but isn't loadable.
 fn read_standalone_file(id: &str) -> Option<StandaloneFileInfo> {
-    let dir = match crate::paths::components() {
+    let dir = match crate::core::paths::components() {
         Ok(d) if d.exists() => d,
         _ => return None,
     };
@@ -447,8 +447,8 @@ pub fn write_standalone_registration(component: &Component) -> Result<()> {
         ));
     }
 
-    let dir = crate::paths::components()?;
-    crate::engine::local_files::local().ensure_dir(&dir)?;
+    let dir = crate::core::paths::components()?;
+    crate::core::engine::local_files::local().ensure_dir(&dir)?;
 
     let path = dir.join(format!("{}.json", component.id));
 
@@ -478,10 +478,10 @@ pub fn write_standalone_registration(component: &Component) -> Result<()> {
         }
     }
 
-    crate::component::portable::validate_component_remote_urls(&json)?;
+    crate::core::component::portable::validate_component_remote_urls(&json)?;
 
-    let content = crate::config::to_string_pretty(&json)?;
-    crate::engine::local_files::write_file_atomic(
+    let content = crate::core::config::to_string_pretty(&json)?;
+    crate::core::engine::local_files::write_file_atomic(
         &path,
         &content,
         &format!("write standalone registration {}", path.display()),
@@ -494,8 +494,8 @@ pub fn rename_standalone_registration(old_id: &str, component: &Component) -> Re
         return write_standalone_registration(component);
     }
 
-    let dir = crate::paths::components()?;
-    crate::engine::local_files::local().ensure_dir(&dir)?;
+    let dir = crate::core::paths::components()?;
+    crate::core::engine::local_files::local().ensure_dir(&dir)?;
 
     let old_path = dir.join(format!("{}.json", old_id));
     let new_path = dir.join(format!("{}.json", component.id));

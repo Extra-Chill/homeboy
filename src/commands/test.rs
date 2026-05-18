@@ -1,15 +1,17 @@
 use clap::Args;
 
-use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::engine::run_dir::RunDir;
-use homeboy::extension::test as extension_test;
-use homeboy::extension::test::{
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::engine::run_dir::RunDir;
+use homeboy::core::extension::test as extension_test;
+use homeboy::core::extension::test::{
     detect_test_drift, report, run_self_check_test_workflow, TestCommandOutput, TestRunWorkflowArgs,
 };
-use homeboy::extension::test::{FailureCategory, FailureCluster, TestAnalysisInput, TestFailure};
-use homeboy::extension::ExtensionCapability;
-use homeboy::git::short_head_revision_at;
-use homeboy::observation::{
+use homeboy::core::extension::test::{
+    FailureCategory, FailureCluster, TestAnalysisInput, TestFailure,
+};
+use homeboy::core::extension::ExtensionCapability;
+use homeboy::core::git::short_head_revision_at;
+use homeboy::core::observation::{
     merge_metadata, ActiveObservation, NewFindingRecord, NewRunRecord, RunStatus,
 };
 use std::path::Path;
@@ -160,7 +162,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         "test",
         Some(&run_dir),
     );
-    let resource_run = homeboy::engine::resource::ResourceSummaryRun::start(Some(format!(
+    let resource_run = homeboy::core::engine::resource::ResourceSummaryRun::start(Some(format!(
         "test {}",
         effective_id
     )));
@@ -177,7 +179,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             coverage: args.coverage,
             coverage_min: args.coverage_min,
             analyze: args.analyze,
-            baseline_flags: homeboy::engine::baseline::BaselineFlags {
+            baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
                 baseline: args.baseline_args.baseline,
                 ignore_baseline: args.baseline_args.ignore_baseline,
                 ratchet: args.baseline_args.ratchet,
@@ -219,8 +221,8 @@ fn start_test_observation(
 
 fn finish_test_workflow_observation(
     observation: Option<TestObservation>,
-    workflow: homeboy::Result<extension_test::TestRunWorkflowResult>,
-) -> homeboy::Result<extension_test::TestRunWorkflowResult> {
+    workflow: homeboy::core::Result<extension_test::TestRunWorkflowResult>,
+) -> homeboy::core::Result<extension_test::TestRunWorkflowResult> {
     match workflow {
         Ok(workflow) => {
             finish_test_observation(observation, &workflow);
@@ -404,7 +406,10 @@ fn finish_test_drift_observation(
     observation.0.finish(status, Some(metadata));
 }
 
-fn finish_test_observation_error(observation: Option<TestObservation>, error: &homeboy::Error) {
+fn finish_test_observation_error(
+    observation: Option<TestObservation>,
+    error: &homeboy::core::Error,
+) {
     let Some(observation) = observation else {
         return;
     };
@@ -486,9 +491,9 @@ mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
     use clap::Parser;
-    use homeboy::component::Component;
-    use homeboy::observation::{FindingListFilter, ObservationStore};
-    use homeboy::refactor::plan::{build_test_refactor_request, TestSourceOptions};
+    use homeboy::core::component::Component;
+    use homeboy::core::observation::{FindingListFilter, ObservationStore};
+    use homeboy::core::refactor::plan::{build_test_refactor_request, TestSourceOptions};
     use std::fs;
     use std::path::PathBuf;
 
@@ -552,7 +557,7 @@ mod tests {
 
             finish_test_observation_error(
                 Some(observation),
-                &homeboy::Error::validation_invalid_argument(
+                &homeboy::core::Error::validation_invalid_argument(
                     "fixture",
                     "simulated test error",
                     None,

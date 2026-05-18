@@ -9,8 +9,8 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use homeboy::observation::{ObservationStore, RunListFilter, RunRecord};
-use homeboy::Error;
+use homeboy::core::observation::{ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -35,7 +35,7 @@ pub struct RunSummary {
 /// Accepts the same forms as elsewhere in the runs surface (s, m, h, d).
 /// Returned timestamp is `now - duration` so the caller can compare with
 /// `started_at >= threshold` semantics.
-pub fn since_threshold(raw: &str) -> homeboy::Result<String> {
+pub fn since_threshold(raw: &str) -> homeboy::core::Result<String> {
     let duration = parse_duration(raw)?;
     let chrono_duration = chrono::Duration::from_std(duration).map_err(|e| {
         Error::validation_invalid_argument("since", e.to_string(), Some(raw.to_string()), None)
@@ -47,7 +47,7 @@ pub fn since_threshold(raw: &str) -> homeboy::Result<String> {
 ///
 /// Mirrors the parser in `bundle.rs`. Kept here so the gh-actions / query /
 /// drift commands can share the same surface without re-implementing it.
-pub fn parse_duration(raw: &str) -> homeboy::Result<Duration> {
+pub fn parse_duration(raw: &str) -> homeboy::core::Result<Duration> {
     let trimmed = raw.trim();
     let split = trimmed
         .find(|ch: char| !ch.is_ascii_digit())
@@ -97,7 +97,7 @@ pub fn parse_duration(raw: &str) -> homeboy::Result<Duration> {
 /// Compile a JSONPath expression. Returns a structured validation error on
 /// invalid syntax instead of panicking. Schema-blind: the engine doesn't know
 /// what the JSON looks like, only how to walk it.
-pub fn compile_jsonpath(expr: &str) -> homeboy::Result<serde_json_path::JsonPath> {
+pub fn compile_jsonpath(expr: &str) -> homeboy::core::Result<serde_json_path::JsonPath> {
     serde_json_path::JsonPath::parse(expr).map_err(|e| {
         Error::validation_invalid_argument(
             "jsonpath",
@@ -156,7 +156,7 @@ pub fn load_artifact_rows(
     store: &ObservationStore,
     filter: RunListFilter,
     since: Option<&str>,
-) -> homeboy::Result<Vec<ArtifactJsonRow>> {
+) -> homeboy::core::Result<Vec<ArtifactJsonRow>> {
     let runs = if let Some(raw) = since {
         let threshold = since_threshold(raw)?;
         store

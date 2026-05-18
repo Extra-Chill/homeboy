@@ -2,12 +2,12 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::component;
-use crate::error::{Error, Result};
-use crate::extension::{self, DiscoveryMarkerConfig, ExtensionManifest};
-use crate::project::{self, Project};
-use crate::server::SshClient;
-use crate::server::{self, Server};
+use crate::core::component;
+use crate::core::error::{Error, Result};
+use crate::core::extension::{self, DiscoveryMarkerConfig, ExtensionManifest};
+use crate::core::project::{self, Project};
+use crate::core::server::SshClient;
+use crate::core::server::{self, Server};
 
 pub mod report;
 

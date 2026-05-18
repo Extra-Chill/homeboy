@@ -18,8 +18,8 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-use crate::error::{Error, Result};
-use crate::git::resolve_target;
+use crate::core::error::{Error, Result};
+use crate::core::git::resolve_target;
 
 /// Per-commit detail row for the inspect output.
 #[derive(Debug, Clone, Serialize)]

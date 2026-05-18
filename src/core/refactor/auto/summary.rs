@@ -1,5 +1,5 @@
 use super::outcome::{FixApplied, FixResultsSummary, PrimitiveFixCount, RuleFixCount};
-use crate::refactor::FixResult;
+use crate::core::refactor::FixResult;
 
 pub fn summarize_fix_results(fixes: &[FixApplied]) -> FixResultsSummary {
     use std::collections::{BTreeMap, HashSet};
@@ -109,7 +109,7 @@ pub fn summarize_audit_fix_result(fix_result: &FixResult) -> FixResultsSummary {
 /// Derive the primitive name from serde's `#[serde(tag = "type", rename_all = "snake_case")]`
 /// attribute on `RefactorPrimitive`. This eliminates manual match arms — adding a new
 /// variant to the enum automatically works for reporting.
-pub fn primitive_name(primitive: &crate::refactor::RefactorPrimitive) -> String {
+pub fn primitive_name(primitive: &crate::core::refactor::RefactorPrimitive) -> String {
     // RefactorPrimitive uses `#[serde(tag = "type", rename_all = "snake_case")]`.
     // Serializing to JSON gives `{"type": "snake_case_name", ...}`.
     // Extract the "type" field value.
@@ -122,7 +122,7 @@ pub fn primitive_name(primitive: &crate::refactor::RefactorPrimitive) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::refactor::RefactorPrimitive;
+    use crate::core::refactor::RefactorPrimitive;
 
     #[test]
     fn primitive_name_derives_from_serde() {

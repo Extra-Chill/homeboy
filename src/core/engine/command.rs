@@ -2,7 +2,7 @@
 
 use std::process::{Command, Output};
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 use serde::Serialize;
 
 pub fn run(program: &str, args: &[&str], context: &str) -> Result<String> {

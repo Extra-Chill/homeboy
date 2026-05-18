@@ -8,10 +8,12 @@
 
 use std::path::Path;
 
-use crate::code_audit::CodeAuditResult;
-use crate::refactor::auto::{self, ChunkStatus, Fix, FixResult, Insertion, InsertionKind, NewFile};
-use crate::refactor::plan;
-use crate::Result;
+use crate::core::code_audit::CodeAuditResult;
+use crate::core::refactor::auto::{
+    self, ChunkStatus, Fix, FixResult, Insertion, InsertionKind, NewFile,
+};
+use crate::core::refactor::plan;
+use crate::core::Result;
 
 /// Result of an explicit import addition (not from audit).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -36,7 +38,7 @@ pub fn fixes_from_audit(audit: &CodeAuditResult, write: bool) -> Result<FixResul
     let root = Path::new(&audit.source_path);
 
     if !root.is_dir() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "from-audit",
             format!(
                 "Audit source_path '{}' is not a directory on this machine. \
@@ -82,7 +84,7 @@ pub fn add_import(
     let matched_files = resolve_target_files(&root, target)?;
 
     if matched_files.is_empty() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "to",
             format!("No files matched pattern '{}'", target),
             None,
@@ -98,7 +100,7 @@ pub fn add_import(
     for file_path in &matched_files {
         let abs_path = root.join(file_path);
         let content = std::fs::read_to_string(&abs_path).map_err(|e| {
-            crate::Error::internal_io(e.to_string(), Some(format!("read {}", file_path)))
+            crate::core::Error::internal_io(e.to_string(), Some(format!("read {}", file_path)))
         })?;
 
         // Skip if the import already exists in the file
@@ -113,7 +115,7 @@ pub fn add_import(
             insertions: vec![Insertion {
                 primitive: None,
                 kind: InsertionKind::ImportAdd,
-                finding: crate::code_audit::AuditFinding::MissingImport,
+                finding: crate::core::code_audit::AuditFinding::MissingImport,
                 manual_only: false,
                 auto_apply: false,
                 blocked_reason: None,
@@ -167,7 +169,7 @@ fn resolve_target_files(root: &Path, target: &str) -> Result<Vec<String>> {
     let glob_pattern = root.join(target).to_string_lossy().to_string();
     let entries: Vec<String> = glob::glob(&glob_pattern)
         .map_err(|e| {
-            crate::Error::validation_invalid_argument(
+            crate::core::Error::validation_invalid_argument(
                 "to",
                 format!("Invalid glob pattern '{}': {}", target, e),
                 None,
@@ -314,7 +316,7 @@ mod tests {
         let audit = CodeAuditResult {
             component_id: "test".to_string(),
             source_path: "/nonexistent/path/that/should/not/exist".to_string(),
-            summary: crate::code_audit::AuditSummary {
+            summary: crate::core::code_audit::AuditSummary {
                 files_scanned: 0,
                 conventions_detected: 0,
                 outliers_found: 0,

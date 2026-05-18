@@ -1,6 +1,6 @@
 //! Shared text normalization and matching primitives.
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 use regex::Regex;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;

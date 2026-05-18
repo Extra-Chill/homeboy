@@ -6,7 +6,7 @@
 //! intentionally not exercised end-to-end (they require a live `gh` and
 //! GitHub) — `no_pr: true` keeps tests deterministic.
 
-use crate::stack::inspect::{inspect_at, InspectOptions};
+use crate::core::stack::inspect::{inspect_at, InspectOptions};
 
 mod support;
 use support::{commit_file, git, init_repo};

@@ -1,6 +1,6 @@
-use crate::component::Component;
-use crate::error::{Error, Result};
-use crate::git;
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
+use crate::core::git;
 
 use super::types::{ReleaseSemverCommit, ReleaseSemverRecommendation};
 
@@ -183,7 +183,7 @@ mod tests {
     use super::{
         build_semver_recommendation, resolve_tag_and_commits, validate_release_version_floor,
     };
-    use crate::component::Component;
+    use crate::core::component::Component;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new("git")

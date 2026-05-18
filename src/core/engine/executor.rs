@@ -35,12 +35,14 @@
 // execute_for_project_interactive() -> routes local/SSH with inherited stdio
 // execute_for_project_direct() -> tries direct first, falls back to shell
 
-use crate::context::resolve_project_ssh;
-use crate::engine::shell;
-use crate::error::{Error, Result};
-use crate::extension::CliConfig;
-use crate::project::{self, Project};
-use crate::server::{execute_local_command, execute_local_command_interactive, CommandOutput};
+use crate::core::context::resolve_project_ssh;
+use crate::core::engine::shell;
+use crate::core::error::{Error, Result};
+use crate::core::extension::CliConfig;
+use crate::core::project::{self, Project};
+use crate::core::server::{
+    execute_local_command, execute_local_command_interactive, CommandOutput,
+};
 use std::process::Command;
 
 /// Execute a command for a project - routes to local or SSH based on server_id config.
@@ -208,7 +210,7 @@ fn parse_direct_template(
     template = template.replace("{{cliPath}}", &cli_path);
 
     // Expand {{extension_path}}
-    let extension_dir = crate::extension::extension_path(extension_id);
+    let extension_dir = crate::core::extension::extension_path(extension_id);
     if extension_dir.exists() {
         template = template.replace("{{extension_path}}", &extension_dir.to_string_lossy());
     }

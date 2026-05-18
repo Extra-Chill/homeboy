@@ -1,11 +1,11 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::context::require_project_base_path;
-use homeboy::engine::{command, executor, shell};
-use homeboy::project::files::{self, FileEntry, GrepMatch, LineChange};
-use homeboy::server::transfer::{self, TransferConfig, TransferOutput};
-use homeboy::{join_remote_path, project};
+use homeboy::core::context::require_project_base_path;
+use homeboy::core::engine::{command, executor, shell};
+use homeboy::core::project::files::{self, FileEntry, GrepMatch, LineChange};
+use homeboy::core::server::transfer::{self, TransferConfig, TransferOutput};
+use homeboy::core::{join_remote_path, project};
 
 use super::CmdResult;
 
@@ -704,7 +704,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
 
     let result = if let Some(line_num) = line_ops.replace_line {
         let content = line_ops.replace_line_content.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "content",
                 "Content required for --replace-line",
                 None,
@@ -714,7 +714,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         files::edit_replace_line(&project_id, &file_path, line_num, &content)?
     } else if let Some(line_num) = line_ops.insert_after {
         let content = line_ops.insert_after_content.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "content",
                 "Content required for --insert-after",
                 None,
@@ -724,7 +724,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         files::edit_insert_after_line(&project_id, &file_path, line_num, &content)?
     } else if let Some(line_num) = line_ops.insert_before {
         let content = line_ops.insert_before_content.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "content",
                 "Content required for --insert-before",
                 None,
@@ -736,7 +736,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         files::edit_delete_line(&project_id, &file_path, line_num)?
     } else if let Some(lines) = line_ops.delete_lines {
         if lines.len() != 2 {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "delete_lines",
                 "DELETE_LINES requires exactly 2 values: START END",
                 None,
@@ -746,7 +746,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         files::edit_delete_lines(&project_id, &file_path, lines[0], lines[1])?
     } else if let Some(pattern) = pattern_ops.replace_pattern {
         let replacement = pattern_ops.replace_pattern_content.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "content",
                 "Content required for --replace-pattern",
                 None,
@@ -756,7 +756,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         files::edit_replace_pattern(&project_id, &file_path, &pattern, &replacement, false)?
     } else if let Some(pattern) = pattern_ops.replace_all_pattern {
         let replacement = pattern_ops.replace_all_content.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "content",
                 "Content required for --replace-all-pattern",
                 None,
@@ -771,7 +771,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
     } else if let Some(content) = file_mods.prepend {
         files::edit_prepend(&project_id, &file_path, &content)?
     } else {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "operation",
             "No edit operation specified. Use one of: --replace-line, --insert-after, --insert-before, --delete-line, --delete-lines, --replace-pattern, --replace-all-pattern, --delete-pattern, --append, --prepend",
             None,

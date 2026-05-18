@@ -5,18 +5,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use crate::component::Component;
-use crate::engine::baseline::BaselineFlags;
-use crate::engine::run_dir::{self, RunDir};
-use crate::error::{Error, ErrorCode, Result};
-use crate::extension::trace::baseline::TraceBaselineComparison;
-use crate::extension::RunnerOutput;
-use crate::extension::{
+use crate::core::component::Component;
+use crate::core::engine::baseline::BaselineFlags;
+use crate::core::engine::run_dir::{self, RunDir};
+use crate::core::error::{Error, ErrorCode, Result};
+use crate::core::extension::trace::baseline::TraceBaselineComparison;
+use crate::core::extension::RunnerOutput;
+use crate::core::extension::{
     build_scenario_runner, path_list_env_value, resolve_execution_context, stderr_tail,
     ExtensionCapability, ExtensionExecutionContext, ScenarioRunnerOptions,
 };
-use crate::paths;
-use crate::rig::RigStateSnapshot;
+use crate::core::paths;
+use crate::core::rig::RigStateSnapshot;
 
 use super::attach::{append_attach_observations, observe_trace_attachments, TraceAttachment};
 use super::overlay::{
@@ -146,21 +146,22 @@ fn run_trace_workflow_with_component_script(
         Some(acquire_trace_overlay_locks(&args.overlays, run_dir)?)
     };
     let applied_overlays = apply_trace_overlays(&args.overlays, args.keep_overlay)?;
-    let script_output = crate::extension::component_script::run_component_scripts_with_run_dir(
-        component,
-        ExtensionCapability::Trace,
-        source_path,
-        run_dir,
-        true,
-        &[
-            (
-                "HOMEBOY_TRACE_SCENARIO".to_string(),
-                args.scenario_id.clone(),
-            ),
-            ("HOMEBOY_TRACE_LIST_ONLY".to_string(), "0".to_string()),
-        ],
-        &[],
-    );
+    let script_output =
+        crate::core::extension::component_script::run_component_scripts_with_run_dir(
+            component,
+            ExtensionCapability::Trace,
+            source_path,
+            run_dir,
+            true,
+            &[
+                (
+                    "HOMEBOY_TRACE_SCENARIO".to_string(),
+                    args.scenario_id.clone(),
+                ),
+                ("HOMEBOY_TRACE_LIST_ONLY".to_string(), "0".to_string()),
+            ],
+            &[],
+        );
     if !args.keep_overlay {
         cleanup_trace_overlays(&applied_overlays)?
     }
@@ -430,11 +431,11 @@ pub fn run_trace_list_workflow(
     run_dir: &RunDir,
 ) -> Result<TraceList> {
     if component.has_script(ExtensionCapability::Trace) {
-        let source_path = crate::extension::component_script::source_path(
+        let source_path = crate::core::extension::component_script::source_path(
             component,
             args.path_override.as_deref(),
         );
-        let output = crate::extension::component_script::run_component_scripts_with_run_dir(
+        let output = crate::core::extension::component_script::run_component_scripts_with_run_dir(
             component,
             ExtensionCapability::Trace,
             &source_path,
@@ -488,8 +489,8 @@ struct TraceListOutput {
     stderr: String,
 }
 
-impl From<crate::extension::component_script::ComponentScriptOutput> for TraceListOutput {
-    fn from(output: crate::extension::component_script::ComponentScriptOutput) -> Self {
+impl From<crate::core::extension::component_script::ComponentScriptOutput> for TraceListOutput {
+    fn from(output: crate::core::extension::component_script::ComponentScriptOutput) -> Self {
         Self {
             exit_code: output.exit_code,
             success: output.success,
@@ -592,7 +593,7 @@ pub(crate) fn build_trace_runner(
             &args.runner_inputs.workload_paths,
             "trace_workloads",
         )),
-        invocation_requirements: crate::engine::invocation::InvocationRequirements::default(),
+        invocation_requirements: crate::core::engine::invocation::InvocationRequirements::default(),
     })?;
 
     if let Some(rig_id) = &args.rig_id {
@@ -1050,8 +1051,8 @@ mod tests {
 
     #[test]
     fn rig_save_baseline_does_not_write_component_homeboy_json() {
-        use crate::extension::trace::baseline;
-        use crate::extension::trace::parsing::{
+        use crate::core::extension::trace::baseline;
+        use crate::core::extension::trace::parsing::{
             TraceResults, TraceSpanResult, TraceSpanStatus, TraceStatus,
         };
 

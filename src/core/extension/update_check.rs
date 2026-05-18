@@ -13,8 +13,8 @@
 //! [`crate::core::update_check_cache`]. The on-disk filename and JSON
 //! schema live here and are unchanged.
 
+use crate::core::extension;
 use crate::core::update_check_cache;
-use crate::extension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -42,7 +42,7 @@ fn is_disabled_by_env() -> bool {
 }
 
 fn is_disabled_by_config() -> bool {
-    !crate::defaults::load_config().update_check
+    !crate::core::defaults::load_config().update_check
 }
 
 fn print_extension_hints(extensions_behind: &HashMap<String, usize>) {

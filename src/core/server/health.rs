@@ -4,7 +4,7 @@
 //! to collect uptime, load, disk, memory, and service health from remote servers.
 
 use super::SshClient;
-use crate::project::Project;
+use crate::core::project::Project;
 use serde::Serialize;
 
 // ============================================================================

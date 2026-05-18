@@ -79,6 +79,16 @@ fn scan_core_source_for_command_layer(
 }
 
 #[test]
+fn library_root_does_not_flatten_core_surface() {
+    let source = source_file("src/lib.rs");
+
+    assert!(
+        !source.contains("pub use core::*"),
+        "src/lib.rs must keep core APIs behind homeboy::core instead of flattening the crate root"
+    );
+}
+
+#[test]
 fn validate_and_format_writes_do_not_select_ecosystem_commands() {
     let files = [
         "src/core/engine/validate_write.rs",

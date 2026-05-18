@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};

@@ -3,10 +3,10 @@
 //! Makes HTTP requests with auth headers resolved from project configuration.
 //! Homeboy doesn't know about specific auth types - it just templates strings.
 
-use crate::error::{Error, ErrorCode, Result};
-use crate::extension::HttpMethod;
-use crate::keychain;
-use crate::project::{ApiConfig, AuthConfig, AuthFlowConfig, VariableSource};
+use crate::core::error::{Error, ErrorCode, Result};
+use crate::core::extension::HttpMethod;
+use crate::core::keychain;
+use crate::core::project::{ApiConfig, AuthConfig, AuthFlowConfig, VariableSource};
 use reqwest::blocking::{Client, ClientBuilder, RequestBuilder, Response};
 use reqwest::Proxy;
 use serde_json::{json, Value};
@@ -367,7 +367,7 @@ fn parse_json_response(response: Response) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{AuthConfig, AuthFlowConfig};
+    use crate::core::project::{AuthConfig, AuthFlowConfig};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;

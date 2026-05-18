@@ -14,7 +14,7 @@
 //! schema live here and are unchanged.
 
 use crate::core::update_check_cache;
-use crate::upgrade;
+use crate::core::upgrade;
 use serde::{Deserialize, Serialize};
 
 const CACHE_FILENAME: &str = "update_check.json";
@@ -49,7 +49,7 @@ fn is_disabled_by_env() -> bool {
 }
 
 pub(crate) fn is_disabled_by_config() -> bool {
-    !crate::defaults::load_config().update_check
+    !crate::core::defaults::load_config().update_check
 }
 
 fn print_hint(latest: &str, current: &str) {

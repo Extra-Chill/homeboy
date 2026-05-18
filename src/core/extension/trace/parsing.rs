@@ -4,11 +4,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
-use crate::observation::timeline::{
+use crate::core::error::{Error, Result};
+use crate::core::observation::timeline::{
     ObservationEvent, ObservationSpanDefinition, ObservationSpanResult, ObservationSpanStatus,
 };
-use crate::rig::RigStateSnapshot;
+use crate::core::rig::RigStateSnapshot;
 
 pub type TraceEvent = ObservationEvent;
 pub type TraceSpanDefinition = ObservationSpanDefinition;

@@ -3,7 +3,7 @@
 //! Walks source files, finds all references to a term (with word-boundary matching
 //! and case-variant awareness), generates edits, and optionally applies them.
 
-use crate::refactor::auto::{AppliedAutofixCapture, FixResultsSummary};
+use crate::core::refactor::auto::{AppliedAutofixCapture, FixResultsSummary};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -17,11 +17,14 @@ mod rename;
 pub mod transform;
 
 /// Resolve the refactor root directory from an explicit path or component id.
-pub fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> crate::Result<PathBuf> {
+pub fn resolve_root(
+    component_id: Option<&str>,
+    path: Option<&str>,
+) -> crate::core::Result<PathBuf> {
     if let Some(p) = path {
         let pb = PathBuf::from(p);
         if !pb.is_dir() {
-            return Err(crate::Error::validation_invalid_argument(
+            return Err(crate::core::Error::validation_invalid_argument(
                 "path",
                 format!("Not a directory: {}", p),
                 None,
@@ -30,8 +33,8 @@ pub fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> crate::Re
         }
         Ok(pb)
     } else {
-        let comp = crate::component::resolve(component_id)?;
-        crate::component::validate_local_path(&comp)
+        let comp = crate::core::component::resolve(component_id)?;
+        crate::core::component::validate_local_path(&comp)
     }
 }
 

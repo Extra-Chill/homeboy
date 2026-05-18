@@ -140,7 +140,7 @@ fn build_step_summary_line(result: &ReleaseStepResult) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{build_summary, derive_overall_status};
-    use crate::release::types::{ReleaseStepResult, ReleaseStepStatus};
+    use crate::core::release::types::{ReleaseStepResult, ReleaseStepStatus};
 
     fn step(id: &str, status: ReleaseStepStatus) -> ReleaseStepResult {
         ReleaseStepResult {

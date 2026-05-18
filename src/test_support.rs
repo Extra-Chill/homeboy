@@ -39,12 +39,12 @@ impl HomeGuard {
         let prior_xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
         let prior_artifact_root = std::env::var("HOMEBOY_ARTIFACT_ROOT").ok();
         let prior_invocation_runtime =
-            std::env::var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
+            std::env::var(crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
         let dir = TempDir::new().expect("home tempdir");
         std::env::set_var("HOME", dir.path());
         std::env::set_var("XDG_DATA_HOME", dir.path().join(".local").join("share"));
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
-        crate::set_artifact_root_override(None);
+        crate::core::set_artifact_root_override(None);
         // Pin invocation runtime to a SHORT tempdir, isolated from `$TMPDIR`
         // and from the home tempdir (which itself can already live on a long
         // path on macOS, e.g. `/var/folders/<14>/T/.tmpXXXXXX/...`). Using
@@ -52,7 +52,7 @@ impl HomeGuard {
         // budget regardless of host configuration.
         let inv_dir = short_invocation_tempdir();
         std::env::set_var(
-            crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+            crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
             inv_dir.path(),
         );
         Self {
@@ -100,15 +100,15 @@ impl Drop for HomeGuard {
             Some(value) => std::env::set_var("HOMEBOY_ARTIFACT_ROOT", value),
             None => std::env::remove_var("HOMEBOY_ARTIFACT_ROOT"),
         }
-        crate::set_artifact_root_override(None);
+        crate::core::set_artifact_root_override(None);
         match &self.prior_invocation_runtime {
             Some(value) => std::env::set_var(
-                crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+                crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
                 value,
             ),
-            None => {
-                std::env::remove_var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV)
-            }
+            None => std::env::remove_var(
+                crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+            ),
         }
     }
 }

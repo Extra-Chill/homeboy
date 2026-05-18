@@ -1,9 +1,9 @@
 use std::process::Command;
 
-use crate::defaults;
-use crate::engine::shell;
-use crate::error::{Error, Result};
-use crate::server::{CommandOutput, SshClient};
+use crate::core::defaults;
+use crate::core::engine::shell;
+use crate::core::error::{Error, Result};
+use crate::core::server::{CommandOutput, SshClient};
 
 /// Fix local file permissions before build.
 ///
@@ -150,12 +150,12 @@ fn ensure_remote_success(output: CommandOutput, operation: &str, remote_path: &s
     }
 
     Err(Error::remote_command_failed(
-        crate::error::RemoteCommandFailedDetails {
+        crate::core::error::RemoteCommandFailedDetails {
             command: format!("{} on {}", operation, remote_path),
             exit_code: output.exit_code,
             stdout: output.stdout,
             stderr: output.stderr,
-            target: crate::error::TargetDetails {
+            target: crate::core::error::TargetDetails {
                 project_id: None,
                 server_id: None,
                 host: None,

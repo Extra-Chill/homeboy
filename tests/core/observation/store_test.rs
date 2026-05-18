@@ -3,8 +3,8 @@
 //! These isolate `HOME` / `XDG_DATA_HOME` so the developer's real local DB is
 //! never read or written.
 
-use crate::observation::store::{self, ObservationStore, CURRENT_SCHEMA_VERSION};
-use crate::observation::{
+use crate::core::observation::store::{self, ObservationStore, CURRENT_SCHEMA_VERSION};
+use crate::core::observation::{
     FindingListFilter, NewFindingRecord, NewRunRecord, RunListFilter, RunStatus,
 };
 use crate::test_support::with_isolated_home;

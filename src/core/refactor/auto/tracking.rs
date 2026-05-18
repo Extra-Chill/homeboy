@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 #[cfg(not(test))]
-pub fn changed_file_set(local_path: &str) -> crate::Result<HashSet<String>> {
-    let uncommitted = crate::git::get_uncommitted_changes(local_path)?;
+pub fn changed_file_set(local_path: &str) -> crate::core::Result<HashSet<String>> {
+    let uncommitted = crate::core::git::get_uncommitted_changes(local_path)?;
     let mut files = HashSet::new();
     files.extend(uncommitted.staged);
     files.extend(uncommitted.unstaged);
@@ -11,12 +11,12 @@ pub fn changed_file_set(local_path: &str) -> crate::Result<HashSet<String>> {
 }
 
 #[cfg(test)]
-pub fn changed_file_set(local_path: &str) -> crate::Result<HashSet<String>> {
+pub fn changed_file_set(local_path: &str) -> crate::core::Result<HashSet<String>> {
     let path = std::path::Path::new(local_path);
     if path.exists() {
         Ok(HashSet::new())
     } else {
-        crate::git::get_uncommitted_changes(local_path).map(|changes| {
+        crate::core::git::get_uncommitted_changes(local_path).map(|changes| {
             let mut files = HashSet::new();
             files.extend(changes.staged);
             files.extend(changes.unstaged);

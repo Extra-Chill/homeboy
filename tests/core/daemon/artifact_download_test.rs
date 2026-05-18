@@ -1,5 +1,5 @@
 use super::*;
-use crate::observation::NewRunRecord;
+use crate::core::observation::NewRunRecord;
 use crate::test_support::HomeGuard;
 
 #[test]

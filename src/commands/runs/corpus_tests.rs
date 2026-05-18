@@ -7,7 +7,7 @@
 
 #![cfg(test)]
 
-use homeboy::observation::{NewRunRecord, ObservationStore, RunRecord, RunStatus};
+use homeboy::core::observation::{NewRunRecord, ObservationStore, RunRecord, RunStatus};
 use homeboy::test_support::with_isolated_home;
 
 use super::bundle::RunsImportArgs;

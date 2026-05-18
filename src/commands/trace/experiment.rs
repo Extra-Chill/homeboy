@@ -3,10 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use homeboy::engine::run_dir::RunDir;
-use homeboy::extension::trace as extension_trace;
-use homeboy::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
-use homeboy::rig;
+use homeboy::core::engine::run_dir::RunDir;
+use homeboy::core::extension::trace as extension_trace;
+use homeboy::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
+use homeboy::core::rig;
 
 use super::{TraceArgs, TraceRigContext};
 
@@ -20,12 +20,12 @@ pub(super) struct TraceExperimentRunPlan<'a> {
 pub(super) fn trace_experiment_plan_for_args<'a>(
     args: &TraceArgs,
     rig_context: Option<&'a TraceRigContext>,
-) -> homeboy::Result<Option<TraceExperimentRunPlan<'a>>> {
+) -> homeboy::core::Result<Option<TraceExperimentRunPlan<'a>>> {
     let Some(name) = args.experiment.as_deref() else {
         return Ok(None);
     };
     let context = rig_context.ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "--experiment",
             "trace experiment plans require --rig so Homeboy can read rig metadata",
             None,
@@ -43,7 +43,7 @@ pub(super) fn trace_experiment_plan_for_args<'a>(
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>();
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "--experiment",
                 format!(
                     "unknown trace experiment '{}' for rig '{}'",
@@ -119,7 +119,7 @@ fn trace_experiment_step(phase: &str, name: &str, index: usize, command: &str) -
 
 pub(super) fn trace_experiment_settings(
     plan: Option<&TraceExperimentRunPlan>,
-) -> homeboy::Result<Vec<(String, serde_json::Value)>> {
+) -> homeboy::core::Result<Vec<(String, serde_json::Value)>> {
     let Some(plan) = plan else {
         return Ok(Vec::new());
     };
@@ -142,7 +142,7 @@ pub(super) fn trace_experiment_settings(
 
 pub(super) fn trace_experiment_env(
     plan: Option<&TraceExperimentRunPlan>,
-) -> homeboy::Result<Vec<(String, String)>> {
+) -> homeboy::core::Result<Vec<(String, String)>> {
     let Some(plan) = plan else {
         return Ok(Vec::new());
     };
@@ -161,7 +161,7 @@ pub(super) fn trace_experiment_env(
 pub(super) fn run_trace_experiment_setup_for_plan(
     plan: Option<&TraceExperimentRunPlan>,
     run_dir: &RunDir,
-) -> homeboy::Result<()> {
+) -> homeboy::core::Result<()> {
     let Some(plan) = plan else {
         return Ok(());
     };
@@ -179,7 +179,7 @@ pub(super) fn run_trace_experiment_setup_for_plan(
 pub(super) fn run_trace_experiment_teardown_for_plan(
     plan: Option<&TraceExperimentRunPlan>,
     run_dir: &RunDir,
-) -> homeboy::Result<()> {
+) -> homeboy::core::Result<()> {
     let Some(plan) = plan else {
         return Ok(());
     };
@@ -204,7 +204,7 @@ fn validate_trace_experiment_plan_phase(
     experiment_name: &str,
     phase: &str,
     command_count: usize,
-) -> homeboy::Result<()> {
+) -> homeboy::core::Result<()> {
     let planned_count = plan
         .steps
         .iter()
@@ -217,7 +217,7 @@ fn validate_trace_experiment_plan_phase(
         return Ok(());
     }
 
-    Err(homeboy::Error::internal_unexpected(format!(
+    Err(homeboy::core::Error::internal_unexpected(format!(
         "trace experiment '{}' {} plan has {} steps for {} commands",
         experiment_name, phase, planned_count, command_count
     )))
@@ -230,7 +230,7 @@ fn run_trace_experiment_commands(
     commands: &[rig::TraceExperimentCommandSpec],
     experiment_env: &BTreeMap<String, String>,
     run_dir: &RunDir,
-) -> homeboy::Result<()> {
+) -> homeboy::core::Result<()> {
     for command_spec in commands {
         let command_text = resolve_trace_experiment_string(context, &command_spec.command);
         let mut command = Command::new(trace_experiment_shell());
@@ -252,7 +252,7 @@ fn run_trace_experiment_commands(
             command.current_dir(PathBuf::from(resolve_trace_experiment_string(context, cwd)));
         }
         let status = command.status().map_err(|err| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "--experiment",
                 format!(
                     "trace experiment '{}' {} command failed to spawn: {}",
@@ -263,7 +263,7 @@ fn run_trace_experiment_commands(
             )
         })?;
         if !status.success() {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "--experiment",
                 format!(
                     "trace experiment '{}' {} command exited {}",
@@ -283,7 +283,7 @@ pub(super) fn collect_trace_experiment_artifacts_for_plan(
     plan: Option<&TraceExperimentRunPlan>,
     run_dir: &RunDir,
     workflow: &mut extension_trace::TraceRunWorkflowResult,
-) -> homeboy::Result<()> {
+) -> homeboy::core::Result<()> {
     let Some(plan) = plan else {
         return Ok(());
     };
@@ -296,7 +296,7 @@ fn collect_trace_experiment_artifacts(
     experiment: &rig::TraceExperimentSpec,
     run_dir: &RunDir,
     workflow: &mut extension_trace::TraceRunWorkflowResult,
-) -> homeboy::Result<()> {
+) -> homeboy::core::Result<()> {
     let Some(results) = workflow.results.as_mut() else {
         return Ok(());
     };
@@ -316,7 +316,7 @@ fn collect_trace_experiment_artifacts(
         };
         let source_path = PathBuf::from(resolve_trace_experiment_string(context, source));
         if !source_path.is_file() {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "--experiment",
                 format!(
                     "trace experiment '{}' artifact '{}' does not exist or is not a file",
@@ -338,7 +338,7 @@ fn collect_trace_experiment_artifacts(
         let destination = run_dir.path().join(&relative);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|err| {
-                homeboy::Error::internal_io(
+                homeboy::core::Error::internal_io(
                     format!(
                         "Failed to create trace experiment artifact dir {}: {}",
                         parent.display(),
@@ -349,7 +349,7 @@ fn collect_trace_experiment_artifacts(
             })?;
         }
         fs::copy(&source_path, &destination).map_err(|err| {
-            homeboy::Error::internal_io(
+            homeboy::core::Error::internal_io(
                 format!(
                     "Failed to collect trace experiment artifact {} to {}: {}",
                     source_path.display(),

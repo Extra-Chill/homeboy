@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 
-use homeboy::deps::{
+use homeboy::core::deps::{
     self, DependencyStackApplyResult, DependencyStackPlan, DependencyStackStatus, DependencyStatus,
     DependencyUpdateResult,
 };
@@ -82,7 +82,7 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
                 deps::status(component.as_deref(), path.as_deref(), package.as_deref())?;
             Ok((
                 serde_json::to_value(output).map_err(|e| {
-                    homeboy::Error::internal_json(
+                    homeboy::core::Error::internal_json(
                         e.to_string(),
                         Some("serialize deps status".to_string()),
                     )
@@ -104,7 +104,7 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
             )?;
             Ok((
                 serde_json::to_value(output).map_err(|e| {
-                    homeboy::Error::internal_json(
+                    homeboy::core::Error::internal_json(
                         e.to_string(),
                         Some("serialize deps update".to_string()),
                     )
@@ -117,7 +117,7 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
                 let output: DependencyStackStatus = deps::stack_status()?;
                 Ok((
                     serde_json::to_value(output).map_err(|e| {
-                        homeboy::Error::internal_json(
+                        homeboy::core::Error::internal_json(
                             e.to_string(),
                             Some("serialize deps stack status".to_string()),
                         )
@@ -129,7 +129,7 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
                 let output: DependencyStackPlan = deps::stack_plan(&upstream)?;
                 Ok((
                     serde_json::to_value(output).map_err(|e| {
-                        homeboy::Error::internal_json(
+                        homeboy::core::Error::internal_json(
                             e.to_string(),
                             Some("serialize deps stack plan".to_string()),
                         )
@@ -141,7 +141,7 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
                 let output: DependencyStackApplyResult = deps::stack_apply(&upstream, dry_run)?;
                 Ok((
                     serde_json::to_value(output).map_err(|e| {
-                        homeboy::Error::internal_json(
+                        homeboy::core::Error::internal_json(
                             e.to_string(),
                             Some("serialize deps stack apply".to_string()),
                         )

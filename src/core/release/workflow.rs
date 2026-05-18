@@ -1,6 +1,6 @@
-use crate::error::{Error, Result};
-use crate::git;
-use crate::plan::PlanStep;
+use crate::core::error::{Error, Result};
+use crate::core::git;
+use crate::core::plan::PlanStep;
 
 use super::context::load_component;
 use super::types::{
@@ -314,7 +314,7 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
     }
 
     let monorepo = git::MonorepoContext::detect(&component.local_path, &input.component_id);
-    let version_info = crate::version::read_component_version(&component)?;
+    let version_info = crate::core::release::version::read_component_version(&component)?;
     let current_version = &version_info.version;
     let tag_name = format_tag(current_version, monorepo.as_ref());
 
@@ -639,8 +639,8 @@ pub fn run_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{PlanStep, PlanStepStatus, PlanValues};
-    use crate::release::{ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus};
+    use crate::core::plan::{PlanStep, PlanStepStatus, PlanValues};
+    use crate::core::release::{ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus};
 
     #[test]
     fn extracts_new_version_from_plan() {

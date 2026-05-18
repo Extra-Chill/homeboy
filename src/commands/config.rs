@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::defaults::{self, Defaults, HomeboyConfig};
+use homeboy::core::defaults::{self, Defaults, HomeboyConfig};
 
 use super::CmdResult;
 
@@ -103,7 +103,7 @@ fn show(builtin: bool) -> CmdResult<ConfigOutput> {
 fn set(pointer: &str, value_str: &str) -> CmdResult<ConfigOutput> {
     // Validate pointer format
     if !pointer.starts_with('/') {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "pointer",
             "JSON pointer must start with '/'",
             None,
@@ -113,7 +113,7 @@ fn set(pointer: &str, value_str: &str) -> CmdResult<ConfigOutput> {
 
     // Parse the value as JSON
     let value: Value = serde_json::from_str(value_str).map_err(|e| {
-        homeboy::Error::validation_invalid_json(
+        homeboy::core::Error::validation_invalid_json(
             e,
             Some("parse value".to_string()),
             Some(value_str.chars().take(200).collect::<String>()),
@@ -125,15 +125,19 @@ fn set(pointer: &str, value_str: &str) -> CmdResult<ConfigOutput> {
 
     // Convert to JSON, set the value, convert back
     let mut config_json = serde_json::to_value(&config).map_err(|e| {
-        homeboy::Error::internal_unexpected(format!("Failed to serialize config: {}", e))
+        homeboy::core::Error::internal_unexpected(format!("Failed to serialize config: {}", e))
     })?;
 
     // Navigate to the pointer location and set the value
-    homeboy::config::set_json_pointer(&mut config_json, pointer, value.clone())?;
+    homeboy::core::config::set_json_pointer(&mut config_json, pointer, value.clone())?;
 
     // Convert back to HomeboyConfig
     config = serde_json::from_value(config_json).map_err(|e| {
-        homeboy::Error::validation_invalid_json(e, Some("deserialize config".to_string()), None)
+        homeboy::core::Error::validation_invalid_json(
+            e,
+            Some("deserialize config".to_string()),
+            None,
+        )
     })?;
 
     // Save the config
@@ -157,7 +161,7 @@ fn set(pointer: &str, value_str: &str) -> CmdResult<ConfigOutput> {
 fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
     // Validate pointer format
     if !pointer.starts_with('/') {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "pointer",
             "JSON pointer must start with '/'",
             None,
@@ -170,15 +174,19 @@ fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
 
     // Convert to JSON
     let mut config_json = serde_json::to_value(&config).map_err(|e| {
-        homeboy::Error::internal_unexpected(format!("Failed to serialize config: {}", e))
+        homeboy::core::Error::internal_unexpected(format!("Failed to serialize config: {}", e))
     })?;
 
     // Remove the value at the pointer
-    homeboy::config::remove_json_pointer(&mut config_json, pointer)?;
+    homeboy::core::config::remove_json_pointer(&mut config_json, pointer)?;
 
     // Convert back to HomeboyConfig
     config = serde_json::from_value(config_json).map_err(|e| {
-        homeboy::Error::validation_invalid_json(e, Some("deserialize config".to_string()), None)
+        homeboy::core::Error::validation_invalid_json(
+            e,
+            Some("deserialize config".to_string()),
+            None,
+        )
     })?;
 
     // Save the config
@@ -237,4 +245,4 @@ fn path() -> CmdResult<ConfigOutput> {
 }
 
 // JSON pointer operations (set_json_pointer, remove_json_pointer) are in
-// homeboy::config — no local implementations needed.
+// homeboy::core::config — no local implementations needed.

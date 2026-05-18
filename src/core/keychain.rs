@@ -3,7 +3,7 @@
 //! Values are stored under service `homeboy` with account
 //! `<project-id>:<variable-name>`.
 
-use crate::error::{Error, ErrorCode, Result};
+use crate::core::error::{Error, ErrorCode, Result};
 use keyring::Entry;
 use serde_json::{json, Value};
 

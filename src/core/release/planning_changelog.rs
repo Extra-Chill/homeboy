@@ -1,8 +1,8 @@
-use crate::component::Component;
-use crate::engine::local_files::FileSystem;
-use crate::error::{Error, Result};
-use crate::git;
-use crate::release::changelog;
+use crate::core::component::Component;
+use crate::core::engine::local_files::FileSystem;
+use crate::core::error::{Error, Result};
+use crate::core::git;
+use crate::core::release::changelog;
 
 use super::planning_semver::resolve_tag_and_commits;
 use super::types::{ReleaseChangelogPlan, ReleaseOptions};
@@ -109,7 +109,7 @@ fn read_changelog_for_release(
     changelog_path: &std::path::Path,
     dry_run: bool,
 ) -> Result<String> {
-    match crate::engine::local_files::local().read(changelog_path) {
+    match crate::core::engine::local_files::local().read(changelog_path) {
         Ok(content) => Ok(content),
         Err(err) if dry_run && is_file_not_found_error(&err) => {
             log_status!(
@@ -145,7 +145,7 @@ pub(super) fn ensure_changelog_initialized(component: &Component) -> Result<()> 
         return Ok(());
     };
 
-    let configured_path = crate::paths::resolve_path(&component.local_path, target);
+    let configured_path = crate::core::paths::resolve_path(&component.local_path, target);
     if configured_path.exists() {
         return Ok(());
     }
@@ -156,10 +156,10 @@ pub(super) fn ensure_changelog_initialized(component: &Component) -> Result<()> 
     }
 
     if let Some(parent) = configured_path.parent() {
-        crate::engine::local_files::local().ensure_dir(parent)?;
+        crate::core::engine::local_files::local().ensure_dir(parent)?;
     }
 
-    crate::engine::local_files::local()
+    crate::core::engine::local_files::local()
         .write(&configured_path, changelog::INITIAL_CHANGELOG_CONTENT)?;
 
     log_status!(
@@ -231,9 +231,9 @@ mod tests {
         build_changelog_plan, ensure_changelog_initialized, generate_changelog_entries,
         group_commits_for_changelog, read_changelog_for_release, strip_pr_reference,
     };
-    use crate::component::Component;
-    use crate::git::{CommitCategory, CommitInfo};
-    use crate::release::types::ReleaseOptions;
+    use crate::core::component::Component;
+    use crate::core::git::{CommitCategory, CommitInfo};
+    use crate::core::release::types::ReleaseOptions;
 
     fn commit(subject: &str, category: CommitCategory) -> CommitInfo {
         CommitInfo {

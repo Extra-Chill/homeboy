@@ -4,12 +4,12 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::runner::{
+use homeboy::core::runner::{
     self, Runner, RunnerConnectReport, RunnerDisconnectReport, RunnerExecOutput, RunnerKind,
     RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOutput,
 };
-use homeboy::{EntityCrudOutput, MergeOutput};
+use homeboy::core::{EntityCrudOutput, MergeOutput};
 
 use super::{CmdResult, DynamicSetArgs};
 
@@ -339,7 +339,7 @@ fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
         spec
     } else {
         let id = input.id.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "id",
                 "Missing required argument: id",
                 None,
@@ -366,11 +366,11 @@ fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
             resources: HashMap::<String, Value>::new(),
         };
 
-        homeboy::config::to_json_string(&new_runner)?
+        homeboy::core::config::to_json_string(&new_runner)?
     };
 
     match runner::create(&json_spec, input.skip_existing)? {
-        homeboy::CreateOutput::Single(result) => Ok((
+        homeboy::core::CreateOutput::Single(result) => Ok((
             RunnerOutput {
                 command: "runner.add".to_string(),
                 id: Some(result.id),
@@ -380,7 +380,7 @@ fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
             },
             0,
         )),
-        homeboy::CreateOutput::Bulk(summary) => {
+        homeboy::core::CreateOutput::Bulk(summary) => {
             let exit_code = summary.exit_code();
             Ok((
                 RunnerOutput {
@@ -420,7 +420,7 @@ fn show(id: &str) -> CmdResult<RunnerOutput> {
 
 fn set(args: DynamicSetArgs) -> CmdResult<RunnerOutput> {
     let merged = super::merge_dynamic_args(&args)?.ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "spec",
             "Provide JSON spec, --json flag, --base64 flag, or --key value flags",
             None,

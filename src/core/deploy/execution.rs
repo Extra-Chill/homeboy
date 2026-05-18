@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use crate::build;
-use crate::component::Component;
-use crate::context::RemoteProjectContext;
-use crate::error::Result;
-use crate::extension::build::resolve_artifact_path_from_root;
-use crate::git;
-use crate::project::Project;
+use crate::core::build;
+use crate::core::component::Component;
+use crate::core::context::RemoteProjectContext;
+use crate::core::error::Result;
+use crate::core::extension::build::resolve_artifact_path_from_root;
+use crate::core::git;
+use crate::core::project::Project;
 
 use super::path_roots::{component_remote_path, resolve_effective_remote_path};
 use super::planning::{calculate_directory_size, format_bytes};
@@ -282,7 +282,7 @@ fn execute_file_deploy(
 
     let mkdir_cmd = format!(
         "mkdir -p {}",
-        crate::engine::shell::quote_path(remote_parent)
+        crate::core::engine::shell::quote_path(remote_parent)
     );
     log_status!("deploy", "Ensuring remote directory: {}", remote_parent);
     let mkdir_output = ctx.client.execute(&mkdir_cmd);
@@ -316,8 +316,8 @@ fn execute_file_deploy(
             if let Some(owner) = component.remote_owner.as_deref() {
                 let chown_cmd = format!(
                     "chown {} {}",
-                    crate::engine::shell::quote_arg(owner),
-                    crate::engine::shell::quote_path(install_dir)
+                    crate::core::engine::shell::quote_arg(owner),
+                    crate::core::engine::shell::quote_path(install_dir)
                 );
                 let chown_output = ctx.client.execute(&chown_cmd);
                 if !chown_output.success {
@@ -584,7 +584,7 @@ fn cleanup_build_dependencies(
     let mut cleanup_paths = Vec::new();
     if let Some(ref extensions) = component.extensions {
         for extension_id in extensions.keys() {
-            if let Ok(manifest) = crate::extension::load_extension(extension_id) {
+            if let Ok(manifest) = crate::core::extension::load_extension(extension_id) {
                 if let Some(ref build) = manifest.build {
                     cleanup_paths.extend(build.cleanup_paths.iter().cloned());
                 }
@@ -661,7 +661,7 @@ fn cleanup_build_dependencies(
 #[cfg(test)]
 mod tests {
     use super::{failed_component_deploy_result, should_try_download_release_artifact};
-    use crate::component::Component;
+    use crate::core::component::Component;
     use crate::core::deploy::types::DeployConfig;
 
     #[test]

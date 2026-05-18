@@ -1,9 +1,9 @@
-use crate::config::{self, from_str};
-use crate::engine::identifier;
-use crate::engine::local_files::{self, FileSystem};
-use crate::error::{Error, Result};
-use crate::git;
-use crate::paths;
+use crate::core::config::{self, from_str};
+use crate::core::engine::identifier;
+use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::error::{Error, Result};
+use crate::core::git;
+use crate::core::paths;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,8 +43,8 @@ pub struct UpdateResult {
 
 pub mod source_metadata {
     use super::{load_extension, read_source_revision, write_source_metadata};
-    use crate::error::{Error, Result};
-    use crate::paths;
+    use crate::core::error::{Error, Result};
+    use crate::core::paths;
 
     #[derive(Debug, Clone, serde::Serialize)]
     pub struct SourceMetadataRepair {
@@ -189,7 +189,7 @@ pub fn install_with_revision(
 ///
 /// Already-installed extensions are skipped so CI setup can be re-run safely.
 pub fn install_for_component(
-    component: &crate::component::Component,
+    component: &crate::core::component::Component,
     source: &str,
 ) -> Result<InstallForComponentResult> {
     let extensions = component.extensions.as_ref().ok_or_else(|| {
@@ -877,8 +877,8 @@ mod tests {
         install, install_for_component, install_with_revision, load_extension,
         read_source_revision, source_metadata, update,
     };
-    use crate::component;
-    use crate::extension::update_all;
+    use crate::core::component;
+    use crate::core::extension::update_all;
     use crate::test_support::with_isolated_home;
     use std::fs;
     use std::path::Path;
@@ -1643,7 +1643,7 @@ exec '{}' "$@"
         std::fs::write(temp.path().join("some-file.txt"), "content").expect("write file");
 
         assert!(
-            crate::git::is_workdir_clean_or_not_git(temp.path()),
+            crate::core::git::is_workdir_clean_or_not_git(temp.path()),
             "non-git directory should be treated as clean"
         );
     }
@@ -1662,7 +1662,7 @@ exec '{}' "$@"
         }
 
         assert!(
-            crate::git::is_workdir_clean_or_not_git(temp.path()),
+            crate::core::git::is_workdir_clean_or_not_git(temp.path()),
             "freshly-initialized git repo with no changes should be clean"
         );
     }
@@ -1683,7 +1683,7 @@ exec '{}' "$@"
         std::fs::write(temp.path().join("untracked.txt"), "hi").expect("write untracked file");
 
         assert!(
-            !crate::git::is_workdir_clean_or_not_git(temp.path()),
+            !crate::core::git::is_workdir_clean_or_not_git(temp.path()),
             "git repo with untracked file should be reported as dirty"
         );
     }

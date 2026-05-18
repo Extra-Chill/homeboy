@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::component::Component;
-use crate::context::RemoteProjectContext;
-use crate::error::{Error, Result};
-use crate::git;
-use crate::project::Project;
-use crate::version;
+use crate::core::component::Component;
+use crate::core::context::RemoteProjectContext;
+use crate::core::error::{Error, Result};
+use crate::core::git;
+use crate::core::project::Project;
+use crate::core::release::version;
 
 use super::execution::execute_component_deploy;
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
@@ -145,7 +145,7 @@ pub(super) fn deploy_components(
 
     for component in &components {
         // Apply per-project overrides (e.g. different extract_command or remote_owner)
-        let component = crate::project::apply_component_overrides(component, &project);
+        let component = crate::core::project::apply_component_overrides(component, &project);
 
         let effective_config = clone_config(config);
 
@@ -167,7 +167,7 @@ pub(super) fn deploy_components(
             result = result.with_deployed_ref(checkout.tag.clone());
         } else if config.head {
             // Deploying from HEAD — record the current branch
-            if let Some(branch) = crate::engine::command::run_in_optional(
+            if let Some(branch) = crate::core::engine::command::run_in_optional(
                 &component.local_path,
                 "git",
                 &["rev-parse", "--abbrev-ref", "HEAD"],
@@ -312,7 +312,7 @@ fn warn_non_default_branch(components: &[Component], config: &DeployConfig) -> R
         let path = &component.local_path;
 
         // Get current branch
-        let current_branch = match crate::engine::command::run_in_optional(
+        let current_branch = match crate::core::engine::command::run_in_optional(
             path,
             "git",
             &["rev-parse", "--abbrev-ref", "HEAD"],
@@ -322,7 +322,7 @@ fn warn_non_default_branch(components: &[Component], config: &DeployConfig) -> R
         };
 
         // Detect default branch from remote HEAD symref, fallback to "main"
-        let default_branch = crate::engine::command::run_in_optional(
+        let default_branch = crate::core::engine::command::run_in_optional(
             path,
             "git",
             &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -530,21 +530,22 @@ fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
         // --abbrev-ref which returns the literal "HEAD" string). If HEAD is
         // already detached, save the commit hash so we can at least restore
         // to the same commit afterward.
-        let original_ref = crate::engine::command::run_in_optional(
+        let original_ref = crate::core::engine::command::run_in_optional(
             path,
             "git",
             &["symbolic-ref", "--short", "HEAD"],
         )
         .or_else(|| {
             // Detached HEAD — save the commit hash as fallback
-            crate::engine::command::run_in_optional(path, "git", &["rev-parse", "HEAD"])
+            crate::core::engine::command::run_in_optional(path, "git", &["rev-parse", "HEAD"])
         })
         .unwrap_or_else(|| "main".to_string());
 
         // If already on this tag's commit, skip checkout
-        let tag_commit = crate::engine::command::run_in_optional(path, "git", &["rev-parse", &tag]);
+        let tag_commit =
+            crate::core::engine::command::run_in_optional(path, "git", &["rev-parse", &tag]);
         let head_commit =
-            crate::engine::command::run_in_optional(path, "git", &["rev-parse", "HEAD"]);
+            crate::core::engine::command::run_in_optional(path, "git", &["rev-parse", "HEAD"]);
         if tag_commit.is_some() && tag_commit == head_commit {
             log_status!(
                 "deploy",
@@ -568,7 +569,12 @@ fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
             component.id,
             tag
         );
-        match crate::engine::command::run_in(path, "git", &["checkout", &tag], "git checkout tag") {
+        match crate::core::engine::command::run_in(
+            path,
+            "git",
+            &["checkout", &tag],
+            "git checkout tag",
+        ) {
             Ok(_) => {
                 checkouts.push(TagCheckout {
                     component_id: component.id.clone(),
@@ -596,7 +602,7 @@ fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
 /// is inconvenient but not destructive.
 fn restore_branches(checkouts: &[TagCheckout]) {
     for checkout in checkouts {
-        let restore = crate::engine::command::run_in(
+        let restore = crate::core::engine::command::run_in(
             &checkout.local_path,
             "git",
             &["checkout", &checkout.original_ref],
@@ -630,7 +636,10 @@ fn restore_branches(checkouts: &[TagCheckout]) {
 /// When found and `--force` is not set, returns an error to prevent
 /// silently deploying stale code. Use `deploy --head` to deploy
 /// unreleased commits, or `homeboy release` to tag them first.
-fn check_unreleased_commits(components: &[Component], config: &DeployConfig) -> crate::Result<()> {
+fn check_unreleased_commits(
+    components: &[Component],
+    config: &DeployConfig,
+) -> crate::core::Result<()> {
     let mut gaps = Vec::new();
 
     for component in components {
@@ -665,7 +674,7 @@ fn check_unreleased_commits(components: &[Component], config: &DeployConfig) -> 
         .map(|(id, gap)| format!("{} ({} commits ahead of {})", id, gap.ahead, gap.tag))
         .collect();
 
-    Err(crate::Error::validation_invalid_argument(
+    Err(crate::core::Error::validation_invalid_argument(
         "deploy",
         format!(
             "Refusing to deploy: HEAD has unreleased commits for: {}",

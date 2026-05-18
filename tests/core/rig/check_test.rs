@@ -4,8 +4,8 @@
 //! `file` and `command` probes exercise the full one-of-three logic,
 //! short-circuit on validation errors, and cover substring matching.
 
-use crate::rig::check::evaluate;
-use crate::rig::spec::{CheckSpec, RigSpec};
+use crate::core::rig::check::evaluate;
+use crate::core::rig::spec::{CheckSpec, RigSpec};
 
 fn minimal_rig() -> RigSpec {
     RigSpec {
@@ -114,7 +114,7 @@ fn test_evaluate_command_unexpected_exit() {
 
 #[test]
 fn test_evaluate_newer_than_left_newer_passes() {
-    use crate::rig::spec::{NewerThanSpec, TimeSource};
+    use crate::core::rig::spec::{NewerThanSpec, TimeSource};
     let tmp_dir = tempfile::tempdir().expect("tmpdir");
     let older = tmp_dir.path().join("older.txt");
     let newer = tmp_dir.path().join("newer.txt");
@@ -142,7 +142,7 @@ fn test_evaluate_newer_than_left_newer_passes() {
 
 #[test]
 fn test_evaluate_newer_than_left_older_fails() {
-    use crate::rig::spec::{NewerThanSpec, TimeSource};
+    use crate::core::rig::spec::{NewerThanSpec, TimeSource};
     let tmp_dir = tempfile::tempdir().expect("tmpdir");
     let older = tmp_dir.path().join("older.txt");
     let newer = tmp_dir.path().join("newer.txt");
@@ -171,7 +171,7 @@ fn test_evaluate_newer_than_left_older_fails() {
 
 #[test]
 fn test_evaluate_newer_than_missing_left_process_passes() {
-    use crate::rig::spec::{DiscoverSpec, NewerThanSpec, TimeSource};
+    use crate::core::rig::spec::{DiscoverSpec, NewerThanSpec, TimeSource};
     let tmp_dir = tempfile::tempdir().expect("tmpdir");
     let bundle = tmp_dir.path().join("bundle.js");
     std::fs::write(&bundle, "x").expect("write");
@@ -200,7 +200,7 @@ fn test_evaluate_newer_than_missing_left_process_passes() {
 
 #[test]
 fn test_evaluate_newer_than_rejects_empty_time_source() {
-    use crate::rig::spec::{NewerThanSpec, TimeSource};
+    use crate::core::rig::spec::{NewerThanSpec, TimeSource};
     let rig = minimal_rig();
     let spec = CheckSpec {
         newer_than: Some(NewerThanSpec {

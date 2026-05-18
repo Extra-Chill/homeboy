@@ -143,8 +143,8 @@ pub fn build_findings(results: &[CheckResult]) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::checks::CheckResult;
-    use crate::code_audit::conventions::{Deviation, Outlier};
+    use crate::core::code_audit::checks::CheckResult;
+    use crate::core::code_audit::conventions::{Deviation, Outlier};
 
     #[test]
     fn clean_result_produces_no_findings() {

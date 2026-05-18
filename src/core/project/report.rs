@@ -1,7 +1,7 @@
 use serde::Serialize;
 
-use crate::error::Result;
-use crate::output::{CreateOutput, EntityCrudOutput, MergeOutput, RemoveResult};
+use crate::core::error::Result;
+use crate::core::output::{CreateOutput, EntityCrudOutput, MergeOutput, RemoveResult};
 
 use super::{calculate_deploy_readiness, collect_status, list, load, Project};
 
@@ -41,7 +41,7 @@ pub struct ProjectListReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectStatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub health: Option<crate::server::health::ServerHealth>,
+    pub health: Option<crate::core::server::health::ServerHealth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component_versions: Option<Vec<ProjectComponentVersion>>,
 }
@@ -51,9 +51,9 @@ pub struct ProjectReportExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub projects: Option<Vec<ProjectListItem>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub components: Option<crate::project::ProjectComponentsOutput>,
+    pub components: Option<crate::core::project::ProjectComponentsOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pin: Option<crate::project::ProjectPinOutput>,
+    pub pin: Option<crate::core::project::ProjectPinOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,7 +61,7 @@ pub struct ProjectReportExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_blockers: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub health: Option<crate::server::health::ServerHealth>,
+    pub health: Option<crate::core::server::health::ServerHealth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component_versions: Option<Vec<ProjectComponentVersion>>,
 }
@@ -260,7 +260,7 @@ pub fn build_delete_output(project_id: &str) -> ProjectReportOutput {
 pub fn build_components_output(
     project_id: &str,
     action: &str,
-    components: crate::project::ProjectComponentsOutput,
+    components: crate::core::project::ProjectComponentsOutput,
 ) -> ProjectReportOutput {
     ProjectReportOutput {
         command: format!("project.components.{action}"),
@@ -277,7 +277,7 @@ pub fn build_components_output(
 pub fn build_pin_output(
     command: &str,
     project_id: &str,
-    pin: crate::project::ProjectPinOutput,
+    pin: crate::core::project::ProjectPinOutput,
 ) -> ProjectReportOutput {
     ProjectReportOutput {
         command: command.to_string(),

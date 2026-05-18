@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::error::{Error, Result};
-use crate::extension;
+use crate::core::error::{Error, Result};
+use crate::core::extension;
 
 /// Result of a post-write format operation.
 #[derive(Debug, Clone, Serialize)]
@@ -145,7 +145,8 @@ fn resolve_format_command(_root: &Path, changed_files: &[PathBuf]) -> Option<Str
                 // Wrapping with `sh <script>` bypasses `#!/usr/bin/env bash` and runs
                 // under POSIX sh — which breaks scripts using bash-only features. See #1276.
                 return Some(
-                    crate::engine::shell::quote_path(&script_path.to_string_lossy()).to_string(),
+                    crate::core::engine::shell::quote_path(&script_path.to_string_lossy())
+                        .to_string(),
                 );
             }
         }

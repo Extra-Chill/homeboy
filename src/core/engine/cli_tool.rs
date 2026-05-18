@@ -1,18 +1,18 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
-use crate::component::{self, Component};
-use crate::context::resolve_project_ssh;
-use crate::engine::executor;
-use crate::engine::shell;
-use crate::engine::template::{render_map, TemplateVars};
-use crate::engine::text;
-use crate::error::ErrorCode;
-use crate::extension::{find_extension_by_tool, CliAutoFlag, CliConfig};
-use crate::project::{self, Project};
-use crate::server;
-use crate::server::{execute_local_command, CommandOutput};
-use crate::{Error, Result};
+use crate::core::component::{self, Component};
+use crate::core::context::resolve_project_ssh;
+use crate::core::engine::executor;
+use crate::core::engine::shell;
+use crate::core::engine::template::{render_map, TemplateVars};
+use crate::core::engine::text;
+use crate::core::error::ErrorCode;
+use crate::core::extension::{find_extension_by_tool, CliAutoFlag, CliConfig};
+use crate::core::project::{self, Project};
+use crate::core::server;
+use crate::core::server::{execute_local_command, CommandOutput};
+use crate::core::{Error, Result};
 
 #[derive(Serialize, Clone)]
 
@@ -35,7 +35,7 @@ pub fn run(tool: &str, identifier: &str, args: &[String]) -> Result<CliToolResul
     let args = shell::normalize_args(args);
 
     // Parse project:subtarget syntax
-    let (project_id, embedded_subtarget) = crate::engine::text::split_identifier(identifier);
+    let (project_id, embedded_subtarget) = crate::core::engine::text::split_identifier(identifier);
 
     // Build args with embedded subtarget prepended if present
     let full_args: Vec<String> = match embedded_subtarget {
@@ -85,7 +85,7 @@ fn try_run_for_component(
 fn build_component_command(
     component: &Component,
     cli_config: &CliConfig,
-    extension: &crate::extension::ExtensionManifest,
+    extension: &crate::core::extension::ExtensionManifest,
     args: &[String],
 ) -> String {
     let mut variables = HashMap::new();
@@ -230,7 +230,7 @@ fn build_project_command(
     variables.insert(TemplateVars::CLI_PATH.to_string(), cli_path);
 
     // Add extension_path so {{extension_path}} resolves in command templates
-    let extension_dir = crate::extension::extension_path(extension_id);
+    let extension_dir = crate::core::extension::extension_path(extension_id);
     if extension_dir.exists() {
         variables.insert(
             TemplateVars::EXTENSION_PATH.to_string(),
@@ -367,7 +367,7 @@ fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::{CliAutoFlagCondition, CliHelpConfig};
+    use crate::core::extension::{CliAutoFlagCondition, CliHelpConfig};
 
     fn cli_config(auto_flags: Vec<CliAutoFlag>) -> CliConfig {
         CliConfig {

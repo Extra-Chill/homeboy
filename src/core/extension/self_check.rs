@@ -1,7 +1,7 @@
-use crate::component::Component;
-use crate::error::{Error, Result};
-use crate::extension::ExtensionCapability;
-use crate::server::{
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
+use crate::core::extension::ExtensionCapability;
+use crate::core::server::{
     execute_local_command_in_dir, execute_local_command_passthrough, CommandOutput,
 };
 use std::path::Path;
@@ -93,7 +93,7 @@ fn execute_self_check_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{Component, SelfCheckConfig};
+    use crate::core::component::{Component, SelfCheckConfig};
 
     #[test]
     fn test_run_self_checks_requires_configured_commands() {

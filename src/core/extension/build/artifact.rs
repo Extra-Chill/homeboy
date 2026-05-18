@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 /// Resolve a potentially glob-patterned artifact path to an actual file.
 ///

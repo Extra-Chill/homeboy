@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::fingerprint::FileFingerprint;
-use crate::extension::TestMappingConfig;
+use crate::core::extension::TestMappingConfig;
 
 /// Partition fingerprints into source files and test files based on the config.
 pub fn partition_fingerprints<'a>(
@@ -159,7 +159,7 @@ pub fn test_to_source_path(test_path: &str, config: &TestMappingConfig) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::TestMappingConfig;
+    use crate::core::extension::TestMappingConfig;
 
     fn make_config() -> TestMappingConfig {
         TestMappingConfig {

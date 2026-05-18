@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use homeboy::engine::run_dir::RunDir;
-use homeboy::extension::trace as extension_trace;
-use homeboy::observation::ObservationStore;
+use homeboy::core::engine::run_dir::RunDir;
+use homeboy::core::extension::trace as extension_trace;
+use homeboy::core::observation::ObservationStore;
 
 pub(super) fn record_trace_artifacts(
     store: &ObservationStore,
@@ -10,7 +10,8 @@ pub(super) fn record_trace_artifacts(
     run_dir: &RunDir,
     results: Option<&extension_trace::TraceResults>,
 ) {
-    let trace_results_path = run_dir.step_file(homeboy::engine::run_dir::files::TRACE_RESULTS);
+    let trace_results_path =
+        run_dir.step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS);
     record_artifact_if_file(store, run_id, "trace-results", &trace_results_path);
     if let Some(results) = results {
         for artifact in &results.artifacts {

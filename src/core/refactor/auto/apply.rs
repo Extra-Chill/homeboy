@@ -1,12 +1,12 @@
 use crate::core::refactor::decompose;
 use crate::core::refactor::plan::verify::rewrite_callers_after_dedup;
 
-use crate::engine::undo::InMemoryRollback;
-use crate::extension::AutofixVerifyConfig;
-use crate::refactor::auto::verify::{
+use crate::core::engine::undo::InMemoryRollback;
+use crate::core::extension::AutofixVerifyConfig;
+use crate::core::refactor::auto::verify::{
     applied_files_from_chunks, capture_pre_apply_snapshot, run_verify_gate,
 };
-use crate::refactor::auto::{ApplyChunkResult, ChunkStatus, DecomposeFixPlan, Fix, NewFile};
+use crate::core::refactor::auto::{ApplyChunkResult, ChunkStatus, DecomposeFixPlan, Fix, NewFile};
 use std::path::Path;
 
 // ============================================================================
@@ -25,8 +25,8 @@ pub fn apply_fixes_via_edit_ops(
     new_files: &mut [NewFile],
     root: &Path,
 ) -> Vec<ApplyChunkResult> {
-    use crate::engine::edit_op::{fix_to_edit_ops, new_file_to_edit_op, TaggedEditOp};
-    use crate::engine::edit_op_apply::apply_edit_ops;
+    use crate::core::engine::edit_op::{fix_to_edit_ops, new_file_to_edit_op, TaggedEditOp};
+    use crate::core::engine::edit_op_apply::apply_edit_ops;
 
     // Merge same-file insertions (same as old path)
     merge_same_file_insertions(fixes);
@@ -164,7 +164,7 @@ pub fn apply_fixes_via_edit_ops(
 
     // Format all modified/created files in one batch
     if !formatted_files.is_empty() {
-        let _ = crate::engine::format_write::format_after_write(root, &formatted_files);
+        let _ = crate::core::engine::format_write::format_after_write(root, &formatted_files);
     }
 
     // Run post-apply hooks for duplicate function fixes (caller rewriting)
@@ -363,8 +363,8 @@ pub fn apply_decompose_plans(plans: &mut [DecomposeFixPlan], root: &Path) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::AuditFinding;
-    use crate::refactor::auto::{Insertion, InsertionKind};
+    use crate::core::code_audit::AuditFinding;
+    use crate::core::refactor::auto::{Insertion, InsertionKind};
 
     fn removal_insertion(start_line: usize, end_line: usize, description: &str) -> Insertion {
         Insertion {

@@ -25,7 +25,7 @@
 use serde::Serialize;
 use std::collections::HashSet;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::git::run_git;
 use super::pr_meta::{fetch_pr_meta, PrHead};

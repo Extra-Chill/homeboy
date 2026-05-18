@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use crate::component;
-use crate::error::Result;
+use crate::core::component;
+use crate::core::error::Result;
 
 pub fn infer_attached_component_id(local_path: &Path) -> Result<String> {
     component::infer_portable_component_id(local_path)

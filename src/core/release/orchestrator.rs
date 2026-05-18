@@ -3,7 +3,7 @@
 //! The planner builds the `ReleasePlan`; this module runs that plan and wraps
 //! the accumulated step results into the public release run shape.
 
-use crate::error::Result;
+use crate::core::error::Result;
 use std::collections::HashSet;
 
 use super::execution_plan::{
@@ -81,7 +81,7 @@ fn finalize(component_id: &str, results: Vec<ReleaseStepResult>) -> ReleaseRun {
 #[cfg(test)]
 mod tests {
     use super::{run, run_with_plan};
-    use crate::release::types::ReleaseOptions;
+    use crate::core::release::types::ReleaseOptions;
 
     #[test]
     fn test_run() {

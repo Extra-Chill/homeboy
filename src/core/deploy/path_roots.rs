@@ -1,10 +1,10 @@
-use crate::component::Component;
-use crate::engine::shell;
-use crate::error::{Error, Result};
-use crate::extension::{self, RemotePathRootRule};
-use crate::paths as base_path;
-use crate::project::Project;
-use crate::server::SshClient;
+use crate::core::component::Component;
+use crate::core::engine::shell;
+use crate::core::error::{Error, Result};
+use crate::core::extension::{self, RemotePathRootRule};
+use crate::core::paths as base_path;
+use crate::core::project::Project;
+use crate::core::server::SshClient;
 use std::collections::HashSet;
 
 pub(super) fn component_remote_path(component: &Component) -> String {
@@ -156,9 +156,9 @@ fn strip_path_prefix<'a>(path: &'a str, prefix: &str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{Component, ScopedExtensionConfig};
-    use crate::extension::{DeployCapability, ExtensionManifest};
-    use crate::server::SshClient;
+    use crate::core::component::{Component, ScopedExtensionConfig};
+    use crate::core::extension::{DeployCapability, ExtensionManifest};
+    use crate::core::server::SshClient;
     use crate::test_support::with_isolated_home;
     use std::collections::HashMap;
 
@@ -193,7 +193,7 @@ mod tests {
     }
 
     fn install_extension_with_detect_command(detect_command: Option<&str>) {
-        crate::extension::save_manifest(&ExtensionManifest {
+        crate::core::extension::save_manifest(&ExtensionManifest {
             id: "wordpress".to_string(),
             name: "WordPress".to_string(),
             version: "1.0.0".to_string(),

@@ -4,16 +4,16 @@
 //! in the end-to-end smoke described in #1468. Unit scope here covers the
 //! pure types and status-enum ergonomics that back the runner's reporting.
 
-use crate::rig::service::ServiceStatus;
+use crate::core::rig::service::ServiceStatus;
 
 #[cfg(unix)]
 mod lifecycle {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
-    use crate::rig::service::{self, ServiceStatus};
-    use crate::rig::spec::{DiscoverSpec, RigSpec, ServiceKind, ServiceSpec};
-    use crate::rig::state::{RigState, ServiceState};
+    use crate::core::rig::service::{self, ServiceStatus};
+    use crate::core::rig::spec::{DiscoverSpec, RigSpec, ServiceKind, ServiceSpec};
+    use crate::core::rig::state::{RigState, ServiceState};
     use crate::test_support::with_isolated_home;
 
     fn command_rig(id: &str, command: &str, cwd: Option<String>) -> RigSpec {
@@ -350,7 +350,7 @@ fn test_service_status_stale_carries_pid() {
 
 #[test]
 fn test_parse_etime_mm_ss() {
-    use crate::rig::service::parse_etime_seconds;
+    use crate::core::rig::service::parse_etime_seconds;
     // 2 minutes 30 seconds.
     assert_eq!(parse_etime_seconds("02:30"), Some(150));
     assert_eq!(parse_etime_seconds("0:01"), Some(1));
@@ -358,14 +358,14 @@ fn test_parse_etime_mm_ss() {
 
 #[test]
 fn test_parse_etime_hh_mm_ss() {
-    use crate::rig::service::parse_etime_seconds;
+    use crate::core::rig::service::parse_etime_seconds;
     // 1h 02m 03s.
     assert_eq!(parse_etime_seconds("01:02:03"), Some(3_723));
 }
 
 #[test]
 fn test_parse_etime_dd_hh_mm_ss() {
-    use crate::rig::service::parse_etime_seconds;
+    use crate::core::rig::service::parse_etime_seconds;
     // 4 days, 9 hours, 27 minutes, 59 seconds — the format BSD `ps` emits
     // for a long-running daemon (matches what `etime` printed during dev).
     assert_eq!(parse_etime_seconds("04-09:27:59"), Some(379_679));
@@ -373,7 +373,7 @@ fn test_parse_etime_dd_hh_mm_ss() {
 
 #[test]
 fn test_parse_etime_rejects_garbage() {
-    use crate::rig::service::parse_etime_seconds;
+    use crate::core::rig::service::parse_etime_seconds;
     assert_eq!(parse_etime_seconds(""), None);
     assert_eq!(parse_etime_seconds("not-a-time"), None);
     assert_eq!(parse_etime_seconds("01"), None);

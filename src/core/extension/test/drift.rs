@@ -13,10 +13,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::code_audit::walker::is_test_path;
-use crate::error::{Error, Result};
-use crate::extension::TestDriftConfig;
-use crate::git;
+use crate::core::code_audit::walker::is_test_path;
+use crate::core::error::{Error, Result};
+use crate::core::extension::TestDriftConfig;
+use crate::core::git;
 
 // ============================================================================
 // Models
@@ -510,7 +510,7 @@ fn matches_any_pattern(path: &str, patterns: &[String]) -> bool {
 
 /// Collect test files in the repo using extension-declared glob patterns.
 fn collect_test_files(root: &Path, test_patterns: &[String]) -> Vec<PathBuf> {
-    use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+    use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
     let config = ScanConfig {
         extensions: ExtensionFilter::All,
@@ -605,7 +605,7 @@ fn is_auto_fixable(change: &ProductionChange) -> bool {
 ///
 /// For each auto-fixable change, creates a TransformRule that replaces
 /// the old symbol with the new one in test files.
-pub fn generate_transform_rules(report: &DriftReport) -> Vec<crate::refactor::TransformRule> {
+pub fn generate_transform_rules(report: &DriftReport) -> Vec<crate::core::refactor::TransformRule> {
     let mut rules = Vec::new();
 
     for change in &report.production_changes {
@@ -677,7 +677,7 @@ pub fn generate_transform_rules(report: &DriftReport) -> Vec<crate::refactor::Tr
             _ => continue,
         };
 
-        rules.push(crate::refactor::TransformRule {
+        rules.push(crate::core::refactor::TransformRule {
             id,
             description,
             find,

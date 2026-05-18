@@ -1,5 +1,5 @@
-use homeboy::extension::trace as extension_trace;
-use homeboy::rig;
+use homeboy::core::extension::trace as extension_trace;
+use homeboy::core::rig;
 
 use super::{trace_scenario, trace_workload_scenario_id, TraceArgs, TraceRigContext};
 
@@ -7,7 +7,7 @@ pub(super) fn trace_probes_for_args(
     args: &TraceArgs,
     rig_context: Option<&TraceRigContext>,
     extension_id: Option<&str>,
-) -> homeboy::Result<Vec<extension_trace::TraceProbeConfig>> {
+) -> homeboy::core::Result<Vec<extension_trace::TraceProbeConfig>> {
     let Some(context) = rig_context else {
         return Ok(Vec::new());
     };
@@ -38,7 +38,7 @@ pub(super) fn trace_probes_for_args(
 fn expand_trace_probe(
     context: &TraceRigContext,
     probe: &extension_trace::TraceProbeConfig,
-) -> homeboy::Result<extension_trace::TraceProbeConfig> {
+) -> homeboy::core::Result<extension_trace::TraceProbeConfig> {
     Ok(match probe {
         extension_trace::TraceProbeConfig::LogTail {
             path,

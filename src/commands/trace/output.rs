@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
-use homeboy::extension::trace as extension_trace;
-use homeboy::extension::trace::TraceCommandOutput;
+use homeboy::core::extension::trace as extension_trace;
+use homeboy::core::extension::trace::TraceCommandOutput;
 
 use super::bundle::{write_trace_experiment_bundle, TraceExperimentBundleRequest};
 use super::TraceArgs;
@@ -118,9 +118,9 @@ pub(super) fn run_compare(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     Ok((TraceCommandOutput::Compare(output), exit_code))
 }
 
-fn required_compare_path_arg<T>(value: Option<T>, field: &'static str) -> homeboy::Result<T> {
+fn required_compare_path_arg<T>(value: Option<T>, field: &'static str) -> homeboy::core::Result<T> {
     value.ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             field,
             "trace compare requires before and after aggregate JSON files",
             None,
@@ -129,9 +129,9 @@ fn required_compare_path_arg<T>(value: Option<T>, field: &'static str) -> homebo
     })
 }
 
-fn read_trace_aggregate_json(path: &Path) -> homeboy::Result<String> {
+fn read_trace_aggregate_json(path: &Path) -> homeboy::core::Result<String> {
     fs::read_to_string(path).map_err(|err| {
-        homeboy::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!("Failed to read trace aggregate {}: {}", path.display(), err),
             Some("trace.compare.read".to_string()),
         )
@@ -141,9 +141,9 @@ fn read_trace_aggregate_json(path: &Path) -> homeboy::Result<String> {
 fn parse_trace_aggregate_for_path(
     content: &str,
     path: &Path,
-) -> homeboy::Result<TraceAggregateInput> {
+) -> homeboy::core::Result<TraceAggregateInput> {
     parse_trace_aggregate_input(content).map_err(|err| {
-        homeboy::Error::internal_json(
+        homeboy::core::Error::internal_json(
             err.to_string(),
             Some(format!("parse trace aggregate {}", path.display())),
         )

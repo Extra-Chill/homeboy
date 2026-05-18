@@ -9,7 +9,7 @@ use homeboy::commands::GlobalArgs;
 use homeboy::commands;
 use homeboy::commands::utils::{args, entity_suggest, resource_policy, response as output, tty};
 use homeboy::commands::{cli, review, trace};
-use homeboy::extension::load_all_extensions;
+use homeboy::core::extension::load_all_extensions;
 
 struct ExtensionCliCommand {
     tool: String,
@@ -146,7 +146,7 @@ fn main() -> std::process::ExitCode {
         .ok()
         .flatten()
         .cloned();
-    homeboy::set_artifact_root_override(artifact_root_override.clone());
+    homeboy::core::set_artifact_root_override(artifact_root_override.clone());
 
     if let Some(extension_cmd) = try_parse_extension_cli_command(&matches, &extension_info) {
         let cli_args = cli::CliArgs {
@@ -171,7 +171,7 @@ fn main() -> std::process::ExitCode {
 
     if let Some(runner_id) = cli.runner.as_deref() {
         if !cli.command.supports_lab_runner() {
-            let err = homeboy::Error::validation_invalid_argument(
+            let err = homeboy::core::Error::validation_invalid_argument(
                 "runner",
                 "--runner is only supported for hot Lab-offload commands: lint, test, audit, bench, and trace",
                 Some(runner_id.to_string()),
@@ -189,7 +189,7 @@ fn main() -> std::process::ExitCode {
         );
     }
 
-    homeboy::set_artifact_root_override(cli.artifact_root.clone().or(artifact_root_override));
+    homeboy::core::set_artifact_root_override(cli.artifact_root.clone().or(artifact_root_override));
 
     if matches!(&cli.command, Commands::Runs(args) if args.is_bundle_export()) {
         output_file = None;
@@ -224,8 +224,8 @@ fn main() -> std::process::ExitCode {
         &cli.command,
         Commands::Upgrade(_) | Commands::Daemon(_) | Commands::SelfCmd(_)
     ) {
-        homeboy::upgrade::update_check::run_startup_check();
-        homeboy::extension::update_check::run_startup_check();
+        homeboy::core::upgrade::update_check::run_startup_check();
+        homeboy::core::extension::update_check::run_startup_check();
     }
 
     let mode = cli.command.response_mode(output_file.is_some());
@@ -235,7 +235,7 @@ fn main() -> std::process::ExitCode {
         CommandResponseMode::Json => {}
         CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {
             if !tty::require_tty_for_interactive() {
-                let err = homeboy::Error::validation_invalid_argument(
+                let err = homeboy::core::Error::validation_invalid_argument(
                     "tty",
                     "This command requires an interactive TTY. For non-interactive usage, run: homeboy ssh <target> -- <command...>",
                     None,
@@ -371,10 +371,10 @@ fn run_lab_offload_inner(
     normalized_args: &[String],
     output_file: Option<&str>,
     capture_patch: bool,
-) -> homeboy::Result<i32> {
-    let runner = homeboy::runner::load(runner_id)?;
-    if runner.kind != homeboy::runner::RunnerKind::Ssh {
-        return Err(homeboy::Error::validation_invalid_argument(
+) -> homeboy::core::Result<i32> {
+    let runner = homeboy::core::runner::load(runner_id)?;
+    if runner.kind != homeboy::core::runner::RunnerKind::Ssh {
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "runner",
             "Lab offload requires a remote SSH runner; local runners would execute on this machine",
             Some(runner.id),
@@ -385,9 +385,9 @@ fn run_lab_offload_inner(
         ));
     }
 
-    let status = homeboy::runner::status(runner_id)?;
+    let status = homeboy::core::runner::status(runner_id)?;
     if !status.connected {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "runner",
             "Lab offload requires a connected runner daemon",
             Some(runner_id.to_string()),
@@ -398,7 +398,7 @@ fn run_lab_offload_inner(
     }
 
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "workspace_root",
             "Lab offload requires runner.workspace_root so the local checkout can be mapped remotely",
             Some(runner.id.clone()),
@@ -408,10 +408,10 @@ fn run_lab_offload_inner(
         )
     })?;
     let remote_cwd = remote_cwd_for_current_checkout(workspace_root)?;
-    let source_snapshot = homeboy::source_snapshot::SourceSnapshot::collect_local(
+    let source_snapshot = homeboy::core::source_snapshot::SourceSnapshot::collect_local(
         runner_id,
         &std::env::current_dir().map_err(|err| {
-            homeboy::Error::internal_io(err.to_string(), Some("read cwd".to_string()))
+            homeboy::core::Error::internal_io(err.to_string(), Some("read cwd".to_string()))
         })?,
         Some(&remote_cwd),
         "lab_offload",
@@ -426,9 +426,9 @@ fn run_lab_offload_inner(
         runner_id,
         remote_cwd
     );
-    let (exec_output, exit_code) = homeboy::runner::exec(
+    let (exec_output, exit_code) = homeboy::core::runner::exec(
         runner_id,
-        homeboy::runner::RunnerExecOptions {
+        homeboy::core::runner::RunnerExecOptions {
             cwd: Some(remote_cwd),
             allow_ssh: false,
             command,
@@ -442,22 +442,22 @@ fn run_lab_offload_inner(
     }
     if let Some(path) = output_file {
         std::fs::write(path, &exec_output.stdout).map_err(|err| {
-            homeboy::Error::internal_io(err.to_string(), Some(format!("write {path}")))
+            homeboy::core::Error::internal_io(err.to_string(), Some(format!("write {path}")))
         })?;
     }
     print!("{}", exec_output.stdout);
     Ok(exit_code)
 }
 
-fn remote_cwd_for_current_checkout(workspace_root: &str) -> homeboy::Result<String> {
+fn remote_cwd_for_current_checkout(workspace_root: &str) -> homeboy::core::Result<String> {
     let cwd = std::env::current_dir().map_err(|err| {
-        homeboy::Error::internal_io(err.to_string(), Some("read cwd".to_string()))
+        homeboy::core::Error::internal_io(err.to_string(), Some("read cwd".to_string()))
     })?;
     let basename = cwd
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "cwd",
                 "current checkout path has no basename for Lab workspace mapping",
                 Some(cwd.display().to_string()),

@@ -19,13 +19,13 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
-use homeboy::code_audit::AuditCommandOutput;
-use homeboy::extension::lint::LintCommandOutput;
-use homeboy::extension::test::TestCommandOutput;
-use homeboy::git;
-use homeboy::plan::HomeboyPlan;
-use homeboy::quality::{build_quality_plan, QualityPlanOptions};
-use homeboy::ObservationOutputMetadata;
+use homeboy::core::code_audit::AuditCommandOutput;
+use homeboy::core::extension::lint::LintCommandOutput;
+use homeboy::core::extension::test::TestCommandOutput;
+use homeboy::core::git;
+use homeboy::core::plan::HomeboyPlan;
+use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
+use homeboy::core::ObservationOutputMetadata;
 
 use super::parse_key_val;
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
@@ -214,7 +214,7 @@ impl<Args, Output: Serialize> ReviewStageDescriptor<Args, Output> {
 fn review_stage_order(plan: &HomeboyPlan) -> Vec<String> {
     plan.steps
         .iter()
-        .filter(|step| step.status == homeboy::plan::PlanStepStatus::Ready)
+        .filter(|step| step.status == homeboy::core::plan::PlanStepStatus::Ready)
         .filter_map(|step| step.kind.strip_prefix("review.").map(str::to_string))
         .collect()
 }
@@ -262,7 +262,7 @@ fn execute_review_stage(
                 .execute(args, global, component_label)
                 .map(|(stage, exit_code)| (ReviewStageRun::Test(stage, exit_code), exit_code))
         }
-        other => Err(homeboy::Error::internal_unexpected(format!(
+        other => Err(homeboy::core::Error::internal_unexpected(format!(
             "review quality plan contains unsupported stage '{other}'"
         ))),
     }
@@ -484,7 +484,7 @@ pub fn run_markdown(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<String> 
 /// Falls back to the generic JSON envelope if the review command failed before
 /// producing an artifact.
 pub fn write_artifact_to_file(
-    result: &homeboy::Result<Value>,
+    result: &homeboy::core::Result<Value>,
     path: &str,
     _exit_code: i32,
 ) -> bool {

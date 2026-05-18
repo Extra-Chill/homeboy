@@ -20,8 +20,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use crate::extension::grammar::{self, Grammar};
+use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::extension::grammar::{self, Grammar};
 
 // ============================================================================
 // Types
@@ -559,7 +559,7 @@ fn apply_rewrites(rewrites: &[ImportRewrite], root: &Path) {
 /// This is a shared utility — same as `core_fingerprint::load_grammar_for_ext`
 /// but accessible from the symbol_graph module without circular dependency.
 fn load_grammar_for_ext(ext: &str) -> Option<Grammar> {
-    let matched = crate::extension::find_extension_for_file_ext(ext, "fingerprint")?;
+    let matched = crate::core::extension::find_extension_for_file_ext(ext, "fingerprint")?;
     let extension_path = matched.extension_path.as_deref()?;
 
     let grammar_path = Path::new(extension_path).join("grammar.toml");
@@ -700,11 +700,11 @@ mod tests {
         if !grammar_path.exists() {
             return; // Skip if grammar not installed
         }
-        let grammar = crate::extension::grammar::load_grammar(grammar_path).unwrap();
+        let grammar = crate::core::extension::grammar::load_grammar(grammar_path).unwrap();
 
         let content = r#"use std::path::Path;
 use crate::core::fixer::{insertion, Fix};
-use crate::extension::grammar;
+use crate::core::extension::grammar;
 
 pub fn hello() {}
 "#;
@@ -723,7 +723,7 @@ pub fn hello() {}
         assert_eq!(imports[1].imported_names, vec!["insertion", "Fix"]);
 
         // Third import: module-level use
-        assert_eq!(imports[2].module_path, "crate::extension");
+        assert_eq!(imports[2].module_path, "crate::core::extension");
         assert_eq!(imports[2].imported_names, vec!["grammar"]);
     }
 

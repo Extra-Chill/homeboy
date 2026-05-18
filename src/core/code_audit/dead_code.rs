@@ -11,7 +11,7 @@ use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::walker::is_test_path;
-use crate::component::AuditConfig;
+use crate::core::component::AuditConfig;
 
 /// A cross-file caller record: which files call a function and with how many args.
 struct CallerRecord {
@@ -386,7 +386,7 @@ fn is_runtime_dispatched_type(
 /// 2. **Callers exist but none pass enough args** → `UnusedParameter` (truly dead, safe to remove)
 /// 3. **Callers pass args for this position** → `IgnoredParameter` (received but ignored, likely a bug)
 fn classify_unused_param(
-    unused: &crate::extension::UnusedParam,
+    unused: &crate::core::extension::UnusedParam,
     caller_map: &HashMap<String, CallerRecord>,
 ) -> (AuditFinding, String, String) {
     let fn_name = &unused.function;
@@ -451,8 +451,8 @@ fn classify_unused_param(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::Language;
-    use crate::extension::{DeadCodeMarker, UnusedParam};
+    use crate::core::code_audit::conventions::Language;
+    use crate::core::extension::{DeadCodeMarker, UnusedParam};
     use std::collections::HashMap;
 
     fn make_fingerprint(
@@ -513,7 +513,7 @@ mod tests {
 
         // Caller in another file passes only 2 args
         let mut caller_fp = make_fingerprint("src/bar.rs", vec![], vec![], vec!["process"], vec![]);
-        caller_fp.call_sites.push(crate::extension::CallSite {
+        caller_fp.call_sites.push(crate::core::extension::CallSite {
             target: "process".to_string(),
             line: 10,
             arg_count: 2,
@@ -541,7 +541,7 @@ mod tests {
         });
 
         let mut caller_fp = make_fingerprint("src/bar.rs", vec![], vec![], vec!["process"], vec![]);
-        caller_fp.call_sites.push(crate::extension::CallSite {
+        caller_fp.call_sites.push(crate::core::extension::CallSite {
             target: "process".to_string(),
             line: 10,
             arg_count: 3,

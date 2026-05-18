@@ -1,7 +1,7 @@
-use crate::component::Component;
-use crate::engine::run_dir::{self, RunDir};
-use crate::error::{Error, Result};
-use crate::extension;
+use crate::core::component::Component;
+use crate::core::engine::run_dir::{self, RunDir};
+use crate::core::error::{Error, Result};
+use crate::core::extension;
 
 /// Run release lint via the component's extension.
 ///
@@ -40,11 +40,12 @@ pub(super) fn validate_lint_quality(component: &Component) -> Result<bool> {
         true
     } else {
         let source_path = std::path::Path::new(&component.local_path);
-        let findings = crate::extension::lint::baseline::parse_findings_file(&lint_findings_file)
-            .unwrap_or_default();
+        let findings =
+            crate::core::extension::lint::baseline::parse_findings_file(&lint_findings_file)
+                .unwrap_or_default();
 
-        if let Some(baseline) = crate::extension::lint::baseline::load_baseline(source_path) {
-            let comparison = crate::extension::lint::baseline::compare(&findings, &baseline);
+        if let Some(baseline) = crate::core::extension::lint::baseline::load_baseline(source_path) {
+            let comparison = crate::core::extension::lint::baseline::compare(&findings, &baseline);
             if comparison.drift_increased {
                 log_status!(
                     "release",
@@ -165,8 +166,8 @@ mod tests {
         code_quality_failure_message, is_runner_infrastructure_failure, validate_lint_quality,
         validate_test_quality,
     };
-    use crate::component::Component;
-    use crate::extension::RunnerOutput;
+    use crate::core::component::Component;
+    use crate::core::extension::RunnerOutput;
 
     fn component_without_quality_runners() -> Component {
         Component {

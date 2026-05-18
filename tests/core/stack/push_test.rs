@@ -1,7 +1,7 @@
 //! Tests for `core::stack::push` — publishing the materialized target branch.
 
-use crate::stack::push::{local_branch_ref, push, remote_branch_ref, PushStatus};
-use crate::stack::spec::{GitRef, StackSpec};
+use crate::core::stack::push::{local_branch_ref, push, remote_branch_ref, PushStatus};
+use crate::core::stack::spec::{GitRef, StackSpec};
 use std::process::Command;
 use tempfile::TempDir;
 

@@ -10,8 +10,8 @@ use super::diagnostic::BenchDiagnostic;
 use super::distribution::BenchRunDistribution;
 use super::parsing::{BenchMetricPhase, BenchResults, BenchScenario};
 use super::run::{BenchRunFailure, BenchRunWorkflowResult};
-use crate::budget::BudgetFinding;
-use crate::rig::RigStateSnapshot;
+use crate::core::budget::BudgetFinding;
+use crate::core::rig::RigStateSnapshot;
 
 #[derive(Serialize)]
 pub struct BenchCommandOutput {
@@ -1125,8 +1125,8 @@ fn format_diagnostic_hint_suffix(diagnostics: &[BenchDiagnostic]) -> String {
 mod tests {
     use super::super::diagnostic::BenchDiagnosticSource;
     use super::*;
-    use crate::extension::bench::artifact::BenchArtifact;
-    use crate::extension::bench::parsing::{
+    use crate::core::extension::bench::artifact::BenchArtifact;
+    use crate::core::extension::bench::parsing::{
         BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, BenchMetrics, BenchRunSnapshot,
         BenchScenario,
     };

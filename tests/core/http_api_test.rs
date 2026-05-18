@@ -1,9 +1,9 @@
-use homeboy::api_jobs::{JobEventKind, JobStatus, JobStore};
-use homeboy::http_api::{
+use homeboy::core::api_jobs::{JobEventKind, JobStatus, JobStore};
+use homeboy::core::http_api::{
     self, AnalysisJobRunOutput, AnalysisJobRunner, HttpApiRequest, HttpEndpoint, HttpMethod,
     JobReadyRunKind,
 };
-use homeboy::observation::{
+use homeboy::core::observation::{
     NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
 };
 
@@ -13,7 +13,7 @@ use crate::test_support::with_isolated_home;
 struct FakeAnalysisJobRunner;
 
 impl AnalysisJobRunner for FakeAnalysisJobRunner {
-    fn run_analysis_job(&self, argv: Vec<String>) -> homeboy::Result<AnalysisJobRunOutput> {
+    fn run_analysis_job(&self, argv: Vec<String>) -> homeboy::core::Result<AnalysisJobRunOutput> {
         Ok(AnalysisJobRunOutput {
             exit_code: 0,
             output: serde_json::json!({ "argv": argv }),
@@ -210,7 +210,7 @@ fn test_handle_with_jobs() {
     store
         .append_event(
             job.id,
-            homeboy::api_jobs::JobEventKind::Stdout,
+            homeboy::core::api_jobs::JobEventKind::Stdout,
             Some("audit output".to_string()),
             None,
         )

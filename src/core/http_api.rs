@@ -10,12 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::api_jobs::JobStore;
-use crate::error::{Error, Result};
-use crate::observation::{
+use crate::core::api_jobs::JobStore;
+use crate::core::error::{Error, Result};
+use crate::core::observation::{
     running_status_note, FindingListFilter, ObservationStore, RunListFilter, RunRecord,
 };
-use crate::{component, git, rig, stack};
+use crate::core::{component, git, rig, stack};
 
 mod analysis_job_runner;
 
@@ -93,7 +93,7 @@ pub struct RunDetail {
     pub summary: RunSummary,
     pub homeboy_version: Option<String>,
     pub metadata: Value,
-    pub artifacts: Vec<crate::observation::ArtifactRecord>,
+    pub artifacts: Vec<crate::core::observation::ArtifactRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

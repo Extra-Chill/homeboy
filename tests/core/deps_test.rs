@@ -1,5 +1,5 @@
-use homeboy::component::{Component, DependencyStackEdge};
-use homeboy::deps::{self, ComposerAction};
+use homeboy::core::component::{Component, DependencyStackEdge};
+use homeboy::core::deps::{self, ComposerAction};
 use std::fs;
 use tempfile::tempdir;
 

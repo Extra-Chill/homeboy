@@ -1,5 +1,5 @@
-use crate::error::{Error, Result};
-use crate::project::{self, Project};
+use crate::core::error::{Error, Result};
+use crate::core::project::{self, Project};
 
 use super::Server;
 

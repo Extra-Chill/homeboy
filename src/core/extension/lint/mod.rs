@@ -2,8 +2,8 @@ pub mod baseline;
 pub mod report;
 pub mod run;
 
-use crate::component::Component;
-use crate::extension::{ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
+use crate::core::component::Component;
+use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
 
 pub use baseline::{BaselineComparison, LintBaseline, LintBaselineMetadata, LintFinding};
 pub use report::LintCommandOutput;
@@ -12,12 +12,12 @@ pub use run::{
     LintRunWorkflowResult,
 };
 
-use crate::engine::run_dir::RunDir;
+use crate::core::engine::run_dir::RunDir;
 
 pub fn resolve_lint_command(
     component: &Component,
-) -> crate::error::Result<ExtensionExecutionContext> {
-    crate::extension::resolve_execution_context(component, ExtensionCapability::Lint)
+) -> crate::core::error::Result<ExtensionExecutionContext> {
+    crate::core::extension::resolve_execution_context(component, ExtensionCapability::Lint)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -34,7 +34,7 @@ pub fn build_lint_runner(
     category: Option<&str>,
     step: Option<&str>,
     run_dir: &RunDir,
-) -> crate::Result<ExtensionRunner> {
+) -> crate::core::Result<ExtensionRunner> {
     let resolved = resolve_lint_command(component)?;
 
     Ok(ExtensionRunner::for_context(resolved)

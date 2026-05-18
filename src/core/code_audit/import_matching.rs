@@ -694,7 +694,7 @@ fn production(values: BTreeMap<String, f64>) {}
     #[test]
     fn content_defines_name_skips_use_statements() {
         assert!(!content_defines_name(
-            "use crate::defaults::default_true;",
+            "use crate::core::defaults::default_true;",
             "default_true"
         ));
     }

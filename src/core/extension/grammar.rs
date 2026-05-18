@@ -28,8 +28,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use crate::engine::local_files;
-use crate::error::{Error, Result};
+use crate::core::engine::local_files;
+use crate::core::error::{Error, Result};
 
 // ============================================================================
 // Grammar definition (loaded from extension TOML/JSON)
@@ -1363,13 +1363,13 @@ mod tests {
 
     #[test]
     fn extract_rust_imports() {
-        let content = "use std::path::Path;\nuse crate::error::Result;\n\nfn foo() {}\n";
+        let content = "use std::path::Path;\nuse crate::core::error::Result;\n\nfn foo() {}\n";
         let grammar = rust_grammar();
         let paths = import_paths(&extract(content, &grammar));
 
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], "std::path::Path");
-        assert_eq!(paths[1], "crate::error::Result");
+        assert_eq!(paths[1], "crate::core::error::Result");
     }
 
     #[test]
@@ -1627,7 +1627,7 @@ mod integration_tests {
         // Test against a sample of Rust code
         let sample = r#"
 use std::path::Path;
-use crate::error::Result;
+use crate::core::error::Result;
 
 pub struct Config {
     data: String,

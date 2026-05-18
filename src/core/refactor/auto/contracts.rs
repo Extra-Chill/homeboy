@@ -1,4 +1,4 @@
-use crate::code_audit::conventions::AuditFinding;
+use crate::core::code_audit::conventions::AuditFinding;
 use crate::core::refactor::decompose;
 
 /// A planned fix for a single file.

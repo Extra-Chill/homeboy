@@ -4,9 +4,9 @@
 //! the underlying HTTP client or keychain implementation.
 
 use super::http::ApiClient;
-use crate::error::Result;
-use crate::keychain;
-use crate::project;
+use crate::core::error::Result;
+use crate::core::keychain;
+use crate::core::project;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -194,7 +194,7 @@ fn redact(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::VariableSource;
+    use crate::core::project::VariableSource;
 
     #[test]
     fn test_redact() {

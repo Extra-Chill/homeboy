@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::extension::{self, grammar, grammar_items, ExtensionManifest, ParsedItem};
+use crate::core::extension::{self, grammar, grammar_items, ExtensionManifest, ParsedItem};
 
 /// Find a refactor-capable extension for a file based on its extension.
 pub(crate) fn find_refactor_extension(file_path: &str) -> Option<ExtensionManifest> {

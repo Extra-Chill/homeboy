@@ -1,8 +1,8 @@
-use crate::component::Component;
-use crate::error::{Error, Result};
-use crate::plan::PlanStep;
-use crate::release::types::{ReleaseState, ReleaseStepResult};
-use crate::version;
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
+use crate::core::plan::PlanStep;
+use crate::core::release::types::{ReleaseState, ReleaseStepResult};
+use crate::core::release::version;
 
 use super::step_success;
 
@@ -52,10 +52,10 @@ pub(crate) fn run_changelog_finalize(
 #[cfg(test)]
 mod tests {
     use super::run_changelog_finalize;
-    use crate::component::{Component, VersionTarget};
-    use crate::plan::PlanStep;
-    use crate::release::types::ReleaseState;
-    use crate::release::ReleaseStepStatus;
+    use crate::core::component::{Component, VersionTarget};
+    use crate::core::plan::PlanStep;
+    use crate::core::release::types::ReleaseState;
+    use crate::core::release::ReleaseStepStatus;
 
     #[test]
     fn test_run_changelog_finalize() {

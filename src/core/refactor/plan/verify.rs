@@ -1,10 +1,10 @@
-use crate::code_audit::CodeAuditResult;
-use crate::engine::undo::UndoSnapshot;
-use crate::refactor::auto as fixer;
+use crate::core::code_audit::CodeAuditResult;
+use crate::core::engine::undo::UndoSnapshot;
+use crate::core::refactor::auto as fixer;
 use serde::Serialize;
 use std::path::Path;
 
-pub use crate::code_audit::{
+pub use crate::core::code_audit::{
     finding_fingerprint, score_delta, weighted_finding_score_with, AuditConvergenceScoring,
 };
 
@@ -15,7 +15,7 @@ pub(crate) fn rewrite_callers_after_dedup(fix: &fixer::Fix, root: &Path) {
         if !matches!(insertion.kind, fixer::InsertionKind::FunctionRemoval { .. }) {
             continue;
         }
-        if insertion.finding != crate::code_audit::AuditFinding::DuplicateFunction {
+        if insertion.finding != crate::core::code_audit::AuditFinding::DuplicateFunction {
             continue;
         }
 
@@ -82,11 +82,11 @@ pub struct AuditRefactorOutcome {
 
 pub fn run_audit_refactor(
     initial_result: CodeAuditResult,
-    only_kinds: &[crate::code_audit::AuditFinding],
-    exclude_kinds: &[crate::code_audit::AuditFinding],
+    only_kinds: &[crate::core::code_audit::AuditFinding],
+    exclude_kinds: &[crate::core::code_audit::AuditFinding],
     scoring: AuditConvergenceScoring,
     write: bool,
-) -> crate::Result<AuditRefactorOutcome> {
+) -> crate::core::Result<AuditRefactorOutcome> {
     let current_result = initial_result;
     let final_fix_result;
     let final_policy_summary;
@@ -137,9 +137,11 @@ pub fn run_audit_refactor(
     })
 }
 
-fn resolve_verify_config(component_id: &str) -> Option<crate::extension::AutofixVerifyConfig> {
-    use crate::component;
-    use crate::extension;
+fn resolve_verify_config(
+    component_id: &str,
+) -> Option<crate::core::extension::AutofixVerifyConfig> {
+    use crate::core::component;
+    use crate::core::extension;
 
     let comp = component::load(component_id).ok()?;
     let extensions = comp.extensions.as_ref()?;
@@ -155,10 +157,10 @@ fn resolve_verify_config(component_id: &str) -> Option<crate::extension::Autofix
 
 fn run_fix_iteration(
     audit_result: &CodeAuditResult,
-    only_kinds: &[crate::code_audit::AuditFinding],
-    exclude_kinds: &[crate::code_audit::AuditFinding],
+    only_kinds: &[crate::core::code_audit::AuditFinding],
+    exclude_kinds: &[crate::core::code_audit::AuditFinding],
     scoring: AuditConvergenceScoring,
-) -> crate::Result<(
+) -> crate::core::Result<(
     fixer::FixResult,
     fixer::PolicySummary,
     AuditRefactorIterationSummary,

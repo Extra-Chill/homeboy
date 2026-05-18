@@ -9,10 +9,12 @@
 //! 4. Scenarios missing from some runs aggregate from the runs that emitted
 //!    them instead of failing the whole bench.
 
-use crate::extension::bench::aggregation::aggregate_runs;
-use crate::extension::bench::artifact::BenchArtifact;
-use crate::extension::bench::parsing::{BenchResults, BenchScenario};
-use crate::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
+use crate::core::extension::bench::aggregation::aggregate_runs;
+use crate::core::extension::bench::artifact::BenchArtifact;
+use crate::core::extension::bench::parsing::{BenchResults, BenchScenario};
+use crate::core::extension::bench::test_support::{
+    results_with_scenarios, scenario_with_iterations,
+};
 
 fn scenario(id: &str, metrics: &[(&str, f64)]) -> BenchScenario {
     scenario_with_iterations(id, metrics, 1)
