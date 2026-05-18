@@ -139,15 +139,32 @@ fi
 # `git pull --ff-only` here as a workaround, which was the original symptom
 # of the upstream gap fixed in homeboy core. See homeboy PR #2368.
 
+# Quality gates run in separate jobs before this script, so --skip-checks
+# is always safe here. The publish and github.release flags are
+# configurable: downstream consumers that wire up extensions like
+# homeboy-extensions/wordpress (release.package + release.publish) want
+# the full pipeline by default. Components that publish artifacts or
+# create GitHub Releases outside the homeboy pipeline (binary cross-
+# compile, hand-rolled gh release create, …) opt out via the action
+# inputs that set these env vars.
+RELEASE_SKIP_PUBLISH="${RELEASE_SKIP_PUBLISH:-false}"
+RELEASE_SKIP_GITHUB_RELEASE="${RELEASE_SKIP_GITHUB_RELEASE:-false}"
+
 RELEASE_OUTPUT_FILE="$(mktemp)"
 RELEASE_ARGS=(
   "${COMP_ID}"
   --path "${WORKSPACE}"
   --skip-checks
-  --skip-publish
-  --no-github-release
   --git-identity bot
 )
+
+if [ "${RELEASE_SKIP_PUBLISH}" = "true" ]; then
+  RELEASE_ARGS+=(--skip-publish)
+fi
+
+if [ "${RELEASE_SKIP_GITHUB_RELEASE}" = "true" ]; then
+  RELEASE_ARGS+=(--no-github-release)
+fi
 
 if [ "${DRY_RUN}" = "true" ]; then
   RELEASE_ARGS+=(--dry-run)
