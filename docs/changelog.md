@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.187.4] - 2026-05-18
+
+### Changed
+- Refactor extension module boundaries
+- reuse daemon pid helper
+
+### Fixed
+- allow head release artifacts in worktree
+- add runner artifact cleanup
+
 ## [0.187.3] - 2026-05-18
 
 ### Changed
