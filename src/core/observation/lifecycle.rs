@@ -101,7 +101,7 @@ pub fn running_status_note(run: &RunRecord) -> Option<String> {
         );
     };
 
-    if pid_is_running(owner_pid) {
+    if crate::core::daemon::pid_is_running(owner_pid) {
         None
     } else {
         Some(
@@ -119,22 +119,6 @@ pub fn run_owner_pid(run: &RunRecord) -> Option<u32> {
         .or_else(|| run.metadata_json.get("process_id"))
         .and_then(|pid| pid.as_u64())
         .and_then(|pid| u32::try_from(pid).ok())
-}
-
-fn pid_is_running(pid: u32) -> bool {
-    if pid > i32::MAX as u32 {
-        return false;
-    }
-
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as libc::pid_t, 0) == 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        pid == std::process::id()
-    }
 }
 
 #[cfg(test)]
