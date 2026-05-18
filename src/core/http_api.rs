@@ -6,19 +6,22 @@
 //! so HTTP requests can return immediately while clients poll job events.
 
 use base64::Engine;
-use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::api_jobs::JobStore;
-use crate::cli_surface::{Cli, Commands};
-use crate::commands::{self, GlobalArgs};
 use crate::error::{Error, Result};
 use crate::observation::{
     running_status_note, FindingListFilter, ObservationStore, RunListFilter, RunRecord,
 };
 use crate::{component, git, rig, stack};
+
+mod analysis_job_runner;
+
+pub use analysis_job_runner::{
+    AnalysisJobRunOutput, AnalysisJobRunner, UnsupportedAnalysisJobRunner,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -238,6 +241,18 @@ pub fn handle(request: HttpApiRequest) -> Result<HttpApiResponse> {
 
 /// Execute a routed HTTP API request against the daemon-owned in-memory job store.
 pub fn handle_with_jobs(request: HttpApiRequest, job_store: &JobStore) -> Result<HttpApiResponse> {
+    handle_with_jobs_and_runner(request, job_store, UnsupportedAnalysisJobRunner)
+}
+
+/// Execute a routed HTTP API request with an injected analysis job runner.
+pub fn handle_with_jobs_and_runner<R>(
+    request: HttpApiRequest,
+    job_store: &JobStore,
+    analysis_runner: R,
+) -> Result<HttpApiResponse>
+where
+    R: AnalysisJobRunner,
+{
     let endpoint = route(request.method, &request.path)?;
     let body = match &endpoint {
         HttpEndpoint::Components => json!({
@@ -346,7 +361,9 @@ pub fn handle_with_jobs(request: HttpApiRequest, job_store: &JobStore) -> Result
             "command": "api.jobs.cancel",
             "job": job_store.cancel(parse_job_id(id)?, "cancel requested via HTTP API")?,
         }),
-        HttpEndpoint::JobReadyRun { kind } => enqueue_analysis_job(job_store, *kind, request.body)?,
+        HttpEndpoint::JobReadyRun { kind } => {
+            enqueue_analysis_job(job_store, *kind, request.body, analysis_runner)?
+        }
     };
 
     Ok(HttpApiResponse {
@@ -478,30 +495,29 @@ fn enqueue_analysis_job(
     job_store: &JobStore,
     kind: JobReadyRunKind,
     body: Option<Value>,
+    analysis_runner: impl AnalysisJobRunner,
 ) -> Result<Value> {
     let request = AnalysisJobRequest::from_body(kind, body)?;
     let argv = request.argv();
-    let command = parse_analysis_command(argv.clone())?;
     let operation = format!("analysis.{}", job_ready_slug(kind));
     let request_summary = request.summary();
+    let command_label = request.command_label();
     let runner = job_store.run_background(operation, move |job| {
         job.progress(json!({
             "phase": "started",
-            "command": request.command_label(),
+            "command": command_label,
             "job_id": job.job_id(),
         }))?;
 
-        let global = GlobalArgs {};
-        let (result, exit_code) = commands::run_json(command, &global);
-        let output = result?;
+        let output = analysis_runner.run_analysis_job(argv)?;
         job.progress(json!({
             "phase": "finished",
-            "exit_code": exit_code,
+            "exit_code": output.exit_code,
         }))?;
         Ok(json!({
-            "command": request.command_label(),
-            "exit_code": exit_code,
-            "output": output,
+            "command": command_label,
+            "exit_code": output.exit_code,
+            "output": output.output,
         }))
     });
     let job = job_store.get(runner.job_id)?;
@@ -515,20 +531,6 @@ fn enqueue_analysis_job(
         },
         "request": request_summary,
     }))
-}
-
-fn parse_analysis_command(argv: Vec<String>) -> Result<Commands> {
-    let cli = Cli::try_parse_from(argv).map_err(|error| {
-        Error::validation_invalid_argument(
-            "body",
-            error.to_string(),
-            None,
-            Some(vec![
-                "Use the documented JSON request body contract for this endpoint".to_string(),
-            ]),
-        )
-    })?;
-    Ok(cli.command)
 }
 
 #[derive(Debug, Clone)]
