@@ -20,7 +20,9 @@
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.sh",
     "validate": "scripts/validate.sh",
-    "format": "scripts/format.sh"
+    "format": "scripts/format.sh",
+    "compiler_warnings": "scripts/compiler-warnings.py",
+    "compiler_warning_fixes": "scripts/compiler-warning-fixes.py"
   },
   "lint": {
     "extension_script": "scripts/lint-runner.sh"
