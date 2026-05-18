@@ -352,6 +352,8 @@ jobs:
           commands: release
           expected-commands: audit,lint,test
           release-dry-run: ${{ inputs.dry-run || 'false' }}
+          release-skip-publish: 'true'
+          release-skip-github-release: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
       - name: Use existing release tag
