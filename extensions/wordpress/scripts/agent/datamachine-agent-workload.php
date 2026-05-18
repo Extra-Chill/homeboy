@@ -1096,6 +1096,61 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_head_branch' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_artifact_engine_key' ) ) {
+    function homeboy_datamachine_agent_artifact_engine_key( array $config ): string {
+        $engine_key = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
+        if ( '' !== $engine_key ) {
+            return $engine_key;
+        }
+
+        $agent_slug = homeboy_datamachine_agent_slug_fragment( homeboy_datamachine_agent_scalar( $config, 'agent_slug', 'agent' ) );
+        return str_replace( array( '-', '.' ), '_', $agent_slug );
+    }
+
+    function homeboy_datamachine_agent_record_artifact_pr_result( array $engine_data, array $config, string $pr_url, string $branch, array $paths ): array {
+        if ( '' === $pr_url ) {
+            return $engine_data;
+        }
+
+        $repo        = homeboy_datamachine_agent_scalar( $config, 'target_repo', homeboy_datamachine_agent_scalar( $config['artifact_export'] ?? array(), 'repo' ) );
+        $engine_key  = homeboy_datamachine_agent_artifact_engine_key( $config );
+        $tool_result = array(
+            'tool_name' => 'create_github_pull_request',
+            'success'   => true,
+            'repo'      => $repo,
+            'head'      => $branch,
+            'url'       => $pr_url,
+            'result'    => array(
+                'success'  => true,
+                'html_url' => $pr_url,
+                'head'     => $branch,
+            ),
+        );
+
+        $engine_data = homeboy_datamachine_agent_record_pr_tool_result( $engine_data, $config, $tool_result );
+        if ( '' === $engine_key ) {
+            return $engine_data;
+        }
+
+        if ( ! isset( $engine_data[ $engine_key ] ) || ! is_array( $engine_data[ $engine_key ] ) ) {
+            $engine_data[ $engine_key ] = array();
+        }
+
+        $engine_data[ $engine_key ] = array_merge(
+            $engine_data[ $engine_key ],
+            array(
+                'success'         => true,
+                'pr_url'          => $pr_url,
+                'head'            => $branch,
+                'artifact_export' => true,
+                'artifact_paths'  => array_values( $paths ),
+            )
+        );
+
+        return $engine_data;
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
     function homeboy_datamachine_agent_export_job_artifacts( int $job_id, array $config, bool $pr_opened, array $engine_data = array(), array $run_context = array() ): array {
         $export_config = is_array( $config['artifact_export'] ?? null ) ? $config['artifact_export'] : array();
@@ -1254,9 +1309,10 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
 
         return array_filter(
             array(
-                'branch' => $branch,
-                'paths'  => $written,
-                'pr_url' => $pr_url,
+                'branch'      => $branch,
+                'paths'       => $written,
+                'pr_url'      => $pr_url,
+                'engine_data' => homeboy_datamachine_agent_record_artifact_pr_result( $engine_data, $config, $pr_url, $branch, $written ),
             )
         );
     }
@@ -2729,6 +2785,10 @@ if ( ! empty( $runner_workspace_capture['changed'] ) && ! $pr_opened ) {
     $artifact_pr_context['fallback_pull_request'] = $fallback_pull_request;
 }
 $job_artifact_exports = homeboy_datamachine_agent_export_job_artifacts( $job_id, $config, $pr_opened, $engine_data, $artifact_pr_context );
+if ( is_array( $job_artifact_exports['engine_data'] ?? null ) ) {
+    $engine_data = $job_artifact_exports['engine_data'];
+    $pr_opened   = true;
+}
 
 $metadata += array(
     'agent_id'             => $agent_id,
