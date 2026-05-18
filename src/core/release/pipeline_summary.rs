@@ -7,11 +7,16 @@ pub(super) fn derive_overall_status(results: &[ReleaseStepResult]) -> ReleaseSte
     let has_failed = results
         .iter()
         .any(|r| matches!(r.status, ReleaseStepStatus::Failed));
+    let has_missing = results
+        .iter()
+        .any(|r| matches!(r.status, ReleaseStepStatus::Missing));
 
-    if has_failed && has_success {
+    if (has_failed || has_missing) && has_success {
         ReleaseStepStatus::PartialSuccess
     } else if has_failed {
         ReleaseStepStatus::Failed
+    } else if has_missing {
+        ReleaseStepStatus::Missing
     } else {
         ReleaseStepStatus::Success
     }
@@ -160,6 +165,26 @@ mod tests {
         let results = vec![
             step("version", ReleaseStepStatus::Success),
             step("release.prepare", ReleaseStepStatus::Failed),
+        ];
+
+        assert_eq!(
+            derive_overall_status(&results),
+            ReleaseStepStatus::PartialSuccess
+        );
+    }
+
+    #[test]
+    fn derive_overall_status_marks_missing_steps_non_successful() {
+        let results = vec![step("package", ReleaseStepStatus::Missing)];
+
+        assert_eq!(derive_overall_status(&results), ReleaseStepStatus::Missing);
+    }
+
+    #[test]
+    fn derive_overall_status_marks_success_plus_missing_partial() {
+        let results = vec![
+            step("version", ReleaseStepStatus::Success),
+            step("package", ReleaseStepStatus::Missing),
         ];
 
         assert_eq!(

@@ -6,6 +6,7 @@ use super::context::load_component;
 use super::types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseBumpPolicyOptions,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePlan, ReleaseRun,
+    ReleaseStepStatus,
 };
 
 pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
@@ -191,6 +192,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     let tag = new_version
         .as_ref()
         .map(|v| format_tag(v, monorepo.as_ref()));
+    let release_step_exit = release_run_failure_exit(&run_result);
     let post_release_exit = if has_post_release_warnings(&run_result) {
         3
     } else {
@@ -203,7 +205,9 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         .filter(|deployment| deployment.summary.failed > 0)
         .map(|_| 1)
         .unwrap_or(0);
-    let exit_code = if deploy_exit_code != 0 {
+    let exit_code = if release_step_exit != 0 {
+        release_step_exit
+    } else if deploy_exit_code != 0 {
         // Deploy failed after the release was already tagged and pushed.
         // The tag cannot be rolled back safely, so warn the user to retry.
         if let Some(ref t) = tag {
@@ -334,6 +338,15 @@ fn has_post_release_warnings(run: &ReleaseRun) -> bool {
                 .and_then(|v| v.as_bool())
                 == Some(false)
     })
+}
+
+fn release_run_failure_exit(run: &ReleaseRun) -> i32 {
+    match run.result.status {
+        ReleaseStepStatus::Success | ReleaseStepStatus::Skipped => 0,
+        ReleaseStepStatus::PartialSuccess
+        | ReleaseStepStatus::Failed
+        | ReleaseStepStatus::Missing => 1,
+    }
 }
 
 fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
@@ -775,6 +788,31 @@ mod tests {
         };
 
         assert!(has_post_release_warnings(&run));
+    }
+
+    #[test]
+    fn release_run_failure_exit_fails_partial_release_runs() {
+        let run = ReleaseRun {
+            component_id: "demo".to_string(),
+            enabled: true,
+            result: ReleaseRunResult {
+                steps: vec![ReleaseStepResult {
+                    id: "git.push".to_string(),
+                    step_type: "git.push".to_string(),
+                    status: ReleaseStepStatus::Failed,
+                    missing: vec![],
+                    warnings: vec![],
+                    hints: vec![],
+                    data: None,
+                    error: Some("push rejected".to_string()),
+                }],
+                status: ReleaseStepStatus::PartialSuccess,
+                warnings: vec![],
+                summary: None,
+            },
+        };
+
+        assert_eq!(release_run_failure_exit(&run), 1);
     }
 
     // ----- Recover-time orphan-tag warning (issue #2234 ask #3) -----
