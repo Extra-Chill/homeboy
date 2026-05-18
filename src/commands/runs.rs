@@ -1325,15 +1325,14 @@ mod tests {
                 .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
                 .expect("run");
             let span = store
-                .record_trace_span(NewTraceSpanRecord {
-                    run_id: run.id.clone(),
-                    span_id: "boot".to_string(),
-                    status: "ok".to_string(),
-                    duration_ms: Some(12.5),
-                    from_event: Some("start".to_string()),
-                    to_event: Some("ready".to_string()),
-                    metadata_json: serde_json::json!({ "phase": "cold" }),
-                })
+                .record_trace_span(
+                    NewTraceSpanRecord::builder(&run.id, "boot", "ok")
+                        .duration_ms(Some(12.5))
+                        .from_event(Some("start"))
+                        .to_event(Some("ready"))
+                        .metadata(serde_json::json!({ "phase": "cold" }))
+                        .build(),
+                )
                 .expect("span");
             let output = home.path().join("trace-bundle");
 
@@ -1366,15 +1365,12 @@ mod tests {
                     .record_artifact(&run.id, "trace_results", &artifact_path)
                     .expect("artifact record");
                 store
-                    .record_trace_span(NewTraceSpanRecord {
-                        run_id: run.id.clone(),
-                        span_id: "first".to_string(),
-                        status: "ok".to_string(),
-                        duration_ms: Some(1.0),
-                        from_event: None,
-                        to_event: Some("done".to_string()),
-                        metadata_json: serde_json::json!({}),
-                    })
+                    .record_trace_span(
+                        NewTraceSpanRecord::builder(&run.id, "first", "ok")
+                            .duration_ms(Some(1.0))
+                            .to_event(Some("done"))
+                            .build(),
+                    )
                     .expect("span");
                 store
                     .record_finding(&NewFindingRecord {

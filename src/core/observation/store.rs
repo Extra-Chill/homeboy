@@ -1611,15 +1611,14 @@ mod api_coverage_tests {
             let run = store.start_run(new_run("trace")).expect("start");
 
             let span = store
-                .record_trace_span(NewTraceSpanRecord {
-                    run_id: run.id.clone(),
-                    span_id: "boot_to_ready".to_string(),
-                    status: "ok".to_string(),
-                    duration_ms: Some(125.0),
-                    from_event: Some("runner.boot".to_string()),
-                    to_event: Some("runner.ready".to_string()),
-                    metadata_json: serde_json::json!({ "source": "test" }),
-                })
+                .record_trace_span(
+                    NewTraceSpanRecord::builder(&run.id, "boot_to_ready", "ok")
+                        .duration_ms(Some(125.0))
+                        .from_event(Some("runner.boot"))
+                        .to_event(Some("runner.ready"))
+                        .metadata(serde_json::json!({ "source": "test" }))
+                        .build(),
+                )
                 .expect("trace span");
 
             let spans = store.list_trace_spans(&run.id).expect("spans");
@@ -1635,15 +1634,14 @@ mod api_coverage_tests {
             let source = ObservationStore::open_initialized().expect("source");
             let run = source.start_run(new_run("trace")).expect("run");
             let span = source
-                .record_trace_span(NewTraceSpanRecord {
-                    run_id: run.id.clone(),
-                    span_id: "boot".to_string(),
-                    status: "ok".to_string(),
-                    duration_ms: Some(42.0),
-                    from_event: Some("start".to_string()),
-                    to_event: Some("ready".to_string()),
-                    metadata_json: serde_json::json!({ "source": "import-test" }),
-                })
+                .record_trace_span(
+                    NewTraceSpanRecord::builder(&run.id, "boot", "ok")
+                        .duration_ms(Some(42.0))
+                        .from_event(Some("start"))
+                        .to_event(Some("ready"))
+                        .metadata(serde_json::json!({ "source": "import-test" }))
+                        .build(),
+                )
                 .expect("span");
 
             let target = ObservationStore::open_initialized().expect("target");
@@ -1660,26 +1658,22 @@ mod api_coverage_tests {
             let run = store.start_run(new_run("trace")).expect("start");
 
             store
-                .record_trace_span(NewTraceSpanRecord {
-                    run_id: run.id.clone(),
-                    span_id: "first".to_string(),
-                    status: "ok".to_string(),
-                    duration_ms: Some(10.0),
-                    from_event: Some("runner.first".to_string()),
-                    to_event: Some("runner.second".to_string()),
-                    metadata_json: serde_json::json!({}),
-                })
+                .record_trace_span(
+                    NewTraceSpanRecord::builder(&run.id, "first", "ok")
+                        .duration_ms(Some(10.0))
+                        .from_event(Some("runner.first"))
+                        .to_event(Some("runner.second"))
+                        .build(),
+                )
                 .expect("first span");
             store
-                .record_trace_span(NewTraceSpanRecord {
-                    run_id: run.id.clone(),
-                    span_id: "second".to_string(),
-                    status: "skipped".to_string(),
-                    duration_ms: None,
-                    from_event: Some("runner.second".to_string()),
-                    to_event: Some("runner.third".to_string()),
-                    metadata_json: serde_json::json!({ "missing": ["runner.third"] }),
-                })
+                .record_trace_span(
+                    NewTraceSpanRecord::builder(&run.id, "second", "skipped")
+                        .from_event(Some("runner.second"))
+                        .to_event(Some("runner.third"))
+                        .metadata(serde_json::json!({ "missing": ["runner.third"] }))
+                        .build(),
+                )
                 .expect("second span");
 
             let spans = store.list_trace_spans(&run.id).expect("spans");

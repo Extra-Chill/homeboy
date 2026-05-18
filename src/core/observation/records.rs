@@ -8,11 +8,13 @@ use crate::extension::lint::LintFinding;
 mod run_builder;
 mod run_status;
 mod trace_run_builder;
+mod trace_span_builder;
 mod triage_items;
 
 pub use run_builder::NewRunRecordBuilder;
 pub use run_status::RunStatus;
 pub use trace_run_builder::NewTraceRunRecordBuilder;
+pub use trace_span_builder::NewTraceSpanRecordBuilder;
 pub use triage_items::{NewTriageItemRecord, TriageItemRecord, TriagePullRequestSignals};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
