@@ -108,7 +108,7 @@ enum ProjectComponentsCommand {
     Set {
         /// Project ID
         project_id: String,
-        /// JSON array of attachments: [{"id":"foo","local_path":"/repo"}]
+        /// JSON array of attachments: [{"id":"foo","local_path":"/repo","remote_path":"wp-content/plugins/foo"}]
         #[arg(long)]
         json: String,
     },

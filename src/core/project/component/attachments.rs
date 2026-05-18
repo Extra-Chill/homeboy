@@ -119,6 +119,7 @@ pub fn attach_component_path(project_id: &str, component_id: &str, local_path: &
         project.components.push(ProjectComponentAttachment {
             id: component_id.to_string(),
             local_path: local_path.to_string(),
+            remote_path: None,
         });
     }
 
@@ -250,6 +251,7 @@ mod tests {
             project.components.push(ProjectComponentAttachment {
                 id: id.to_string(),
                 local_path: format!("/workspace/{}", id),
+                remote_path: None,
             });
         }
         project
