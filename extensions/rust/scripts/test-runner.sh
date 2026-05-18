@@ -205,9 +205,19 @@ TEST_ARGS=(
 # Cargo test accepts positional test name patterns after --.
 # We extract module paths from file paths (e.g., src/commands/audit.rs → commands::audit).
 SCOPE_FILTER_ARGS=()
+SCOPE_INTEGRATION_ARGS=()
 if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     while IFS= read -r test_file; do
         [ -z "$test_file" ] && continue
+        if [[ "$test_file" == tests/*.rs && "$test_file" != tests/*/* ]]; then
+            test_target="${test_file#tests/}"
+            test_target="${test_target%.rs}"
+            if [ -n "$test_target" ]; then
+                SCOPE_INTEGRATION_ARGS+=("$test_target")
+            fi
+            continue
+        fi
+
         # Convert file path to Rust module path for cargo test filtering
         # e.g., src/commands/audit.rs → commands::audit
         #        src/utils/baseline.rs → utils::baseline
@@ -222,7 +232,14 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
         fi
     done <<< "${HOMEBOY_CHANGED_TEST_FILES}"
 
-    if [ ${#SCOPE_FILTER_ARGS[@]} -gt 0 ]; then
+    if [ ${#SCOPE_INTEGRATION_ARGS[@]} -gt 0 ] && [ ${#SCOPE_FILTER_ARGS[@]} -gt 0 ]; then
+        echo "Changed files include integration and inline tests; running full cargo test."
+    elif [ ${#SCOPE_INTEGRATION_ARGS[@]} -gt 0 ]; then
+        for test_target in "${SCOPE_INTEGRATION_ARGS[@]}"; do
+            TEST_ARGS+=(--test "$test_target")
+        done
+        echo "Scoped to changed integration tests: ${SCOPE_INTEGRATION_ARGS[*]}"
+    elif [ ${#SCOPE_FILTER_ARGS[@]} -gt 0 ]; then
         # Join module paths with | for regex-style OR matching
         FILTER=$(IFS='|'; echo "${SCOPE_FILTER_ARGS[*]}")
         TEST_ARGS+=(-- "$FILTER")
