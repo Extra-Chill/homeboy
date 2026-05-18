@@ -2,9 +2,23 @@ mod default_pattern_for_file;
 mod types;
 mod version;
 
-pub use default_pattern_for_file::*;
-pub use types::*;
-pub use version::*;
+pub(crate) use default_pattern_for_file::{
+    build_init_warnings, read_component_snapshot, resolve_version_file_path,
+};
+use default_pattern_for_file::{
+    build_version_parse_error, parse_versions, replace_since_tag_placeholders,
+    resolve_target_pattern,
+};
+pub use default_pattern_for_file::{
+    default_pattern_for_file, read_component_version, read_version,
+};
+#[cfg(test)]
+use types::DEFAULT_SINCE_PLACEHOLDER;
+pub use types::{
+    BumpResult, ChangelogValidationResult, ComponentVersionInfo, ComponentVersionSnapshot,
+    UnconfiguredPattern, VersionTargetInfo,
+};
+pub use version::{get_component_version, increment_version, parse_version};
 
 use crate::core::component::{self, Component, VersionTarget};
 use crate::core::config::{from_str, set_json_pointer, to_string_pretty};
