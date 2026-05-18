@@ -691,17 +691,20 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
         .filter(|(key, _)| !baseline.contains(*key))
         .map(|((path, term), lines)| format!("{path}: {term} on lines {lines:?}"))
         .collect::<Vec<_>>();
+    let debt_report = format_baseline_debt_report(&found);
 
     assert!(
         unexpected.is_empty(),
-        "core-owned source contains non-baselined ecosystem behavior:\n{}\n\nAdd extension-owned behavior instead, or update the narrow baseline only for known issue #2240 cleanup violations.",
-        unexpected.join("\n")
+        "core-owned source contains non-baselined ecosystem behavior:\n{}\n\nAdd extension-owned behavior instead, or update the narrow baseline only for known issue #2240 cleanup violations.\n\n{}",
+        unexpected.join("\n"),
+        debt_report
     );
 
     let occurrence_count = found.values().map(Vec::len).sum::<usize>();
     assert_eq!(
         occurrence_count, BASELINE_OCCURRENCES,
-        "core-owned source ecosystem baseline occurrence count changed"
+        "core-owned source ecosystem baseline occurrence count changed. If this went down, lower BASELINE_OCCURRENCES and remove stale BASELINE entries. If it went up, move behavior into an extension-owned layer.\n\n{}",
+        debt_report
     );
 
     let term_distribution = homeboy::core::top_n::top_n_by(
@@ -774,6 +777,96 @@ fn relative_path(root: &Path, path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn format_baseline_debt_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
+    let occurrence_count = found.values().map(Vec::len).sum::<usize>();
+    let paths = found
+        .keys()
+        .map(|(path, _)| path.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut by_term = BTreeMap::<&str, (usize, BTreeSet<&str>)>::new();
+    let mut by_path = BTreeMap::<&str, (usize, BTreeSet<&str>)>::new();
+
+    for ((path, term), lines) in found {
+        let count = lines.len();
+        let term_entry = by_term.entry(term.as_str()).or_default();
+        term_entry.0 += count;
+        term_entry.1.insert(path.as_str());
+
+        let path_entry = by_path.entry(path.as_str()).or_default();
+        path_entry.0 += count;
+        path_entry.1.insert(term.as_str());
+    }
+
+    let mut term_rows = by_term
+        .iter()
+        .map(|(term, (count, paths))| {
+            (
+                *count,
+                format!("- {term}: {count} occurrences across {} files", paths.len()),
+            )
+        })
+        .collect::<Vec<_>>();
+    sort_counted_rows_desc(&mut term_rows);
+
+    let mut path_rows = by_path
+        .iter()
+        .map(|(path, (count, terms))| {
+            (
+                *count,
+                format!(
+                    "- {path}: {count} occurrences across {} terms ({})",
+                    terms.len(),
+                    terms.iter().copied().collect::<Vec<_>>().join(", ")
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    sort_counted_rows_desc(&mut path_rows);
+
+    format!(
+        "Core-agnostic baseline debt (#2240): {occurrence_count} occurrences across {} path/term pairs and {} files.\nTop terms:\n{}\nTop files:\n{}\nStale baseline entries to prune after cleanup:\n{}",
+        found.len(),
+        paths.len(),
+        first_counted_rows(term_rows),
+        first_counted_rows(path_rows),
+        stale_baseline_report(found)
+    )
+}
+
+fn stale_baseline_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
+    let stale_rows = BASELINE
+        .iter()
+        .filter(|entry| !found.contains_key(&(entry.path.to_string(), entry.term.to_string())))
+        .map(|entry| format!("- {}: {}", entry.path, entry.term))
+        .collect::<Vec<_>>();
+
+    if stale_rows.is_empty() {
+        return "- none".to_string();
+    }
+
+    first_rows(stale_rows)
+}
+
+fn first_rows(rows: Vec<String>) -> String {
+    rows.into_iter().take(10).collect::<Vec<_>>().join("\n")
+}
+
+fn first_counted_rows(mut rows: Vec<(usize, String)>) -> String {
+    sort_counted_rows_desc(&mut rows);
+
+    rows.into_iter()
+        .take(10)
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sort_counted_rows_desc(rows: &mut [(usize, String)]) {
+    rows.sort_by(|(left_count, left), (right_count, right)| {
+        right_count.cmp(left_count).then_with(|| left.cmp(right))
+    });
 }
 
 impl Term {
