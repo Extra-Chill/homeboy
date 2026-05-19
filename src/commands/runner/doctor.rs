@@ -752,13 +752,17 @@ mod probes {
             return None;
         }
         let stat = unsafe { stat.assume_init() };
-        let block_size = stat.f_frsize.max(1);
-        let total_blocks = stat.f_blocks;
-        let available_blocks = stat.f_bavail;
+        let block_size = u128::from(stat.f_frsize.max(1));
+        let total_blocks = u128::from(stat.f_blocks);
+        let available_blocks = u128::from(stat.f_bavail);
         Some(DiskProbe {
             path: common::display_path(path),
-            total_mb: total_blocks.saturating_mul(block_size) / 1024 / 1024,
-            available_mb: available_blocks.saturating_mul(block_size) / 1024 / 1024,
+            total_mb: (total_blocks.saturating_mul(block_size) / 1024 / 1024)
+                .try_into()
+                .ok()?,
+            available_mb: (available_blocks.saturating_mul(block_size) / 1024 / 1024)
+                .try_into()
+                .ok()?,
         })
     }
 
