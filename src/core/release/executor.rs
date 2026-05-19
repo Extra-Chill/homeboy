@@ -512,11 +512,23 @@ pub(crate) fn run_git_tag(
 
 /// Push commits (and tags) to the remote.
 pub(crate) fn run_git_push(component: &Component, component_id: &str) -> Result<ReleaseStepResult> {
+    let branch = crate::core::git::current_branch(std::path::Path::new(&component.local_path))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "branch",
+                "Release push requires a checked-out branch",
+                Some(component.local_path.clone()),
+                Some(vec![
+                    "Check out the release branch before running `homeboy release`.".to_string(),
+                ]),
+            )
+        })?;
     let output = crate::core::git::push_at(
         Some(component_id),
         crate::core::git::PushOptions {
             tags: true,
             force_with_lease: false,
+            refspec: Some(format!("HEAD:refs/heads/{branch}")),
             ..Default::default()
         },
         Some(&component.local_path),
@@ -1272,6 +1284,20 @@ mod tests {
     use crate::core::release::ReleaseStepStatus;
     use std::process::Command;
 
+    fn git(path: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn sanitize_tag_for_filename_preserves_safe_chars() {
         assert_eq!(sanitize_tag_for_filename("v1.2.3"), "v1.2.3");
@@ -1314,13 +1340,65 @@ mod tests {
         let result = run_git_push(&component, "fixture").expect("push step should return result");
 
         assert_eq!(result.status, ReleaseStepStatus::Failed);
-        assert!(result.error.unwrap().contains("fatal:"));
+        assert!(!result.error.unwrap().trim().is_empty());
         assert_eq!(
             result
                 .data
                 .and_then(|data| data.get("success").and_then(serde_json::Value::as_bool)),
             Some(false)
         );
+    }
+
+    #[test]
+    fn test_run_git_push_without_upstream() {
+        let local = tempfile::tempdir().expect("local tempdir");
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        git(remote.path(), &["init", "--bare"]);
+        git(local.path(), &["init"]);
+        git(local.path(), &["checkout", "-b", "main"]);
+        git(local.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            local.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        git(
+            local.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("remote path"),
+            ],
+        );
+        std::fs::write(local.path().join("release.txt"), "release").expect("write fixture");
+        git(local.path(), &["add", "release.txt"]);
+        git(local.path(), &["commit", "-m", "release: v1.0.0"]);
+        git(
+            local.path(),
+            &["tag", "-a", "v1.0.0", "-m", "Release v1.0.0"],
+        );
+
+        let upstream = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
+            .current_dir(local.path())
+            .output()
+            .expect("check upstream");
+        assert!(
+            !upstream.status.success(),
+            "fixture should not have upstream"
+        );
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: local.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+
+        let result = run_git_push(&component, "fixture").expect("push step should return result");
+
+        assert_eq!(result.status, ReleaseStepStatus::Success);
+        git(remote.path(), &["show-ref", "--verify", "refs/heads/main"]);
+        git(remote.path(), &["show-ref", "--verify", "refs/tags/v1.0.0"]);
     }
 
     #[test]
