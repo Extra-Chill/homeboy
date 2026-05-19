@@ -3,8 +3,8 @@ use homeboy::core::component;
 use homeboy::core::context;
 use homeboy::core::deploy::{self, DeployConfig, ReleaseStateStatus};
 use homeboy::core::git;
-use homeboy::core::project;
 use homeboy::core::release::version;
+use homeboy::core::scope::{self, Scope};
 use serde::Serialize;
 
 use super::CmdResult;
@@ -297,8 +297,7 @@ fn run_path_status(args: &StatusArgs) -> CmdResult<StatusResult> {
 /// Combines local version, remote (deployed) version, release state, upstream
 /// drift, and unreleased commit count into a single view per component.
 fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<StatusResult> {
-    let proj = project::load(project_id)?;
-    let components = project::resolve_project_components(&proj)?;
+    let components = scope::resolve_scope_component_records(&Scope::Project(project_id.into()))?;
 
     if components.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(

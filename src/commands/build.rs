@@ -4,6 +4,7 @@ use homeboy::core::component;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::project;
+use homeboy::core::scope::{self, Scope};
 
 use crate::commands::utils::resolve::resolve_project_components;
 use crate::commands::CmdResult;
@@ -92,7 +93,8 @@ pub fn run(
             ));
         }
 
-        let components = project::resolve_project_components(&proj)?;
+        let components =
+            scope::resolve_scope_component_records(&Scope::Project(target_id.clone()))?;
         return build::run_components(&components);
     }
 
@@ -128,12 +130,19 @@ pub fn run(
             ));
         }
 
-        let components: Result<Vec<_>, _> = component_ids
+        let project_components =
+            scope::resolve_scope_component_records(&Scope::Project(project_id.clone()))?;
+        let components: Vec<_> = component_ids
             .iter()
-            .map(|id| project::resolve_project_component(&proj, id))
+            .filter_map(|id| {
+                project_components
+                    .iter()
+                    .find(|component| component.id == *id)
+                    .cloned()
+            })
             .collect();
 
-        return build::run_components(&components?);
+        return build::run_components(&components);
     }
 
     // Single target_id: treat as component ID

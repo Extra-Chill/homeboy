@@ -176,6 +176,26 @@ pub fn resolve_scope_components(scope: &Scope) -> Result<Vec<ScopeComponentRef>>
     }
 }
 
+/// Resolve a scope to full component records for source-code commands.
+///
+/// Unlike `resolve_scope_components()`, this preserves command/runtime fields
+/// such as extension settings, scripts, version targets, and deploy metadata.
+/// Component-first commands should prefer this when they need to execute work
+/// against the component rather than only report on it.
+pub fn resolve_scope_component_records(scope: &Scope) -> Result<Vec<component::Component>> {
+    match scope {
+        Scope::Component(component_id) => Ok(vec![component::load(component_id)?]),
+        Scope::Project(project_id) => {
+            let project = project::load(project_id)?;
+            project::resolve_project_components(&project)
+        }
+        Scope::Fleet(fleet_id) => resolve_fleet_component_records(fleet_id),
+        Scope::Rig(rig_id) => resolve_rig_component_records(rig_id),
+        Scope::Workspace => resolve_workspace_component_records(),
+        Scope::Path { path, component_id } => resolve_path_component_record(path, component_id),
+    }
+}
+
 fn resolve_component_scope(component_id: &str) -> Result<Vec<ScopeComponentRef>> {
     let comp = component::load(component_id)?;
     let priority_labels = comp.priority_labels.clone();
@@ -252,6 +272,97 @@ fn resolve_rig_scope(rig_id: &str) -> Result<Vec<ScopeComponentRef>> {
     }
     refs.sort_by(|a, b| a.component_id.cmp(&b.component_id));
     Ok(refs)
+}
+
+fn resolve_fleet_component_records(fleet_id: &str) -> Result<Vec<component::Component>> {
+    let fleet = fleet::load(fleet_id)?;
+    let mut components = BTreeMap::new();
+
+    for project_id in fleet.project_ids {
+        for mut component in resolve_scope_component_records(&Scope::Project(project_id))? {
+            if component.priority_labels.is_none() {
+                component.priority_labels = fleet.priority_labels.clone();
+            }
+            components.entry(component.id.clone()).or_insert(component);
+        }
+    }
+
+    Ok(components.into_values().collect())
+}
+
+fn resolve_rig_component_records(rig_id: &str) -> Result<Vec<component::Component>> {
+    let spec = rig::load(rig_id)?;
+    let mut components = Vec::new();
+
+    for (component_id, component_spec) in spec.components.iter() {
+        let local_path = rig::expand::expand_vars(&spec, &component_spec.path);
+        let mut component = component::discover_from_portable(Path::new(&local_path))
+            .or_else(|| component::load(component_id).ok())
+            .unwrap_or_default();
+        component.id = component_id.clone();
+        component.local_path = local_path;
+        if component.remote_url.is_none() {
+            component.remote_url = component_spec.remote_url.clone();
+        }
+        if component.triage_remote_url.is_none() {
+            component.triage_remote_url = component_spec.triage_remote_url.clone();
+        }
+        if component.extensions.is_none() {
+            component.extensions = component_spec.extensions.clone();
+        }
+        components.push(component);
+    }
+
+    components.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(components)
+}
+
+fn resolve_path_component_record(
+    path: &str,
+    component_id: &Option<String>,
+) -> Result<Vec<component::Component>> {
+    let refs = resolve_path_scope(path, component_id.as_deref())?;
+    let component_ref = refs.into_iter().next().ok_or_else(|| {
+        Error::internal_unexpected("Path scope did not resolve a component".to_string())
+    })?;
+    let mut component = component::discover_from_portable(Path::new(&component_ref.local_path))
+        .or_else(|| component::load(&component_ref.component_id).ok())
+        .unwrap_or_default();
+    if let Some(component_id) = component_id {
+        component.id = component_id.clone();
+    } else if component.id.is_empty() {
+        component.id = component_ref.component_id;
+    }
+    component.local_path = component_ref.local_path;
+    if component.remote_url.is_none() {
+        component.remote_url = component_ref.remote_url;
+    }
+    if component.triage_remote_url.is_none() {
+        component.triage_remote_url = component_ref.triage_remote_url;
+    }
+    Ok(vec![component])
+}
+
+fn resolve_workspace_component_records() -> Result<Vec<component::Component>> {
+    let mut components = BTreeMap::new();
+
+    for project in project::list()? {
+        for component in resolve_scope_component_records(&Scope::Project(project.id))? {
+            components.entry(component.id.clone()).or_insert(component);
+        }
+    }
+
+    for rig in rig::list()? {
+        for component in resolve_scope_component_records(&Scope::Rig(rig.id))? {
+            components.entry(component.id.clone()).or_insert(component);
+        }
+    }
+
+    for component in component::list()? {
+        components.entry(component.id.clone()).or_insert(component);
+    }
+
+    Ok(components.into_values().collect())
 }
 
 fn resolve_path_scope(path: &str, component_id: Option<&str>) -> Result<Vec<ScopeComponentRef>> {
@@ -362,7 +473,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scope_reports_kind_and_id() {
+    fn test_kind_name() {
         let scope = Scope::Rig("studio-combined".to_string());
 
         assert_eq!(scope.kind(), ScopeKind::Rig);
@@ -411,5 +522,80 @@ mod tests {
         assert!(CommandScopeClass::Workspace
             .description()
             .contains("workspace-wide"));
+    }
+
+    #[test]
+    fn test_resolve_scope_component_records() {
+        let tmp = tempfile::TempDir::new().expect("checkout tempdir");
+        std::fs::create_dir(tmp.path().join(".git")).expect("git marker");
+        std::fs::write(
+            tmp.path().join("homeboy.json"),
+            serde_json::json!({
+                "id": "portable-component",
+                "extensions": { "rust": {} },
+                "version_targets": [
+                    { "file": "Cargo.toml", "pattern": "version = \\\"(.*)\\\"" }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("portable config");
+
+        let records = resolve_scope_component_records(&Scope::Path {
+            path: tmp.path().to_string_lossy().to_string(),
+            component_id: None,
+        })
+        .expect("path scope records");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "portable-component");
+        assert_eq!(
+            records[0].local_path,
+            tmp.path()
+                .canonicalize()
+                .expect("canonical checkout")
+                .to_string_lossy()
+        );
+        assert!(records[0]
+            .extensions
+            .as_ref()
+            .is_some_and(|extensions| extensions.contains_key("rust")));
+        assert!(records[0].version_targets.is_some());
+    }
+
+    #[test]
+    fn test_resolve_scope_components() {
+        let tmp = tempfile::TempDir::new().expect("checkout tempdir");
+        std::fs::create_dir(tmp.path().join(".git")).expect("git marker");
+
+        let refs = resolve_scope_components(&Scope::Path {
+            path: tmp.path().to_string_lossy().to_string(),
+            component_id: Some("explicit-component".to_string()),
+        })
+        .expect("path scope refs");
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].component_id, "explicit-component");
+        assert!(refs[0]
+            .sources
+            .iter()
+            .any(|source| source.starts_with("path:")));
+    }
+
+    #[test]
+    fn test_with_priority_labels() {
+        let component_ref = ScopeComponentRef::new(
+            "component".to_string(),
+            "/tmp/component".to_string(),
+            None,
+            None,
+            "component:component".to_string(),
+        )
+        .with_priority_labels(Some(vec!["urgent".to_string()]));
+
+        assert_eq!(
+            component_ref.priority_labels,
+            Some(vec!["urgent".to_string()])
+        );
     }
 }
