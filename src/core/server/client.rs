@@ -1493,6 +1493,8 @@ mod tests {
 
     #[cfg(unix)]
     fn pid_is_alive(pid: libc::pid_t) -> bool {
-        unsafe { libc::kill(pid, 0) == 0 }
+        u32::try_from(pid)
+            .map(crate::core::process::pid_is_running)
+            .unwrap_or(false)
     }
 }

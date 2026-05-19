@@ -203,14 +203,8 @@ fn observe_pid(raw_pid: &str) -> (String, BTreeMap<String, serde_json::Value>) {
     }
 }
 
-#[cfg(unix)]
 fn process_exists(pid: u32) -> bool {
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-fn process_exists(_pid: u32) -> bool {
-    false
+    crate::core::process::pid_is_running(pid)
 }
 
 fn observe_port(raw_port: &str) -> (String, BTreeMap<String, serde_json::Value>) {

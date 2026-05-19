@@ -365,13 +365,8 @@ mod platform {
             })
     }
 
-    /// Cheap liveness probe — `kill(pid, 0)` returns 0 if the process exists and
-    /// we have permission to signal it. Matches what `ps` and most supervisors do.
     fn pid_alive(pid: u32) -> bool {
-        if pid == 0 {
-            return false;
-        }
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        crate::core::process::pid_is_running(pid)
     }
 
     fn process_group_alive(pgid: u32) -> bool {
