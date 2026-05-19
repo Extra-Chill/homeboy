@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.17.1] - 2026-05-19
+
+### Fixed
+- handle multiple inline test scopes
+
 ## [1.17.0] - 2026-05-19
 
 ### Added
