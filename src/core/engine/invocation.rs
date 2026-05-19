@@ -415,23 +415,14 @@ fn write_lease(lease: &InvocationLease) -> Result<()> {
 }
 
 fn lease_path(invocation_id: &str) -> Result<PathBuf> {
-    Ok(invocation_leases_dir()?.join(format!("{}.json", sanitize_id(invocation_id))))
+    Ok(invocation_leases_dir()?.join(format!(
+        "{}.json",
+        paths::sanitize_path_segment(invocation_id)
+    )))
 }
 
 fn invocation_leases_dir() -> Result<PathBuf> {
     Ok(paths::homeboy()?.join("invocation-leases"))
-}
-
-fn sanitize_id(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 struct InvocationIndexLock {

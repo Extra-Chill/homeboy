@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{json_excerpt, parse_context, sanitize_id};
+use super::{json_excerpt, parse_context};
 
 const CHILD_RECORD_DIR: &str = "invocation-children";
 const CHILD_CLEANUP_GRACE: Duration = Duration::from_millis(200);
@@ -148,7 +148,7 @@ impl InvocationChildRecord {
     }
 
     pub(crate) fn children_dir(invocation_id: &str) -> Result<PathBuf> {
-        Ok(Self::root()?.join(sanitize_id(invocation_id)))
+        Ok(Self::root()?.join(paths::sanitize_path_segment(invocation_id)))
     }
 
     pub(crate) fn record_path(invocation_id: &str, root_pid: u32) -> Result<PathBuf> {

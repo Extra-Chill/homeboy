@@ -240,19 +240,7 @@ fn read_lease(path: &Path) -> Result<Option<RigRunLease>> {
 }
 
 fn lease_path(rig_id: &str) -> Result<PathBuf> {
-    Ok(paths::rig_leases_dir()?.join(format!("{}.json", sanitize_id(rig_id))))
-}
-
-fn sanitize_id(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    Ok(paths::rig_leases_dir()?.join(format!("{}.json", paths::sanitize_path_segment(rig_id))))
 }
 
 #[cfg(test)]
