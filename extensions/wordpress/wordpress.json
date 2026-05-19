@@ -172,13 +172,13 @@
     "verifications": [
       {
         "path_pattern": "/wp-content/plugins/",
-        "verify_command": "find {{targetDir}} -maxdepth 2 -name '*.php' -exec grep -l 'Plugin Name:' {} + 2>/dev/null | head -1",
-        "verify_error_message": "No WordPress plugin header found in {{targetDir}}"
+        "verify_command": "test -f {{stagingArtifact}} && plugin_slug=$(basename {{targetDir}}) && zip_root=$(unzip -qql {{stagingArtifact}} | head -1 | awk '{print $4}' | cut -d/ -f1) && test -n \"$zip_root\" && candidate=\"$zip_root/$plugin_slug.php\" && if ! unzip -Z1 {{stagingArtifact}} | grep -Fxq \"$candidate\"; then candidate=$(unzip -Z1 {{stagingArtifact}} | awk -v root=\"$zip_root/\" '$0 ~ \"^\" root \".+\\\\.php$\" { print; exit }'); fi && test -n \"$candidate\" && rel=${candidate#\"$zip_root/\"} && test -f \"{{targetDir}}/$rel\" && unzip -p {{stagingArtifact}} \"$candidate\" | cmp -s - \"{{targetDir}}/$rel\" && find {{targetDir}} -maxdepth 2 -name '*.php' -exec grep -l 'Plugin Name:' {} + 2>/dev/null | head -1",
+        "verify_error_message": "WordPress plugin deploy verification failed for {{targetDir}}: installed files do not match {{stagingArtifact}} or no plugin header was found"
       },
       {
         "path_pattern": "/wp-content/themes/",
-        "verify_command": "grep -l 'Theme Name:' {{targetDir}}/style.css 2>/dev/null",
-        "verify_error_message": "No WordPress theme header found in {{targetDir}}/style.css"
+        "verify_command": "test -f {{stagingArtifact}} && zip_root=$(unzip -qql {{stagingArtifact}} | head -1 | awk '{print $4}' | cut -d/ -f1) && test -n \"$zip_root\" && test -f {{targetDir}}/style.css && unzip -p {{stagingArtifact}} \"$zip_root/style.css\" | cmp -s - {{targetDir}}/style.css && grep -l 'Theme Name:' {{targetDir}}/style.css 2>/dev/null",
+        "verify_error_message": "WordPress theme deploy verification failed for {{targetDir}}: installed style.css does not match {{stagingArtifact}} or no theme header was found"
       }
     ],
     "overrides": [
