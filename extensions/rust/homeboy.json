@@ -1,9 +1,6 @@
 {
   "id": "rust",
   "changelog_target": "docs/CHANGELOG.md",
-  "extensions": {
-    "rust": {}
-  },
   "version_targets": [
     {
       "file": "rust.json",
