@@ -450,7 +450,7 @@ mod tests {
             remote_path: remote_path.to_string(),
             version_targets: Some(vec![VersionTarget {
                 file: "fixture.php".to_string(),
-                pattern: None,
+                pattern: Some(r"Version:\s*(\d+\.\d+\.\d+)".to_string()),
             }]),
             ..Default::default()
         }
