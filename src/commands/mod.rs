@@ -360,6 +360,7 @@ pub mod raw_output;
 pub mod refactor;
 pub mod release;
 pub mod report;
+pub mod response;
 pub mod review;
 pub mod rig;
 pub mod runner;

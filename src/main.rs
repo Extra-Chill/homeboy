@@ -1,12 +1,13 @@
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
 use std::path::Path;
 
-use homeboy::cli_surface::{Cli, CommandRawOutputMode, CommandResponseMode, Commands};
+use homeboy::cli_surface::Cli;
+use homeboy::cli_surface::Commands;
 use homeboy::commands::GlobalArgs;
 
 use homeboy::commands;
 use homeboy::commands::cli;
-use homeboy::commands::utils::{args, entity_suggest, resource_policy, response as output, tty};
+use homeboy::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use homeboy::core::extension::load_all_extensions;
 
 struct ExtensionCliCommand {
@@ -229,24 +230,6 @@ fn main() -> std::process::ExitCode {
     let mode = cli.command.response_mode(output_file.is_some());
     let output_artifact_policy = cli.command.output_artifact_policy(output_file.is_some());
 
-    match mode {
-        CommandResponseMode::Json => {}
-        CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {
-            if !tty::require_tty_for_interactive() {
-                let err = homeboy::core::Error::validation_invalid_argument(
-                    "tty",
-                    "This command requires an interactive TTY. For non-interactive usage, run: homeboy ssh <target> -- <command...>",
-                    None,
-                    None,
-                );
-                output::print_result::<serde_json::Value>(Err(err)).ok();
-                return std::process::ExitCode::from(exit_code_to_u8(2));
-            }
-        }
-        CommandResponseMode::Raw(CommandRawOutputMode::Markdown) => {}
-        CommandResponseMode::Raw(CommandRawOutputMode::PlainText) => {}
-    }
-
     if matches!(cli.command, Commands::List) {
         let mut cmd = build_augmented_command(&extension_info);
         cmd.print_help().expect("Failed to print help");
@@ -266,42 +249,15 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    if let CommandResponseMode::Raw(
-        raw_mode @ (CommandRawOutputMode::Markdown | CommandRawOutputMode::PlainText),
-    ) = mode
-    {
-        let raw_result = commands::raw_output::run(cli.command, &global, raw_mode)
-            .expect("markdown and plain-text modes should return raw output");
-        match raw_result {
-            Ok((content, exit_code)) => {
-                print!("{}", content);
-                return std::process::ExitCode::from(exit_code_to_u8(exit_code));
-            }
-            Err(err) => {
-                output::print_result::<serde_json::Value>(Err(err)).ok();
-                return std::process::ExitCode::from(exit_code_to_u8(1));
-            }
-        }
-    }
+    let exit_code = commands::response::run(
+        cli.command,
+        &global,
+        mode,
+        output_artifact_policy,
+        output_file.as_deref(),
+    );
 
-    let json_run =
-        commands::output_artifact::run_json(cli.command, &global, output_artifact_policy);
-
-    // Write JSON to --output file if specified (before printing to stdout).
-    if let Some(ref path) = output_file {
-        commands::output_artifact::write_to_file(&json_run, output_artifact_policy, path);
-    }
-
-    match mode {
-        CommandResponseMode::Json => {
-            output::print_json_result(json_run.stdout_result, json_run.exit_code).ok();
-        }
-        CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {}
-        CommandResponseMode::Raw(CommandRawOutputMode::Markdown) => {}
-        CommandResponseMode::Raw(CommandRawOutputMode::PlainText) => {}
-    }
-
-    std::process::ExitCode::from(exit_code_to_u8(json_run.exit_code))
+    std::process::ExitCode::from(exit_code_to_u8(exit_code))
 }
 
 fn exit_code_to_u8(code: i32) -> u8 {
