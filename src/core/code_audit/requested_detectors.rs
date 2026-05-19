@@ -10,6 +10,7 @@ use super::comment_blocks;
 use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use super::source_locations::line_of_offset;
 
 #[derive(Debug, Clone)]
 struct DerivedValue {
@@ -446,14 +447,6 @@ where
                 .unwrap_or_else(|| extra(name))
         })
         .to_string()
-}
-
-fn line_of_offset(content: &str, offset: usize) -> usize {
-    content[..offset.min(content.len())]
-        .bytes()
-        .filter(|b| *b == b'\n')
-        .count()
-        + 1
 }
 
 fn line_at_offset(content: &str, offset: usize) -> &str {

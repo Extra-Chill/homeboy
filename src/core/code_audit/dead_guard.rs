@@ -20,6 +20,7 @@ use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::requirements::{known_available_symbols, KnownSymbols};
+use super::source_locations::line_of_offset;
 use crate::core::component::AuditConfig;
 
 /// Kinds of guards we detect.
@@ -427,14 +428,6 @@ fn extract_guards(content: &str) -> Vec<Guard> {
         });
     }
     out
-}
-
-fn line_of_offset(content: &str, offset: usize) -> usize {
-    content[..offset.min(content.len())]
-        .bytes()
-        .filter(|b| *b == b'\n')
-        .count()
-        + 1
 }
 
 fn line_start_offset(content: &str, line: usize) -> usize {

@@ -8,6 +8,7 @@ use regex::Regex;
 use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use super::source_locations::line_of_offset;
 
 static ENV_MUTATION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"std::env::(?:set_var|remove_var)\s*\(\s*\"([A-Z_][A-Z0-9_]*)\""#)
@@ -109,14 +110,6 @@ fn is_canonical_env_guard_file(path: &str) -> bool {
         || normalized.contains("/support/")
         || normalized.ends_with("/test_helpers.rs")
         || normalized.ends_with("/test_support.rs")
-}
-
-fn line_of_offset(content: &str, offset: usize) -> usize {
-    content[..offset.min(content.len())]
-        .bytes()
-        .filter(|b| *b == b'\n')
-        .count()
-        + 1
 }
 
 #[cfg(test)]
