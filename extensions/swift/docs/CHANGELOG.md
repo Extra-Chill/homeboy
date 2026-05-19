@@ -2,6 +2,12 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.6.0] - 2026-05-19
+
+### Added
+- declare structured sidecar capabilities
+- declare drift selection config
+
 ## [2.5.1] - 2026-04-27
 
 ### Fixed
