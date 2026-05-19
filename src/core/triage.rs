@@ -266,6 +266,11 @@ pub fn run(target: TriageTarget, options: TriageOptions) -> Result<TriageOutput>
         }
     }
 
+    if options.mine {
+        components.retain(triage_component_has_items);
+        unresolved.clear();
+    }
+
     let summary = summarize(&components, &unresolved);
     let unresolved_summary = summarize_unresolved(&unresolved);
     let command = triage_command(&target);
@@ -286,6 +291,17 @@ pub fn run(target: TriageTarget, options: TriageOptions) -> Result<TriageOutput>
     Ok(output)
 }
 
+fn triage_component_has_items(component: &TriageComponentReport) -> bool {
+    component
+        .issues
+        .as_ref()
+        .is_some_and(|bucket| !bucket.items.is_empty())
+        || component
+            .pull_requests
+            .as_ref()
+            .is_some_and(|bucket| !bucket.items.is_empty())
+}
+
 struct TriageObservation {
     store: ObservationStore,
     run_id: String,
@@ -298,6 +314,7 @@ impl TriageObservation {
     fn start(target: &TriageTarget, options: &TriageOptions) -> Option<Self> {
         let store = ObservationStore::open_initialized().ok()?;
         let component_id = triage_observation_component_id(target);
+        let metadata = triage_observation_metadata(target, options);
         let previous_run = store
             .latest_run(RunListFilter {
                 kind: Some("triage".to_string()),
@@ -307,7 +324,8 @@ impl TriageObservation {
                 limit: Some(1),
             })
             .ok()
-            .flatten();
+            .flatten()
+            .filter(|run| run.metadata_json == metadata);
         let store_path = store
             .status()
             .map(|status| status.path)
@@ -324,25 +342,7 @@ impl TriageObservation {
                         TriageTarget::Rig(id) => Some(id.clone()),
                         _ => None,
                     })
-                    .metadata(serde_json::json!({
-                        "target": {
-                            "kind": target.kind_name(),
-                            "id": target.id(),
-                        },
-                        "options": {
-                            "include_issues": options.include_issues,
-                            "include_prs": options.include_prs,
-                            "mine": options.mine,
-                            "assigned": options.assigned,
-                            "labels": options.labels,
-                            "needs_review": options.needs_review,
-                            "failing_checks": options.failing_checks,
-                            "drilldown": options.drilldown,
-                            "issue_numbers": options.issue_numbers,
-                            "stale_days": options.stale_days,
-                            "limit": options.limit,
-                        }
-                    }))
+                    .metadata(metadata)
                     .build(),
             )
             .ok()?;
@@ -398,6 +398,28 @@ impl TriageObservation {
             comparison,
         })
     }
+}
+
+fn triage_observation_metadata(target: &TriageTarget, options: &TriageOptions) -> Value {
+    serde_json::json!({
+        "target": {
+            "kind": target.kind_name(),
+            "id": target.id(),
+        },
+        "options": {
+            "include_issues": options.include_issues,
+            "include_prs": options.include_prs,
+            "mine": options.mine,
+            "assigned": options.assigned,
+            "labels": options.labels,
+            "needs_review": options.needs_review,
+            "failing_checks": options.failing_checks,
+            "drilldown": options.drilldown,
+            "issue_numbers": options.issue_numbers,
+            "stale_days": options.stale_days,
+            "limit": options.limit,
+        }
+    })
 }
 
 type TriageObservationItemKey = (String, String, String, String, u64);
@@ -2385,6 +2407,23 @@ mod tests {
         assert_eq!(
             comparison.changed_items[0].changed_fields,
             vec!["next_action"]
+        );
+    }
+
+    #[test]
+    fn triage_observation_metadata_distinguishes_personal_and_firehose_runs() {
+        let personal = TriageOptions {
+            mine: true,
+            ..TriageOptions::default()
+        };
+        let firehose = TriageOptions {
+            mine: false,
+            ..TriageOptions::default()
+        };
+
+        assert_ne!(
+            triage_observation_metadata(&TriageTarget::Workspace, &personal),
+            triage_observation_metadata(&TriageTarget::Workspace, &firehose)
         );
     }
 

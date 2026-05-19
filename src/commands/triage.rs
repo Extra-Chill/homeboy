@@ -22,6 +22,10 @@ pub struct TriageArgs {
     #[arg(long, global = true)]
     mine: bool,
 
+    /// Show the broad repo firehose instead of the default personal workload.
+    #[arg(long, global = true, conflicts_with = "mine")]
+    all: bool,
+
     /// Restrict to issues/PRs assigned to this GitHub user.
     #[arg(long, global = true, value_name = "USER")]
     assigned: Option<String>,
@@ -93,12 +97,23 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageOut
     issue_numbers.sort_unstable();
     issue_numbers.dedup();
 
+    let target = match args.command.unwrap_or(TriageCommand::Workspace) {
+        TriageCommand::Component { component_id, path } => {
+            resolve_component_target(component_id, path)?
+        }
+        TriageCommand::Project { project_id } => TriageTarget::Project(project_id),
+        TriageCommand::Fleet { fleet_id } => TriageTarget::Fleet(fleet_id),
+        TriageCommand::Rig { rig_id } => TriageTarget::Rig(rig_id),
+        TriageCommand::Workspace => TriageTarget::Workspace,
+    };
+
     let include_issues = args.issues || !args.prs || !issue_numbers.is_empty();
     let include_prs = args.prs || !args.issues;
+    let default_to_personal_workload = matches!(target, TriageTarget::Workspace) && !args.all;
     let options = TriageOptions {
         include_issues,
         include_prs,
-        mine: args.mine,
+        mine: args.mine || default_to_personal_workload,
         assigned: args.assigned,
         labels: args.label,
         needs_review: args.needs_review,
@@ -110,16 +125,6 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageOut
             None => None,
         },
         limit: args.limit,
-    };
-
-    let target = match args.command.unwrap_or(TriageCommand::Workspace) {
-        TriageCommand::Component { component_id, path } => {
-            resolve_component_target(component_id, path)?
-        }
-        TriageCommand::Project { project_id } => TriageTarget::Project(project_id),
-        TriageCommand::Fleet { fleet_id } => TriageTarget::Fleet(fleet_id),
-        TriageCommand::Rig { rig_id } => TriageTarget::Rig(rig_id),
-        TriageCommand::Workspace => TriageTarget::Workspace,
     };
 
     Ok((triage::run(target, options)?, 0))
@@ -194,6 +199,14 @@ mod tests {
         let cli = TestCli::parse_from(["triage", "workspace"]);
 
         assert!(matches!(cli.args.command, Some(TriageCommand::Workspace)));
+    }
+
+    #[test]
+    fn all_flag_opts_out_of_personal_workload_default() {
+        let cli = TestCli::parse_from(["triage", "--all"]);
+
+        assert!(cli.args.all);
+        assert!(!cli.args.mine);
     }
 
     #[test]
