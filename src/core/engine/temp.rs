@@ -52,28 +52,19 @@ fn unique_name(prefix: &str, suffix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_support::home_env_guard;
 
     #[test]
     fn runtime_temp_dir_honors_override() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = home_env_guard();
         let dir = tempfile::tempdir().expect("tempdir");
-        unsafe {
-            env::set_var(HOMEBOY_RUNTIME_TMPDIR_ENV, dir.path());
-        }
+        env::set_var(HOMEBOY_RUNTIME_TMPDIR_ENV, dir.path());
 
         let path = runtime_temp_dir("homeboy-test-dir").expect("temp dir path");
         assert!(path.starts_with(dir.path()));
         assert!(path.is_dir());
 
-        unsafe {
-            env::remove_var(HOMEBOY_RUNTIME_TMPDIR_ENV);
-        }
+        env::remove_var(HOMEBOY_RUNTIME_TMPDIR_ENV);
     }
 
     #[test]

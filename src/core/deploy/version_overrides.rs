@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::Path;
 
 use super::permissions;
@@ -126,16 +127,20 @@ fn fetch_version_from_file(
         None => base_path::join_remote_path(Some(base_path), &component.remote_path).ok()?,
     };
     let remote_path = base_path::join_remote_child(None, &remote_dir, version_file).ok()?;
+    let pattern = component
+        .version_targets
+        .as_ref()
+        .and_then(|targets| targets.first())
+        .and_then(|t| t.pattern.as_deref());
+
+    if client.is_local {
+        let content = fs::read_to_string(&remote_path).ok()?;
+        return parse_component_version(&content, pattern, version_file);
+    }
 
     let output = client.execute(&format!("cat '{}' 2>/dev/null", remote_path));
 
     if output.success {
-        let pattern = component
-            .version_targets
-            .as_ref()
-            .and_then(|targets| targets.first())
-            .and_then(|t| t.pattern.as_deref());
-
         parse_component_version(&output.stdout, pattern, version_file)
     } else {
         None
