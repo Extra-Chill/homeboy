@@ -353,6 +353,7 @@ pub mod issues;
 pub mod lint;
 pub mod logs;
 pub mod observe;
+pub mod output_artifact;
 pub mod project;
 pub mod refactor;
 pub mod release;

@@ -1,14 +1,12 @@
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
 use std::path::Path;
 
-use homeboy::cli_surface::{
-    Cli, CommandOutputArtifactPolicy, CommandRawOutputMode, CommandResponseMode, Commands,
-};
+use homeboy::cli_surface::{Cli, CommandRawOutputMode, CommandResponseMode, Commands};
 use homeboy::commands::GlobalArgs;
 
 use homeboy::commands;
+use homeboy::commands::cli;
 use homeboy::commands::utils::{args, entity_suggest, resource_policy, response as output, tty};
-use homeboy::commands::{cli, review, trace};
 use homeboy::core::extension::load_all_extensions;
 
 struct ExtensionCliCommand {
@@ -296,49 +294,24 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    let (json_result, exit_code, output_json_result) = match (output_artifact_policy, cli.command) {
-        (CommandOutputArtifactPolicy::TraceJsonSummaryArtifact, Commands::Trace(args)) => {
-            let (json_result, exit_code, output_json_result) =
-                trace::run_json_with_output_artifact(args, &global);
-            (json_result, exit_code, output_json_result)
-        }
-        (_, command) => {
-            let (json_result, exit_code) = commands::run_json(command, &global);
-            (json_result, exit_code, None)
-        }
-    };
+    let json_run =
+        commands::output_artifact::run_json(cli.command, &global, output_artifact_policy);
 
     // Write JSON to --output file if specified (before printing to stdout).
     if let Some(ref path) = output_file {
-        match output_artifact_policy {
-            CommandOutputArtifactPolicy::ReviewStableArtifact => {
-                if !review::write_artifact_to_file(&json_result, path, exit_code) {
-                    output::write_json_to_file(&json_result, path, exit_code);
-                }
-            }
-            CommandOutputArtifactPolicy::TraceJsonSummaryArtifact => {
-                output::write_json_to_file(
-                    output_json_result.as_ref().unwrap_or(&json_result),
-                    path,
-                    exit_code,
-                );
-            }
-            CommandOutputArtifactPolicy::GenericEnvelope => {
-                output::write_json_to_file(&json_result, path, exit_code);
-            }
-        }
+        commands::output_artifact::write_to_file(&json_run, output_artifact_policy, path);
     }
 
     match mode {
         CommandResponseMode::Json => {
-            output::print_json_result(json_result, exit_code).ok();
+            output::print_json_result(json_run.stdout_result, json_run.exit_code).ok();
         }
         CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {}
         CommandResponseMode::Raw(CommandRawOutputMode::Markdown) => {}
         CommandResponseMode::Raw(CommandRawOutputMode::PlainText) => {}
     }
 
-    std::process::ExitCode::from(exit_code_to_u8(exit_code))
+    std::process::ExitCode::from(exit_code_to_u8(json_run.exit_code))
 }
 
 fn exit_code_to_u8(code: i32) -> u8 {
