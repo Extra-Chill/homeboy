@@ -26,6 +26,7 @@ EOF
 
 cat > "$PROJECT_DIR/src/core/mod.rs" <<'EOF'
 pub mod daemon;
+pub mod service;
 EOF
 
 cat > "$PROJECT_DIR/src/core/daemon.rs" <<'EOF'
@@ -51,6 +52,25 @@ use super::*;
 #[test]
 fn inline_scope_runs() {
     assert_eq!(daemon_value(), 2);
+}
+EOF
+
+cat > "$PROJECT_DIR/src/core/service.rs" <<'EOF'
+pub fn service_value() -> u8 {
+    3
+}
+
+#[cfg(test)]
+#[path = "../../tests/core/service_test.rs"]
+mod service_test;
+EOF
+
+cat > "$PROJECT_DIR/tests/core/service_test.rs" <<'EOF'
+use super::*;
+
+#[test]
+fn second_inline_scope_runs() {
+    assert_eq!(service_value(), 3);
 }
 EOF
 
@@ -104,5 +124,25 @@ fi
 
 if [[ "$OUTPUT" != *"1 passed"* ]]; then
     printf 'Expected scoped inline test to run. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_CHANGED_TEST_FILES=$'tests/core/daemon_test.rs\ntests/core/service_test.rs' \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+
+if [[ "$OUTPUT" != *"Changed files include multiple inline test modules; running full cargo test."* ]]; then
+    printf 'Expected full cargo test fallback for multiple inline filters. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+if [[ "$OUTPUT" != *"2 passed"* ]]; then
+    printf 'Expected full fallback to run both inline tests. Output:\n%s\n' "$OUTPUT" >&2
     exit 1
 fi

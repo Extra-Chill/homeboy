@@ -244,11 +244,12 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
             TEST_ARGS+=(--test "$test_target")
         done
         echo "Scoped to changed integration tests: ${SCOPE_INTEGRATION_ARGS[*]}"
-    elif [ ${#SCOPE_FILTER_ARGS[@]} -gt 0 ]; then
-        # Join module paths with | for regex-style OR matching
-        FILTER=$(IFS='|'; echo "${SCOPE_FILTER_ARGS[*]}")
+    elif [ ${#SCOPE_FILTER_ARGS[@]} -eq 1 ]; then
+        FILTER="${SCOPE_FILTER_ARGS[0]}"
         TEST_ARGS+=(-- "$FILTER")
         echo "Scoped to changed files: ${FILTER}"
+    elif [ ${#SCOPE_FILTER_ARGS[@]} -gt 1 ]; then
+        echo "Changed files include multiple inline test modules; running full cargo test."
     fi
 fi
 
