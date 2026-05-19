@@ -31,6 +31,138 @@ homeboy_datamachine_agent_bundle_clone_url() {
     esac
 }
 
+homeboy_datamachine_agent_wp_codebox_secret_env_names() {
+    jq -r '
+        [
+            "HOMEBOY_DATAMACHINE_AGENT_CONFIG",
+            .prompt_env?,
+            (.github_token_env? // "GITHUB_TOKEN"),
+            .github_repository_token_env?,
+            (.provider_credentials? // {} | to_entries[]? | .value)
+        ]
+        | map(select(type == "string" and . != ""))
+        | unique[]
+    ' <<<"$CONFIG_JSON"
+}
+
+homeboy_datamachine_agent_wp_codebox_run() {
+    local wp_codebox_bin="${HOMEBOY_WP_CODEBOX_BIN:-}"
+    if [ -z "$wp_codebox_bin" ]; then
+        wp_codebox_bin=$(jq -r '.wp_codebox_bin // "wp-codebox"' "$CONFIG_PATH")
+    fi
+    if [ "$wp_codebox_bin" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>&1; then
+        echo "ERROR: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN or config wp_codebox_bin" >&2
+        exit 1
+    fi
+
+    local artifacts_dir="${HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR:-}"
+    if [ -z "$artifacts_dir" ]; then
+        artifacts_dir=$(jq -r '.wp_codebox_artifacts_dir // empty' "$CONFIG_PATH")
+    fi
+    if [ -z "$artifacts_dir" ]; then
+        if [ -z "$RUNTIME_DIR" ]; then
+            RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-datamachine-agent-runtime.XXXXXX")
+        fi
+        artifacts_dir="$RUNTIME_DIR/wp-codebox-artifacts"
+    fi
+    if [ -z "$RUNTIME_DIR" ]; then
+        RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-datamachine-agent-runtime.XXXXXX")
+    fi
+
+    local workload_wrapper="$RUNTIME_DIR/wp-codebox-datamachine-agent-workload.php"
+    cat > "$workload_wrapper" <<'PHP'
+<?php
+$homeboy_workload_result = require '/homeboy-extension/scripts/agent/datamachine-agent-workload.php';
+echo wp_json_encode( is_array( $homeboy_workload_result ) ? $homeboy_workload_result : array() );
+PHP
+
+    local agents_api_path="${HOMEBOY_AGENTS_API_PATH:-${AGENTS_API_PATH:-}}"
+    local data_machine_path="${HOMEBOY_DATA_MACHINE_PATH:-${DATA_MACHINE_PATH:-}}"
+    local data_machine_code_path="${HOMEBOY_DATA_MACHINE_CODE_PATH:-${DATA_MACHINE_CODE_PATH:-}}"
+    if [ -z "$agents_api_path" ]; then
+        agents_api_path=$(jq -r '.wp_codebox_components.agents_api // .wp_codebox_agents_api_path // empty' "$CONFIG_PATH")
+    fi
+    if [ -z "$data_machine_path" ]; then
+        data_machine_path=$(jq -r '.wp_codebox_components.data_machine // .wp_codebox_data_machine_path // empty' "$CONFIG_PATH")
+    fi
+    if [ -z "$data_machine_code_path" ]; then
+        data_machine_code_path=$(jq -r '.wp_codebox_components.data_machine_code // .wp_codebox_data_machine_code_path // empty' "$CONFIG_PATH")
+    fi
+    if [ -z "$agents_api_path" ] || [ -z "$data_machine_path" ] || [ -z "$data_machine_code_path" ]; then
+        echo "ERROR: wp-codebox runtime requires Agents API, Data Machine, and Data Machine Code paths via env or config" >&2
+        exit 1
+    fi
+
+    local wp_codebox_args=(
+        agent-sandbox-run
+        --agents-api "$agents_api_path"
+        --data-machine "$data_machine_path"
+        --data-machine-code "$data_machine_code_path"
+        --task "$WORKLOAD_LABEL"
+        --code-file "$workload_wrapper"
+        --wp "$PLAYGROUND_WORDPRESS_VERSION"
+        --artifacts "$artifacts_dir"
+        --json
+        --mount "$EXTENSION_PATH:/homeboy-extension:readonly"
+    )
+
+    if [ -n "$BUNDLE_PATH" ]; then
+        wp_codebox_args+=(--mount "$BUNDLE_PATH:$BUNDLE_GUEST_PATH:readonly")
+    fi
+
+    local extra_mount
+    while IFS= read -r extra_mount; do
+        wp_codebox_args+=(--mount "$extra_mount")
+    done < <(jq -r '.wp_codebox_mounts? // [] | .[]? | select(type == "string" and . != "")' <<<"$CONFIG_JSON")
+
+    local provider_plugin_path
+    while IFS= read -r provider_plugin_path; do
+        wp_codebox_args+=(--provider-plugin "$provider_plugin_path")
+    done < <(jq -r '.provider_plugin_paths? // [] | .[]? | select(type == "string" and . != "")' <<<"$CONFIG_JSON")
+
+    local secret_env_name
+    while IFS= read -r secret_env_name; do
+        wp_codebox_args+=(--secret-env "$secret_env_name")
+    done < <(homeboy_datamachine_agent_wp_codebox_secret_env_names)
+
+    local wp_codebox_output
+    wp_codebox_output=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-output.XXXXXX")
+    HOMEBOY_DATAMACHINE_AGENT_CONFIG="$CONFIG_JSON" \
+        "$wp_codebox_bin" "${wp_codebox_args[@]}" \
+        >"$wp_codebox_output"
+
+    jq -n \
+        --arg component "$COMPONENT_ID" \
+        --arg workloadId "$WORKLOAD_ID" \
+        --arg workloadLabel "$WORKLOAD_LABEL" \
+        --slurpfile run "$wp_codebox_output" \
+        '
+        def parsed_workload:
+            ($run[0].execution.stdout? // "{}" | fromjson? // {}) as $outer
+            | ($outer.output? // "{}" | fromjson? // {});
+        parsed_workload as $workload
+        | {
+            component_id: $component,
+            iterations: 1,
+            scenarios: [
+                {
+                    id: $workloadId,
+                    label: $workloadLabel,
+                    metrics: (($workload.metrics // {}) | with_entries(.key |= . + "_mean")),
+                    metadata: (($workload.metadata // {}) + {
+                        wp_codebox: {
+                            success: ($run[0].success // false),
+                            runtime: ($run[0].runtime // null),
+                            artifacts: ($run[0].artifacts // null),
+                            error: ($run[0].error // null)
+                        }
+                    })
+                }
+            ]
+        }
+        ' >"$RESULTS_FILE"
+}
+
 CONFIG_PATH="${HOMEBOY_DATAMACHINE_AGENT_CONFIG_PATH:-}"
 if [ -z "$CONFIG_PATH" ] && [ "${1:-}" != "" ]; then
     CONFIG_PATH="$1"
@@ -128,6 +260,8 @@ if [ -z "$COMPONENT_ID" ]; then
 fi
 
 CONFIG_JSON=$(jq -c . "$CONFIG_PATH")
+BUNDLE_PATH=""
+BUNDLE_GUEST_PATH=""
 BUNDLE_REPO=$(jq -r '.bundle_repo // empty' "$CONFIG_PATH")
 if [ -n "$BUNDLE_REPO" ]; then
     BUNDLE_REF=$(jq -r '.bundle_ref // "main"' "$CONFIG_PATH")
@@ -166,6 +300,23 @@ if [ -n "$BUNDLE_REPO" ]; then
             (if (.validation_dependencies // .dependencies // []) | type == "array" then (.validation_dependencies // .dependencies // []) elif (.validation_dependencies // .dependencies // null) | type == "string" then [(.validation_dependencies // .dependencies)] else [] end)
             + [$bundlePath]
         )' <<<"$CONFIG_JSON")
+else
+    BUNDLE_HOST_PATH=$(jq -r '.bundle_host_path // empty' "$CONFIG_PATH")
+    if [ -n "$BUNDLE_HOST_PATH" ]; then
+        BUNDLE_PATH="$BUNDLE_HOST_PATH"
+        BUNDLE_GUEST_SLUG="$(basename "$(cd "$BUNDLE_PATH" && pwd)")"
+        BUNDLE_GUEST_PATH=$(jq -r --arg fallback "/wordpress/wp-content/plugins/${BUNDLE_GUEST_SLUG}" '.bundle_path // $fallback' "$CONFIG_PATH")
+        CONFIG_JSON=$(jq -c \
+            --arg bundlePath "$BUNDLE_PATH" \
+            --arg bundleGuestPath "$BUNDLE_GUEST_PATH" \
+            '. + {
+                bundle_path: $bundleGuestPath,
+                bundle_host_path: $bundlePath
+            } | .validation_dependencies = (
+                (if (.validation_dependencies // .dependencies // []) | type == "array" then (.validation_dependencies // .dependencies // []) elif (.validation_dependencies // .dependencies // null) | type == "string" then [(.validation_dependencies // .dependencies)] else [] end)
+                + [$bundlePath]
+            )' <<<"$CONFIG_JSON")
+    fi
 fi
 
 WORKLOAD_ID=$(jq -r '.workload_id // "datamachine-agent"' "$CONFIG_PATH")
@@ -212,6 +363,10 @@ if [ "$ENABLE_TERMINAL_ACTIONS" = "1" ]; then
         }' <<<"$CONFIG_JSON")
 fi
 
+AGENT_RUNTIME=$(jq -r '.agent_runtime // env.HOMEBOY_DATAMACHINE_AGENT_RUNTIME // "homeboy"' <<<"$CONFIG_JSON")
+if [ "$AGENT_RUNTIME" = "wp-codebox" ]; then
+    homeboy_datamachine_agent_wp_codebox_run
+else
 SETTINGS_JSON=$(jq -nc \
     --arg workloadPath "$WORKLOAD_PLAYGROUND_PATH" \
     --arg workloadId "$WORKLOAD_ID" \
@@ -249,6 +404,7 @@ HOMEBOY_COMPONENT_PATH="$COMPONENT_PATH" \
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
     bash "$EXTENSION_PATH/scripts/bench/bench-runner.sh"
+fi
 
 if [ -n "$TERMINAL_SERVER_PID" ]; then
     kill "$TERMINAL_SERVER_PID" >/dev/null 2>&1 || true
