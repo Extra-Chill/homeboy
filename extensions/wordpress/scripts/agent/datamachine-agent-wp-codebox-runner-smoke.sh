@@ -51,6 +51,46 @@ has_arg --secret-env "$@"
 has_arg HOMEBOY_DATAMACHINE_AGENT_CONFIG "$@"
 
 node - <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+
+const artifactRoot = path.join(path.dirname(process.env.FAKE_WP_CODEBOX_ARGS_FILE), 'wp-codebox-artifacts', 'runtime-smoke')
+const filesRoot = path.join(artifactRoot, 'files')
+fs.mkdirSync(filesRoot, { recursive: true })
+
+const changedFiles = {
+  schema: 'wp-codebox/changed-files/v1',
+  files: [
+    {
+      path: '/wordpress/wp-content/plugins/example/generated.txt',
+      status: 'added',
+      mountTarget: '/wordpress/wp-content/plugins/example',
+      relativePath: 'generated.txt',
+    },
+  ],
+}
+const review = {
+  schema: 'wp-codebox/artifact-review/v1',
+  artifactId: 'runtime-smoke',
+  summary: 'Sandbox produced changes in 1 file.',
+  stats: { added: 1, modified: 0, deleted: 0, total: 1 },
+  changedFiles: changedFiles.files,
+  progress: [{ type: 'complete', label: 'Ready for your review.' }],
+  actions: [{ kind: 'approve', label: 'Apply changes', requiresApprovedFiles: true }],
+  evidence: {
+    patch: 'files/patch.diff',
+    patchSha256: 'sha256:example',
+    changedFiles: 'files/changed-files.json',
+  },
+  riskFlags: [],
+}
+
+fs.writeFileSync(path.join(artifactRoot, 'manifest.json'), JSON.stringify({ files: [] }, null, 2) + '\n')
+fs.writeFileSync(path.join(artifactRoot, 'metadata.json'), JSON.stringify({ artifacts: { review: 'files/review.json', changedFiles: 'files/changed-files.json', patch: 'files/patch.diff' } }, null, 2) + '\n')
+fs.writeFileSync(path.join(filesRoot, 'changed-files.json'), JSON.stringify(changedFiles, null, 2) + '\n')
+fs.writeFileSync(path.join(filesRoot, 'review.json'), JSON.stringify(review, null, 2) + '\n')
+fs.writeFileSync(path.join(filesRoot, 'patch.diff'), 'diff --git a/generated.txt b/generated.txt\n')
+
 const output = {
   metrics: {
     config_present: 1,
@@ -77,10 +117,14 @@ process.stdout.write(JSON.stringify({
     stdout: JSON.stringify({ output: JSON.stringify(output) }),
   },
   artifacts: {
-    directory: '/tmp/wp-codebox-artifacts/runtime-smoke',
-    manifestPath: '/tmp/wp-codebox-artifacts/runtime-smoke/manifest.json',
-    blueprintAfterPath: '/tmp/wp-codebox-artifacts/runtime-smoke/blueprint.after.json',
-    capturedMountsPath: '/tmp/wp-codebox-artifacts/runtime-smoke/files/mounted-files.json',
+    directory: artifactRoot,
+    manifestPath: path.join(artifactRoot, 'manifest.json'),
+    metadataPath: path.join(artifactRoot, 'metadata.json'),
+    blueprintAfterPath: path.join(artifactRoot, 'blueprint.after.json'),
+    capturedMountsPath: path.join(filesRoot, 'mounted-files.json'),
+    changedFilesPath: path.join(filesRoot, 'changed-files.json'),
+    patchPath: path.join(filesRoot, 'patch.diff'),
+    reviewPath: path.join(filesRoot, 'review.json'),
   },
 }) + '\n')
 NODE
@@ -135,7 +179,11 @@ done
 
 wp_codebox_success=$(jq -r "$scenario | .metadata.wp_codebox.success // false" "$RESULTS_TMPFILE")
 artifact_dir=$(jq -r "$scenario | .metadata.wp_codebox.artifacts.directory // \"\"" "$RESULTS_TMPFILE")
-if [ "$wp_codebox_success" != "true" ] || [ -z "$artifact_dir" ]; then
+review_schema=$(jq -r "$scenario | .metadata.wp_codebox.review_payload.schema // \"missing\"" "$RESULTS_TMPFILE")
+changed_files_schema=$(jq -r "$scenario | .metadata.wp_codebox.changed_files.schema // \"missing\"" "$RESULTS_TMPFILE")
+review_artifact=$(jq -r "$scenario | .artifacts.wp_codebox_review.kind // \"missing\"" "$RESULTS_TMPFILE")
+patch_artifact=$(jq -r "$scenario | .artifacts.wp_codebox_patch.kind // \"missing\"" "$RESULTS_TMPFILE")
+if [ "$wp_codebox_success" != "true" ] || [ -z "$artifact_dir" ] || [ "$review_schema" != "wp-codebox/artifact-review/v1" ] || [ "$changed_files_schema" != "wp-codebox/changed-files/v1" ] || [ "$review_artifact" != "review" ] || [ "$patch_artifact" != "patch" ]; then
     echo "ERROR: wp_codebox metadata missing (success=$wp_codebox_success artifact_dir=$artifact_dir)" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
