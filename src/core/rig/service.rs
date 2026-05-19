@@ -370,10 +370,9 @@ mod platform {
     }
 
     fn process_group_alive(pgid: u32) -> bool {
-        if pgid == 0 {
-            return false;
-        }
-        unsafe { libc::kill(-(pgid as libc::pid_t), 0) == 0 }
+        i32::try_from(pgid)
+            .map(crate::core::process::process_group_is_running)
+            .unwrap_or(false)
     }
 
     fn target_alive(pid: u32, process_group: bool) -> bool {

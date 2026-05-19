@@ -956,8 +956,8 @@ fn cleanup_process_group(pgid: libc::pid_t) {
         libc::kill(-pgid, libc::SIGTERM);
     }
     std::thread::sleep(Duration::from_millis(200));
-    unsafe {
-        if libc::kill(-pgid, 0) == 0 {
+    if crate::core::process::process_group_is_running(pgid) {
+        unsafe {
             libc::kill(-pgid, libc::SIGKILL);
         }
     }
