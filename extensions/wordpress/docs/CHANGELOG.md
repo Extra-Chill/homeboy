@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.91.0] - 2026-05-19
+
+### Added
+- add wp-codebox apply adapter
+
 ## [2.90.5] - 2026-05-19
 
 ### Fixed
