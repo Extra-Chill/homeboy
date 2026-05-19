@@ -2,6 +2,22 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.17.0] - 2026-05-19
+
+### Added
+- add compiler warning contracts
+- emit aggregate construction fingerprints
+- declare structured sidecar capabilities
+
+### Fixed
+- stop self-packaging extension releases
+- allow dirty crate publishes
+- scope inline test modules
+- scope changed integration tests
+- fail scoped zero-test runs
+- verify Rust autofixes compile
+- report lint autofix results
+
 ## [1.16.1] - 2026-05-08
 
 ### Fixed
