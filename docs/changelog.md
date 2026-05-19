@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.188.8] - 2026-05-19
+
+### Changed
+- share code audit line lookup
+- reuse rig test support helpers
+
+### Fixed
+- exclude artifacts from crate package
+
 ## [0.188.7] - 2026-05-19
 
 ### Changed
