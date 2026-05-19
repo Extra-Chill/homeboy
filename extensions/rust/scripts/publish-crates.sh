@@ -19,4 +19,4 @@ if [[ "$CURRENT_VERSION" == "$PUBLISHED_VERSION" ]]; then
 fi
 
 echo "Publishing $PACKAGE_NAME v$CURRENT_VERSION to crates.io..."
-cargo publish --locked
+cargo publish --locked --allow-dirty
