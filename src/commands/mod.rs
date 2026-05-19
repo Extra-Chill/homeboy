@@ -355,6 +355,7 @@ pub mod logs;
 pub mod observe;
 pub mod output_artifact;
 pub mod project;
+pub mod raw_output;
 pub mod refactor;
 pub mod release;
 pub mod report;
@@ -374,46 +375,6 @@ pub mod undo;
 pub mod upgrade;
 pub mod utils;
 pub mod version;
-
-pub fn run_markdown(
-    command: crate::cli_surface::Commands,
-    global: &GlobalArgs,
-) -> homeboy::core::Result<(String, i32)> {
-    match command {
-        crate::cli_surface::Commands::Docs(args) => docs::run_markdown(args),
-        crate::cli_surface::Commands::Changelog(args) => changelog::run_markdown(args),
-        crate::cli_surface::Commands::Review(args) => review::run_markdown(args, global),
-        crate::cli_surface::Commands::Trace(args) => trace::run_markdown(args, global),
-        crate::cli_surface::Commands::Runs(args) => runs::run_markdown(args, global),
-        crate::cli_surface::Commands::Report(args) => report::run_markdown(args),
-        _ => Err(homeboy::core::Error::validation_invalid_argument(
-            "output_mode",
-            "Command does not support markdown output",
-            None,
-            None,
-        )),
-    }
-}
-
-pub fn run_plain_text(
-    command: crate::cli_surface::Commands,
-    global: &GlobalArgs,
-) -> homeboy::core::Result<(String, i32)> {
-    match command {
-        crate::cli_surface::Commands::File(args) => match file::run(args, global)? {
-            (file::FileCommandOutput::Raw(content), exit_code) => Ok((content, exit_code)),
-            _ => Err(homeboy::core::Error::internal_unexpected(
-                "Unexpected output type for raw mode",
-            )),
-        },
-        _ => Err(homeboy::core::Error::validation_invalid_argument(
-            "output_mode",
-            "Command does not support plain text output",
-            None,
-            None,
-        )),
-    }
-}
 
 /// Dispatch a command to its handler and map result to JSON.
 macro_rules! dispatch {

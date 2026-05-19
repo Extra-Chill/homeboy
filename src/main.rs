@@ -266,23 +266,13 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    if let CommandResponseMode::Raw(CommandRawOutputMode::Markdown) = mode {
-        let markdown_result = commands::run_markdown(cli.command, &global);
-
-        match markdown_result {
-            Ok((content, exit_code)) => {
-                print!("{}", content);
-                return std::process::ExitCode::from(exit_code_to_u8(exit_code));
-            }
-            Err(err) => {
-                output::print_result::<serde_json::Value>(Err(err)).ok();
-                return std::process::ExitCode::from(exit_code_to_u8(1));
-            }
-        }
-    }
-
-    if let CommandResponseMode::Raw(CommandRawOutputMode::PlainText) = mode {
-        match commands::run_plain_text(cli.command, &global) {
+    if let CommandResponseMode::Raw(
+        raw_mode @ (CommandRawOutputMode::Markdown | CommandRawOutputMode::PlainText),
+    ) = mode
+    {
+        let raw_result = commands::raw_output::run(cli.command, &global, raw_mode)
+            .expect("markdown and plain-text modes should return raw output");
+        match raw_result {
             Ok((content, exit_code)) => {
                 print!("{}", content);
                 return std::process::ExitCode::from(exit_code_to_u8(exit_code));
