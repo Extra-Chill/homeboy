@@ -227,9 +227,6 @@ fn main() -> std::process::ExitCode {
         homeboy::core::extension::update_check::run_startup_check();
     }
 
-    let mode = cli.command.response_mode(output_file.is_some());
-    let output_artifact_policy = cli.command.output_artifact_policy(output_file.is_some());
-
     if matches!(cli.command, Commands::List) {
         let mut cmd = build_augmented_command(&extension_info);
         cmd.print_help().expect("Failed to print help");
@@ -249,13 +246,7 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    let exit_code = commands::response::run(
-        cli.command,
-        &global,
-        mode,
-        output_artifact_policy,
-        output_file.as_deref(),
-    );
+    let exit_code = commands::response::run(cli.command, &global, output_file.as_deref());
 
     std::process::ExitCode::from(exit_code_to_u8(exit_code))
 }

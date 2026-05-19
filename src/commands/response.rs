@@ -1,17 +1,12 @@
-use crate::cli_surface::{
-    CommandOutputArtifactPolicy, CommandRawOutputMode, CommandResponseMode, Commands,
-};
+use crate::cli_surface::{CommandRawOutputMode, CommandResponseMode, Commands};
 
 use super::utils::{response as output, tty};
 use super::GlobalArgs;
 
-pub fn run(
-    command: Commands,
-    global: &GlobalArgs,
-    mode: CommandResponseMode,
-    output_artifact_policy: CommandOutputArtifactPolicy,
-    output_file: Option<&str>,
-) -> i32 {
+pub fn run(command: Commands, global: &GlobalArgs, output_file: Option<&str>) -> i32 {
+    let mode = command.response_mode(output_file.is_some());
+    let output_artifact_policy = command.output_artifact_policy(output_file.is_some());
+
     match mode {
         CommandResponseMode::Json => {}
         CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {
