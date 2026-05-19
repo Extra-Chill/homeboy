@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-node-targeted.XXXXXX")"
+trap 'rm -rf "$TMPDIR"' EXIT
+
+run_gutenberg_fallback_smoke() {
+    local project_dir="${TMPDIR}/gutenberg"
+    mkdir -p "$project_dir/packages/core-data/src/test"
+
+    cat > "${project_dir}/package.json" <<'JSON'
+{
+  "name": "gutenberg",
+  "scripts": {
+    "test": "node aggregate-test-should-not-run.mjs",
+    "test:unit": "node unit-test-recorder.mjs"
+  }
+}
+JSON
+
+    cat > "${project_dir}/aggregate-test-should-not-run.mjs" <<'JS'
+console.error('aggregate test script should not run for targeted Gutenberg args');
+process.exit(1);
+JS
+
+    cat > "${project_dir}/unit-test-recorder.mjs" <<'JS'
+import { writeFileSync } from 'node:fs';
+
+const args = process.argv.slice(2);
+writeFileSync('received-args.json', JSON.stringify(args));
+
+if (args.join('\n') !== 'packages/core-data/src/test/resolvers.js\n--runInBand') {
+  console.error(`Unexpected test args: ${JSON.stringify(args)}`);
+  process.exit(1);
+}
+
+console.log('PASS packages/core-data/src/test/resolvers.js');
+console.log('Tests:       36 passed, 36 total');
+JS
+
+    touch "${project_dir}/packages/core-data/src/test/resolvers.js"
+
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+    HOMEBOY_COMPONENT_PATH="$project_dir" \
+    HOMEBOY_COMPONENT_ID="gutenberg-targeted-smoke" \
+    bash "${SCRIPT_DIR}/test-runner.sh" packages/core-data/src/test/resolvers.js --runInBand > "${TMPDIR}/gutenberg.out"
+
+    if ! grep -q 'Command:   npm run test:unit --' "${TMPDIR}/gutenberg.out"; then
+        echo "Expected Gutenberg targeted args to use test:unit" >&2
+        cat "${TMPDIR}/gutenberg.out" >&2
+        exit 1
+    fi
+
+    if [ "$(cat "${project_dir}/received-args.json")" != '["packages/core-data/src/test/resolvers.js","--runInBand"]' ]; then
+        echo "Runner did not forward targeted Gutenberg args to test:unit" >&2
+        cat "${project_dir}/received-args.json" >&2
+        exit 1
+    fi
+}
+
+run_configured_script_smoke() {
+    local project_dir="${TMPDIR}/configured"
+    mkdir -p "$project_dir/tests"
+
+    cat > "${project_dir}/package.json" <<'JSON'
+{
+  "name": "configured-targeted-script",
+  "scripts": {
+    "test": "node aggregate-test-should-not-run.mjs",
+    "test:unit": "node unit-test-recorder.mjs"
+  }
+}
+JSON
+
+    cat > "${project_dir}/aggregate-test-should-not-run.mjs" <<'JS'
+console.error('aggregate test script should not run when targeted test_script is configured');
+process.exit(1);
+JS
+
+    cat > "${project_dir}/unit-test-recorder.mjs" <<'JS'
+import { writeFileSync } from 'node:fs';
+
+const args = process.argv.slice(2);
+writeFileSync('received-args.json', JSON.stringify(args));
+
+if (args.join('\n') !== 'tests/example.test.js') {
+  console.error(`Unexpected test args: ${JSON.stringify(args)}`);
+  process.exit(1);
+}
+
+console.log('# tests 1');
+console.log('# pass 1');
+console.log('# fail 0');
+JS
+
+    touch "${project_dir}/tests/example.test.js"
+
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+    HOMEBOY_COMPONENT_PATH="$project_dir" \
+    HOMEBOY_COMPONENT_ID="configured-targeted-smoke" \
+    HOMEBOY_SETTINGS_JSON='{"test_script":"test:unit"}' \
+    bash "${SCRIPT_DIR}/test-runner.sh" tests/example.test.js > "${TMPDIR}/configured.out"
+
+    if ! grep -q 'Command:   npm run test:unit --' "${TMPDIR}/configured.out"; then
+        echo "Expected configured targeted args to use test:unit" >&2
+        cat "${TMPDIR}/configured.out" >&2
+        exit 1
+    fi
+
+    if [ "$(cat "${project_dir}/received-args.json")" != '["tests/example.test.js"]' ]; then
+        echo "Runner did not forward configured targeted args to test:unit" >&2
+        cat "${project_dir}/received-args.json" >&2
+        exit 1
+    fi
+}
+
+run_gutenberg_fallback_smoke
+run_configured_script_smoke
+
+echo "nodejs targeted-script smoke passed"
