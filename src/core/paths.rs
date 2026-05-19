@@ -125,6 +125,19 @@ fn expand_path(path: PathBuf) -> PathBuf {
     PathBuf::from(shellexpand::tilde(&raw).into_owned())
 }
 
+pub(crate) fn sanitize_path_segment(segment: &str) -> String {
+    segment
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Projects directory
 pub fn projects() -> Result<PathBuf> {
     Ok(homeboy()?.join("projects"))
