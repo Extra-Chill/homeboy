@@ -23,16 +23,17 @@ pub(super) fn resolve_effective_remote_path(
     fallback_base_path: &str,
 ) -> Result<String> {
     let remote_path = component_remote_path(component);
+    let remote_path = strip_leading_parent_segments(&remote_path);
 
     if remote_path.trim_start().starts_with('/') {
-        return base_path::join_remote_path(Some(fallback_base_path), &remote_path);
+        return base_path::join_remote_path(Some(fallback_base_path), remote_path);
     }
 
-    if let Some(resolved) = resolve_with_project_root(project, component, &remote_path)? {
+    if let Some(resolved) = resolve_with_project_root(project, component, remote_path)? {
         return Ok(resolved);
     }
 
-    base_path::join_remote_path(Some(fallback_base_path), &remote_path)
+    base_path::join_remote_path(Some(fallback_base_path), remote_path)
 }
 
 pub(super) fn project_with_detected_path_roots(
@@ -153,6 +154,10 @@ fn strip_path_prefix<'a>(path: &'a str, prefix: &str) -> &'a str {
         .unwrap_or(path)
 }
 
+fn strip_leading_parent_segments(path: &str) -> &str {
+    path.trim_start_matches("../")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +265,38 @@ mod tests {
             .expect("resolve path");
 
             assert_eq!(resolved, "/htdocs/wp-content/plugins/foo");
+        });
+    }
+
+    #[test]
+    fn resolves_legacy_parent_relative_content_paths_through_project_root() {
+        with_isolated_home(|_| {
+            install_extension();
+
+            let resolved = resolve_effective_remote_path(
+                &project_with_root(),
+                &component("../wp-content/plugins/foo"),
+                "/srv/site",
+            )
+            .expect("resolve path");
+
+            assert_eq!(resolved, "/htdocs/wp-content/plugins/foo");
+        });
+    }
+
+    #[test]
+    fn strips_legacy_parent_relative_paths_before_base_path_fallback() {
+        with_isolated_home(|_| {
+            install_extension();
+
+            let resolved = resolve_effective_remote_path(
+                &project_with_root(),
+                &component("../var/log/app.log"),
+                "/srv/site",
+            )
+            .expect("resolve path");
+
+            assert_eq!(resolved, "/srv/site/var/log/app.log");
         });
     }
 
