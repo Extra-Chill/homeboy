@@ -486,32 +486,6 @@ fn strip_runner_flag(args: &[String]) -> Vec<String> {
     stripped
 }
 
-#[cfg(test)]
-mod tests {
-    use super::strip_runner_flag;
-
-    #[test]
-    fn strips_runner_flag_forms_before_remote_exec() {
-        let args = vec![
-            "homeboy".to_string(),
-            "lint".to_string(),
-            "--runner".to_string(),
-            "lab-a".to_string(),
-            "--json-summary".to_string(),
-            "--runner=lab-b".to_string(),
-        ];
-
-        assert_eq!(
-            strip_runner_flag(&args),
-            vec![
-                "homeboy".to_string(),
-                "lint".to_string(),
-                "--json-summary".to_string()
-            ]
-        );
-    }
-}
-
 /// Attempt to augment a clap error with entity suggestions.
 /// Returns Some(augmented_message) if the unrecognized string matches a known entity.
 fn try_augment_clap_error(e: &clap::Error) -> Option<String> {
@@ -603,4 +577,30 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_runner_flag;
+
+    #[test]
+    fn strips_runner_flag_forms_before_remote_exec() {
+        let args = vec![
+            "homeboy".to_string(),
+            "lint".to_string(),
+            "--runner".to_string(),
+            "lab-a".to_string(),
+            "--json-summary".to_string(),
+            "--runner=lab-b".to_string(),
+        ];
+
+        assert_eq!(
+            strip_runner_flag(&args),
+            vec![
+                "homeboy".to_string(),
+                "lint".to_string(),
+                "--json-summary".to_string()
+            ]
+        );
+    }
 }

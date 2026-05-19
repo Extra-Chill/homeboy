@@ -368,7 +368,7 @@ fn finding_from_derived_literal_site(
         convention: rule.convention.clone(),
         severity: severity_from_config(&rule.severity),
         file: site.file.clone(),
-        description: render_template_from_values(description, &site.captures, &extra),
+        description: render_template_from_values(description, &site.captures, extra),
         suggestion: render_template_from_values(suggestion, &site.captures, extra),
         kind: AuditFinding::from_str(&rule.kind).unwrap_or(AuditFinding::LegacyComment),
     }
