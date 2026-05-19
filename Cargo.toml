@@ -8,6 +8,7 @@ description = "CLI for multi-component deployment and development workflow autom
 repository = "https://github.com/Extra-Chill/homeboy"
 homepage = "https://github.com/Extra-Chill/homeboy"
 build = "build.rs"
+exclude = ["/artifacts/"]
 
 [lib]
 name = "homeboy"
