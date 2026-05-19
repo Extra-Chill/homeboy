@@ -52,6 +52,13 @@
       "type": "string",
       "default": "https://registry.npmjs.org",
       "description": "npm registry URL for publishing"
+    },
+    {
+      "id": "targeted_test_script",
+      "label": "Targeted Test Script",
+      "type": "string",
+      "default": "",
+      "description": "npm script to run when homeboy test receives passthrough test args, for example 'test:unit'"
     }
   ],
   "audit": {

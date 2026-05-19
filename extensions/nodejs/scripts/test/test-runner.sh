@@ -23,6 +23,7 @@ set -euo pipefail
 #   HOMEBOY_TEST_RESULTS_FILE    — where to write TestResults envelope
 #   HOMEBOY_TEST_FAILURES_FILE   — where to write parsed failure details
 #   HOMEBOY_NODE_TEST_COMMAND    — override the test command entirely
+#   HOMEBOY_NODE_TARGETED_TEST_SCRIPT — npm script to use when args are present
 #   HOMEBOY_CHANGED_TEST_FILES   — newline-separated test files selected by core
 #   HOMEBOY_DEBUG                — verbose
 
@@ -40,6 +41,65 @@ homeboy_resolve_context
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
 homeboy_detect_package_manager
+
+RUNNER_ARGS=("$@")
+if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
+    while IFS= read -r selected_test_file; do
+        [ -n "$selected_test_file" ] || continue
+        RUNNER_ARGS+=("$selected_test_file")
+    done <<< "$HOMEBOY_CHANGED_TEST_FILES"
+fi
+
+homeboy_node_json_value() {
+    local expression="$1"
+    node -e "
+        const raw = process.env.HOMEBOY_SETTINGS_JSON || '{}';
+        let settings = {};
+        try { settings = JSON.parse(raw); } catch {}
+        const value = (${expression});
+        if (typeof value === 'string' && value) console.log(value);
+    " 2>/dev/null || true
+}
+
+homeboy_node_package_value() {
+    local expression="$1"
+    PACKAGE_JSON_PATH="${PROJECT_PATH}/package.json" \
+    node -e "
+        const pkg = require(process.env.PACKAGE_JSON_PATH);
+        const value = (${expression});
+        if (typeof value === 'string' && value) console.log(value);
+    " 2>/dev/null || true
+}
+
+homeboy_node_script_command() {
+    local script_name="$1"
+    printf '%s' "${PKG_RUN} ${script_name} --"
+}
+
+homeboy_node_targeted_test_script() {
+    local configured_script="${HOMEBOY_NODE_TARGETED_TEST_SCRIPT:-}"
+    if [ -z "$configured_script" ]; then
+        configured_script="$(homeboy_node_json_value "settings.node_targeted_test_script || settings.targeted_test_script || settings.test_script || settings.testing?.targeted_test_script || ''")"
+    fi
+
+    if [ -n "$configured_script" ]; then
+        if ! homeboy_has_npm_script "$configured_script"; then
+            echo "Error: targeted Node.js test script '${configured_script}' is not defined in package.json" >&2
+            exit 1
+        fi
+        printf '%s' "$configured_script"
+        return 0
+    fi
+
+    local package_name
+    package_name="$(homeboy_node_package_value "pkg.name || ''")"
+    if [ "$package_name" = "gutenberg" ] && homeboy_has_npm_script "test:unit"; then
+        printf '%s' "test:unit"
+        return 0
+    fi
+
+    return 1
+}
 
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
 if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; then
@@ -60,6 +120,8 @@ fi
 # Resolve the test command.
 if [ -n "${HOMEBOY_NODE_TEST_COMMAND:-}" ]; then
     TEST_CMD="$HOMEBOY_NODE_TEST_COMMAND"
+elif [ ${#RUNNER_ARGS[@]} -gt 0 ] && TARGETED_TEST_SCRIPT="$(homeboy_node_targeted_test_script)"; then
+    TEST_CMD="$(homeboy_node_script_command "$TARGETED_TEST_SCRIPT")"
 elif homeboy_has_npm_script "test"; then
     TEST_CMD="$PKG_RUN test"
 else
@@ -70,14 +132,6 @@ fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: test command: $TEST_CMD" >&2
-fi
-
-RUNNER_ARGS=("$@")
-if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
-    while IFS= read -r selected_test_file; do
-        [ -n "$selected_test_file" ] || continue
-        RUNNER_ARGS+=("$selected_test_file")
-    done <<< "$HOMEBOY_CHANGED_TEST_FILES"
 fi
 
 echo "Running Node.js tests..."
