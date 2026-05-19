@@ -49,6 +49,7 @@ mod rust_test_wiring;
 mod shadow_modules;
 mod shared_scaffolding;
 mod signatures;
+mod source_locations;
 mod structural;
 mod test_coverage;
 pub(crate) mod test_mapping;
