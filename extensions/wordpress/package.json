@@ -14,6 +14,7 @@
   "scripts": {
     "lint:js": "eslint --ext .js,.jsx,.ts,.tsx",
     "test:page-profiler": "node tests/page-profiler-smoke.js",
+    "test:datamachine-agent-wp-codebox-runner": "bash scripts/agent/datamachine-agent-wp-codebox-runner-smoke.sh",
     "test:agent-terminal-actions": "node tests/agent-terminal-actions-smoke.js",
     "test:terminal-action-server": "node tests/terminal-action-server-smoke.js",
     "test:playground-readiness": "node tests/playground-readiness-smoke.js",
