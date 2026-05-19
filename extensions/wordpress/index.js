@@ -6,4 +6,5 @@ module.exports = {
 	...require('./lib/page-profiler'),
 	...require('./lib/timing-correlator'),
 	...require('./lib/agent-terminal-actions'),
+	...require('./lib/wp-codebox-apply-adapter'),
 };
