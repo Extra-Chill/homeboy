@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.90.2] - 2026-05-19
+
+### Changed
+- Add WP Codebox agent runner adapter
+
 ## [2.90.1] - 2026-05-18
 
 ### Fixed
