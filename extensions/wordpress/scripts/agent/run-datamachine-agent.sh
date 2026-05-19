@@ -131,16 +131,71 @@ PHP
         "$wp_codebox_bin" "${wp_codebox_args[@]}" \
         >"$wp_codebox_output"
 
+    local wp_codebox_review_input="$RUNTIME_DIR/wp-codebox-review.json"
+    local wp_codebox_changed_files_input="$RUNTIME_DIR/wp-codebox-changed-files.json"
+    local wp_codebox_artifacts_json="$RUNTIME_DIR/wp-codebox-artifacts.json"
+    printf 'null\n' >"$wp_codebox_review_input"
+    printf 'null\n' >"$wp_codebox_changed_files_input"
+
+    local wp_codebox_review_path
+    local wp_codebox_changed_files_path
+    wp_codebox_review_path=$(jq -r '.artifacts.reviewPath // empty' "$wp_codebox_output")
+    wp_codebox_changed_files_path=$(jq -r '.artifacts.changedFilesPath // empty' "$wp_codebox_output")
+    if [ -n "$wp_codebox_review_path" ] && [ -f "$wp_codebox_review_path" ]; then
+        cp "$wp_codebox_review_path" "$wp_codebox_review_input"
+    fi
+    if [ -n "$wp_codebox_changed_files_path" ] && [ -f "$wp_codebox_changed_files_path" ]; then
+        cp "$wp_codebox_changed_files_path" "$wp_codebox_changed_files_input"
+    fi
+
+    jq -n \
+        --slurpfile run "$wp_codebox_output" \
+        --slurpfile review "$wp_codebox_review_input" \
+        --slurpfile changedFiles "$wp_codebox_changed_files_input" \
+        '
+        ($run[0].artifacts // {}) as $artifacts
+        | {
+            schema: "homeboy/wp-codebox-artifacts/v1",
+            success: ($run[0].success // false),
+            runtime: ($run[0].runtime // null),
+            paths: {
+                directory: ($artifacts.directory // ""),
+                manifest: ($artifacts.manifestPath // ""),
+                metadata: ($artifacts.metadataPath // ""),
+                blueprint_after: ($artifacts.blueprintAfterPath // ""),
+                blueprint_after_notes: ($artifacts.blueprintAfterNotesPath // ""),
+                events: ($artifacts.eventsPath // ""),
+                commands: ($artifacts.commandsPath // ""),
+                observations: ($artifacts.observationsPath // ""),
+                runtime_log: ($artifacts.runtimeLogPath // ""),
+                commands_log: ($artifacts.commandsLogPath // ""),
+                mounts: ($artifacts.mountsPath // ""),
+                captured_mounts: ($artifacts.capturedMountsPath // ""),
+                diffs: ($artifacts.diffsPath // ""),
+                changed_files: ($artifacts.changedFilesPath // ""),
+                patch: ($artifacts.patchPath // ""),
+                review: ($artifacts.reviewPath // "")
+            } | with_entries(select(.value != "")),
+            review_payload: ($review[0] // null),
+            changed_files: ($changedFiles[0] // null)
+        }
+        ' >"$wp_codebox_artifacts_json"
+
     jq -n \
         --arg component "$COMPONENT_ID" \
         --arg workloadId "$WORKLOAD_ID" \
         --arg workloadLabel "$WORKLOAD_LABEL" \
         --slurpfile run "$wp_codebox_output" \
+        --slurpfile wpCodeboxArtifacts "$wp_codebox_artifacts_json" \
         '
         def parsed_workload:
             ($run[0].execution.stdout? // "{}" | fromjson? // {}) as $outer
             | ($outer.output? // "{}" | fromjson? // {});
+        def artifact_entry($path; $kind; $label):
+            { path: $path, kind: $kind, label: $label };
         parsed_workload as $workload
+        | ($wpCodeboxArtifacts[0] // {}) as $wpArtifacts
+        | ($wpArtifacts.paths // {}) as $wpPaths
         | {
             component_id: $component,
             iterations: 1,
@@ -149,11 +204,21 @@ PHP
                     id: $workloadId,
                     label: $workloadLabel,
                     metrics: (($workload.metrics // {}) | with_entries(.key |= . + "_mean")),
+                    artifacts: ({
+                        wp_codebox_manifest: artifact_entry(($wpPaths.manifest // ""); "manifest"; "WP Codebox manifest"),
+                        wp_codebox_metadata: artifact_entry(($wpPaths.metadata // ""); "metadata"; "WP Codebox metadata"),
+                        wp_codebox_review: artifact_entry(($wpPaths.review // ""); "review"; "WP Codebox review payload"),
+                        wp_codebox_changed_files: artifact_entry(($wpPaths.changed_files // ""); "changed-files"; "WP Codebox changed files"),
+                        wp_codebox_patch: artifact_entry(($wpPaths.patch // ""); "patch"; "WP Codebox patch")
+                    } | with_entries(select(.value.path != ""))),
                     metadata: (($workload.metadata // {}) + {
                         wp_codebox: {
                             success: ($run[0].success // false),
                             runtime: ($run[0].runtime // null),
                             artifacts: ($run[0].artifacts // null),
+                            canonical_artifacts: ($wpPaths // {}),
+                            review_payload: ($wpArtifacts.review_payload // null),
+                            changed_files: ($wpArtifacts.changed_files // null),
                             error: ($run[0].error // null)
                         }
                     })
