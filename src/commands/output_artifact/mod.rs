@@ -28,7 +28,7 @@ pub fn run_json(
             }
         }
         (_, command) => {
-            let (stdout_result, exit_code) = super::run_json(command, global);
+            let (stdout_result, exit_code) = super::json_output::run(command, global);
 
             JsonCommandRun {
                 stdout_result,
