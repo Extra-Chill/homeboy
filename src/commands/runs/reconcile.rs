@@ -5,6 +5,7 @@ use serde_json::Value;
 use homeboy::core::observation::{
     run_owner_pid, ObservationStore, RunListFilter, RunRecord, RunStatus,
 };
+use homeboy::core::process::pid_is_running;
 
 use crate::commands::runs::RunsOutput;
 use crate::commands::CmdResult;
@@ -141,22 +142,6 @@ fn with_reconcile_metadata(run: &RunRecord, owner_pid: u32, reason: &str) -> Val
         "homeboy_reconciled": marker,
         "homeboy_original_metadata": metadata,
     })
-}
-
-fn pid_is_running(pid: u32) -> bool {
-    if pid > i32::MAX as u32 {
-        return false;
-    }
-
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as libc::pid_t, 0) == 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        pid == std::process::id()
-    }
 }
 
 #[cfg(test)]

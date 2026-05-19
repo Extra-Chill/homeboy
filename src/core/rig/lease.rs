@@ -165,7 +165,7 @@ fn prune_stale_leases() -> Result<()> {
         let Some(lease) = read_lease(&path)? else {
             continue;
         };
-        if !crate::core::daemon::pid_is_running(lease.pid) {
+        if !crate::core::process::pid_is_running(lease.pid) {
             fs::remove_file(&path).map_err(|e| {
                 Error::internal_unexpected(format!(
                     "Failed to remove stale rig lease {}: {}",
@@ -182,7 +182,7 @@ fn live_leases() -> Result<Vec<RigRunLease>> {
     let mut leases = Vec::new();
     for path in lease_files()? {
         if let Some(lease) = read_lease(&path)? {
-            if crate::core::daemon::pid_is_running(lease.pid) {
+            if crate::core::process::pid_is_running(lease.pid) {
                 leases.push(lease);
             }
         }

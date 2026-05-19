@@ -329,7 +329,7 @@ fn refresh_lease_index() -> Result<Vec<InvocationLease>> {
         let Some(lease) = decode_lease_file(&path)? else {
             continue;
         };
-        if crate::core::daemon::pid_is_running(lease.pid) {
+        if crate::core::process::pid_is_running(lease.pid) {
             live.push(lease);
         } else {
             remove_stale_invocation_lease(&path)?;

@@ -493,7 +493,7 @@ fn wait_for_tcp(port: u16, timeout: Duration) -> bool {
 
 fn session_is_live(session: &RunnerSession) -> bool {
     if let Some(pid) = session.tunnel_pid {
-        if !pid_is_running(pid) {
+        if !crate::core::process::pid_is_running(pid) {
             return false;
         }
     }
@@ -573,20 +573,6 @@ fn command_failure_message(prefix: &str, output: &crate::core::server::CommandOu
 
 fn is_loopback_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
-fn pid_is_running(pid: u32) -> bool {
-    if pid > i32::MAX as u32 {
-        return false;
-    }
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as libc::pid_t, 0) == 0
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
 }
 
 fn terminate_pid(pid: u32) {

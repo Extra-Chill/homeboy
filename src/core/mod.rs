@@ -25,6 +25,7 @@ pub mod keychain;
 pub mod observation;
 pub mod output;
 pub mod plan;
+pub mod process;
 pub mod project;
 pub mod quality;
 pub mod refactor;
