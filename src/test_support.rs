@@ -6,6 +6,7 @@ pub(crate) struct HomeGuard {
     prior: Option<String>,
     prior_xdg_data_home: Option<String>,
     prior_artifact_root: Option<String>,
+    prior_runtime_tmpdir: Option<String>,
     prior_invocation_runtime: Option<String>,
     dir: TempDir,
     /// Held alongside `dir` so the short invocation runtime tempdir is
@@ -38,12 +39,14 @@ impl HomeGuard {
         let prior = std::env::var("HOME").ok();
         let prior_xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
         let prior_artifact_root = std::env::var("HOMEBOY_ARTIFACT_ROOT").ok();
+        let prior_runtime_tmpdir = std::env::var("HOMEBOY_RUNTIME_TMPDIR").ok();
         let prior_invocation_runtime =
             std::env::var(crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
         let dir = TempDir::new().expect("home tempdir");
         std::env::set_var("HOME", dir.path());
         std::env::set_var("XDG_DATA_HOME", dir.path().join(".local").join("share"));
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
+        std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
         crate::core::set_artifact_root_override(None);
         // Pin invocation runtime to a SHORT tempdir, isolated from `$TMPDIR`
         // and from the home tempdir (which itself can already live on a long
@@ -59,6 +62,7 @@ impl HomeGuard {
             prior,
             prior_xdg_data_home,
             prior_artifact_root,
+            prior_runtime_tmpdir,
             prior_invocation_runtime,
             dir,
             _inv_dir: Some(inv_dir),
@@ -99,6 +103,10 @@ impl Drop for HomeGuard {
         match &self.prior_artifact_root {
             Some(value) => std::env::set_var("HOMEBOY_ARTIFACT_ROOT", value),
             None => std::env::remove_var("HOMEBOY_ARTIFACT_ROOT"),
+        }
+        match &self.prior_runtime_tmpdir {
+            Some(value) => std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", value),
+            None => std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR"),
         }
         crate::core::set_artifact_root_override(None);
         match &self.prior_invocation_runtime {
