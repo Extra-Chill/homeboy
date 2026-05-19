@@ -538,6 +538,7 @@ jobs:
     if: ${{ always() && needs.plan.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     runs-on: ubuntu-22.04
     outputs:
       val: ${{ steps.host.outputs.manifest }}
@@ -639,46 +640,12 @@ jobs:
           done
           git push
 
-  publish-crates:
-    needs:
-      - prepare
-      - plan
-      - host
-    runs-on: ubuntu-22.04
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
-    steps:
-      - uses: actions/checkout@v4
-        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
-        with:
-          ref: ${{ needs.prepare.outputs.release-tag }}
-          persist-credentials: false
-          submodules: recursive
-
-      - name: Install Rust toolchain
-        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish to crates.io
-        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
-        shell: bash
-        run: |
-          cargo publish --locked || {
-            if cargo search homeboy --limit 1 | grep -q '^homeboy = '; then
-              echo "Version already published on crates.io; skipping"
-              exit 0
-            fi
-            exit 1
-          }
-
   announce:
     needs:
       - plan
       - host
       - publish-homebrew-formula
-      - publish-crates
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') && (needs.publish-crates.result == 'skipped' || needs.publish-crates.result == 'success') }}
+    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
