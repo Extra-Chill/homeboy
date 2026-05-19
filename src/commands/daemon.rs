@@ -129,7 +129,7 @@ impl AnalysisJobRunner for CommandAnalysisJobRunner {
             )
         })?;
         let global = crate::commands::GlobalArgs {};
-        let (result, exit_code) = crate::commands::run_json(cli.command, &global);
+        let (result, exit_code) = crate::commands::json_output::run(cli.command, &global);
         Ok(AnalysisJobRunOutput {
             exit_code,
             output: result?,

@@ -350,6 +350,7 @@ pub mod fleet;
 pub mod git;
 pub mod http;
 pub mod issues;
+pub mod json_output;
 pub mod lint;
 pub mod logs;
 pub mod observe;
@@ -375,78 +376,6 @@ pub mod undo;
 pub mod upgrade;
 pub mod utils;
 pub mod version;
-
-/// Dispatch a command to its handler and map result to JSON.
-macro_rules! dispatch {
-    ($args:expr, $global:expr, $extension:ident) => {
-        crate::commands::utils::response::map_cmd_result_to_json($extension::run($args, $global))
-    };
-}
-
-pub fn run_json(
-    command: crate::cli_surface::Commands,
-    global: &GlobalArgs,
-) -> (homeboy::core::Result<serde_json::Value>, i32) {
-    crate::commands::utils::tty::status("homeboy is working...");
-
-    match command {
-        // All commands use global context
-        crate::cli_surface::Commands::Status(args) => dispatch!(args, global, status),
-        crate::cli_surface::Commands::Test(args) => dispatch!(args, global, test),
-        crate::cli_surface::Commands::Bench(args) => dispatch!(args, global, bench),
-        crate::cli_surface::Commands::Trace(args) => dispatch!(args, global, trace),
-        crate::cli_surface::Commands::Observe(args) => dispatch!(args, global, observe),
-        crate::cli_surface::Commands::Lint(args) => dispatch!(args, global, lint),
-        crate::cli_surface::Commands::Project(args) => dispatch!(args, global, project),
-        crate::cli_surface::Commands::Ssh(args) => dispatch!(args, global, ssh),
-        crate::cli_surface::Commands::Server(args) => dispatch!(args, global, server),
-        crate::cli_surface::Commands::Db(args) => dispatch!(args, global, db),
-        crate::cli_surface::Commands::Deps(args) => dispatch!(args, global, deps),
-        crate::cli_surface::Commands::Doctor(args) => dispatch!(args, global, doctor),
-        crate::cli_surface::Commands::File(args) => dispatch!(args, global, file),
-        crate::cli_surface::Commands::Fleet(args) => dispatch!(args, global, fleet),
-        crate::cli_surface::Commands::Logs(args) => dispatch!(args, global, logs),
-        crate::cli_surface::Commands::Triage(args) => dispatch!(args, global, triage),
-        crate::cli_surface::Commands::Deploy(args) => dispatch!(args, global, deploy),
-        crate::cli_surface::Commands::Component(args) => dispatch!(args, global, component),
-        crate::cli_surface::Commands::Config(args) => dispatch!(args, global, config),
-        crate::cli_surface::Commands::Daemon(args) => dispatch!(args, global, daemon),
-        crate::cli_surface::Commands::Extension(args) => dispatch!(args, global, extension),
-        crate::cli_surface::Commands::Docs(args) => dispatch!(args, global, docs),
-        crate::cli_surface::Commands::Changelog(args) => dispatch!(args, global, changelog),
-        crate::cli_surface::Commands::Git(args) => dispatch!(args, global, git),
-        crate::cli_surface::Commands::Issues(args) => dispatch!(args, global, issues),
-        crate::cli_surface::Commands::Version(args) => dispatch!(args, global, version),
-        crate::cli_surface::Commands::Build(args) => dispatch!(args, global, build),
-        crate::cli_surface::Commands::Changes(args) => dispatch!(args, global, changes),
-        crate::cli_surface::Commands::Release(args) => dispatch!(args, global, release),
-        crate::cli_surface::Commands::Report(args) => dispatch!(args, global, report),
-        crate::cli_surface::Commands::Review(args) => dispatch!(args, global, review),
-        crate::cli_surface::Commands::Audit(args) => dispatch!(args, global, audit),
-        crate::cli_surface::Commands::Refactor(args) => dispatch!(args, global, refactor),
-        crate::cli_surface::Commands::Rig(args) => dispatch!(args, global, rig),
-        crate::cli_surface::Commands::Runner(args) => dispatch!(args, global, runner),
-        crate::cli_surface::Commands::Runs(args) => dispatch!(args, global, runs),
-        crate::cli_surface::Commands::SelfCmd(args) => dispatch!(args, global, self_cmd),
-        crate::cli_surface::Commands::Stack(args) => dispatch!(args, global, stack),
-        crate::cli_surface::Commands::Undo(args) => dispatch!(args, global, undo),
-        crate::cli_surface::Commands::Auth(args) => dispatch!(args, global, auth),
-        crate::cli_surface::Commands::Api(args) => dispatch!(args, global, api),
-        crate::cli_surface::Commands::Http(args) => dispatch!(args, global, http),
-        crate::cli_surface::Commands::Upgrade(args) => dispatch!(args, global, upgrade),
-
-        // Special case: List uses raw output mode
-        crate::cli_surface::Commands::List => {
-            let err = homeboy::core::Error::validation_invalid_argument(
-                "output_mode",
-                "List command uses raw output mode",
-                None,
-                None,
-            );
-            crate::commands::utils::response::map_cmd_result_to_json::<serde_json::Value>(Err(err))
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
