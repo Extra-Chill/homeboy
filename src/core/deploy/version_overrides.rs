@@ -323,23 +323,18 @@ pub(super) fn deploy_with_override(
         ));
     }
 
-    // Step 4: Run cleanup command if configured
-    if let Some(cleanup_cmd_template) = &override_config.cleanup_command {
-        let cleanup_cmd = render_map(cleanup_cmd_template, &vars);
-        log_status!("deploy", "Running cleanup: {}", cleanup_cmd);
-        let _ = ssh_client.execute(&cleanup_cmd); // Best effort cleanup
-    }
-
-    // Step 5: Fix permissions unless skipped
+    // Step 4: Fix permissions unless skipped
     if !override_config.skip_permissions_fix {
         log_status!("deploy", "Fixing file permissions");
         permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)?;
     }
 
-    // Step 6: Run verification if configured
+    // Step 5: Run verification if configured. Keep the staged artifact around
+    // until after this step so extension verifiers can compare installed files
+    // against the exact uploaded payload.
     if let Some(v) = verification {
         if let Some(ref verify_cmd_template) = v.verify_command {
-            let mut verify_vars = HashMap::new();
+            let mut verify_vars = vars.clone();
             verify_vars.insert(
                 TemplateVars::TARGET_DIR.to_string(),
                 remote_path.to_string(),
@@ -356,6 +351,13 @@ pub(super) fn deploy_with_override(
                 return Ok(DeployResult::failure(1, error_msg));
             }
         }
+    }
+
+    // Step 6: Run cleanup command if configured
+    if let Some(cleanup_cmd_template) = &override_config.cleanup_command {
+        let cleanup_cmd = render_map(cleanup_cmd_template, &vars);
+        log_status!("deploy", "Running cleanup: {}", cleanup_cmd);
+        let _ = ssh_client.execute(&cleanup_cmd); // Best effort cleanup
     }
 
     Ok(DeployResult::success(0))
@@ -404,5 +406,154 @@ pub(super) fn run_post_deploy_hooks(
         Err(e) => {
             log_status!("deploy", "post:deploy hook error: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::component::VersionTarget;
+    use crate::core::extension::{DeployOverride, DeployVerification, ExtensionManifest};
+    use crate::core::server::SshClient;
+    use std::collections::HashMap;
+    use std::fs;
+
+    fn local_client() -> SshClient {
+        SshClient {
+            host: "localhost".to_string(),
+            user: "test".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: true,
+            env: HashMap::new(),
+        }
+    }
+
+    fn extension() -> ExtensionManifest {
+        serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "name": "Fixture",
+            "version": "1.0.0"
+        }))
+        .expect("extension manifest")
+    }
+
+    fn versioned_component(remote_path: &str) -> Component {
+        Component {
+            id: "fixture".to_string(),
+            remote_path: remote_path.to_string(),
+            version_targets: Some(vec![VersionTarget {
+                file: "fixture.php".to_string(),
+                pattern: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_fetch_remote_versions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        fs::write(temp.path().join("fixture.php"), "Version: 1.2.3").expect("version file");
+
+        let versions = fetch_remote_versions(
+            &[versioned_component(".")],
+            temp.path().to_str().expect("base path"),
+            &local_client(),
+        );
+
+        assert_eq!(versions.get("fixture").map(String::as_str), Some("1.2.3"));
+    }
+
+    #[test]
+    fn test_fetch_remote_versions_for_project() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_dir = temp.path().join("plugin");
+        fs::create_dir_all(&remote_dir).expect("remote dir");
+        fs::write(remote_dir.join("fixture.php"), "Version: 2.3.4").expect("version file");
+
+        let versions = fetch_remote_versions_for_project(
+            &[versioned_component("plugin")],
+            None,
+            temp.path().to_str().expect("base path"),
+            &local_client(),
+        );
+
+        assert_eq!(versions.get("fixture").map(String::as_str), Some("2.3.4"));
+    }
+
+    #[test]
+    fn test_find_deploy_override() {
+        assert!(find_deploy_override("/not-a-real-homeboy-extension-target/").is_none());
+    }
+
+    #[test]
+    fn test_find_deploy_verification() {
+        assert!(find_deploy_verification("/not-a-real-homeboy-extension-target/").is_none());
+    }
+
+    #[test]
+    fn test_prefer_installed_binary() {
+        let current_exe = std::env::current_exe().expect("current exe");
+
+        assert!(prefer_installed_binary(&current_exe).is_none());
+    }
+
+    #[test]
+    fn test_run_post_deploy_hooks() {
+        let component = Component {
+            id: "fixture".to_string(),
+            ..Default::default()
+        };
+
+        run_post_deploy_hooks(&local_client(), &component, "/tmp/fixture", "/tmp");
+    }
+
+    #[test]
+    fn test_deploy_with_override_keeps_staging_artifact_until_verification() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("artifact.zip");
+        let staging = temp.path().join("staging");
+        let target = temp.path().join("target");
+        fs::write(&artifact, "artifact bytes").expect("artifact");
+
+        let override_config = DeployOverride {
+            path_pattern: "/target/".to_string(),
+            staging_path: staging.to_string_lossy().to_string(),
+            install_command:
+                "mkdir -p {{targetDir}} && cp {{stagingArtifact}} {{targetDir}}/installed.zip"
+                    .to_string(),
+            cleanup_command: Some("rm -f {{stagingArtifact}}".to_string()),
+            skip_permissions_fix: true,
+        };
+        let verification = DeployVerification {
+            path_pattern: "/target/".to_string(),
+            verify_command: Some(
+                "test -f {{stagingArtifact}} && cmp -s {{stagingArtifact}} {{targetDir}}/installed.zip && echo verified"
+                    .to_string(),
+            ),
+            verify_error_message: Some("artifact mismatch".to_string()),
+        };
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            Some(&verification),
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy failed: {:?}", result.error);
+        assert!(!staging.join("artifact.zip").exists());
+        assert_eq!(
+            fs::read_to_string(target.join("installed.zip")).expect("installed artifact"),
+            "artifact bytes"
+        );
     }
 }
