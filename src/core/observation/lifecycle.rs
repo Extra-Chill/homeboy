@@ -101,7 +101,7 @@ pub fn running_status_note(run: &RunRecord) -> Option<String> {
         );
     };
 
-    if crate::core::daemon::pid_is_running(owner_pid) {
+    if crate::core::process::pid_is_running(owner_pid) {
         None
     } else {
         Some(

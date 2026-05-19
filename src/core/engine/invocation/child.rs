@@ -236,7 +236,7 @@ impl InvocationChildRecord {
     }
 
     fn process_identity_matches(pid: u32, started_at: Option<&str>) -> bool {
-        if !crate::core::daemon::pid_is_running(pid) {
+        if !crate::core::process::pid_is_running(pid) {
             return false;
         }
         match (started_at, Self::process_started_at(pid)) {

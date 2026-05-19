@@ -11,6 +11,7 @@ use crate::core::api_jobs::JobStore;
 use crate::core::error::{Error, Result};
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
 use crate::core::paths;
+use crate::core::process::pid_is_running;
 use crate::core::source_snapshot::SourceSnapshot;
 
 mod artifact_download;
@@ -573,22 +574,6 @@ fn write_http_response(mut stream: TcpStream, response: HttpResponse) -> std::io
         body.len(),
         body
     )
-}
-
-pub(crate) fn pid_is_running(pid: u32) -> bool {
-    if pid > i32::MAX as u32 {
-        return false;
-    }
-
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as libc::pid_t, 0) == 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        pid == std::process::id()
-    }
 }
 
 fn terminate_pid(pid: u32) -> Result<()> {
