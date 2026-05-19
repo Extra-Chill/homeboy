@@ -1,10 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::component::Component;
-use crate::config;
-use crate::error::Result;
+use crate::core::component::Component;
+use crate::core::config;
+use crate::core::error::Result;
+use crate::core::paths as base_path;
+use crate::core::project::Project;
 use crate::is_zero_u32;
-use crate::paths as base_path;
+
+use super::path_roots::resolve_effective_remote_path;
 
 /// Parse bulk component IDs from a JSON spec.
 pub fn parse_bulk_component_ids(json_spec: &str) -> Result<Vec<String>> {
@@ -201,6 +204,16 @@ impl ComponentDeployResult {
         }
     }
 
+    pub(super) fn new_for_project(
+        component: &Component,
+        project: &Project,
+        base_path: &str,
+    ) -> Self {
+        let mut result = Self::new(component, base_path);
+        result.remote_path = resolve_effective_remote_path(project, component, base_path).ok();
+        result
+    }
+
     /// Shorthand for the common failure pattern: status="failed" + versions + error.
     pub(super) fn failed(
         component: &Component,
@@ -268,7 +281,11 @@ mod tests {
         parse_bulk_component_ids, ComponentDeployResult, ComponentStatus, DeployResult,
         ReleaseState, ReleaseStateStatus,
     };
-    use crate::component::Component;
+    use crate::core::component::{Component, ScopedExtensionConfig};
+    use crate::core::extension::{DeployCapability, ExtensionManifest, RemotePathRootRule};
+    use crate::core::project::Project;
+    use crate::test_support::with_isolated_home;
+    use std::collections::HashMap;
 
     fn component() -> Component {
         Component::new(
@@ -277,6 +294,42 @@ mod tests {
             "wp-content/plugins/fixture".to_string(),
             None,
         )
+    }
+
+    fn component_with_extension() -> Component {
+        let mut component = component();
+        component.extensions = Some(HashMap::from([(
+            "wordpress".to_string(),
+            ScopedExtensionConfig::default(),
+        )]));
+        component
+    }
+
+    fn install_wordpress_extension() {
+        crate::core::extension::save_manifest(&ExtensionManifest {
+            id: "wordpress".to_string(),
+            name: "WordPress".to_string(),
+            version: "1.0.0".to_string(),
+            deploy: Some(DeployCapability {
+                verifications: Vec::new(),
+                overrides: Vec::new(),
+                remote_path_inference: Vec::new(),
+                path_roots: vec![RemotePathRootRule {
+                    path_prefix: "wp-content".to_string(),
+                    root: "wp_content".to_string(),
+                    strip_prefix: true,
+                    detect_command: None,
+                }],
+                version_patterns: Vec::new(),
+                since_tag: None,
+            }),
+            ..serde_json::from_value(serde_json::json!({
+                "name": "WordPress",
+                "version": "1.0.0"
+            }))
+            .expect("manifest")
+        })
+        .expect("save extension");
     }
 
     fn deploy_result() -> ComponentDeployResult {
@@ -390,6 +443,32 @@ mod tests {
             result.remote_path.as_deref(),
             Some("/srv/wp-content/plugins/fixture")
         );
+    }
+
+    #[test]
+    fn new_for_project_reports_effective_remote_path() {
+        with_isolated_home(|_| {
+            install_wordpress_extension();
+            let project = Project {
+                id: "site".to_string(),
+                path_roots: HashMap::from([(
+                    "wp_content".to_string(),
+                    "/htdocs/wp-content".to_string(),
+                )]),
+                ..Project::default()
+            };
+
+            let result = ComponentDeployResult::new_for_project(
+                &component_with_extension(),
+                &project,
+                "/srv/site",
+            );
+
+            assert_eq!(
+                result.remote_path.as_deref(),
+                Some("/htdocs/wp-content/plugins/fixture")
+            );
+        });
     }
 
     #[test]

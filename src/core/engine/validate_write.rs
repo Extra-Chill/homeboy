@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::undo::InMemoryRollback;
-use crate::error::{Error, Result};
-use crate::extension;
+use crate::core::error::{Error, Result};
+use crate::core::extension;
 
 /// Result of a post-write validation check.
 #[derive(Debug, Clone, Serialize)]
@@ -247,7 +247,8 @@ fn resolve_validate_command(_root: &Path, changed_files: &[PathBuf]) -> Option<S
                 // under POSIX sh — which breaks scripts using bash-only features like
                 // process substitution (`done < <(...)`). See #1276.
                 return Some(
-                    crate::engine::shell::quote_path(&script_path.to_string_lossy()).to_string(),
+                    crate::core::engine::shell::quote_path(&script_path.to_string_lossy())
+                        .to_string(),
                 );
             }
         }
@@ -334,7 +335,7 @@ mod tests {
         // Mimic what resolve_validate_command emits for an extension script —
         // the quoted path with no `sh ` prefix — and run it the same way
         // validate_write does.
-        let command = crate::engine::shell::quote_path(&script_path.to_string_lossy());
+        let command = crate::core::engine::shell::quote_path(&script_path.to_string_lossy());
         let output = std::process::Command::new("sh")
             .args(["-c", &command])
             .output()

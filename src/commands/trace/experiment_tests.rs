@@ -5,7 +5,7 @@ use crate::commands::utils::args::{
 };
 use crate::test_support::with_isolated_home;
 
-use homeboy::extension::trace as extension_trace;
+use homeboy::core::extension::trace as extension_trace;
 
 use super::{execute_trace_run, TraceArgs, TraceSchedule, TraceVariantMatrixMode};
 

@@ -1,7 +1,7 @@
 //! Best-effort run-local resource summaries.
 
-use crate::engine::run_dir::{self, RunDir};
-use crate::error::{Error, Result};
+use crate::core::engine::run_dir::{self, RunDir};
+use crate::core::error::{Error, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;

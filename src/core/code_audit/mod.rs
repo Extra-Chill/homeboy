@@ -11,6 +11,7 @@
 //! 5. Producing actionable findings for outliers
 //! 6. Analyzing structural complexity (god files, high item counts)
 
+mod aggregate_construction;
 pub mod baseline;
 mod checks;
 pub mod codebase_map;
@@ -76,7 +77,10 @@ pub use report::AuditCommandOutput;
 pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs, AuditRunWorkflowResult};
 pub use walker::is_test_path;
 
-use crate::{component, component::AuditConfig, is_zero, Result};
+use crate::core::component::AuditConfig;
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus};
+use crate::core::{component, Result};
+use crate::is_zero;
 
 /// Summary counts for the audit report.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -125,8 +129,9 @@ pub(crate) struct AuditWithAnalysis {
     pub(crate) analysis: AuditAnalysisContext,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AuditExecutionPlan {
+    pub(crate) plan: HomeboyPlan,
     pub(crate) run_conventions: bool,
     pub(crate) run_structural: bool,
     pub(crate) run_duplication: bool,
@@ -151,36 +156,42 @@ pub(crate) struct AuditExecutionPlan {
     pub(crate) run_shared_scaffolding: bool,
     pub(crate) run_parallel_runner_setup: bool,
     pub(crate) run_enum_dispatch_contracts: bool,
+    pub(crate) run_aggregate_construction: bool,
 }
 
 impl AuditExecutionPlan {
     pub(crate) fn full() -> Self {
-        Self {
-            run_conventions: true,
-            run_structural: true,
-            run_duplication: true,
-            run_dead_code: true,
-            run_comment_hygiene: true,
-            run_test_coverage: true,
-            run_layer_ownership: true,
-            run_test_topology: true,
-            run_rust_test_wiring: true,
-            run_docs: true,
-            run_compiler_warnings: true,
-            run_wrapper_inference: true,
-            run_shadow_modules: true,
-            run_field_patterns: true,
-            run_facade_passthrough: true,
-            run_literal_shapes: true,
-            run_deprecation_age: true,
-            run_dead_guard: true,
-            run_requested_detectors: true,
-            run_core_boundary_leaks: true,
-            run_global_env_guard: true,
-            run_shared_scaffolding: true,
-            run_parallel_runner_setup: true,
-            run_enum_dispatch_contracts: true,
-        }
+        Self::with_generic_plan(
+            "full",
+            Self {
+                plan: HomeboyPlan::for_description(PlanKind::Audit, "audit"),
+                run_conventions: true,
+                run_structural: true,
+                run_duplication: true,
+                run_dead_code: true,
+                run_comment_hygiene: true,
+                run_test_coverage: true,
+                run_layer_ownership: true,
+                run_test_topology: true,
+                run_rust_test_wiring: true,
+                run_docs: true,
+                run_compiler_warnings: true,
+                run_wrapper_inference: true,
+                run_shadow_modules: true,
+                run_field_patterns: true,
+                run_facade_passthrough: true,
+                run_literal_shapes: true,
+                run_deprecation_age: true,
+                run_dead_guard: true,
+                run_requested_detectors: true,
+                run_core_boundary_leaks: true,
+                run_global_env_guard: true,
+                run_shared_scaffolding: true,
+                run_parallel_runner_setup: true,
+                run_enum_dispatch_contracts: true,
+                run_aggregate_construction: true,
+            },
+        )
     }
 
     pub(crate) fn from_filters(only: &[AuditFinding], exclude: &[AuditFinding]) -> Self {
@@ -188,162 +199,235 @@ impl AuditExecutionPlan {
             return Self::full();
         }
 
-        Self {
-            run_conventions: Self::family_enabled(
-                only,
-                exclude,
-                &[
-                    AuditFinding::MissingMethod,
-                    AuditFinding::ExtraMethod,
-                    AuditFinding::MissingRegistration,
-                    AuditFinding::DifferentRegistration,
-                    AuditFinding::MissingInterface,
-                    AuditFinding::NamingMismatch,
-                    AuditFinding::SignatureMismatch,
-                    AuditFinding::NamespaceMismatch,
-                    AuditFinding::MissingImport,
-                ],
-            ),
-            run_structural: Self::family_enabled(
-                only,
-                exclude,
-                &[
-                    AuditFinding::GodFile,
-                    AuditFinding::HighItemCount,
-                    AuditFinding::DirectorySprawl,
-                ],
-            ),
-            run_duplication: Self::family_enabled(
-                only,
-                exclude,
-                &[
-                    AuditFinding::DuplicateFunction,
-                    AuditFinding::IntraMethodDuplicate,
-                    AuditFinding::NearDuplicate,
-                    AuditFinding::ParallelImplementation,
-                ],
-            ),
-            run_dead_code: Self::family_enabled(
-                only,
-                exclude,
-                &[
-                    AuditFinding::UnusedParameter,
-                    AuditFinding::IgnoredParameter,
-                    AuditFinding::DeadCodeMarker,
-                    AuditFinding::UnreferencedExport,
-                    AuditFinding::OrphanedInternal,
-                ],
-            ),
-            run_comment_hygiene: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::TodoMarker, AuditFinding::LegacyComment],
-            ),
-            run_test_coverage: Self::family_enabled(
-                only,
-                exclude,
-                &[
-                    AuditFinding::MissingTestFile,
-                    AuditFinding::MissingTestMethod,
-                    AuditFinding::OrphanedTest,
-                    AuditFinding::VacuousTest,
-                ],
-            ),
-            run_layer_ownership: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::LayerOwnershipViolation],
-            ),
-            run_test_topology: Self::family_enabled(
-                only,
-                exclude,
-                &[
-                    AuditFinding::InlineTestModule,
-                    AuditFinding::ScatteredTestFile,
-                    AuditFinding::VacuousTest,
-                ],
-            ),
-            run_rust_test_wiring: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::UnwiredNestedRustTest],
-            ),
-            run_docs: Self::family_enabled(
-                only,
-                exclude,
-                &[
-                    AuditFinding::BrokenDocReference,
-                    AuditFinding::UndocumentedFeature,
-                    AuditFinding::StaleDocReference,
-                ],
-            ),
-            run_compiler_warnings: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::CompilerWarning],
-            ),
-            run_wrapper_inference: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::MissingWrapperDeclaration],
-            ),
-            run_shadow_modules: Self::family_enabled(only, exclude, &[AuditFinding::ShadowModule]),
-            run_field_patterns: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::RepeatedFieldPattern],
-            ),
-            run_facade_passthrough: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::FacadePassthrough],
-            ),
-            run_literal_shapes: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::RepeatedLiteralShape],
-            ),
-            run_deprecation_age: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::DeprecationAge],
-            ),
-            run_dead_guard: Self::family_enabled(only, exclude, &[AuditFinding::DeadGuard]),
-            run_requested_detectors: Self::family_enabled(
-                only,
-                exclude,
-                &[
-                    AuditFinding::JsonLikeExactMatch,
-                    AuditFinding::ConstantBackedSlugLiteral,
-                    AuditFinding::OptionScopeDrift,
-                ],
-            ),
-            run_core_boundary_leaks: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::CoreBoundaryLeak],
-            ),
-            run_global_env_guard: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::GlobalEnvMutationGuard],
-            ),
-            run_shared_scaffolding: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::SharedScaffolding],
-            ),
-            run_parallel_runner_setup: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::ParallelRunnerSetup],
-            ),
-            run_enum_dispatch_contracts: Self::family_enabled(
-                only,
-                exclude,
-                &[AuditFinding::RepeatedEnumDispatchContract],
-            ),
-        }
+        Self::with_generic_plan(
+            "filtered",
+            Self {
+                plan: HomeboyPlan::for_description(PlanKind::Audit, "audit"),
+                run_conventions: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[
+                        AuditFinding::MissingMethod,
+                        AuditFinding::ExtraMethod,
+                        AuditFinding::MissingRegistration,
+                        AuditFinding::DifferentRegistration,
+                        AuditFinding::MissingInterface,
+                        AuditFinding::NamingMismatch,
+                        AuditFinding::SignatureMismatch,
+                        AuditFinding::NamespaceMismatch,
+                        AuditFinding::MissingImport,
+                    ],
+                ),
+                run_structural: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[
+                        AuditFinding::GodFile,
+                        AuditFinding::HighItemCount,
+                        AuditFinding::DirectorySprawl,
+                    ],
+                ),
+                run_duplication: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[
+                        AuditFinding::DuplicateFunction,
+                        AuditFinding::IntraMethodDuplicate,
+                        AuditFinding::NearDuplicate,
+                        AuditFinding::ParallelImplementation,
+                    ],
+                ),
+                run_dead_code: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[
+                        AuditFinding::UnusedParameter,
+                        AuditFinding::IgnoredParameter,
+                        AuditFinding::DeadCodeMarker,
+                        AuditFinding::UnreferencedExport,
+                        AuditFinding::OrphanedInternal,
+                    ],
+                ),
+                run_comment_hygiene: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::TodoMarker, AuditFinding::LegacyComment],
+                ),
+                run_test_coverage: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[
+                        AuditFinding::MissingTestFile,
+                        AuditFinding::MissingTestMethod,
+                        AuditFinding::OrphanedTest,
+                        AuditFinding::VacuousTest,
+                    ],
+                ),
+                run_layer_ownership: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::LayerOwnershipViolation],
+                ),
+                run_test_topology: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[
+                        AuditFinding::InlineTestModule,
+                        AuditFinding::ScatteredTestFile,
+                        AuditFinding::VacuousTest,
+                    ],
+                ),
+                run_rust_test_wiring: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::UnwiredNestedRustTest],
+                ),
+                run_docs: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[
+                        AuditFinding::BrokenDocReference,
+                        AuditFinding::UndocumentedFeature,
+                        AuditFinding::StaleDocReference,
+                    ],
+                ),
+                run_compiler_warnings: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::CompilerWarning],
+                ),
+                run_wrapper_inference: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::MissingWrapperDeclaration],
+                ),
+                run_shadow_modules: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::ShadowModule],
+                ),
+                run_field_patterns: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::RepeatedFieldPattern],
+                ),
+                run_facade_passthrough: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::FacadePassthrough],
+                ),
+                run_literal_shapes: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::RepeatedLiteralShape],
+                ),
+                run_deprecation_age: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::DeprecationAge],
+                ),
+                run_dead_guard: Self::family_enabled(only, exclude, &[AuditFinding::DeadGuard]),
+                run_requested_detectors: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[
+                        AuditFinding::JsonLikeExactMatch,
+                        AuditFinding::ConstantBackedSlugLiteral,
+                        AuditFinding::OptionScopeDrift,
+                    ],
+                ),
+                run_core_boundary_leaks: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::CoreBoundaryLeak],
+                ),
+                run_global_env_guard: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::GlobalEnvMutationGuard],
+                ),
+                run_shared_scaffolding: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::SharedScaffolding],
+                ),
+                run_parallel_runner_setup: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::ParallelRunnerSetup],
+                ),
+                run_enum_dispatch_contracts: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::RepeatedEnumDispatchContract],
+                ),
+                run_aggregate_construction: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::DirectAggregateConstruction],
+                ),
+            },
+        )
+    }
+
+    fn with_generic_plan(mode: &str, mut audit: Self) -> Self {
+        audit.plan = HomeboyPlan::builder_for_description(PlanKind::Audit, "audit execution")
+            .mode(mode)
+            .steps(audit.detector_steps())
+            .summarize_disabled_as_skipped()
+            .build();
+        audit
+    }
+
+    fn detector_steps(&self) -> Vec<PlanStep> {
+        [
+            ("conventions", self.run_conventions),
+            ("structural", self.run_structural),
+            ("duplication", self.run_duplication),
+            ("dead_code", self.run_dead_code),
+            ("comment_hygiene", self.run_comment_hygiene),
+            ("test_coverage", self.run_test_coverage),
+            ("layer_ownership", self.run_layer_ownership),
+            ("test_topology", self.run_test_topology),
+            ("rust_test_wiring", self.run_rust_test_wiring),
+            ("docs", self.run_docs),
+            ("compiler_warnings", self.run_compiler_warnings),
+            ("wrapper_inference", self.run_wrapper_inference),
+            ("shadow_modules", self.run_shadow_modules),
+            ("field_patterns", self.run_field_patterns),
+            ("facade_passthrough", self.run_facade_passthrough),
+            ("literal_shapes", self.run_literal_shapes),
+            ("deprecation_age", self.run_deprecation_age),
+            ("dead_guard", self.run_dead_guard),
+            ("requested_detectors", self.run_requested_detectors),
+            ("core_boundary_leaks", self.run_core_boundary_leaks),
+            ("global_env_guard", self.run_global_env_guard),
+            ("shared_scaffolding", self.run_shared_scaffolding),
+            ("parallel_runner_setup", self.run_parallel_runner_setup),
+            ("enum_dispatch_contracts", self.run_enum_dispatch_contracts),
+            ("aggregate_construction", self.run_aggregate_construction),
+        ]
+        .into_iter()
+        .map(|(name, enabled)| {
+            let builder = PlanStep::builder(
+                format!("audit.{name}"),
+                format!("audit.detector.{name}"),
+                if enabled {
+                    PlanStepStatus::Ready
+                } else {
+                    PlanStepStatus::Disabled
+                },
+            )
+            .label(name.replace('_', " "));
+
+            if enabled {
+                builder
+            } else {
+                builder.skip_reason("filtered")
+            }
+            .build()
+        })
+        .collect()
     }
 
     fn family_enabled(
@@ -375,6 +459,7 @@ impl AuditExecutionPlan {
             || self.run_shared_scaffolding
             || self.run_parallel_runner_setup
             || self.run_enum_dispatch_contracts
+            || self.run_aggregate_construction
     }
 }
 
@@ -464,7 +549,7 @@ fn read_reference_paths_from_env() -> Vec<String> {
 pub fn audit_path(path: &str) -> Result<CodeAuditResult> {
     let p = Path::new(path);
     if !p.is_dir() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "path",
             format!("Not a directory: {}", path),
             None,
@@ -559,7 +644,7 @@ fn audit_config_for(component_id: &str, root: &Path) -> AuditConfig {
     if let Some(component) = &component {
         if let Some(extensions) = &component.extensions {
             for extension_id in extensions.keys() {
-                if let Ok(manifest) = crate::extension::load_extension(extension_id) {
+                if let Ok(manifest) = crate::core::extension::load_extension(extension_id) {
                     if let Some(rules) = manifest.audit_detector_rules() {
                         audit_config.merge(rules);
                     }
@@ -839,7 +924,7 @@ fn audit_internal(
         if let Ok(comp) = component::load(component_id) {
             if let Some(extensions) = &comp.extensions {
                 for ext_id in extensions.keys() {
-                    if let Ok(ext_manifest) = crate::extension::load_extension(ext_id) {
+                    if let Ok(ext_manifest) = crate::core::extension::load_extension(ext_id) {
                         if let Some(test_mapping) = ext_manifest.test_mapping() {
                             let coverage_findings = test_coverage::analyze_test_coverage(
                                 root,
@@ -925,7 +1010,7 @@ fn audit_internal(
     }
 
     // Phase 4l: Compiler warnings (dead code, unused imports, unused variables)
-    // Runs cargo check / tsc / go vet and parses warnings into findings.
+    // Runs extension-owned warning scripts and maps their output to findings.
     let compiler_findings = if plan.run_compiler_warnings {
         compiler_warnings::run(root)
     } else {
@@ -1140,6 +1225,21 @@ fn audit_internal(
             enum_dispatch_findings.len()
         );
         all_findings.extend(enum_dispatch_findings);
+    }
+
+    // Phase 4x: Direct aggregate construction despite canonical construction seams.
+    let aggregate_construction_findings = if plan.run_aggregate_construction {
+        aggregate_construction::run(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
+    if !aggregate_construction_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Aggregate construction: {} finding(s) (direct literals bypass construction seams)",
+            aggregate_construction_findings.len()
+        );
+        all_findings.extend(aggregate_construction_findings);
     }
 
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,
@@ -1433,9 +1533,9 @@ fn detect_doc_drift(root: &Path, component_id: &str) -> Vec<Finding> {
     };
 
     let doc_excludes = if let Ok(comp) = component::load(component_id) {
-        crate::component::scope::resolve_component_scope(
+        crate::core::component::scope::resolve_component_scope(
             &comp,
-            crate::component::scope::ScopeCommand::Audit,
+            crate::core::component::scope::ScopeCommand::Audit,
         )
         .exclude
     } else {

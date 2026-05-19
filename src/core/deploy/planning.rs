@@ -1,18 +1,18 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::component::{self, Component};
-use crate::error::{Error, Result};
-use crate::extension;
-use crate::git;
-use crate::project::{self, Project};
-use crate::server::SshClient;
-use crate::version;
+use crate::core::component::{self, Component};
+use crate::core::error::{Error, Result};
+use crate::core::extension;
+use crate::core::git;
+use crate::core::project::{self, Project};
+use crate::core::release::version;
+use crate::core::server::SshClient;
 
 use super::types::{
     ComponentStatus, DeployConfig, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
 };
-use super::version_overrides::fetch_remote_versions;
+use super::version_overrides::fetch_remote_versions_for_project;
 
 pub(super) fn calculate_directory_size(path: &Path) -> std::io::Result<u64> {
     let mut total_size = 0;
@@ -62,6 +62,7 @@ pub(super) fn plan_components(
     config: &DeployConfig,
     all_components: &[Component],
     skipped_component_ids: &[String],
+    project: &Project,
     base_path: &str,
     client: &SshClient,
 ) -> Result<Vec<Component>> {
@@ -130,7 +131,8 @@ pub(super) fn plan_components(
     }
 
     if config.outdated {
-        let remote_versions = fetch_remote_versions(all_components, base_path, client);
+        let remote_versions =
+            fetch_remote_versions_for_project(all_components, Some(project), base_path, client);
 
         let selected: Vec<Component> = all_components
             .iter()
@@ -348,7 +350,7 @@ pub(super) fn load_project_components(
         match effective_artifact {
             Some(artifact) if !is_git_deploy && !is_file_deploy => {
                 let resolved_artifact =
-                    crate::paths::resolve_path_string(&loaded.local_path, &artifact);
+                    crate::core::paths::resolve_path_string(&loaded.local_path, &artifact);
                 loaded.build_artifact = Some(resolved_artifact);
                 deployable.push(loaded);
             }
@@ -382,7 +384,7 @@ pub(super) fn load_project_components(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::VersionTarget;
+    use crate::core::component::VersionTarget;
     use tempfile::TempDir;
 
     fn run_git(path: &Path, args: &[&str]) {

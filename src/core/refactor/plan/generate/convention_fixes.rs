@@ -1,6 +1,6 @@
-use crate::code_audit::conventions::Language;
-use crate::code_audit::naming::{detect_naming_suffix, suffix_matches};
-use crate::code_audit::{AuditFinding, CodeAuditResult};
+use crate::core::code_audit::conventions::Language;
+use crate::core::code_audit::naming::{detect_naming_suffix, suffix_matches};
+use crate::core::code_audit::{AuditFinding, CodeAuditResult};
 use crate::core::refactor::auto::{Fix, InsertionKind, SkippedFile};
 
 use regex::Regex;

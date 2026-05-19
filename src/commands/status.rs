@@ -1,10 +1,10 @@
 use clap::Args;
-use homeboy::component;
-use homeboy::context;
-use homeboy::deploy::{self, DeployConfig, ReleaseStateStatus};
-use homeboy::git;
-use homeboy::scope::{self, Scope};
-use homeboy::version;
+use homeboy::core::component;
+use homeboy::core::context;
+use homeboy::core::deploy::{self, DeployConfig, ReleaseStateStatus};
+use homeboy::core::git;
+use homeboy::core::release::version;
+use homeboy::core::scope::{self, Scope};
 use serde::Serialize;
 
 use super::CmdResult;
@@ -148,7 +148,7 @@ pub struct ProjectDashboardSummary {
 
 pub enum StatusResult {
     Summary(StatusOutput),
-    Full(homeboy::context::report::ContextReport),
+    Full(homeboy::core::context::report::ContextReport),
     Dashboard(ProjectDashboardOutput),
 }
 
@@ -300,7 +300,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
     let components = scope::resolve_scope_component_records(&Scope::Project(project_id.into()))?;
 
     if components.is_empty() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "project",
             format!("Project '{}' has no components attached", project_id),
             Some(project_id.to_string()),
@@ -449,7 +449,11 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
 /// Returns `None` if the path is not a git repo or has no upstream configured.
 fn fetch_upstream_drift(path: &str) -> Option<UpstreamDrift> {
     // Best-effort fetch — silently proceeds if no remote or network issue.
-    let _ = homeboy::engine::command::run_in_optional(path, "git", &["fetch", "--tags", "--quiet"]);
+    let _ = homeboy::core::engine::command::run_in_optional(
+        path,
+        "git",
+        &["fetch", "--tags", "--quiet"],
+    );
 
     let snapshot = git::get_repo_snapshot(path).ok()?;
 
@@ -471,7 +475,7 @@ fn fetch_upstream_drift(path: &str) -> Option<UpstreamDrift> {
 /// Unlike `get_latest_tag()` which uses `git describe` (reachable from HEAD),
 /// this lists all tags and picks the one with the highest semver version.
 fn get_latest_tag_overall(path: &str) -> Option<String> {
-    let output = homeboy::engine::command::run_in_optional(
+    let output = homeboy::core::engine::command::run_in_optional(
         path,
         "git",
         &["tag", "-l", "--sort=-v:refname"],

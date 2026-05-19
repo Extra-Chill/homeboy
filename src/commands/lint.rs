@@ -1,15 +1,19 @@
 use clap::Args;
 
-use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::engine::run_dir::RunDir;
-use homeboy::extension::lint::{
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::engine::run_dir::RunDir;
+use homeboy::core::extension::lint::{
     report, run_main_lint_workflow, run_self_check_lint_workflow, LintCommandOutput,
     LintRunWorkflowArgs,
 };
-use homeboy::extension::ExtensionCapability;
-use homeboy::git;
-use homeboy::observation::{finding_records_from_lint, ActiveObservation, NewRunRecord, RunStatus};
-use homeboy::refactor::plan::{collect_refactor_sources, lint_refactor_request, LintSourceOptions};
+use homeboy::core::extension::ExtensionCapability;
+use homeboy::core::git;
+use homeboy::core::observation::{
+    finding_records_from_lint, ActiveObservation, NewRunRecord, RunStatus,
+};
+use homeboy::core::refactor::plan::{
+    collect_refactor_sources, lint_refactor_request, LintSourceOptions,
+};
 
 use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
@@ -145,7 +149,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
     }
 
     let run_dir = RunDir::create()?;
-    let resource_run = homeboy::engine::resource::ResourceSummaryRun::start(Some(format!(
+    let resource_run = homeboy::core::engine::resource::ResourceSummaryRun::start(Some(format!(
         "lint {}",
         effective_id
     )));
@@ -172,7 +176,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             sniffs: args.sniffs.clone(),
             exclude_sniffs: args.exclude_sniffs.clone(),
             category: args.category.clone(),
-            baseline_flags: homeboy::engine::baseline::BaselineFlags {
+            baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
                 baseline: args.baseline_args.baseline,
                 ignore_baseline: args.baseline_args.ignore_baseline,
                 ratchet: args.baseline_args.ratchet,
@@ -189,8 +193,8 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
 
 fn finish_lint_workflow(
     observation: Option<LintObservation>,
-    workflow: homeboy::Result<homeboy::extension::lint::LintRunWorkflowResult>,
-) -> homeboy::Result<homeboy::extension::lint::LintRunWorkflowResult> {
+    workflow: homeboy::core::Result<homeboy::core::extension::lint::LintRunWorkflowResult>,
+) -> homeboy::core::Result<homeboy::core::extension::lint::LintRunWorkflowResult> {
     match workflow {
         Ok(workflow) => {
             if let Some(observation) = observation {
@@ -211,20 +215,19 @@ struct LintObservation(ActiveObservation);
 
 impl LintObservation {
     fn start(component_id: String, source_path: &std::path::Path, command: String) -> Option<Self> {
-        ActiveObservation::start_best_effort(NewRunRecord {
-            kind: "lint".to_string(),
-            component_id: Some(component_id),
-            command: Some(command),
-            cwd: Some(source_path.to_string_lossy().to_string()),
-            homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            git_sha: None,
-            rig_id: None,
-            metadata_json: serde_json::json!({ "source": "homeboy lint" }),
-        })
+        ActiveObservation::start_best_effort(
+            NewRunRecord::builder("lint")
+                .component_id(component_id)
+                .command(command)
+                .cwd_path(source_path)
+                .current_homeboy_version()
+                .metadata(serde_json::json!({ "source": "homeboy lint" }))
+                .build(),
+        )
         .map(Self)
     }
 
-    fn finish_workflow(self, workflow: &homeboy::extension::lint::LintRunWorkflowResult) {
+    fn finish_workflow(self, workflow: &homeboy::core::extension::lint::LintRunWorkflowResult) {
         if let Some(findings) = &workflow.lint_findings {
             let records = finding_records_from_lint(self.0.run_id(), findings);
             self.0.record_findings(&records);
@@ -292,7 +295,7 @@ fn lint_command_label(component_id: &str, args: &LintArgs) -> String {
 /// this path returns exit 0 unless the underlying fixer actually errored.
 fn run_fix(
     args: LintArgs,
-    ctx: &homeboy::engine::execution_context::ExecutionContext,
+    ctx: &homeboy::core::engine::execution_context::ExecutionContext,
     component_label: String,
     settings: Vec<(String, String)>,
 ) -> CmdResult<LintCommandOutput> {
@@ -336,11 +339,11 @@ fn run_fix(
 mod tests {
     use super::LintArgs;
     use clap::Parser;
-    use homeboy::component::Component;
-    use homeboy::extension::lint as extension_lint;
-    use homeboy::extension::lint::baseline::{self as lint_baseline, LintFinding};
-    use homeboy::extension::lint::report;
-    use homeboy::refactor::plan::{
+    use homeboy::core::component::Component;
+    use homeboy::core::extension::lint as extension_lint;
+    use homeboy::core::extension::lint::baseline::{self as lint_baseline, LintFinding};
+    use homeboy::core::extension::lint::report;
+    use homeboy::core::refactor::plan::{
         lint_refactor_request, LintSourceOptions, RefactorSourceRun, SourceTotals,
     };
     use std::path::Path;

@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::permissions;
-use crate::component;
-use crate::defaults;
-use crate::engine::shell;
-use crate::engine::template::{render_map, TemplateVars};
-use crate::error::{Error, Result};
-use crate::extension::DeployVerification;
-use crate::server::SshClient;
+use crate::core::component;
+use crate::core::defaults;
+use crate::core::engine::shell;
+use crate::core::engine::template::{render_map, TemplateVars};
+use crate::core::error::{Error, Result};
+use crate::core::extension::DeployVerification;
+use crate::core::server::SshClient;
 
 use super::transfer::{upload_directory, upload_file};
 use super::types::DeployResult;

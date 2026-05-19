@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use homeboy::self_status;
+use homeboy::core::self_status;
 use serde_json::Value;
 
 use crate::commands::utils::args::HiddenJsonArgs;
@@ -28,7 +28,7 @@ pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         SelfCommand::Status(_) => {
             let status = self_status::collect_status();
             let json = serde_json::to_value(status)
-                .map_err(|e| homeboy::Error::internal_json(e.to_string(), None))?;
+                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
             Ok((json, 0))
         }
     }

@@ -2,18 +2,20 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::permissions;
-use crate::component::Component;
-use crate::engine::hooks::{self, HookFailureMode};
-use crate::engine::shell;
-use crate::engine::template::{render_map, TemplateVars};
-use crate::error::{Error, Result};
-use crate::extension::{
+use crate::core::component::Component;
+use crate::core::engine::hooks::{self, HookFailureMode};
+use crate::core::engine::shell;
+use crate::core::engine::template::{render_map, TemplateVars};
+use crate::core::error::{Error, Result};
+use crate::core::extension::{
     load_all_extensions, DeployOverride, DeployVerification, ExtensionManifest,
 };
-use crate::paths as base_path;
-use crate::server::SshClient;
-use crate::version;
+use crate::core::paths as base_path;
+use crate::core::project::Project;
+use crate::core::release::version;
+use crate::core::server::SshClient;
 
+use super::path_roots::resolve_effective_remote_path;
 use super::transfer::scp_file;
 use super::types::DeployResult;
 
@@ -78,11 +80,20 @@ pub fn fetch_remote_versions(
     base_path: &str,
     client: &SshClient,
 ) -> HashMap<String, String> {
+    fetch_remote_versions_for_project(components, None, base_path, client)
+}
+
+pub(super) fn fetch_remote_versions_for_project(
+    components: &[Component],
+    project: Option<&Project>,
+    base_path: &str,
+    client: &SshClient,
+) -> HashMap<String, String> {
     let mut versions = HashMap::new();
 
     for component in components {
         // Try standard version-file approach first
-        if let Some(ver) = fetch_version_from_file(component, base_path, client) {
+        if let Some(ver) = fetch_version_from_file(component, project, base_path, client) {
             versions.insert(component.id.clone(), ver);
             continue;
         }
@@ -100,6 +111,7 @@ pub fn fetch_remote_versions(
 /// Try to fetch version by reading a version file on the remote server.
 fn fetch_version_from_file(
     component: &Component,
+    project: Option<&Project>,
     base_path: &str,
     client: &SshClient,
 ) -> Option<String> {
@@ -109,8 +121,11 @@ fn fetch_version_from_file(
         .and_then(|targets| targets.first())
         .map(|t| t.file.as_str())?;
 
-    let remote_path =
-        base_path::join_remote_child(Some(base_path), &component.remote_path, version_file).ok()?;
+    let remote_dir = match project {
+        Some(project) => resolve_effective_remote_path(project, component, base_path).ok()?,
+        None => base_path::join_remote_path(Some(base_path), &component.remote_path).ok()?,
+    };
+    let remote_path = base_path::join_remote_child(None, &remote_dir, version_file).ok()?;
 
     let output = client.execute(&format!("cat '{}' 2>/dev/null", remote_path));
 

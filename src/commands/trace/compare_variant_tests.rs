@@ -6,8 +6,8 @@ use crate::commands::utils::args::{
 use crate::commands::GlobalArgs;
 use crate::test_support::with_isolated_home;
 
-use homeboy::extension::trace as extension_trace;
-use homeboy::extension::trace::TraceCommandOutput;
+use homeboy::core::extension::trace as extension_trace;
+use homeboy::core::extension::trace::TraceCommandOutput;
 
 use super::test_fixture::{init_overlay_component, write_trace_extension};
 use super::{run, TraceArgs, TraceSchedule, TraceVariantMatrixMode};

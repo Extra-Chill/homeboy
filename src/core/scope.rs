@@ -9,10 +9,10 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::component;
-use crate::deploy::release_download::detect_remote_url;
-use crate::error::{Error, Result};
-use crate::{fleet, project, rig};
+use crate::core::component;
+use crate::core::deploy::release_download::detect_remote_url;
+use crate::core::error::{Error, Result};
+use crate::core::{fleet, project, rig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -50,6 +50,15 @@ impl Scope {
             Scope::Workspace => "workspace",
             Scope::Path { path, component_id } => component_id.as_deref().unwrap_or(path.as_str()),
         }
+    }
+
+    pub fn command_name(&self, namespace: &str, path_kind: ScopeKind) -> String {
+        let kind = if matches!(self, Scope::Path { .. }) {
+            path_kind
+        } else {
+            self.kind()
+        };
+        format!("{namespace}.{}", kind.as_str())
     }
 }
 
@@ -484,7 +493,23 @@ mod tests {
     }
 
     #[test]
-    fn test_description() {
+    fn command_name_uses_scope_kind_with_path_override() {
+        assert_eq!(
+            Scope::Rig("studio".to_string()).command_name("triage", ScopeKind::Component),
+            "triage.rig"
+        );
+        assert_eq!(
+            Scope::Path {
+                path: "/tmp/checkout".to_string(),
+                component_id: None,
+            }
+            .command_name("triage", ScopeKind::Component),
+            "triage.component"
+        );
+    }
+
+    #[test]
+    fn command_scope_class_descriptions_are_stable() {
         assert!(CommandScopeClass::Component
             .description()
             .contains("component IDs"));

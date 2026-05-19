@@ -9,8 +9,10 @@
 //! End-to-end correctness is verified out-of-band via the live-verify
 //! fixture spec described in the PR body.
 
-use crate::stack::apply::{checkout_force, cherry_pick, rebase, url_matches, CherryPickResult};
-use crate::stack::{save, GitRef, StackSpec};
+use crate::core::stack::apply::{
+    checkout_force, cherry_pick, rebase, url_matches, CherryPickResult,
+};
+use crate::core::stack::{save, GitRef, StackSpec};
 use crate::test_support::with_isolated_home;
 use std::fs;
 use std::process::Command;

@@ -1,7 +1,7 @@
-use crate::code_audit::{AuditFinding, CodeAuditResult};
 use crate::core::code_audit::fingerprint;
+use crate::core::code_audit::{AuditFinding, CodeAuditResult};
+use crate::core::engine::text::levenshtein;
 use crate::core::refactor::auto::{Fix, InsertionKind, RefactorPrimitive, SkippedFile};
-use crate::engine::text::levenshtein;
 use std::path::Path;
 
 use super::{insertion_with_primitive, manual_only};
@@ -129,7 +129,7 @@ fn lines_inside_string_literals(lines: &[&str]) -> Vec<bool> {
 
         // Check for raw string opening: r#"  r##"  r###" etc.
         if let Some(close_pattern) =
-            crate::extension::grammar::find_unclosed_raw_string_on_line(line)
+            crate::core::extension::grammar::find_unclosed_raw_string_on_line(line)
         {
             // Mark subsequent lines as inside the string until we find the close.
             let mut j = i + 1;
@@ -233,7 +233,7 @@ fn find_test_function_range(content: &str, fn_name: &str) -> Option<(usize, usiz
 
         // Check if this line opens a raw string that isn't closed on the same line.
         if let Some(close_pattern) =
-            crate::extension::grammar::find_unclosed_raw_string_on_line(line)
+            crate::core::extension::grammar::find_unclosed_raw_string_on_line(line)
         {
             raw_string_close = Some(close_pattern);
             // Still count braces on this line BEFORE the raw string opens.
@@ -784,9 +784,9 @@ mod tests {
 
     // ── Integration tests: source-file-deleted promotion ──────────────
 
-    use crate::code_audit::test_helpers::empty_result;
-    use crate::code_audit::{Finding, Severity};
-    use crate::refactor::auto::{Fix, SkippedFile};
+    use crate::core::code_audit::test_helpers::empty_result;
+    use crate::core::code_audit::{Finding, Severity};
+    use crate::core::refactor::auto::{Fix, SkippedFile};
 
     fn fixture_content() -> &'static str {
         r#"#[cfg(test)]

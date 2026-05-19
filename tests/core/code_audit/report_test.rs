@@ -1,10 +1,10 @@
-use crate::code_audit::report::{
+use crate::core::code_audit::report::{
     build_audit_summary, build_changed_since_summary, compute_fixability,
     compute_fixability_with_analysis, finding_kind_key, from_main_workflow,
     AuditChangedSinceSummary, AuditCommandOutput,
 };
-use crate::code_audit::test_helpers::{empty_result, make_finding};
-use crate::code_audit::{AuditFinding, Finding, FindingConfidence, Severity};
+use crate::core::code_audit::test_helpers::{empty_result, make_finding};
+use crate::core::code_audit::{AuditFinding, Finding, FindingConfidence, Severity};
 
 #[test]
 fn test_build_audit_summary_empty_result() {
@@ -64,7 +64,7 @@ fn test_build_audit_summary_prioritizes_warnings_in_top_findings() {
         kind: AuditFinding::DuplicateFunction,
     });
 
-    let summary = crate::code_audit::report::build_audit_summary(&result, 1);
+    let summary = crate::core::code_audit::report::build_audit_summary(&result, 1);
 
     assert_eq!(summary.top_findings[0].severity, Severity::Warning);
     assert_eq!(
@@ -196,8 +196,8 @@ fn test_build_changed_since_summary_splits_introduced_from_context() {
         kind: AuditFinding::UnreferencedExport,
     });
 
-    let comparison = crate::engine::baseline::Comparison {
-        new_items: vec![crate::engine::baseline::NewItem {
+    let comparison = crate::core::engine::baseline::Comparison {
+        new_items: vec![crate::core::engine::baseline::NewItem {
             fingerprint: "dead_code::src/large.rs::UnreferencedExport".to_string(),
             description: "New unused export".to_string(),
             context_label: "dead_code".to_string(),
@@ -294,8 +294,9 @@ fn test_compute_fixability_counts_fixes_from_real_audit() {
     fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
 
     // Run a real audit
-    let result = crate::code_audit::audit_path_with_id("fixability-test", &root.to_string_lossy())
-        .expect("audit should run");
+    let result =
+        crate::core::code_audit::audit_path_with_id("fixability-test", &root.to_string_lossy())
+            .expect("audit should run");
 
     // Compute fixability
     let fixability = compute_fixability(&result);
@@ -339,10 +340,10 @@ fn test_compute_fixability_with_analysis() {
     .unwrap();
     fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
 
-    let audit = crate::code_audit::audit_path_with_id_with_plan_and_analysis(
+    let audit = crate::core::code_audit::audit_path_with_id_with_plan_and_analysis(
         "fixability-context-test",
         &root.to_string_lossy(),
-        &crate::code_audit::AuditExecutionPlan::full(),
+        &crate::core::code_audit::AuditExecutionPlan::full(),
     )
     .expect("audit should run with analysis");
 
@@ -424,11 +425,12 @@ fn test_finding_kind_key() {
 #[test]
 fn test_from_main_workflow() {
     let output = AuditCommandOutput::Summary(build_audit_summary(&empty_result(), 0));
-    let (output, exit_code) = from_main_workflow(crate::code_audit::run::AuditRunWorkflowResult {
-        output,
-        exit_code: 3,
-        findings: Vec::new(),
-    });
+    let (output, exit_code) =
+        from_main_workflow(crate::core::code_audit::run::AuditRunWorkflowResult {
+            output,
+            exit_code: 3,
+            findings: Vec::new(),
+        });
 
     assert_eq!(exit_code, 3);
     assert!(matches!(output, AuditCommandOutput::Summary(_)));

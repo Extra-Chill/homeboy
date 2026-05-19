@@ -1,12 +1,11 @@
 //! Installed rig source lifecycle.
 
-use crate::error::{Error, Result};
-use crate::git;
-use crate::paths;
+use crate::core::error::{Error, Result};
+use crate::core::git;
+use crate::core::paths;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::install::{
     discover_stacks, link_or_copy_file, write_source_metadata, write_stack_source_metadata,
@@ -224,9 +223,9 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
         ));
     }
 
-    let previous_revision = short_head_revision(&package_path);
+    let previous_revision = git::short_head_revision(&package_path);
     git::pull_repo(&package_path)?;
-    let source_revision = short_head_revision(&package_path);
+    let source_revision = git::short_head_revision(&package_path);
 
     let mut updated = Vec::new();
     let mut updated_stacks = Vec::new();
@@ -323,21 +322,6 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
         skipped,
         failed: Vec::new(),
     })
-}
-
-fn short_head_revision(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(path)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let revision = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!revision.is_empty()).then_some(revision)
 }
 
 fn removed_rig_source_rig(rig: &RigSourceRig, metadata_path: &Path) -> RemovedRigSourceRig {

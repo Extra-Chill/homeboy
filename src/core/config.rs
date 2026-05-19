@@ -1,12 +1,12 @@
-use crate::engine::identifier;
-use crate::engine::local_files::{self, FileSystem};
-use crate::engine::text::levenshtein;
-use crate::error::Error;
-use crate::output::{
+use crate::core::engine::identifier;
+use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::engine::text::levenshtein;
+use crate::core::error::Error;
+use crate::core::output::{
     BatchResult, CreateOutput, CreateResult, MergeOutput, MergeResult, RemoveResult,
 };
-use crate::paths;
-use crate::Result;
+use crate::core::paths;
+use crate::core::Result;
 use heck::ToSnakeCase;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -742,12 +742,13 @@ fn entity_metadata<T: ConfigEntity>() -> ConfigEntityMetadata {
     }
 }
 
-fn config_entity_registry() -> [ConfigEntityMetadata; 4] {
+fn config_entity_registry() -> [ConfigEntityMetadata; 5] {
     [
-        entity_metadata::<crate::project::Project>(),
-        entity_metadata::<crate::server::Server>(),
-        entity_metadata::<crate::extension::ExtensionManifest>(),
-        entity_metadata::<crate::fleet::Fleet>(),
+        entity_metadata::<crate::core::project::Project>(),
+        entity_metadata::<crate::core::server::Server>(),
+        entity_metadata::<crate::core::runner::Runner>(),
+        entity_metadata::<crate::core::extension::ExtensionManifest>(),
+        entity_metadata::<crate::core::fleet::Fleet>(),
     ]
 }
 
@@ -1535,7 +1536,7 @@ macro_rules! entity_crud {
     // Feature: slugify_id
     (@feature $Entity:ty, slugify_id) => {
         pub fn slugify_id(name: &str) -> Result<String> {
-            crate::engine::identifier::slugify_id(name, "name")
+            crate::core::engine::identifier::slugify_id(name, "name")
         }
     };
 }

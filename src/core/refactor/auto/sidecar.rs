@@ -1,5 +1,5 @@
 use super::outcome::{AutofixSidecarFiles, FixApplied};
-use crate::engine::run_dir::{self, RunDir};
+use crate::core::engine::run_dir::{self, RunDir};
 use std::path::Path;
 
 impl AutofixSidecarFiles {

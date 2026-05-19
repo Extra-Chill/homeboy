@@ -31,7 +31,8 @@
 use serde::Serialize;
 use std::collections::HashSet;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 
 use super::apply::{
     checkout_force, cherry_pick, ensure_head_remote, fetch_remote_branch, fetch_sha, AppliedPr,
@@ -62,6 +63,8 @@ pub struct SyncOutput {
 /// into `stack sync` output.
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncPreview {
+    #[serde(flatten)]
+    pub plan: HomeboyPlan,
     pub stack_id: String,
     pub component_path: String,
     pub branch: String,
@@ -257,8 +260,19 @@ pub(crate) fn plan_sync(spec: &StackSpec) -> Result<SyncPlan> {
         replayed_count,
     );
 
+    let plan = sync_homeboy_plan(
+        spec,
+        &dropped,
+        &replayed,
+        &uncertain,
+        target_exists,
+        would_mutate,
+        blocked,
+    );
+
     Ok(SyncPlan {
         preview: SyncPreview {
+            plan,
             stack_id: spec.id.clone(),
             component_path: path,
             branch: spec.target.branch.clone(),
@@ -280,6 +294,81 @@ pub(crate) fn plan_sync(spec: &StackSpec) -> Result<SyncPlan> {
         kept_entries,
         kept_metas,
     })
+}
+
+fn sync_homeboy_plan(
+    spec: &StackSpec,
+    dropped: &[DroppedPr],
+    replayed: &[ReplayedPr],
+    uncertain: &[UncertainPr],
+    target_exists: bool,
+    would_mutate: bool,
+    blocked: bool,
+) -> HomeboyPlan {
+    let mut steps = Vec::new();
+    for pr in dropped {
+        steps.push(sync_pr_step(
+            "drop",
+            &pr.repo,
+            pr.number,
+            PlanStepStatus::Skipped,
+            &pr.reason,
+        ));
+    }
+    for pr in replayed {
+        steps.push(sync_pr_step(
+            "replay",
+            &pr.repo,
+            pr.number,
+            PlanStepStatus::Ready,
+            &pr.reason,
+        ));
+    }
+    for pr in uncertain {
+        steps.push(sync_pr_step(
+            "uncertain",
+            &pr.repo,
+            pr.number,
+            PlanStepStatus::Missing,
+            &pr.error,
+        ));
+    }
+
+    HomeboyPlan::builder_for_description(PlanKind::StackSync, spec.id.clone())
+        .inputs(
+            PlanValues::new()
+                .string("stack_id", spec.id.clone())
+                .bool("target_exists", target_exists),
+        )
+        .policy_value("would_mutate", serde_json::Value::Bool(would_mutate))
+        .policy_value("blocked", serde_json::Value::Bool(blocked))
+        .steps(steps)
+        .summarize()
+        .build()
+}
+
+fn sync_pr_step(
+    action: &str,
+    repo: &str,
+    number: u64,
+    status: PlanStepStatus,
+    reason: &str,
+) -> PlanStep {
+    PlanStep::builder(
+        format!("stack.sync.{action}.{repo}#{number}"),
+        format!("stack.sync.{action}"),
+        status.clone(),
+    )
+    .label(format!("{action} {repo}#{number}"))
+    .blocking(status == PlanStepStatus::Missing)
+    .scope(vec![format!("{repo}#{number}")])
+    .inputs(
+        PlanValues::new()
+            .string("repo", repo)
+            .number("number", number)
+            .string("reason", reason),
+    )
+    .build()
 }
 
 /// Read-only preview for `homeboy stack diff`.

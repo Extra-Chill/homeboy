@@ -12,12 +12,13 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::component::Component;
-use crate::error::{Error, Result};
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
 
 /// Parsed GitHub owner/repo from a remote URL.
 #[derive(Debug, Clone)]
 pub struct GitHubRepo {
+    pub host: String,
     pub owner: String,
     pub repo: String,
 }
@@ -26,8 +27,8 @@ impl GitHubRepo {
     /// Construct a release artifact download URL.
     pub(crate) fn release_artifact_url(&self, tag: &str, artifact_name: &str) -> String {
         format!(
-            "https://github.com/{}/{}/releases/download/{}/{}",
-            self.owner, self.repo, tag, artifact_name
+            "https://{}/{}/{}/releases/download/{}/{}",
+            self.host, self.owner, self.repo, tag, artifact_name
         )
     }
 }
@@ -39,6 +40,7 @@ impl GitHubRepo {
 /// - `https://github.com/owner/repo.git`
 /// - `https://user:token@github.com/owner/repo.git`
 /// - `git@github.com:owner/repo.git`
+/// - GitHub Enterprise equivalents such as `git@github.a8c.com:owner/repo.git`
 pub fn parse_github_url(url: &str) -> Option<GitHubRepo> {
     // HTTPS format
     if let Some(repo) = parse_github_http_url(url) {
@@ -46,13 +48,22 @@ pub fn parse_github_url(url: &str) -> Option<GitHubRepo> {
     }
 
     // SSH format
-    if let Some(rest) = url.strip_prefix("git@github.com:") {
-        if let Some(repo) = parse_owner_repo(rest) {
-            return Some(repo);
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        if is_github_host(host) {
+            if let Some(repo) = parse_owner_repo(host, path) {
+                return Some(repo);
+            }
         }
     }
 
     None
+}
+
+fn is_github_host(host: &str) -> bool {
+    let host = host.rsplit('@').next().unwrap_or(host).trim();
+
+    host == "github.com" || (host.starts_with("github.") && !host.starts_with("github.com."))
 }
 
 fn parse_github_http_url(url: &str) -> Option<GitHubRepo> {
@@ -60,21 +71,23 @@ fn parse_github_http_url(url: &str) -> Option<GitHubRepo> {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
     let (host, path) = rest.split_once('/')?;
+    let host = host.rsplit('@').next()?;
 
     // GitHub HTTPS remotes may include credentials before the host, e.g.
     // https://x-access-token:TOKEN@github.com/owner/repo.git.
-    if host.rsplit('@').next()? != "github.com" {
+    if !is_github_host(host) {
         return None;
     }
 
-    parse_owner_repo(path)
+    parse_owner_repo(host, path)
 }
 
-fn parse_owner_repo(path: &str) -> Option<GitHubRepo> {
+fn parse_owner_repo(host: &str, path: &str) -> Option<GitHubRepo> {
     let path = path.trim_end_matches('/').trim_end_matches(".git");
     let parts: Vec<&str> = path.splitn(3, '/').collect();
     if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
         return Some(GitHubRepo {
+            host: host.to_string(),
             owner: parts[0].to_string(),
             repo: parts[1].to_string(),
         });
@@ -107,7 +120,7 @@ pub fn download_release_artifact(
     let url = github.release_artifact_url(tag, artifact_name);
 
     // Create temp directory for the download
-    let tmp_dir = crate::engine::temp::runtime_temp_dir("deploy-download")?;
+    let tmp_dir = crate::core::engine::temp::runtime_temp_dir("deploy-download")?;
     let dest_path = tmp_dir.join(artifact_name);
 
     log_status!("deploy", "Downloading release artifact: {}", url);
@@ -212,6 +225,7 @@ mod tests {
     #[test]
     fn parse_github_url_https() {
         let repo = parse_github_url("https://github.com/Extra-Chill/homeboy").unwrap();
+        assert_eq!(repo.host, "github.com");
         assert_eq!(repo.owner, "Extra-Chill");
         assert_eq!(repo.repo, "homeboy");
     }
@@ -251,8 +265,25 @@ mod tests {
     #[test]
     fn parse_github_url_ssh() {
         let repo = parse_github_url("git@github.com:Extra-Chill/homeboy.git").unwrap();
+        assert_eq!(repo.host, "github.com");
         assert_eq!(repo.owner, "Extra-Chill");
         assert_eq!(repo.repo, "homeboy");
+    }
+
+    #[test]
+    fn parse_github_url_enterprise_ssh() {
+        let repo = parse_github_url("git@github.a8c.com:Automattic/intelligence.git").unwrap();
+        assert_eq!(repo.host, "github.a8c.com");
+        assert_eq!(repo.owner, "Automattic");
+        assert_eq!(repo.repo, "intelligence");
+    }
+
+    #[test]
+    fn parse_github_url_enterprise_https() {
+        let repo = parse_github_url("https://github.a8c.com/Automattic/intelligence.git").unwrap();
+        assert_eq!(repo.host, "github.a8c.com");
+        assert_eq!(repo.owner, "Automattic");
+        assert_eq!(repo.repo, "intelligence");
     }
 
     #[test]
@@ -274,6 +305,7 @@ mod tests {
     #[test]
     fn release_artifact_url_format() {
         let repo = GitHubRepo {
+            host: "github.com".to_string(),
             owner: "Extra-Chill".to_string(),
             repo: "data-machine".to_string(),
         };
@@ -281,6 +313,20 @@ mod tests {
         assert_eq!(
             url,
             "https://github.com/Extra-Chill/data-machine/releases/download/v0.36.1/data-machine.zip"
+        );
+    }
+
+    #[test]
+    fn enterprise_release_artifact_url_uses_remote_host() {
+        let repo = GitHubRepo {
+            host: "github.a8c.com".to_string(),
+            owner: "Automattic".to_string(),
+            repo: "intelligence".to_string(),
+        };
+        let url = repo.release_artifact_url("v1.2.3", "intelligence.zip");
+        assert_eq!(
+            url,
+            "https://github.a8c.com/Automattic/intelligence/releases/download/v1.2.3/intelligence.zip"
         );
     }
 

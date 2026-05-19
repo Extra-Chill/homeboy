@@ -6,7 +6,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::stack::{
+use homeboy::core::stack::{
     self, ApplyOutput, DiffOutput, GitRef, InspectOptions, InspectOutput, PushOutput, RebaseOutput,
     StackPrEntry, StackSpec, StatusOutput, SyncOutput,
 };
@@ -329,7 +329,7 @@ fn create(
     // Refuse to silently overwrite an existing stack — `add-pr`/`remove-pr`
     // are the right verbs for editing a live spec.
     if stack::exists(stack_id)? {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "stack_id",
             format!("Stack '{}' already exists", stack_id),
             None,
@@ -377,7 +377,7 @@ fn add_pr(
         .iter()
         .any(|p| p.repo == repo && p.number == number)
     {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "number",
             format!("PR {}#{} is already in stack '{}'", repo, number, stack_id),
             None,
@@ -415,7 +415,7 @@ fn remove_pr(stack_id: &str, number: u64, repo: Option<&str>) -> CmdResult<Stack
         .collect();
 
     if matches.is_empty() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "number",
             format!("No PR {} in stack '{}'", number, stack_id),
             None,
@@ -426,7 +426,7 @@ fn remove_pr(stack_id: &str, number: u64, repo: Option<&str>) -> CmdResult<Stack
     }
     if matches.len() > 1 {
         let repos: Vec<String> = matches.iter().map(|i| spec.prs[*i].repo.clone()).collect();
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "number",
             format!(
                 "PR {} matches multiple entries in stack '{}' (repos: {}). Pass --repo to disambiguate.",

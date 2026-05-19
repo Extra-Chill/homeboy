@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 use std::env;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -111,7 +111,7 @@ pub fn artifact_root() -> Result<PathBuf> {
         }
     }
 
-    if let Some(path) = crate::defaults::load_config().artifact_root {
+    if let Some(path) = crate::core::defaults::load_config().artifact_root {
         if !path.trim().is_empty() {
             return Ok(expand_path(PathBuf::from(path)));
         }
@@ -250,6 +250,21 @@ pub fn daemon_state_file() -> Result<PathBuf> {
     Ok(daemon_state_dir()?.join("state.json"))
 }
 
+/// Daemon durable job state file (~/.config/homeboy/daemon/jobs.json).
+pub fn daemon_jobs_file() -> Result<PathBuf> {
+    Ok(daemon_state_dir()?.join("jobs.json"))
+}
+
+/// Runner connection session state directory (~/.config/homeboy/runner-sessions/).
+pub fn runner_sessions_dir() -> Result<PathBuf> {
+    Ok(homeboy()?.join("runner-sessions"))
+}
+
+/// Runner connection session state file (~/.config/homeboy/runner-sessions/{id}.json).
+pub fn runner_session_file(id: &str) -> Result<PathBuf> {
+    Ok(runner_sessions_dir()?.join(format!("{}.json", id)))
+}
+
 /// Stack config file path (~/.config/homeboy/stacks/{id}.json)
 pub fn stack_config(id: &str) -> Result<PathBuf> {
     Ok(stacks()?.join(format!("{}.json", id)))
@@ -362,9 +377,9 @@ mod tests {
     fn artifact_root_uses_configured_value() {
         with_isolated_home(|home| {
             let configured = home.path().join("custom-artifacts");
-            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+            crate::core::defaults::save_config(&crate::core::defaults::HomeboyConfig {
                 artifact_root: Some(configured.to_string_lossy().to_string()),
-                ..crate::defaults::HomeboyConfig::default()
+                ..crate::core::defaults::HomeboyConfig::default()
             })
             .expect("save config");
 
@@ -377,9 +392,9 @@ mod tests {
         with_isolated_home(|home| {
             let configured = home.path().join("config-artifacts");
             let env_root = home.path().join("env-artifacts");
-            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+            crate::core::defaults::save_config(&crate::core::defaults::HomeboyConfig {
                 artifact_root: Some(configured.to_string_lossy().to_string()),
-                ..crate::defaults::HomeboyConfig::default()
+                ..crate::core::defaults::HomeboyConfig::default()
             })
             .expect("save config");
             std::env::set_var("HOMEBOY_ARTIFACT_ROOT", &env_root);
@@ -496,6 +511,28 @@ mod tests {
                 .and_then(|p| p.file_name())
                 .and_then(|s| s.to_str()),
             Some("studio-dev.state")
+        );
+    }
+
+    #[test]
+    fn test_runner_sessions_dir_under_homeboy_dir() {
+        let path = runner_sessions_dir().expect("runner_sessions_dir resolves");
+        assert!(path.ends_with("runner-sessions"), "got {}", path.display());
+        assert!(path.parent().expect("parent").ends_with("homeboy"));
+    }
+
+    #[test]
+    fn test_runner_session_file_uses_id_filename() {
+        let path = runner_session_file("lab-box").expect("runner_session_file resolves");
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("lab-box.json")
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str()),
+            Some("runner-sessions")
         );
     }
 

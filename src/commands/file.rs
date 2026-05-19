@@ -1,8 +1,11 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::project::files::{self, FileEntry, GrepMatch, LineChange};
-use homeboy::server::transfer::{self, TransferConfig, TransferOutput};
+use homeboy::core::context::require_project_base_path;
+use homeboy::core::engine::{command, executor, shell};
+use homeboy::core::project::files::{self, FileEntry, GrepMatch, LineChange};
+use homeboy::core::server::transfer::{self, TransferConfig, TransferOutput};
+use homeboy::core::{join_remote_path, project};
 
 use super::CmdResult;
 
@@ -28,6 +31,9 @@ enum FileCommand {
         project_id: String,
         /// Remote file path
         path: String,
+        /// Compatibility flag; file read emits JSON unless --raw is used.
+        #[arg(long, hide = true)]
+        _json: bool,
         /// Output raw content only (no JSON wrapper)
         #[arg(long)]
         raw: bool,
@@ -37,6 +43,13 @@ enum FileCommand {
         /// Project ID
         project_id: String,
         /// Remote file path
+        path: String,
+    },
+    /// Create a directory
+    Mkdir {
+        /// Project ID
+        project_id: String,
+        /// Remote directory path
         path: String,
     },
     /// Delete a file or directory
@@ -266,6 +279,7 @@ pub struct FileOutput {
     recursive: Option<bool>,
     entries: Option<Vec<FileEntry>>,
     content: Option<String>,
+    size: Option<i64>,
     bytes_written: Option<usize>,
     stdout: Option<String>,
     stderr: Option<String>,
@@ -347,6 +361,7 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
         FileCommand::Read {
             project_id,
             path,
+            _json: _,
             raw,
         } => {
             if raw {
@@ -360,6 +375,37 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
         FileCommand::Write { project_id, path } => {
             let (out, code) = write(&project_id, &path)?;
             Ok((FileCommandOutput::Standard(out), code))
+        }
+        FileCommand::Mkdir { project_id, path } => {
+            let project = project::load(&project_id)?;
+            let project_base_path = require_project_base_path(&project_id, &project)?;
+            let full_path = join_remote_path(Some(&project_base_path), &path)?;
+            let output = executor::execute_for_project(
+                &project,
+                &format!("mkdir {}", shell::quote_path(&full_path)),
+            )?;
+            command::require_success(output.success, &output.stderr, "MKDIR")?;
+
+            Ok((
+                FileCommandOutput::Standard(FileOutput {
+                    command: "file.mkdir".to_string(),
+                    project_id,
+                    base_path: Some(project_base_path),
+                    path: Some(full_path),
+                    old_path: None,
+                    new_path: None,
+                    recursive: None,
+                    entries: None,
+                    content: None,
+                    size: None,
+                    bytes_written: None,
+                    stdout: None,
+                    stderr: None,
+                    exit_code: 0,
+                    success: true,
+                }),
+                0,
+            ))
         }
         FileCommand::Delete {
             project_id,
@@ -477,6 +523,7 @@ fn list(project_id: &str, path: &str) -> CmdResult<FileOutput> {
             recursive: None,
             entries: Some(result.entries),
             content: None,
+            size: None,
             bytes_written: None,
             stdout: None,
             stderr: None,
@@ -501,6 +548,7 @@ fn read(project_id: &str, path: &str) -> CmdResult<FileOutput> {
             recursive: None,
             entries: None,
             content: Some(result.content),
+            size: result.size,
             bytes_written: None,
             stdout: None,
             stderr: None,
@@ -526,6 +574,7 @@ fn write(project_id: &str, path: &str) -> CmdResult<FileOutput> {
             recursive: None,
             entries: None,
             content: None,
+            size: None,
             bytes_written: Some(result.bytes_written),
             stdout: None,
             stderr: None,
@@ -550,6 +599,7 @@ fn delete(project_id: &str, path: &str, recursive: bool) -> CmdResult<FileOutput
             recursive: Some(result.recursive),
             entries: None,
             content: None,
+            size: None,
             bytes_written: None,
             stdout: None,
             stderr: None,
@@ -574,6 +624,7 @@ fn rename(project_id: &str, old_path: &str, new_path: &str) -> CmdResult<FileOut
             recursive: None,
             entries: None,
             content: None,
+            size: None,
             bytes_written: None,
             stdout: None,
             stderr: None,
@@ -653,7 +704,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
 
     let result = if let Some(line_num) = line_ops.replace_line {
         let content = line_ops.replace_line_content.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "content",
                 "Content required for --replace-line",
                 None,
@@ -663,7 +714,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         files::edit_replace_line(&project_id, &file_path, line_num, &content)?
     } else if let Some(line_num) = line_ops.insert_after {
         let content = line_ops.insert_after_content.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "content",
                 "Content required for --insert-after",
                 None,
@@ -673,7 +724,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         files::edit_insert_after_line(&project_id, &file_path, line_num, &content)?
     } else if let Some(line_num) = line_ops.insert_before {
         let content = line_ops.insert_before_content.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "content",
                 "Content required for --insert-before",
                 None,
@@ -685,7 +736,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         files::edit_delete_line(&project_id, &file_path, line_num)?
     } else if let Some(lines) = line_ops.delete_lines {
         if lines.len() != 2 {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "delete_lines",
                 "DELETE_LINES requires exactly 2 values: START END",
                 None,
@@ -695,7 +746,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         files::edit_delete_lines(&project_id, &file_path, lines[0], lines[1])?
     } else if let Some(pattern) = pattern_ops.replace_pattern {
         let replacement = pattern_ops.replace_pattern_content.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "content",
                 "Content required for --replace-pattern",
                 None,
@@ -705,7 +756,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         files::edit_replace_pattern(&project_id, &file_path, &pattern, &replacement, false)?
     } else if let Some(pattern) = pattern_ops.replace_all_pattern {
         let replacement = pattern_ops.replace_all_content.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "content",
                 "Content required for --replace-all-pattern",
                 None,
@@ -720,7 +771,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
     } else if let Some(content) = file_mods.prepend {
         files::edit_prepend(&project_id, &file_path, &content)?
     } else {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "operation",
             "No edit operation specified. Use one of: --replace-line, --insert-after, --insert-before, --delete-line, --delete-lines, --replace-pattern, --replace-all-pattern, --delete-pattern, --append, --prepend",
             None,
@@ -744,3 +795,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
         0,
     ))
 }
+
+#[cfg(test)]
+#[path = "../../tests/commands/file_test.rs"]
+mod file_test;

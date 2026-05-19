@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use crate::component::{self, Component};
-use crate::engine::local_files;
-use crate::engine::validation;
-use crate::error::Result;
-use crate::paths::resolve_path;
+use crate::core::component::{self, Component};
+use crate::core::engine::local_files;
+use crate::core::engine::validation;
+use crate::core::error::Result;
+use crate::core::paths::resolve_path;
 
 use super::sections::*;
 use super::settings::*;

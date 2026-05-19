@@ -2,8 +2,8 @@
 //!
 //! Provides JSON envelope, printing, and exit code mapping.
 
-use homeboy::error::Hint;
-use homeboy::{Error, ErrorCode, Result};
+use homeboy::core::error::Hint;
+use homeboy::core::{Error, ErrorCode, Result};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -132,6 +132,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::ExtensionUnsupported
         | ErrorCode::DocsTopicNotFound
         | ErrorCode::RigNotFound
+        | ErrorCode::RunnerNotFound
         | ErrorCode::StackNotFound
         | ErrorCode::ProjectNoActive => 4,
 

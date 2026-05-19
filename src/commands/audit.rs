@@ -1,22 +1,25 @@
 use clap::Args;
 use std::path::Path;
 
-use homeboy::code_audit::{
+use homeboy::core::code_audit::{
     self, report, run_main_audit_workflow, AuditCommandOutput, AuditRunWorkflowArgs,
 };
-use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::git::short_head_revision_at;
-use homeboy::observation::{
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::git::short_head_revision_at;
+use homeboy::core::observation::{
     finding_records_from_audit, NewRunRecord, ObservationStore, RunRecord, RunStatus,
 };
 
-use super::utils::args::{BaselineArgs, PositionalComponentArgs};
+use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
 pub struct AuditArgs {
     #[command(flatten)]
     pub comp: PositionalComponentArgs,
+
+    #[command(flatten)]
+    pub extension_override: ExtensionOverrideArgs,
 
     /// Only show discovered conventions (skip findings)
     #[arg(long)]
@@ -50,13 +53,14 @@ pub struct AuditArgs {
 fn parse_finding_kinds(
     values: &[String],
     flag: &str,
-) -> homeboy::Result<Vec<code_audit::AuditFinding>> {
+) -> homeboy::core::Result<Vec<code_audit::AuditFinding>> {
     use std::str::FromStr;
     values
         .iter()
         .map(|value| {
-            code_audit::AuditFinding::from_str(value)
-                .map_err(|msg| homeboy::Error::validation_invalid_argument(flag, msg, None, None))
+            code_audit::AuditFinding::from_str(value).map_err(|msg| {
+                homeboy::core::Error::validation_invalid_argument(flag, msg, None, None)
+            })
         })
         .collect()
 }
@@ -110,7 +114,7 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         exclude_kinds,
         only_labels: args.only,
         exclude_labels: args.exclude,
-        baseline_flags: homeboy::engine::baseline::BaselineFlags {
+        baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
             baseline: args.baseline_args.baseline,
             ignore_baseline: args.baseline_args.ignore_baseline,
             ratchet: args.baseline_args.ratchet,
@@ -149,16 +153,16 @@ fn start_audit_observation(
     let path = Path::new(source_path);
     let metadata = audit_observation_initial_metadata(source_path, args);
     let run = store
-        .start_run(NewRunRecord {
-            kind: "audit".to_string(),
-            component_id: Some(component_id.to_string()),
-            command: Some(audit_observation_command(component_id, args)),
-            cwd: Some(source_path.to_string()),
-            homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            git_sha: short_head_revision_at(path),
-            rig_id: None,
-            metadata_json: metadata.clone(),
-        })
+        .start_run(
+            NewRunRecord::builder("audit")
+                .component_id(component_id)
+                .command(audit_observation_command(component_id, args))
+                .cwd_path(path)
+                .current_homeboy_version()
+                .git_sha(short_head_revision_at(path))
+                .metadata(metadata.clone())
+                .build(),
+        )
         .ok()?;
 
     Some(AuditObservation {
@@ -196,7 +200,10 @@ fn finish_audit_observation(
         .finish_run(&observation.audit_run.id, status, Some(metadata));
 }
 
-fn finish_audit_observation_error(observation: Option<AuditObservation>, error: &homeboy::Error) {
+fn finish_audit_observation_error(
+    observation: Option<AuditObservation>,
+    error: &homeboy::core::Error,
+) {
     let Some(observation) = observation else {
         return;
     };
@@ -229,6 +236,9 @@ fn audit_observation_command(component_id: &str, args: &AuditArgs) -> String {
     for kind in &args.exclude {
         parts.push(format!("--exclude={kind}"));
     }
+    for extension in &args.extension_override.extensions {
+        parts.push(format!("--extension={extension}"));
+    }
     if let Some(changed_since) = &args.changed_since {
         parts.push(format!("--changed-since={changed_since}"));
     }
@@ -247,6 +257,7 @@ fn audit_observation_initial_metadata(source_path: &str, args: &AuditArgs) -> se
         "mode": if args.conventions { "conventions" } else { "audit" },
         "only": args.only,
         "exclude": args.exclude,
+        "extensions": args.extension_override.extensions,
         "baseline": {
             "baseline": args.baseline_args.baseline,
             "ignore_baseline": args.baseline_args.ignore_baseline,
@@ -347,7 +358,7 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
     }
 
     // Load component to find its extensions
-    let comp = match homeboy::component::load(component_id_or_path) {
+    let comp = match homeboy::core::component::load(component_id_or_path) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -358,7 +369,7 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
     };
 
     for ext_id in extensions.keys() {
-        let ext_manifest = match homeboy::extension::load_extension(ext_id) {
+        let ext_manifest = match homeboy::core::extension::load_extension(ext_id) {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -369,7 +380,7 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
         };
 
         // Resolve script path relative to extension directory
-        let ext_path = homeboy::extension::extension_path(ext_id);
+        let ext_path = homeboy::core::extension::extension_path(ext_id);
         if !ext_path.is_dir() {
             continue;
         }
@@ -426,8 +437,9 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::utils::args::BaselineArgs;
+    use crate::commands::utils::args::{BaselineArgs, ExtensionOverrideArgs};
     use crate::test_support::with_isolated_home;
+    use clap::Parser;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -473,6 +485,7 @@ mod tests {
                 component: Some("homeboy".to_string()),
                 path: None,
             },
+            extension_override: ExtensionOverrideArgs::default(),
             conventions: false,
             only: vec![],
             exclude: vec![],
@@ -485,6 +498,29 @@ mod tests {
             json_summary: true,
             fixability: false,
         }
+    }
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        audit: AuditArgs,
+    }
+
+    #[test]
+    fn parses_one_shot_extension_override() {
+        let cli = TestCli::try_parse_from([
+            "audit",
+            "--path",
+            "/tmp/repo",
+            "--extension",
+            "rust",
+            "--changed-since",
+            "origin/main",
+        ])
+        .expect("audit should parse --extension override");
+
+        assert_eq!(cli.audit.extension_override.extensions, vec!["rust"]);
+        assert_eq!(cli.audit.changed_since.as_deref(), Some("origin/main"));
     }
 
     #[test]
@@ -500,7 +536,7 @@ mod tests {
 
             finish_audit_observation_error(
                 Some(observation),
-                &homeboy::Error::validation_invalid_argument(
+                &homeboy::core::Error::validation_invalid_argument(
                     "fixture",
                     "simulated audit error",
                     None,
@@ -568,10 +604,10 @@ mod tests {
 
             let store = ObservationStore::open_initialized().expect("store");
             let findings = store
-                .list_findings(homeboy::observation::FindingListFilter {
+                .list_findings(homeboy::core::observation::FindingListFilter {
                     run_id: Some(run_id),
                     tool: Some("audit".to_string()),
-                    ..homeboy::observation::FindingListFilter::default()
+                    ..homeboy::core::observation::FindingListFilter::default()
                 })
                 .expect("list findings");
 
@@ -632,6 +668,7 @@ mod tests {
                 component: Some(root.to_string_lossy().to_string()),
                 path: None,
             },
+            extension_override: ExtensionOverrideArgs::default(),
             conventions: false,
             only: vec![],
             exclude: vec![],

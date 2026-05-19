@@ -1,16 +1,16 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-use crate::component::{self, Component};
-use crate::config::{is_json_input, parse_bulk_ids};
-use crate::deploy::permissions;
-use crate::engine::command::CapturedOutput;
-use crate::engine::shell;
-use crate::error::{Error, Result};
-use crate::extension::{self, exec_context, ExtensionCapability, ExtensionExecutionContext};
-use crate::output::{BulkResult, BulkSummary, ItemOutcome};
-use crate::paths;
-use crate::server::execute_local_command_in_dir;
+use crate::core::component::{self, Component};
+use crate::core::config::{is_json_input, parse_bulk_ids};
+use crate::core::deploy::permissions;
+use crate::core::engine::command::CapturedOutput;
+use crate::core::engine::shell;
+use crate::core::error::{Error, Result};
+use crate::core::extension::{self, exec_context, ExtensionCapability, ExtensionExecutionContext};
+use crate::core::output::{BulkResult, BulkSummary, ItemOutcome};
+use crate::core::paths;
+use crate::core::server::execute_local_command_in_dir;
 
 mod artifact;
 
@@ -382,8 +382,8 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
 
     // Warn when HEAD is ahead of the latest tag — the build will include
     // unreleased commits that won't be deployed unless using `deploy --head`.
-    if let Some(gap) = crate::deploy::provenance::detect_tag_gap(comp) {
-        crate::deploy::provenance::warn_tag_gap(&comp.id, &gap, "build");
+    if let Some(gap) = crate::core::deploy::provenance::detect_tag_gap(comp) {
+        crate::core::deploy::provenance::warn_tag_gap(&comp.id, &gap, "build");
         log_status!(
             "build",
             "Build uses current working tree. To deploy these commits: use `deploy --head` or run `homeboy release`."
@@ -420,7 +420,7 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
     // Execute via ExtensionRunner — uses the full exec context protocol (settings,
     // project info, context version) instead of the minimal env var set.
     let runner_output = if let ResolvedBuildCommand::ComponentScript { .. } = &resolved {
-        crate::extension::component_script::run_component_scripts(
+        crate::core::extension::component_script::run_component_scripts(
             comp,
             extension::ExtensionCapability::Build,
             &validated_path,

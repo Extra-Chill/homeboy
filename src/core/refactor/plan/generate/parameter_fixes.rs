@@ -12,8 +12,8 @@ use std::path::Path;
 
 use regex::Regex;
 
-use crate::code_audit::{AuditFinding, CodeAuditResult};
-use crate::refactor::auto::{Fix, Insertion, InsertionKind, RefactorPrimitive, SkippedFile};
+use crate::core::code_audit::{AuditFinding, CodeAuditResult};
+use crate::core::refactor::auto::{Fix, Insertion, InsertionKind, RefactorPrimitive, SkippedFile};
 
 use super::insertion_with_primitive;
 
@@ -166,7 +166,7 @@ fn build_param_removal(
             old_text: old_sig.to_string(),
             new_text: new_sig,
         },
-        crate::code_audit::AuditFinding::UnusedParameter,
+        crate::core::code_audit::AuditFinding::UnusedParameter,
         String::new(),
         format!(
             "Remove unused parameter '{}' from '{}' (position {}, no callers pass it)",

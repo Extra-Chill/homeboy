@@ -63,15 +63,15 @@ pub struct FileFingerprint {
     /// Public/protected class properties (e.g., ["string $name", "$data"]).
     pub properties: Vec<String>,
     /// Hook references: do_action() and apply_filters() calls.
-    pub hooks: Vec<crate::extension::HookRef>,
+    pub hooks: Vec<crate::core::extension::HookRef>,
     /// Function parameters that are declared but never used in the function body.
-    pub unused_parameters: Vec<crate::extension::UnusedParam>,
+    pub unused_parameters: Vec<crate::core::extension::UnusedParam>,
     /// Dead code suppression markers (e.g., `#[allow(dead_code)]`).
-    pub dead_code_markers: Vec<crate::extension::DeadCodeMarker>,
+    pub dead_code_markers: Vec<crate::core::extension::DeadCodeMarker>,
     /// Function/method names called within this file.
     pub internal_calls: Vec<String>,
     /// Call sites with argument counts (for cross-file parameter analysis).
-    pub call_sites: Vec<crate::extension::CallSite>,
+    pub call_sites: Vec<crate::core::extension::CallSite>,
     /// Public functions/methods exported from this file.
     pub public_api: Vec<String>,
     /// Functions/methods registered as hook/callback targets from WITHIN
@@ -95,6 +95,10 @@ pub struct FileFingerprint {
     pub convention_tags: Vec<String>,
     /// Method names that are trait implementations (called via trait dispatch).
     pub trait_impl_methods: Vec<String>,
+    /// Extension-reported direct aggregate literal construction sites.
+    pub aggregate_literals: Vec<crate::core::extension::AggregateLiteral>,
+    /// Extension-reported canonical construction seams for aggregate types.
+    pub aggregate_construction_seams: Vec<crate::core::extension::AggregateConstructionSeam>,
 }
 
 /// Extract a structural fingerprint from a source file on disk.
@@ -152,7 +156,7 @@ pub(crate) fn fingerprint_extension_content(
     relative_path: &str,
     content: &str,
 ) -> Option<FileFingerprint> {
-    use crate::extension;
+    use crate::core::extension;
 
     let matched_extension = extension::find_extension_for_file_ext(ext, "fingerprint")?;
     let output = extension::run_fingerprint_script(&matched_extension, relative_path, content)?;
@@ -189,6 +193,8 @@ pub(crate) fn fingerprint_extension_content(
         runtime_dispatched_types: output.runtime_dispatched_types,
         convention_tags: normalize_convention_tags(output.convention_tags),
         trait_impl_methods: Vec::new(), // Extension scripts don't track this
+        aggregate_literals: output.aggregate_literals,
+        aggregate_construction_seams: output.aggregate_construction_seams,
     })
 }
 

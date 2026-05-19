@@ -1,10 +1,12 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::component;
-use homeboy::deploy::{self, ReleaseStateStatus};
-use homeboy::release::{self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult};
-use homeboy::scope::{self, Scope};
+use homeboy::core::component;
+use homeboy::core::deploy::{self, ReleaseStateStatus};
+use homeboy::core::release::{
+    self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleasePipelineOptions,
+};
+use homeboy::core::scope::{self, Scope};
 
 use super::utils::args::{DryRunArgs, HiddenJsonArgs};
 use super::CmdResult;
@@ -39,6 +41,17 @@ pub struct ReleaseArgs {
     /// Recover from an interrupted release (tag + push current version)
     #[arg(long)]
     recover: bool,
+
+    /// Finish the release pipeline for an already-versioned, already-tagged HEAD.
+    /// Skips changelog/version/git mutation steps and runs package, GitHub Release,
+    /// publish, cleanup, and post-release hooks against the tag pointing at HEAD.
+    #[arg(long)]
+    head: bool,
+
+    /// Use existing release artifacts from this directory instead of running release.package.
+    /// Requires --head.
+    #[arg(long, value_name = "DIR")]
+    from_artifacts: Option<String>,
 
     /// Skip pre-release lint and test checks
     #[arg(long)]
@@ -89,6 +102,17 @@ pub enum ReleaseCommandOutput {
     Batch(BatchReleaseOutput),
 }
 
+impl ReleaseArgs {
+    fn pipeline_options(&self) -> ReleasePipelineOptions {
+        ReleasePipelineOptions {
+            deploy: self.deploy,
+            skip_publish: self.skip_publish,
+            head: self.head,
+            from_artifacts: self.from_artifacts.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 impl ReleaseArgs {
     /// Construct ReleaseArgs programmatically for tests and internal callers.
@@ -100,6 +124,8 @@ impl ReleaseArgs {
         dry_run: bool,
         deploy: bool,
         recover: bool,
+        head: bool,
+        from_artifacts: Option<String>,
         skip_checks: bool,
         skip_publish: bool,
         bump: Option<String>,
@@ -113,6 +139,8 @@ impl ReleaseArgs {
             _json: HiddenJsonArgs::default(),
             deploy,
             recover,
+            head,
+            from_artifacts,
             skip_checks,
             bump,
             force_lower_bump: false,
@@ -139,12 +167,11 @@ pub fn run(
             component_id: component_id.clone(),
             path_override: args.path.clone(),
             dry_run: args.dry_run_args.dry_run,
-            deploy: args.deploy,
             recover: args.recover,
             skip_checks: args.skip_checks,
             bump_override: bump_override.clone(),
             force_lower_bump: args.force_lower_bump,
-            skip_publish: args.skip_publish,
+            pipeline: args.pipeline_options(),
             skip_github_release: args.no_github_release,
             git_identity: args.git_identity.clone(),
         })?;
@@ -157,7 +184,7 @@ pub fn run(
 
     // Multiple components: batch release
     if args.path.is_some() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "path",
             "--path is not supported for batch releases (multiple components)",
             None,
@@ -165,10 +192,26 @@ pub fn run(
         ));
     }
     if args.recover {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "recover",
             "--recover is not supported for batch releases — run recovery per-component",
             None,
+            None,
+        ));
+    }
+    if args.head {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "head",
+            "--head is not supported for batch releases — finish one component release at a time",
+            None,
+            None,
+        ));
+    }
+    if args.from_artifacts.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "from-artifacts",
+            "--from-artifacts requires --head and is not supported for batch releases",
+            args.from_artifacts.clone(),
             None,
         ));
     }
@@ -177,12 +220,16 @@ pub fn run(
         component_id: String::new(), // overridden per component
         path_override: None,
         dry_run: args.dry_run_args.dry_run,
-        deploy: args.deploy,
         recover: false,
         skip_checks: args.skip_checks,
         bump_override,
         force_lower_bump: args.force_lower_bump,
-        skip_publish: args.skip_publish,
+        pipeline: ReleasePipelineOptions {
+            deploy: args.deploy,
+            skip_publish: args.skip_publish,
+            head: false,
+            from_artifacts: None,
+        },
         skip_github_release: args.no_github_release,
         git_identity: args.git_identity.clone(),
     };
@@ -211,13 +258,13 @@ pub fn run(
 fn resolve_component_ids(
     args: &ReleaseArgs,
     components: &[String],
-) -> homeboy::Result<Vec<String>> {
+) -> homeboy::core::Result<Vec<String>> {
     if let Some(ref project_id) = args.project {
         let components =
             scope::resolve_scope_component_records(&Scope::Project(project_id.into()))?;
 
         if components.is_empty() {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "project",
                 format!("Project '{}' has no components attached", project_id),
                 Some(project_id.to_string()),
@@ -255,7 +302,7 @@ fn resolve_component_ids(
             } else {
                 "that need a release"
             };
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "project",
                 format!("No components {} in project '{}'", filter_desc, project_id),
                 Some(project_id.to_string()),
@@ -279,7 +326,7 @@ fn resolve_component_ids(
         // Try CWD-based component detection
         match component::resolve_effective(None, None, None) {
             Ok(comp) => Ok(vec![comp.id]),
-            Err(_) => Err(homeboy::Error::validation_missing_argument(vec![
+            Err(_) => Err(homeboy::core::Error::validation_missing_argument(vec![
                 "component ID(s), or --project <project-id>".to_string(),
             ])),
         }
@@ -294,7 +341,7 @@ struct PositionalReleaseArgs {
     bump: Option<String>,
 }
 
-fn resolve_positional_args(args: &ReleaseArgs) -> homeboy::Result<PositionalReleaseArgs> {
+fn resolve_positional_args(args: &ReleaseArgs) -> homeboy::core::Result<PositionalReleaseArgs> {
     let mut components = args.components.clone();
 
     if args.project.is_some() || components.len() < 2 {
@@ -313,7 +360,7 @@ fn resolve_positional_args(args: &ReleaseArgs) -> homeboy::Result<PositionalRele
     };
 
     if args.bump.is_some() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "bump",
             "Use either a positional bump type or --bump, not both",
             Some(bump),
@@ -355,6 +402,8 @@ mod tests {
             true,
             false,
             false,
+            false,
+            None,
             false,
             false,
             None,

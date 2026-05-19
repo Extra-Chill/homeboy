@@ -72,8 +72,8 @@ pub use workloads::{
     invocation_requirements_for_extension_workloads, workloads_for_extension, RigWorkloadKind,
 };
 
-use crate::error::{Error, Result};
-use crate::paths;
+use crate::core::error::{Error, Result};
+use crate::core::paths;
 use std::fs;
 use std::path::Path;
 

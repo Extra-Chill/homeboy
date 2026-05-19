@@ -1,7 +1,7 @@
-use crate::engine::shell;
-use crate::fleet;
-use crate::project::Project;
-use crate::server::{resolve_context, SshClient, SshResolveArgs};
+use crate::core::engine::shell;
+use crate::core::fleet;
+use crate::core::project::Project;
+use crate::core::server::{resolve_context, SshClient, SshResolveArgs};
 use serde::Serialize;
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -30,10 +30,10 @@ pub fn collect_exec(
     command: Vec<String>,
     check: bool,
     user_override: Option<String>,
-) -> crate::Result<(Vec<FleetExecProjectResult>, FleetExecSummary, i32)> {
+) -> crate::core::Result<(Vec<FleetExecProjectResult>, FleetExecSummary, i32)> {
     if command.is_empty() {
         return Err(
-            crate::Error::validation_missing_argument(vec!["command".to_string()])
+            crate::core::Error::validation_missing_argument(vec!["command".to_string()])
                 .with_hint("Usage: homeboy fleet exec <fleet> -- <command>".to_string()),
         );
     }
@@ -47,7 +47,7 @@ pub fn collect_exec(
     let projects = fleet::get_projects(fleet_id)?;
 
     if projects.is_empty() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "fleet",
             "Fleet has no projects",
             Some(fleet_id.to_string()),

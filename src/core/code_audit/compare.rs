@@ -58,7 +58,7 @@ pub fn finding_fingerprint(finding: &Finding) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::{AuditFinding, AuditSummary};
+    use crate::core::code_audit::{AuditFinding, AuditSummary};
 
     fn mk_result_with_findings(findings: Vec<Finding>) -> CodeAuditResult {
         CodeAuditResult {

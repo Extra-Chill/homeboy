@@ -277,6 +277,8 @@ mod tests {
             runtime_dispatched_types: vec![],
             convention_tags: vec![],
             trait_impl_methods: vec![],
+            aggregate_literals: vec![],
+            aggregate_construction_seams: vec![],
         }
     }
 

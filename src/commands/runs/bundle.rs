@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-use homeboy::observation::{
+use homeboy::core::observation::{
     ArtifactRecord, FindingRecord, ObservationStore, RunRecord, TraceSpanRecord,
 };
-use homeboy::Error;
+use homeboy::core::Error;
 
 use super::common::since_threshold;
 use super::{require_run, CmdResult, RunsOutput};
@@ -216,7 +216,7 @@ fn import_via_gh_actions(args: RunsImportArgs) -> CmdResult<RunsOutput> {
     })
 }
 
-fn require_gh_arg(value: Option<String>, name: &str) -> homeboy::Result<String> {
+fn require_gh_arg(value: Option<String>, name: &str) -> homeboy::core::Result<String> {
     value
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| Error::validation_missing_argument(vec![format!("--{name}")]))
@@ -225,7 +225,7 @@ fn require_gh_arg(value: Option<String>, name: &str) -> homeboy::Result<String> 
 fn build_bundle(
     store: &ObservationStore,
     runs: Vec<RunRecord>,
-) -> homeboy::Result<ObservationBundle> {
+) -> homeboy::core::Result<ObservationBundle> {
     let mut artifacts = Vec::new();
     let mut trace_spans = Vec::new();
     let mut findings = Vec::new();
@@ -260,7 +260,7 @@ fn build_bundle(
     })
 }
 
-fn write_bundle_dir(path: &Path, bundle: &ObservationBundle) -> homeboy::Result<()> {
+fn write_bundle_dir(path: &Path, bundle: &ObservationBundle) -> homeboy::core::Result<()> {
     if path.exists() && !path.is_dir() {
         return Err(Error::validation_invalid_argument(
             "output",
@@ -284,7 +284,7 @@ fn write_bundle_dir(path: &Path, bundle: &ObservationBundle) -> homeboy::Result<
     Ok(())
 }
 
-fn read_bundle_dir(path: &Path) -> homeboy::Result<ObservationBundle> {
+fn read_bundle_dir(path: &Path) -> homeboy::core::Result<ObservationBundle> {
     if !path.is_dir() {
         return Err(Error::validation_invalid_argument(
             "input",
@@ -361,7 +361,7 @@ fn is_test_failure_finding(finding: &FindingRecord) -> bool {
                 == Some("test-failures"))
 }
 
-fn write_json(path: PathBuf, value: &impl Serialize) -> homeboy::Result<()> {
+fn write_json(path: PathBuf, value: &impl Serialize) -> homeboy::core::Result<()> {
     let json = serde_json::to_string_pretty(value).map_err(|e| {
         Error::internal_json(e.to_string(), Some(format!("serialize {}", path.display())))
     })?;
@@ -373,7 +373,7 @@ fn write_json(path: PathBuf, value: &impl Serialize) -> homeboy::Result<()> {
     })
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> homeboy::Result<T> {
+fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> homeboy::core::Result<T> {
     let raw = fs::read_to_string(&path).map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -389,7 +389,9 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> homeboy::Result<T> 
     })
 }
 
-fn read_optional_json<T: for<'de> Deserialize<'de> + Default>(path: PathBuf) -> homeboy::Result<T> {
+fn read_optional_json<T: for<'de> Deserialize<'de> + Default>(
+    path: PathBuf,
+) -> homeboy::core::Result<T> {
     if !path.exists() {
         return Ok(T::default());
     }

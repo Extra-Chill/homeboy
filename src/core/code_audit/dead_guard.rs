@@ -20,7 +20,7 @@ use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::requirements::{known_available_symbols, KnownSymbols};
-use crate::component::AuditConfig;
+use crate::core::component::AuditConfig;
 
 /// Kinds of guards we detect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,8 +476,8 @@ fn line_text(content: &str, line: usize) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::Language;
-    use crate::code_audit::fingerprint::FileFingerprint;
+    use crate::core::code_audit::conventions::Language;
+    use crate::core::code_audit::fingerprint::FileFingerprint;
     use std::fs;
 
     fn make_fp(path: &str, content: &str) -> FileFingerprint {

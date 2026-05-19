@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::read_json_spec_to_string;
-use crate::error::{Error, Result};
-use crate::output::{BulkResult, BulkSummary, ItemOutcome};
-use crate::project;
-use crate::release::changelog;
+use crate::core::config::read_json_spec_to_string;
+use crate::core::error::{Error, Result};
+use crate::core::output::{BulkResult, BulkSummary, ItemOutcome};
+use crate::core::project;
+use crate::core::release::changelog;
 
 use super::changes::*;
 use super::commits::*;
@@ -185,7 +185,8 @@ pub fn detect_baseline_with_version(
     // machine) are available before we resolve the baseline.  Best-effort:
     // if there is no remote or the network is unavailable we silently
     // proceed with whatever tags are already local.
-    let _ = crate::engine::command::run_in_optional(path, "git", &["fetch", "--tags", "--quiet"]);
+    let _ =
+        crate::core::engine::command::run_in_optional(path, "git", &["fetch", "--tags", "--quiet"]);
 
     // Priority 1: Check for latest tag
     if let Some(tag) = get_latest_tag(path)? {
@@ -341,7 +342,7 @@ pub fn get_repo_snapshot(path: &str) -> Result<RepoSnapshot> {
         return Err(Error::git_command_failed("Not a git repository"));
     }
 
-    let branch = crate::engine::command::run_in(
+    let branch = crate::core::engine::command::run_in(
         path,
         "git",
         &["rev-parse", "--abbrev-ref", "HEAD"],
@@ -358,13 +359,13 @@ pub fn get_repo_snapshot(path: &str) -> Result<RepoSnapshot> {
         .map(|o| o.status.success() && o.stdout.is_empty())
         .unwrap_or(false);
 
-    let (ahead, behind) = crate::engine::command::run_in_optional(
+    let (ahead, behind) = crate::core::engine::command::run_in_optional(
         path,
         "git",
         &["rev-parse", "--abbrev-ref", "@{upstream}"],
     )
     .and_then(|_| {
-        crate::engine::command::run_in_optional(
+        crate::core::engine::command::run_in_optional(
             path,
             "git",
             &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
@@ -438,7 +439,7 @@ pub(crate) fn build_untracked_hint(path: &str, untracked_count: usize) -> Option
 }
 
 fn resolve_changelog_info(
-    component: &crate::component::Component,
+    component: &crate::core::component::Component,
     _commits: &[CommitInfo],
 ) -> Option<ChangelogInfo> {
     let changelog_path = changelog::resolve_changelog_path(component).ok()?;
@@ -1130,7 +1131,7 @@ pub fn tag_at(
 
 /// Check if a tag exists on the remote.
 pub fn tag_exists_on_remote(path: &str, tag_name: &str) -> Result<bool> {
-    Ok(crate::engine::command::run_in_optional(
+    Ok(crate::core::engine::command::run_in_optional(
         path,
         "git",
         &[
@@ -1147,7 +1148,7 @@ pub fn tag_exists_on_remote(path: &str, tag_name: &str) -> Result<bool> {
 /// Check if a tag exists locally.
 pub fn tag_exists_locally(path: &str, tag_name: &str) -> Result<bool> {
     Ok(
-        crate::engine::command::run_in_optional(path, "git", &["tag", "-l", tag_name])
+        crate::core::engine::command::run_in_optional(path, "git", &["tag", "-l", tag_name])
             .map(|s| !s.is_empty())
             .unwrap_or(false),
     )
@@ -1155,7 +1156,7 @@ pub fn tag_exists_locally(path: &str, tag_name: &str) -> Result<bool> {
 
 /// Get the commit SHA a tag points to.
 pub fn get_tag_commit(path: &str, tag_name: &str) -> Result<String> {
-    crate::engine::command::run_in(
+    crate::core::engine::command::run_in(
         path,
         "git",
         &["rev-list", "-n", "1", tag_name],
@@ -1165,7 +1166,7 @@ pub fn get_tag_commit(path: &str, tag_name: &str) -> Result<String> {
 
 /// Get the current HEAD commit SHA.
 pub fn get_head_commit(path: &str) -> Result<String> {
-    crate::engine::command::run_in(path, "git", &["rev-parse", "HEAD"], "get HEAD commit")
+    crate::core::engine::command::run_in(path, "git", &["rev-parse", "HEAD"], "get HEAD commit")
 }
 
 /// Get the current HEAD short commit SHA, returning `None` outside git checkouts.
@@ -1188,10 +1189,10 @@ pub fn short_head_revision_at(path: &Path) -> Option<String> {
 /// Returns Ok(Some(n)) if behind by n commits, Ok(None) if not behind or no upstream.
 pub fn fetch_and_get_behind_count(path: &str) -> Result<Option<u32>> {
     // Run git fetch (update tracking refs)
-    crate::engine::command::run_in(path, "git", &["fetch"], "git fetch")?;
+    crate::core::engine::command::run_in(path, "git", &["fetch"], "git fetch")?;
 
     // Check if upstream exists
-    let upstream = crate::engine::command::run_in_optional(
+    let upstream = crate::core::engine::command::run_in_optional(
         path,
         "git",
         &["rev-parse", "--abbrev-ref", "@{upstream}"],
@@ -1201,7 +1202,7 @@ pub fn fetch_and_get_behind_count(path: &str) -> Result<Option<u32>> {
     }
 
     // Get ahead/behind counts
-    let counts = crate::engine::command::run_in_optional(
+    let counts = crate::core::engine::command::run_in_optional(
         path,
         "git",
         &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
@@ -1270,7 +1271,7 @@ pub fn changes_at(
     let (id, path) = resolve_target(component_id, path_override)?;
 
     // Load component for version checking and changelog info
-    let component = crate::component::resolve_effective(Some(&id), Some(&path), None).ok();
+    let component = crate::core::component::resolve_effective(Some(&id), Some(&path), None).ok();
 
     // Determine baseline with version alignment awareness
     let baseline = match since_tag {
@@ -1287,7 +1288,7 @@ pub fn changes_at(
             // Use component version for alignment checking
             let current_version = component
                 .as_ref()
-                .and_then(crate::release::version::get_component_version);
+                .and_then(crate::core::release::version::get_component_version);
             detect_baseline_with_version(&path, current_version.as_deref())?
         }
     };

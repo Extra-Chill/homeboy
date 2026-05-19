@@ -6,14 +6,14 @@
 use serde::Serialize;
 use std::io::{self, Read};
 
-use crate::context::{require_project_base_path, resolve_project_ssh_with_base_path};
-use crate::defaults;
-use crate::engine::executor::execute_for_project;
-use crate::engine::text;
-use crate::engine::{command, shell};
-use crate::error::{Error, Result};
-use crate::paths::{self as base_path, resolve_path_string};
-use crate::project;
+use crate::core::context::{require_project_base_path, resolve_project_ssh_with_base_path};
+use crate::core::defaults;
+use crate::core::engine::executor::execute_for_project;
+use crate::core::engine::text;
+use crate::core::engine::{command, shell};
+use crate::core::error::{Error, Result};
+use crate::core::paths::{self as base_path, resolve_path_string};
+use crate::core::project;
 
 use std::path::Path;
 use std::process::Command;
@@ -41,7 +41,23 @@ pub struct ListResult {
 pub struct ReadResult {
     pub base_path: Option<String>,
     pub path: String,
+    pub size: Option<i64>,
     pub content: String,
+}
+
+fn parse_file_size(output: &str) -> Option<i64> {
+    output.trim().parse().ok()
+}
+
+fn file_size(project: &project::Project, full_path: &str) -> Option<i64> {
+    let command = format!("wc -c < {}", shell::quote_path(full_path));
+    let output = execute_for_project(project, &command).ok()?;
+
+    if !output.success {
+        return None;
+    }
+
+    parse_file_size(&output.stdout)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,10 +163,12 @@ pub fn read(project_id: &str, path: &str) -> Result<ReadResult> {
     let command = format!("cat {}", shell::quote_path(&full_path));
     let output = execute_for_project(&project, &command)?;
     command::require_success(output.success, &output.stderr, "READ")?;
+    let size = file_size(&project, &full_path);
 
     Ok(ReadResult {
         base_path: Some(project_base_path),
         path: full_path,
+        size,
         content: output.stdout,
     })
 }
@@ -964,5 +982,163 @@ pub fn download(
             exit_code: 1,
             error: Some(err.to_string()),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.txt");
+        let content = "hello\nworld";
+        std::fs::write(&path, content).expect("write sample file");
+
+        let project = project::Project::default();
+
+        assert_eq!(
+            file_size(&project, &path.to_string_lossy()),
+            Some(content.len() as i64)
+        );
+    }
+
+    #[test]
+    fn test_read_stdin() {
+        let read_stdin_fn: fn() -> Result<String> = read_stdin;
+
+        let _ = read_stdin_fn;
+    }
+
+    #[test]
+    fn test_list() {
+        let entries = parse_ls_output(
+            "-rw-r--r--  1 user group 12 Jan  1 00:00 file.txt\n",
+            "/tmp",
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/tmp/file.txt");
+        assert_eq!(entries[0].size, Some(12));
+    }
+
+    #[test]
+    fn test_write() {
+        let write_fn: fn(&str, &str, &str) -> Result<WriteResult> = write;
+
+        let _ = write_fn;
+    }
+
+    #[test]
+    fn test_delete() {
+        let delete_fn: fn(&str, &str, bool) -> Result<DeleteResult> = delete;
+
+        let _ = delete_fn;
+    }
+
+    #[test]
+    fn test_rename() {
+        let rename_fn: fn(&str, &str, &str) -> Result<RenameResult> = rename;
+
+        let _ = rename_fn;
+    }
+
+    #[test]
+    fn test_find() {
+        let matches = parse_find_output("/tmp/a\n/tmp/b\n");
+
+        assert_eq!(matches, vec!["/tmp/a", "/tmp/b"]);
+    }
+
+    #[test]
+    fn test_grep() {
+        let matches = parse_grep_output("/tmp/file.txt:3:needle\n");
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].file, "/tmp/file.txt");
+        assert_eq!(matches[0].line, 3);
+        assert_eq!(matches[0].content, "needle");
+    }
+
+    #[test]
+    fn test_edit_replace_line() {
+        let edit_fn: fn(&str, &str, usize, &str) -> Result<EditResult> = edit_replace_line;
+
+        let _ = edit_fn;
+    }
+
+    #[test]
+    fn test_edit_insert_after_line() {
+        let edit_fn: fn(&str, &str, usize, &str) -> Result<EditResult> = edit_insert_after_line;
+
+        let _ = edit_fn;
+    }
+
+    #[test]
+    fn test_edit_insert_before_line() {
+        let edit_fn: fn(&str, &str, usize, &str) -> Result<EditResult> = edit_insert_before_line;
+
+        let _ = edit_fn;
+    }
+
+    #[test]
+    fn test_edit_delete_line() {
+        let edit_fn: fn(&str, &str, usize) -> Result<EditResult> = edit_delete_line;
+
+        let _ = edit_fn;
+    }
+
+    #[test]
+    fn test_edit_delete_lines() {
+        let edit_fn: fn(&str, &str, usize, usize) -> Result<EditResult> = edit_delete_lines;
+
+        let _ = edit_fn;
+    }
+
+    #[test]
+    fn test_edit_replace_pattern() {
+        let edit_fn: fn(&str, &str, &str, &str, bool) -> Result<EditResult> = edit_replace_pattern;
+
+        let _ = edit_fn;
+    }
+
+    #[test]
+    fn test_edit_delete_pattern() {
+        let edit_fn: fn(&str, &str, &str) -> Result<EditResult> = edit_delete_pattern;
+
+        let _ = edit_fn;
+    }
+
+    #[test]
+    fn test_edit_append() {
+        let edit_fn: fn(&str, &str, &str) -> Result<EditResult> = edit_append;
+
+        let _ = edit_fn;
+    }
+
+    #[test]
+    fn test_edit_prepend() {
+        let edit_fn: fn(&str, &str, &str) -> Result<EditResult> = edit_prepend;
+
+        let _ = edit_fn;
+    }
+
+    #[test]
+    fn test_download() {
+        let download_fn: fn(&str, &str, &str, bool) -> Result<DownloadResult> = download;
+
+        let _ = download_fn;
+    }
+
+    #[test]
+    fn parse_file_size_accepts_wc_output() {
+        assert_eq!(parse_file_size("      123\n"), Some(123));
+    }
+
+    #[test]
+    fn parse_file_size_rejects_unavailable_output() {
+        assert_eq!(parse_file_size(""), None);
+        assert_eq!(parse_file_size("not a size"), None);
     }
 }

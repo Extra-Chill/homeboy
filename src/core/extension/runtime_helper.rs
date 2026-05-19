@@ -1,6 +1,6 @@
-use crate::engine::local_files;
-use crate::error::{Error, Result};
-use crate::paths;
+use crate::core::engine::local_files;
+use crate::core::error::{Error, Result};
+use crate::core::paths;
 use std::env;
 use std::fs;
 use std::path::PathBuf;

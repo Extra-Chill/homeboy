@@ -1,10 +1,10 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::db::{self, DbResult, DbTunnelResult};
-use homeboy::engine::text;
-use homeboy::observation::store::{self, ObservationDbStatus};
-use homeboy::project;
+use homeboy::core::db::{self, DbResult, DbTunnelResult};
+use homeboy::core::engine::text;
+use homeboy::core::observation::store::{self, ObservationDbStatus};
+use homeboy::core::project;
 
 use super::CmdResult;
 
@@ -151,7 +151,7 @@ fn status() -> CmdResult<DbOutput> {
 fn parse_subtarget(
     project_id: &str,
     args: &[String],
-) -> homeboy::Result<(Option<String>, Vec<String>)> {
+) -> homeboy::core::Result<(Option<String>, Vec<String>)> {
     let project = project::load(project_id)?;
 
     if project.sub_targets.is_empty() {

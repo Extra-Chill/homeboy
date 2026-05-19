@@ -3,8 +3,8 @@ use std::fs;
 
 use crate::test_support::with_isolated_home;
 
-use homeboy::component::ScopedExtensionConfig;
-use homeboy::rig::ComponentSpec;
+use homeboy::core::component::ScopedExtensionConfig;
+use homeboy::core::rig::ComponentSpec;
 
 use super::test_fixture::{
     init_overlay_component, write_trace_extension, write_trace_rig,
@@ -348,7 +348,7 @@ fn trace_run_persists_observation_history() {
         assert_eq!(exit_code, 0);
         let store = ObservationStore::open_initialized().expect("store");
         let runs = store
-            .list_runs(homeboy::observation::RunListFilter {
+            .list_runs(homeboy::core::observation::RunListFilter {
                 kind: Some("trace".to_string()),
                 ..Default::default()
             })
@@ -1444,7 +1444,7 @@ fn failed_trace_run_persists_observation_history() {
         assert_eq!(exit_code, 3);
         let store = ObservationStore::open_initialized().expect("store");
         let runs = store
-            .list_runs(homeboy::observation::RunListFilter {
+            .list_runs(homeboy::core::observation::RunListFilter {
                 kind: Some("trace".to_string()),
                 ..Default::default()
             })

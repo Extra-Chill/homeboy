@@ -5,19 +5,23 @@
 //! command behavior. Long-running analysis endpoints enqueue daemon-owned jobs
 //! so HTTP requests can return immediately while clients poll job events.
 
-use clap::Parser;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::api_jobs::JobStore;
-use crate::cli_surface::{Cli, Commands};
-use crate::commands::{self, GlobalArgs};
-use crate::error::{Error, Result};
-use crate::observation::{
+use crate::core::api_jobs::JobStore;
+use crate::core::error::{Error, Result};
+use crate::core::observation::{
     running_status_note, FindingListFilter, ObservationStore, RunListFilter, RunRecord,
 };
-use crate::{component, git, rig, stack};
+use crate::core::{component, git, rig, stack};
+
+mod analysis_job_runner;
+
+pub use analysis_job_runner::{
+    AnalysisJobRunOutput, AnalysisJobRunner, UnsupportedAnalysisJobRunner,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -56,6 +60,7 @@ pub enum HttpEndpoint {
     Runs,
     Run { id: String },
     RunArtifacts { id: String },
+    RunArtifactContent { id: String, artifact_id: String },
     RunFindings { id: String },
     AuditRuns,
     BenchRuns,
@@ -88,7 +93,7 @@ pub struct RunDetail {
     pub summary: RunSummary,
     pub homeboy_version: Option<String>,
     pub metadata: Value,
-    pub artifacts: Vec<crate::observation::ArtifactRecord>,
+    pub artifacts: Vec<crate::core::observation::ArtifactRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -116,6 +121,7 @@ impl HttpEndpoint {
             Self::Runs => "runs.list",
             Self::Run { .. } => "runs.show",
             Self::RunArtifacts { .. } => "runs.artifacts",
+            Self::RunArtifactContent { .. } => "runs.artifact.content",
             Self::RunFindings { .. } => "runs.findings",
             Self::AuditRuns => "audit.runs",
             Self::BenchRuns => "bench.runs",
@@ -164,6 +170,12 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["runs", id, "artifacts"]) => Ok(HttpEndpoint::RunArtifacts {
             id: (*id).to_string(),
         }),
+        (HttpMethod::Get, ["runs", id, "artifacts", artifact_id, "content"]) => {
+            Ok(HttpEndpoint::RunArtifactContent {
+                id: (*id).to_string(),
+                artifact_id: (*artifact_id).to_string(),
+            })
+        }
         (HttpMethod::Get, ["runs", id, "findings"]) => Ok(HttpEndpoint::RunFindings {
             id: (*id).to_string(),
         }),
@@ -209,6 +221,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /runs".to_string(),
                 "GET /runs/:id".to_string(),
                 "GET /runs/:id/artifacts".to_string(),
+                "GET /runs/:id/artifacts/:artifact_id/content".to_string(),
                 "GET /runs/:id/findings".to_string(),
                 "GET /audit/runs".to_string(),
                 "GET /bench/runs".to_string(),
@@ -228,6 +241,18 @@ pub fn handle(request: HttpApiRequest) -> Result<HttpApiResponse> {
 
 /// Execute a routed HTTP API request against the daemon-owned in-memory job store.
 pub fn handle_with_jobs(request: HttpApiRequest, job_store: &JobStore) -> Result<HttpApiResponse> {
+    handle_with_jobs_and_runner(request, job_store, UnsupportedAnalysisJobRunner)
+}
+
+/// Execute a routed HTTP API request with an injected analysis job runner.
+pub fn handle_with_jobs_and_runner<R>(
+    request: HttpApiRequest,
+    job_store: &JobStore,
+    analysis_runner: R,
+) -> Result<HttpApiResponse>
+where
+    R: AnalysisJobRunner,
+{
     let endpoint = route(request.method, &request.path)?;
     let body = match &endpoint {
         HttpEndpoint::Components => json!({
@@ -293,6 +318,7 @@ pub fn handle_with_jobs(request: HttpApiRequest, job_store: &JobStore) -> Result
                 "artifacts": store.list_artifacts(id)?,
             })
         }
+        HttpEndpoint::RunArtifactContent { id, artifact_id } => artifact_content(id, artifact_id)?,
         HttpEndpoint::RunFindings { id } => {
             let store = ObservationStore::open_initialized()?;
             require_run(&store, id)?;
@@ -335,7 +361,9 @@ pub fn handle_with_jobs(request: HttpApiRequest, job_store: &JobStore) -> Result
             "command": "api.jobs.cancel",
             "job": job_store.cancel(parse_job_id(id)?, "cancel requested via HTTP API")?,
         }),
-        HttpEndpoint::JobReadyRun { kind } => enqueue_analysis_job(job_store, *kind, request.body)?,
+        HttpEndpoint::JobReadyRun { kind } => {
+            enqueue_analysis_job(job_store, *kind, request.body, analysis_runner)?
+        }
     };
 
     Ok(HttpApiResponse {
@@ -343,6 +371,59 @@ pub fn handle_with_jobs(request: HttpApiRequest, job_store: &JobStore) -> Result
         endpoint: endpoint.name().to_string(),
         body,
     })
+}
+
+fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
+    let store = ObservationStore::open_initialized()?;
+    require_run(&store, run_id)?;
+    let artifact = store.get_artifact(artifact_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact_id",
+            format!("artifact record not found: {artifact_id}"),
+            Some(artifact_id.to_string()),
+            None,
+        )
+    })?;
+    if artifact.run_id != run_id {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "artifact does not belong to requested run",
+            Some(artifact_id.to_string()),
+            None,
+        ));
+    }
+    if artifact.artifact_type != "file" {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "artifact {} is {}, not a downloadable file",
+                artifact.id, artifact.artifact_type
+            ),
+            Some(artifact.id),
+            None,
+        ));
+    }
+    let path = std::path::PathBuf::from(&artifact.path);
+    let content = std::fs::read(&path).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("read recorded artifact {}", path.display())),
+        )
+    })?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&artifact.id);
+    Ok(json!({
+        "command": "api.runs.artifact.content",
+        "run_id": run_id,
+        "artifact_id": artifact.id,
+        "filename": filename,
+        "mime": artifact.mime,
+        "size_bytes": artifact.size_bytes,
+        "sha256": artifact.sha256,
+        "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+    }))
 }
 
 fn path_segments(path: &str) -> Vec<String> {
@@ -414,30 +495,29 @@ fn enqueue_analysis_job(
     job_store: &JobStore,
     kind: JobReadyRunKind,
     body: Option<Value>,
+    analysis_runner: impl AnalysisJobRunner,
 ) -> Result<Value> {
     let request = AnalysisJobRequest::from_body(kind, body)?;
     let argv = request.argv();
-    let command = parse_analysis_command(argv.clone())?;
     let operation = format!("analysis.{}", job_ready_slug(kind));
     let request_summary = request.summary();
+    let command_label = request.command_label();
     let runner = job_store.run_background(operation, move |job| {
         job.progress(json!({
             "phase": "started",
-            "command": request.command_label(),
+            "command": command_label,
             "job_id": job.job_id(),
         }))?;
 
-        let global = GlobalArgs {};
-        let (result, exit_code) = commands::run_json(command, &global);
-        let output = result?;
+        let output = analysis_runner.run_analysis_job(argv)?;
         job.progress(json!({
             "phase": "finished",
-            "exit_code": exit_code,
+            "exit_code": output.exit_code,
         }))?;
         Ok(json!({
-            "command": request.command_label(),
-            "exit_code": exit_code,
-            "output": output,
+            "command": command_label,
+            "exit_code": output.exit_code,
+            "output": output.output,
         }))
     });
     let job = job_store.get(runner.job_id)?;
@@ -451,20 +531,6 @@ fn enqueue_analysis_job(
         },
         "request": request_summary,
     }))
-}
-
-fn parse_analysis_command(argv: Vec<String>) -> Result<Commands> {
-    let cli = Cli::try_parse_from(argv).map_err(|error| {
-        Error::validation_invalid_argument(
-            "body",
-            error.to_string(),
-            None,
-            Some(vec![
-                "Use the documented JSON request body contract for this endpoint".to_string(),
-            ]),
-        )
-    })?;
-    Ok(cli.command)
 }
 
 #[derive(Debug, Clone)]

@@ -1,8 +1,8 @@
-use crate::component::Component;
-use crate::engine::local_files::FileSystem;
-use crate::error::{Error, Result};
-use crate::git;
-use crate::release::changelog;
+use crate::core::component::Component;
+use crate::core::engine::local_files::FileSystem;
+use crate::core::error::{Error, Result};
+use crate::core::git;
+use crate::core::release::changelog;
 
 use super::planning_semver::resolve_tag_and_commits;
 use super::types::{ReleaseChangelogPlan, ReleaseOptions};
@@ -109,7 +109,7 @@ fn read_changelog_for_release(
     changelog_path: &std::path::Path,
     dry_run: bool,
 ) -> Result<String> {
-    match crate::engine::local_files::local().read(changelog_path) {
+    match crate::core::engine::local_files::local().read(changelog_path) {
         Ok(content) => Ok(content),
         Err(err) if dry_run && is_file_not_found_error(&err) => {
             log_status!(
@@ -135,6 +135,41 @@ fn is_file_not_found_error(err: &Error) -> bool {
         || err.message.contains("No such file")
         || detail.contains("File not found")
         || detail.contains("No such file")
+}
+
+/// First-release bootstrap: if the component's configured `changelog_target`
+/// doesn't exist on disk (and no fallback candidate exists), create a minimal
+/// changelog scaffold so downstream finalization has a file to update.
+pub(super) fn ensure_changelog_initialized(component: &Component) -> Result<()> {
+    let Some(ref target) = component.changelog_target else {
+        return Ok(());
+    };
+
+    let configured_path = crate::core::paths::resolve_path(&component.local_path, target);
+    if configured_path.exists() {
+        return Ok(());
+    }
+
+    let repo_root = std::path::Path::new(&component.local_path);
+    if changelog::discover_changelog_relative_path(repo_root).is_some() {
+        return Ok(());
+    }
+
+    if let Some(parent) = configured_path.parent() {
+        crate::core::engine::local_files::local().ensure_dir(parent)?;
+    }
+
+    crate::core::engine::local_files::local()
+        .write(&configured_path, changelog::INITIAL_CHANGELOG_CONTENT)?;
+
+    log_status!(
+        "release",
+        "Initialized changelog at {} (first release for {})",
+        configured_path.display(),
+        component.id
+    );
+
+    Ok(())
 }
 
 /// Strip trailing PR/issue references like "(#123)" or "(#123, #456)" from text.
@@ -193,12 +228,12 @@ fn group_commits_for_changelog(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_changelog_plan, generate_changelog_entries, group_commits_for_changelog,
-        read_changelog_for_release, strip_pr_reference,
+        build_changelog_plan, ensure_changelog_initialized, generate_changelog_entries,
+        group_commits_for_changelog, read_changelog_for_release, strip_pr_reference,
     };
-    use crate::component::Component;
-    use crate::git::{CommitCategory, CommitInfo};
-    use crate::release::types::ReleaseOptions;
+    use crate::core::component::Component;
+    use crate::core::git::{CommitCategory, CommitInfo};
+    use crate::core::release::types::ReleaseOptions;
 
     fn commit(subject: &str, category: CommitCategory) -> CommitInfo {
         CommitInfo {
@@ -269,6 +304,86 @@ mod tests {
         assert_eq!(plan.entry_count, 1);
         assert!(!plan.dry_run);
         assert!(plan.path.ends_with("CHANGELOG.md"));
+    }
+
+    #[test]
+    fn ensure_changelog_initialized_creates_missing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
+
+        let changelog_path = temp.path().join("CHANGELOG.md");
+        assert!(!changelog_path.exists(), "precondition: no changelog yet");
+
+        ensure_changelog_initialized(&component).expect("preflight should bootstrap");
+
+        let content = std::fs::read_to_string(&changelog_path).expect("file created");
+        assert_eq!(content, super::changelog::INITIAL_CHANGELOG_CONTENT);
+        assert!(
+            !content.contains("## Unreleased"),
+            "should NOT pre-create Unreleased section (legacy): {}",
+            content
+        );
+    }
+
+    #[test]
+    fn ensure_changelog_initialized_creates_parent_dir_for_nested_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = component_with_changelog_target(&temp, Some("docs/CHANGELOG.md"));
+
+        let docs_dir = temp.path().join("docs");
+        assert!(!docs_dir.exists(), "precondition: no docs/ yet");
+
+        ensure_changelog_initialized(&component).expect("preflight should bootstrap");
+
+        assert!(docs_dir.is_dir(), "docs/ parent should be created");
+        assert!(
+            temp.path().join("docs/CHANGELOG.md").exists(),
+            "changelog should land at docs/CHANGELOG.md"
+        );
+    }
+
+    #[test]
+    fn ensure_changelog_initialized_leaves_existing_file_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
+        let changelog_path = temp.path().join("CHANGELOG.md");
+        let original = "# Changelog\n\n## [1.0.0] - 2026-01-01\n\n### Added\n- real release\n";
+        std::fs::write(&changelog_path, original).unwrap();
+
+        ensure_changelog_initialized(&component).expect("no-op on existing file");
+
+        let after = std::fs::read_to_string(&changelog_path).unwrap();
+        assert_eq!(after, original, "existing changelog must not be rewritten");
+    }
+
+    #[test]
+    fn ensure_changelog_initialized_defers_to_existing_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
+
+        std::fs::create_dir_all(temp.path().join("docs")).unwrap();
+        let fallback = temp.path().join("docs/CHANGELOG.md");
+        std::fs::write(&fallback, "# Changelog\n\n## [0.1.0] - 2026-01-01\n").unwrap();
+
+        ensure_changelog_initialized(&component).expect("defer to fallback");
+
+        assert!(
+            !temp.path().join("CHANGELOG.md").exists(),
+            "should not create duplicate when fallback exists"
+        );
+    }
+
+    #[test]
+    fn ensure_changelog_initialized_is_noop_without_configured_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = component_with_changelog_target(&temp, None);
+
+        ensure_changelog_initialized(&component).expect("no-op without target");
+
+        for entry in std::fs::read_dir(temp.path()).unwrap() {
+            let path = entry.unwrap().path();
+            panic!("should have created nothing, but found: {}", path.display());
+        }
     }
 
     #[test]

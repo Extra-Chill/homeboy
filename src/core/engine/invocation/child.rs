@@ -1,6 +1,6 @@
-use crate::engine::resource::ChildProcessIdentity;
-use crate::error::{Error, Result};
-use crate::paths;
+use crate::core::engine::resource::ChildProcessIdentity;
+use crate::core::error::{Error, Result};
+use crate::core::paths;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -289,6 +289,36 @@ mod audit_coverage_tests {
             .expect("child record");
             assert!(guard.path.exists());
         });
+    }
+
+    #[test]
+    fn test_children_dir() {
+        with_isolated_home(|_| {
+            let dir = InvocationChildRecord::children_dir("inv/../audit").expect("children dir");
+
+            assert!(dir.ends_with("inv____audit"));
+        });
+    }
+
+    #[test]
+    fn test_record_path() {
+        with_isolated_home(|_| {
+            let dir = InvocationChildRecord::children_dir("inv/../audit").expect("children dir");
+            let path =
+                InvocationChildRecord::record_path("inv/../audit", 1234).expect("record path");
+
+            assert_eq!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("1234.json")
+            );
+            assert!(path.starts_with(&dir));
+        });
+    }
+
+    #[test]
+    fn test_process_started_at_handles_current_and_missing_processes() {
+        assert!(InvocationChildRecord::process_started_at(std::process::id()).is_some());
+        assert!(InvocationChildRecord::process_started_at(u32::MAX).is_none());
     }
 
     #[test]

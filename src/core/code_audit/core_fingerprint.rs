@@ -39,8 +39,8 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use crate::extension::grammar::{self, Grammar, Symbol};
-use crate::extension::{self, DeadCodeMarker, HookRef, UnusedParam};
+use crate::core::extension::grammar::{self, Grammar, Symbol};
+use crate::core::extension::{self, DeadCodeMarker, HookRef, UnusedParam};
 
 use super::conventions::Language;
 use super::fingerprint::FileFingerprint;
@@ -250,6 +250,8 @@ pub fn fingerprint_from_grammar(
         runtime_dispatched_types,
         convention_tags: Vec::new(),
         trait_impl_methods,
+        aggregate_literals: Vec::new(),
+        aggregate_construction_seams: Vec::new(),
     })
 }
 
@@ -1397,7 +1399,7 @@ pub fn run() {
         assert_eq!(command_fp.namespace.as_deref(), Some("crate::commands"));
 
         let nested_content = r#"
-use crate::Result;
+use crate::core::Result;
 
 pub fn undo() -> Result<()> {
     Ok(())

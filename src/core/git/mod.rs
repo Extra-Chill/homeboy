@@ -5,16 +5,49 @@ mod operations;
 mod pr_policy;
 mod primitives;
 
-pub use changes::*;
-pub use commits::*;
-pub use github::*;
-pub use operations::*;
-pub use pr_policy::*;
-pub use primitives::*;
+pub use changes::{
+    discard_worktree_changes, get_diff, get_dirty_files, get_files_changed_since, get_range_diff,
+    get_uncommitted_changes, UncommittedChanges,
+};
+pub(crate) use commits::extract_version_from_tag;
+pub use commits::{
+    categorize_commits, find_version_commit, find_version_release_commit, get_commits_since_tag,
+    get_commits_since_tag_for_path, get_last_n_commits, get_latest_tag, get_latest_tag_with_prefix,
+    recommended_bump_from_commits, strip_conventional_prefix, CommitCategory, CommitCounts,
+    CommitInfo, MonorepoContext, SemverBump,
+};
+pub use github::{
+    gh_probe_succeeds, issue_close, issue_comment, issue_create, issue_edit, issue_find,
+    merge_section, parse_comment_sections, pr_comment, pr_create, pr_edit, pr_files, pr_find,
+    pr_merge, pr_view, render_comment, GithubFindItem, GithubFindOutput, GithubIssueOutput,
+    GithubPrOutput, GithubPrView, IssueCloseOptions, IssueCloseReason, IssueCommentOptions,
+    IssueCreateOptions, IssueEditOptions, IssueFindOptions, IssueState, PrCommentMode,
+    PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions, PrState,
+};
+pub use operations::{
+    build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,
+    changes_project_filtered, cherry_pick, cherry_pick_at, commit, commit_at, commit_from_json,
+    detect_baseline_with_version, execute_git_for_release, fetch_and_fast_forward,
+    fetch_and_get_behind_count, get_head_commit, get_repo_snapshot, get_tag_commit, pull, pull_at,
+    pull_bulk, push, push_at, push_bulk, rebase, rebase_at, short_head_revision_at, status,
+    status_at, status_bulk, tag, tag_at, tag_exists_locally, tag_exists_on_remote, BaselineInfo,
+    BaselineSource, ChangelogInfo, ChangesOutput, CherryPickOptions, CommitJsonOutput,
+    CommitOptions, GitOutput, PushOptions, RebaseOptions, RepoBaselineSnapshot, RepoSnapshot,
+};
+pub use pr_policy::{
+    evaluate_merge_policy, evaluate_open_policy, PrPolicyContext, PrPolicyDecision, PrPolicyFile,
+    PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules,
+};
+pub use primitives::{
+    clone_repo, clone_repo_at_ref, current_branch, get_component_path_prefix, get_git_root,
+    is_workdir_clean, is_workdir_clean_or_not_git, pull_repo, run_git, short_head_revision,
+    update_to_remote_default_branch,
+};
+pub(crate) use primitives::{is_git_repo, list_tracked_markdown_files};
 
 use std::process::Command;
 
-use crate::error::Error;
+use crate::core::error::Error;
 
 fn execute_git(path: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
     Command::new("git").args(args).current_dir(path).output()
@@ -62,7 +95,7 @@ pub fn parse_git_identity(identity: Option<&str>) -> GitIdentity {
 }
 
 /// Configure git user.name and user.email in a repository.
-pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::Result<()> {
+pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::core::error::Result<()> {
     for (key, value) in [
         ("user.name", identity.name.as_str()),
         ("user.email", identity.email.as_str()),
@@ -90,7 +123,7 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::R
 ///    to the directory basename.
 /// 3. **`component_id` only** — look the component up in the registry,
 ///    use its configured `local_path`.
-/// 4. **Neither** — fall through to [`crate::component::resolve`], which
+/// 4. **Neither** — fall through to [`crate::core::component::resolve`], which
 ///    detects from CWD via the registry first, then portable
 ///    `homeboy.json` at CWD or git root. This is what makes
 ///    `homeboy git status` (and friends) work without arguments when
@@ -98,7 +131,7 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::R
 pub(crate) fn resolve_target(
     component_id: Option<&str>,
     path_override: Option<&str>,
-) -> crate::error::Result<(String, String)> {
+) -> crate::core::error::Result<(String, String)> {
     // Case 1 & 2: explicit path given.
     if let Some(path) = path_override {
         if let Some(id) = component_id {
@@ -106,12 +139,12 @@ pub(crate) fn resolve_target(
         }
         // Discover ID from path or its git root via portable homeboy.json.
         let dir = std::path::Path::new(path);
-        if let Some(comp) = crate::component::discover_from_portable(dir) {
+        if let Some(comp) = crate::core::component::discover_from_portable(dir) {
             return Ok((comp.id, path.to_string()));
         }
-        if let Some(git_root) = crate::component::resolution::detect_git_root(dir) {
+        if let Some(git_root) = crate::core::component::resolution::detect_git_root(dir) {
             if git_root != dir {
-                if let Some(comp) = crate::component::discover_from_portable(&git_root) {
+                if let Some(comp) = crate::core::component::discover_from_portable(&git_root) {
                     return Ok((comp.id, path.to_string()));
                 }
             }
@@ -128,12 +161,12 @@ pub(crate) fn resolve_target(
 
     // Case 3: ID without path — look it up in the registry.
     if let Some(id) = component_id {
-        let comp = crate::component::resolve_effective(Some(id), None, None)?;
+        let comp = crate::core::component::resolve_effective(Some(id), None, None)?;
         return Ok((id.to_string(), comp.local_path));
     }
 
     // Case 4: neither — CWD detection.
-    let comp = crate::component::resolve(None)?;
+    let comp = crate::core::component::resolve(None)?;
     Ok((comp.id, comp.local_path))
 }
 

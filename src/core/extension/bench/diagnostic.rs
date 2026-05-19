@@ -88,7 +88,7 @@ fn with_default_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::bench::parsing::{BenchMetrics, BenchRunSnapshot, BenchScenario};
+    use crate::core::extension::bench::parsing::{BenchMetrics, BenchRunSnapshot, BenchScenario};
 
     #[test]
     fn test_collect_diagnostics() {

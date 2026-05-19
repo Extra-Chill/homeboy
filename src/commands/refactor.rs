@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
-use homeboy::code_audit::{AuditFinding, CodeAuditResult};
-use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::refactor::{
+use homeboy::core::code_audit::{AuditFinding, CodeAuditResult};
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::refactor::{
     self, auto, AddResult, MoveResult, RenameContext, RenameScope, RenameSpec, RenameTargeting,
 };
 use serde::Serialize;
@@ -317,7 +317,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
                 run_move_file(&file_path, &to, &target, write_mode.write)
             } else if let Some(from_path) = from {
                 if item.is_empty() {
-                    return Err(homeboy::Error::validation_invalid_argument(
+                    return Err(homeboy::core::Error::validation_invalid_argument(
                         "item",
                         "Either --item (with --from) or --file is required",
                         None,
@@ -330,7 +330,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
                 }
                 run_move(&item, &from_path, &to, &target, write_mode.write)
             } else {
-                Err(homeboy::Error::validation_invalid_argument(
+                Err(homeboy::core::Error::validation_invalid_argument(
                     "from",
                     "Either --from (with --item) or --file is required",
                     None,
@@ -377,7 +377,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
 #[serde(tag = "command")]
 pub enum RefactorOutput {
     #[serde(rename = "refactor.sources")]
-    Sources(homeboy::refactor::plan::RefactorSourceRun),
+    Sources(homeboy::core::refactor::plan::RefactorSourceRun),
 
     #[serde(rename = "refactor.rename")]
     Rename {
@@ -433,13 +433,13 @@ pub enum RefactorOutput {
     #[serde(rename = "refactor.transform")]
     Transform {
         #[serde(flatten)]
-        result: homeboy::refactor::TransformResult,
+        result: homeboy::core::refactor::TransformResult,
     },
 
     #[serde(rename = "refactor.decompose")]
     Decompose {
-        plan: homeboy::refactor::DecomposePlan,
-        move_results: Vec<homeboy::refactor::MoveResult>,
+        plan: homeboy::core::refactor::DecomposePlan,
+        move_results: Vec<homeboy::core::refactor::MoveResult>,
         dry_run: bool,
         applied: bool,
     },
@@ -504,10 +504,10 @@ pub struct RefactorBulkSummary {
 }
 
 impl RefactorTargetArgs {
-    fn resolve_targets(&self) -> homeboy::Result<Vec<RefactorTarget>> {
+    fn resolve_targets(&self) -> homeboy::core::Result<Vec<RefactorTarget>> {
         let component_ids = collect_component_ids(&self.component_ids, &self.components);
         if self.path.is_some() && !component_ids.is_empty() {
-            return Err(homeboy::Error::validation_invalid_argument(
+            return Err(homeboy::core::Error::validation_invalid_argument(
                 "component",
                 "--path cannot be combined with multiple component IDs",
                 None,
@@ -527,7 +527,7 @@ impl RefactorTargetArgs {
         }
 
         if component_ids.is_empty() {
-            return Err(homeboy::Error::validation_missing_argument(vec![
+            return Err(homeboy::core::Error::validation_missing_argument(vec![
                 "component".to_string(),
             ]));
         }
@@ -547,13 +547,13 @@ fn resolve_top_level_targets(
     comp: Option<&PositionalComponentArgs>,
     component_ids: &[String],
     components: &[String],
-) -> homeboy::Result<Vec<RefactorTarget>> {
+) -> homeboy::core::Result<Vec<RefactorTarget>> {
     let flagged_ids = collect_component_ids(component_ids, components);
 
     if let Some(comp) = comp {
         if let Some(ref component_id) = comp.component {
             if !flagged_ids.is_empty() {
-                return Err(homeboy::Error::validation_invalid_argument(
+                return Err(homeboy::core::Error::validation_invalid_argument(
                     "component",
                     "Use either positional component syntax or --component/--components, not both",
                     None,
@@ -572,7 +572,7 @@ fn resolve_top_level_targets(
 
     if flagged_ids.is_empty() {
         // No component specified anywhere — try CWD auto-discovery
-        let component = homeboy::component::resolution::resolve(None)?;
+        let component = homeboy::core::component::resolution::resolve(None)?;
         return Ok(vec![RefactorTarget {
             label: component.id.clone(),
             component_id: Some(component.id),
@@ -714,7 +714,7 @@ fn run_refactor_sources_single(
     git_identity: Option<&str>,
 ) -> CmdResult<RefactorOutput> {
     let component_id = component_id.ok_or_else(|| {
-        homeboy::Error::validation_missing_argument(vec!["component".to_string()])
+        homeboy::core::Error::validation_missing_argument(vec!["component".to_string()])
     })?;
     let ctx = execution_context::resolve(&ResolveOptions::source_only(
         component_id,
@@ -724,8 +724,8 @@ fn run_refactor_sources_single(
     let only_findings = parse_audit_findings(only)?;
     let exclude_findings = parse_audit_findings(exclude)?;
     let source_path = ctx.source_path.clone();
-    let sources = homeboy::refactor::plan::collect_refactor_sources(
-        homeboy::refactor::plan::RefactorSourceRequest {
+    let sources = homeboy::core::refactor::plan::collect_refactor_sources(
+        homeboy::core::refactor::plan::RefactorSourceRequest {
             component: ctx.component,
             root: ctx.source_path,
             sources: requested_sources,
@@ -733,8 +733,8 @@ fn run_refactor_sources_single(
             only: only_findings,
             exclude: exclude_findings,
             settings: settings.to_vec(),
-            lint: homeboy::refactor::plan::LintSourceOptions::default(),
-            test: homeboy::refactor::plan::TestSourceOptions::default(),
+            lint: homeboy::core::refactor::plan::LintSourceOptions::default(),
+            test: homeboy::core::refactor::plan::TestSourceOptions::default(),
             write,
             force,
         },
@@ -750,12 +750,12 @@ fn run_refactor_sources_single(
     Ok((RefactorOutput::Sources(sources), exit_code))
 }
 
-fn parse_audit_findings(values: &[String]) -> homeboy::Result<Vec<AuditFinding>> {
+fn parse_audit_findings(values: &[String]) -> homeboy::core::Result<Vec<AuditFinding>> {
     values
         .iter()
         .map(|value| {
             value.parse::<AuditFinding>().map_err(|_| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "kind",
                     format!("Unknown audit finding kind: {}", value),
                     None,
@@ -855,7 +855,7 @@ fn run_rename_single(
             .chain(result.file_renames.iter().map(|r| r.from.clone()))
             .chain(result.file_renames.iter().map(|r| r.to.clone()))
             .collect();
-        homeboy::engine::undo::UndoSnapshot::capture_and_save(
+        homeboy::core::engine::undo::UndoSnapshot::capture_and_save(
             &root,
             "refactor rename",
             &affected_files,
@@ -936,7 +936,7 @@ fn run_add(
     // Mode 2: Explicit import addition
     if let Some(import_line) = import {
         let destination = to.ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "to",
                 "--to is required when using --import",
                 None,
@@ -954,7 +954,7 @@ fn run_add(
     }
 
     // Neither mode specified
-    Err(homeboy::Error::validation_invalid_argument(
+    Err(homeboy::core::Error::validation_invalid_argument(
         "add",
         "Specify either --from-audit or --import with --to",
         None,
@@ -990,7 +990,7 @@ fn run_add_from_audit(source: &str, write: bool) -> CmdResult<RefactorOutput> {
         serde_json::from_value(json_content)
     }
     .map_err(|e| {
-        homeboy::Error::validation_invalid_json(
+        homeboy::core::Error::validation_invalid_json(
             e,
             Some("parse audit result for refactor add".to_string()),
             Some(
@@ -1089,7 +1089,11 @@ fn run_move_single(
     let root = refactor::move_items::resolve_root(component_id, path)?;
 
     if write {
-        homeboy::engine::undo::UndoSnapshot::capture_and_save(&root, "refactor move", [from, to]);
+        homeboy::core::engine::undo::UndoSnapshot::capture_and_save(
+            &root,
+            "refactor move",
+            [from, to],
+        );
     }
 
     let item_refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
@@ -1168,7 +1172,7 @@ fn run_move_file_single(
     let root = refactor::move_items::resolve_root(component_id, path)?;
 
     if write {
-        homeboy::engine::undo::UndoSnapshot::capture_and_save(
+        homeboy::core::engine::undo::UndoSnapshot::capture_and_save(
             &root,
             "refactor move --file",
             [file, to],
@@ -1243,7 +1247,7 @@ fn run_propagate_single(
         // Dry-run to discover affected files for the undo snapshot
         let preview = refactor::propagate(&config)?;
         let affected_files: Vec<&str> = preview.edits.iter().map(|e| e.file.as_str()).collect();
-        homeboy::engine::undo::UndoSnapshot::capture_and_save(
+        homeboy::core::engine::undo::UndoSnapshot::capture_and_save(
             &root,
             "refactor propagate",
             affected_files,
@@ -1344,7 +1348,7 @@ fn run_transform_single(
                 .iter()
                 .flat_map(|r| r.matches.iter().map(|m| m.file.clone()))
                 .collect();
-            homeboy::engine::undo::UndoSnapshot::capture_and_save(
+            homeboy::core::engine::undo::UndoSnapshot::capture_and_save(
                 &root,
                 "refactor transform",
                 &affected_files,
@@ -1444,7 +1448,7 @@ fn run_decompose_single(
         let affected: Vec<&str> = std::iter::once(file)
             .chain(plan.groups.iter().map(|g| g.suggested_target.as_str()))
             .collect();
-        homeboy::engine::undo::UndoSnapshot::capture_and_save(
+        homeboy::core::engine::undo::UndoSnapshot::capture_and_save(
             &root,
             "refactor decompose",
             &affected,
@@ -1514,9 +1518,9 @@ const AUTOFIX_PREFIX: &str = "chore(ci): homeboy autofix";
 /// Stage all changes and create a commit after refactor --write.
 fn autofix_commit(
     path: &str,
-    sources: &homeboy::refactor::plan::RefactorSourceRun,
+    sources: &homeboy::core::refactor::plan::RefactorSourceRun,
     git_identity: Option<&str>,
-) -> homeboy::Result<()> {
+) -> homeboy::core::Result<()> {
     use std::process::Command;
 
     // Stage all changes
@@ -1524,10 +1528,10 @@ fn autofix_commit(
         .args(["add", "-A"])
         .current_dir(path)
         .output()
-        .map_err(|e| homeboy::Error::git_command_failed(format!("git add: {e}")))?;
+        .map_err(|e| homeboy::core::Error::git_command_failed(format!("git add: {e}")))?;
     if !add.status.success() {
         let stderr = String::from_utf8_lossy(&add.stderr);
-        return Err(homeboy::Error::git_command_failed(format!(
+        return Err(homeboy::core::Error::git_command_failed(format!(
             "git add -A failed: {stderr}"
         )));
     }
@@ -1537,7 +1541,7 @@ fn autofix_commit(
         .args(["diff", "--cached", "--quiet"])
         .current_dir(path)
         .output()
-        .map_err(|e| homeboy::Error::git_command_failed(format!("git diff: {e}")))?;
+        .map_err(|e| homeboy::core::Error::git_command_failed(format!("git diff: {e}")))?;
     if diff_check.status.success() {
         eprintln!("[refactor] No staged changes after git add — skipping commit");
         return Ok(());
@@ -1552,10 +1556,10 @@ fn autofix_commit(
             .args(["config", key, value])
             .current_dir(path)
             .output()
-            .map_err(|e| homeboy::Error::git_command_failed(format!("git config: {e}")))?;
+            .map_err(|e| homeboy::core::Error::git_command_failed(format!("git config: {e}")))?;
         if !config.status.success() {
             let stderr = String::from_utf8_lossy(&config.stderr);
-            return Err(homeboy::Error::git_command_failed(format!(
+            return Err(homeboy::core::Error::git_command_failed(format!(
                 "git config {key} failed: {stderr}"
             )));
         }
@@ -1570,10 +1574,10 @@ fn autofix_commit(
         .args(["commit", "-m", &message, "--author", &author])
         .current_dir(path)
         .output()
-        .map_err(|e| homeboy::Error::git_command_failed(format!("git commit: {e}")))?;
+        .map_err(|e| homeboy::core::Error::git_command_failed(format!("git commit: {e}")))?;
     if !commit.status.success() {
         let stderr = String::from_utf8_lossy(&commit.stderr);
-        return Err(homeboy::Error::git_command_failed(format!(
+        return Err(homeboy::core::Error::git_command_failed(format!(
             "git commit failed: {stderr}"
         )));
     }
@@ -1618,7 +1622,9 @@ fn resolve_git_identity(identity: Option<&str>) -> (String, String) {
 /// Dead code removed: 4 fixes (2 files)
 /// ...
 /// ```
-fn build_autofix_commit_message(sources: &homeboy::refactor::plan::RefactorSourceRun) -> String {
+fn build_autofix_commit_message(
+    sources: &homeboy::core::refactor::plan::RefactorSourceRun,
+) -> String {
     let source_labels: Vec<&str> = sources.sources.iter().map(|s| s.as_str()).collect();
     let source_desc = source_labels.join(", ");
 

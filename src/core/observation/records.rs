@@ -2,35 +2,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
-use crate::code_audit::{self, report::finding_kind_key};
-use crate::extension::lint::LintFinding;
+use crate::core::code_audit::{self, report::finding_kind_key};
+use crate::core::extension::lint::LintFinding;
 
+mod run_builder;
+mod run_status;
+mod trace_run_builder;
+mod trace_span_builder;
 mod triage_items;
 
+pub use run_builder::NewRunRecordBuilder;
+pub use run_status::RunStatus;
+pub use trace_run_builder::NewTraceRunRecordBuilder;
+pub use trace_span_builder::NewTraceSpanRecordBuilder;
 pub use triage_items::{NewTriageItemRecord, TriageItemRecord, TriagePullRequestSignals};
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-pub enum RunStatus {
-    Running,
-    Pass,
-    Fail,
-    Error,
-    Skipped,
-    Stale,
-}
-
-impl RunStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Pass => "pass",
-            Self::Fail => "fail",
-            Self::Error => "error",
-            Self::Skipped => "skipped",
-            Self::Stale => "stale",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct NewRunRecord {
@@ -42,6 +27,12 @@ pub struct NewRunRecord {
     pub git_sha: Option<String>,
     pub rig_id: Option<String>,
     pub metadata_json: serde_json::Value,
+}
+
+impl NewRunRecord {
+    pub fn builder(kind: impl Into<String>) -> NewRunRecordBuilder {
+        NewRunRecordBuilder::new(kind)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -220,7 +211,7 @@ fn audit_severity_key(severity: &code_audit::Severity) -> String {
 pub fn finding_records_from_annotations_dir(
     run_id: &str,
     annotations_dir: &Path,
-) -> crate::error::Result<Vec<NewFindingRecord>> {
+) -> crate::core::error::Result<Vec<NewFindingRecord>> {
     if !annotations_dir.exists() {
         return Ok(Vec::new());
     }
@@ -242,8 +233,8 @@ pub fn finding_records_from_annotations_dir(
     Ok(records)
 }
 
-fn annotation_dir_error(action: &str, path: &Path, error: std::io::Error) -> crate::Error {
-    crate::Error::internal_io(
+fn annotation_dir_error(action: &str, path: &Path, error: std::io::Error) -> crate::core::Error {
+    crate::core::Error::internal_io(
         format!(
             "Failed to {} annotations dir {}: {}",
             action,
@@ -257,13 +248,13 @@ fn annotation_dir_error(action: &str, path: &Path, error: std::io::Error) -> cra
 pub fn finding_records_from_annotation_file(
     run_id: &str,
     path: &Path,
-) -> crate::error::Result<Vec<NewFindingRecord>> {
+) -> crate::core::error::Result<Vec<NewFindingRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
 
     let content = std::fs::read_to_string(path).map_err(|e| {
-        crate::Error::internal_io(
+        crate::core::Error::internal_io(
             format!("Failed to read annotations file {}: {}", path.display(), e),
             Some("observation.findings.annotations".to_string()),
         )
@@ -274,7 +265,7 @@ pub fn finding_records_from_annotation_file(
 
     let annotations: Vec<AnnotationFindingRecord> =
         serde_json::from_str(&content).map_err(|e| {
-            crate::Error::internal_io(
+            crate::core::Error::internal_io(
                 format!("Malformed annotations JSON in {}: {}", path.display(), e),
                 Some("observation.findings.annotations".to_string()),
             )
@@ -366,6 +357,17 @@ pub struct NewTraceRunRecord {
     pub metadata_json: serde_json::Value,
 }
 
+impl NewTraceRunRecord {
+    pub fn builder(
+        run_id: impl Into<String>,
+        component_id: impl Into<String>,
+        scenario_id: impl Into<String>,
+        status: impl Into<String>,
+    ) -> NewTraceRunRecordBuilder {
+        NewTraceRunRecordBuilder::new(run_id, component_id, scenario_id, status)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TraceRunRecord {
     pub run_id: String,
@@ -405,13 +407,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_run_status_as_str() {
-        assert_eq!(RunStatus::Running.as_str(), "running");
-        assert_eq!(RunStatus::Pass.as_str(), "pass");
-        assert_eq!(RunStatus::Fail.as_str(), "fail");
-        assert_eq!(RunStatus::Error.as_str(), "error");
-        assert_eq!(RunStatus::Skipped.as_str(), "skipped");
-        assert_eq!(RunStatus::Stale.as_str(), "stale");
+    fn test_builder() {
+        let record = NewRunRecord::builder("lint").build();
+
+        assert_eq!(record.kind, "lint");
+        assert_eq!(record.metadata_json, serde_json::json!({}));
     }
 
     #[test]

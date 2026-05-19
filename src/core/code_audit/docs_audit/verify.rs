@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig, WalkEntry};
+use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig, WalkEntry};
 
 use super::claims::{Claim, ClaimType};
 

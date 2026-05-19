@@ -6,7 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::code_audit::FindingConfidence;
+use crate::core::code_audit::FindingConfidence;
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 
 /// One row of incoming findings: "command produced N findings of category X
 /// for component Y." This is the input grain reconcile reasons over.
@@ -169,12 +170,24 @@ pub enum ReconcileSkipReason {
 }
 
 /// The full reconciliation plan: every action, in execution order.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReconcilePlan {
+    #[serde(flatten)]
+    pub plan: HomeboyPlan,
     pub actions: Vec<ReconcileAction>,
 }
 
 impl ReconcilePlan {
+    pub fn new(component_id: impl Into<String>, actions: Vec<ReconcileAction>) -> Self {
+        let component_id = component_id.into();
+        let plan = HomeboyPlan::builder_for_component(PlanKind::IssueReconcile, component_id)
+            .steps(actions.iter().enumerate().map(action_step))
+            .summarize()
+            .build();
+
+        Self { plan, actions }
+    }
+
     /// Count actions by variant (file_new, update, etc.). Used by the CLI
     /// to render a one-line summary.
     pub fn counts(&self) -> ReconcilePlanCounts {
@@ -196,6 +209,79 @@ impl ReconcilePlan {
         self.actions
             .iter()
             .all(|a| matches!(a, ReconcileAction::Skip { .. }))
+    }
+}
+
+fn action_step((index, action): (usize, &ReconcileAction)) -> PlanStep {
+    let action_kind = action_kind(action);
+    let id = format!("issues.reconcile.{:03}.{}", index + 1, action_kind);
+    let kind = format!("issues.reconcile.{action_kind}");
+    let builder = PlanStep::builder(
+        id,
+        kind,
+        if matches!(action, ReconcileAction::Skip { .. }) {
+            PlanStepStatus::Skipped
+        } else {
+            PlanStepStatus::Ready
+        },
+    )
+    .label(action_label(action))
+    .blocking(!matches!(action, ReconcileAction::Skip { .. }))
+    .inputs(PlanValues::new().json("action", action));
+
+    match action {
+        ReconcileAction::Skip { reason, .. } => builder.skip_reason(format!("{:?}", reason)),
+        _ => builder,
+    }
+    .build()
+}
+
+fn action_kind(action: &ReconcileAction) -> &'static str {
+    match action {
+        ReconcileAction::FileNew { .. } => "file_new",
+        ReconcileAction::Update { .. } => "update",
+        ReconcileAction::UpdateClosed { .. } => "update_closed",
+        ReconcileAction::Close { .. } => "close",
+        ReconcileAction::CloseDuplicate { .. } => "close_duplicate",
+        ReconcileAction::Skip { .. } => "skip",
+    }
+}
+
+fn action_label(action: &ReconcileAction) -> String {
+    match action {
+        ReconcileAction::FileNew {
+            command,
+            component_id,
+            category,
+            count,
+            ..
+        } => format!("File new {command} issue for {category} in {component_id} ({count})"),
+        ReconcileAction::Update {
+            number,
+            category,
+            count,
+            ..
+        } => format!("Update {category} issue #{number} ({count})"),
+        ReconcileAction::UpdateClosed {
+            number,
+            category,
+            count,
+            ..
+        } => format!("Refresh closed {category} issue #{number} ({count})"),
+        ReconcileAction::Close {
+            number, category, ..
+        } => {
+            format!("Close resolved {category} issue #{number}")
+        }
+        ReconcileAction::CloseDuplicate {
+            number,
+            keep,
+            category,
+            ..
+        } => format!("Close duplicate {category} issue #{number}, keeping #{keep}"),
+        ReconcileAction::Skip {
+            category, reason, ..
+        } => format!("Skip {category} ({:?})", reason),
     }
 }
 

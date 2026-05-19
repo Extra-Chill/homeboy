@@ -5,12 +5,11 @@
 //! Installed rigs stay loadable through the existing flat rig config path by
 //! linking `~/.config/homeboy/rigs/<id>.json` to the package spec.
 
-use crate::error::{Error, Result};
-use crate::{extension, git, paths, stack};
+use crate::core::error::{Error, Result};
+use crate::core::{extension, git, paths, stack};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscoveredRig {
@@ -308,7 +307,7 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
     fs::create_dir_all(paths::rig_packages()?)
         .map_err(|e| Error::internal_io(e.to_string(), Some("create rig packages dir".into())))?;
     git::clone_repo(root_source, &package_path)?;
-    let source_revision = short_head_revision(&package_path);
+    let source_revision = git::short_head_revision(&package_path);
     let discovery_path = match subpath {
         Some(subpath) => package_path.join(subpath),
         None => package_path.clone(),
@@ -567,21 +566,6 @@ pub(crate) fn link_or_copy_file(source: &Path, target: &Path) -> Result<()> {
             .map(|_| ())
             .map_err(|e| Error::internal_io(e.to_string(), Some("copy rig spec".into())))
     }
-}
-
-fn short_head_revision(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(path)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let revision = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!revision.is_empty()).then_some(revision)
 }
 
 #[cfg(test)]

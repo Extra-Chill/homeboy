@@ -1,9 +1,9 @@
 //! Tests for active rig run leases.
 
-use crate::error::ErrorCode;
-use crate::rig::lease::{acquire_active_run_lease, active_run_leases};
-use crate::rig::spec::{RigResourcesSpec, RigSpec};
-use crate::rig::{run_up, RigRunLease};
+use crate::core::error::ErrorCode;
+use crate::core::rig::lease::{acquire_active_run_lease, active_run_leases};
+use crate::core::rig::spec::{RigResourcesSpec, RigSpec};
+use crate::core::rig::{run_up, RigRunLease};
 use crate::test_support::with_isolated_home;
 
 fn rig(id: &str, resources: RigResourcesSpec) -> RigSpec {
@@ -126,7 +126,7 @@ fn test_acquire_active_run_lease_prunes_stale_pid() {
             started_at: "2026-04-27T00:00:00Z".to_string(),
             resources: resources(),
         };
-        let lease_dir = crate::paths::rig_leases_dir().expect("lease dir");
+        let lease_dir = crate::core::paths::rig_leases_dir().expect("lease dir");
         std::fs::create_dir_all(&lease_dir).expect("create lease dir");
         std::fs::write(
             lease_dir.join("studio.json"),

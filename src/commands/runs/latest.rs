@@ -1,8 +1,8 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::observation::{FindingRecord, ObservationStore, RunListFilter, RunRecord};
-use homeboy::Error;
+use homeboy::core::observation::{FindingRecord, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::Error;
 
 use crate::commands::{
     runs::{run_summary, RunSummary, RunsOutput},
@@ -52,7 +52,7 @@ pub fn latest_run(args: RunsLatestRunArgs) -> CmdResult<RunsOutput> {
 
 pub(crate) fn latest_run_context(
     args: RunsLatestRunArgs,
-) -> homeboy::Result<(ObservationStore, RunRecord)> {
+) -> homeboy::core::Result<(ObservationStore, RunRecord)> {
     let store = ObservationStore::open_initialized()?;
     let run = require_latest_run(&store, run_filter_from_latest_args(args))?;
     Ok((store, run))
@@ -61,7 +61,7 @@ pub(crate) fn latest_run_context(
 pub(crate) fn require_latest_run(
     store: &ObservationStore,
     filter: RunListFilter,
-) -> homeboy::Result<RunRecord> {
+) -> homeboy::core::Result<RunRecord> {
     store.latest_run(filter)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "filter",

@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::plan::{ReconcileAction, ReconcilePlan, ReconcilePlanCounts};
 use super::tracker::{CloseReason, Tracker};
@@ -258,9 +258,7 @@ mod tests {
 
     #[test]
     fn applies_file_new_via_tracker() {
-        let plan = ReconcilePlan {
-            actions: vec![file_new("x")],
-        };
+        let plan = ReconcilePlan::new("c", vec![file_new("x")]);
         let tracker = MockTracker::new();
         let result = apply_plan(plan, &tracker).unwrap();
 
@@ -275,8 +273,9 @@ mod tests {
 
     #[test]
     fn applies_update_close_dedupe_in_order() {
-        let plan = ReconcilePlan {
-            actions: vec![
+        let plan = ReconcilePlan::new(
+            "c",
+            vec![
                 ReconcileAction::Update {
                     number: 100,
                     title: "audit: x in c (3)".into(),
@@ -296,7 +295,7 @@ mod tests {
                     comment: "dupe of #100".into(),
                 },
             ],
-        };
+        );
         let tracker = MockTracker::new();
         let result = apply_plan(plan, &tracker).unwrap();
 
@@ -325,8 +324,9 @@ mod tests {
 
     #[test]
     fn skip_actions_make_no_tracker_calls() {
-        let plan = ReconcilePlan {
-            actions: vec![
+        let plan = ReconcilePlan::new(
+            "c",
+            vec![
                 ReconcileAction::Skip {
                     category: "x".into(),
                     component_id: "c".into(),
@@ -338,7 +338,7 @@ mod tests {
                     reason: ReconcileSkipReason::ClosedNotPlannedNoRefresh,
                 },
             ],
-        };
+        );
         let tracker = MockTracker::new();
         let result = apply_plan(plan, &tracker).unwrap();
 
@@ -356,8 +356,9 @@ mod tests {
 
     #[test]
     fn failed_actions_recorded_but_run_continues() {
-        let plan = ReconcilePlan {
-            actions: vec![
+        let plan = ReconcilePlan::new(
+            "c",
+            vec![
                 file_new("a"),
                 ReconcileAction::Close {
                     number: 1,
@@ -366,7 +367,7 @@ mod tests {
                 },
                 file_new("c"),
             ],
-        };
+        );
         let mut tracker = MockTracker::new();
         tracker.fail_close = true;
 
@@ -393,14 +394,15 @@ mod tests {
         // UpdateClosed should refresh body only — the title carrying
         // an outdated count is fine because the issue is closed and the
         // body holds the latest count + run link.
-        let plan = ReconcilePlan {
-            actions: vec![ReconcileAction::UpdateClosed {
+        let plan = ReconcilePlan::new(
+            "c",
+            vec![ReconcileAction::UpdateClosed {
                 number: 50,
                 body: "fresh".into(),
                 category: "x".into(),
                 count: 99,
             }],
-        };
+        );
         let tracker = MockTracker::new();
         apply_plan(plan, &tracker).unwrap();
         assert_eq!(tracker.calls.borrow()[0], "update:#50:-");

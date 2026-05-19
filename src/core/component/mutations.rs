@@ -1,9 +1,9 @@
-use crate::component::{
+use crate::core::component::{
     associated_projects, mutate_portable, rename_component, resolve_effective, Component,
 };
-use crate::config;
-use crate::error::{Error, Result};
-use crate::output::{MergeOutput, MergeResult};
+use crate::core::config;
+use crate::core::error::{Error, Result};
+use crate::core::output::{MergeOutput, MergeResult};
 use serde_json::Value;
 use std::path::Path;
 

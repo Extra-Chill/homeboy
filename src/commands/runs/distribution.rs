@@ -4,7 +4,7 @@ use clap::Args;
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::observation::{ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::observation::{ObservationStore, RunListFilter, RunRecord};
 
 use crate::commands::CmdResult;
 
@@ -212,7 +212,7 @@ fn scalar_metadata_label(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
 
-    use homeboy::observation::{NewRunRecord, RunStatus};
+    use homeboy::core::observation::{NewRunRecord, RunStatus};
     use homeboy::test_support::with_isolated_home;
 
     struct XdgGuard(Option<String>);
@@ -235,16 +235,15 @@ mod tests {
     }
 
     fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
-        NewRunRecord {
-            kind: kind.to_string(),
-            component_id: Some(component_id.to_string()),
-            command: Some(format!("homeboy {kind} {component_id}")),
-            cwd: Some("/tmp/homeboy-fixture".to_string()),
-            homeboy_version: Some("test-version".to_string()),
-            git_sha: Some("abc123".to_string()),
-            rig_id: Some(rig_id.to_string()),
-            metadata_json: metadata,
-        }
+        NewRunRecord::builder(kind)
+            .component_id(component_id)
+            .command(format!("homeboy {kind} {component_id}"))
+            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+            .homeboy_version("test-version")
+            .git_sha(Some("abc123".to_string()))
+            .rig_id(rig_id)
+            .metadata(metadata)
+            .build()
     }
 
     #[test]

@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 /// How [`copy_tree`] handles non-directory entries it encounters while walking
 /// the source tree, and how it formats IO error messages.

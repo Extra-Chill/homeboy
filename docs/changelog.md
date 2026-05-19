@@ -4,6 +4,300 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.188.1] - 2026-05-19
+
+### Fixed
+- skip head artifact release worktree planning
+
+## [0.188.0] - 2026-05-18
+
+### Added
+- add compiler warning extension contracts
+
+## [0.187.4] - 2026-05-18
+
+### Changed
+- Refactor extension module boundaries
+- reuse daemon pid helper
+
+### Fixed
+- allow head release artifacts in worktree
+- add runner artifact cleanup
+
+## [0.187.3] - 2026-05-18
+
+### Changed
+- reuse git short revision helper
+- flatten release version module
+
+### Fixed
+- allow head release from detached tags
+
+## [0.187.2] - 2026-05-18
+
+### Fixed
+- install extensions before release finish
+- allow project component remote path overrides
+
+## [0.187.1] - 2026-05-18
+
+### Changed
+- narrow wildcard module surfaces
+
+### Fixed
+- select homeboy binary in release finish
+
+## [0.187.0] - 2026-05-18
+
+### Added
+- finish pipeline from tagged head
+- attach state.artifacts to github.release output
+
+### Changed
+- make git reexports explicit
+- make changelog reexports explicit
+- report core agnostic baseline debt
+- make version reexports explicit
+- make server reexports explicit
+- require explicit core paths
+- guard core command boundary
+- decouple HTTP analysis jobs from commands
+
+### Fixed
+- skip package during self-release prepare
+- fail release command on failed steps
+- exclude homeboy build artifacts from scans
+- include dirty files in test drift diffs
+- keep release diagnostics extension agnostic
+- guard runner doctor Unix probes
+
+## [0.186.12] - 2026-05-18
+
+### Changed
+- add trace span record builder
+
+### Fixed
+- support GitHub Enterprise release remotes
+
+## [0.186.11] - 2026-05-18
+
+### Changed
+- add trace run record builder
+
+## [0.186.10] - 2026-05-18
+
+### Changed
+- reuse observation test run builders
+- reuse observation fixture builder
+
+## [0.186.9] - 2026-05-18
+
+### Changed
+- reuse observation run builder
+
+## [0.186.8] - 2026-05-18
+
+### Changed
+- add observation run builder
+
+## [0.186.7] - 2026-05-17
+
+### Changed
+- add plan values builder
+
+## [0.186.6] - 2026-05-17
+
+### Changed
+- reuse remaining plan step inputs
+
+## [0.186.5] - 2026-05-17
+
+### Changed
+- reuse decompose plan step inputs
+- reuse issue plan step inputs
+- reuse dependency stack step inputs
+
+## [0.186.4] - 2026-05-17
+
+### Changed
+- reuse stack sync step inputs
+
+## [0.186.3] - 2026-05-17
+
+### Changed
+- reuse quality plan step helpers
+
+## [0.186.2] - 2026-05-17
+
+### Changed
+- centralize scope command names
+
+## [0.186.1] - 2026-05-17
+
+### Changed
+- reuse plan builders in trace
+- Capture Lab runner fix patches
+
+## [0.186.0] - 2026-05-17
+
+### Added
+- apply lab patches locally
+
+## [0.185.0] - 2026-05-16
+
+### Added
+- offload hot commands to lab runners
+- sync runner workspaces
+- record runner source snapshots
+- execute commands on runners
+- add plan construction helpers
+
+### Changed
+- reuse plan step builders
+- detect direct aggregate construction
+
+### Fixed
+- mirror runner evidence into local runs
+- honor head deploys for release artifacts
+
+## [0.184.0] - 2026-05-16
+
+### Added
+- bootstrap runner daemon over SSH tunnel
+
+## [0.183.1] - 2026-05-16
+
+### Changed
+- Persist daemon job state
+
+## [0.183.0] - 2026-05-16
+
+### Added
+- add runner doctor diagnostics
+
+### Changed
+- Expose daemon artifact retrieval endpoints
+
+## [0.182.0] - 2026-05-16
+
+### Added
+- add runner registry
+
+## [0.181.6] - 2026-05-15
+
+### Fixed
+- enforce deploy path root resolution
+
+## [0.181.5] - 2026-05-15
+
+### Changed
+- finish generic audit and trace plans
+
+## [0.181.4] - 2026-05-15
+
+### Changed
+- move workflow plans onto generic plan substrate
+
+## [0.181.3] - 2026-05-15
+
+### Changed
+- derive release plan metadata from generic plan
+- centralize component plan construction
+
+## [0.181.2] - 2026-05-15
+
+### Changed
+- make release plan access explicit
+- use generic plan steps in release
+- align file read coverage with audit conventions
+- satisfy project pin audit checks
+
+### Fixed
+- include file size in file read output
+- add atomic project pin updates
+
+## [0.181.1] - 2026-05-15
+
+### Changed
+- drive review with quality plan
+
+## [0.181.0] - 2026-05-15
+
+### Added
+- add file mkdir command
+
+### Changed
+- extract quality plan substrate
+
+### Fixed
+- keep file mkdir audit-clean
+
+## [0.180.1] - 2026-05-14
+
+### Changed
+- drive release plans with generic substrate
+
+## [0.180.0] - 2026-05-14
+
+### Added
+- introduce generic plan substrate
+
+## [0.179.10] - 2026-05-14
+
+### Changed
+- Resolve deploy paths through project roots
+
+## [0.179.9] - 2026-05-14
+
+### Changed
+- extract release execution orchestrator
+
+## [0.179.8] - 2026-05-14
+
+### Changed
+- extract release planner
+
+## [0.179.7] - 2026-05-14
+
+### Changed
+- extract release context loading
+
+## [0.179.6] - 2026-05-14
+
+### Changed
+- Add generic HTTP auth profiles
+
+## [0.179.5] - 2026-05-14
+
+### Changed
+- move release changelog bootstrap policy
+
+## [0.179.4] - 2026-05-14
+
+### Changed
+- extract release git preflight policy
+
+## [0.179.3] - 2026-05-13
+
+### Changed
+- extract release quality preflight policy
+
+### Fixed
+- enable native macOS keychain backend
+
+## [0.179.2] - 2026-05-13
+
+### Changed
+- move release worktree preflight policy
+
+### Fixed
+- accept audit extension override
+
+## [0.179.1] - 2026-05-13
+
+### Changed
+- extract shared scope model
+
 ## [0.179.0] - 2026-05-13
 
 ### Added

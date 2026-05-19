@@ -13,10 +13,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::code_audit::walker::is_test_path;
-use crate::error::{Error, Result};
-use crate::extension::TestDriftConfig;
-use crate::git;
+use crate::core::code_audit::walker::is_test_path;
+use crate::core::error::{Error, Result};
+use crate::core::extension::TestDriftConfig;
+use crate::core::git;
 
 // ============================================================================
 // Models
@@ -261,8 +261,9 @@ fn get_changed_files(root: &Path, since: &str) -> Result<Vec<String>> {
 
 /// Get diff for a specific file.
 fn get_file_diff(root: &Path, since: &str, file: &str) -> Result<String> {
+    let merge_base = merge_base(root, since)?;
     let output = Command::new("git")
-        .args(["diff", since, "HEAD", "--", file])
+        .args(["diff", &merge_base, "--", file])
         .current_dir(root)
         .output()
         .map_err(|e| {
@@ -273,6 +274,35 @@ fn get_file_diff(root: &Path, since: &str, file: &str) -> Result<String> {
         })?;
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Resolve the comparison base used for drift diffs.
+///
+/// `git diff <base> -- <file>` compares the merge base to the working tree,
+/// so drift extraction sees committed, staged, and unstaged edits. This keeps
+/// it aligned with `git::get_files_changed_since`, which already includes
+/// dirty files in changed-since scopes.
+fn merge_base(root: &Path, since: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["merge-base", since, "HEAD"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| {
+            Error::internal_io(
+                format!("Failed to resolve merge base for {}: {}", since, e),
+                Some("test_drift.git".to_string()),
+            )
+        })?;
+
+    if !output.status.success() {
+        return Err(Error::git_command_failed(format!(
+            "git merge-base {} HEAD failed: {}",
+            since,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Get renamed files from git diff.
@@ -510,7 +540,7 @@ fn matches_any_pattern(path: &str, patterns: &[String]) -> bool {
 
 /// Collect test files in the repo using extension-declared glob patterns.
 fn collect_test_files(root: &Path, test_patterns: &[String]) -> Vec<PathBuf> {
-    use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+    use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
     let config = ScanConfig {
         extensions: ExtensionFilter::All,
@@ -605,7 +635,7 @@ fn is_auto_fixable(change: &ProductionChange) -> bool {
 ///
 /// For each auto-fixable change, creates a TransformRule that replaces
 /// the old symbol with the new one in test files.
-pub fn generate_transform_rules(report: &DriftReport) -> Vec<crate::refactor::TransformRule> {
+pub fn generate_transform_rules(report: &DriftReport) -> Vec<crate::core::refactor::TransformRule> {
     let mut rules = Vec::new();
 
     for change in &report.production_changes {
@@ -677,7 +707,7 @@ pub fn generate_transform_rules(report: &DriftReport) -> Vec<crate::refactor::Tr
             _ => continue,
         };
 
-        rules.push(crate::refactor::TransformRule {
+        rules.push(crate::core::refactor::TransformRule {
             id,
             description,
             find,
@@ -823,6 +853,55 @@ mod tests {
 
         let report = detect_drift("fixture", &opts).expect("drift report");
         assert!(report.production_changes.is_empty());
+    }
+
+    #[test]
+    fn detect_drift_includes_uncommitted_production_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run_git(root, &["init", "-q", "-b", "main"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test"]);
+
+        std::fs::create_dir_all(root.join("inc")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("inc/FlowStepConfig.php"),
+            "<?php\nclass FlowStepConfig { public function handler_config() {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tests/FlowStepConfigTest.php"),
+            "<?php\n$this->assertSame([], $config->handler_config());\n",
+        )
+        .unwrap();
+        run_git(root, &["add", "inc", "tests"]);
+        run_git(root, &["commit", "-q", "-m", "initial"]);
+
+        std::fs::write(
+            root.join("inc/FlowStepConfig.php"),
+            "<?php\nclass FlowStepConfig { public function handler_configs() {} }\n",
+        )
+        .unwrap();
+
+        let opts = DriftOptions {
+            root: root.to_path_buf(),
+            since: "HEAD".to_string(),
+            source_patterns: vec!["inc/**/*.php".to_string()],
+            test_patterns: vec!["tests/**/*.php".to_string()],
+        };
+
+        let report = detect_drift("fixture", &opts).expect("drift report");
+
+        assert!(report
+            .production_changes
+            .iter()
+            .any(|change| change.old_symbol == "handler_config"));
+        assert_eq!(report.drifted_tests.len(), 1);
+        assert_eq!(
+            report.drifted_tests[0].test_file,
+            "tests/FlowStepConfigTest.php"
+        );
     }
 
     #[test]

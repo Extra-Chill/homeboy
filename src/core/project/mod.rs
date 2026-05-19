@@ -1,10 +1,10 @@
-use crate::component::ScopedExtensionConfig;
-use crate::config::{self, ConfigEntity};
-use crate::engine::local_files::{self, FileSystem};
-use crate::error::{Error, Result};
-use crate::output::{CreateOutput, MergeOutput, RemoveResult};
-use crate::paths;
-use crate::server;
+use crate::core::component::ScopedExtensionConfig;
+use crate::core::config::{self, ConfigEntity};
+use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::error::{Error, Result};
+use crate::core::output::{CreateOutput, MergeOutput, RemoveResult};
+use crate::core::paths;
+use crate::core::server;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,7 +27,8 @@ pub use component::{
 pub use files::{FileEntry, GrepMatch, LineChange};
 pub use logs::{LogContent, LogEntry, LogSearchResult, PinnedLogsContent};
 pub use pins::{
-    add_pin, list_pins, remove_pin, ProjectPinChange, ProjectPinListItem, ProjectPinOutput,
+    add_pin, list_pins, remove_pin, rename_pin, update_pin, PinUpdateOptions, ProjectPinChange,
+    ProjectPinListItem, ProjectPinOutput,
 };
 pub use readiness::calculate_deploy_readiness;
 pub use report::{
@@ -43,6 +44,14 @@ pub use status::{collect_status, ProjectComponentStatus, ProjectStatusSnapshot};
 pub struct ProjectComponentAttachment {
     pub id: String,
     pub local_path: String,
+    /// Project-specific deploy target for this attached component.
+    ///
+    /// Repo-owned `homeboy.json` is portable component metadata, while the
+    /// install path can vary by project layout. Keeping this optional field on
+    /// the attachment lets one component deploy to multiple projects without
+    /// rewriting the repo-tracked `remote_path` for each environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -58,11 +67,11 @@ pub struct ProjectComponentOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_strategy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_deploy: Option<crate::component::GitDeployConfig>,
+    pub git_deploy: Option<crate::core::component::GitDeployConfig>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub hooks: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scopes: Option<crate::component::ScopeConfig>,
+    pub scopes: Option<crate::core::component::ScopeConfig>,
     /// Override the CLI path used by extension deploy install steps.
     /// For example, Studio sites need "studio wp" instead of the default "wp".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +97,8 @@ pub struct Project {
     pub server_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_path: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub path_roots: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_prefix: Option<String>,
 

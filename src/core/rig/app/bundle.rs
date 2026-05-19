@@ -4,9 +4,9 @@ use std::fs;
 use std::path::Path;
 
 use super::ResolvedLauncher;
-use crate::error::{Error, Result};
-use crate::rig::spec::AppLauncherPreflight;
-use crate::rig::RigSpec;
+use crate::core::error::{Error, Result};
+use crate::core::rig::spec::AppLauncherPreflight;
+use crate::core::rig::RigSpec;
 
 pub(super) fn write_macos_bundle(rig: &RigSpec, launcher: &ResolvedLauncher) -> Result<()> {
     let contents = launcher.launcher_path.join("Contents");

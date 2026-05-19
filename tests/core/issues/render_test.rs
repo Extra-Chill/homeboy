@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::{build_findings_from_native_output, IssueRenderContext};
-use crate::code_audit::FindingConfidence;
+use crate::core::code_audit::FindingConfidence;
 
 #[test]
 fn test_build_findings_from_native_output() {

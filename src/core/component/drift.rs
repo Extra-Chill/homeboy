@@ -32,7 +32,7 @@
 //!
 //! [Extra-Chill/homeboy-action]: https://github.com/Extra-Chill/homeboy-action
 
-use crate::component::Component;
+use crate::core::component::Component;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -42,7 +42,7 @@ use std::path::Path;
 /// audit baseline (`homeboy.json`) is always first; remaining entries are
 /// the union of extension-declared lockfiles and component-declared extras.
 ///
-/// Extension manifests are loaded via [`crate::extension::load_extension`].
+/// Extension manifests are loaded via [`crate::core::extension::load_extension`].
 /// Extensions that fail to load are silently skipped — drift resolution is
 /// a non-essential side query and should not break callers.
 pub fn drift_file_paths(component: &Component) -> Vec<String> {
@@ -50,7 +50,7 @@ pub fn drift_file_paths(component: &Component) -> Vec<String> {
 
     if let Some(extensions) = component.extensions.as_ref() {
         for extension_id in extensions.keys() {
-            let Ok(manifest) = crate::extension::load_extension(extension_id) else {
+            let Ok(manifest) = crate::core::extension::load_extension(extension_id) else {
                 continue;
             };
             let Some(build) = manifest.build.as_ref() else {

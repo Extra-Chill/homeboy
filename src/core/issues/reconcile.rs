@@ -230,7 +230,19 @@ fn reconcile_with_scope(
         );
     }
 
-    ReconcilePlan { actions }
+    let component_id = scope
+        .map(|(_, component_id)| component_id.to_string())
+        .or_else(|| groups.first().map(|group| group.component_id.clone()))
+        .or_else(|| {
+            existing.iter().find_map(|issue| {
+                parse_issue_key(&issue.body)
+                    .or_else(|| parse_category_key(&issue.title))
+                    .map(|(_, component_id, _)| component_id)
+            })
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    ReconcilePlan::new(component_id, actions)
 }
 
 fn close_absent_open_issues(
@@ -437,7 +449,7 @@ impl IssueGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::FindingConfidence;
+    use crate::core::code_audit::FindingConfidence;
 
     fn group(category: &str, count: usize) -> IssueGroup {
         IssueGroup {
@@ -1086,8 +1098,9 @@ mod tests {
 
     #[test]
     fn plan_counts_aggregate_correctly() {
-        let plan = ReconcilePlan {
-            actions: vec![
+        let plan = ReconcilePlan::new(
+            "c",
+            vec![
                 ReconcileAction::FileNew {
                     command: "a".into(),
                     component_id: "c".into(),
@@ -1117,7 +1130,7 @@ mod tests {
                     reason: ReconcileSkipReason::NoFindingsNoIssue,
                 },
             ],
-        };
+        );
         let c = plan.counts();
         assert_eq!(c.file_new, 1);
         assert_eq!(c.update, 2);

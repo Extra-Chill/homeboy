@@ -1,14 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use crate::build;
-use crate::component::Component;
-use crate::context::RemoteProjectContext;
-use crate::error::Result;
-use crate::extension::build::resolve_artifact_path_from_root;
-use crate::git;
-use crate::paths as base_path;
-use crate::project::Project;
+use crate::core::build;
+use crate::core::component::Component;
+use crate::core::context::RemoteProjectContext;
+use crate::core::error::Result;
+use crate::core::extension::build::resolve_artifact_path_from_root;
+use crate::core::git;
+use crate::core::project::Project;
 
+use super::path_roots::{component_remote_path, resolve_effective_remote_path};
 use super::planning::{calculate_directory_size, format_bytes};
 use super::policy::{owner_hint_for_path, protected_path_suffixes, validate_deploy_target};
 use super::release_download;
@@ -33,15 +33,12 @@ pub(super) fn execute_component_deploy(
 
     // Try downloading release artifact from GitHub instead of building locally.
     // This is the preferred path when the component has remote_url set.
-    let release_artifact: Option<PathBuf> = if !is_git_deploy
-        && !is_file_deploy
-        && !config.skip_build
-        && release_download::supports_release_deploy(component)
-    {
-        try_download_release_artifact(component)
-    } else {
-        None
-    };
+    let release_artifact: Option<PathBuf> =
+        if should_try_download_release_artifact(component, config, is_git_deploy, is_file_deploy) {
+            try_download_release_artifact(component)
+        } else {
+            None
+        };
 
     // Build (git-deploy, file-deploy, skip-build, and release-download skip this step)
     let (build_exit_code, build_error) =
@@ -65,16 +62,14 @@ pub(super) fn execute_component_deploy(
     // Auto-resolve remote_path from linked extension deploy policy when not explicitly set.
     // This is a deploy-time safety net; the primary resolution happens in
     // resolve_project_component (#812).
-    let effective_remote_path = if component.remote_path.trim().is_empty() {
-        if let Some(resolved) = component.auto_resolve_remote_path() {
-            log_status!("deploy", "Auto-resolved remote path: {}", resolved);
-            resolved
-        } else {
-            component.remote_path.clone()
-        }
-    } else {
-        component.remote_path.clone()
-    };
+    let effective_remote_path = component_remote_path(component);
+    if component.remote_path.trim().is_empty() && !effective_remote_path.trim().is_empty() {
+        log_status!(
+            "deploy",
+            "Auto-resolved remote path: {}",
+            effective_remote_path
+        );
+    }
 
     if component.remote_owner.is_none() {
         if let Some(suggested_owner) = owner_hint_for_path(component, &effective_remote_path) {
@@ -92,8 +87,8 @@ pub(super) fn execute_component_deploy(
     }
 
     // Resolve and validate install directory before any destructive operation.
-    let install_dir = match base_path::join_remote_path(Some(base_path), &effective_remote_path)
-        .and_then(|install_dir| {
+    let install_dir =
+        match resolve_effective_remote_path(project, component, base_path).and_then(|install_dir| {
             validate_deploy_target(
                 &install_dir,
                 base_path,
@@ -102,18 +97,18 @@ pub(super) fn execute_component_deploy(
             )?;
             Ok(install_dir)
         }) {
-        Ok(install_dir) => install_dir,
-        Err(err) => {
-            return failed_component_deploy_result(
-                component,
-                base_path,
-                local_version,
-                remote_version,
-                build_exit_code,
-                err.to_string(),
-            );
-        }
-    };
+            Ok(install_dir) => install_dir,
+            Err(err) => {
+                return failed_component_deploy_result(
+                    component,
+                    base_path,
+                    local_version,
+                    remote_version,
+                    build_exit_code,
+                    err.to_string(),
+                );
+            }
+        };
 
     // Dispatch by deploy strategy
     let strategy = component.deploy_strategy.as_deref().unwrap_or("rsync");
@@ -154,6 +149,19 @@ pub(super) fn execute_component_deploy(
         build_exit_code,
         release_artifact.as_ref(),
     )
+}
+
+fn should_try_download_release_artifact(
+    component: &Component,
+    config: &DeployConfig,
+    is_git_deploy: bool,
+    is_file_deploy: bool,
+) -> bool {
+    !is_git_deploy
+        && !is_file_deploy
+        && !config.head
+        && !config.skip_build
+        && release_download::supports_release_deploy(component)
 }
 
 fn failed_component_deploy_result(
@@ -274,7 +282,7 @@ fn execute_file_deploy(
 
     let mkdir_cmd = format!(
         "mkdir -p {}",
-        crate::engine::shell::quote_path(remote_parent)
+        crate::core::engine::shell::quote_path(remote_parent)
     );
     log_status!("deploy", "Ensuring remote directory: {}", remote_parent);
     let mkdir_output = ctx.client.execute(&mkdir_cmd);
@@ -308,8 +316,8 @@ fn execute_file_deploy(
             if let Some(owner) = component.remote_owner.as_deref() {
                 let chown_cmd = format!(
                     "chown {} {}",
-                    crate::engine::shell::quote_arg(owner),
-                    crate::engine::shell::quote_path(install_dir)
+                    crate::core::engine::shell::quote_arg(owner),
+                    crate::core::engine::shell::quote_path(install_dir)
                 );
                 let chown_output = ctx.client.execute(&chown_cmd);
                 if !chown_output.success {
@@ -576,7 +584,7 @@ fn cleanup_build_dependencies(
     let mut cleanup_paths = Vec::new();
     if let Some(ref extensions) = component.extensions {
         for extension_id in extensions.keys() {
-            if let Ok(manifest) = crate::extension::load_extension(extension_id) {
+            if let Ok(manifest) = crate::core::extension::load_extension(extension_id) {
                 if let Some(ref build) = manifest.build {
                     cleanup_paths.extend(build.cleanup_paths.iter().cloned());
                 }
@@ -652,8 +660,9 @@ fn cleanup_build_dependencies(
 
 #[cfg(test)]
 mod tests {
-    use super::failed_component_deploy_result;
-    use crate::component::Component;
+    use super::{failed_component_deploy_result, should_try_download_release_artifact};
+    use crate::core::component::Component;
+    use crate::core::deploy::types::DeployConfig;
 
     #[test]
     fn test_execute_component_deploy_failure_helper_preserves_build_exit_code() {
@@ -677,5 +686,34 @@ mod tests {
         assert_eq!(result.remote_version.as_deref(), Some("0.9.0"));
         assert_eq!(result.build_exit_code, Some(7));
         assert_eq!(result.error.as_deref(), Some("deploy failed"));
+    }
+
+    #[test]
+    fn head_deploy_skips_release_artifact_download() {
+        let component = Component {
+            id: "example".to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("build/example.zip".to_string()),
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: true,
+            tagged: false,
+        };
+
+        assert!(!should_try_download_release_artifact(
+            &component, &config, false, false
+        ));
     }
 }

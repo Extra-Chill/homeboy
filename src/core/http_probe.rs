@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::error::Error;
+use crate::core::error::Error;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HttpProbeError {

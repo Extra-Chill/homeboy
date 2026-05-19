@@ -16,9 +16,9 @@
 
 use std::path::Path;
 
-use crate::code_audit::{AuditFinding, CodeAuditResult};
-use crate::engine::local_files;
-use crate::refactor::auto::{Fix, SkippedFile};
+use crate::core::code_audit::{AuditFinding, CodeAuditResult};
+use crate::core::engine::local_files;
+use crate::core::refactor::auto::{Fix, SkippedFile};
 
 use super::{manual_blocked, range_removal};
 

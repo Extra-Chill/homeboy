@@ -8,7 +8,7 @@ use super::parsing::{
     TraceArtifact, TraceAssertionStatus, TraceList, TraceResults, TraceSpanStatus,
 };
 use super::run::{TraceOverlay, TraceRunWorkflowResult};
-use crate::rig::RigStateSnapshot;
+use crate::core::rig::RigStateSnapshot;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -527,7 +527,7 @@ pub fn from_list_workflow(component: String, list: TraceList) -> (TraceCommandOu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::trace::parsing::{TraceScenario, TraceStatus};
+    use crate::core::extension::trace::parsing::{TraceScenario, TraceStatus};
 
     #[test]
     fn test_from_list_workflow() {
@@ -622,18 +622,18 @@ mod tests {
                 summary: Some("Created a site".to_string()),
                 failure: None,
                 rig: None,
-                timeline: vec![crate::extension::trace::parsing::TraceEvent {
+                timeline: vec![crate::core::extension::trace::parsing::TraceEvent {
                     t_ms: 10,
                     source: "ui".to_string(),
                     event: "submit".to_string(),
                     data: std::collections::BTreeMap::new(),
                 }],
                 span_definitions: Vec::new(),
-                span_results: vec![crate::extension::trace::parsing::TraceSpanResult {
+                span_results: vec![crate::core::extension::trace::parsing::TraceSpanResult {
                     id: "submit_to_cli".to_string(),
                     from: "ui.submit".to_string(),
                     to: "cli.start".to_string(),
-                    status: crate::extension::trace::parsing::TraceSpanStatus::Ok,
+                    status: crate::core::extension::trace::parsing::TraceSpanStatus::Ok,
                     duration_ms: Some(42),
                     from_t_ms: Some(10),
                     to_t_ms: Some(52),
@@ -710,11 +710,11 @@ mod tests {
             rig: None,
             timeline: Vec::new(),
             span_definitions: Vec::new(),
-            span_results: vec![crate::extension::trace::parsing::TraceSpanResult {
+            span_results: vec![crate::core::extension::trace::parsing::TraceSpanResult {
                 id: "submit_to_cli".to_string(),
                 from: "ui.submit".to_string(),
                 to: "cli.start".to_string(),
-                status: crate::extension::trace::parsing::TraceSpanStatus::Ok,
+                status: crate::core::extension::trace::parsing::TraceSpanStatus::Ok,
                 duration_ms: Some(42),
                 from_t_ms: Some(10),
                 to_t_ms: Some(52),

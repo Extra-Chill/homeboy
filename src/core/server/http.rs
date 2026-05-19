@@ -3,10 +3,10 @@
 //! Makes HTTP requests with auth headers resolved from project configuration.
 //! Homeboy doesn't know about specific auth types - it just templates strings.
 
-use crate::error::{Error, ErrorCode, Result};
-use crate::extension::HttpMethod;
-use crate::keychain;
-use crate::project::{ApiConfig, AuthConfig, AuthFlowConfig, VariableSource};
+use crate::core::error::{Error, ErrorCode, Result};
+use crate::core::extension::HttpMethod;
+use crate::core::keychain;
+use crate::core::project::{ApiConfig, AuthConfig, AuthFlowConfig, VariableSource};
 use reqwest::blocking::{Client, ClientBuilder, RequestBuilder, Response};
 use reqwest::Proxy;
 use serde_json::{json, Value};
@@ -20,7 +20,7 @@ fn not_found_error(msg: impl Into<String>) -> Error {
     Error::new(ErrorCode::ExtensionNotFound, msg, Value::Null)
 }
 
-fn http_error(e: reqwest::Error) -> Error {
+pub(crate) fn http_error(e: reqwest::Error) -> Error {
     Error::new(
         ErrorCode::RemoteCommandFailed,
         format!("HTTP request failed: {}", e),
@@ -289,10 +289,10 @@ fn form_fields(body: &Value) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
-fn build_client(api_config: &ApiConfig) -> Result<Client> {
+pub(crate) fn build_client_with_proxy(proxy_url: Option<&str>) -> Result<Client> {
     let mut builder = ClientBuilder::new();
 
-    if let Some(proxy_url) = api_config.proxy_url.as_deref() {
+    if let Some(proxy_url) = proxy_url {
         builder =
             builder.proxy(Proxy::all(proxy_url).map_err(|e| {
                 config_error(format!("Invalid API proxy URL '{}': {}", proxy_url, e))
@@ -300,6 +300,10 @@ fn build_client(api_config: &ApiConfig) -> Result<Client> {
     }
 
     builder.build().map_err(http_error)
+}
+
+fn build_client(api_config: &ApiConfig) -> Result<Client> {
+    build_client_with_proxy(api_config.proxy_url.as_deref())
 }
 
 /// Resolves a variable from its source.
@@ -363,7 +367,7 @@ fn parse_json_response(response: Response) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{AuthConfig, AuthFlowConfig};
+    use crate::core::project::{AuthConfig, AuthFlowConfig};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -452,6 +456,25 @@ mod tests {
             "unexpected request: {}",
             request
         );
+    }
+
+    #[test]
+    fn test_http_error() {
+        let reqwest_error = Client::new()
+            .get("http://")
+            .send()
+            .expect_err("invalid URL should fail before network I/O");
+
+        let err = http_error(reqwest_error);
+
+        assert_eq!(err.code, ErrorCode::RemoteCommandFailed);
+        assert!(err.message.contains("HTTP request failed"));
+    }
+
+    #[test]
+    fn test_build_client_with_proxy() {
+        build_client_with_proxy(Some("socks5://127.0.0.1:8080"))
+            .expect("socks proxy should be accepted");
     }
 
     #[test]

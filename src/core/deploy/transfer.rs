@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use crate::defaults;
-use crate::engine::shell;
-use crate::error::{Error, Result};
-use crate::server::SshClient;
+use crate::core::defaults;
+use crate::core::engine::shell;
+use crate::core::error::{Error, Result};
+use crate::core::server::SshClient;
 
 use super::types::DeployResult;
 
@@ -259,7 +259,7 @@ fn scp_file_atomic(
 #[cfg(test)]
 mod tests {
     use super::{process_output_result, scp_file, upload_directory, upload_file};
-    use crate::server::SshClient;
+    use crate::core::server::SshClient;
     use std::collections::HashMap;
     use std::fs;
     use std::process::Command;

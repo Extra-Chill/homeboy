@@ -1,6 +1,6 @@
 //! Temporal trace assertion evaluation over timeline events.
 
-use crate::extension::bench::distribution::percentile;
+use crate::core::extension::bench::distribution::percentile;
 use serde_json::json;
 
 use super::parsing::{
@@ -604,7 +604,7 @@ fn event_details(events: &[&super::parsing::TraceEvent]) -> Vec<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::trace::parsing::TraceEvent;
+    use crate::core::extension::trace::parsing::TraceEvent;
     use std::collections::BTreeMap;
 
     fn event(t_ms: u64, source: &str, event: &str) -> TraceEvent {

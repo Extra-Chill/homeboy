@@ -2,8 +2,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::OnceLock;
 
-use homeboy::engine::text;
-use homeboy::extension::load_all_extensions;
+use homeboy::core::engine::text;
+use homeboy::core::extension::load_all_extensions;
 
 include!(concat!(env!("OUT_DIR"), "/generated_docs.rs"));
 
@@ -18,7 +18,7 @@ pub struct ResolvedDoc {
     pub content: String,
 }
 
-pub fn resolve(topic: &[String]) -> homeboy::Result<ResolvedDoc> {
+pub fn resolve(topic: &[String]) -> homeboy::core::Result<ResolvedDoc> {
     let (_, key, _) = normalize_topic(topic);
 
     // Try exact match first (existing behavior)
@@ -52,7 +52,7 @@ pub fn resolve(topic: &[String]) -> homeboy::Result<ResolvedDoc> {
         }
     }
 
-    Err(homeboy::Error::docs_topic_not_found(&key))
+    Err(homeboy::core::Error::docs_topic_not_found(&key))
 }
 
 fn load_extension_doc(topic: &str) -> Option<(String, String)> {

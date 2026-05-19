@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::discovery::{discover_attached_component, infer_attached_component_id};
-use crate::project::{load, save, Project, ProjectComponentAttachment};
+use crate::core::project::{load, save, Project, ProjectComponentAttachment};
 
 fn component_ids_from_attachments(components: &[ProjectComponentAttachment]) -> Vec<String> {
     components
@@ -119,6 +119,7 @@ pub fn attach_component_path(project_id: &str, component_id: &str, local_path: &
         project.components.push(ProjectComponentAttachment {
             id: component_id.to_string(),
             local_path: local_path.to_string(),
+            remote_path: None,
         });
     }
 
@@ -250,6 +251,7 @@ mod tests {
             project.components.push(ProjectComponentAttachment {
                 id: id.to_string(),
                 local_path: format!("/workspace/{}", id),
+                remote_path: None,
             });
         }
         project

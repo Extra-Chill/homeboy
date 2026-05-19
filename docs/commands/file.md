@@ -11,6 +11,7 @@ homeboy file <COMMAND>
 - `list <project_id> <path>`
 - `read <project_id> <path>`
 - `write <project_id> <path>` (reads content from stdin)
+- `mkdir <project_id> <path>` (create a directory)
 - `delete <project_id> <path> [-r|--recursive]` (delete directories recursively)
 - `rename <project_id> <old_path> <new_path>`
 - `find <project_id> <path> [options]` (search for files by name)
@@ -92,11 +93,11 @@ Notes:
 
 > Note: all command output is wrapped in the global JSON envelope described in the [JSON output contract](../architecture/output-system.md). `homeboy file` returns one of several output types as the `data` payload.
 
-### Standard operations (list, read, write, delete, rename)
+### Standard operations (list, read, write, mkdir, delete, rename)
 
 Fields:
 
-- `command`: `file.list` | `file.read` | `file.write` | `file.delete` | `file.rename`
+- `command`: `file.list` | `file.read` | `file.write` | `file.mkdir` | `file.delete` | `file.rename`
 - `project_id`
 - `base_path`: project base path if configured
 - `path` / `old_path` / `new_path`: resolved full remote paths

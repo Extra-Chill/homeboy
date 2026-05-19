@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod auth_profiles;
 mod client;
 mod connection;
 pub mod health;
@@ -8,20 +9,25 @@ mod keys;
 mod session;
 pub mod transfer;
 
-pub use client::*;
-pub use connection::*;
-pub use health::*;
-pub use keys::*;
-pub use session::*;
-pub use transfer::*;
+pub(crate) use client::execute_local_command_stderr_passthrough;
+pub use client::{
+    execute_local_command, execute_local_command_in_dir, execute_local_command_interactive,
+    execute_local_command_passthrough, CommandOutput, SshClient,
+};
+pub use connection::{resolve_context, SshResolveArgs, SshResolveResult};
+pub use keys::{
+    generate_key, get_public_key, import_key, unset_key, use_key, KeyGenerateResult,
+    KeyImportResult,
+};
+pub use session::{ManagedSshSession, ManagedSshSessionOutput};
 
 use std::collections::HashMap;
 
-use crate::config::{self, ConfigEntity};
-use crate::error::{Error, Result};
-use crate::output::{CreateOutput, MergeOutput, RemoveResult};
-use crate::paths;
-use crate::project;
+use crate::core::config::{self, ConfigEntity};
+use crate::core::error::{Error, Result};
+use crate::core::output::{CreateOutput, MergeOutput, RemoveResult};
+use crate::core::paths;
+use crate::core::project;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

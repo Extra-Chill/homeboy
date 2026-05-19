@@ -168,7 +168,7 @@ fn default_baseline_failure_summary_marks_implicit_baseline() {
             artifacts: Vec::new(),
             results: None,
             rig_state: None,
-            failure: Some(homeboy::extension::bench::run::BenchRunFailure {
+            failure: Some(homeboy::core::extension::bench::run::BenchRunFailure {
                 component_id: "studio".to_string(),
                 component_path: None,
                 scenario_id: None,
@@ -214,7 +214,7 @@ fn default_baseline_early_error_hint_names_requested_rig() {
         execution_order: vec!["studio-agent-sdk".to_string(), "studio-bfb".to_string()],
         opt_out_flag: "--ignore-default-baseline",
     };
-    let error = homeboy::Error::rig_pipeline_failed(
+    let error = homeboy::core::Error::rig_pipeline_failed(
         "studio-agent-sdk",
         "check",
         "rig check failed; refusing to run bench against an unhealthy rig",

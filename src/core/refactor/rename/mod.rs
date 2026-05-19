@@ -6,11 +6,11 @@
 //! 3. Generates file content edits and file/directory renames
 //! 4. Applies changes to disk (or returns a dry-run preview)
 
-use crate::engine::codebase_scan::{
+use crate::core::engine::codebase_scan::{
     self, find_boundary_matches, find_case_insensitive_matches, find_literal_matches,
     ExtensionFilter, ScanConfig,
 };
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -571,11 +571,11 @@ fn join_display(words: &[String]) -> String {
         .join(" ")
 }
 
-// Boundary matching and literal matching are provided by crate::engine::codebase_scan.
+// Boundary matching and literal matching are provided by crate::core::engine::codebase_scan.
 // See: find_boundary_matches(), find_literal_matches()
 
 // ============================================================================
-// File walking — delegates to crate::engine::codebase_scan
+// File walking — delegates to crate::core::engine::codebase_scan
 // ============================================================================
 
 /// Build a ScanConfig appropriate for rename operations.
@@ -1157,8 +1157,8 @@ fn extract_field_identifier(trimmed: &str) -> Option<String> {
 /// renames are routed through `apply_edit_ops()` so they share the same
 /// execution path as the fixer pipeline and other manual commands.
 pub fn apply_renames(result: &mut RenameResult, root: &Path) -> Result<()> {
-    use crate::engine::edit_op::rename_file_moves_to_edit_ops;
-    use crate::engine::edit_op_apply::apply_edit_ops;
+    use crate::core::engine::edit_op::rename_file_moves_to_edit_ops;
+    use crate::core::engine::edit_op_apply::apply_edit_ops;
 
     // Apply content edits first (whole-file replacement — rename operates at
     // full-content granularity, not line-level, so these bypass EditOp).

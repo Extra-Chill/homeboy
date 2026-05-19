@@ -19,7 +19,7 @@ use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::idiomatic::is_trivial_method;
 use super::walker::is_test_path;
-use crate::component::DuplicationDetectorConfig;
+use crate::core::component::DuplicationDetectorConfig;
 
 /// Minimum number of locations for a function to count as duplicated.
 const MIN_DUPLICATE_LOCATIONS: usize = 2;
@@ -1684,7 +1684,7 @@ pub(crate) fn detect_parallel_implementations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::Language;
+    use crate::core::code_audit::conventions::Language;
 
     fn make_fingerprint(path: &str, methods: &[&str], hashes: &[(&str, &str)]) -> FileFingerprint {
         make_fingerprint_with_structural(path, methods, hashes, &[])

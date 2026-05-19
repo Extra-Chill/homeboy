@@ -2,9 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::error::Error;
-use crate::rig::spec::{ComponentSpec, RigSpec};
-use crate::stack::{GitRef, StackPrEntry, StackSpec, SyncOutput, SyncPreview};
+use crate::core::error::Error;
+use crate::core::plan::{HomeboyPlan, PlanKind};
+use crate::core::rig::spec::{ComponentSpec, RigSpec};
+use crate::core::stack::{GitRef, StackPrEntry, StackSpec, SyncOutput, SyncPreview};
 
 use super::{plan_stack_sync, run_component_sync, run_sync_with, validate_component_stack_path};
 
@@ -43,6 +44,7 @@ fn rig_with_components(components: HashMap<String, ComponentSpec>) -> RigSpec {
 fn sync_output(stack_id: &str, picked: usize, skipped: usize, dropped: usize) -> SyncOutput {
     SyncOutput {
         preview: SyncPreview {
+            plan: HomeboyPlan::for_description(PlanKind::StackSync, stack_id),
             stack_id: stack_id.to_string(),
             component_path: "/tmp/component".to_string(),
             branch: "dev/combined-fixes".to_string(),
@@ -193,6 +195,7 @@ fn test_sync_entry_serializes_counts_and_refs() {
     let report = run_sync_with(&rig, false, |_component_id, stack_id, _dry_run| {
         Ok(SyncOutput {
             preview: SyncPreview {
+                plan: HomeboyPlan::for_description(PlanKind::StackSync, stack_id),
                 stack_id: stack_id.to_string(),
                 component_path: "/tmp/component".to_string(),
                 branch: "dev/combined-fixes".to_string(),

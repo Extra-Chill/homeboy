@@ -1,16 +1,35 @@
-use crate::error::{Error, Result};
-use crate::git;
+use crate::core::error::{Error, Result};
+use crate::core::git;
+use crate::core::plan::PlanStep;
 
-use super::pipeline::load_component;
+use super::context::load_component;
 use super::types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseBumpPolicyOptions,
-    ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePlan, ReleasePlanStatus,
-    ReleasePlanStep, ReleaseRun,
+    ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePlan, ReleaseRun,
+    ReleaseStepStatus,
 };
 
 pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
     if input.recover {
         return run_recover(&input);
+    }
+
+    if input.pipeline.from_artifacts.is_some() && !input.pipeline.head {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            "--from-artifacts requires --head",
+            input.pipeline.from_artifacts.clone(),
+            None,
+        ));
+    }
+
+    if input.pipeline.head && input.bump_override.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "bump",
+            "--head uses the version already present at HEAD and cannot be combined with --bump",
+            input.bump_override.clone(),
+            None,
+        ));
     }
 
     let component = load_component(
@@ -22,7 +41,11 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     )?;
 
     let monorepo = git::MonorepoContext::detect(&component.local_path, &input.component_id);
-    let resolved_bump = resolve_bump(&component.local_path, monorepo.as_ref())?;
+    let resolved_bump = if input.pipeline.head {
+        None
+    } else {
+        resolve_bump(&component.local_path, monorepo.as_ref())?
+    };
     let (auto_bump_type, releasable_count) = resolved_bump
         .clone()
         .unwrap_or_else(|| ("none".to_string(), 0));
@@ -30,7 +53,9 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     let has_breaking_commits = auto_bump_type == "major";
 
     // Resolve the effective bump type: --bump overrides auto-detection.
-    let bump_type = if let Some(ref override_value) = input.bump_override {
+    let bump_type = if input.pipeline.head {
+        "head".to_string()
+    } else if let Some(ref override_value) = input.bump_override {
         // Check if it's an explicit version string (e.g. "2.0.0")
         let is_explicit_version = override_value.contains('.');
 
@@ -114,8 +139,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         dry_run: input.dry_run,
         path_override: input.path_override,
         skip_checks: input.skip_checks,
-        skip_publish: input.skip_publish,
-        deploy: input.deploy,
+        pipeline: input.pipeline.clone(),
         skip_github_release: input.skip_github_release,
         git_identity: input.git_identity.clone(),
         bump_policy: ReleaseBumpPolicyOptions {
@@ -127,11 +151,16 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
 
     if options.dry_run {
         let plan = super::plan(&input.component_id, &options)?;
-        let new_version = extract_new_version_from_plan(&plan);
+        let new_version = if input.pipeline.head {
+            current_component_version(&component)?
+        } else {
+            extract_new_version_from_plan(&plan)
+        };
         let tag = new_version
             .as_ref()
             .map(|v| format_tag(v, monorepo.as_ref()));
         let deployment = input
+            .pipeline
             .deploy
             .then(|| super::deployment::plan_deployment(&input.component_id));
 
@@ -155,10 +184,15 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     let (plan, run_result) = super::pipeline::run_with_plan(&input.component_id, &options)?;
     display_release_summary(&run_result);
 
-    let new_version = extract_new_version_from_run(&run_result);
+    let new_version = if input.pipeline.head {
+        current_component_version(&component)?
+    } else {
+        extract_new_version_from_run(&run_result)
+    };
     let tag = new_version
         .as_ref()
         .map(|v| format_tag(v, monorepo.as_ref()));
+    let release_step_exit = release_run_failure_exit(&run_result);
     let post_release_exit = if has_post_release_warnings(&run_result) {
         3
     } else {
@@ -171,7 +205,9 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         .filter(|deployment| deployment.summary.failed > 0)
         .map(|_| 1)
         .unwrap_or(0);
-    let exit_code = if deploy_exit_code != 0 {
+    let exit_code = if release_step_exit != 0 {
+        release_step_exit
+    } else if deploy_exit_code != 0 {
         // Deploy failed after the release was already tagged and pushed.
         // The tag cannot be rolled back safely, so warn the user to retry.
         if let Some(ref t) = tag {
@@ -209,6 +245,12 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     ))
 }
 
+fn current_component_version(
+    component: &crate::core::component::Component,
+) -> Result<Option<String>> {
+    super::version::read_component_version(component).map(|info| Some(info.version))
+}
+
 fn resolve_bump(
     local_path: &str,
     monorepo: Option<&git::MonorepoContext>,
@@ -241,23 +283,25 @@ fn format_tag(version: &str, monorepo: Option<&git::MonorepoContext>) -> String 
 }
 
 fn extract_new_version_from_plan(plan: &ReleasePlan) -> Option<String> {
-    plan.steps
+    plan.plan
+        .steps
         .iter()
-        .find(|s| s.step_type == "version")
-        .and_then(|s| s.config.get("to"))
+        .find(|s| s.kind == "version")
+        .and_then(|s| s.inputs.get("to"))
         .and_then(|v| v.as_str())
         .map(String::from)
 }
 
 fn skipped_reason_from_plan(plan: &ReleasePlan) -> Option<String> {
-    if plan.enabled {
+    if plan.enabled() {
         return None;
     }
 
-    plan.steps
+    plan.plan
+        .steps
         .iter()
         .find(|step| step.id == "release.skip")
-        .and_then(|step| step.config.get("reason"))
+        .and_then(|step| step.inputs.get("reason"))
         .and_then(|value| value.as_str())
         .map(str::to_string)
 }
@@ -296,6 +340,15 @@ fn has_post_release_warnings(run: &ReleaseRun) -> bool {
     })
 }
 
+fn release_run_failure_exit(run: &ReleaseRun) -> i32 {
+    match run.result.status {
+        ReleaseStepStatus::Success | ReleaseStepStatus::Skipped => 0,
+        ReleaseStepStatus::PartialSuccess
+        | ReleaseStepStatus::Failed
+        | ReleaseStepStatus::Missing => 1,
+    }
+}
+
 fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
     let component = load_component(
         &input.component_id,
@@ -312,7 +365,7 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
     }
 
     let monorepo = git::MonorepoContext::detect(&component.local_path, &input.component_id);
-    let version_info = crate::version::read_component_version(&component)?;
+    let version_info = crate::core::release::version::read_component_version(&component)?;
     let current_version = &version_info.version;
     let tag_name = format_tag(current_version, monorepo.as_ref());
 
@@ -463,52 +516,34 @@ fn recovery_release_plan(
     ));
 
     for step in &mut steps {
-        step.config.insert(
+        step.inputs.insert(
             "version".to_string(),
             serde_json::Value::String(version.to_string()),
         );
-        step.config.insert(
+        step.inputs.insert(
             "tag".to_string(),
             serde_json::Value::String(tag_name.to_string()),
         );
     }
 
-    ReleasePlan {
-        component_id: component_id.to_string(),
-        enabled: !actions.is_empty(),
+    ReleasePlan::new(
+        component_id,
+        !actions.is_empty(),
         steps,
-        semver_recommendation: None,
-        warnings: vec![],
-        hints: actions.to_vec(),
-    }
+        None,
+        Vec::new(),
+        actions.to_vec(),
+    )
 }
 
-fn recovery_step(
-    id: &str,
-    label: impl Into<String>,
-    needed: bool,
-    needs: Vec<String>,
-) -> ReleasePlanStep {
-    let mut config = std::collections::HashMap::new();
-    if !needed {
-        config.insert(
-            "reason".to_string(),
-            serde_json::Value::String("already-complete".to_string()),
-        );
-    }
-
-    ReleasePlanStep {
-        id: id.to_string(),
-        step_type: id.to_string(),
-        label: Some(label.into()),
-        needs,
-        config,
-        status: if needed {
-            ReleasePlanStatus::Ready
-        } else {
-            ReleasePlanStatus::Disabled
-        },
-        missing: vec![],
+fn recovery_step(id: &str, label: impl Into<String>, needed: bool, needs: Vec<String>) -> PlanStep {
+    if needed {
+        PlanStep::ready_labeled(id, id, label, needs, std::iter::empty())
+    } else {
+        PlanStep::disabled_with_reason(id, id, "already-complete")
+            .label(label)
+            .needs(needs)
+            .build()
     }
 }
 
@@ -585,12 +620,11 @@ pub fn run_batch(
             component_id: component_id.clone(),
             path_override: None,
             dry_run: input_template.dry_run,
-            deploy: input_template.deploy,
             recover: input_template.recover,
             skip_checks: input_template.skip_checks,
             bump_override: input_template.bump_override.clone(),
             force_lower_bump: input_template.force_lower_bump,
-            skip_publish: input_template.skip_publish,
+            pipeline: input_template.pipeline.clone(),
             skip_github_release: input_template.skip_github_release,
             git_identity: input_template.git_identity.clone(),
         };
@@ -655,30 +689,21 @@ pub fn run_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::release::{ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus};
-    use std::collections::HashMap;
+    use crate::core::plan::{PlanStep, PlanStepStatus, PlanValues};
+    use crate::core::release::{ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus};
 
     #[test]
     fn extracts_new_version_from_plan() {
-        let plan = ReleasePlan {
-            component_id: "demo".to_string(),
-            enabled: true,
-            steps: vec![crate::release::ReleasePlanStep {
-                id: "version".to_string(),
-                step_type: "version".to_string(),
-                label: None,
-                needs: vec![],
-                config: HashMap::from([(
-                    "to".to_string(),
-                    serde_json::Value::String("1.2.3".to_string()),
-                )]),
-                status: crate::release::ReleasePlanStatus::Ready,
-                missing: vec![],
-            }],
-            semver_recommendation: None,
-            warnings: vec![],
-            hints: vec![],
-        };
+        let plan = ReleasePlan::new(
+            "demo",
+            true,
+            vec![PlanStep::ready("version", "version")
+                .inputs(PlanValues::new().string("to", "1.2.3"))
+                .build()],
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
 
         assert_eq!(
             extract_new_version_from_plan(&plan).as_deref(),
@@ -694,35 +719,35 @@ mod tests {
         ];
         let plan = recovery_release_plan("demo", "1.2.3", "v1.2.3", true, true, false, &actions);
 
-        assert!(plan.enabled);
-        assert_eq!(plan.component_id, "demo");
-        assert_eq!(plan.hints, actions);
-        assert_eq!(plan.steps.len(), 3);
-        assert_eq!(plan.steps[0].id, "recover.commit");
+        assert!(plan.enabled());
+        assert_eq!(plan.component_id(), Some("demo"));
+        assert_eq!(plan.plan.hints, actions);
+        assert_eq!(plan.plan.steps.len(), 3);
+        assert_eq!(plan.plan.steps[0].id, "recover.commit");
+        assert_eq!(plan.plan.steps[0].status, PlanStepStatus::Ready);
+        assert_eq!(plan.plan.steps[1].id, "recover.tag");
+        assert_eq!(plan.plan.steps[1].status, PlanStepStatus::Ready);
+        assert_eq!(plan.plan.steps[2].id, "recover.push");
+        assert_eq!(plan.plan.steps[2].status, PlanStepStatus::Disabled);
         assert_eq!(
-            plan.steps[0].status,
-            crate::release::ReleasePlanStatus::Ready
-        );
-        assert_eq!(plan.steps[1].id, "recover.tag");
-        assert_eq!(
-            plan.steps[1].status,
-            crate::release::ReleasePlanStatus::Ready
-        );
-        assert_eq!(plan.steps[2].id, "recover.push");
-        assert_eq!(
-            plan.steps[2].status,
-            crate::release::ReleasePlanStatus::Disabled
-        );
-        assert_eq!(
-            plan.steps[2].config.get("reason").and_then(|v| v.as_str()),
+            plan.plan.steps[2]
+                .inputs
+                .get("reason")
+                .and_then(|v| v.as_str()),
             Some("already-complete")
         );
         assert_eq!(
-            plan.steps[0].config.get("version").and_then(|v| v.as_str()),
+            plan.plan.steps[0]
+                .inputs
+                .get("version")
+                .and_then(|v| v.as_str()),
             Some("1.2.3")
         );
         assert_eq!(
-            plan.steps[0].config.get("tag").and_then(|v| v.as_str()),
+            plan.plan.steps[0]
+                .inputs
+                .get("tag")
+                .and_then(|v| v.as_str()),
             Some("v1.2.3")
         );
     }
@@ -731,12 +756,13 @@ mod tests {
     fn recovery_release_plan_is_disabled_when_nothing_needed() {
         let plan = recovery_release_plan("demo", "1.2.3", "v1.2.3", false, false, false, &[]);
 
-        assert!(!plan.enabled);
-        assert!(plan.hints.is_empty());
+        assert!(!plan.enabled());
+        assert!(plan.plan.hints.is_empty());
         assert!(plan
+            .plan
             .steps
             .iter()
-            .all(|step| step.status == crate::release::ReleasePlanStatus::Disabled));
+            .all(|step| step.status == PlanStepStatus::Disabled));
     }
 
     #[test]
@@ -762,6 +788,31 @@ mod tests {
         };
 
         assert!(has_post_release_warnings(&run));
+    }
+
+    #[test]
+    fn release_run_failure_exit_fails_partial_release_runs() {
+        let run = ReleaseRun {
+            component_id: "demo".to_string(),
+            enabled: true,
+            result: ReleaseRunResult {
+                steps: vec![ReleaseStepResult {
+                    id: "git.push".to_string(),
+                    step_type: "git.push".to_string(),
+                    status: ReleaseStepStatus::Failed,
+                    missing: vec![],
+                    warnings: vec![],
+                    hints: vec![],
+                    data: None,
+                    error: Some("push rejected".to_string()),
+                }],
+                status: ReleaseStepStatus::PartialSuccess,
+                warnings: vec![],
+                summary: None,
+            },
+        };
+
+        assert_eq!(release_run_failure_exit(&run), 1);
     }
 
     // ----- Recover-time orphan-tag warning (issue #2234 ask #3) -----

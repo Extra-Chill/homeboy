@@ -3,8 +3,8 @@
     use std::process::Command;
     use std::sync::{Mutex, OnceLock};
 
-    use crate::component::{Component, ScopedExtensionConfig};
-    use crate::extension::{ExtensionCapability, ExtensionExecutionContext};
+    use crate::core::component::{Component, ScopedExtensionConfig};
+    use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext};
     use crate::test_support::with_isolated_home;
 
     use super::*;
@@ -95,9 +95,9 @@ JSON
                 ratchet: false,
             },
             regression_threshold_percent:
-                crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms:
-                crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         };
 
         let output =
@@ -168,9 +168,9 @@ JSON
                 ratchet: false,
             },
             regression_threshold_percent:
-                crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms:
-                crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         };
 
         let output = build_trace_runner(Some(&context), &component, &args, &run_dir, true).unwrap();
@@ -262,9 +262,9 @@ JSON
                 ratchet: false,
             },
             regression_threshold_percent:
-                crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms:
-                crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         };
         let output = RunnerOutput {
             success: false,
@@ -347,9 +347,9 @@ JSON
                 ratchet: false,
             },
             regression_threshold_percent:
-                crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms:
-                crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         };
 
         let output =
@@ -431,9 +431,9 @@ JSON
                     ratchet: false,
                 },
                 regression_threshold_percent:
-                    crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+                    crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
                 regression_min_delta_ms:
-                    crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+                    crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             },
             &run_dir,
             None,
@@ -562,7 +562,7 @@ JSON
                 fs::read_to_string(fixture.component_dir.join("scenario.txt")).unwrap(),
                 "base\n"
             );
-            assert!(crate::extension::trace::list_trace_overlay_locks()
+            assert!(crate::core::extension::trace::list_trace_overlay_locks()
                 .unwrap()
                 .is_empty());
             run_dir.cleanup();
@@ -623,9 +623,9 @@ JSON
                 ratchet: false,
             },
             regression_threshold_percent:
-                crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms:
-                crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         };
         OverlayFixture {
             _temp: temp,

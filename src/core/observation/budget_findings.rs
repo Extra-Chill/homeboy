@@ -1,4 +1,4 @@
-use crate::budget::BudgetFinding;
+use crate::core::budget::BudgetFinding;
 
 use super::records::NewFindingRecord;
 

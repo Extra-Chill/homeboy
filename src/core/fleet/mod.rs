@@ -1,8 +1,8 @@
-use crate::config::{self, ConfigEntity};
-use crate::error::{Error, Result};
-use crate::output::{CreateOutput, MergeOutput, RemoveResult};
-use crate::project;
-use crate::project::ProjectComponentOverrides;
+use crate::core::config::{self, ConfigEntity};
+use crate::core::error::{Error, Result};
+use crate::core::output::{CreateOutput, MergeOutput, RemoveResult};
+use crate::core::project;
+use crate::core::project::ProjectComponentOverrides;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -82,7 +82,7 @@ pub fn add_project(fleet_id: &str, project_id: &str) -> Result<Fleet> {
 
     // Validate project exists
     if !project::exists(project_id) {
-        let suggestions = config::find_similar_ids::<crate::project::Project>(project_id);
+        let suggestions = config::find_similar_ids::<crate::core::project::Project>(project_id);
         return Err(Error::project_not_found(project_id, suggestions));
     }
 
@@ -106,7 +106,7 @@ pub fn remove_project(fleet_id: &str, project_id: &str) -> Result<Fleet> {
 }
 
 /// Get all projects in a fleet with full project data
-pub fn get_projects(fleet_id: &str) -> Result<Vec<crate::project::Project>> {
+pub fn get_projects(fleet_id: &str) -> Result<Vec<crate::core::project::Project>> {
     let fleet = load(fleet_id)?;
     let mut projects = Vec::new();
 

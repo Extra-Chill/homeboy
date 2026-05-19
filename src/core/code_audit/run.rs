@@ -3,8 +3,8 @@
 //! Mirrors `core/extension/lint/run.rs` and `core/extension/test/run.rs` — the command
 //! layer provides CLI args, this module owns all business logic and returns structured results.
 
-use crate::code_audit::{self, baseline, AuditWithAnalysis, CodeAuditResult};
-use crate::git;
+use crate::core::code_audit::{self, baseline, AuditWithAnalysis, CodeAuditResult};
+use crate::core::git;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -23,7 +23,7 @@ pub struct AuditRunWorkflowArgs {
     pub exclude_kinds: Vec<code_audit::AuditFinding>,
     pub only_labels: Vec<String>,
     pub exclude_labels: Vec<String>,
-    pub baseline_flags: crate::engine::baseline::BaselineFlags,
+    pub baseline_flags: crate::core::engine::baseline::BaselineFlags,
     pub changed_since: Option<String>,
     pub json_summary: bool,
     pub include_fixability: bool,
@@ -39,7 +39,7 @@ pub struct AuditRunWorkflowResult {
 /// Run the main audit workflow.
 pub fn run_main_audit_workflow(
     args: AuditRunWorkflowArgs,
-) -> crate::Result<AuditRunWorkflowResult> {
+) -> crate::core::Result<AuditRunWorkflowResult> {
     // Run audit — scoped or full
     let result = run_audit(&args)?;
 
@@ -189,7 +189,7 @@ fn scope_convention_outliers_to_findings(result: &mut CodeAuditResult) {
 }
 
 /// Run the audit scan (scoped or full). Returns None if changed-since found no files.
-fn run_audit(args: &AuditRunWorkflowArgs) -> crate::Result<Option<AuditWithAnalysis>> {
+fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWithAnalysis>> {
     let plan = if args.baseline_flags.baseline {
         code_audit::AuditExecutionPlan::full()
     } else {
@@ -222,7 +222,7 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::Result<Option<AuditWithAnaly
 fn run_baseline_save(
     result: CodeAuditResult,
     args: &AuditRunWorkflowArgs,
-) -> crate::Result<AuditRunWorkflowResult> {
+) -> crate::core::Result<AuditRunWorkflowResult> {
     let findings = result.findings.clone();
     let saved = if let Some(ref git_ref) = args.changed_since {
         let changed = git::get_files_changed_since(&args.source_path, git_ref)?;
@@ -240,13 +240,15 @@ fn run_baseline_save(
             );
         }
         baseline::save_baseline_scoped(&result, &changed)
-            .map_err(crate::Error::internal_unexpected)?
+            .map_err(crate::core::Error::internal_unexpected)?
     } else {
-        baseline::save_baseline(&result).map_err(crate::Error::internal_unexpected)?
+        baseline::save_baseline(&result).map_err(crate::core::Error::internal_unexpected)?
     };
 
-    let baseline_data = baseline::load_baseline(Path::new(&result.source_path))
-        .ok_or_else(|| crate::Error::internal_unexpected("Failed to read back saved baseline"))?;
+    let baseline_data =
+        baseline::load_baseline(Path::new(&result.source_path)).ok_or_else(|| {
+            crate::core::Error::internal_unexpected("Failed to read back saved baseline")
+        })?;
 
     if let Some(score) = baseline_data.metadata.alignment_score {
         eprintln!(
@@ -281,7 +283,7 @@ fn run_comparison_workflow(
     result: CodeAuditResult,
     analysis: &code_audit::AuditAnalysisContext,
     args: &AuditRunWorkflowArgs,
-) -> crate::Result<AuditRunWorkflowResult> {
+) -> crate::core::Result<AuditRunWorkflowResult> {
     // Try file-based baseline
     if !args.baseline_flags.ignore_baseline {
         if let Some(existing_baseline) = baseline::load_baseline(Path::new(&result.source_path)) {
@@ -339,7 +341,7 @@ fn build_comparison_output(
     analysis: &code_audit::AuditAnalysisContext,
     existing_baseline: baseline::AuditBaseline,
     args: &AuditRunWorkflowArgs,
-) -> crate::Result<AuditRunWorkflowResult> {
+) -> crate::core::Result<AuditRunWorkflowResult> {
     let comparison = baseline::compare(&result, &existing_baseline);
     let exit_code = if comparison.drift_increased { 1 } else { 0 };
     let changed_since_summary = args

@@ -1,4 +1,4 @@
-use crate::code_audit::AuditFinding;
+use crate::core::code_audit::AuditFinding;
 use crate::core::refactor::auto::{Insertion, InsertionKind, NewFile, RefactorPrimitive};
 
 pub fn insertion(

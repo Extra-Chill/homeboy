@@ -11,7 +11,7 @@ use super::fingerprint::FileFingerprint;
 use super::import_matching::has_import_with_context;
 use super::naming::{detect_naming_suffix, suffix_matches};
 use super::signatures::{compute_signature_skeleton, tokenize_signature};
-use crate::component::AuditConfig;
+use crate::core::component::AuditConfig;
 
 const GENERIC_UTILITY_SUFFIXES: &[&str] = &[
     "Base",
@@ -172,7 +172,7 @@ pub enum AuditFinding {
     /// Documentation exists but references stale paths that have moved.
     StaleDocReference,
     /// Compiler warning (dead code, unused import, unused variable, etc).
-    /// Detected by running the language compiler/checker (cargo check, tsc, etc).
+    /// Detected by running an extension-owned language compiler/checker script.
     CompilerWarning,
     /// Wrapper file is missing an explicit declaration of what it wraps.
     /// Detected by tracing calls in the wrapper to infer the implementation target.
@@ -237,6 +237,9 @@ pub enum AuditFinding {
     /// Repeated exhaustive match blocks over the same enum duplicate a
     /// label/getter/policy contract that should likely live on the enum.
     RepeatedEnumDispatchContract,
+    /// Direct aggregate/struct literals are repeated even though a canonical
+    /// construction seam exists for the same type.
+    DirectAggregateConstruction,
     /// Configured ecosystem/language/framework term appears in core-owned source.
     CoreBoundaryLeak,
 }
@@ -295,6 +298,7 @@ impl AuditFinding {
             "unwired_nested_rust_test",
             "parallel_runner_setup",
             "repeated_enum_dispatch_contract",
+            "direct_aggregate_construction",
             "core_boundary_leak",
         ]
     }

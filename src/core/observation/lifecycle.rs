@@ -11,7 +11,7 @@ pub struct ActiveObservation {
 }
 
 impl ActiveObservation {
-    pub fn start(record: NewRunRecord) -> crate::Result<Self> {
+    pub fn start(record: NewRunRecord) -> crate::core::Result<Self> {
         let store = ObservationStore::open_initialized()?;
         let initial_metadata = record.metadata_json.clone();
         let run = store.start_run(record)?;
@@ -101,7 +101,7 @@ pub fn running_status_note(run: &RunRecord) -> Option<String> {
         );
     };
 
-    if pid_is_running(owner_pid) {
+    if crate::core::daemon::pid_is_running(owner_pid) {
         None
     } else {
         Some(
@@ -121,40 +121,23 @@ pub fn run_owner_pid(run: &RunRecord) -> Option<u32> {
         .and_then(|pid| u32::try_from(pid).ok())
 }
 
-fn pid_is_running(pid: u32) -> bool {
-    if pid > i32::MAX as u32 {
-        return false;
-    }
-
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as libc::pid_t, 0) == 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        pid == std::process::id()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observation::FindingListFilter;
+    use crate::core::observation::FindingListFilter;
     use crate::test_support::with_isolated_home;
     use std::fs;
 
     fn run_record() -> NewRunRecord {
-        NewRunRecord {
-            kind: "test".to_string(),
-            component_id: Some("homeboy".to_string()),
-            command: Some("homeboy test homeboy".to_string()),
-            cwd: Some("/tmp/homeboy".to_string()),
-            homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            git_sha: Some("abc123".to_string()),
-            rig_id: Some("studio".to_string()),
-            metadata_json: serde_json::json!({ "status": "running" }),
-        }
+        NewRunRecord::builder("test")
+            .component_id("homeboy")
+            .command("homeboy test homeboy")
+            .cwd_path(std::path::Path::new("/tmp/homeboy"))
+            .current_homeboy_version()
+            .git_sha(Some("abc123".to_string()))
+            .rig_id("studio")
+            .metadata(serde_json::json!({ "status": "running" }))
+            .build()
     }
 
     fn active_observation() -> ActiveObservation {

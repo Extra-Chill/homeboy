@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
+use crate::core::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
 
 const BASELINE_KEY: &str = "lint";
 
@@ -56,13 +56,13 @@ impl Fingerprintable for LintFingerprint<'_> {
 pub type LintBaseline = generic::Baseline<LintBaselineMetadata>;
 pub type BaselineComparison = generic::Comparison;
 
-pub fn parse_findings_file(path: &Path) -> crate::error::Result<Vec<LintFinding>> {
+pub fn parse_findings_file(path: &Path) -> crate::core::error::Result<Vec<LintFinding>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
 
     let content = std::fs::read_to_string(path).map_err(|e| {
-        crate::Error::internal_io(
+        crate::core::Error::internal_io(
             format!(
                 "Failed to read lint findings file {}: {}",
                 path.display(),
@@ -77,7 +77,7 @@ pub fn parse_findings_file(path: &Path) -> crate::error::Result<Vec<LintFinding>
     }
 
     let findings: Vec<LintFinding> = serde_json::from_str(&content).map_err(|e| {
-        crate::Error::internal_io(
+        crate::core::Error::internal_io(
             format!("Malformed lint findings JSON in {}: {}", path.display(), e),
             Some("lint.baseline.parse".to_string()),
         )
@@ -90,7 +90,7 @@ pub fn save_baseline(
     source_path: &Path,
     component_id: &str,
     findings: &[LintFinding],
-) -> crate::error::Result<std::path::PathBuf> {
+) -> crate::core::error::Result<std::path::PathBuf> {
     let config = BaselineConfig::new(source_path, BASELINE_KEY);
     let metadata = LintBaselineMetadata {
         findings_count: findings.len(),

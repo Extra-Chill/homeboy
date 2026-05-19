@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
-use homeboy::triage::{self, TriageOptions, TriageOutput, TriageTarget};
-use homeboy::Error;
+use homeboy::core::triage::{self, TriageOptions, TriageOutput, TriageTarget};
+use homeboy::core::Error;
 use std::path::PathBuf;
 
 use super::CmdResult;
@@ -141,7 +141,7 @@ fn resolve_component_target(
             // silently picking one side. If the component is not registered, we
             // accept the explicit id as the synthetic component_id.
             if let Some(ref id) = component_id {
-                if let Ok(comp) = homeboy::component::load(id) {
+                if let Ok(comp) = homeboy::core::component::load(id) {
                     let registered = canonicalize_for_compare(&comp.local_path);
                     let supplied = canonicalize_for_compare(&path);
                     if registered != supplied {
@@ -174,7 +174,7 @@ fn canonicalize_for_compare(path: &str) -> String {
 mod tests {
     use super::{resolve_component_target, TriageArgs, TriageCommand};
     use clap::Parser;
-    use homeboy::triage::TriageTarget;
+    use homeboy::core::triage::TriageTarget;
 
     #[derive(Parser)]
     struct TestCli {

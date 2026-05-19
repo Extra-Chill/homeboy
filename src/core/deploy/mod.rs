@@ -1,5 +1,6 @@
 mod execution;
 mod orchestration;
+mod path_roots;
 pub(crate) mod permissions;
 mod planning;
 mod policy;
@@ -19,10 +20,10 @@ pub use types::{
 };
 pub use version_overrides::fetch_remote_versions;
 
-use crate::component;
-use crate::context::resolve_project_ssh_with_base_path;
-use crate::error::{Error, Result};
-use crate::project;
+use crate::core::component;
+use crate::core::context::resolve_project_ssh_with_base_path;
+use crate::core::error::{Error, Result};
+use crate::core::project;
 
 /// High-level deploy entry point. Resolves SSH context internally.
 ///

@@ -1,4 +1,4 @@
-use homeboy::component::AuditConfig;
+use homeboy::core::component::AuditConfig;
 
 #[test]
 fn is_empty_reports_only_empty_rule_sets() {

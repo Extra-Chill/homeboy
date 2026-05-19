@@ -1,10 +1,10 @@
 //! walker — extracted from conventions.rs.
 //!
-//! File walking delegated to `crate::engine::codebase_scan` for consistency.
+//! File walking delegated to `crate::core::engine::codebase_scan` for consistency.
 
 use std::path::Path;
 
-use crate::engine::codebase_scan::{self, CodebaseSnapshot, ExtensionFilter, ScanConfig};
+use crate::core::engine::codebase_scan::{self, CodebaseSnapshot, ExtensionFilter, ScanConfig};
 
 /// Extension index/entry-point filenames that should be excluded from convention
 /// sibling detection. These files organize other files rather than being
@@ -31,7 +31,7 @@ pub(crate) fn is_index_file(path: &Path) -> bool {
 
 /// Collect all file extensions that installed extensions can handle.
 pub(crate) fn extension_provided_file_extensions() -> Vec<String> {
-    crate::extension::load_all_extensions()
+    crate::core::extension::load_all_extensions()
         .unwrap_or_default()
         .into_iter()
         .flat_map(|m| m.provided_file_extensions().to_vec())

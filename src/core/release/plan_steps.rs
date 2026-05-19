@@ -1,16 +1,17 @@
-use crate::component::Component;
-use crate::extension::ExtensionManifest;
-use crate::git;
-use crate::release::pipeline_capabilities::{
+use crate::core::component::Component;
+use crate::core::extension::ExtensionManifest;
+use crate::core::git;
+use crate::core::plan::{PlanStep, PlanValues};
+use crate::core::quality::{build_quality_steps as build_shared_quality_steps, QualityPlanOptions};
+use crate::core::release::pipeline_capabilities::{
     get_publish_targets, has_package_capability, has_prepare_capability,
 };
-use crate::release::types::{
-    ReleaseChangelogPlan, ReleaseOptions, ReleasePlanStatus, ReleasePlanStep,
-    ReleaseSemverRecommendation,
+use crate::core::release::types::{
+    ReleaseChangelogPlan, ReleaseOptions, ReleaseSemverRecommendation,
 };
-use crate::Result;
+use crate::core::Result;
 
-type StepConfig = std::collections::HashMap<String, serde_json::Value>;
+type StepConfig = PlanValues;
 
 /// Return true if this component should get a GitHub Release created.
 ///
@@ -20,14 +21,14 @@ type StepConfig = std::collections::HashMap<String, serde_json::Value>;
 /// through cleanly — the step simply isn't added to the plan.
 pub(super) fn github_release_applies(component: &Component) -> bool {
     let remote_url = component.remote_url.clone().or_else(|| {
-        crate::deploy::release_download::detect_remote_url(std::path::Path::new(
+        crate::core::deploy::release_download::detect_remote_url(std::path::Path::new(
             &component.local_path,
         ))
     });
 
     remote_url
         .as_deref()
-        .and_then(crate::deploy::release_download::parse_github_url)
+        .and_then(crate::core::deploy::release_download::parse_github_url)
         .is_some()
 }
 
@@ -37,16 +38,8 @@ fn ready_step(
     label: impl Into<String>,
     needs: Vec<String>,
     config: StepConfig,
-) -> ReleasePlanStep {
-    ReleasePlanStep {
-        id: id.to_string(),
-        step_type: step_type.to_string(),
-        label: Some(label.into()),
-        needs,
-        config,
-        status: ReleasePlanStatus::Ready,
-        missing: vec![],
-    }
+) -> PlanStep {
+    PlanStep::ready_labeled(id, step_type, label, needs, config)
 }
 
 fn disabled_step(
@@ -54,43 +47,57 @@ fn disabled_step(
     step_type: &str,
     label: impl Into<String>,
     config: StepConfig,
-) -> ReleasePlanStep {
-    ReleasePlanStep {
-        id: id.to_string(),
-        step_type: step_type.to_string(),
-        label: Some(label.into()),
-        needs: vec![],
-        config,
-        status: ReleasePlanStatus::Disabled,
-        missing: vec![],
-    }
+) -> PlanStep {
+    PlanStep::disabled(id, step_type)
+        .label(label)
+        .inputs(config)
+        .build()
 }
 
 fn string_config(key: &str, value: impl Into<String>) -> StepConfig {
-    let mut config = StepConfig::new();
-    config.insert(key.to_string(), serde_json::Value::String(value.into()));
-    config
+    StepConfig::new().string(key, value)
 }
 
 pub(super) fn build_preflight_steps(
     options: &ReleaseOptions,
     semver_recommendation: Option<&ReleaseSemverRecommendation>,
-) -> Vec<ReleasePlanStep> {
-    let mut steps = vec![
+) -> Vec<PlanStep> {
+    let default_branch_step = if options.pipeline.head {
+        disabled_step(
+            "preflight.default_branch",
+            "preflight.default_branch",
+            "Validate default branch",
+            string_config("reason", "head-release"),
+        )
+    } else {
         ready_step(
             "preflight.default_branch",
             "preflight.default_branch",
             "Validate default branch",
             vec![],
             StepConfig::new(),
-        ),
+        )
+    };
+    let working_tree_step = if options.pipeline.head && options.pipeline.from_artifacts.is_some() {
+        disabled_step(
+            "preflight.working_tree",
+            "preflight.working_tree",
+            "Validate working tree",
+            string_config("reason", "head-release-artifacts"),
+        )
+    } else {
         ready_step(
             "preflight.working_tree",
             "preflight.working_tree",
             "Validate working tree",
             vec!["preflight.git_identity".to_string()],
             StepConfig::new(),
-        ),
+        )
+    };
+
+    let mut steps = vec![
+        default_branch_step,
+        working_tree_step,
         ready_step(
             "preflight.remote_sync",
             "preflight.remote_sync",
@@ -126,74 +133,30 @@ pub(super) fn build_preflight_steps(
 
     steps.extend(build_quality_steps(options));
 
-    let mut changelog_config = StepConfig::new();
-    changelog_config.insert(
-        "dry_run".to_string(),
-        serde_json::Value::Bool(options.dry_run),
-    );
-    steps.push(ready_step(
-        "preflight.changelog_bootstrap",
-        "preflight.changelog_bootstrap",
-        "Ensure changelog exists",
-        vec!["preflight.test".to_string()],
-        changelog_config,
-    ));
+    if !options.pipeline.head {
+        steps.push(ready_step(
+            "preflight.changelog_bootstrap",
+            "preflight.changelog_bootstrap",
+            "Ensure changelog exists",
+            vec!["preflight.test".to_string()],
+            StepConfig::new().bool("dry_run", options.dry_run),
+        ));
+    }
 
     steps
 }
 
-fn build_quality_steps(options: &ReleaseOptions) -> Vec<ReleasePlanStep> {
-    if options.skip_checks {
-        return vec![
-            disabled_step(
-                "preflight.audit",
-                "preflight.audit",
-                "Run release audit",
-                string_config("reason", "--skip-checks"),
-            ),
-            disabled_step(
-                "preflight.lint",
-                "preflight.lint",
-                "Run release lint",
-                string_config("reason", "--skip-checks"),
-            ),
-            disabled_step(
-                "preflight.test",
-                "preflight.test",
-                "Run release tests",
-                string_config("reason", "--skip-checks"),
-            ),
-        ];
-    }
-
-    vec![
-        disabled_step(
-            "preflight.audit",
-            "preflight.audit",
-            "Run release audit",
-            string_config("reason", "no-release-audit-policy"),
-        ),
-        ready_step(
-            "preflight.lint",
-            "preflight.lint",
-            "Run release lint",
-            vec!["preflight.bump_policy".to_string()],
-            StepConfig::new(),
-        ),
-        ready_step(
-            "preflight.test",
-            "preflight.test",
-            "Run release tests",
-            vec!["preflight.lint".to_string()],
-            StepConfig::new(),
-        ),
-    ]
+fn build_quality_steps(options: &ReleaseOptions) -> Vec<PlanStep> {
+    build_shared_quality_steps(&QualityPlanOptions::release_preflight(
+        "release",
+        options.skip_checks,
+    ))
 }
 
 fn build_bump_policy_step(
     options: &ReleaseOptions,
     semver_recommendation: Option<&ReleaseSemverRecommendation>,
-) -> ReleasePlanStep {
+) -> PlanStep {
     let Some(recommendation) = semver_recommendation else {
         return disabled_step(
             "preflight.bump_policy",
@@ -203,36 +166,24 @@ fn build_bump_policy_step(
         );
     };
 
-    let mut config = StepConfig::new();
-    config.insert(
-        "requested".to_string(),
-        serde_json::Value::String(recommendation.requested_bump.clone()),
-    );
+    let mut config = StepConfig::new()
+        .string("requested", recommendation.requested_bump.clone())
+        .bool("underbump", recommendation.is_underbump)
+        .bool("force_lower_bump", options.bump_policy.force_lower_bump);
     if let Some(recommended) = recommendation.recommended_bump.as_ref() {
-        config.insert(
-            "recommended".to_string(),
-            serde_json::Value::String(recommended.clone()),
-        );
+        config = config.string("recommended", recommended.clone());
     }
-    config.insert(
-        "underbump".to_string(),
-        serde_json::Value::Bool(recommendation.is_underbump),
-    );
-    config.insert(
-        "force_lower_bump".to_string(),
-        serde_json::Value::Bool(options.bump_policy.force_lower_bump),
-    );
 
     if recommendation.is_underbump {
-        config.insert(
-            "policy".to_string(),
-            serde_json::Value::String(if options.dry_run {
+        config = config.string(
+            "policy",
+            if options.dry_run {
                 "preview-lower-bump".to_string()
             } else if options.bump_policy.force_lower_bump {
                 "forced-lower-bump".to_string()
             } else {
                 "requires-force-lower-bump".to_string()
-            }),
+            },
         );
     }
 
@@ -256,9 +207,23 @@ pub(super) fn build_release_steps(
     monorepo: Option<&git::MonorepoContext>,
     warnings: &mut Vec<String>,
     _hints: &mut Vec<String>,
-) -> Result<Vec<ReleasePlanStep>> {
+) -> Result<Vec<PlanStep>> {
     let mut steps = Vec::new();
     let publish_targets = get_publish_targets(extensions);
+
+    add_release_extension_diagnostics(component, extensions, &publish_targets, options, warnings);
+
+    if options.pipeline.head {
+        return Ok(build_head_release_steps(
+            component,
+            extensions,
+            new_version,
+            options,
+            monorepo,
+            &publish_targets,
+            warnings,
+        ));
+    }
 
     if !publish_targets.is_empty() && !has_package_capability(extensions) {
         warnings.push(
@@ -274,15 +239,10 @@ pub(super) fn build_release_steps(
         new_version,
     ));
 
-    let mut version_config = string_config("bump", options.bump_type.clone());
-    version_config.insert(
-        "from".to_string(),
-        serde_json::Value::String(current_version.to_string()),
-    );
-    version_config.insert(
-        "to".to_string(),
-        serde_json::Value::String(new_version.to_string()),
-    );
+    let version_config = StepConfig::new()
+        .string("bump", options.bump_type.clone())
+        .string("from", current_version)
+        .string("to", new_version);
     steps.push(ready_step(
         "version",
         "version",
@@ -315,7 +275,7 @@ pub(super) fn build_release_steps(
         StepConfig::new(),
     ));
 
-    let tag_needs = if !publish_targets.is_empty() && !options.skip_publish {
+    let tag_needs = if !publish_targets.is_empty() && !options.pipeline.skip_publish {
         steps.push(ready_step(
             "package",
             "package",
@@ -340,14 +300,12 @@ pub(super) fn build_release_steps(
         string_config("name", tag_name),
     ));
 
-    let mut push_config = StepConfig::new();
-    push_config.insert("tags".to_string(), serde_json::Value::Bool(true));
     steps.push(ready_step(
         "git.push",
         "git.push",
         "Push to remote",
         vec!["git.tag".to_string()],
-        push_config,
+        StepConfig::new().bool("tags", true),
     ));
 
     if !options.skip_github_release && github_release_applies(component) {
@@ -361,7 +319,7 @@ pub(super) fn build_release_steps(
     }
 
     let mut publish_step_ids: Vec<String> = Vec::new();
-    if !publish_targets.is_empty() && !options.skip_publish {
+    if !publish_targets.is_empty() && !options.pipeline.skip_publish {
         for target in &publish_targets {
             let step_id = format!("publish.{}", target);
             publish_step_ids.push(step_id.clone());
@@ -374,7 +332,7 @@ pub(super) fn build_release_steps(
             ));
         }
 
-        if !options.deploy {
+        if !options.pipeline.deploy {
             steps.push(ready_step(
                 "cleanup",
                 "cleanup",
@@ -383,15 +341,17 @@ pub(super) fn build_release_steps(
                 StepConfig::new(),
             ));
         }
-    } else if options.skip_publish && !publish_targets.is_empty() {
+    } else if options.pipeline.skip_publish && !publish_targets.is_empty() {
         log_status!("release", "Skipping publish/package steps (--skip-publish)");
     }
 
-    let post_release_hooks =
-        crate::engine::hooks::resolve_hooks(component, crate::engine::hooks::events::POST_RELEASE);
+    let post_release_hooks = crate::core::engine::hooks::resolve_hooks(
+        component,
+        crate::core::engine::hooks::events::POST_RELEASE,
+    );
     if !post_release_hooks.is_empty() {
-        let post_release_needs = if !options.skip_publish && !publish_targets.is_empty() {
-            if options.deploy {
+        let post_release_needs = if !options.pipeline.skip_publish && !publish_targets.is_empty() {
+            if options.pipeline.deploy {
                 publish_step_ids.clone()
             } else {
                 vec!["cleanup".to_string()]
@@ -409,10 +369,10 @@ pub(super) fn build_release_steps(
         ));
     }
 
-    if options.deploy {
+    if options.pipeline.deploy {
         let deploy_needs = if !post_release_hooks.is_empty() {
             vec!["post_release".to_string()]
-        } else if !options.skip_publish && !publish_step_ids.is_empty() {
+        } else if !options.pipeline.skip_publish && !publish_step_ids.is_empty() {
             publish_step_ids
         } else {
             vec!["git.push".to_string()]
@@ -430,60 +390,227 @@ pub(super) fn build_release_steps(
     Ok(steps)
 }
 
+fn build_head_release_steps(
+    component: &Component,
+    extensions: &[ExtensionManifest],
+    version: &str,
+    options: &ReleaseOptions,
+    monorepo: Option<&git::MonorepoContext>,
+    publish_targets: &[String],
+    warnings: &mut Vec<String>,
+) -> Vec<PlanStep> {
+    let mut steps = Vec::new();
+    let mut artifact_need = "preflight.remote_sync".to_string();
+
+    if !publish_targets.is_empty()
+        && !options.pipeline.skip_publish
+        && options.pipeline.from_artifacts.is_none()
+        && !has_package_capability(extensions)
+    {
+        warnings.push(
+            "Publish targets derived from extensions but no extension provides 'release.package'. \
+             Add an extension that provides packaging or use --from-artifacts."
+                .to_string(),
+        );
+    }
+
+    if !options.pipeline.skip_publish {
+        if let Some(dir) = options.pipeline.from_artifacts.as_ref() {
+            steps.push(ready_step(
+                "artifacts.inventory",
+                "artifacts.inventory",
+                "Inventory existing release artifacts",
+                vec![artifact_need.clone()],
+                string_config("dir", dir),
+            ));
+            artifact_need = "artifacts.inventory".to_string();
+        } else if has_package_capability(extensions) {
+            steps.push(ready_step(
+                "package",
+                "package",
+                "Package release artifacts",
+                vec![artifact_need.clone()],
+                StepConfig::new(),
+            ));
+            artifact_need = "package".to_string();
+        }
+    } else if options.pipeline.skip_publish && !publish_targets.is_empty() {
+        log_status!("release", "Skipping publish/package steps (--skip-publish)");
+    }
+
+    if !options.skip_github_release && github_release_applies(component) {
+        let tag_name = match monorepo {
+            Some(ctx) => ctx.format_tag(version),
+            None => format!("v{}", version),
+        };
+        steps.push(ready_step(
+            "github.release",
+            "github.release",
+            "Create GitHub Release",
+            vec![artifact_need.clone()],
+            string_config("tag", tag_name),
+        ));
+    }
+
+    let mut publish_step_ids: Vec<String> = Vec::new();
+    if !publish_targets.is_empty() && !options.pipeline.skip_publish {
+        for target in publish_targets {
+            let step_id = format!("publish.{}", target);
+            publish_step_ids.push(step_id.clone());
+            steps.push(ready_step(
+                &step_id,
+                &step_id,
+                format!("Publish to {}", target),
+                vec![artifact_need.clone()],
+                StepConfig::new(),
+            ));
+        }
+
+        if !options.pipeline.deploy {
+            steps.push(ready_step(
+                "cleanup",
+                "cleanup",
+                "Clean up release artifacts",
+                publish_step_ids.clone(),
+                StepConfig::new(),
+            ));
+        }
+    }
+
+    let post_release_hooks = crate::core::engine::hooks::resolve_hooks(
+        component,
+        crate::core::engine::hooks::events::POST_RELEASE,
+    );
+    if !post_release_hooks.is_empty() {
+        let post_release_needs = if !options.pipeline.skip_publish && !publish_targets.is_empty() {
+            if options.pipeline.deploy {
+                publish_step_ids.clone()
+            } else {
+                vec!["cleanup".to_string()]
+            }
+        } else if !options.skip_github_release && github_release_applies(component) {
+            vec!["github.release".to_string()]
+        } else {
+            vec![artifact_need.clone()]
+        };
+
+        steps.push(ready_step(
+            "post_release",
+            "post_release",
+            "Run post-release hooks",
+            post_release_needs,
+            string_array_config("commands", &post_release_hooks),
+        ));
+    }
+
+    if options.pipeline.deploy {
+        let deploy_needs = if !post_release_hooks.is_empty() {
+            vec!["post_release".to_string()]
+        } else if !options.pipeline.skip_publish && !publish_step_ids.is_empty() {
+            publish_step_ids
+        } else if !options.skip_github_release && github_release_applies(component) {
+            vec!["github.release".to_string()]
+        } else {
+            vec![artifact_need]
+        };
+
+        steps.push(ready_step(
+            "deploy",
+            "deploy",
+            "Deploy released component",
+            deploy_needs,
+            string_config("execution", "release_plan"),
+        ));
+    }
+
+    steps
+}
+
+fn add_release_extension_diagnostics(
+    component: &Component,
+    extensions: &[ExtensionManifest],
+    publish_targets: &[String],
+    options: &ReleaseOptions,
+    warnings: &mut Vec<String>,
+) {
+    if options.pipeline.skip_publish || !publish_targets.is_empty() {
+        return;
+    }
+
+    let Some(configured) = component.extensions.as_ref() else {
+        return;
+    };
+    if configured.is_empty() {
+        return;
+    }
+
+    let mut configured_ids: Vec<String> = configured.keys().cloned().collect();
+    configured_ids.sort();
+    if !configured_extension_has_release_actions(&configured_ids, extensions)
+        && !has_package_capability(extensions)
+    {
+        return;
+    }
+
+    let loaded = extensions
+        .iter()
+        .map(|extension| {
+            let mut action_ids: Vec<&str> = extension
+                .actions
+                .iter()
+                .map(|action| action.id.as_str())
+                .collect();
+            action_ids.sort_unstable();
+            format!("{} [{}]", extension.id, action_ids.join(", "))
+        })
+        .collect::<Vec<_>>();
+
+    warnings.push(format!(
+        "Release publish planning found configured extensions ({}) but no extension provides \
+         'release.publish'. Loaded extension actions: {}.",
+        configured_ids.join(", "),
+        if loaded.is_empty() {
+            "none".to_string()
+        } else {
+            loaded.join("; ")
+        }
+    ));
+}
+
+fn configured_extension_has_release_actions(
+    configured_ids: &[String],
+    extensions: &[ExtensionManifest],
+) -> bool {
+    extensions.iter().any(|extension| {
+        configured_ids.iter().any(|id| id == &extension.id)
+            && extension
+                .actions
+                .iter()
+                .any(|action| action.id.starts_with("release."))
+    })
+}
+
 fn build_changelog_steps(
     changelog_plan: &ReleaseChangelogPlan,
     current_version: &str,
     new_version: &str,
-) -> Vec<ReleasePlanStep> {
-    let mut policy_config = StepConfig::new();
-    policy_config.insert(
-        "policy".to_string(),
-        serde_json::Value::String(changelog_plan.policy.clone()),
-    );
-    policy_config.insert(
-        "path".to_string(),
-        serde_json::Value::String(changelog_plan.path.clone()),
-    );
-    policy_config.insert(
-        "dry_run".to_string(),
-        serde_json::Value::Bool(changelog_plan.dry_run),
-    );
+) -> Vec<PlanStep> {
+    let policy_config = StepConfig::new()
+        .string("policy", changelog_plan.policy.clone())
+        .string("path", changelog_plan.path.clone())
+        .bool("dry_run", changelog_plan.dry_run);
 
-    let mut generate_config = StepConfig::new();
-    generate_config.insert(
-        "source".to_string(),
-        serde_json::Value::String("commits".to_string()),
-    );
-    generate_config.insert(
-        "entry_count".to_string(),
-        serde_json::Value::Number(serde_json::Number::from(changelog_plan.entry_count as u64)),
-    );
+    let generate_config = StepConfig::new()
+        .string("source", "commits")
+        .number("entry_count", changelog_plan.entry_count as u64);
 
-    let mut finalize_config = StepConfig::new();
-    finalize_config.insert(
-        "path".to_string(),
-        serde_json::Value::String(changelog_plan.path.clone()),
-    );
-    finalize_config.insert(
-        "from".to_string(),
-        serde_json::Value::String(current_version.to_string()),
-    );
-    finalize_config.insert(
-        "to".to_string(),
-        serde_json::Value::String(new_version.to_string()),
-    );
-    finalize_config.insert(
-        "entries".to_string(),
-        serde_json::to_value(&changelog_plan.entries).unwrap_or_default(),
-    );
-    finalize_config.insert(
-        "entry_count".to_string(),
-        serde_json::Value::Number(serde_json::Number::from(changelog_plan.entry_count as u64)),
-    );
-    finalize_config.insert(
-        "mode".to_string(),
-        serde_json::Value::String("version-step".to_string()),
-    );
+    let finalize_config = StepConfig::new()
+        .string("path", changelog_plan.path.clone())
+        .string("from", current_version)
+        .string("to", new_version)
+        .json("entries", &changelog_plan.entries)
+        .number("entry_count", changelog_plan.entry_count as u64)
+        .string("mode", "version-step");
 
     vec![
         ready_step(
@@ -511,25 +638,17 @@ fn build_changelog_steps(
 }
 
 fn string_array_config(key: &str, values: &[String]) -> StepConfig {
-    let mut config = StepConfig::new();
-    config.insert(
-        key.to_string(),
-        serde_json::Value::Array(
-            values
-                .iter()
-                .map(|value| serde_json::Value::String(value.clone()))
-                .collect(),
-        ),
-    );
-    config
+    StepConfig::new().json(key, values)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{build_preflight_steps, build_release_steps, github_release_applies};
-    use crate::component::Component;
-    use crate::release::types::{
-        ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleasePlanStatus,
+    use crate::core::component::{Component, ScopedExtensionConfig};
+    use crate::core::extension::ExtensionManifest;
+    use crate::core::plan::PlanStepStatus;
+    use crate::core::release::types::{
+        ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleasePipelineOptions,
         ReleaseSemverRecommendation,
     };
 
@@ -557,8 +676,8 @@ mod tests {
                 "preflight.changelog_bootstrap"
             ]
         );
-        assert_eq!(steps[0].status, ReleasePlanStatus::Ready);
-        assert_eq!(steps[1].status, ReleasePlanStatus::Disabled);
+        assert_eq!(steps[0].status, PlanStepStatus::Ready);
+        assert_eq!(steps[1].status, PlanStepStatus::Disabled);
         assert_eq!(steps[2].needs, vec!["preflight.git_identity"]);
     }
 
@@ -576,11 +695,11 @@ mod tests {
             .find(|step| step.id == "preflight.git_identity")
             .expect("git identity step");
 
-        assert_eq!(identity.status, ReleasePlanStatus::Ready);
+        assert_eq!(identity.status, PlanStepStatus::Ready);
         assert_eq!(identity.needs, vec!["preflight.default_branch"]);
         assert_eq!(
             identity
-                .config
+                .inputs
                 .get("identity")
                 .and_then(|value| value.as_str()),
             Some("Release Bot <bot@example.com>")
@@ -602,15 +721,57 @@ mod tests {
                 .find(|step| step.id == step_id)
                 .expect("quality step");
 
-            assert_eq!(quality.status, ReleasePlanStatus::Disabled);
+            assert_eq!(quality.status, PlanStepStatus::Disabled);
             assert_eq!(
                 quality
-                    .config
+                    .inputs
                     .get("reason")
                     .and_then(|value| value.as_str()),
                 Some("--skip-checks")
             );
         }
+    }
+
+    #[test]
+    fn head_release_with_artifacts_skips_branch_and_working_tree_checks() {
+        let options = ReleaseOptions {
+            bump_type: "head".to_string(),
+            pipeline: ReleasePipelineOptions {
+                head: true,
+                from_artifacts: Some("artifacts".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let steps = build_preflight_steps(&options, None);
+        let default_branch = steps
+            .iter()
+            .find(|step| step.id == "preflight.default_branch")
+            .expect("default branch step");
+
+        assert_eq!(default_branch.status, PlanStepStatus::Disabled);
+        assert_eq!(
+            default_branch
+                .inputs
+                .get("reason")
+                .and_then(|value| value.as_str()),
+            Some("head-release")
+        );
+
+        let working_tree = steps
+            .iter()
+            .find(|step| step.id == "preflight.working_tree")
+            .expect("working tree step");
+
+        assert_eq!(working_tree.status, PlanStepStatus::Disabled);
+        assert_eq!(
+            working_tree
+                .inputs
+                .get("reason")
+                .and_then(|value| value.as_str()),
+            Some("head-release-artifacts")
+        );
     }
 
     #[test]
@@ -638,14 +799,14 @@ mod tests {
             .find(|step| step.id == "preflight.changelog_bootstrap")
             .expect("changelog bootstrap step");
 
-        assert_eq!(audit.status, ReleasePlanStatus::Disabled);
+        assert_eq!(audit.status, PlanStepStatus::Disabled);
         assert_eq!(
-            audit.config.get("reason").and_then(|value| value.as_str()),
+            audit.inputs.get("reason").and_then(|value| value.as_str()),
             Some("no-release-audit-policy")
         );
-        assert_eq!(lint.status, ReleasePlanStatus::Ready);
+        assert_eq!(lint.status, PlanStepStatus::Ready);
         assert_eq!(lint.needs, vec!["preflight.bump_policy"]);
-        assert_eq!(test.status, ReleasePlanStatus::Ready);
+        assert_eq!(test.status, PlanStepStatus::Ready);
         assert_eq!(test.needs, vec!["preflight.lint"]);
         assert_eq!(changelog_bootstrap.needs, vec!["preflight.test"]);
     }
@@ -664,32 +825,32 @@ mod tests {
             .find(|step| step.id == "preflight.bump_policy")
             .expect("bump policy step");
 
-        assert_eq!(bump_policy.status, ReleasePlanStatus::Ready);
+        assert_eq!(bump_policy.status, PlanStepStatus::Ready);
         assert_eq!(bump_policy.needs, vec!["preflight.remote_sync"]);
         assert_eq!(
             bump_policy
-                .config
+                .inputs
                 .get("recommended")
                 .and_then(|value| value.as_str()),
             Some("minor")
         );
         assert_eq!(
             bump_policy
-                .config
+                .inputs
                 .get("requested")
                 .and_then(|value| value.as_str()),
             Some("patch")
         );
         assert_eq!(
             bump_policy
-                .config
+                .inputs
                 .get("policy")
                 .and_then(|value| value.as_str()),
             Some("requires-force-lower-bump")
         );
         assert_eq!(
             bump_policy
-                .config
+                .inputs
                 .get("force_lower_bump")
                 .and_then(|value| value.as_bool()),
             Some(false)
@@ -716,14 +877,14 @@ mod tests {
 
         assert_eq!(
             bump_policy
-                .config
+                .inputs
                 .get("policy")
                 .and_then(|value| value.as_str()),
             Some("forced-lower-bump")
         );
         assert_eq!(
             bump_policy
-                .config
+                .inputs
                 .get("force_lower_bump")
                 .and_then(|value| value.as_bool()),
             Some(true)
@@ -747,7 +908,7 @@ mod tests {
 
         assert_eq!(
             bump_policy
-                .config
+                .inputs
                 .get("policy")
                 .and_then(|value| value.as_str()),
             Some("preview-lower-bump")
@@ -851,27 +1012,27 @@ mod tests {
             .expect("changelog finalize step");
 
         assert_eq!(
-            policy.config.get("policy").and_then(|value| value.as_str()),
+            policy.inputs.get("policy").and_then(|value| value.as_str()),
             Some("generated")
         );
         assert_eq!(
-            policy.config.get("path").and_then(|value| value.as_str()),
+            policy.inputs.get("path").and_then(|value| value.as_str()),
             Some("CHANGELOG.md")
         );
         assert_eq!(
             generate
-                .config
+                .inputs
                 .get("entry_count")
                 .and_then(|value| value.as_u64()),
             Some(1)
         );
         assert_eq!(
-            finalize.config.get("mode").and_then(|value| value.as_str()),
+            finalize.inputs.get("mode").and_then(|value| value.as_str()),
             Some("version-step")
         );
         assert_eq!(
             finalize
-                .config
+                .inputs
                 .get("entries")
                 .and_then(|value| value.as_object())
                 .and_then(|entries| entries.get("Fixed"))
@@ -888,7 +1049,10 @@ mod tests {
         let mut hints = Vec::new();
         let options = ReleaseOptions {
             bump_type: "patch".to_string(),
-            deploy: true,
+            pipeline: ReleasePipelineOptions {
+                deploy: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -912,11 +1076,125 @@ mod tests {
         assert_eq!(deploy.needs, vec!["git.push"]);
         assert_eq!(
             deploy
-                .config
+                .inputs
                 .get("execution")
                 .and_then(|value| value.as_str()),
             Some("release_plan")
         );
+    }
+
+    #[test]
+    fn head_release_plan_skips_mutation_steps_and_uses_existing_artifacts() {
+        let mut component = fixture_component();
+        component.remote_url = Some("https://github.com/Extra-Chill/homeboy.git".to_string());
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "WordPress",
+            "version": "1.0.0",
+            "actions": [
+                {
+                    "id": "release.publish",
+                    "label": "Publish release",
+                    "type": "command",
+                    "command": "true"
+                }
+            ]
+        }))
+        .expect("extension manifest");
+        extension.id = "wordpress".to_string();
+        let mut warnings = Vec::new();
+        let mut hints = Vec::new();
+        let options = ReleaseOptions {
+            bump_type: "head".to_string(),
+            pipeline: ReleasePipelineOptions {
+                head: true,
+                from_artifacts: Some("artifacts".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let steps = build_release_steps(
+            &component,
+            &[extension],
+            "1.0.1",
+            "1.0.1",
+            &fixture_changelog_plan(),
+            &options,
+            None,
+            &mut warnings,
+            &mut hints,
+        )
+        .expect("steps");
+
+        let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+        assert!(!ids.contains(&"changelog.finalize"));
+        assert!(!ids.contains(&"version"));
+        assert!(!ids.contains(&"git.commit"));
+        assert!(!ids.contains(&"git.tag"));
+        assert!(!ids.contains(&"git.push"));
+        assert_eq!(
+            ids,
+            vec![
+                "artifacts.inventory",
+                "github.release",
+                "publish.wordpress",
+                "cleanup"
+            ]
+        );
+        assert_eq!(
+            steps[0].inputs.get("dir").and_then(|value| value.as_str()),
+            Some("artifacts")
+        );
+        assert_eq!(steps[1].needs, vec!["artifacts.inventory"]);
+        assert_eq!(steps[2].needs, vec!["artifacts.inventory"]);
+    }
+
+    #[test]
+    fn release_plan_warns_when_configured_extensions_have_no_publish_action() {
+        let mut component = fixture_component();
+        component.extensions = Some(std::collections::HashMap::from([(
+            "wordpress".to_string(),
+            ScopedExtensionConfig::default(),
+        )]));
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "WordPress",
+            "version": "1.0.0",
+            "actions": [
+                {
+                    "id": "release.package",
+                    "label": "Package release",
+                    "type": "command",
+                    "command": "true"
+                }
+            ]
+        }))
+        .expect("extension manifest");
+        extension.id = "wordpress".to_string();
+        let mut warnings = Vec::new();
+        let mut hints = Vec::new();
+        let options = ReleaseOptions {
+            bump_type: "patch".to_string(),
+            ..Default::default()
+        };
+
+        let _steps = build_release_steps(
+            &component,
+            &[extension],
+            "1.0.0",
+            "1.0.1",
+            &fixture_changelog_plan(),
+            &options,
+            None,
+            &mut warnings,
+            &mut hints,
+        )
+        .expect("steps");
+
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("configured extensions (wordpress)")
+                && warning.contains("release.package")
+                && warning.contains("no extension provides 'release.publish'")
+        }));
     }
 
     #[test]

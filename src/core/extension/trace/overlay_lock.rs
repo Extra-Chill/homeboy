@@ -4,9 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::engine::run_dir::RunDir;
-use crate::error::{Error, ErrorCode, Result};
-use crate::paths;
+use crate::core::engine::run_dir::RunDir;
+use crate::core::error::{Error, ErrorCode, Result};
+use crate::core::paths;
 
 #[derive(Debug)]
 pub(super) struct TraceOverlayLock {

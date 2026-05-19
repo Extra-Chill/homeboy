@@ -5,12 +5,12 @@
 //! Pass `local: true` to bypass SSH and execute commands directly on the
 //! current machine (useful when homeboy runs on the target server itself).
 
-use crate::context::require_project_base_path;
-use crate::engine::executor::{execute_for_project, execute_for_project_interactive};
-use crate::engine::shell;
-use crate::error::{Error, Result};
-use crate::paths as base_path;
-use crate::project::{self, Project};
+use crate::core::context::require_project_base_path;
+use crate::core::engine::executor::{execute_for_project, execute_for_project_interactive};
+use crate::core::engine::shell;
+use crate::core::error::{Error, Result};
+use crate::core::paths as base_path;
+use crate::core::project::{self, Project};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,27 +1,28 @@
-use crate::component::Component;
-use crate::error::{Error, Result};
-use crate::release::types::{ReleasePlanStep, ReleaseState, ReleaseStepResult};
-use crate::version;
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
+use crate::core::plan::PlanStep;
+use crate::core::release::types::{ReleaseState, ReleaseStepResult};
+use crate::core::release::version;
 
 use super::step_success;
 
 pub(crate) fn run_changelog_finalize(
-    step: &ReleasePlanStep,
+    step: &PlanStep,
     component: &Component,
     state: &mut ReleaseState,
 ) -> Result<ReleaseStepResult> {
     let current_version = step
-        .config
+        .inputs
         .get("from")
         .and_then(|value| value.as_str())
         .ok_or_else(|| Error::internal_unexpected("changelog.finalize step missing from"))?;
     let new_version = step
-        .config
+        .inputs
         .get("to")
         .and_then(|value| value.as_str())
         .ok_or_else(|| Error::internal_unexpected("changelog.finalize step missing to"))?;
     let entries = step
-        .config
+        .inputs
         .get("entries")
         .cloned()
         .map(serde_json::from_value)
@@ -51,9 +52,10 @@ pub(crate) fn run_changelog_finalize(
 #[cfg(test)]
 mod tests {
     use super::run_changelog_finalize;
-    use crate::component::{Component, VersionTarget};
-    use crate::release::types::{ReleasePlanStatus, ReleasePlanStep, ReleaseState};
-    use crate::release::ReleaseStepStatus;
+    use crate::core::component::{Component, VersionTarget};
+    use crate::core::plan::PlanStep;
+    use crate::core::release::types::ReleaseState;
+    use crate::core::release::ReleaseStepStatus;
 
     #[test]
     fn test_run_changelog_finalize() {
@@ -79,20 +81,12 @@ mod tests {
             }]),
             ..Component::default()
         };
-        let mut step = ReleasePlanStep {
-            id: "changelog.finalize".to_string(),
-            step_type: "changelog.finalize".to_string(),
-            label: None,
-            needs: vec![],
-            config: std::collections::HashMap::new(),
-            status: ReleasePlanStatus::Ready,
-            missing: vec![],
-        };
-        step.config
+        let mut step = PlanStep::ready("changelog.finalize", "changelog.finalize").build();
+        step.inputs
             .insert("from".to_string(), serde_json::json!("0.6.12"));
-        step.config
+        step.inputs
             .insert("to".to_string(), serde_json::json!("0.6.13"));
-        step.config.insert(
+        step.inputs.insert(
             "entries".to_string(),
             serde_json::json!({ "Fixed": ["Close release plan gap"] }),
         );

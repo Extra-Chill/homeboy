@@ -1,5 +1,6 @@
-use crate::component::{self, Component, DependencyStackEdge};
-use crate::{Error, Result};
+use crate::core::component::{self, Component, DependencyStackEdge};
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
+use crate::core::{Error, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
@@ -21,8 +22,10 @@ pub struct DependencyStackEdgeStatus {
     pub test: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct DependencyStackPlan {
+    #[serde(flatten)]
+    pub plan: HomeboyPlan,
     pub upstream: String,
     pub step_count: usize,
     pub steps: Vec<DependencyStackPlanStep>,
@@ -199,11 +202,49 @@ pub fn stack_plan_from_components(
         }
     }
 
-    Ok(DependencyStackPlan {
-        upstream: upstream.to_string(),
-        step_count: steps.len(),
-        steps,
-    })
+    Ok(DependencyStackPlan::new(upstream, steps))
+}
+
+impl DependencyStackPlan {
+    pub fn new(upstream: impl Into<String>, steps: Vec<DependencyStackPlanStep>) -> Self {
+        let upstream = upstream.into();
+        let plan = HomeboyPlan::builder_for_component(PlanKind::DependencyStack, upstream.clone())
+            .steps(steps.iter().map(stack_step))
+            .summarize()
+            .build();
+
+        Self {
+            plan,
+            upstream,
+            step_count: steps.len(),
+            steps,
+        }
+    }
+}
+
+fn stack_step(step: &DependencyStackPlanStep) -> PlanStep {
+    PlanStep::ready(
+        format!("deps.stack.{:03}.{}", step.sequence, step.downstream),
+        "deps.stack.update_downstream",
+    )
+    .label(format!(
+        "Update {} in {} from {}",
+        step.package, step.downstream, step.upstream
+    ))
+    .scope(vec![step.downstream.clone()])
+    .inputs(
+        PlanValues::new()
+            .string(
+                "declaring_component_id",
+                step.declaring_component_id.clone(),
+            )
+            .string("upstream", step.upstream.clone())
+            .string("downstream", step.downstream.clone())
+            .string("downstream_path", step.downstream_path.clone())
+            .string("package", step.package.clone())
+            .string("update_command", step.update_command.clone()),
+    )
+    .build()
 }
 
 fn edge_status(component: &Component, edge: &DependencyStackEdge) -> DependencyStackEdgeStatus {

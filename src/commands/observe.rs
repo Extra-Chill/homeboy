@@ -10,14 +10,14 @@ use clap::Args;
 use regex::Regex;
 use serde::Serialize;
 
-use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::engine::run_dir::{self, RunDir};
-use homeboy::extension::trace::{
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::engine::run_dir::{self, RunDir};
+use homeboy::core::extension::trace::{
     ActiveTraceProbes, TraceArtifact, TraceEvent, TraceProbeConfig, TraceResults, TraceStatus,
 };
-use homeboy::git::short_head_revision_at;
-use homeboy::observation::{NewRunRecord, ObservationStore, RunStatus};
-use homeboy::Error;
+use homeboy::core::git::short_head_revision_at;
+use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
+use homeboy::core::Error;
 
 use super::utils::args::PositionalComponentArgs;
 use super::{CmdResult, GlobalArgs};
@@ -121,16 +121,16 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
         "run_dir": run_dir.path(),
     });
 
-    let run = store.start_run(NewRunRecord {
-        kind: "observe".to_string(),
-        component_id: Some(component_id.clone()),
-        command: Some(command),
-        cwd: Some(component_path.to_string_lossy().to_string()),
-        homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        git_sha: short_head_revision_at(&component_path),
-        rig_id: None,
-        metadata_json: initial_metadata,
-    })?;
+    let run = store.start_run(
+        NewRunRecord::builder("observe")
+            .component_id(component_id.clone())
+            .command(command)
+            .cwd_path(&component_path)
+            .current_homeboy_version()
+            .git_sha(short_head_revision_at(&component_path))
+            .metadata(initial_metadata)
+            .build(),
+    )?;
 
     let mut status = RunStatus::Pass;
     let observe_result = collect_timeline(&args);
@@ -199,7 +199,7 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
     ))
 }
 
-fn validate_probe_selection(args: &ObserveArgs) -> homeboy::Result<()> {
+fn validate_probe_selection(args: &ObserveArgs) -> homeboy::core::Result<()> {
     if args.tail_logs.is_empty() && args.watch_processes.is_empty() && args.probes.is_empty() {
         return Err(Error::validation_invalid_argument(
             "probe",
@@ -217,7 +217,7 @@ fn validate_probe_selection(args: &ObserveArgs) -> homeboy::Result<()> {
     Ok(())
 }
 
-fn collect_timeline(args: &ObserveArgs) -> homeboy::Result<Vec<TraceEvent>> {
+fn collect_timeline(args: &ObserveArgs) -> homeboy::core::Result<Vec<TraceEvent>> {
     let start = Instant::now();
     let mut tail_logs = build_tail_log_states(args)?;
     let mut process_watches = build_process_watch_states(args)?;
@@ -247,7 +247,9 @@ fn collect_timeline(args: &ObserveArgs) -> homeboy::Result<Vec<TraceEvent>> {
     Ok(timeline)
 }
 
-fn build_standard_probe_configs(args: &ObserveArgs) -> homeboy::Result<Vec<TraceProbeConfig>> {
+fn build_standard_probe_configs(
+    args: &ObserveArgs,
+) -> homeboy::core::Result<Vec<TraceProbeConfig>> {
     args.probes
         .iter()
         .map(|raw| {
@@ -263,7 +265,7 @@ fn build_standard_probe_configs(args: &ObserveArgs) -> homeboy::Result<Vec<Trace
         .collect()
 }
 
-fn build_tail_log_states(args: &ObserveArgs) -> homeboy::Result<Vec<TailLogState>> {
+fn build_tail_log_states(args: &ObserveArgs) -> homeboy::core::Result<Vec<TailLogState>> {
     let grep = args
         .grep
         .as_deref()
@@ -286,7 +288,7 @@ fn build_tail_log_states(args: &ObserveArgs) -> homeboy::Result<Vec<TailLogState
         .collect()
 }
 
-fn build_process_watch_states(args: &ObserveArgs) -> homeboy::Result<Vec<ProcessWatchState>> {
+fn build_process_watch_states(args: &ObserveArgs) -> homeboy::core::Result<Vec<ProcessWatchState>> {
     args.watch_processes
         .iter()
         .map(|pattern| {
@@ -315,7 +317,7 @@ fn watch_process_is_due(state: &mut ProcessWatchState, start: Instant, interval:
     false
 }
 
-fn poll_tail_log(state: &mut TailLogState, t_ms: u64) -> homeboy::Result<Vec<TraceEvent>> {
+fn poll_tail_log(state: &mut TailLogState, t_ms: u64) -> homeboy::core::Result<Vec<TraceEvent>> {
     let mut file = match File::open(&state.path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -375,7 +377,7 @@ fn poll_tail_log(state: &mut TailLogState, t_ms: u64) -> homeboy::Result<Vec<Tra
 fn poll_process_watch(
     state: &mut ProcessWatchState,
     t_ms: u64,
-) -> homeboy::Result<Vec<TraceEvent>> {
+) -> homeboy::core::Result<Vec<TraceEvent>> {
     let output = Command::new("ps")
         .args(["-axo", "pid=,ppid=,command="])
         .output()
@@ -470,7 +472,7 @@ fn parse_process_snapshot(stdout: &str) -> Vec<(u32, ProcessInfo)> {
         .collect()
 }
 
-fn write_trace_results(path: &Path, results: &TraceResults) -> homeboy::Result<()> {
+fn write_trace_results(path: &Path, results: &TraceResults) -> homeboy::core::Result<()> {
     let content = serde_json::to_string_pretty(results).map_err(|e| {
         Error::internal_unexpected(format!("Failed to serialize observe timeline: {e}"))
     })?;

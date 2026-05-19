@@ -11,7 +11,7 @@ mod orphaned_test_fixes;
 mod parameter_fixes;
 mod signatures;
 
-use crate::code_audit::{fingerprint::FileFingerprint, AuditFinding, CodeAuditResult};
+use crate::core::code_audit::{fingerprint::FileFingerprint, AuditFinding, CodeAuditResult};
 use crate::core::refactor::auto::{DecomposeFixPlan, Fix, FixPolicy, FixResult, SkippedFile};
 use crate::core::refactor::decompose;
 use crate::core::refactor::plan::file_intent::{FileIntent, FileIntentMap};
@@ -114,7 +114,7 @@ pub(crate) fn generate_fixes_impl(
         if matches!(
             finding.kind,
             AuditFinding::GodFile | AuditFinding::HighItemCount
-        ) && !crate::code_audit::walker::is_test_path(&finding.file)
+        ) && !crate::core::code_audit::walker::is_test_path(&finding.file)
         {
             intent_map.set(finding.file.clone(), FileIntent::Decompose);
         }
@@ -168,7 +168,7 @@ pub(crate) fn generate_fixes_impl(
             if decompose_seen.contains(&finding.file) {
                 continue;
             }
-            let is_test = crate::code_audit::walker::is_test_path(&finding.file);
+            let is_test = crate::core::code_audit::walker::is_test_path(&finding.file);
             if is_test {
                 continue;
             }

@@ -12,16 +12,17 @@
 //! steps, so the DAG scaffolding bought nothing but indirection. The logic
 //! inside each `run_*` function is unchanged; only the plumbing is different.
 
-use crate::component::Component;
-use crate::engine::local_files::FileSystem;
-use crate::engine::validation;
-use crate::error::{Error, Result};
-use crate::extension::{self, ExtensionManifest};
-use crate::{changelog as release_changelog, version};
+use crate::core::component::Component;
+use crate::core::engine::local_files::FileSystem;
+use crate::core::engine::validation;
+use crate::core::error::{Error, Result};
+use crate::core::extension::{self, ExtensionManifest};
+use crate::core::release::{changelog as release_changelog, version};
 
 use super::types::{ReleaseArtifact, ReleaseState, ReleaseStepResult, ReleaseStepStatus};
 use super::utils::{extract_latest_notes, parse_release_artifacts};
 
+pub(crate) mod artifacts;
 pub(crate) mod changelog;
 pub(crate) mod prepare;
 
@@ -30,7 +31,7 @@ pub(crate) fn step_success(
     id: &str,
     step_type: &str,
     data: Option<serde_json::Value>,
-    hints: Vec<crate::error::Hint>,
+    hints: Vec<crate::core::error::Hint>,
 ) -> ReleaseStepResult {
     ReleaseStepResult {
         id: id.to_string(),
@@ -50,7 +51,7 @@ fn step_failed(
     step_type: &str,
     data: Option<serde_json::Value>,
     error: Option<String>,
-    hints: Vec<crate::error::Hint>,
+    hints: Vec<crate::core::error::Hint>,
 ) -> ReleaseStepResult {
     ReleaseStepResult {
         id: id.to_string(),
@@ -136,7 +137,7 @@ pub(crate) fn run_version(
             "version",
             Some(failure_data),
             Some(error_msg),
-            vec![crate::error::Hint {
+            vec![crate::core::error::Hint {
                 message: "If a previous run partially bumped this component, run `homeboy release <component> --recover` to finish it cleanly.".to_string(),
             }],
         ));
@@ -235,7 +236,7 @@ fn collect_head_version_mismatches(
 /// repository toplevel regardless of cwd.
 fn git_toplevel(path: &str) -> Option<std::path::PathBuf> {
     let output =
-        crate::git::execute_git_for_release(path, &["rev-parse", "--show-toplevel"]).ok()?;
+        crate::core::git::execute_git_for_release(path, &["rev-parse", "--show-toplevel"]).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -252,9 +253,9 @@ fn git_toplevel(path: &str) -> Option<std::path::PathBuf> {
 /// HEAD, the git command fails, or the content can't be parsed.
 fn read_version_at_head(
     component: &Component,
-    target: &crate::component::VersionTarget,
+    target: &crate::core::component::VersionTarget,
 ) -> Option<String> {
-    use crate::release::version::{
+    use crate::core::release::version::{
         default_pattern_for_file, parse_version, resolve_version_file_path,
     };
 
@@ -295,13 +296,13 @@ fn read_version_at_head(
 
     let spec = format!("HEAD:{}", rel_path);
     let output =
-        crate::git::execute_git_for_release(&component.local_path, &["show", &spec]).ok()?;
+        crate::core::git::execute_git_for_release(&component.local_path, &["show", &spec]).ok()?;
     if !output.status.success() {
         return None;
     }
 
     let content = String::from_utf8(output.stdout).ok()?;
-    let normalized_pattern = crate::component::normalize_version_pattern(&pattern);
+    let normalized_pattern = crate::core::component::normalize_version_pattern(&pattern);
     parse_version(&content, &normalized_pattern)
 }
 
@@ -313,7 +314,8 @@ pub(crate) fn run_git_commit(
     component_id: &str,
     state: &ReleaseState,
 ) -> Result<ReleaseStepResult> {
-    let status_output = crate::git::status_at(Some(component_id), Some(&component.local_path))?;
+    let status_output =
+        crate::core::git::status_at(Some(component_id), Some(&component.local_path))?;
     let is_clean = status_output.stdout.trim().is_empty();
 
     if is_clean {
@@ -336,14 +338,14 @@ pub(crate) fn run_git_commit(
         .map(|v| format!("release: v{}", v))
         .unwrap_or_else(|| "release: unknown".to_string());
 
-    let options = crate::git::CommitOptions {
+    let options = crate::core::git::CommitOptions {
         staged_only: false,
         files: None,
         exclude: None,
         amend: should_amend,
     };
 
-    let output = crate::git::commit_at(
+    let output = crate::core::git::commit_at(
         Some(component_id),
         Some(&message),
         options,
@@ -412,7 +414,7 @@ pub(crate) fn run_git_tag(
                     "mismatches": mismatches,
                 })),
                 Some(error_msg),
-                vec![crate::error::Hint {
+                vec![crate::core::error::Hint {
                     message: format!(
                         "Inspect the failed bump: `git status` then `git log -1`. To finish a partial release, run `homeboy release {} --recover`.",
                         component_id
@@ -422,9 +424,9 @@ pub(crate) fn run_git_tag(
         }
     }
 
-    if crate::git::tag_exists_locally(&component.local_path, tag_name).unwrap_or(false) {
-        let tag_commit = crate::git::get_tag_commit(&component.local_path, tag_name)?;
-        let head_commit = crate::git::get_head_commit(&component.local_path)?;
+    if crate::core::git::tag_exists_locally(&component.local_path, tag_name).unwrap_or(false) {
+        let tag_commit = crate::core::git::get_tag_commit(&component.local_path, tag_name)?;
+        let head_commit = crate::core::git::get_head_commit(&component.local_path)?;
 
         if tag_commit == head_commit {
             state.tag = Some(tag_name.to_string());
@@ -458,7 +460,7 @@ pub(crate) fn run_git_tag(
     }
 
     let message = format!("Release {}", tag_name);
-    let output = crate::git::tag_at(
+    let output = crate::core::git::tag_at(
         Some(component_id),
         Some(tag_name),
         Some(&message),
@@ -472,19 +474,21 @@ pub(crate) fn run_git_tag(
 
         if output.stderr.contains("already exists") {
             let local_exists =
-                crate::git::tag_exists_locally(&component.local_path, tag_name).unwrap_or(false);
+                crate::core::git::tag_exists_locally(&component.local_path, tag_name)
+                    .unwrap_or(false);
             let remote_exists =
-                crate::git::tag_exists_on_remote(&component.local_path, tag_name).unwrap_or(false);
+                crate::core::git::tag_exists_on_remote(&component.local_path, tag_name)
+                    .unwrap_or(false);
 
             if local_exists && !remote_exists {
-                hints.push(crate::error::Hint {
+                hints.push(crate::core::error::Hint {
                     message: format!(
                         "Tag '{}' exists locally but not on remote. Push it with: git push origin {}",
                         tag_name, tag_name
                     ),
                 });
             } else if local_exists && remote_exists {
-                hints.push(crate::error::Hint {
+                hints.push(crate::core::error::Hint {
                     message: format!(
                         "Tag '{}' already exists locally and on remote. Delete local tag first: git tag -d {}",
                         tag_name, tag_name
@@ -508,9 +512,9 @@ pub(crate) fn run_git_tag(
 
 /// Push commits (and tags) to the remote.
 pub(crate) fn run_git_push(component: &Component, component_id: &str) -> Result<ReleaseStepResult> {
-    let output = crate::git::push_at(
+    let output = crate::core::git::push_at(
         Some(component_id),
-        crate::git::PushOptions {
+        crate::core::git::PushOptions {
             tags: true,
             force_with_lease: false,
             ..Default::default()
@@ -759,11 +763,11 @@ pub(crate) fn run_post_release(
     component: &Component,
     commands: &[String],
 ) -> Result<ReleaseStepResult> {
-    let hook_result = crate::engine::hooks::run_commands(
+    let hook_result = crate::core::engine::hooks::run_commands(
         commands,
         &component.local_path,
-        crate::engine::hooks::events::POST_RELEASE,
-        crate::engine::hooks::HookFailureMode::NonFatal,
+        crate::core::engine::hooks::events::POST_RELEASE,
+        crate::core::engine::hooks::HookFailureMode::NonFatal,
     )?;
 
     if !hook_result.all_succeeded {
@@ -830,7 +834,9 @@ pub(crate) fn run_github_release(
         .remote_url
         .clone()
         .or_else(|| {
-            crate::deploy::release_download::detect_remote_url(std::path::Path::new(local_path))
+            crate::core::deploy::release_download::detect_remote_url(std::path::Path::new(
+                local_path,
+            ))
         })
         .ok_or_else(|| {
             Error::internal_unexpected(
@@ -840,7 +846,7 @@ pub(crate) fn run_github_release(
         })?;
 
     let github =
-        crate::deploy::release_download::parse_github_url(&remote_url).ok_or_else(|| {
+        crate::core::deploy::release_download::parse_github_url(&remote_url).ok_or_else(|| {
             Error::validation_invalid_argument(
                 "github.release",
                 format!("Remote URL '{}' is not a GitHub URL", remote_url),
@@ -901,23 +907,102 @@ pub(crate) fn run_github_release(
         ));
     }
 
+    // Collect artifact paths from state. Populated by release.package
+    // (or any other extension action that emits artifact metadata into
+    // ReleaseState::artifacts). Passing these to `gh release create` or
+    // `gh release upload --clobber` attaches them to the Release in a
+    // single API call — keeping the github.release step responsible for
+    // the full Release lifecycle (entry + assets) instead of requiring a
+    // separate publish.<target> step.
+    let artifact_paths: Vec<String> = state
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.path.clone())
+        .collect();
+    let has_artifacts = !artifact_paths.is_empty();
+
     let repo_flag = format!("{}/{}", github.owner, github.repo);
     if gh_release_exists(&tag, &repo_flag) {
+        // Release entry already exists (idempotent retry, or release
+        // created out of band). When the release has no artifacts to
+        // attach, skip — there is nothing to update. When artifacts are
+        // present, upload them with --clobber so retries keep the latest
+        // build attached without duplicating the GitHub Release entry.
+        if !has_artifacts {
+            log_status!(
+                "release",
+                "GitHub Release {} already exists for {} — skipping (idempotent)",
+                tag,
+                repo_flag
+            );
+            return Ok(step_success(
+                "github.release",
+                "github.release",
+                Some(serde_json::json!({
+                    "skipped": true,
+                    "reason": "release-already-exists",
+                    "tag": tag,
+                    "owner": github.owner,
+                    "repo": github.repo,
+                })),
+                Vec::new(),
+            ));
+        }
+
         log_status!(
             "release",
-            "GitHub Release {} already exists for {} — skipping (idempotent)",
+            "GitHub Release {} already exists for {} — uploading {} artifact(s) with --clobber",
             tag,
-            repo_flag
+            repo_flag,
+            artifact_paths.len()
         );
+
+        let mut upload_args: Vec<&str> = vec!["release", "upload", &tag];
+        for path in &artifact_paths {
+            upload_args.push(path);
+        }
+        upload_args.extend_from_slice(&["--clobber", "-R", &repo_flag]);
+
+        let upload_output = std::process::Command::new("gh")
+            .args(&upload_args)
+            .output()
+            .map_err(|e| {
+                Error::internal_io(
+                    format!("Failed to invoke gh: {}", e),
+                    Some("gh release upload".to_string()),
+                )
+            })?;
+
+        if !upload_output.status.success() {
+            let stderr = String::from_utf8_lossy(&upload_output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&upload_output.stdout).to_string();
+            log_status!("release", "⚠ `gh release upload` failed: {}", stderr.trim());
+            return Ok(step_success(
+                "github.release",
+                "github.release",
+                Some(serde_json::json!({
+                    "skipped": true,
+                    "reason": "gh-upload-failed",
+                    "tag": tag,
+                    "owner": github.owner,
+                    "repo": github.repo,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "artifact_count": artifact_paths.len(),
+                })),
+                Vec::new(),
+            ));
+        }
+
         return Ok(step_success(
             "github.release",
             "github.release",
             Some(serde_json::json!({
-                "skipped": true,
-                "reason": "release-already-exists",
+                "action": "github.release.upload",
                 "tag": tag,
                 "owner": github.owner,
                 "repo": github.repo,
+                "artifact_count": artifact_paths.len(),
             })),
             Vec::new(),
         ));
@@ -929,7 +1014,7 @@ pub(crate) fn run_github_release(
         notes
     };
 
-    let tmp_dir = crate::engine::temp::runtime_temp_dir("github-release")?;
+    let tmp_dir = crate::core::engine::temp::runtime_temp_dir("github-release")?;
     let notes_path = tmp_dir.join(format!("notes-{}.md", sanitize_tag_for_filename(&tag)));
     std::fs::write(&notes_path, &notes_body).map_err(|e| {
         Error::internal_io(
@@ -938,29 +1023,38 @@ pub(crate) fn run_github_release(
         )
     })?;
 
+    let notes_path_str = notes_path.to_str().ok_or_else(|| {
+        Error::internal_unexpected("github.release: notes-file path is not valid UTF-8".to_string())
+    })?;
+
     log_status!(
         "release",
-        "Creating GitHub Release {} on {}...",
+        "Creating GitHub Release {} on {} with {} artifact(s)...",
         tag,
-        repo_flag
+        repo_flag,
+        artifact_paths.len()
     );
 
+    // Build args dynamically so we can append artifact paths as positional
+    // arguments — `gh release create <tag> [files...]` attaches each file
+    // as a Release asset in the same API call.
+    let mut create_args: Vec<&str> = vec![
+        "release",
+        "create",
+        &tag,
+        "--title",
+        &tag,
+        "--notes-file",
+        notes_path_str,
+        "-R",
+        &repo_flag,
+    ];
+    for path in &artifact_paths {
+        create_args.push(path);
+    }
+
     let output = std::process::Command::new("gh")
-        .args([
-            "release",
-            "create",
-            &tag,
-            "--title",
-            &tag,
-            "--notes-file",
-            notes_path.to_str().ok_or_else(|| {
-                Error::internal_unexpected(
-                    "github.release: notes-file path is not valid UTF-8".to_string(),
-                )
-            })?,
-            "-R",
-            &repo_flag,
-        ])
+        .args(&create_args)
         .output()
         .map_err(|e| {
             Error::internal_io(
@@ -1004,6 +1098,7 @@ pub(crate) fn run_github_release(
             "owner": github.owner,
             "repo": github.repo,
             "url": url,
+            "artifact_count": artifact_paths.len(),
         })),
         Vec::new(),
     ))
@@ -1015,7 +1110,7 @@ pub(crate) fn run_github_release(
 
 fn load_release_notes(component: &Component) -> Result<String> {
     let changelog_path = release_changelog::resolve_changelog_path(component)?;
-    let changelog_content = crate::engine::local_files::local().read(&changelog_path)?;
+    let changelog_content = crate::core::engine::local_files::local().read(&changelog_path)?;
     validation::require(
         extract_latest_notes(&changelog_content),
         "changelog",
@@ -1024,8 +1119,9 @@ fn load_release_notes(component: &Component) -> Result<String> {
 }
 
 fn should_amend_release_commit(local_path: &str) -> Result<bool> {
-    let log_output = crate::git::execute_git_for_release(local_path, &["log", "-1", "--format=%s"])
-        .map_err(|e| Error::internal_io(e.to_string(), Some("git log".to_string())))?;
+    let log_output =
+        crate::core::git::execute_git_for_release(local_path, &["log", "-1", "--format=%s"])
+            .map_err(|e| Error::internal_io(e.to_string(), Some("git log".to_string())))?;
     if !log_output.status.success() {
         return Ok(false);
     }
@@ -1037,8 +1133,9 @@ fn should_amend_release_commit(local_path: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let status_output = crate::git::execute_git_for_release(local_path, &["status", "-sb"])
-        .map_err(|e| Error::internal_io(e.to_string(), Some("git status".to_string())))?;
+    let status_output =
+        crate::core::git::execute_git_for_release(local_path, &["status", "-sb"])
+            .map_err(|e| Error::internal_io(e.to_string(), Some("git status".to_string())))?;
     if !status_output.status.success() {
         return Ok(false);
     }
@@ -1135,15 +1232,15 @@ fn store_artifacts_from_output(
 // ---------------------------------------------------------------------------
 
 fn gh_is_available() -> bool {
-    crate::git::gh_probe_succeeds(&["--version"])
+    crate::core::git::gh_probe_succeeds(&["--version"])
 }
 
 fn gh_is_authenticated() -> bool {
-    crate::git::gh_probe_succeeds(&["auth", "status", "--hostname", "github.com"])
+    crate::core::git::gh_probe_succeeds(&["auth", "status", "--hostname", "github.com"])
 }
 
 fn gh_release_exists(tag: &str, repo_flag: &str) -> bool {
-    crate::git::gh_probe_succeeds(&["release", "view", tag, "-R", repo_flag])
+    crate::core::git::gh_probe_succeeds(&["release", "view", tag, "-R", repo_flag])
 }
 
 fn fallback_gh_command(tag: &str) -> String {
@@ -1171,8 +1268,8 @@ mod tests {
         fallback_gh_command, publish_step_result, run_git_push, sanitize_tag_for_filename,
         store_artifacts_from_output,
     };
-    use crate::component::Component;
-    use crate::release::ReleaseStepStatus;
+    use crate::core::component::Component;
+    use crate::core::release::ReleaseStepStatus;
     use std::process::Command;
 
     #[test]
@@ -1289,7 +1386,7 @@ mod tests {
             "stdout": "",
             "stderr": "",
         });
-        let mut state = crate::release::types::ReleaseState::default();
+        let mut state = crate::core::release::types::ReleaseState::default();
 
         let err = store_artifacts_from_output(&mut state, &response)
             .expect_err("empty failing package output should fail");
@@ -1301,8 +1398,8 @@ mod tests {
     // ----- Orphan-tag regression coverage (issue #2234) -----
 
     use super::{collect_head_version_mismatches, collect_version_target_mismatches, run_git_tag};
-    use crate::component::VersionTarget;
-    use crate::release::types::ReleaseState;
+    use crate::core::component::VersionTarget;
+    use crate::core::release::types::ReleaseState;
 
     fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         let output = std::process::Command::new(args[0])
@@ -1487,7 +1584,7 @@ mod tests {
         );
         assert!(err.contains("v0.6.13"), "error should name the tag");
         assert!(
-            !crate::git::tag_exists_locally(&component.local_path, "v0.6.13").unwrap_or(true),
+            !crate::core::git::tag_exists_locally(&component.local_path, "v0.6.13").unwrap_or(true),
             "tag must NOT have been created when invariant fails"
         );
     }
@@ -1506,7 +1603,7 @@ mod tests {
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
         assert!(
-            crate::git::tag_exists_locally(&component.local_path, "v0.6.13").unwrap_or(false),
+            crate::core::git::tag_exists_locally(&component.local_path, "v0.6.13").unwrap_or(false),
             "tag should have been created on HEAD"
         );
     }

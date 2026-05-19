@@ -14,7 +14,7 @@ use super::records::{
     NewTraceRunRecord, NewTraceSpanRecord, NewTriageItemRecord, RunListFilter, RunRecord,
     RunStatus, TraceRunRecord, TraceSpanRecord, TriageItemRecord, TriagePullRequestSignals,
 };
-use crate::{paths, Error, Result};
+use crate::core::{paths, Error, Result};
 
 pub const CURRENT_SCHEMA_VERSION: i64 = 5;
 
@@ -683,7 +683,7 @@ impl ObservationStore {
         collect_rows(rows, "collect artifact records")
     }
 
-    fn get_artifact(&self, artifact_id: &str) -> Result<Option<ArtifactRecord>> {
+    pub fn get_artifact(&self, artifact_id: &str) -> Result<Option<ArtifactRecord>> {
         validate_required("artifact_id", artifact_id)?;
         self.connection
             .query_row(
@@ -1077,16 +1077,26 @@ fn with_run_owner_metadata(mut metadata: serde_json::Value) -> serde_json::Value
         "pid": std::process::id(),
         "recorded_at": chrono::Utc::now().to_rfc3339(),
     });
+    let source_snapshot = std::env::var("HOMEBOY_SOURCE_SNAPSHOT_JSON")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
 
     if let Some(object) = metadata.as_object_mut() {
         object.insert("homeboy_run_owner".to_string(), owner);
+        if let Some(source_snapshot) = source_snapshot {
+            object.insert("source_snapshot".to_string(), source_snapshot);
+        }
         return metadata;
     }
 
-    serde_json::json!({
+    let mut wrapped = serde_json::json!({
         "homeboy_run_owner": owner,
         "homeboy_original_metadata": metadata,
-    })
+    });
+    if let (Some(object), Some(source_snapshot)) = (wrapped.as_object_mut(), source_snapshot) {
+        object.insert("source_snapshot".to_string(), source_snapshot);
+    }
+    wrapped
 }
 
 fn parse_metadata(raw: String) -> rusqlite::Result<serde_json::Value> {
@@ -1313,16 +1323,15 @@ mod api_coverage_tests {
     }
 
     fn new_run(kind: &str) -> NewRunRecord {
-        NewRunRecord {
-            kind: kind.to_string(),
-            component_id: Some("homeboy".to_string()),
-            command: Some(format!("homeboy {kind}")),
-            cwd: Some("/tmp/homeboy".to_string()),
-            homeboy_version: Some("test".to_string()),
-            git_sha: Some("abc123".to_string()),
-            rig_id: Some("studio".to_string()),
-            metadata_json: serde_json::json!({ "source": "inline" }),
-        }
+        NewRunRecord::builder(kind)
+            .component_id("homeboy")
+            .command(format!("homeboy {kind}"))
+            .cwd_path(std::path::Path::new("/tmp/homeboy"))
+            .homeboy_version("test")
+            .git_sha(Some("abc123".to_string()))
+            .rig_id("studio")
+            .metadata(serde_json::json!({ "source": "inline" }))
+            .build()
     }
 
     #[test]
@@ -1365,6 +1374,29 @@ mod api_coverage_tests {
             let run = store.start_run(new_run("bench")).expect("start");
             assert_eq!(run.status, "running");
             assert_eq!(run.kind, "bench");
+        });
+    }
+
+    #[test]
+    fn test_start_run_records_source_snapshot_from_environment() {
+        with_isolated_home(|_| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let snapshot = serde_json::json!({
+                "runner_id": "lab",
+                "remote_path": "/srv/homeboy/repo",
+                "dirty": true,
+                "sync_mode": "snapshot",
+                "snapshot_hash": "sha256:dirty",
+                "synced_at": "2026-05-16T00:00:00Z",
+                "sync_excludes": ["node_modules/"]
+            });
+
+            std::env::set_var("HOMEBOY_SOURCE_SNAPSHOT_JSON", snapshot.to_string());
+            let run = store.start_run(new_run("test")).expect("start");
+            std::env::remove_var("HOMEBOY_SOURCE_SNAPSHOT_JSON");
+
+            assert_eq!(run.metadata_json["source_snapshot"], snapshot);
         });
     }
 
@@ -1472,7 +1504,7 @@ mod api_coverage_tests {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();
             let artifact_root = home.path().join("agent-readable-artifacts");
-            crate::set_artifact_root_override(Some(artifact_root.clone()));
+            crate::core::set_artifact_root_override(Some(artifact_root.clone()));
             let store = ObservationStore::open_initialized().expect("store");
             let run = store.start_run(new_run("bench")).expect("start");
             let path = home.path().join("artifact.json");
@@ -1555,15 +1587,13 @@ mod api_coverage_tests {
             let run = store.start_run(new_run("trace")).expect("start");
 
             let trace_run = store
-                .record_trace_run(NewTraceRunRecord {
-                    run_id: run.id.clone(),
-                    component_id: "studio".to_string(),
-                    rig_id: Some("studio-rig".to_string()),
-                    scenario_id: "create-site".to_string(),
-                    status: "pass".to_string(),
-                    baseline_status: Some("pass".to_string()),
-                    metadata_json: serde_json::json!({ "span_count": 1 }),
-                })
+                .record_trace_run(
+                    NewTraceRunRecord::builder(&run.id, "studio", "create-site", "pass")
+                        .trace_rig_id(Some("studio-rig"))
+                        .baseline_status(Some("pass"))
+                        .metadata(serde_json::json!({ "span_count": 1 }))
+                        .build(),
+                )
                 .expect("trace run");
 
             assert_eq!(trace_run.run_id, run.id);
@@ -1581,15 +1611,14 @@ mod api_coverage_tests {
             let run = store.start_run(new_run("trace")).expect("start");
 
             let span = store
-                .record_trace_span(NewTraceSpanRecord {
-                    run_id: run.id.clone(),
-                    span_id: "boot_to_ready".to_string(),
-                    status: "ok".to_string(),
-                    duration_ms: Some(125.0),
-                    from_event: Some("runner.boot".to_string()),
-                    to_event: Some("runner.ready".to_string()),
-                    metadata_json: serde_json::json!({ "source": "test" }),
-                })
+                .record_trace_span(
+                    NewTraceSpanRecord::builder(&run.id, "boot_to_ready", "ok")
+                        .duration_ms(Some(125.0))
+                        .from_event(Some("runner.boot"))
+                        .to_event(Some("runner.ready"))
+                        .metadata(serde_json::json!({ "source": "test" }))
+                        .build(),
+                )
                 .expect("trace span");
 
             let spans = store.list_trace_spans(&run.id).expect("spans");
@@ -1605,15 +1634,14 @@ mod api_coverage_tests {
             let source = ObservationStore::open_initialized().expect("source");
             let run = source.start_run(new_run("trace")).expect("run");
             let span = source
-                .record_trace_span(NewTraceSpanRecord {
-                    run_id: run.id.clone(),
-                    span_id: "boot".to_string(),
-                    status: "ok".to_string(),
-                    duration_ms: Some(42.0),
-                    from_event: Some("start".to_string()),
-                    to_event: Some("ready".to_string()),
-                    metadata_json: serde_json::json!({ "source": "import-test" }),
-                })
+                .record_trace_span(
+                    NewTraceSpanRecord::builder(&run.id, "boot", "ok")
+                        .duration_ms(Some(42.0))
+                        .from_event(Some("start"))
+                        .to_event(Some("ready"))
+                        .metadata(serde_json::json!({ "source": "import-test" }))
+                        .build(),
+                )
                 .expect("span");
 
             let target = ObservationStore::open_initialized().expect("target");
@@ -1630,26 +1658,22 @@ mod api_coverage_tests {
             let run = store.start_run(new_run("trace")).expect("start");
 
             store
-                .record_trace_span(NewTraceSpanRecord {
-                    run_id: run.id.clone(),
-                    span_id: "first".to_string(),
-                    status: "ok".to_string(),
-                    duration_ms: Some(10.0),
-                    from_event: Some("runner.first".to_string()),
-                    to_event: Some("runner.second".to_string()),
-                    metadata_json: serde_json::json!({}),
-                })
+                .record_trace_span(
+                    NewTraceSpanRecord::builder(&run.id, "first", "ok")
+                        .duration_ms(Some(10.0))
+                        .from_event(Some("runner.first"))
+                        .to_event(Some("runner.second"))
+                        .build(),
+                )
                 .expect("first span");
             store
-                .record_trace_span(NewTraceSpanRecord {
-                    run_id: run.id.clone(),
-                    span_id: "second".to_string(),
-                    status: "skipped".to_string(),
-                    duration_ms: None,
-                    from_event: Some("runner.second".to_string()),
-                    to_event: Some("runner.third".to_string()),
-                    metadata_json: serde_json::json!({ "missing": ["runner.third"] }),
-                })
+                .record_trace_span(
+                    NewTraceSpanRecord::builder(&run.id, "second", "skipped")
+                        .from_event(Some("runner.second"))
+                        .to_event(Some("runner.third"))
+                        .metadata(serde_json::json!({ "missing": ["runner.third"] }))
+                        .build(),
+                )
                 .expect("second span");
 
             let spans = store.list_trace_spans(&run.id).expect("spans");

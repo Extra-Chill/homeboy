@@ -1,10 +1,10 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::context;
-use homeboy::git::{self, ChangesOutput};
-use homeboy::project;
-use homeboy::BulkResult;
+use homeboy::core::context;
+use homeboy::core::git::{self, ChangesOutput};
+use homeboy::core::project;
+use homeboy::core::BulkResult;
 
 use super::utils::resolve::resolve_project_components;
 use super::CmdResult;
@@ -125,7 +125,7 @@ pub fn run(
     }
 
     // Multiple components or unmanaged: return error with helpful hints
-    let mut err = homeboy::Error::validation_invalid_argument(
+    let mut err = homeboy::core::Error::validation_invalid_argument(
         "input",
         "No component ID provided",
         None,
@@ -148,9 +148,9 @@ pub fn run(
     Err(err)
 }
 
-fn reject_path_for_bulk(path: Option<&str>, mode: &str) -> homeboy::Result<()> {
+fn reject_path_for_bulk(path: Option<&str>, mode: &str) -> homeboy::core::Result<()> {
     if path.is_some() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "path",
             format!(
                 "--path is only supported for single-component changes, not {}",

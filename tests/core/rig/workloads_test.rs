@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crate::rig::spec::RigSpec;
-use crate::rig::{
+use crate::core::rig::spec::RigSpec;
+use crate::core::rig::{
     check_groups_for_extension_workloads, extension_ids_for_workloads, workloads_for_extension,
     RigWorkloadKind,
 };
@@ -61,9 +61,9 @@ fn test_invocation_requirements_for_extension_workloads() {
     )
     .expect("parse rig spec");
 
-    let requirements = crate::rig::invocation_requirements_for_extension_workloads(
+    let requirements = crate::core::rig::invocation_requirements_for_extension_workloads(
         &rig_spec,
-        crate::rig::RigWorkloadKind::Bench,
+        crate::core::rig::RigWorkloadKind::Bench,
         "nodejs",
     );
 

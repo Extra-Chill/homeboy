@@ -9,8 +9,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::baseline::{self as generic, BaselineConfig};
-use crate::error::Result;
+use crate::core::engine::baseline::{self as generic, BaselineConfig};
+use crate::core::error::Result;
 
 const BASELINE_KEY: &str = "test";
 

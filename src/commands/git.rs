@@ -1,14 +1,14 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::git::{
+use homeboy::core::git::{
     self, CherryPickOptions, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrOutput,
     IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
     IssueFindOptions, IssueState, PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions,
     PrFindOptions, PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions, PrState,
     PushOptions, RebaseOptions,
 };
-use homeboy::BulkResult;
+use homeboy::core::BulkResult;
 
 use crate::commands::version;
 
@@ -834,7 +834,7 @@ pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Gi
                 None => {
                     // Need component_id to look up version
                     let id = component_id.as_ref().ok_or_else(|| {
-                        homeboy::Error::validation_invalid_argument(
+                        homeboy::core::Error::validation_invalid_argument(
                             "componentId",
                             "Missing componentId",
                             None,
@@ -939,7 +939,7 @@ fn run_issue(args: IssueArgs) -> CmdResult<GitCommandOutput> {
             path,
         } => {
             let body = resolve_body(body, body_file)?.ok_or_else(|| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "body",
                     "Comment body is required (--body or --body-file)",
                     None,
@@ -1107,7 +1107,7 @@ fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             path,
         } => {
             let body = resolve_body(body, body_file)?.ok_or_else(|| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "body",
                     "Comment body is required (--body or --body-file)",
                     None,
@@ -1227,7 +1227,10 @@ fn run_pr_policy(args: PrPolicyArgs) -> CmdResult<GitCommandOutput> {
 
 /// Resolve a body argument from either inline `--body` or a file path.
 /// Returns `Ok(None)` if neither is set. Supports `-` for stdin.
-fn resolve_body(inline: Option<String>, file: Option<String>) -> homeboy::Result<Option<String>> {
+fn resolve_body(
+    inline: Option<String>,
+    file: Option<String>,
+) -> homeboy::core::Result<Option<String>> {
     if let Some(body) = inline {
         return Ok(Some(body));
     }
@@ -1239,7 +1242,7 @@ fn resolve_body(inline: Option<String>, file: Option<String>) -> homeboy::Result
         use std::io::Read;
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf).map_err(|e| {
-            homeboy::Error::internal_io(
+            homeboy::core::Error::internal_io(
                 format!("Failed to read body from stdin: {}", e),
                 Some("stdin".into()),
             )
@@ -1248,7 +1251,7 @@ fn resolve_body(inline: Option<String>, file: Option<String>) -> homeboy::Result
     }
 
     let content = std::fs::read_to_string(&path).map_err(|e| {
-        homeboy::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!("Failed to read body file: {}", e),
             Some(path.clone()),
         )
@@ -1256,9 +1259,9 @@ fn resolve_body(inline: Option<String>, file: Option<String>) -> homeboy::Result
     Ok(Some(content))
 }
 
-fn read_lines_file(path: &str) -> homeboy::Result<Vec<String>> {
+fn read_lines_file(path: &str) -> homeboy::core::Result<Vec<String>> {
     let content = std::fs::read_to_string(path).map_err(|e| {
-        homeboy::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!("Failed to read lines file: {}", e),
             Some(path.to_string()),
         )
@@ -1271,12 +1274,12 @@ fn read_lines_file(path: &str) -> homeboy::Result<Vec<String>> {
         .collect())
 }
 
-fn parse_issue_state(s: &str) -> homeboy::Result<IssueState> {
+fn parse_issue_state(s: &str) -> homeboy::core::Result<IssueState> {
     match s {
         "open" => Ok(IssueState::Open),
         "closed" => Ok(IssueState::Closed),
         "all" => Ok(IssueState::All),
-        other => Err(homeboy::Error::validation_invalid_argument(
+        other => Err(homeboy::core::Error::validation_invalid_argument(
             "state",
             format!("Unknown issue state '{}'", other),
             None,
@@ -1285,13 +1288,13 @@ fn parse_issue_state(s: &str) -> homeboy::Result<IssueState> {
     }
 }
 
-fn parse_issue_close_reason(s: &str) -> homeboy::Result<IssueCloseReason> {
+fn parse_issue_close_reason(s: &str) -> homeboy::core::Result<IssueCloseReason> {
     // Accept both kebab-case (CLI ergonomic) and snake_case (matches GitHub
     // GraphQL state_reason values for symmetry with `--json stateReason`).
     match s {
         "completed" => Ok(IssueCloseReason::Completed),
         "not-planned" | "not_planned" => Ok(IssueCloseReason::NotPlanned),
-        other => Err(homeboy::Error::validation_invalid_argument(
+        other => Err(homeboy::core::Error::validation_invalid_argument(
             "reason",
             format!("Unknown close reason '{}'", other),
             None,
@@ -1300,13 +1303,13 @@ fn parse_issue_close_reason(s: &str) -> homeboy::Result<IssueCloseReason> {
     }
 }
 
-fn parse_pr_state(s: &str) -> homeboy::Result<PrState> {
+fn parse_pr_state(s: &str) -> homeboy::core::Result<PrState> {
     match s {
         "open" => Ok(PrState::Open),
         "closed" => Ok(PrState::Closed),
         "merged" => Ok(PrState::Merged),
         "all" => Ok(PrState::All),
-        other => Err(homeboy::Error::validation_invalid_argument(
+        other => Err(homeboy::core::Error::validation_invalid_argument(
             "state",
             format!("Unknown PR state '{}'", other),
             None,

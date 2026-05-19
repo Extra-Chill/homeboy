@@ -10,8 +10,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use homeboy::code_audit::FindingConfidence;
-use homeboy::issues::{
+use homeboy::core::code_audit::FindingConfidence;
+use homeboy::core::issues::{
     apply_plan, build_findings_from_native_output, reconcile_scoped, GithubTracker,
     IssueRenderContext, ReconcileConfig, ReconcileFindingsInput, ReconcilePlan, ReconcileResult,
     Tracker,
@@ -127,7 +127,7 @@ pub struct ReconcileOutput {
     pub command: String,
     pub applied: bool,
     /// Always populated — same shape regardless of dry-run vs apply.
-    pub plan_summary: PlanSummary,
+    pub plan_summary: ReconcileOutputSummary,
     /// Only populated when `applied = true`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<ReconcileResult>,
@@ -136,7 +136,7 @@ pub struct ReconcileOutput {
 }
 
 #[derive(Serialize, Default)]
-pub struct PlanSummary {
+pub struct ReconcileOutputSummary {
     pub total_actions: usize,
     pub file_new: usize,
     pub update: usize,
@@ -220,11 +220,11 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
 fn into_issue_groups(
     input: ReconcileFindingsInput,
     component_id: &str,
-) -> Vec<homeboy::issues::IssueGroup> {
+) -> Vec<homeboy::core::issues::IssueGroup> {
     input
         .groups
         .into_iter()
-        .map(|(category, row)| homeboy::issues::IssueGroup {
+        .map(|(category, row)| homeboy::core::issues::IssueGroup {
             command: input.command.clone(),
             component_id: component_id.to_string(),
             category,
@@ -240,17 +240,17 @@ fn read_reconcile_input(
     findings: Option<&str>,
     from_output: &[(String, String)],
     run_url: Option<String>,
-) -> homeboy::Result<ReconcileFindingsInput> {
+) -> homeboy::core::Result<ReconcileFindingsInput> {
     match (findings, from_output.is_empty()) {
         (Some(path), true) => read_findings(path),
         (None, false) => build_findings_input(from_output, run_url),
-        (Some(_), false) => Err(homeboy::Error::validation_invalid_argument(
+        (Some(_), false) => Err(homeboy::core::Error::validation_invalid_argument(
             "findings",
             "Use either --findings or --from-output, not both",
             None,
             None,
         )),
-        (None, true) => Err(homeboy::Error::validation_invalid_argument(
+        (None, true) => Err(homeboy::core::Error::validation_invalid_argument(
             "findings",
             "Missing --findings or --from-output",
             None,
@@ -265,9 +265,9 @@ fn read_reconcile_input(
 fn build_findings_input(
     from_output: &[(String, String)],
     run_url: Option<String>,
-) -> homeboy::Result<ReconcileFindingsInput> {
+) -> homeboy::core::Result<ReconcileFindingsInput> {
     if from_output.is_empty() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "from-output",
             "At least one --from-output COMMAND=PATH pair is required",
             None,
@@ -281,7 +281,7 @@ fn build_findings_input(
     for (command, path) in from_output {
         if let Some(existing) = command_label {
             if existing != command {
-                return Err(homeboy::Error::validation_invalid_argument(
+                return Err(homeboy::core::Error::validation_invalid_argument(
                     "from-output",
                     "Multiple command labels in one issue reconcile input are not supported yet",
                     None,
@@ -301,16 +301,16 @@ fn build_findings_input(
     Ok(merged)
 }
 
-fn read_findings(path: &str) -> homeboy::Result<ReconcileFindingsInput> {
+fn read_findings(path: &str) -> homeboy::core::Result<ReconcileFindingsInput> {
     let value = read_json_value(path, "findings")?;
     parse_findings_value(value)
 }
 
-fn read_json_value(path: &str, label: &str) -> homeboy::Result<Value> {
+fn read_json_value(path: &str, label: &str) -> homeboy::core::Result<Value> {
     let raw = if path == "-" {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf).map_err(|e| {
-            homeboy::Error::internal_io(
+            homeboy::core::Error::internal_io(
                 format!("read {} from stdin: {}", label, e),
                 Some("stdin".into()),
             )
@@ -318,7 +318,7 @@ fn read_json_value(path: &str, label: &str) -> homeboy::Result<Value> {
         buf
     } else {
         std::fs::read_to_string(path).map_err(|e| {
-            homeboy::Error::internal_io(
+            homeboy::core::Error::internal_io(
                 format!("read {} file: {}", label, e),
                 Some(path.to_string()),
             )
@@ -326,7 +326,7 @@ fn read_json_value(path: &str, label: &str) -> homeboy::Result<Value> {
     };
 
     let value: Value = serde_json::from_str(&raw).map_err(|e| {
-        homeboy::Error::validation_invalid_json(
+        homeboy::core::Error::validation_invalid_json(
             e,
             Some("parse findings JSON".to_string()),
             Some(raw.chars().take(200).collect()),
@@ -336,9 +336,9 @@ fn read_json_value(path: &str, label: &str) -> homeboy::Result<Value> {
     Ok(value)
 }
 
-fn parse_findings_value(value: Value) -> homeboy::Result<ReconcileFindingsInput> {
+fn parse_findings_value(value: Value) -> homeboy::core::Result<ReconcileFindingsInput> {
     let obj = value.as_object().ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "findings",
             "Findings JSON must be an object with a `command` and `groups` field",
             None,
@@ -350,7 +350,7 @@ fn parse_findings_value(value: Value) -> homeboy::Result<ReconcileFindingsInput>
         .get("command")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "findings.command",
                 "Missing or non-string `command` field (e.g. \"audit\")",
                 None,
@@ -359,10 +359,10 @@ fn parse_findings_value(value: Value) -> homeboy::Result<ReconcileFindingsInput>
         })?
         .to_string();
 
-    let mut groups: BTreeMap<String, homeboy::issues::RenderedIssueGroup> = BTreeMap::new();
+    let mut groups: BTreeMap<String, homeboy::core::issues::RenderedIssueGroup> = BTreeMap::new();
     if let Some(groups_value) = obj.get("groups") {
         let groups_obj = groups_value.as_object().ok_or_else(|| {
-            homeboy::Error::validation_invalid_argument(
+            homeboy::core::Error::validation_invalid_argument(
                 "findings.groups",
                 "`groups` must be a JSON object keyed by category",
                 None,
@@ -371,7 +371,7 @@ fn parse_findings_value(value: Value) -> homeboy::Result<ReconcileFindingsInput>
         })?;
         for (category, row_value) in groups_obj {
             let row_obj = row_value.as_object().ok_or_else(|| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     format!("findings.groups.{}", category),
                     "Each group must be a JSON object with `count`, optional `label`, optional `body`, optional `confidence`",
                     None,
@@ -399,7 +399,7 @@ fn parse_findings_value(value: Value) -> homeboy::Result<ReconcileFindingsInput>
                 .and_then(parse_confidence);
             groups.insert(
                 category.clone(),
-                homeboy::issues::RenderedIssueGroup {
+                homeboy::core::issues::RenderedIssueGroup {
                     count,
                     label,
                     body,
@@ -440,7 +440,7 @@ fn render_plan_lines(plan: &ReconcilePlan) -> Vec<String> {
     plan.actions
         .iter()
         .map(|a| match a {
-            homeboy::issues::ReconcileAction::FileNew {
+            homeboy::core::issues::ReconcileAction::FileNew {
                 command,
                 component_id,
                 category,
@@ -450,13 +450,13 @@ fn render_plan_lines(plan: &ReconcilePlan) -> Vec<String> {
                 "file_new      {}: {} in {} ({})",
                 command, category, component_id, count
             ),
-            homeboy::issues::ReconcileAction::Update {
+            homeboy::core::issues::ReconcileAction::Update {
                 number,
                 category,
                 count,
                 ..
             } => format!("update        {} ({}) → #{}", category, count, number),
-            homeboy::issues::ReconcileAction::UpdateClosed {
+            homeboy::core::issues::ReconcileAction::UpdateClosed {
                 number,
                 category,
                 count,
@@ -465,10 +465,10 @@ fn render_plan_lines(plan: &ReconcilePlan) -> Vec<String> {
                 "update_closed {} ({}) → #{} (stays closed)",
                 category, count, number
             ),
-            homeboy::issues::ReconcileAction::Close {
+            homeboy::core::issues::ReconcileAction::Close {
                 number, category, ..
             } => format!("close         {} → #{}", category, number),
-            homeboy::issues::ReconcileAction::CloseDuplicate {
+            homeboy::core::issues::ReconcileAction::CloseDuplicate {
                 number,
                 keep,
                 category,
@@ -477,16 +477,16 @@ fn render_plan_lines(plan: &ReconcilePlan) -> Vec<String> {
                 "dedupe        {} → keep #{}, close #{}",
                 category, keep, number
             ),
-            homeboy::issues::ReconcileAction::Skip {
+            homeboy::core::issues::ReconcileAction::Skip {
                 category, reason, ..
             } => format!("skip          {} ({:?})", category, reason),
         })
         .collect()
 }
 
-fn summarize_plan(plan: &ReconcilePlan) -> PlanSummary {
+fn summarize_plan(plan: &ReconcilePlan) -> ReconcileOutputSummary {
     let counts = plan.counts();
-    PlanSummary {
+    ReconcileOutputSummary {
         total_actions: plan.actions.len(),
         file_new: counts.file_new,
         update: counts.update,

@@ -170,7 +170,7 @@ fn row_to_triage_item_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Triage
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observation::NewRunRecord;
+    use crate::core::observation::NewRunRecord;
     use crate::test_support::with_isolated_home;
 
     #[test]
@@ -220,16 +220,13 @@ mod tests {
 
     fn start_triage_run(store: &ObservationStore) -> RunRecord {
         store
-            .start_run(NewRunRecord {
-                kind: "triage".to_string(),
-                component_id: Some("workspace".to_string()),
-                command: Some("triage.workspace".to_string()),
-                cwd: None,
-                homeboy_version: Some("test".to_string()),
-                git_sha: None,
-                rig_id: None,
-                metadata_json: serde_json::json!({}),
-            })
+            .start_run(
+                NewRunRecord::builder("triage")
+                    .component_id("workspace")
+                    .command("triage.workspace")
+                    .homeboy_version("test")
+                    .build(),
+            )
             .expect("run")
     }
 

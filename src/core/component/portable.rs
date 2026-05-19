@@ -1,5 +1,5 @@
-use crate::component::{resolve_effective, Component};
-use crate::error::{Error, Result};
+use crate::core::component::{resolve_effective, Component};
+use crate::core::error::{Error, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -44,13 +44,13 @@ fn portable_component_id_from_value(portable: &Value, dir: &Path) -> Option<Stri
                 );
                 return None;
             }
-            return crate::engine::identifier::slugify_id(id_str, "component_id").ok();
+            return crate::core::engine::identifier::slugify_id(id_str, "component_id").ok();
         }
     }
 
     // No "id" key at all — infer from directory name (backward compat for minimal configs)
     let dir_name = dir.file_name()?.to_string_lossy();
-    crate::engine::identifier::slugify_id(&dir_name, "component_id").ok()
+    crate::core::engine::identifier::slugify_id(&dir_name, "component_id").ok()
 }
 
 pub fn infer_portable_component_id(dir: &Path) -> Result<String> {
@@ -136,8 +136,8 @@ pub fn write_portable_config(dir: &Path, component: &Component) -> Result<()> {
 
     validate_component_remote_urls(&merged)?;
 
-    let content = crate::config::to_string_pretty(&merged)?;
-    crate::engine::local_files::write_file_atomic(
+    let content = crate::core::config::to_string_pretty(&merged)?;
+    crate::core::engine::local_files::write_file_atomic(
         &path,
         &content,
         &format!("write {}", path.display()),
@@ -168,7 +168,7 @@ fn validate_github_remote_url_field(component: &Value, field: &str) -> Result<()
     if url.trim().is_empty() {
         return Ok(());
     }
-    if crate::deploy::release_download::parse_github_url(url).is_some() {
+    if crate::core::deploy::release_download::parse_github_url(url).is_some() {
         return Ok(());
     }
 
@@ -179,6 +179,7 @@ fn validate_github_remote_url_field(component: &Value, field: &str) -> Result<()
         Some(vec![
             "Use https://github.com/<owner>/<repo>.git".to_string(),
             "Or use git@github.com:<owner>/<repo>.git".to_string(),
+            "GitHub Enterprise hosts such as github.a8c.com are also supported".to_string(),
         ]),
     ))
 }
@@ -274,7 +275,7 @@ pub fn discover_from_portable(dir: &Path) -> Option<Component> {
 
         // Auto-detect remote_url from git if not already set
         if !obj.contains_key("remote_url") {
-            if let Some(url) = crate::deploy::release_download::detect_remote_url(dir) {
+            if let Some(url) = crate::core::deploy::release_download::detect_remote_url(dir) {
                 obj.insert("remote_url".to_string(), Value::String(url));
             }
         }
@@ -405,7 +406,8 @@ mod tests {
         );
 
         let patch = serde_json::json!({ "local_path": "/new/path" });
-        crate::config::merge_config(&mut component, patch, &[]).expect("merge should succeed");
+        crate::core::config::merge_config(&mut component, patch, &[])
+            .expect("merge should succeed");
 
         assert!(
             component.id.trim().is_empty(),
@@ -527,7 +529,7 @@ mod tests {
             .unwrap();
 
             let patch = r#"{"remote_url":"/Users/chubes/Developer/homeboy"}"#;
-            let result = crate::component::mutations::merge(Some("my-comp"), patch, &[]);
+            let result = crate::core::component::mutations::merge(Some("my-comp"), patch, &[]);
 
             assert!(result.is_err());
             assert_eq!(
@@ -568,5 +570,22 @@ mod tests {
             json.get("triage_remote_url").and_then(|v| v.as_str()),
             Some("git@github.com:Extra-Chill/homeboy.git")
         );
+    }
+
+    #[test]
+    fn write_accepts_github_enterprise_remote_urls() {
+        let dir = TempDir::new().expect("temp dir");
+        let mut component = Component::new(
+            "test-comp".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            String::new(),
+            None,
+        );
+        component.remote_url = Some("git@github.a8c.com:Automattic/intelligence.git".to_string());
+        component.triage_remote_url =
+            Some("https://github.a8c.com/Automattic/intelligence.git".to_string());
+
+        write_portable_config(dir.path(), &component)
+            .expect("GitHub Enterprise remotes should be valid");
     }
 }

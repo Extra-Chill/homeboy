@@ -1,6 +1,6 @@
-use crate::component::Component;
-use crate::error::Result;
-use crate::project;
+use crate::core::component::Component;
+use crate::core::error::Result;
+use crate::core::project;
 
 fn update_project_references(old_id: &str, new_id: &str) -> Result<()> {
     let projects = project::list().unwrap_or_default();
@@ -60,12 +60,12 @@ pub fn shared_components() -> Result<std::collections::HashMap<String, Vec<Strin
 }
 
 pub fn rename_component(id: &str, new_id: &str) -> Result<Component> {
-    let resolved_new_id = crate::engine::identifier::slugify_id(new_id, "component_id")?;
-    let component = crate::component::mutate_portable(id, |component| {
+    let resolved_new_id = crate::core::engine::identifier::slugify_id(new_id, "component_id")?;
+    let component = crate::core::component::mutate_portable(id, |component| {
         component.id = resolved_new_id.clone();
         Ok(())
     })?;
-    crate::component::inventory::rename_standalone_registration(id, &component)?;
+    crate::core::component::inventory::rename_standalone_registration(id, &component)?;
     update_project_references(id, &resolved_new_id)?;
     Ok(component)
 }

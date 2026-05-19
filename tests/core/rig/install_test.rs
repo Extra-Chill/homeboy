@@ -1,6 +1,6 @@
 //! Rig install lifecycle tests. Covers `src/core/rig/install.rs`.
 
-use crate::rig::{
+use crate::core::rig::{
     declared_id, discover_rigs, install, list, list_ids, load, read_source_metadata,
     read_stack_source_metadata,
 };
@@ -139,7 +139,7 @@ fn test_read_source_metadata_after_local_install() {
     assert_eq!(result.installed.len(), 1);
     assert_eq!(result.installed[0].id, "alpha");
 
-    let installed = crate::paths::rig_config("alpha").expect("rig path");
+    let installed = crate::core::paths::rig_config("alpha").expect("rig path");
     assert!(installed.exists());
     #[cfg(unix)]
     assert_eq!(fs::read_link(&installed).expect("symlink"), source);
@@ -165,13 +165,13 @@ fn install_package_with_sibling_stacks_installs_stack_specs() {
     assert_eq!(result.installed.len(), 1);
     assert_eq!(result.installed_stacks.len(), 1);
     assert_eq!(result.installed_stacks[0].id, "studio-combined");
-    let installed = crate::paths::stack_config("studio-combined").expect("stack path");
+    let installed = crate::core::paths::stack_config("studio-combined").expect("stack path");
     assert!(installed.exists());
     #[cfg(unix)]
     assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
-    assert_eq!(crate::stack::list().expect("stack list").len(), 1);
+    assert_eq!(crate::core::stack::list().expect("stack list").len(), 1);
     assert_eq!(
-        crate::stack::load("studio-combined")
+        crate::core::stack::load("studio-combined")
             .expect("load stack")
             .component,
         "studio"
@@ -204,8 +204,8 @@ fn install_multi_rig_package_can_select_id() {
     let result = install(package.path().to_str().unwrap(), Some("beta"), false).expect("install");
     assert_eq!(result.installed.len(), 1);
     assert_eq!(result.installed[0].id, "beta");
-    assert!(crate::paths::rig_config("beta").unwrap().exists());
-    assert!(!crate::paths::rig_config("alpha").unwrap().exists());
+    assert!(crate::core::paths::rig_config("beta").unwrap().exists());
+    assert!(!crate::core::paths::rig_config("alpha").unwrap().exists());
 }
 
 #[test]
@@ -217,8 +217,8 @@ fn install_multi_rig_package_can_install_all() {
 
     let result = install(package.path().to_str().unwrap(), None, true).expect("install");
     assert_eq!(result.installed.len(), 2);
-    assert!(crate::paths::rig_config("alpha").unwrap().exists());
-    assert!(crate::paths::rig_config("beta").unwrap().exists());
+    assert!(crate::core::paths::rig_config("alpha").unwrap().exists());
+    assert!(crate::core::paths::rig_config("beta").unwrap().exists());
 }
 
 #[test]
@@ -228,9 +228,9 @@ fn install_refreshes_existing_matching_local_rig_without_metadata() {
     let refreshed = minimal_rig("alpha").replace("alpha rig", "alpha rig refreshed");
     write_rig(package.path(), "alpha", &refreshed);
 
-    fs::create_dir_all(crate::paths::rigs().expect("rigs dir")).expect("rigs dir");
+    fs::create_dir_all(crate::core::paths::rigs().expect("rigs dir")).expect("rigs dir");
     fs::write(
-        crate::paths::rig_config("alpha").expect("alpha rig path"),
+        crate::core::paths::rig_config("alpha").expect("alpha rig path"),
         minimal_rig("alpha"),
     )
     .expect("stale installed rig");
@@ -238,8 +238,8 @@ fn install_refreshes_existing_matching_local_rig_without_metadata() {
     let result = install(package.path().to_str().unwrap(), None, false).expect("refresh");
 
     assert_eq!(result.installed.len(), 1);
-    let installed =
-        fs::read_to_string(crate::paths::rig_config("alpha").unwrap()).expect("installed rig");
+    let installed = fs::read_to_string(crate::core::paths::rig_config("alpha").unwrap())
+        .expect("installed rig");
     assert!(installed.contains("alpha rig refreshed"));
     assert_eq!(
         read_source_metadata("alpha").expect("metadata").rig_path,
@@ -253,9 +253,9 @@ fn install_rejects_existing_rig_with_different_declared_id() {
     let package = tempfile::tempdir().expect("package");
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-    fs::create_dir_all(crate::paths::rigs().expect("rigs dir")).expect("rigs dir");
+    fs::create_dir_all(crate::core::paths::rigs().expect("rigs dir")).expect("rigs dir");
     fs::write(
-        crate::paths::rig_config("alpha").expect("alpha rig path"),
+        crate::core::paths::rig_config("alpha").expect("alpha rig path"),
         minimal_rig("beta"),
     )
     .expect("conflicting installed rig");
@@ -271,9 +271,9 @@ fn install_refreshes_existing_matching_stack_without_metadata() {
     write_rig(package.path(), "studio", &minimal_rig("studio"));
     let stack_path = write_stack(package.path(), "studio-combined", "studio");
 
-    fs::create_dir_all(crate::paths::stacks().expect("stacks dir")).expect("stacks dir");
+    fs::create_dir_all(crate::core::paths::stacks().expect("stacks dir")).expect("stacks dir");
     fs::write(
-        crate::paths::stack_config("studio-combined").expect("stack path"),
+        crate::core::paths::stack_config("studio-combined").expect("stack path"),
         fs::read_to_string(&stack_path).expect("package stack"),
     )
     .expect("existing stack");
@@ -293,9 +293,9 @@ fn install_rejects_existing_stack_with_different_content() {
     write_rig(package.path(), "studio", &minimal_rig("studio"));
     write_stack(package.path(), "studio-combined", "studio");
 
-    fs::create_dir_all(crate::paths::stacks().expect("stacks dir")).expect("stacks dir");
+    fs::create_dir_all(crate::core::paths::stacks().expect("stacks dir")).expect("stacks dir");
     fs::write(
-        crate::paths::stack_config("studio-combined").expect("stack path"),
+        crate::core::paths::stack_config("studio-combined").expect("stack path"),
         minimal_stack("studio-combined", "other"),
     )
     .expect("conflicting stack");
@@ -307,9 +307,9 @@ fn install_rejects_existing_stack_with_different_content() {
 #[test]
 fn installed_filename_is_runtime_identity_when_declared_id_differs() {
     let _home = HomeGuard::new();
-    fs::create_dir_all(crate::paths::rigs().expect("rigs dir")).expect("rigs dir");
+    fs::create_dir_all(crate::core::paths::rigs().expect("rigs dir")).expect("rigs dir");
     fs::write(
-        crate::paths::rig_config("replacement").expect("replacement rig path"),
+        crate::core::paths::rig_config("replacement").expect("replacement rig path"),
         minimal_rig("alpha"),
     )
     .expect("replacement rig");
@@ -395,7 +395,7 @@ fn git_url_installs_clone_package_and_config_link() {
         .parent()
         .unwrap()
         .ends_with("rig-packages"));
-    assert!(crate::paths::rig_config("alpha").unwrap().exists());
+    assert!(crate::core::paths::rig_config("alpha").unwrap().exists());
     assert_eq!(read_source_metadata("alpha").unwrap().source, source);
 }
 
@@ -423,8 +423,8 @@ fn git_url_subpath_installs_single_rig_directory() {
     assert!(result.installed[0]
         .spec_path
         .ends_with("packages/studio/rig.json"));
-    assert!(crate::paths::rig_config("studio").unwrap().exists());
-    assert!(!crate::paths::rig_config("other").unwrap().exists());
+    assert!(crate::core::paths::rig_config("studio").unwrap().exists());
+    assert!(!crate::core::paths::rig_config("other").unwrap().exists());
 
     let metadata = read_source_metadata("studio").expect("metadata");
     assert_eq!(metadata.source, root_source.to_string_lossy());
@@ -449,13 +449,13 @@ fn git_url_subpath_installs_only_stacks_under_selected_subpath() {
 
     assert_eq!(result.installed_stacks.len(), 1);
     assert_eq!(result.installed_stacks[0].id, "studio-combined");
-    assert!(crate::paths::stack_config("studio-combined")
+    assert!(crate::core::paths::stack_config("studio-combined")
         .unwrap()
         .exists());
-    assert!(!crate::paths::stack_config("root-combined")
+    assert!(!crate::core::paths::stack_config("root-combined")
         .unwrap()
         .exists());
-    let stacks = crate::stack::list().expect("stack list");
+    let stacks = crate::core::stack::list().expect("stack list");
     assert_eq!(stacks.len(), 1);
     assert_eq!(stacks[0].id, "studio-combined");
 }

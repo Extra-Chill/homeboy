@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use crate::component::Component;
-use crate::engine::invocation::{InvocationGuard, InvocationRequirements};
-use crate::engine::resource;
-use crate::error::Result;
-use crate::server::CommandOutput;
+use crate::core::component::Component;
+use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
+use crate::core::engine::resource;
+use crate::core::error::Result;
+use crate::core::server::CommandOutput;
 
 /// Output from a extension runner script execution.
 pub struct RunnerOutput {
@@ -124,7 +124,7 @@ impl ExtensionRunner {
 
     /// Set the run directory, injecting HOMEBOY_RUN_DIR and all legacy
     /// per-file env vars so extension scripts work with either pattern.
-    pub fn with_run_dir(mut self, run_dir: &crate::engine::run_dir::RunDir) -> Self {
+    pub fn with_run_dir(mut self, run_dir: &crate::core::engine::run_dir::RunDir) -> Self {
         self.env_vars.extend(run_dir.legacy_env_vars());
         self.run_dir_path = Some(run_dir.path().to_path_buf());
         self
@@ -216,7 +216,8 @@ impl ExtensionRunner {
         }
 
         if let (Some(run_dir_path), Some(invocation)) = (&self.run_dir_path, invocation.as_ref()) {
-            let run_dir = crate::engine::run_dir::RunDir::from_existing(run_dir_path.clone())?;
+            let run_dir =
+                crate::core::engine::run_dir::RunDir::from_existing(run_dir_path.clone())?;
             invocation.preserve_artifacts(&run_dir)?;
         }
 
@@ -232,7 +233,7 @@ impl ExtensionRunner {
         let Some(path) = &self.run_dir_path else {
             return Ok(None);
         };
-        let run_dir = crate::engine::run_dir::RunDir::from_existing(path.clone())?;
+        let run_dir = crate::core::engine::run_dir::RunDir::from_existing(path.clone())?;
         InvocationGuard::acquire(&run_dir, &self.invocation_requirements).map(Some)
     }
 
@@ -277,9 +278,9 @@ impl ExtensionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::Component;
-    use crate::engine::run_dir::RunDir;
-    use crate::extension::ExtensionCapability;
+    use crate::core::component::Component;
+    use crate::core::engine::run_dir::RunDir;
+    use crate::core::extension::ExtensionCapability;
 
     fn context() -> ExtensionExecutionContext {
         ExtensionExecutionContext {

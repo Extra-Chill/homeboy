@@ -1,8 +1,8 @@
-use crate::component::Component;
-use crate::error::Result;
-use crate::git::UncommittedChanges;
-use crate::release::changelog;
-use crate::release::version::ComponentVersionInfo;
+use crate::core::component::Component;
+use crate::core::error::{Error, Result};
+use crate::core::git::UncommittedChanges;
+use crate::core::release::changelog;
+use crate::core::release::version::ComponentVersionInfo;
 
 use super::types::ReleaseOptions;
 
@@ -13,7 +13,11 @@ pub(super) fn validate_release_worktree(
     options: &ReleaseOptions,
     version_info: &ComponentVersionInfo,
 ) -> Result<Option<serde_json::Value>> {
-    let uncommitted = crate::git::get_uncommitted_changes(&component.local_path)?;
+    if options.pipeline.head && options.pipeline.from_artifacts.is_some() {
+        return Ok(None);
+    }
+
+    let uncommitted = crate::core::git::get_uncommitted_changes(&component.local_path)?;
     if !uncommitted.has_changes {
         return Ok(None);
     }
@@ -61,6 +65,48 @@ pub(super) fn validate_release_worktree(
     }
 
     Ok(None)
+}
+
+/// Stage 0 fail-fast: refuse to run release work when the working tree has
+/// unexplained dirty files before lint/test/build can drown out the real error.
+pub(super) fn validate_working_tree_fail_fast(component: &Component) -> Result<()> {
+    let uncommitted = crate::core::git::get_uncommitted_changes(&component.local_path)?;
+    if !uncommitted.has_changes {
+        return Ok(());
+    }
+
+    let all_files: Vec<String> = uncommitted
+        .staged
+        .iter()
+        .chain(uncommitted.unstaged.iter())
+        .chain(uncommitted.untracked.iter())
+        .cloned()
+        .collect();
+
+    let unexpected = filter_homeboy_managed(all_files);
+    if unexpected.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "working_tree",
+        "Uncommitted changes detected — refusing to release",
+        None,
+        Some(vec![
+            "Commit, stash, or discard changes before releasing".to_string(),
+            format!(
+                "Unexpected dirty files ({}): {}{}",
+                unexpected.len(),
+                unexpected
+                    .iter()
+                    .take(10)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if unexpected.len() > 10 { ", …" } else { "" }
+            ),
+        ]),
+    ))
 }
 
 const HOMEBOY_MANAGED_PREFIXES: &[&str] = &[
@@ -128,12 +174,12 @@ fn get_unexpected_uncommitted_files(
 mod tests {
     use super::{
         filter_homeboy_managed, get_release_allowed_files, get_unexpected_uncommitted_files,
-        is_homeboy_managed_path, validate_release_worktree,
+        is_homeboy_managed_path, validate_release_worktree, validate_working_tree_fail_fast,
     };
-    use crate::component::Component;
-    use crate::git::UncommittedChanges;
-    use crate::release::types::ReleaseOptions;
-    use crate::release::version::{ComponentVersionInfo, VersionTargetInfo};
+    use crate::core::component::Component;
+    use crate::core::git::UncommittedChanges;
+    use crate::core::release::types::ReleaseOptions;
+    use crate::core::release::version::{ComponentVersionInfo, VersionTargetInfo};
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new("git")
@@ -214,6 +260,51 @@ mod tests {
             .and_then(|value| value.as_array())
             .expect("details should include dirty files");
         assert_eq!(files[0].as_str(), Some("src.rs"));
+    }
+
+    #[test]
+    fn head_release_artifacts_skip_release_worktree_validation() {
+        let temp = git_repo();
+        let dir = temp.path();
+        std::fs::write(dir.join("CHANGELOG.md"), "# Changelog\n").unwrap();
+        std::fs::write(dir.join("manifest.toml"), "version = \"1.0.0\"\n").unwrap();
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
+        std::fs::create_dir(dir.join("artifacts")).unwrap();
+        std::fs::write(dir.join("artifacts/release.zip"), "fixture\n").unwrap();
+
+        let details = validate_release_worktree(
+            &git_component(dir),
+            &ReleaseOptions {
+                pipeline: crate::core::release::types::ReleasePipelineOptions {
+                    head: true,
+                    from_artifacts: Some("artifacts".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &version_info(dir),
+        )
+        .expect("head artifact releases should allow artifact directories");
+
+        assert!(details.is_none());
+    }
+
+    #[test]
+    fn test_validate_working_tree_fail_fast() {
+        let temp = git_repo();
+        let dir = temp.path();
+        std::fs::write(dir.join("README.md"), "initial\n").unwrap();
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
+        std::fs::write(dir.join("src.rs"), "unexpected\n").unwrap();
+
+        let err = validate_working_tree_fail_fast(&git_component(dir))
+            .expect_err("unexpected user file should fail fast");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("Uncommitted changes detected"));
+        assert!(err.details.to_string().contains("src.rs"));
     }
 
     #[test]

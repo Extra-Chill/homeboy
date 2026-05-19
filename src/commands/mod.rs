@@ -2,7 +2,7 @@ use base64::Engine;
 use clap::Args;
 use serde_json::{json, Map, Value};
 
-pub type CmdResult<T> = homeboy::Result<(T, i32)>;
+pub type CmdResult<T> = homeboy::core::Result<(T, i32)>;
 
 pub(crate) fn escape_markdown_table_cell(value: &str) -> String {
     value.replace('|', "\\|")
@@ -103,13 +103,13 @@ impl DynamicSetArgs {
     /// If the positional `spec` looks like a flag (starts with `--`), it was
     /// misrouted by clap after a `--` separator and is not a JSON spec.
     /// Use `effective_extra()` to recover it as a key-value flag.
-    pub fn json_spec(&self) -> Result<Option<String>, homeboy::Error> {
+    pub fn json_spec(&self) -> Result<Option<String>, homeboy::core::Error> {
         // Base64 takes priority - decode and return
         if let Some(b64) = &self.base64 {
             let decoded_bytes = base64::engine::general_purpose::STANDARD
                 .decode(b64)
                 .map_err(|e| {
-                    homeboy::Error::validation_invalid_argument(
+                    homeboy::core::Error::validation_invalid_argument(
                         "base64",
                         format!("Invalid base64 encoding: {}", e),
                         None,
@@ -117,7 +117,7 @@ impl DynamicSetArgs {
                     )
                 })?;
             let decoded_str = String::from_utf8(decoded_bytes).map_err(|e| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "base64",
                     format!("Decoded base64 is not valid UTF-8: {}", e),
                     None,
@@ -162,7 +162,7 @@ fn is_dynamic_set_arg(arg: &str) -> bool {
 // ============================================================================
 
 /// Parse --key value and key=value pairs into a JSON object.
-fn parse_kv_flags(extra: &[String]) -> homeboy::Result<Value> {
+fn parse_kv_flags(extra: &[String]) -> homeboy::core::Result<Value> {
     let mut obj = Map::new();
     let mut iter = extra.iter().peekable();
 
@@ -171,7 +171,7 @@ fn parse_kv_flags(extra: &[String]) -> homeboy::Result<Value> {
             insert_path_value(&mut obj, &key, parse_value(&value));
         } else if let Some(key) = arg.strip_prefix("--") {
             let value = iter.next().ok_or_else(|| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     key,
                     format!("Missing value for flag --{}", key),
                     None,
@@ -255,9 +255,9 @@ fn parse_value(s: &str) -> Value {
 }
 
 /// Merge JSON spec with --key value flags. Flags override spec values.
-pub fn merge_json_sources(spec: Option<&str>, extra: &[String]) -> homeboy::Result<Value> {
+pub fn merge_json_sources(spec: Option<&str>, extra: &[String]) -> homeboy::core::Result<Value> {
     let mut base = if let Some(spec) = spec {
-        let raw = homeboy::config::read_json_spec_to_string(spec)?;
+        let raw = homeboy::core::config::read_json_spec_to_string(spec)?;
         serde_json::from_str(&raw).map_err(|e| {
             let hint = if raw.contains('\\') {
                 Some(
@@ -269,7 +269,7 @@ pub fn merge_json_sources(spec: Option<&str>, extra: &[String]) -> homeboy::Resu
             } else {
                 None
             };
-            homeboy::Error::validation_invalid_json(
+            homeboy::core::Error::validation_invalid_json(
                 e,
                 Some("parse JSON spec".to_string()),
                 Some(format!(
@@ -301,7 +301,7 @@ pub fn merge_json_sources(spec: Option<&str>, extra: &[String]) -> homeboy::Resu
 
 /// Merge JSON sources from `DynamicSetArgs` into a single JSON value.
 /// Returns `None` if no JSON/base64/key-value input was provided.
-pub fn merge_dynamic_args(args: &DynamicSetArgs) -> homeboy::Result<Option<Value>> {
+pub fn merge_dynamic_args(args: &DynamicSetArgs) -> homeboy::core::Result<Option<Value>> {
     let spec = args.json_spec()?;
     let extra = args.effective_extra();
     if spec.is_none() && extra.is_empty() {
@@ -315,11 +315,11 @@ pub fn merge_dynamic_args(args: &DynamicSetArgs) -> homeboy::Result<Option<Value
 pub fn finalize_set_spec(
     merged: &Value,
     explicit_replace: &[String],
-) -> homeboy::Result<(String, Vec<String>)> {
-    let json_string = homeboy::config::to_json_string(merged)?;
+) -> homeboy::core::Result<(String, Vec<String>)> {
+    let json_string = homeboy::core::config::to_json_string(merged)?;
 
     let mut replace_fields = explicit_replace.to_vec();
-    for field in homeboy::config::collect_array_fields(merged) {
+    for field in homeboy::core::config::collect_array_fields(merged) {
         if !replace_fields.contains(&field) {
             replace_fields.push(field);
         }
@@ -348,6 +348,7 @@ pub mod extension;
 pub mod file;
 pub mod fleet;
 pub mod git;
+pub mod http;
 pub mod issues;
 pub mod lint;
 pub mod logs;
@@ -358,6 +359,7 @@ pub mod release;
 pub mod report;
 pub mod review;
 pub mod rig;
+pub mod runner;
 pub mod runs;
 pub mod self_cmd;
 pub mod server;
@@ -375,7 +377,7 @@ pub mod version;
 pub fn run_markdown(
     command: crate::cli_surface::Commands,
     global: &GlobalArgs,
-) -> homeboy::Result<(String, i32)> {
+) -> homeboy::core::Result<(String, i32)> {
     match command {
         crate::cli_surface::Commands::Docs(args) => docs::run_markdown(args),
         crate::cli_surface::Commands::Changelog(args) => changelog::run_markdown(args),
@@ -383,7 +385,7 @@ pub fn run_markdown(
         crate::cli_surface::Commands::Trace(args) => trace::run_markdown(args, global),
         crate::cli_surface::Commands::Runs(args) => runs::run_markdown(args, global),
         crate::cli_surface::Commands::Report(args) => report::run_markdown(args),
-        _ => Err(homeboy::Error::validation_invalid_argument(
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
             "output_mode",
             "Command does not support markdown output",
             None,
@@ -395,15 +397,15 @@ pub fn run_markdown(
 pub fn run_plain_text(
     command: crate::cli_surface::Commands,
     global: &GlobalArgs,
-) -> homeboy::Result<(String, i32)> {
+) -> homeboy::core::Result<(String, i32)> {
     match command {
         crate::cli_surface::Commands::File(args) => match file::run(args, global)? {
             (file::FileCommandOutput::Raw(content), exit_code) => Ok((content, exit_code)),
-            _ => Err(homeboy::Error::internal_unexpected(
+            _ => Err(homeboy::core::Error::internal_unexpected(
                 "Unexpected output type for raw mode",
             )),
         },
-        _ => Err(homeboy::Error::validation_invalid_argument(
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
             "output_mode",
             "Command does not support plain text output",
             None,
@@ -422,7 +424,7 @@ macro_rules! dispatch {
 pub fn run_json(
     command: crate::cli_surface::Commands,
     global: &GlobalArgs,
-) -> (homeboy::Result<serde_json::Value>, i32) {
+) -> (homeboy::core::Result<serde_json::Value>, i32) {
     crate::commands::utils::tty::status("homeboy is working...");
 
     match command {
@@ -461,17 +463,19 @@ pub fn run_json(
         crate::cli_surface::Commands::Audit(args) => dispatch!(args, global, audit),
         crate::cli_surface::Commands::Refactor(args) => dispatch!(args, global, refactor),
         crate::cli_surface::Commands::Rig(args) => dispatch!(args, global, rig),
+        crate::cli_surface::Commands::Runner(args) => dispatch!(args, global, runner),
         crate::cli_surface::Commands::Runs(args) => dispatch!(args, global, runs),
         crate::cli_surface::Commands::SelfCmd(args) => dispatch!(args, global, self_cmd),
         crate::cli_surface::Commands::Stack(args) => dispatch!(args, global, stack),
         crate::cli_surface::Commands::Undo(args) => dispatch!(args, global, undo),
         crate::cli_surface::Commands::Auth(args) => dispatch!(args, global, auth),
         crate::cli_surface::Commands::Api(args) => dispatch!(args, global, api),
+        crate::cli_surface::Commands::Http(args) => dispatch!(args, global, http),
         crate::cli_surface::Commands::Upgrade(args) => dispatch!(args, global, upgrade),
 
         // Special case: List uses raw output mode
         crate::cli_surface::Commands::List => {
-            let err = homeboy::Error::validation_invalid_argument(
+            let err = homeboy::core::Error::validation_invalid_argument(
                 "output_mode",
                 "List command uses raw output mode",
                 None,

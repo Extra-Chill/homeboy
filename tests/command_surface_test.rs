@@ -9,6 +9,7 @@ fn includes_current_top_level_commands() {
     assert!(surface.contains_path(&["daemon"]));
     assert!(surface.contains_path(&["deps"]));
     assert!(surface.contains_path(&["git"]));
+    assert!(surface.contains_path(&["http"]));
     assert!(surface.contains_path(&["self"]));
     assert!(surface.contains_path(&["stack"]));
     assert!(surface.contains_path(&["report"]));
@@ -23,6 +24,7 @@ fn includes_first_level_subcommands() {
     let surface = current_command_surface();
 
     assert!(surface.contains_path(&["git", "status"]));
+    assert!(surface.contains_path(&["http", "get"]));
     assert!(surface.contains_path(&["deps", "status"]));
     assert!(surface.contains_path(&["deps", "update"]));
     assert!(surface.contains_path(&["daemon", "serve"]));
@@ -30,6 +32,7 @@ fn includes_first_level_subcommands() {
     assert!(surface.contains_path(&["stack", "inspect"]));
     assert!(surface.contains_path(&["report", "failure-digest"]));
     assert!(surface.contains_path(&["file", "download"]));
+    assert!(surface.contains_path(&["file", "mkdir"]));
     assert!(surface.contains_path(&["file", "upload"]));
     assert!(surface.contains_path(&["file", "copy"]));
     assert!(surface.contains_path(&["file", "sync"]));

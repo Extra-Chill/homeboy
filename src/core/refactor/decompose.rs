@@ -3,13 +3,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::extension::{self, grammar, grammar_items, ParsedItem};
-use crate::Result;
+use crate::core::extension::{self, grammar, grammar_items, ParsedItem};
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
+use crate::core::Result;
 
 use super::move_items::{MoveOptions, MoveResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecomposePlan {
+    #[serde(flatten, default)]
+    pub plan: HomeboyPlan,
     pub file: String,
     pub strategy: String,
     pub total_items: usize,
@@ -39,7 +42,7 @@ pub struct DecomposeGroup {
 
 pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePlan> {
     if strategy != "grouped" {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "strategy",
             format!("Unsupported strategy '{}'. Use: grouped", strategy),
             None,
@@ -49,7 +52,7 @@ pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePl
 
     let source_path = root.join(file);
     if !source_path.is_file() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "file",
             format!("Source file does not exist: {}", file),
             None,
@@ -57,8 +60,9 @@ pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePl
         ));
     }
 
-    let content = std::fs::read_to_string(&source_path)
-        .map_err(|e| crate::Error::internal_io(e.to_string(), Some(format!("read {}", file))))?;
+    let content = std::fs::read_to_string(&source_path).map_err(|e| {
+        crate::core::Error::internal_io(e.to_string(), Some(format!("read {}", file)))
+    })?;
 
     let mut warnings = Vec::new();
     let items = parse_items(file, &content).unwrap_or_else(|| {
@@ -80,6 +84,7 @@ pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePl
     ];
 
     Ok(DecomposePlan {
+        plan: decompose_homeboy_plan(file, strategy, items.len(), &groups, &warnings),
         file: file.to_string(),
         strategy: strategy.to_string(),
         total_items: items.len(),
@@ -88,6 +93,47 @@ pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePl
         checklist,
         warnings,
     })
+}
+
+fn decompose_homeboy_plan(
+    file: &str,
+    strategy: &str,
+    total_items: usize,
+    groups: &[DecomposeGroup],
+    warnings: &[String],
+) -> HomeboyPlan {
+    HomeboyPlan::builder_for_description(PlanKind::Refactor, file.to_string())
+        .mode("decompose")
+        .inputs(
+            PlanValues::new()
+                .string("file", file)
+                .string("strategy", strategy)
+                .number("total_items", total_items as u64),
+        )
+        .steps(groups.iter().map(decompose_group_step))
+        .warnings(warnings.to_vec())
+        .summarize()
+        .build()
+}
+
+fn decompose_group_step(group: &DecomposeGroup) -> PlanStep {
+    PlanStep::ready(
+        format!("refactor.decompose.{}", group.name),
+        "refactor.decompose.extract_group",
+    )
+    .label(format!(
+        "Extract {} item(s) to {}",
+        group.item_names.len(),
+        group.suggested_target
+    ))
+    .scope(group.item_names.clone())
+    .inputs(
+        PlanValues::new()
+            .string("group", group.name.clone())
+            .string("suggested_target", group.suggested_target.clone())
+            .json("item_names", &group.item_names),
+    )
+    .build()
 }
 
 pub fn apply_plan(plan: &DecomposePlan, root: &Path, write: bool) -> Result<Vec<MoveResult>> {
@@ -216,7 +262,7 @@ pub fn apply_plan_skeletons(plan: &DecomposePlan, root: &Path) -> Result<Vec<Str
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                crate::Error::internal_io(
+                crate::core::Error::internal_io(
                     e.to_string(),
                     Some(format!("create directory {}", parent.display())),
                 )
@@ -230,7 +276,10 @@ pub fn apply_plan_skeletons(plan: &DecomposePlan, root: &Path) -> Result<Vec<Str
         );
 
         std::fs::write(&path, header).map_err(|e| {
-            crate::Error::internal_io(e.to_string(), Some(format!("write {}", path.display())))
+            crate::core::Error::internal_io(
+                e.to_string(),
+                Some(format!("write {}", path.display())),
+            )
         })?;
         created.push(group.suggested_target.clone());
     }
@@ -1332,7 +1381,7 @@ fn split_oversized_group(name: &str, names: &[String]) -> Vec<(String, Vec<Strin
 fn validate_plan_sources(plan: &DecomposePlan, root: &Path) -> Result<()> {
     let source_path = root.join(&plan.file);
     let content = std::fs::read_to_string(&source_path).map_err(|e| {
-        crate::Error::internal_io(e.to_string(), Some("pre-write validation".to_string()))
+        crate::core::Error::internal_io(e.to_string(), Some("pre-write validation".to_string()))
     })?;
 
     let ext = Path::new(&plan.file).extension().and_then(|e| e.to_str());
@@ -1347,7 +1396,7 @@ fn validate_plan_sources(plan: &DecomposePlan, root: &Path) -> Result<()> {
         let items = grammar_items::parse_items(&content, &grammar);
         for item in &items {
             if !grammar_items::validate_brace_balance(&item.source, &grammar) {
-                return Err(crate::Error::validation_invalid_argument(
+                return Err(crate::core::Error::validation_invalid_argument(
                     "file",
                     format!(
                         "Pre-write validation failed: item '{}' (lines {}-{}) has unbalanced braces. \
@@ -1708,7 +1757,7 @@ fn public_items_for_group(plan: &DecomposePlan, group: &DecomposeGroup) -> Vec<S
 }
 
 fn parse_items_for_group_export(ext: &str, content: &str, file: &str) -> Option<Vec<ParsedItem>> {
-    let manifest = crate::extension::find_extension_for_file_ext(ext, "refactor")?;
+    let manifest = crate::core::extension::find_extension_for_file_ext(ext, "refactor")?;
     crate::core::refactor::move_items::ext_parse_items(&manifest, content, file)
         .or_else(|| crate::core::refactor::move_items::core_parse_items(&manifest, content))
 }

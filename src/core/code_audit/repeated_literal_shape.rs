@@ -611,7 +611,7 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::Language;
+    use crate::core::code_audit::conventions::Language;
 
     fn fp(path: &str, content: &str) -> FileFingerprint {
         FileFingerprint {

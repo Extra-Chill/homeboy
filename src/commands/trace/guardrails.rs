@@ -1,5 +1,5 @@
-use homeboy::extension::trace as extension_trace;
-use homeboy::rig;
+use homeboy::core::extension::trace as extension_trace;
+use homeboy::core::rig;
 
 use super::{
     load_rig_context, required_trace_scenario, resolve_component_id, trace_variants_for_args,
@@ -8,7 +8,7 @@ use super::{
 
 pub(super) fn run_trace_guardrails_for_args(
     args: &TraceArgs,
-) -> homeboy::Result<Vec<extension_trace::TraceGuardrailOutput>> {
+) -> homeboy::core::Result<Vec<extension_trace::TraceGuardrailOutput>> {
     let Some(context) = load_rig_context(args.rig.as_deref())? else {
         return Ok(Vec::new());
     };

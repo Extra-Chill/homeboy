@@ -1,11 +1,11 @@
-use crate::component::Component;
-use crate::extension::test::drift::{detect_drift, generate_transform_rules, DriftReport};
-use crate::extension::test::resolve_drift_options;
-use crate::extension::test::TestScopeOutput;
-use crate::extension::test::{ChangeType, TestAnalysis};
-use crate::extension::test::{TestBaselineComparison, TestCounts};
-use crate::refactor::AppliedRefactor;
-use crate::refactor::{
+use crate::core::component::Component;
+use crate::core::extension::test::drift::{detect_drift, generate_transform_rules, DriftReport};
+use crate::core::extension::test::resolve_drift_options;
+use crate::core::extension::test::TestScopeOutput;
+use crate::core::extension::test::{ChangeType, TestAnalysis};
+use crate::core::extension::test::{TestBaselineComparison, TestCounts};
+use crate::core::refactor::AppliedRefactor;
+use crate::core::refactor::{
     self,
     auto::{self, AutofixMode},
     TransformSet,
@@ -57,7 +57,7 @@ pub fn detect_test_drift(
     component_id: &str,
     component: &Component,
     since: &str,
-) -> Result<DriftWorkflowResult, crate::Error> {
+) -> Result<DriftWorkflowResult, crate::core::Error> {
     crate::log_status!(
         "drift",
         "Detecting test drift since {} in {}",
@@ -184,7 +184,7 @@ pub fn auto_fix_test_drift(
     since: &str,
     write: bool,
     include_report: bool,
-) -> Result<AutoFixDriftWorkflowResult, crate::Error> {
+) -> Result<AutoFixDriftWorkflowResult, crate::core::Error> {
     let source_path = {
         let expanded = shellexpand::tilde(&component.local_path);
         std::path::PathBuf::from(expanded.as_ref())

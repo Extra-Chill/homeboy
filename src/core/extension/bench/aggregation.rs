@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
-use crate::error::{Error, Result};
-use crate::extension::bench::distribution::{distribution, percentile};
-use crate::extension::bench::parsing::{
+use crate::core::error::{Error, Result};
+use crate::core::extension::bench::distribution::{distribution, percentile};
+use crate::core::extension::bench::parsing::{
     BenchMetrics, BenchResults, BenchRunSnapshot, BenchScenario,
 };
-use crate::observation::timeline::{ObservationSpanResult, ObservationSpanStatus};
+use crate::core::observation::timeline::{ObservationSpanResult, ObservationSpanStatus};
 
 pub fn aggregate_runs(runs: &[BenchResults]) -> Result<BenchResults> {
     let first = runs

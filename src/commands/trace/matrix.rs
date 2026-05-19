@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use homeboy::extension::trace as extension_trace;
-use homeboy::extension::trace::TraceCommandOutput;
+use homeboy::core::extension::trace as extension_trace;
+use homeboy::core::extension::trace::TraceCommandOutput;
 
 use super::output::{
     compare_trace_aggregates_with_focus, render_matrix_markdown, TraceAggregateInput,
@@ -26,7 +26,7 @@ pub(super) struct TraceVariantCombination {
 
 pub(super) fn run_variant_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     if args.keep_overlay {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "--keep-overlay",
             "trace compare-variant reuses the same component checkout across runs, so overlays must be reverted after each combination",
             None,
@@ -45,7 +45,7 @@ pub(super) fn run_variant_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         ))
     });
     std::fs::create_dir_all(&output_dir).map_err(|err| {
-        homeboy::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to create trace variant output dir {}: {}",
                 output_dir.display(),
@@ -123,7 +123,7 @@ pub(super) fn run_variant_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         runs,
     };
     std::fs::write(&summary_path, render_matrix_markdown(&output)).map_err(|err| {
-        homeboy::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to write trace variant summary {}: {}",
                 summary_path.display(),
@@ -139,7 +139,7 @@ pub(super) fn run_variant_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutpu
 fn run_variant_aggregate(
     args: &TraceArgs,
     overlays: Vec<String>,
-) -> homeboy::Result<extension_trace::TraceAggregateOutput> {
+) -> homeboy::core::Result<extension_trace::TraceAggregateOutput> {
     let mut run_args = args.clone();
     apply_command_target_component(&mut run_args);
     run_args.repeat = args.repeat.max(1);
@@ -153,9 +153,9 @@ fn run_variant_aggregate(
     }
 }
 
-fn variant_stack_items(args: &TraceArgs) -> homeboy::Result<Vec<TraceVariantStackItem>> {
+fn variant_stack_items(args: &TraceArgs) -> homeboy::core::Result<Vec<TraceVariantStackItem>> {
     if !args.variants.is_empty() && !args.overlays.is_empty() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "--variant",
             "mixing --variant and --overlay would make stack order ambiguous; use one ordered stack source",
             None,
@@ -168,7 +168,7 @@ fn variant_stack_items(args: &TraceArgs) -> homeboy::Result<Vec<TraceVariantStac
         &args.overlays
     };
     if values.is_empty() {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "--overlay",
             "trace compare-variant requires at least one --overlay or --variant",
             None,
@@ -278,12 +278,12 @@ fn aggregate_to_compare_input(
     }
 }
 
-fn write_json_artifact<T: serde::Serialize>(path: &Path, value: &T) -> homeboy::Result<()> {
+fn write_json_artifact<T: serde::Serialize>(path: &Path, value: &T) -> homeboy::core::Result<()> {
     let content = serde_json::to_string_pretty(value).map_err(|err| {
-        homeboy::Error::internal_json(err.to_string(), Some("trace.variant.json".to_string()))
+        homeboy::core::Error::internal_json(err.to_string(), Some("trace.variant.json".to_string()))
     })?;
     std::fs::write(path, content).map_err(|err| {
-        homeboy::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!("Failed to write trace artifact {}: {}", path.display(), err),
             Some("trace.variant.write".to_string()),
         )

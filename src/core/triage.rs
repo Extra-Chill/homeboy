@@ -12,17 +12,17 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::defaults;
-use crate::deploy::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
-use crate::error::{Error, Result};
-use crate::git::gh_probe_succeeds;
-use crate::observation::{
+use crate::core::defaults;
+use crate::core::deploy::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
+use crate::core::error::{Error, Result};
+use crate::core::git::gh_probe_succeeds;
+use crate::core::observation::{
     NewRunRecord, NewTriageItemRecord, ObservationStore, RunListFilter, RunStatus,
     TriageItemRecord, TriagePullRequestSignals,
 };
-use crate::scope::{self, Scope, ScopeComponentRef, ScopeOutput};
+use crate::core::scope::{self, Scope, ScopeComponentRef, ScopeKind, ScopeOutput};
 
-pub use crate::scope::Scope as TriageTarget;
+pub use crate::core::scope::Scope as TriageTarget;
 
 #[derive(Debug, Clone, Default)]
 pub struct TriageOptions {
@@ -41,7 +41,7 @@ pub struct TriageOptions {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TriageOutput {
-    pub command: &'static str,
+    pub command: String,
     pub target: ScopeOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observation: Option<TriageObservationOutput>,
@@ -268,8 +268,9 @@ pub fn run(target: TriageTarget, options: TriageOptions) -> Result<TriageOutput>
 
     let summary = summarize(&components, &unresolved);
     let unresolved_summary = summarize_unresolved(&unresolved);
+    let command = triage_command(&target);
     let mut output = TriageOutput {
-        command: triage_command(&target),
+        command: command.clone(),
         target: ScopeOutput::from(&target),
         observation: None,
         summary,
@@ -311,40 +312,39 @@ impl TriageObservation {
             .status()
             .map(|status| status.path)
             .unwrap_or_else(|_| "<unavailable>".to_string());
+        let cwd = std::env::current_dir().ok();
         let run = store
-            .start_run(NewRunRecord {
-                kind: "triage".to_string(),
-                component_id: Some(component_id),
-                command: Some(triage_command(target).to_string()),
-                cwd: std::env::current_dir()
-                    .ok()
-                    .map(|path| path.to_string_lossy().to_string()),
-                homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                git_sha: None,
-                rig_id: match target {
-                    TriageTarget::Rig(id) => Some(id.clone()),
-                    _ => None,
-                },
-                metadata_json: serde_json::json!({
-                    "target": {
-                        "kind": target.kind_name(),
-                        "id": target.id(),
-                    },
-                    "options": {
-                        "include_issues": options.include_issues,
-                        "include_prs": options.include_prs,
-                        "mine": options.mine,
-                        "assigned": options.assigned,
-                        "labels": options.labels,
-                        "needs_review": options.needs_review,
-                        "failing_checks": options.failing_checks,
-                        "drilldown": options.drilldown,
-                        "issue_numbers": options.issue_numbers,
-                        "stale_days": options.stale_days,
-                        "limit": options.limit,
-                    }
-                }),
-            })
+            .start_run(
+                NewRunRecord::builder("triage")
+                    .component_id(component_id)
+                    .command(triage_command(target))
+                    .optional_cwd_path(cwd.as_deref())
+                    .current_homeboy_version()
+                    .optional_rig_id(match target {
+                        TriageTarget::Rig(id) => Some(id.clone()),
+                        _ => None,
+                    })
+                    .metadata(serde_json::json!({
+                        "target": {
+                            "kind": target.kind_name(),
+                            "id": target.id(),
+                        },
+                        "options": {
+                            "include_issues": options.include_issues,
+                            "include_prs": options.include_prs,
+                            "mine": options.mine,
+                            "assigned": options.assigned,
+                            "labels": options.labels,
+                            "needs_review": options.needs_review,
+                            "failing_checks": options.failing_checks,
+                            "drilldown": options.drilldown,
+                            "issue_numbers": options.issue_numbers,
+                            "stale_days": options.stale_days,
+                            "limit": options.limit,
+                        }
+                    }))
+                    .build(),
+            )
             .ok()?;
 
         Some(Self {
@@ -657,18 +657,11 @@ fn resolve_target_components(target: &TriageTarget) -> Result<Vec<ComponentRef>>
     }
 }
 
-fn triage_command(target: &TriageTarget) -> &'static str {
-    match target {
-        Scope::Component(_) => "triage.component",
-        Scope::Project(_) => "triage.project",
-        Scope::Fleet(_) => "triage.fleet",
-        Scope::Rig(_) => "triage.rig",
-        Scope::Workspace => "triage.workspace",
-        // `--path` is an escape hatch on subcommands (currently `component`); keep
-        // the same command identity so JSON consumers don't see a phantom
-        // `triage.path` verb.
-        Scope::Path { .. } => "triage.component",
-    }
+fn triage_command(target: &TriageTarget) -> String {
+    // `--path` is an escape hatch on subcommands (currently `component`); keep
+    // the same command identity so JSON consumers don't see a phantom
+    // `triage.path` verb.
+    target.command_name("triage", ScopeKind::Component)
 }
 
 fn dedupe_refs_by_repo(component_refs: Vec<ComponentRef>) -> Vec<ComponentRef> {
@@ -800,6 +793,7 @@ fn parse_github_parent_repo(raw: &str) -> std::result::Result<Option<GitHubRepo>
     let parsed: RawRepoParent = serde_json::from_str(raw.trim()).map_err(|e| e.to_string())?;
     Ok(if parsed.is_fork {
         parsed.parent.map(|parent| GitHubRepo {
+            host: "github.com".to_string(),
             owner: parent.owner.login,
             repo: parent.name,
         })
@@ -2557,6 +2551,7 @@ mod tests {
             assert_eq!(repo.owner, "chubes4");
             assert_eq!(repo.repo, "wordpress-playground");
             Ok(Some(GitHubRepo {
+                host: "github.com".to_string(),
                 owner: "WordPress".to_string(),
                 repo: "wordpress-playground".to_string(),
             }))

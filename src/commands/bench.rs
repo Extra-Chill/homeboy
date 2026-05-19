@@ -4,16 +4,16 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::thread;
 
-use homeboy::engine::execution_context::{self, ResolveOptions};
-use homeboy::engine::run_dir::RunDir;
-use homeboy::extension::bench as extension_bench;
-use homeboy::extension::bench::{
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::engine::run_dir::RunDir;
+use homeboy::core::extension::bench as extension_bench;
+use homeboy::core::extension::bench::{
     aggregate_comparison_with_axes, BenchCommandOutput, BenchComparisonOutput,
     BenchComparisonSummaryOutput, BenchDefaultBaselineExpansion, BenchListWorkflowArgs,
     BenchListWorkflowResult, RigBenchEntry, DEFAULT_REGRESSION_THRESHOLD_PERCENT,
 };
-use homeboy::extension::ExtensionCapability;
-use homeboy::rig::{self, RigSpec};
+use homeboy::core::extension::ExtensionCapability;
+use homeboy::core::rig::{self, RigSpec};
 
 use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs,
@@ -36,6 +36,10 @@ pub struct BenchArgs {
 impl BenchArgs {
     pub fn is_run_command(&self) -> bool {
         self.command.is_none()
+    }
+
+    pub fn lab_offload_writes_local_state(&self) -> bool {
+        self.run.baseline_args.baseline || self.run.baseline_args.ratchet
     }
 }
 
@@ -362,7 +366,7 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
     // in sequence by default, or in bounded parallel batches when the user
     // explicitly opts in with --rig-concurrency.
     if run_args.baseline_args.baseline {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "--baseline",
             "Cannot --baseline a cross-rig run; baselines are per-rig. \
              Run `homeboy bench --rig <id> --baseline` once per rig you \
@@ -372,7 +376,7 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
         ));
     }
     if run_args.baseline_args.ratchet {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "--ratchet",
             "Cannot --ratchet a cross-rig run; baselines are per-rig. \
              Run `homeboy bench --rig <id> --ratchet` once per rig.",
@@ -443,9 +447,9 @@ struct CrossRigBenchOutput {
 }
 
 fn add_default_baseline_failure_hint(
-    error: homeboy::Error,
+    error: homeboy::core::Error,
     metadata: Option<&BenchDefaultBaselineExpansion>,
-) -> homeboy::Error {
+) -> homeboy::core::Error {
     let Some(metadata) = metadata else {
         return error;
     };
@@ -496,7 +500,7 @@ fn run_cross_rig_benches(
     run_args: &BenchRunArgs,
     passthrough_args: &[String],
     ordered_rigs: Vec<String>,
-) -> homeboy::Result<Vec<CrossRigBenchOutput>> {
+) -> homeboy::core::Result<Vec<CrossRigBenchOutput>> {
     if run_args.rig_concurrency <= 1 || ordered_rigs.len() <= 1 {
         return ordered_rigs
             .into_iter()
@@ -520,11 +524,11 @@ fn run_cross_rig_benches(
                 .into_iter()
                 .map(|handle| match handle.join() {
                     Ok(result) => result,
-                    Err(_) => Err(homeboy::Error::internal_unexpected(
+                    Err(_) => Err(homeboy::core::Error::internal_unexpected(
                         "bench rig worker panicked during parallel comparison",
                     )),
                 })
-                .collect::<homeboy::Result<Vec<_>>>()
+                .collect::<homeboy::core::Result<Vec<_>>>()
         })?;
         outputs.append(&mut chunk_outputs);
     }
@@ -536,7 +540,7 @@ fn run_cross_rig_bench(
     run_args: &BenchRunArgs,
     passthrough_args: &[String],
     rig_id: String,
-) -> homeboy::Result<CrossRigBenchOutput> {
+) -> homeboy::core::Result<CrossRigBenchOutput> {
     let axes = rig_axes(&rig_id)?;
     let (output, _exit) = matrix::run_single(run_args, passthrough_args, Some(rig_id.clone()))?;
     Ok(CrossRigBenchOutput {
@@ -546,7 +550,7 @@ fn run_cross_rig_bench(
     })
 }
 
-fn rig_axes(rig_id: &str) -> homeboy::Result<Option<BTreeMap<String, String>>> {
+fn rig_axes(rig_id: &str) -> homeboy::core::Result<Option<BTreeMap<String, String>>> {
     let spec = rig::load(rig_id)?;
     let Some(bench) = spec.bench else {
         return Ok(None);
@@ -566,12 +570,12 @@ fn ordered_rig_ids(args: &BenchRunArgs) -> Vec<String> {
     rig_ids
 }
 
-fn validate_report_selection_for_single_run(args: &BenchRunArgs) -> homeboy::Result<()> {
+fn validate_report_selection_for_single_run(args: &BenchRunArgs) -> homeboy::core::Result<()> {
     if args.report.is_empty() {
         return Ok(());
     }
 
-    Err(homeboy::Error::validation_invalid_argument(
+    Err(homeboy::core::Error::validation_invalid_argument(
         "--report",
         "Bench reports are only available for multi-rig comparisons. Pass two or more --rig values, for example: --rig baseline,candidate --report side-by-side.",
         None,
@@ -624,7 +628,7 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
         .unwrap_or_default();
 
     let run_dir = RunDir::create()?;
-    let resource_run = homeboy::engine::resource::ResourceSummaryRun::start(Some(format!(
+    let resource_run = homeboy::core::engine::resource::ResourceSummaryRun::start(Some(format!(
         "bench list {}",
         effective_id
     )));
@@ -653,7 +657,7 @@ struct ListRigContext {
     package_root: Option<PathBuf>,
 }
 
-fn load_list_rig(args: &BenchListArgs) -> homeboy::Result<Option<ListRigContext>> {
+fn load_list_rig(args: &BenchListArgs) -> homeboy::core::Result<Option<ListRigContext>> {
     match args.rig.as_slice() {
         [] => Ok(None),
         [rig_id] => {
@@ -662,7 +666,7 @@ fn load_list_rig(args: &BenchListArgs) -> homeboy::Result<Option<ListRigContext>
                 .map(|metadata| PathBuf::from(metadata.package_path));
             Ok(Some(ListRigContext { spec, package_root }))
         }
-        _ => Err(homeboy::Error::validation_invalid_argument(
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
             "--rig",
             "bench list accepts exactly one rig id",
             None,
@@ -674,7 +678,7 @@ fn load_list_rig(args: &BenchListArgs) -> homeboy::Result<Option<ListRigContext>
 fn resolve_list_component_id(
     args: &BenchListArgs,
     rig_spec: Option<&RigSpec>,
-) -> homeboy::Result<String> {
+) -> homeboy::core::Result<String> {
     if let Some(id) = args.comp.id() {
         return Ok(id.to_string());
     }
@@ -688,7 +692,7 @@ fn resolve_list_component_id(
             return Ok(default);
         }
 
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "bench.default_component",
             format!(
                 "rig '{}' does not declare bench.default_component; pass a component id or add bench.default_component to the rig spec",
@@ -702,7 +706,10 @@ fn resolve_list_component_id(
     args.comp.resolve_id()
 }
 
-fn run_rig_workload_preflight(spec: &RigSpec, extension_id: Option<&str>) -> homeboy::Result<()> {
+fn run_rig_workload_preflight(
+    spec: &RigSpec,
+    extension_id: Option<&str>,
+) -> homeboy::core::Result<()> {
     let groups = extension_id.and_then(|id| {
         rig::check_groups_for_extension_workloads(spec, rig::RigWorkloadKind::Bench, id)
     });
@@ -711,7 +718,7 @@ fn run_rig_workload_preflight(spec: &RigSpec, extension_id: Option<&str>) -> hom
         None => rig::run_check(spec)?,
     };
     if !check.success {
-        return Err(homeboy::Error::rig_pipeline_failed(
+        return Err(homeboy::core::Error::rig_pipeline_failed(
             &spec.id,
             "check",
             "rig check failed; refusing to list bench workloads for an unhealthy rig",
@@ -765,7 +772,7 @@ fn default_baseline_notice(metadata: &BenchDefaultBaselineExpansion) -> String {
 
 fn maybe_expand_default_baseline(
     args: &BenchRunArgs,
-) -> homeboy::Result<Option<DefaultBaselineExpansion>> {
+) -> homeboy::core::Result<Option<DefaultBaselineExpansion>> {
     if args.rig.len() != 1 {
         return Ok(None);
     }
@@ -793,7 +800,7 @@ fn maybe_expand_default_baseline(
     };
 
     if baseline_rig_id == *candidate {
-        return Err(homeboy::Error::validation_invalid_argument(
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "bench.default_baseline_rig",
             format!(
                 "rig '{}' declares itself as its own default_baseline_rig; \

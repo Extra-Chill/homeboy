@@ -10,20 +10,26 @@ mod gh_actions;
 mod latest;
 mod query;
 mod reconcile;
+mod remote;
+mod remote_artifact;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io;
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
-use homeboy::Error;
+use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::Error;
 
 use super::{CmdResult, GlobalArgs};
 use bundle::{
     export_runs, import_runs, RunsExportArgs, RunsExportOutput, RunsImportArgs, RunsImportOutput,
 };
+pub use common::RunSummary;
 use compare::{compare_runs, RunsCompareArgs, RunsCompareOutput};
 pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
 use drift::{runs_drift, RunsDriftArgs, RunsDriftOutput};
@@ -57,6 +63,8 @@ enum RunsCommand {
     Show { run_id: String },
     /// List artifacts recorded for one run
     Artifacts { run_id: String },
+    /// Retrieve or sync recorded run artifacts
+    Artifact(RunsArtifactArgs),
     /// List findings recorded for one run
     Findings(findings::RunsFindingsArgs),
     /// Show one recorded finding
@@ -76,6 +84,9 @@ enum RunsCommand {
 
 #[derive(Args, Clone, Default)]
 pub struct RunsListArgs {
+    /// Query runs from a connected execution runner daemon
+    #[arg(long)]
+    pub runner: Option<String>,
     /// Run kind: bench, rig, trace, etc.
     #[arg(long)]
     pub kind: Option<String>,
@@ -102,6 +113,8 @@ pub enum RunsOutput {
     Compare(RunsCompareOutput),
     Show(RunsShowOutput),
     Artifacts(RunsArtifactsOutput),
+    ArtifactGet(RunsArtifactGetOutput),
+    ArtifactCleanupDownloads(RunsArtifactCleanupDownloadsOutput),
     Findings(RunsFindingsOutput),
     Finding(RunsFindingOutput),
     LatestFinding(RunsLatestFindingOutput),
@@ -134,6 +147,67 @@ pub struct RunsArtifactsOutput {
     pub artifacts: Vec<ArtifactRecord>,
 }
 
+#[derive(Args, Clone)]
+pub struct RunsArtifactArgs {
+    #[command(subcommand)]
+    command: RunsArtifactCommand,
+}
+
+#[derive(Subcommand, Clone)]
+enum RunsArtifactCommand {
+    /// Copy a recorded file artifact to a local path
+    Get(RunsArtifactGetArgs),
+    /// Plan or delete locally cached runner artifact downloads
+    CleanupDownloads(RunsArtifactCleanupDownloadsArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct RunsArtifactGetArgs {
+    /// Observation run id that owns the artifact
+    pub run_id: String,
+    /// Artifact id/path token from `homeboy runs artifacts <run-id>`
+    pub artifact_id: String,
+    /// Destination file path. Defaults to the recorded artifact filename.
+    #[arg(long, short = 'o')]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactGetOutput {
+    pub command: &'static str,
+    pub run_id: String,
+    pub artifact_id: String,
+    pub output_path: String,
+    pub content_type: Option<String>,
+    pub size_bytes: Option<i64>,
+    pub sha256: Option<String>,
+}
+
+#[derive(Args, Clone, Default)]
+pub struct RunsArtifactCleanupDownloadsArgs {
+    /// Delete the planned cached downloads. Without this flag, only reports the plan.
+    #[arg(long)]
+    pub apply: bool,
+    /// Limit cleanup to one runner id under the local runner artifact cache.
+    #[arg(long)]
+    pub runner: Option<String>,
+    /// Limit cleanup to one run id. Requires --runner.
+    #[arg(long)]
+    pub run_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactCleanupDownloadsOutput {
+    pub command: &'static str,
+    pub dry_run: bool,
+    pub root: String,
+    pub removed: bool,
+    pub file_count: usize,
+    pub directory_count: usize,
+    pub size_bytes: u64,
+    pub paths: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct BenchHistoryOutput {
     pub command: &'static str,
@@ -152,22 +226,6 @@ pub struct BenchCompareOutput {
     pub to_run: RunSummary,
     pub comparisons: Vec<BenchMetricComparison>,
     pub missing: Vec<BenchMissingMetric>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct RunSummary {
-    pub id: String,
-    pub kind: String,
-    pub status: String,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub component_id: Option<String>,
-    pub rig_id: Option<String>,
-    pub git_sha: Option<String>,
-    pub command: Option<String>,
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -207,6 +265,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Reconcile(args) => reconcile_runs(args),
         RunsCommand::Show { run_id } => show_run(&run_id),
         RunsCommand::Artifacts { run_id } => artifacts(&run_id),
+        RunsCommand::Artifact(args) => artifact_command(args),
         RunsCommand::Findings(args) => findings::findings(args),
         RunsCommand::Finding { finding_id } => findings::finding(&finding_id),
         RunsCommand::LatestFinding(args) => findings::latest_finding(args),
@@ -240,6 +299,10 @@ pub fn run_markdown(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<String> {
 }
 
 pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOutput> {
+    if let Some(runner_id) = args.runner.clone() {
+        return remote::list_runner_runs(&runner_id, args, command);
+    }
+
     let store = ObservationStore::open_initialized()?;
     reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
     let runs = store
@@ -282,6 +345,98 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     ))
 }
 
+fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
+    match args.command {
+        RunsArtifactCommand::Get(args) => artifact_get(args),
+        RunsArtifactCommand::CleanupDownloads(args) => remote_artifact::cleanup_downloads(args),
+    }
+}
+
+fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
+    let store = ObservationStore::open_initialized()?;
+    require_run(&store, &args.run_id)?;
+    let artifact = store.get_artifact(&args.artifact_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact_id",
+            format!("artifact record not found: {}", args.artifact_id),
+            Some(args.artifact_id.clone()),
+            None,
+        )
+    })?;
+
+    if artifact.run_id != args.run_id {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "artifact does not belong to requested run",
+            Some(args.artifact_id),
+            None,
+        ));
+    }
+    if artifact.artifact_type != "file" {
+        if remote_artifact::is_remote_artifact(&artifact) {
+            return remote_artifact::get(artifact, args.output);
+        }
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "artifact {} is {}, not a downloadable file",
+                artifact.id, artifact.artifact_type
+            ),
+            Some(artifact.id),
+            None,
+        ));
+    }
+
+    let source = PathBuf::from(&artifact.path);
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&artifact.id)
+        .to_string();
+    let output = args.output.unwrap_or_else(|| PathBuf::from(file_name));
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
+        })?;
+    }
+
+    let mut reader = File::open(&source).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("open artifact {}", source.display())),
+        )
+    })?;
+    let mut writer = File::create(&output).map_err(|e| {
+        Error::internal_io(e.to_string(), Some(format!("create {}", output.display())))
+    })?;
+    io::copy(&mut reader, &mut writer).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!(
+                "copy artifact {} to {}",
+                artifact.id,
+                output.display()
+            )),
+        )
+    })?;
+
+    Ok((
+        RunsOutput::ArtifactGet(RunsArtifactGetOutput {
+            command: "runs.artifact.get",
+            run_id: artifact.run_id,
+            artifact_id: artifact.id,
+            output_path: output.display().to_string(),
+            content_type: artifact.mime,
+            size_bytes: artifact.size_bytes,
+            sha256: artifact.sha256,
+        }),
+        0,
+    ))
+}
+
 pub fn bench_history(
     component_id: &str,
     scenario_id: Option<&str>,
@@ -301,7 +456,7 @@ pub fn bench_history(
         .filter(|run| scenario_id.is_none_or(|scenario| run_contains_scenario(run, scenario)))
         .take(limit.max(1) as usize)
         .map(|run| run_detail(&store, run))
-        .collect::<homeboy::Result<Vec<_>>>()?;
+        .collect::<homeboy::core::Result<Vec<_>>>()?;
 
     Ok((
         RunsOutput::BenchHistory(BenchHistoryOutput {
@@ -372,7 +527,7 @@ pub fn bench_compare(from_run_id: &str, to_run_id: &str) -> CmdResult<RunsOutput
     ))
 }
 
-fn require_run(store: &ObservationStore, run_id: &str) -> homeboy::Result<RunRecord> {
+fn require_run(store: &ObservationStore, run_id: &str) -> homeboy::core::Result<RunRecord> {
     store.get_run(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
@@ -383,7 +538,7 @@ fn require_run(store: &ObservationStore, run_id: &str) -> homeboy::Result<RunRec
     })
 }
 
-fn require_kind(run: &RunRecord, expected: &str) -> homeboy::Result<()> {
+fn require_kind(run: &RunRecord, expected: &str) -> homeboy::core::Result<()> {
     if run.kind == expected {
         return Ok(());
     }
@@ -398,7 +553,7 @@ fn require_kind(run: &RunRecord, expected: &str) -> homeboy::Result<()> {
     ))
 }
 
-fn run_detail(store: &ObservationStore, run: RunRecord) -> homeboy::Result<RunDetail> {
+fn run_detail(store: &ObservationStore, run: RunRecord) -> homeboy::core::Result<RunDetail> {
     let artifacts = store.list_artifacts(&run.id)?;
     Ok(RunDetail {
         summary: run_summary(run.clone()),
@@ -496,7 +651,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    use homeboy::observation::{
+    use homeboy::core::observation::{
         FindingListFilter, FindingRecord, NewFindingRecord, NewRunRecord, NewTraceSpanRecord,
         RunRecord, RunStatus, TraceSpanRecord,
     };
@@ -523,16 +678,15 @@ mod tests {
     }
 
     fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
-        NewRunRecord {
-            kind: kind.to_string(),
-            component_id: Some(component_id.to_string()),
-            command: Some(format!("homeboy {kind} {component_id}")),
-            cwd: Some("/tmp/homeboy-fixture".to_string()),
-            homeboy_version: Some("test-version".to_string()),
-            git_sha: Some("abc123".to_string()),
-            rig_id: Some(rig_id.to_string()),
-            metadata_json: metadata,
-        }
+        NewRunRecord::builder(kind)
+            .component_id(component_id)
+            .command(format!("homeboy {kind} {component_id}"))
+            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+            .homeboy_version("test-version")
+            .git_sha(Some("abc123".to_string()))
+            .rig_id(rig_id)
+            .metadata(metadata)
+            .build()
     }
 
     #[test]
@@ -555,6 +709,7 @@ mod tests {
 
             let (output, _) = list_runs(
                 RunsListArgs {
+                    runner: None,
                     kind: Some("bench".to_string()),
                     component_id: Some("homeboy".to_string()),
                     rig: Some("studio".to_string()),
@@ -599,6 +754,7 @@ mod tests {
 
             let (output, _) = list_runs(
                 RunsListArgs {
+                    runner: None,
                     kind: Some("bench".to_string()),
                     component_id: Some("homeboy".to_string()),
                     rig: Some("studio".to_string()),
@@ -716,6 +872,50 @@ mod tests {
                 output.artifacts[0].url.as_deref(),
                 Some("https://example.test/")
             );
+        });
+    }
+
+    #[test]
+    fn artifact_get_copies_registered_file_without_raw_path_lookup() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+                .expect("run");
+            let artifact_path = home.path().join("bench-results.json");
+            std::fs::write(&artifact_path, br#"{"ok":true}"#).expect("artifact");
+            let artifact = store
+                .record_artifact(&run.id, "bench_results", &artifact_path)
+                .expect("record artifact");
+            let output_path = home.path().join("downloaded.json");
+
+            let (output, _) = artifact_get(RunsArtifactGetArgs {
+                run_id: run.id.clone(),
+                artifact_id: artifact.id.clone(),
+                output: Some(output_path.clone()),
+            })
+            .expect("get artifact");
+
+            let RunsOutput::ArtifactGet(output) = output else {
+                panic!("expected artifact get output");
+            };
+            assert_eq!(output.command, "runs.artifact.get");
+            assert_eq!(output.artifact_id, artifact.id);
+            assert_eq!(
+                std::fs::read(&output_path).expect("downloaded"),
+                br#"{"ok":true}"#
+            );
+
+            let err = match artifact_get(RunsArtifactGetArgs {
+                run_id: run.id,
+                artifact_id: artifact_path.display().to_string(),
+                output: Some(home.path().join("bad.json")),
+            }) {
+                Ok(_) => panic!("raw paths are not accepted as artifact ids"),
+                Err(err) => err,
+            };
+            assert!(err.to_string().contains("artifact record not found"));
         });
     }
 
@@ -1154,15 +1354,14 @@ mod tests {
                 .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
                 .expect("run");
             let span = store
-                .record_trace_span(NewTraceSpanRecord {
-                    run_id: run.id.clone(),
-                    span_id: "boot".to_string(),
-                    status: "ok".to_string(),
-                    duration_ms: Some(12.5),
-                    from_event: Some("start".to_string()),
-                    to_event: Some("ready".to_string()),
-                    metadata_json: serde_json::json!({ "phase": "cold" }),
-                })
+                .record_trace_span(
+                    NewTraceSpanRecord::builder(&run.id, "boot", "ok")
+                        .duration_ms(Some(12.5))
+                        .from_event(Some("start"))
+                        .to_event(Some("ready"))
+                        .metadata(serde_json::json!({ "phase": "cold" }))
+                        .build(),
+                )
                 .expect("span");
             let output = home.path().join("trace-bundle");
 
@@ -1195,15 +1394,12 @@ mod tests {
                     .record_artifact(&run.id, "trace_results", &artifact_path)
                     .expect("artifact record");
                 store
-                    .record_trace_span(NewTraceSpanRecord {
-                        run_id: run.id.clone(),
-                        span_id: "first".to_string(),
-                        status: "ok".to_string(),
-                        duration_ms: Some(1.0),
-                        from_event: None,
-                        to_event: Some("done".to_string()),
-                        metadata_json: serde_json::json!({}),
-                    })
+                    .record_trace_span(
+                        NewTraceSpanRecord::builder(&run.id, "first", "ok")
+                            .duration_ms(Some(1.0))
+                            .to_event(Some("done"))
+                            .build(),
+                    )
                     .expect("span");
                 store
                     .record_finding(&NewFindingRecord {

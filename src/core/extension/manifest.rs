@@ -1,9 +1,9 @@
-use crate::component::AuditConfig;
-use crate::config::ConfigEntity;
-use crate::engine::output_parse::ParseSpec;
-use crate::engine::run_dir;
-use crate::error::{Error, Result};
-use crate::paths;
+use crate::core::component::AuditConfig;
+use crate::core::config::ConfigEntity;
+use crate::core::engine::output_parse::ParseSpec;
+use crate::core::engine::run_dir;
+use crate::core::error::{Error, Result};
+use crate::core::paths;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,6 +52,8 @@ pub struct DeployCapability {
     pub overrides: Vec<DeployOverride>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_path_inference: Vec<RemotePathInferenceRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_roots: Vec<RemotePathRootRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub version_patterns: Vec<VersionPatternConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,6 +296,16 @@ pub struct ScriptsConfig {
     /// - PHP: `vendor/bin/phpcbf`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// Script that collects compiler warnings.
+    /// Runs from the project root and receives `{root}` JSON on stdin.
+    /// Outputs `{warnings:[...]}` JSON using Homeboy's generic warning envelope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compiler_warnings: Option<String>,
+    /// Script that converts compiler warnings into machine-applicable fixes.
+    /// Runs from the project root and receives `{root, findings}` JSON on stdin.
+    /// Outputs `{fixes:[...]}` JSON using Homeboy's generic fix envelope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compiler_warning_fixes: Option<String>,
     /// Script that extracts function contracts from source files.
     /// Receives `{file, content}` JSON on stdin, outputs `{file, contracts: [...]}` JSON on stdout.
     /// Each contract describes a function's signature, control flow branches, effects, and calls.
@@ -667,7 +679,7 @@ impl ExtensionManifest {
     }
 
     /// Parse the version string as semver.
-    pub fn semver(&self) -> crate::error::Result<semver::Version> {
+    pub fn semver(&self) -> crate::core::error::Result<semver::Version> {
         super::version::parse_extension_version(&self.version, &self.id)
     }
 
@@ -723,6 +735,20 @@ impl ExtensionManifest {
     /// Get the format script path (relative to extension dir), if configured.
     pub fn format_script(&self) -> Option<&str> {
         self.scripts.as_ref().and_then(|s| s.format.as_deref())
+    }
+
+    /// Get the compiler warning script path (relative to extension dir), if configured.
+    pub fn compiler_warnings_script(&self) -> Option<&str> {
+        self.scripts
+            .as_ref()
+            .and_then(|s| s.compiler_warnings.as_deref())
+    }
+
+    /// Get the compiler warning fixes script path (relative to extension dir), if configured.
+    pub fn compiler_warning_fixes_script(&self) -> Option<&str> {
+        self.scripts
+            .as_ref()
+            .and_then(|s| s.compiler_warning_fixes.as_deref())
     }
 
     /// Get the contract script path (relative to extension dir), if configured.
@@ -855,6 +881,16 @@ pub struct DeployOverride {
 pub struct RemotePathInferenceRule {
     pub when_file_contains: FileContainsCondition,
     pub remote_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemotePathRootRule {
+    pub path_prefix: String,
+    pub root: String,
+    #[serde(default)]
+    pub strip_prefix: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detect_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

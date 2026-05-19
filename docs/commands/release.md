@@ -18,6 +18,8 @@ Legacy positional bump syntax is still accepted for compatibility: `homeboy rele
 - `--path <PATH>`: Override local path for a single-component release
 - `--deploy`: Deploy this component to all projects that use it after release
 - `--recover`: Recover from an interrupted release
+- `--head`: Finish the release pipeline for the version commit and tag already checked out at HEAD
+- `--from-artifacts <DIR>`: With `--head`, attach/publish existing artifacts from a directory instead of running `release.package`
 - `--skip-checks`: Skip pre-release lint/test checks
 - `--bump <BUMP>`: Force `major`, `minor`, `patch`, or an explicit version like `2.0.0`
 - `--force-lower-bump`: Allow a forced bump lower than the commit-derived recommendation
@@ -28,6 +30,8 @@ Legacy positional bump syntax is still accepted for compatibility: `homeboy rele
 ## Description
 
 `homeboy release` executes component releases: detects or applies a version bump, finalizes generated changelog entries, commits, tags, pushes, and optionally publishes release artifacts. Use `--dry-run` to preview the release plan without making changes.
+
+`--head` is for CI jobs where another step already created the release commit and tag, but Homeboy should still own the rest of the release lifecycle. It keeps the safe preflight checks, skips changelog/version/git mutation steps, populates release state from the version and tag at HEAD, then runs `release.package` (unless `--from-artifacts` is provided), `github.release`, `release.publish`, cleanup, and post-release hooks through the normal pipeline.
 
 When `--bump` requests a lower keyword bump than Homeboy detects from releasable commits, release execution requires confirmation in an interactive terminal. Non-interactive runs must pass `--force-lower-bump`; otherwise Homeboy refuses before creating release artifacts, commits, tags, or pushes. Dry-run still returns the plan and semver recommendation for review.
 
@@ -42,6 +46,14 @@ homeboy release <component_id> --dry-run
 
 # 3. Execute the release
 homeboy release <component_id>
+```
+
+### Finish an already-tagged release
+
+```sh
+# Build/package artifacts somewhere else, then let Homeboy create/update the
+# GitHub Release and run publish hooks without re-tagging.
+homeboy release <component_id> --head --from-artifacts ./artifacts --skip-checks
 ```
 
 ## Release Pipeline

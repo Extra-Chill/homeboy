@@ -7,11 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
-use crate::code_audit::conventions::AuditFinding;
-use crate::code_audit::findings::{Finding, Severity};
-use crate::code_audit::walker::is_test_path;
+use crate::core::code_audit::conventions::AuditFinding;
+use crate::core::code_audit::findings::{Finding, Severity};
+use crate::core::code_audit::walker::is_test_path;
 
 pub(super) fn run(root: &Path) -> Vec<Finding> {
     let config = ScanConfig {
@@ -659,8 +659,8 @@ fn public_api_compiles() {
         let findings = detect_vacuous_tests(
             "tests/core/rig/check_test.rs",
             r#"
-use crate::rig::check::evaluate;
-use crate::rig::spec::{CheckSpec, RigSpec};
+use crate::core::rig::check::evaluate;
+use crate::core::rig::spec::{CheckSpec, RigSpec};
 
 fn minimal_rig() -> RigSpec { todo!() }
 
@@ -681,7 +681,7 @@ fn test_evaluate_file_exists() {
         let findings = detect_vacuous_tests(
             "tests/core/deps_test.rs",
             r#"
-use homeboy::deps::{self, ComposerAction};
+use homeboy::core::deps::{self, ComposerAction};
 
 #[test]
 fn status_filters_to_one_package() {
@@ -857,7 +857,7 @@ fn calls_product() {
         let findings = detect_vacuous_tests(
             "tests/core/extension/bench/runs_flag_test.rs",
             r#"
-use crate::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
+use crate::core::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
 
 fn scenario(id: &str) -> BenchScenario {
     scenario_with_iterations(id, &[("ms", 1.0)], 1)

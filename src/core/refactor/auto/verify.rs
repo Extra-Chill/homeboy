@@ -32,9 +32,9 @@
 //!
 //! Default: gate runs when the extension provides an `autofix_verify` config.
 
-use crate::engine::undo::InMemoryRollback;
-use crate::extension::AutofixVerifyConfig;
-use crate::refactor::auto::{ApplyChunkResult, ChunkStatus};
+use crate::core::engine::undo::InMemoryRollback;
+use crate::core::extension::AutofixVerifyConfig;
+use crate::core::refactor::auto::{ApplyChunkResult, ChunkStatus};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -333,7 +333,7 @@ pub fn applied_files_from_chunks(chunks: &[ApplyChunkResult]) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::refactor::auto::{ApplyChunkResult, ChunkStatus};
+    use crate::core::refactor::auto::{ApplyChunkResult, ChunkStatus};
     use std::fs;
 
     fn chunk(name: &str, files: &[&str], status: ChunkStatus) -> ApplyChunkResult {

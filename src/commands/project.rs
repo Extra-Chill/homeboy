@@ -2,7 +2,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use std::path::Path;
 
 use super::CmdResult;
-use homeboy::project::{self};
+use homeboy::core::project::{self};
 
 #[derive(Args)]
 pub struct ProjectArgs {
@@ -108,7 +108,7 @@ enum ProjectComponentsCommand {
     Set {
         /// Project ID
         project_id: String,
-        /// JSON array of attachments: [{"id":"foo","local_path":"/repo"}]
+        /// JSON array of attachments: [{"id":"foo","local_path":"/repo","remote_path":"wp-content/plugins/foo"}]
         #[arg(long)]
         json: String,
     },
@@ -169,6 +169,34 @@ enum ProjectPinCommand {
         #[arg(long, value_enum)]
         r#type: ProjectPinType,
     },
+    /// Update an existing pinned file or log
+    Update {
+        /// Project ID
+        project_id: String,
+        /// Path to update
+        path: String,
+        /// Item type: file or log
+        #[arg(long, value_enum)]
+        r#type: ProjectPinType,
+        /// Optional display label
+        #[arg(long)]
+        label: Option<String>,
+        /// Number of lines to tail (logs only)
+        #[arg(long)]
+        tail: Option<u32>,
+    },
+    /// Rename the path for an existing pinned file or log
+    Rename {
+        /// Project ID
+        project_id: String,
+        /// Current pinned path
+        old_path: String,
+        /// New pinned path
+        new_path: String,
+        /// Item type: file or log
+        #[arg(long, value_enum)]
+        r#type: ProjectPinType,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -177,7 +205,7 @@ enum ProjectPinType {
     Log,
 }
 
-pub type ProjectOutput = homeboy::project::ProjectReportOutput;
+pub type ProjectOutput = homeboy::core::project::ProjectReportOutput;
 
 pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ProjectOutput> {
     match args.command {
@@ -196,7 +224,7 @@ pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                 spec
             } else {
                 let id = id.ok_or_else(|| {
-                    homeboy::Error::validation_invalid_argument(
+                    homeboy::core::Error::validation_invalid_argument(
                         "id",
                         "Missing required argument: id",
                         None,
@@ -213,7 +241,7 @@ pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
                     ..Default::default()
                 };
 
-                homeboy::config::serialize_with_id(&new_project, &id)?
+                homeboy::core::config::serialize_with_id(&new_project, &id)?
             };
 
             Ok(project::build_create_output(project::create(
@@ -228,7 +256,7 @@ pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             json,
         } => {
             let json_spec = json.or(spec).ok_or_else(|| {
-                homeboy::Error::validation_invalid_argument(
+                homeboy::core::Error::validation_invalid_argument(
                     "spec",
                     "Provide JSON spec or use --json flag",
                     None,
@@ -262,7 +290,7 @@ fn show(project_id: &str) -> CmdResult<ProjectOutput> {
 
 fn set(args: super::DynamicSetArgs) -> CmdResult<ProjectOutput> {
     let merged = super::merge_dynamic_args(&args)?.ok_or_else(|| {
-        homeboy::Error::validation_invalid_argument(
+        homeboy::core::Error::validation_invalid_argument(
             "spec",
             "Provide JSON spec, --json flag, --base64 flag, or --key value flags",
             None,
@@ -360,7 +388,7 @@ fn components_clear(project_id: &str) -> CmdResult<ProjectOutput> {
 fn write_project_components_response(
     project_id: &str,
     action: &str,
-    components: homeboy::project::ProjectComponentsOutput,
+    components: homeboy::core::project::ProjectComponentsOutput,
 ) -> (ProjectOutput, i32) {
     (
         project::build_components_output(project_id, action, components),
@@ -383,6 +411,19 @@ fn pin(command: ProjectPinCommand) -> CmdResult<ProjectOutput> {
             path,
             r#type,
         } => pin_remove(&project_id, &path, r#type),
+        ProjectPinCommand::Update {
+            project_id,
+            path,
+            r#type: update_type,
+            label,
+            tail,
+        } => pin_update(&project_id, &path, update_type, label, tail),
+        ProjectPinCommand::Rename {
+            project_id,
+            old_path,
+            new_path,
+            r#type,
+        } => pin_rename(&project_id, &old_path, &new_path, r#type),
     }
 }
 
@@ -425,6 +466,43 @@ fn pin_remove(project_id: &str, path: &str, pin_type: ProjectPinType) -> CmdResu
 
     Ok((
         project::build_pin_output("project.pin.remove", project_id, pin),
+        0,
+    ))
+}
+
+fn pin_update(
+    project_id: &str,
+    path: &str,
+    pin_type: ProjectPinType,
+    label: Option<String>,
+    tail: Option<u32>,
+) -> CmdResult<ProjectOutput> {
+    let pin = project::update_pin(
+        project_id,
+        map_pin_type(pin_type),
+        path,
+        project::PinUpdateOptions {
+            label,
+            tail_lines: tail,
+        },
+    )?;
+
+    Ok((
+        project::build_pin_output("project.pin.update", project_id, pin),
+        0,
+    ))
+}
+
+fn pin_rename(
+    project_id: &str,
+    old_path: &str,
+    new_path: &str,
+    pin_type: ProjectPinType,
+) -> CmdResult<ProjectOutput> {
+    let pin = project::rename_pin(project_id, map_pin_type(pin_type), old_path, new_path)?;
+
+    Ok((
+        project::build_pin_output("project.pin.rename", project_id, pin),
         0,
     ))
 }

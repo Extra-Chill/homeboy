@@ -2,12 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::extension::trace::TraceProbeConfig;
-use crate::extension::trace::TraceSpanMetadata;
+use crate::core::extension::trace::TraceProbeConfig;
+use crate::core::extension::trace::TraceSpanMetadata;
 use std::collections::{BTreeMap, HashMap};
 
-use crate::component::ScopedExtensionConfig;
-use crate::extension::bench::{BenchGate, BenchGateOp};
+use crate::core::component::ScopedExtensionConfig;
+use crate::core::extension::bench::{BenchGate, BenchGateOp};
 
 /// A rig: components + services + pipelines.
 ///

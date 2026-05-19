@@ -31,8 +31,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use homeboy::observation::{ObservationStore, RunRecord};
-use homeboy::Error;
+use homeboy::core::observation::{ObservationStore, RunRecord};
+use homeboy::core::Error;
 
 use super::{CmdResult, RunsOutput};
 
@@ -167,7 +167,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                     persist_artifact_file(&homeboy_run_id, &artifact_id, &file_name, &json_bytes)?;
                 let sha = format!("{:x}", Sha256::digest(&json_bytes));
                 let size = i64::try_from(json_bytes.len()).ok();
-                let artifact_record = homeboy::observation::ArtifactRecord {
+                let artifact_record = homeboy::core::observation::ArtifactRecord {
                     id: artifact_id,
                     run_id: homeboy_run_id.clone(),
                     kind: artifact.name.clone(),
@@ -348,7 +348,7 @@ fn list_workflow_runs(
     repo: &str,
     workflow: &str,
     since: &str,
-) -> homeboy::Result<(Vec<GhWorkflowRun>, bool)> {
+) -> homeboy::core::Result<(Vec<GhWorkflowRun>, bool)> {
     let cache_key = list_runs_cache_key(repo, workflow);
     let etag_path = list_runs_cache_path(&cache_key, "etag")?;
     let body_path = list_runs_cache_path(&cache_key, "json")?;
@@ -488,7 +488,7 @@ fn split_headers_and_body(raw: &str) -> (Option<String>, String) {
 /// Parse one or more concatenated JSON arrays (gh `--paginate` output) into
 /// a single flat list of workflow runs. The runs payload from
 /// `actions/workflows/.../runs` is `{"total_count":N, "workflow_runs":[...]}`.
-fn parse_runs_payload(body: &[u8]) -> homeboy::Result<Vec<GhWorkflowRun>> {
+fn parse_runs_payload(body: &[u8]) -> homeboy::core::Result<Vec<GhWorkflowRun>> {
     #[derive(Deserialize)]
     struct WorkflowRunsPage {
         #[serde(default)]
@@ -515,7 +515,7 @@ fn parse_runs_payload(body: &[u8]) -> homeboy::Result<Vec<GhWorkflowRun>> {
 fn filter_runs_by_since(
     runs: Vec<GhWorkflowRun>,
     since: &str,
-) -> homeboy::Result<Vec<GhWorkflowRun>> {
+) -> homeboy::core::Result<Vec<GhWorkflowRun>> {
     let threshold = super::common::since_threshold(since)?;
     Ok(runs
         .into_iter()
@@ -533,7 +533,7 @@ fn filter_runs_by_since(
 /// `--created` uses GitHub's date filter, which is always inclusive of the
 /// boundary day. Convert our duration-style `--since` into a `YYYY-MM-DD`
 /// boundary suitable for the filter.
-fn since_iso_filter(since: &str) -> homeboy::Result<String> {
+fn since_iso_filter(since: &str) -> homeboy::core::Result<String> {
     let raw = super::common::since_threshold(since)?;
     Ok(raw[..10].to_string())
 }
@@ -563,7 +563,7 @@ struct GhArtifact {
     archive_download_url: Option<String>,
 }
 
-fn list_run_artifacts(repo: &str, gh_run_id: u64) -> homeboy::Result<Vec<GhArtifact>> {
+fn list_run_artifacts(repo: &str, gh_run_id: u64) -> homeboy::core::Result<Vec<GhArtifact>> {
     let api_path = format!("repos/{repo}/actions/runs/{gh_run_id}/artifacts?per_page=100");
     let args = vec!["api".to_string(), "--paginate".into(), api_path.clone()];
     let output = Command::new("gh")
@@ -609,7 +609,7 @@ fn list_run_artifacts(repo: &str, gh_run_id: u64) -> homeboy::Result<Vec<GhArtif
     Ok(out)
 }
 
-fn download_artifact_zip(repo: &str, artifact_id: u64) -> homeboy::Result<Vec<u8>> {
+fn download_artifact_zip(repo: &str, artifact_id: u64) -> homeboy::core::Result<Vec<u8>> {
     // `gh api repos/.../actions/artifacts/{id}/zip` follows the redirect to
     // the artifact storage URL automatically.
     let api_path = format!("repos/{repo}/actions/artifacts/{artifact_id}/zip");
@@ -633,7 +633,7 @@ fn download_artifact_zip(repo: &str, artifact_id: u64) -> homeboy::Result<Vec<u8
 /// pairs for every entry that ends in `.json`. Non-JSON entries are
 /// returned to the caller anyway when `keep_non_json` is true (currently
 /// we only return JSON — keeping the API simple).
-fn unpack_json_files_from_zip(zip_bytes: &[u8]) -> homeboy::Result<Vec<(String, Vec<u8>)>> {
+fn unpack_json_files_from_zip(zip_bytes: &[u8]) -> homeboy::core::Result<Vec<(String, Vec<u8>)>> {
     let cursor = Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| {
         Error::validation_invalid_argument(
@@ -674,9 +674,9 @@ fn persist_artifact_file(
     artifact_id: &str,
     file_name: &str,
     bytes: &[u8],
-) -> homeboy::Result<PathBuf> {
+) -> homeboy::core::Result<PathBuf> {
     let safe_name = sanitize_file_name(file_name);
-    let target_dir = crate::paths::homeboy_data()?
+    let target_dir = crate::core::paths::homeboy_data()?
         .join("artifacts")
         .join(homeboy_run_id);
     fs::create_dir_all(&target_dir).map_err(|e| {
@@ -705,8 +705,8 @@ fn list_runs_cache_key(repo: &str, workflow: &str) -> String {
     format!("{:x}", digest)
 }
 
-fn list_runs_cache_path(key: &str, ext: &str) -> homeboy::Result<PathBuf> {
-    let base = crate::paths::homeboy()?
+fn list_runs_cache_path(key: &str, ext: &str) -> homeboy::core::Result<PathBuf> {
+    let base = crate::core::paths::homeboy()?
         .join("cache")
         .join("gh-actions-runs");
     fs::create_dir_all(&base).map_err(|e| {
@@ -722,7 +722,7 @@ fn list_runs_cache_path(key: &str, ext: &str) -> homeboy::Result<PathBuf> {
 
 /// Compile a `--artifact-glob` value into a matcher. Uses the existing `glob`
 /// crate's `Pattern` for shell-style matching (`*`, `?`, character classes).
-fn compile_glob(raw: &str) -> homeboy::Result<glob::Pattern> {
+fn compile_glob(raw: &str) -> homeboy::core::Result<glob::Pattern> {
     glob::Pattern::new(raw).map_err(|e| {
         Error::validation_invalid_argument(
             "artifact_glob",

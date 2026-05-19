@@ -2,14 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use crate::core::engine::symbol_graph::module_path_from_file;
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use crate::Result;
+use crate::core::Result;
 
-use super::{
-    core_parse_items, ext_parse_items, ext_rewrite_caller_imports, find_refactor_extension,
-    ImportRewrite, MoveFileResult,
-};
+use super::extension_integration::{core_parse_items, find_refactor_extension};
+use super::{ext_parse_items, ext_rewrite_caller_imports, ImportRewrite, MoveFileResult};
 
 /// Move an entire module file to a new location, rewriting all imports.
 ///
@@ -25,7 +23,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
 
     // Validate source exists
     if !source_abs.exists() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "from",
             format!("Source file does not exist: {}", from),
             None,
@@ -35,7 +33,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
 
     // Validate destination doesn't exist
     if dest_abs.exists() {
-        return Err(crate::Error::validation_invalid_argument(
+        return Err(crate::core::Error::validation_invalid_argument(
             "to",
             format!("Destination already exists: {}", to),
             None,
@@ -157,7 +155,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
         // Create destination parent directory
         if let Some(parent) = dest_abs.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                crate::Error::internal_io(
+                crate::core::Error::internal_io(
                     e.to_string(),
                     Some(format!("create directory {}", parent.display())),
                 )
@@ -166,7 +164,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
 
         // Move the file
         std::fs::rename(&source_abs, &dest_abs).map_err(|e| {
-            crate::Error::internal_io(e.to_string(), Some(format!("move {} → {}", from, to)))
+            crate::core::Error::internal_io(e.to_string(), Some(format!("move {} → {}", from, to)))
         })?;
 
         // Update old parent mod.rs — remove mod declaration

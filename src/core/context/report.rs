@@ -3,14 +3,16 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::component::{self, Component};
-use crate::deploy;
-use crate::extension::{
+use crate::core::component::{self, Component};
+use crate::core::deploy;
+use crate::core::extension::{
     extension_ready_status, is_extension_compatible, is_extension_linked, load_all_extensions,
 };
-use crate::project::{self, Project};
-use crate::server::{self, Server};
-use crate::{changelog, git, is_zero, is_zero_u32, version, Result};
+use crate::core::project::{self, Project};
+use crate::core::release::{changelog, version};
+use crate::core::server::{self, Server};
+use crate::core::{git, Result};
+use crate::{is_zero, is_zero_u32};
 
 use super::{build_component_info, path_is_parent_of, ComponentGap, ContextOutput};
 
@@ -167,7 +169,7 @@ pub struct ChangelogSnapshot {
     pub items: Option<Vec<String>>,
 }
 
-pub type ComponentReleaseState = crate::deploy::ReleaseState;
+pub type ComponentReleaseState = crate::core::deploy::ReleaseState;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ComponentWithState {
@@ -408,7 +410,7 @@ fn collect_focused_components(
 
 fn compute_status(
     components: &[ComponentWithState],
-    release_buckets: &crate::deploy::ReleaseStateBuckets,
+    release_buckets: &crate::core::deploy::ReleaseStateBuckets,
 ) -> ContextReportStatus {
     let mut config_gaps = 0;
     let mut gap_details = Vec::new();
@@ -525,7 +527,7 @@ fn build_actionable_next_steps(
     components: &[ComponentWithState],
     projects: &[ProjectListItem],
     linked_extension_ids: &HashSet<String>,
-    all_extensions: &[crate::extension::ExtensionManifest],
+    all_extensions: &[crate::core::extension::ExtensionManifest],
 ) -> Vec<String> {
     let mut next_steps = Vec::new();
 
@@ -636,7 +638,7 @@ fn build_actionable_next_steps(
 
     let mut outdated_extensions = Vec::new();
     for extension in all_extensions {
-        if let Some(update) = crate::extension::check_update_available(&extension.id) {
+        if let Some(update) = crate::core::extension::check_update_available(&extension.id) {
             outdated_extensions.push(update);
         }
     }

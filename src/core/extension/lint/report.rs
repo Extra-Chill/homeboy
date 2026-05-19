@@ -3,13 +3,13 @@
 //! Mirrors `core/extension/test/report.rs` — the command layer calls a single
 //! builder function to convert a workflow result into the command output tuple.
 
-use crate::extension::lint::baseline::{BaselineComparison, LintFinding};
-use crate::extension::{
+use crate::core::extension::lint::baseline::{BaselineComparison, LintFinding};
+use crate::core::extension::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, VerificationPhase,
 };
-use crate::refactor::plan::RefactorSourceRun;
-use crate::refactor::AppliedRefactor;
+use crate::core::refactor::plan::RefactorSourceRun;
+use crate::core::refactor::AppliedRefactor;
 use serde::Serialize;
 
 use super::run::{LintRunWorkflowResult, LintSummaryOutput};

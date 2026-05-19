@@ -8,20 +8,20 @@ use std::thread;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::component::Component;
-use crate::engine::baseline::BaselineFlags;
-use crate::engine::invocation::InvocationRequirements;
-use crate::engine::run_dir::{self, RunDir};
-use crate::error::{Error, Result};
-use crate::extension::bench::aggregate_runs;
-use crate::extension::bench::baseline::{self, BenchBaselineComparison};
-use crate::extension::bench::diagnostic::{self, BenchDiagnostic};
-use crate::extension::bench::failure_diagnostic::bench_failure_stderr_tail;
-use crate::extension::bench::parsing::{
+use crate::core::component::Component;
+use crate::core::engine::baseline::BaselineFlags;
+use crate::core::engine::invocation::InvocationRequirements;
+use crate::core::engine::run_dir::{self, RunDir};
+use crate::core::error::{Error, Result};
+use crate::core::extension::bench::aggregate_runs;
+use crate::core::extension::bench::baseline::{self, BenchBaselineComparison};
+use crate::core::extension::bench::diagnostic::{self, BenchDiagnostic};
+use crate::core::extension::bench::failure_diagnostic::bench_failure_stderr_tail;
+use crate::core::extension::bench::parsing::{
     self, BenchResults, BenchRunExecution, BenchRunMetadata, BenchRunnerMetadata, BenchScenario,
     BenchWorkloadMetadata,
 };
-use crate::extension::{
+use crate::core::extension::{
     build_scenario_runner, resolve_execution_context, ExtensionCapability,
     ExtensionExecutionContext, ExtensionRunner, ScenarioRunnerOptions,
 };
@@ -130,11 +130,11 @@ pub fn run_bench_list_workflow(
 ) -> Result<BenchListWorkflowResult> {
     let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
     if component.has_script(ExtensionCapability::Bench) {
-        let source_path = crate::extension::component_script::source_path(
+        let source_path = crate::core::extension::component_script::source_path(
             component,
             args.path_override.as_deref(),
         );
-        let output = crate::extension::component_script::run_component_scripts_with_run_dir(
+        let output = crate::core::extension::component_script::run_component_scripts_with_run_dir(
             component,
             ExtensionCapability::Bench,
             &source_path,
@@ -475,28 +475,29 @@ pub fn run_main_bench_workflow(
     }
 
     if component.has_script(ExtensionCapability::Bench) {
-        let script_output = crate::extension::component_script::run_component_scripts_with_run_dir(
-            component,
-            ExtensionCapability::Bench,
-            source_path,
-            run_dir,
-            true,
-            &[
-                (
-                    "HOMEBOY_BENCH_ITERATIONS".to_string(),
-                    args.iterations.to_string(),
-                ),
-                (
-                    "HOMEBOY_BENCH_WARMUP_ITERATIONS".to_string(),
-                    args.warmup_iterations.unwrap_or(0).to_string(),
-                ),
-                (
-                    "HOMEBOY_BENCH_SCENARIOS".to_string(),
-                    args.scenario_ids.join(","),
-                ),
-            ],
-            &args.passthrough_args,
-        )?;
+        let script_output =
+            crate::core::extension::component_script::run_component_scripts_with_run_dir(
+                component,
+                ExtensionCapability::Bench,
+                source_path,
+                run_dir,
+                true,
+                &[
+                    (
+                        "HOMEBOY_BENCH_ITERATIONS".to_string(),
+                        args.iterations.to_string(),
+                    ),
+                    (
+                        "HOMEBOY_BENCH_WARMUP_ITERATIONS".to_string(),
+                        args.warmup_iterations.unwrap_or(0).to_string(),
+                    ),
+                    (
+                        "HOMEBOY_BENCH_SCENARIOS".to_string(),
+                        args.scenario_ids.join(","),
+                    ),
+                ],
+                &args.passthrough_args,
+            )?;
         let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
         let mut parsed = if results_file.exists() {
             parse_execution_results_file(
@@ -880,7 +881,7 @@ fn is_secret_like_env_key(key: &str) -> bool {
 }
 
 fn source_revision_at(path: &Path) -> Option<String> {
-    crate::git::short_head_revision_at(path).or_else(|| {
+    crate::core::git::short_head_revision_at(path).or_else(|| {
         std::fs::read_to_string(path.join(".source-revision"))
             .ok()
             .map(|value| value.trim().to_string())
@@ -1099,7 +1100,7 @@ fn run_concurrent_instances(
         }));
     }
 
-    let mut per_instance: Vec<(u32, crate::extension::RunnerOutput)> =
+    let mut per_instance: Vec<(u32, crate::core::extension::RunnerOutput)> =
         Vec::with_capacity(concurrency as usize);
     for h in handles {
         match h.join() {
@@ -1190,7 +1191,7 @@ fn run_concurrent_instances(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::path_list_env_value;
+    use crate::core::extension::path_list_env_value;
     use std::collections::BTreeMap;
 
     #[test]

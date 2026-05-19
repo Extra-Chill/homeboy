@@ -10,8 +10,8 @@
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 
-use homeboy::observation::{ObservationStore, RunListFilter};
-use homeboy::Error;
+use homeboy::core::observation::{ObservationStore, RunListFilter};
+use homeboy::core::Error;
 
 use super::common::{
     compile_jsonpath, distribution_share, load_artifact_rows, DistributionSnapshot,

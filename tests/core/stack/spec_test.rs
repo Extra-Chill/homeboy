@@ -1,6 +1,6 @@
 //! Spec parsing + path expansion tests for `core::stack::spec`.
 
-use crate::stack::spec::{expand_path, parse_git_ref, GitRef, StackPrEntry, StackSpec};
+use crate::core::stack::spec::{expand_path, parse_git_ref, GitRef, StackPrEntry, StackSpec};
 
 const STUDIO_FIXTURE: &str = r#"{
     "id": "studio-combined",

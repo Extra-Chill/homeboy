@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::git::run_git;
 use super::spec::{resolve_existing_component_path, StackSpec};

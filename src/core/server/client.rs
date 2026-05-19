@@ -5,15 +5,15 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use crate::engine::invocation;
-use crate::engine::resource::{ChildProcessIdentity, ExtensionChildResourceSummary};
-use crate::engine::shell;
-use crate::error::{Error, Result};
+use crate::core::engine::invocation;
+use crate::core::engine::resource::{ChildProcessIdentity, ExtensionChildResourceSummary};
+use crate::core::engine::shell;
+use crate::core::error::{Error, Result};
 use chrono::Utc;
 
 use super::{
-    ensure_control_path_parent, ManagedSshSession, ManagedSshSessionOutput, Server, ServerAuthMode,
-    ServerSessionConfig,
+    session::ensure_control_path_parent, ManagedSshSession, ManagedSshSessionOutput, Server,
+    ServerAuthMode, ServerSessionConfig,
 };
 use std::process::{Command, Stdio};
 
@@ -1465,7 +1465,7 @@ mod tests {
         ));
         let command = format!(
             "sh -c 'sleep 30 >/dev/null 2>&1 < /dev/null & echo $! > {}'",
-            crate::engine::shell::quote_path(&pid_file.to_string_lossy())
+            crate::core::engine::shell::quote_path(&pid_file.to_string_lossy())
         );
 
         let output = execute_local_command_in_dir(&command, None, None);

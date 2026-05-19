@@ -3,7 +3,7 @@ use std::net::TcpListener;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 use super::{event, push_event, TraceEvent};
 

@@ -1,12 +1,12 @@
 //! default_pattern_for_file — extracted from version.rs.
 
-use crate::component::{self, Component, VersionTarget};
-use crate::engine::codebase_scan;
-use crate::engine::local_files::{self, FileSystem};
-use crate::engine::text;
-use crate::error::{Error, Result};
-use crate::extension::load_all_extensions;
-use crate::paths::resolve_path_string;
+use crate::core::component::{self, Component, VersionTarget};
+use crate::core::engine::codebase_scan;
+use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::engine::text;
+use crate::core::error::{Error, Result};
+use crate::core::extension::load_all_extensions;
+use crate::core::paths::resolve_path_string;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
@@ -72,7 +72,7 @@ pub(crate) fn build_version_parse_error(file: &str, pattern: &str, content: &str
     }
 
     if content.contains("Version:")
-        && !Regex::new(&crate::engine::text::ensure_multiline(pattern))
+        && !Regex::new(&crate::core::engine::text::ensure_multiline(pattern))
             .map(|r| r.is_match(content))
             .unwrap_or(false)
     {
@@ -192,7 +192,7 @@ pub fn read_version(component_id: Option<&str>) -> Result<ComponentVersionInfo> 
     // If no component_id, return homeboy binary's own version
     let id = match component_id {
         None => {
-            let version = crate::upgrade::current_version().to_string();
+            let version = crate::core::upgrade::current_version().to_string();
             return Ok(ComponentVersionInfo {
                 version,
                 targets: vec![],
@@ -349,7 +349,7 @@ pub(crate) fn replace_since_tag_placeholders(
     component: &Component,
     new_version: &str,
 ) -> Result<usize> {
-    use crate::extension::load_extension;
+    use crate::core::extension::load_extension;
 
     // Find the extension's since_tag config
     let since_tag = component.extensions.as_ref().and_then(|extensions| {

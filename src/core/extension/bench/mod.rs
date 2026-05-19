@@ -33,8 +33,8 @@ pub mod run;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use crate::component::Component;
-use crate::extension::{ExtensionCapability, ExtensionExecutionContext};
+use crate::core::component::Component;
+use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext};
 
 pub use aggregation::aggregate_runs;
 pub use artifact::BenchArtifact;
@@ -63,6 +63,6 @@ pub use run::{
 
 pub fn resolve_bench_command(
     component: &Component,
-) -> crate::error::Result<ExtensionExecutionContext> {
-    crate::extension::resolve_execution_context(component, ExtensionCapability::Bench)
+) -> crate::core::error::Result<ExtensionExecutionContext> {
+    crate::core::extension::resolve_execution_context(component, ExtensionCapability::Bench)
 }

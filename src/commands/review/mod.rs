@@ -19,11 +19,13 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
-use homeboy::code_audit::AuditCommandOutput;
-use homeboy::extension::lint::LintCommandOutput;
-use homeboy::extension::test::TestCommandOutput;
-use homeboy::git;
-use homeboy::ObservationOutputMetadata;
+use homeboy::core::code_audit::AuditCommandOutput;
+use homeboy::core::extension::lint::LintCommandOutput;
+use homeboy::core::extension::test::TestCommandOutput;
+use homeboy::core::git;
+use homeboy::core::plan::HomeboyPlan;
+use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
+use homeboy::core::ObservationOutputMetadata;
 
 use super::parse_key_val;
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
@@ -130,6 +132,7 @@ pub struct ReviewSummary {
 #[derive(Serialize)]
 pub struct ReviewCommandOutput {
     pub command: String,
+    pub plan: HomeboyPlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observation: Option<ObservationOutputMetadata>,
     pub artifact: ReviewArtifact,
@@ -171,6 +174,12 @@ struct ReviewStageDescriptor<Args, Output: Serialize> {
     finding_count: fn(&Output) -> usize,
 }
 
+enum ReviewStageRun {
+    Audit(ReviewStage<AuditCommandOutput>, i32),
+    Lint(ReviewStage<LintCommandOutput>, i32),
+    Test(ReviewStage<TestCommandOutput>, i32),
+}
+
 impl<Args, Output: Serialize> ReviewStageDescriptor<Args, Output> {
     fn execute(
         &self,
@@ -202,6 +211,63 @@ impl<Args, Output: Serialize> ReviewStageDescriptor<Args, Output> {
     }
 }
 
+fn review_stage_order(plan: &HomeboyPlan) -> Vec<String> {
+    plan.steps
+        .iter()
+        .filter(|step| step.status == homeboy::core::plan::PlanStepStatus::Ready)
+        .filter_map(|step| step.kind.strip_prefix("review.").map(str::to_string))
+        .collect()
+}
+
+fn execute_review_stage(
+    stage_name: &str,
+    args: &ReviewArgs,
+    global: &GlobalArgs,
+    component_label: &str,
+) -> CmdResult<ReviewStageRun> {
+    match stage_name {
+        "audit" => {
+            let descriptor = ReviewStageDescriptor {
+                name: "audit",
+                include_changed_only_scope: false,
+                build_args: build_audit_args,
+                run: audit::run,
+                finding_count: audit_finding_count,
+            };
+            descriptor
+                .execute(args, global, component_label)
+                .map(|(stage, exit_code)| (ReviewStageRun::Audit(stage, exit_code), exit_code))
+        }
+        "lint" => {
+            let descriptor = ReviewStageDescriptor {
+                name: "lint",
+                include_changed_only_scope: true,
+                build_args: build_lint_args,
+                run: lint::run,
+                finding_count: lint_finding_count,
+            };
+            descriptor
+                .execute(args, global, component_label)
+                .map(|(stage, exit_code)| (ReviewStageRun::Lint(stage, exit_code), exit_code))
+        }
+        "test" => {
+            let descriptor = ReviewStageDescriptor {
+                name: "test",
+                include_changed_only_scope: false,
+                build_args: build_test_args,
+                run: test::run,
+                finding_count: test_finding_count,
+            };
+            descriptor
+                .execute(args, global, component_label)
+                .map(|(stage, exit_code)| (ReviewStageRun::Test(stage, exit_code), exit_code))
+        }
+        other => Err(homeboy::core::Error::internal_unexpected(format!(
+            "review quality plan contains unsupported stage '{other}'"
+        ))),
+    }
+}
+
 pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutput> {
     // Resolve component ID (auto-discovers from CWD when omitted) and source
     // path so we can probe git for the changed-file set ourselves.
@@ -217,6 +283,8 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
         "full"
     }
     .to_string();
+
+    let quality_plan = build_quality_plan(QualityPlanOptions::review(&component_label));
 
     // Probe the changed set once at the umbrella level so we can short-circuit
     // before paying for any extension setup. Each stage will re-derive its
@@ -265,6 +333,10 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
 
         let output = ReviewCommandOutput {
             command: "review".to_string(),
+            plan: build_quality_plan(QualityPlanOptions::skipped_review(
+                &component_label,
+                "no files changed",
+            )),
             observation: observation_metadata,
             artifact,
             summary: ReviewSummary {
@@ -296,51 +368,42 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
 
     let mut top_hints: Vec<String> = Vec::new();
 
-    let audit_descriptor = ReviewStageDescriptor {
-        name: "audit",
-        include_changed_only_scope: false,
-        build_args: build_audit_args,
-        run: audit::run,
-        finding_count: audit_finding_count,
-    };
-    let (audit_stage, audit_exit) = match audit_descriptor.execute(&args, global, &component_label)
-    {
-        Ok(result) => result,
-        Err(error) => {
-            observation::finish_error(review_observation, &error);
-            return Err(error);
-        }
-    };
+    let mut audit_stage = None;
+    let mut audit_exit = 0;
+    let mut lint_stage = None;
+    let mut lint_exit = 0;
+    let mut test_stage = None;
+    let mut test_exit = 0;
 
-    let lint_descriptor = ReviewStageDescriptor {
-        name: "lint",
-        include_changed_only_scope: true,
-        build_args: build_lint_args,
-        run: lint::run,
-        finding_count: lint_finding_count,
-    };
-    let (lint_stage, lint_exit) = match lint_descriptor.execute(&args, global, &component_label) {
-        Ok(result) => result,
-        Err(error) => {
-            observation::finish_error(review_observation, &error);
-            return Err(error);
-        }
-    };
+    for stage_name in review_stage_order(&quality_plan) {
+        let (stage_run, _stage_exit) =
+            match execute_review_stage(&stage_name, &args, global, &component_label) {
+                Ok(result) => result,
+                Err(error) => {
+                    observation::finish_error(review_observation, &error);
+                    return Err(error);
+                }
+            };
 
-    let test_descriptor = ReviewStageDescriptor {
-        name: "test",
-        include_changed_only_scope: false,
-        build_args: build_test_args,
-        run: test::run,
-        finding_count: test_finding_count,
-    };
-    let (test_stage, test_exit) = match test_descriptor.execute(&args, global, &component_label) {
-        Ok(result) => result,
-        Err(error) => {
-            observation::finish_error(review_observation, &error);
-            return Err(error);
+        match stage_run {
+            ReviewStageRun::Audit(stage, exit_code) => {
+                audit_stage = Some(stage);
+                audit_exit = exit_code;
+            }
+            ReviewStageRun::Lint(stage, exit_code) => {
+                lint_stage = Some(stage);
+                lint_exit = exit_code;
+            }
+            ReviewStageRun::Test(stage, exit_code) => {
+                test_stage = Some(stage);
+                test_exit = exit_code;
+            }
         }
-    };
+    }
+
+    let audit_stage = audit_stage.expect("review quality plan must include audit stage");
+    let lint_stage = lint_stage.expect("review quality plan must include lint stage");
+    let test_stage = test_stage.expect("review quality plan must include test stage");
 
     // Aggregate
     let overall_passed = audit_stage.passed && lint_stage.passed && test_stage.passed;
@@ -386,6 +449,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
 
     let output = ReviewCommandOutput {
         command: "review".to_string(),
+        plan: quality_plan,
         observation: observation_metadata,
         artifact,
         summary,
@@ -420,7 +484,7 @@ pub fn run_markdown(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<String> 
 /// Falls back to the generic JSON envelope if the review command failed before
 /// producing an artifact.
 pub fn write_artifact_to_file(
-    result: &homeboy::Result<Value>,
+    result: &homeboy::core::Result<Value>,
     path: &str,
     _exit_code: i32,
 ) -> bool {
@@ -568,6 +632,7 @@ fn git_ref(path: &str, git_ref: &str) -> Option<String> {
 fn build_audit_args(args: &ReviewArgs) -> audit::AuditArgs {
     audit::AuditArgs {
         comp: args.comp.clone(),
+        extension_override: args.extension_override.clone(),
         conventions: false,
         only: Vec::new(),
         exclude: Vec::new(),

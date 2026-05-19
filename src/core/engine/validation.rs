@@ -1,6 +1,6 @@
 //! Input validation primitives.
 
-use crate::error::{Error, Result};
+use crate::core::error::{Error, Result};
 
 pub fn require<T>(opt: Option<T>, field: &str, message: &str) -> Result<T> {
     opt.ok_or_else(|| Error::validation_invalid_argument(field, message, None, None))
@@ -16,7 +16,7 @@ pub fn require_with_hints<T>(
 }
 
 pub struct ValidationCollector {
-    errors: Vec<crate::error::ValidationErrorItem>,
+    errors: Vec<crate::core::error::ValidationErrorItem>,
 }
 
 impl ValidationCollector {
@@ -35,7 +35,7 @@ impl ValidationCollector {
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| err.message.clone());
 
-                self.errors.push(crate::error::ValidationErrorItem {
+                self.errors.push(crate::core::error::ValidationErrorItem {
                     field: field.to_string(),
                     problem,
                     context: if err.details.as_object().is_some_and(|o| !o.is_empty()) {
@@ -50,7 +50,7 @@ impl ValidationCollector {
     }
 
     pub fn push(&mut self, field: &str, problem: &str, context: Option<serde_json::Value>) {
-        self.errors.push(crate::error::ValidationErrorItem {
+        self.errors.push(crate::core::error::ValidationErrorItem {
             field: field.to_string(),
             problem: problem.to_string(),
             context,
@@ -98,7 +98,7 @@ impl ValidationCollector {
 /// re-emit path would drop everything except `field`/`problem` — making it
 /// impossible to debug failures that bottle up via `ValidationCollector`
 /// (e.g. release working-tree checks emitting the dirty file list).
-fn single_error_to_invalid_argument(err: &crate::error::ValidationErrorItem) -> Error {
+fn single_error_to_invalid_argument(err: &crate::core::error::ValidationErrorItem) -> Error {
     let base = Error::validation_invalid_argument(&err.field, &err.problem, None, None);
     match &err.context {
         Some(context) => Error {

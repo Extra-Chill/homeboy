@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use crate::error::{Error, Result};
-use crate::paths;
+use crate::core::error::{Error, Result};
+use crate::core::paths;
 
 const INDEX_LOCK_NAME: &str = ".index.lock";
 const INDEX_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);

@@ -1,4 +1,4 @@
-use homeboy::deploy::parse_bulk_component_ids;
+use homeboy::core::deploy::parse_bulk_component_ids;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 use crate::commands::{
     api, audit, auth, bench, build, changelog, changes, component, config, daemon, db, deploy,
-    deps, doctor, extension, file, fleet, git, issues, lint, logs, observe, project, refactor,
-    release, report, review, rig, runs, self_cmd, server, ssh, stack, status, test, trace, triage,
-    undo, upgrade, version,
+    deps, doctor, extension, file, fleet, git, http, issues, lint, logs, observe, project,
+    refactor, release, report, review, rig, runner, runs, self_cmd, server, ssh, stack, status,
+    test, trace, triage, undo, upgrade, version,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -28,6 +28,10 @@ pub struct Cli {
     /// Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root.
     #[arg(long, global = true, value_name = "DIR")]
     pub artifact_root: Option<PathBuf>,
+
+    /// Offload supported hot commands to a connected Homeboy Lab runner.
+    #[arg(long, global = true, value_name = "RUNNER_ID")]
+    pub runner: Option<String>,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -110,6 +114,9 @@ pub enum Commands {
     /// Manage local dev rigs (reproducible multi-component environments)
     #[command(visible_alias = "rigs")]
     Rig(rig::RigArgs),
+    /// Manage local and SSH execution runners
+    #[command(visible_alias = "runners")]
+    Runner(runner::RunnerArgs),
     /// Inspect persisted observation runs and artifacts
     Runs(runs::RunsArgs),
     /// Inspect the active Homeboy binary and install signals
@@ -124,6 +131,8 @@ pub enum Commands {
     Auth(auth::AuthArgs),
     /// Make API requests to a project
     Api(api::ApiArgs),
+    /// Make generic HTTP requests
+    Http(http::HttpArgs),
     /// Upgrade Homeboy to the latest version
     Upgrade(upgrade::UpgradeArgs),
     /// List available commands (alias for --help)
@@ -151,6 +160,29 @@ pub enum CommandOutputArtifactPolicy {
 }
 
 impl Commands {
+    pub fn supports_lab_runner(&self) -> bool {
+        match self {
+            Commands::Audit(_) => true,
+            Commands::Bench(args) if args.is_run_command() => true,
+            Commands::Lint(_) => true,
+            Commands::Test(_) => true,
+            Commands::Trace(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn lab_offload_mutation_flag(&self) -> Option<&'static str> {
+        match self {
+            Commands::Bench(args) if args.lab_offload_writes_local_state() => {
+                Some("--baseline/--ratchet")
+            }
+            Commands::Lint(args) if args.fix => Some("--fix"),
+            Commands::Test(args) if args.write => Some("--write"),
+            Commands::Trace(args) if args.keep_overlay => Some("--keep-overlay"),
+            _ => None,
+        }
+    }
+
     pub fn response_mode(&self, has_output_file: bool) -> CommandResponseMode {
         match self {
             Commands::Ssh(args) if args.subcommand.is_none() && args.command.is_empty() => {
@@ -272,6 +304,10 @@ mod tests {
             .command
     }
 
+    fn parsed_cli(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("CLI args should parse")
+    }
+
     #[test]
     fn test_current_command_surface() {
         let surface = current_command_surface();
@@ -317,6 +353,45 @@ mod tests {
         assert_eq!(
             Commands::List.response_mode(false),
             CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
+        );
+    }
+
+    #[test]
+    fn test_supports_lab_runner() {
+        assert!(parsed_command(&["homeboy", "lint"]).supports_lab_runner());
+        assert!(parsed_command(&["homeboy", "test"]).supports_lab_runner());
+        assert!(parsed_command(&["homeboy", "audit"]).supports_lab_runner());
+        assert!(parsed_command(&["homeboy", "bench"]).supports_lab_runner());
+        assert!(parsed_command(&["homeboy", "trace"]).supports_lab_runner());
+        assert!(!parsed_command(&["homeboy", "status"]).supports_lab_runner());
+        assert!(!parsed_command(&["homeboy", "bench", "list"]).supports_lab_runner());
+
+        let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
+        assert_eq!(cli.runner.as_deref(), Some("lab-a"));
+        assert!(cli.command.supports_lab_runner());
+    }
+
+    #[test]
+    fn test_lab_offload_mutation_flag() {
+        assert_eq!(
+            parsed_command(&["homeboy", "lint", "--fix"]).lab_offload_mutation_flag(),
+            Some("--fix")
+        );
+        assert_eq!(
+            parsed_command(&["homeboy", "test", "--write"]).lab_offload_mutation_flag(),
+            Some("--write")
+        );
+        assert_eq!(
+            parsed_command(&["homeboy", "bench", "--baseline"]).lab_offload_mutation_flag(),
+            Some("--baseline/--ratchet")
+        );
+        assert_eq!(
+            parsed_command(&["homeboy", "trace", "--keep-overlay"]).lab_offload_mutation_flag(),
+            Some("--keep-overlay")
+        );
+        assert_eq!(
+            parsed_command(&["homeboy", "audit"]).lab_offload_mutation_flag(),
+            None
         );
     }
 

@@ -9,8 +9,8 @@
 //! The default implementation [`GithubTracker`] wraps the existing
 //! `core/git/github.rs` primitives.
 
-use crate::error::Result;
-use crate::git::{
+use crate::core::error::Result;
+use crate::core::git::{
     issue_close, issue_create, issue_edit, issue_find, IssueCloseOptions, IssueCloseReason,
     IssueCreateOptions, IssueEditOptions, IssueFindOptions, IssueState,
 };
@@ -118,7 +118,7 @@ impl Tracker for GithubTracker {
             },
         )?;
         out.number.ok_or_else(|| {
-            crate::error::Error::internal_io(
+            crate::core::error::Error::internal_io(
                 "issue.create succeeded but returned no number".to_string(),
                 Some("gh issue create".into()),
             )
@@ -157,7 +157,7 @@ impl Tracker for GithubTracker {
 /// Translate a GitHub `GithubFindItem` into the tracker-agnostic
 /// [`TrackedIssue`] shape. Returns `None` when the issue's state shape is
 /// unrecognized — defensive against future GitHub state additions.
-fn github_to_tracked(item: crate::git::GithubFindItem) -> Option<TrackedIssue> {
+fn github_to_tracked(item: crate::core::git::GithubFindItem) -> Option<TrackedIssue> {
     let state = match item.state.to_lowercase().as_str() {
         "open" => TrackedIssueState::Open,
         "closed" => match item.state_reason.as_str() {
@@ -192,7 +192,7 @@ fn github_to_tracked(item: crate::git::GithubFindItem) -> Option<TrackedIssue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::GithubFindItem;
+    use crate::core::git::GithubFindItem;
 
     fn item(state: &str, state_reason: &str) -> GithubFindItem {
         GithubFindItem {

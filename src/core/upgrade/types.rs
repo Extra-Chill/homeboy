@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::extension::ExtensionSourceUpdate;
+use crate::core::extension::ExtensionSourceUpdate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
