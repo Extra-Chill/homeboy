@@ -36,6 +36,11 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
+      - name: Install cargo-dist
+        if: matrix.component == 'rust'
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+
       - uses: Extra-Chill/homeboy-action@v2
         with:
           component: ${{ matrix.component }}
