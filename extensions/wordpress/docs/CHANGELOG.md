@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.90.5] - 2026-05-19
+
+### Fixed
+- surface wp-codebox agent artifacts
+
 ## [2.90.4] - 2026-05-19
 
 ### Fixed
