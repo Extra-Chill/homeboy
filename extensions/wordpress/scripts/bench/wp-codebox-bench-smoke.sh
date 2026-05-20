@@ -12,7 +12,7 @@
 #
 # Manual integration test, not part of CI. Run after changes to:
 #   - bench-runner-wp-codebox.sh
-#   - wp-codebox bench-run / wordpress.bench
+#   - wp-codebox recipe-run / wordpress.bench
 #
 # Usage: bash wordpress/scripts/bench/wp-codebox-bench-smoke.sh
 # Exit:  0 = harness round-trips end-to-end, non-zero = regression
