@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.96.11] - 2026-05-20
+
+### Fixed
+- stop mounting phpunit runner
+- pass phpunit wrapper host path
+
 ## [2.96.10] - 2026-05-20
 
 ### Fixed
