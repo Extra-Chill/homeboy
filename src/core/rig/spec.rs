@@ -690,6 +690,46 @@ mod tests {
     }
 
     #[test]
+    fn test_string_settings() {
+        let profile: TraceProfileSpec = serde_json::from_str(
+            r#"{
+                "settings": {
+                    "title": "Studio",
+                    "retry_count": 2
+                }
+            }"#,
+        )
+        .expect("parse profile");
+
+        assert_eq!(
+            profile.string_settings(),
+            vec![("title".to_string(), "Studio".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_json_settings() {
+        let profile: TraceProfileSpec = serde_json::from_str(
+            r#"{
+                "settings": {
+                    "title": "Studio",
+                    "retry_count": 2,
+                    "options": { "headless": true }
+                }
+            }"#,
+        )
+        .expect("parse profile");
+
+        assert_eq!(
+            profile.json_settings(),
+            vec![
+                ("options".to_string(), serde_json::json!({ "headless": true })),
+                ("retry_count".to_string(), serde_json::json!(2))
+            ]
+        );
+    }
+
+    #[test]
     fn test_trace_default_phase_preset() {
         let workload = WorkloadSpec::Detailed(WorkloadEntry {
             path: "trace.mjs".to_string(),

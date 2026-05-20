@@ -512,6 +512,7 @@ fn respond_bad_gateway(mut stream: TcpStream, message: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::super::{ActiveTraceProbes, TraceProbeConfig};
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -519,7 +520,16 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn http_egress_proxy_captures_http_request_and_response_bodies() {
+    fn test_default_redact_headers() {
+        let headers = default_redact_headers();
+
+        assert!(headers.contains(&"authorization".to_string()));
+        assert!(headers.contains(&"cookie".to_string()));
+        assert!(headers.contains(&"set-cookie".to_string()));
+    }
+
+    #[test]
+    fn test_run_http_egress() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).expect("bind upstream");
         let upstream_addr = upstream.local_addr().expect("upstream addr");
         let server = thread::spawn(move || {
