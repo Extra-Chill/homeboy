@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.96.10] - 2026-05-20
+
+### Fixed
+- pass phpunit args to wp-codebox
+
 ## [2.96.9] - 2026-05-20
 
 ### Fixed
