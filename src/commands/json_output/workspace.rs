@@ -1,0 +1,30 @@
+use crate::cli_surface::Commands;
+
+use super::{map, JsonRun};
+use crate::commands::{
+    build, changelog, changes, component, config, docs, extension, project, refactor, release,
+    report, rig, runner, runs, stack, undo, version, GlobalArgs,
+};
+
+pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
+    match command {
+        Commands::Project(args) => map(project::run(args, global)),
+        Commands::Component(args) => map(component::run(args, global)),
+        Commands::Config(args) => map(config::run(args, global)),
+        Commands::Extension(args) => map(extension::run(args, global)),
+        Commands::Docs(args) => map(docs::run(args, global)),
+        Commands::Changelog(args) => map(changelog::run(args, global)),
+        Commands::Version(args) => map(version::run(args, global)),
+        Commands::Build(args) => map(build::run(args, global)),
+        Commands::Changes(args) => map(changes::run(args, global)),
+        Commands::Release(args) => map(release::run(args, global)),
+        Commands::Report(args) => map(report::run(args, global)),
+        Commands::Refactor(args) => map(refactor::run(args, global)),
+        Commands::Rig(args) => map(rig::run(args, global)),
+        Commands::Runner(args) => map(runner::run(args, global)),
+        Commands::Runs(args) => map(runs::run(args, global)),
+        Commands::Stack(args) => map(stack::run(args, global)),
+        Commands::Undo(args) => map(undo::run(args, global)),
+        _ => unreachable!("command routed to wrong JSON output family"),
+    }
+}
