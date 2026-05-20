@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.96.2] - 2026-05-20
+
+### Fixed
+- remove legacy playground runners
+
 ## [2.96.1] - 2026-05-20
 
 ### Fixed
