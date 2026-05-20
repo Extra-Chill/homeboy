@@ -117,6 +117,7 @@ pub(super) fn review_observation_initial_metadata(
         "changed_since": args.changed_since,
         "changed_only": args.changed_only,
         "summary": args.summary,
+        "ci_profile": args.ci_profile,
         "report": args.report,
         "changed_file_count": changed_file_count,
         "observation_status": "running",
@@ -129,6 +130,15 @@ pub(super) fn review_observation_finish_metadata(
     exit_code: i32,
     error: Option<&str>,
 ) -> serde_json::Value {
+    let mut stages = vec![
+        stage_observation(&output.audit),
+        stage_observation(&output.lint),
+        stage_observation(&output.test),
+    ];
+    if let Some(ref stage) = output.ci_profile {
+        stages.push(stage_observation(stage));
+    }
+
     merge_metadata(
         initial_metadata,
         serde_json::json!({
@@ -140,11 +150,7 @@ pub(super) fn review_observation_finish_metadata(
             "changed_file_count": output.summary.changed_file_count,
             "hints": output.summary.hints,
             "artifact": output.artifact,
-            "stages": [
-                stage_observation(&output.audit),
-                stage_observation(&output.lint),
-                stage_observation(&output.test),
-            ],
+            "stages": stages,
             "error": error,
         }),
     )
@@ -183,6 +189,7 @@ mod tests {
             changed_since: Some("origin/main".to_string()),
             changed_only: false,
             summary: true,
+            ci_profile: None,
             report: Some("pr-comment".to_string()),
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
@@ -275,6 +282,7 @@ mod tests {
             audit,
             lint,
             test,
+            ci_profile: None,
         };
 
         let metadata = review_observation_finish_metadata(initial, &output, 1, None);

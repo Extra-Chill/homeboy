@@ -6,6 +6,7 @@ Run scoped audit + lint + test in a single invocation against PR-style changes.
 
 ```bash
 homeboy review [component] --changed-since=<ref>
+homeboy review [component] --changed-since=<ref> --ci-profile=<profile>
 homeboy review [component] --changed-only
 homeboy review [component]
 ```
@@ -44,6 +45,17 @@ Output is deterministic and matches each command's per-stage output.
 If neither flag is passed, all three stages run against the entire component —
 equivalent to running `audit`, `lint`, and `test` back-to-back without scope.
 
+## CI profile gate
+
+- `--ci-profile <ID>`: Run an extension-declared CI profile as an additional
+  review gate after audit, lint, and test. The profile resolves through the
+  same explicit `ci.profiles` / `ci.jobs` manifest contract used by
+  `homeboy ci run --profile <ID>`.
+
+`review --ci-profile` does not parse arbitrary provider YAML. Discovered CI
+files remain inventory-only; runnable review parity comes from extension-owned
+profile declarations.
+
 ## Component Requirements
 
 `review` delegates to `audit`, `lint`, and `test`. Lint and test stages require linked extensions that provide those capabilities; review does not run arbitrary component shell commands.
@@ -58,6 +70,7 @@ Useful remediation paths when review reports missing extensions:
 
 - `--summary`: Forward the per-stage summary flag to each command (`--summary`
   on lint, `--json-summary` on audit and test).
+- `--ci-profile <ID>`: Add the declared CI profile as a fourth review stage.
 - `--baseline` / `--ignore-baseline` / `--ratchet`: Forwarded to every stage
   that participates in the baseline engine.
 
@@ -69,6 +82,9 @@ homeboy review --changed-since=trunk
 
 # Review a specific component against a release tag
 homeboy review my-plugin --changed-since=v1.2.0
+
+# Review a branch and run the extension-declared PR CI profile
+homeboy review my-plugin --changed-since=main --ci-profile=pr
 
 # Quick local check of working-tree edits (lint only scopes)
 homeboy review --changed-only

@@ -19,7 +19,9 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
+use homeboy::core::ci_profile::{self, CiRunOutput, CiRunSelection};
 use homeboy::core::code_audit::AuditCommandOutput;
+use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::TestCommandOutput;
 use homeboy::core::git;
@@ -57,6 +59,10 @@ pub struct ReviewArgs {
     /// Show compact summary instead of full per-stage output
     #[arg(long)]
     pub summary: bool,
+
+    /// Run an extension-declared CI profile as an additional review gate.
+    #[arg(long, value_name = "ID")]
+    pub ci_profile: Option<String>,
 
     /// Output format. Default JSON envelope; `--report=pr-comment` emits a
     /// markdown PR-comment section instead, suitable for piping to
@@ -140,6 +146,8 @@ pub struct ReviewCommandOutput {
     pub audit: ReviewStage<AuditCommandOutput>,
     pub lint: ReviewStage<LintCommandOutput>,
     pub test: ReviewStage<TestCommandOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_profile: Option<ReviewStage<CiRunOutput>>,
 }
 
 /// Stable machine-readable artifact for automated PR review consumers.
@@ -329,6 +337,14 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
                 artifact_command(&stage_skipped::<Value>("test", "no files changed")),
             ],
         };
+        if args.ci_profile.is_some() {
+            artifact
+                .commands
+                .push(artifact_command(&stage_skipped::<Value>(
+                    "ci",
+                    "no files changed",
+                )));
+        }
         artifact.observation = observation_metadata.clone();
 
         let output = ReviewCommandOutput {
@@ -352,6 +368,10 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
             audit: stage_skipped("audit", "no files changed"),
             lint: stage_skipped("lint", "no files changed"),
             test: stage_skipped("test", "no files changed"),
+            ci_profile: args
+                .ci_profile
+                .as_ref()
+                .map(|_| stage_skipped("ci", "no files changed")),
         };
         observation::finish_success(review_observation, &output, 0);
         return Ok((output, 0));
@@ -404,18 +424,77 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     let audit_stage = audit_stage.expect("review quality plan must include audit stage");
     let lint_stage = lint_stage.expect("review quality plan must include lint stage");
     let test_stage = test_stage.expect("review quality plan must include test stage");
+    let (ci_profile_stage, ci_profile_exit) = match args.ci_profile.as_ref() {
+        Some(profile) => {
+            let ctx = execution_context::resolve(&ResolveOptions {
+                component_id: args.comp.component.clone(),
+                path_override: args.comp.path.clone(),
+                capability: None,
+                settings_overrides: Vec::new(),
+                settings_json_overrides: Vec::new(),
+                extension_overrides: args.extension_override.extensions.clone(),
+            })?;
+            let extension_ids = ctx
+                .component
+                .extensions
+                .as_ref()
+                .map(|extensions| {
+                    let mut ids: Vec<String> = extensions.keys().cloned().collect();
+                    ids.sort();
+                    ids
+                })
+                .unwrap_or_default();
+            let extension_id = ci_profile::select_extension_id(&extension_ids)?;
+            let output = ci_profile::run_for_extension(
+                &ctx.source_path,
+                &extension_id,
+                CiRunSelection::Profile(profile.clone()),
+            )?;
+            let exit_code = output.exit_code;
+            let finding_count = output.jobs.iter().filter(|job| !job.success).count();
+            let stage = ReviewStage {
+                stage: "ci".to_string(),
+                ran: true,
+                passed: exit_code == 0,
+                exit_code,
+                finding_count,
+                hint: format!(
+                    "Deep dive: homeboy ci run {} --profile {}",
+                    component_label, profile
+                ),
+                skipped_reason: None,
+                output: Some(output),
+            };
+            (Some(stage), exit_code)
+        }
+        None => (None, 0),
+    };
 
     // Aggregate
-    let overall_passed = audit_stage.passed && lint_stage.passed && test_stage.passed;
+    let overall_passed = audit_stage.passed
+        && lint_stage.passed
+        && test_stage.passed
+        && ci_profile_stage
+            .as_ref()
+            .map(|stage| stage.passed)
+            .unwrap_or(true);
     let overall_exit = if overall_passed {
         0
-    } else if [audit_exit, lint_exit, test_exit].iter().any(|&c| c >= 2) {
+    } else if [audit_exit, lint_exit, test_exit, ci_profile_exit]
+        .iter()
+        .any(|&c| c >= 2)
+    {
         2
     } else {
         1
     };
-    let total_findings =
-        audit_stage.finding_count + lint_stage.finding_count + test_stage.finding_count;
+    let total_findings = audit_stage.finding_count
+        + lint_stage.finding_count
+        + test_stage.finding_count
+        + ci_profile_stage
+            .as_ref()
+            .map(|stage| stage.finding_count)
+            .unwrap_or(0);
 
     if args.changed_only {
         top_hints.push(
@@ -434,15 +513,20 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
         hints: top_hints,
     };
 
+    let mut commands = vec![
+        artifact_command(&audit_stage),
+        artifact_command(&lint_stage),
+        artifact_command(&test_stage),
+    ];
+    if let Some(ref stage) = ci_profile_stage {
+        commands.push(artifact_command(stage));
+    }
+
     let mut artifact = build_artifact(
         &component_label,
         args.changed_since.as_deref().unwrap_or(""),
         git_ref(&source_path, "HEAD").unwrap_or_default().as_str(),
-        vec![
-            artifact_command(&audit_stage),
-            artifact_command(&lint_stage),
-            artifact_command(&test_stage),
-        ],
+        commands,
     );
     let observation_metadata = review_observation.as_ref().map(|o| o.output_metadata());
     artifact.observation = observation_metadata.clone();
@@ -456,6 +540,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
         audit: audit_stage,
         lint: lint_stage,
         test: test_stage,
+        ci_profile: ci_profile_stage,
     };
 
     print_human_summary(&output);
@@ -731,6 +816,9 @@ fn print_human_summary(output: &ReviewCommandOutput) {
     print_stage_line(&output.audit);
     print_stage_line(&output.lint);
     print_stage_line(&output.test);
+    if let Some(ref stage) = output.ci_profile {
+        print_stage_line(stage);
+    }
     for hint in &output.summary.hints {
         eprintln!("[review] hint: {}", hint);
     }
@@ -875,6 +963,14 @@ mod tests {
         .expect("should parse");
         assert!(cli.review.summary);
         assert!(cli.review.baseline_args.ignore_baseline);
+    }
+
+    #[test]
+    fn parses_ci_profile() {
+        let cli = TestCli::try_parse_from(["test", "my-comp", "--ci-profile", "pr"])
+            .expect("should parse ci profile");
+
+        assert_eq!(cli.review.ci_profile.as_deref(), Some("pr"));
     }
 
     #[test]
@@ -1069,6 +1165,7 @@ mod tests {
             changed_since: Some("trunk".to_string()),
             changed_only: false,
             summary: false,
+            ci_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
@@ -1088,6 +1185,7 @@ mod tests {
             changed_since: None,
             changed_only: true,
             summary: false,
+            ci_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
@@ -1109,6 +1207,7 @@ mod tests {
             changed_since: None,
             changed_only: false,
             summary: false,
+            ci_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
