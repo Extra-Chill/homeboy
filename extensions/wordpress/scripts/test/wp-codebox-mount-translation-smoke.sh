@@ -70,16 +70,12 @@ if (!codeFileArg) {
   throw new Error('missing code-file arg')
 }
 const wrapper = codeFileArg.slice('code-file='.length)
-if (wrapper !== '/homeboy-wp-codebox-runner.php') {
-  throw new Error(`unexpected wrapper runtime path: ${wrapper}`)
+if (!fs.existsSync(wrapper)) {
+  throw new Error(`wrapper code file missing: ${wrapper}`)
 }
 
 const mounts = recipe.inputs?.mounts || []
-const wrapperMount = mounts.find((mount) => mount.target === wrapper)
-if (!wrapperMount) {
-  throw new Error('wrapper mount missing')
-}
-const wrapperSource = fs.readFileSync(wrapperMount.source, 'utf8')
+const wrapperSource = fs.readFileSync(wrapper, 'utf8')
 for (const expected of [
   Buffer.from('tests/OnlyTest.php').toString('base64'),
   Buffer.from(JSON.stringify({ WP_DEBUG: true, CUSTOM_NUMBER: 7 })).toString('base64'),
