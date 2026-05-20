@@ -1,6 +1,36 @@
 use crate::cli_surface::{CommandRawOutputMode, Commands};
 
+use super::utils::{response as output, tty};
 use super::{changelog, docs, file, report, review, runs, trace, GlobalArgs};
+
+pub enum RawExecution {
+    Handled(i32),
+    Continue(Box<Commands>),
+}
+
+pub fn run_and_print(
+    command: Commands,
+    global: &GlobalArgs,
+    mode: CommandRawOutputMode,
+) -> RawExecution {
+    if let CommandRawOutputMode::InteractivePassthrough = mode {
+        return validate_interactive_tty(command);
+    };
+
+    let raw_result =
+        run(command, global, mode).expect("markdown and plain-text modes should return raw output");
+
+    RawExecution::Handled(match raw_result {
+        Ok((content, exit_code)) => {
+            print!("{}", content);
+            exit_code
+        }
+        Err(err) => {
+            output::print_result::<serde_json::Value>(Err(err)).ok();
+            1
+        }
+    })
+}
 
 pub fn run(
     command: Commands,
@@ -36,6 +66,21 @@ fn run_plain_text(command: Commands, global: &GlobalArgs) -> homeboy::core::Resu
         },
         _ => unsupported_output("plain text"),
     }
+}
+
+fn validate_interactive_tty(command: Commands) -> RawExecution {
+    if tty::require_tty_for_interactive() {
+        return RawExecution::Continue(Box::new(command));
+    }
+
+    let err = homeboy::core::Error::validation_invalid_argument(
+        "tty",
+        "This command requires an interactive TTY. For non-interactive usage, run: homeboy ssh <target> -- <command...>",
+        None,
+        None,
+    );
+    output::print_result::<serde_json::Value>(Err(err)).ok();
+    RawExecution::Handled(2)
 }
 
 fn unsupported_output(mode: &str) -> homeboy::core::Result<(String, i32)> {
