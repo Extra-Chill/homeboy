@@ -45,21 +45,41 @@ function argValue(name) {
   return index >= 0 ? args[index + 1] : ''
 }
 
-for (const expected of ['run', '--json', '--command', 'wordpress.run-php']) {
+for (const expected of ['recipe-run', '--json']) {
   if (!args.includes(expected)) {
     throw new Error(`missing expected wp-codebox arg: ${expected}`)
   }
 }
 
-requirePair('--wp', '6.10')
-requirePair('--arg', 'bootstrap=none')
+const recipePath = argValue('--recipe')
+if (!recipePath) {
+  throw new Error('missing --recipe')
+}
 
-const codeFileArg = args.find((arg) => arg.startsWith('code-file='))
+const recipe = JSON.parse(fs.readFileSync(recipePath, 'utf8'))
+if (recipe.runtime?.wp !== '6.10') {
+  throw new Error(`unexpected recipe runtime wp: ${recipe.runtime?.wp}`)
+}
+const step = recipe.workflow?.steps?.[0]
+if (step?.command !== 'wordpress.phpunit') {
+  throw new Error(`unexpected recipe command: ${step?.command}`)
+}
+
+const codeFileArg = (step.args || []).find((arg) => arg.startsWith('code-file='))
 if (!codeFileArg) {
   throw new Error('missing code-file arg')
 }
 const wrapper = codeFileArg.slice('code-file='.length)
-const wrapperSource = fs.readFileSync(wrapper, 'utf8')
+if (wrapper !== '/homeboy-wp-codebox-runner.php') {
+  throw new Error(`unexpected wrapper runtime path: ${wrapper}`)
+}
+
+const mounts = recipe.inputs?.mounts || []
+const wrapperMount = mounts.find((mount) => mount.target === wrapper)
+if (!wrapperMount) {
+  throw new Error('wrapper mount missing')
+}
+const wrapperSource = fs.readFileSync(wrapperMount.source, 'utf8')
 for (const expected of [
   Buffer.from('tests/OnlyTest.php').toString('base64'),
   Buffer.from(JSON.stringify({ WP_DEBUG: true, CUSTOM_NUMBER: 7 })).toString('base64'),
@@ -72,21 +92,16 @@ for (const expected of [
   }
 }
 
-const mounts = []
-for (let index = 0; index < args.length - 1; index += 1) {
-  if (args[index] === '--mount') {
-    mounts.push(args[index + 1])
-  }
-}
+const mountStrings = mounts.map((mount) => `${mount.source}:${mount.target}${mount.mode === 'readonly' ? ':readonly' : ''}`)
 
 const requiredMounts = JSON.parse(process.env.REQUIRED_MOUNTS_JSON)
 for (const mount of requiredMounts) {
-  if (!mounts.includes(mount)) {
-    throw new Error(`missing mount: ${mount}\nactual:\n${mounts.join('\n')}`)
+  if (!mountStrings.includes(mount)) {
+    throw new Error(`missing mount: ${mount}\nactual:\n${mountStrings.join('\n')}`)
   }
 }
 
-const componentMount = mounts.find((mount) => mount.endsWith(':/wordpress/wp-content/plugins/example'))
+const componentMount = mountStrings.find((mount) => mount.endsWith(':/wordpress/wp-content/plugins/example'))
 if (!componentMount) {
   throw new Error('component mount missing')
 }
@@ -106,10 +121,12 @@ fs.writeFileSync(path.join(filesRoot, 'test-results.json'), JSON.stringify({ sch
 
 process.stdout.write(JSON.stringify({
   success: true,
-  execution: {
-    stdout: 'OK (1 test, 1 assertion)\n',
-    stderr: '',
-  },
+  executions: [
+    {
+      stdout: 'OK (1 test, 1 assertion)\n',
+      stderr: '',
+    },
+  ],
   artifacts: {
     directory: path.dirname(filesRoot),
     testResultsPath: path.join(filesRoot, 'test-results.json'),
