@@ -39,13 +39,33 @@ if (!argsFile) {
 }
 fs.writeFileSync(argsFile, `${args.join('\n')}\n`)
 
-for (const expected of ['agent-sandbox-run', '--json', '--secret-env', 'HOMEBOY_DATAMACHINE_AGENT_CONFIG']) {
+for (const expected of ['recipe-run', '--recipe', '--json']) {
   if (!args.includes(expected)) {
     throw new Error(`missing expected wp-codebox arg: ${expected}`)
   }
 }
 
-const artifactRoot = path.join(path.dirname(process.env.FAKE_WP_CODEBOX_ARGS_FILE), 'wp-codebox-artifacts', 'runtime-smoke')
+const valueAfter = (name) => {
+  const index = args.indexOf(name)
+  if (index === -1 || index + 1 >= args.length) {
+    throw new Error(`missing expected wp-codebox arg value: ${name}`)
+  }
+  return args[index + 1]
+}
+
+const recipePath = valueAfter('--recipe')
+const recipe = JSON.parse(fs.readFileSync(recipePath, 'utf8'))
+const recipeText = JSON.stringify(recipe)
+for (const expected of ['wp-codebox.agent-sandbox-run', 'HOMEBOY_DATAMACHINE_AGENT_CONFIG', '/homeboy-extension', 'agents-api', 'data-machine', 'data-machine-code']) {
+  if (!recipeText.includes(expected)) {
+    throw new Error(`missing expected wp-codebox recipe value: ${expected}`)
+  }
+}
+if (!recipe.inputs?.mounts?.some((mount) => mount.source.endsWith('/bundle') && mount.target === '/wordpress/wp-content/plugins/bundle' && mount.mode === 'readonly')) {
+  throw new Error('missing bundle readonly mount in recipe')
+}
+
+const artifactRoot = path.join(valueAfter('--artifacts'), 'runtime-smoke')
 const filesRoot = path.join(artifactRoot, 'files')
 fs.mkdirSync(filesRoot, { recursive: true })
 
@@ -104,9 +124,10 @@ process.stdout.write(JSON.stringify({
     backend: 'wordpress-playground',
     status: 'destroyed',
   },
-  execution: {
+  executions: [{
+    command: 'wordpress.run-php',
     stdout: JSON.stringify({ output: JSON.stringify(output) }),
-  },
+  }],
   artifacts: {
     directory: artifactRoot,
     manifestPath: path.join(artifactRoot, 'manifest.json'),
@@ -178,28 +199,10 @@ if [ "$wp_codebox_success" != "true" ] || [ -z "$artifact_dir" ] || [ "$review_s
     exit 1
 fi
 
-require_arg_pair() {
-    local name="$1"
-    local value="$2"
-    local previous=""
-    local line=""
-    while IFS= read -r line; do
-        if [ "$previous" = "$name" ] && [ "$line" = "$value" ]; then
-            return 0
-        fi
-        previous="$line"
-    done < "$FAKE_ARGS_FILE"
-
-    echo "ERROR: expected wp-codebox arg pair $name $value" >&2
+if ! grep -qx 'recipe-run' "$FAKE_ARGS_FILE" || ! grep -qx -- '--recipe' "$FAKE_ARGS_FILE"; then
+    echo "ERROR: expected wp-codebox recipe-run invocation" >&2
     cat "$FAKE_ARGS_FILE" >&2
     exit 1
-}
-
-require_arg_pair --agents-api "$AGENTS_API_DIR"
-require_arg_pair --data-machine "$DATA_MACHINE_DIR"
-require_arg_pair --data-machine-code "$DATA_MACHINE_CODE_DIR"
-require_arg_pair --mount "$EXTENSION_PATH:/homeboy-extension:readonly"
-require_arg_pair --mount "$BUNDLE_DIR:/wordpress/wp-content/plugins/bundle:readonly"
-require_arg_pair --secret-env HOMEBOY_DATAMACHINE_AGENT_CONFIG
+fi
 
 echo "✓ WP Codebox Data Machine agent runner smoke test PASSED"
