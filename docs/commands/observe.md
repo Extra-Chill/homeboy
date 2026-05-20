@@ -10,6 +10,7 @@ homeboy observe <component> --duration 5m --watch-process 'opencode-ai/bin/.*ser
 homeboy observe <component> --duration 5m --watch-process 'node .*serve' --watch-process-interval 1s
 homeboy observe <component> --duration 5m --tail-log /path/to/app.log --watch-process 'node .*serve'
 homeboy observe <component> --duration 30s --probe '{"type":"http.poll","url":"http://127.0.0.1:3000/health","assert-status":200}'
+homeboy observe <component> --duration 60s --probe '{"type":"http.egress","host":"api.example.com","capture":"body"}'
 ```
 
 ## V1 Scope
@@ -23,7 +24,9 @@ V1 supports:
 - `--grep <regex>` to filter tailed log lines
 - `--watch-process <regex>` for process command-line polling
 - `--watch-process-interval <duration>` for process polling cadence; defaults to `1s`
-- `--probe <json>` for repeatable portable trace probe configs (`log.tail`, `process.snapshot`, `file.watch`, `port.snapshot`, `http.poll`, and `cmd.run`)
+- `--probe <json>` for repeatable portable trace probe configs (`log.tail`, `process.snapshot`, `file.watch`, `port.snapshot`, `http.poll`, `http.egress`, and `cmd.run`)
+
+`http.egress` starts a local proxy and emits a `http.egress proxy.ready` event with `proxy_url`. Point a target process at that URL with `HTTP_PROXY` / `HTTPS_PROXY` to capture proxied traffic. V1 captures HTTP request/response bodies and HTTPS `CONNECT` metadata; it does not decrypt TLS tunnels.
 
 ## Output
 
