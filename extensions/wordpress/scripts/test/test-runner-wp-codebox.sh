@@ -414,7 +414,7 @@ jq -n \
         schema: "wp-codebox/workspace-recipe/v1",
         runtime: {wp: $wp, blueprint: {steps: []}},
         inputs: {mounts: $mounts},
-        workflow: {steps: [{command: "wordpress.run-php", args: ["code-file=" + $codeFile, "bootstrap=none"]}]}
+        workflow: {steps: [{command: "wordpress.phpunit", args: ["code-file=" + $codeFile]}]}
     }' > "$RECIPE_FILE"
 
 set +e
