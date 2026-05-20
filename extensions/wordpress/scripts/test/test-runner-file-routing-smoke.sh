@@ -9,7 +9,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 assert_contains() {
     local file="$1"
     local expected="$2"
-    if ! grep -Fq "$expected" "$file"; then
+    if ! grep -Fq -- "$expected" "$file"; then
         echo "Expected $file to contain: $expected" >&2
         sed 's/^/  /' "$file" >&2
         exit 1
@@ -19,7 +19,7 @@ assert_contains() {
 assert_not_contains() {
     local file="$1"
     local unexpected="$2"
-    if grep -Fq "$unexpected" "$file"; then
+    if grep -Fq -- "$unexpected" "$file"; then
         echo "Expected $file not to contain: $unexpected" >&2
         sed 's/^/  /' "$file" >&2
         exit 1
@@ -58,6 +58,14 @@ printf 'CHANGED=%s\n' "${HOMEBOY_CHANGED_TEST_FILES:-}"
 printf 'ARGS=%s\n' "$*"
 SH
 chmod +x "${TMPDIR}/stubs/playground.sh"
+
+cat > "${TMPDIR}/stubs/wp-codebox.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "WP_CODEBOX_STUB"
+printf '%s\n' "$@" > "${WP_CODEBOX_ARGS_FILE}"
+SH
+chmod +x "${TMPDIR}/stubs/wp-codebox.sh"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
@@ -104,6 +112,36 @@ HOMEBOY_CHANGED_TEST_FILES=$'tests/import-agent-ability-smoke.php\ntests/Unit/Im
 assert_contains "${TMPDIR}/changed-mixed-files.out" "PLAYGROUND_STUB"
 assert_contains "${TMPDIR}/changed-mixed-files.out" "CHANGED=tests/import-agent-ability-smoke.php"
 assert_not_contains "${TMPDIR}/changed-mixed-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
+
+WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-args.txt" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_WORDPRESS_TEST_RUNTIME="wp-codebox" \
+HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/Unit/ImportAgentAbilityTest.php --filter ImportAgent > "${TMPDIR}/wp-codebox-file.out"
+
+assert_contains "${TMPDIR}/wp-codebox-file.out" "WP_CODEBOX_STUB"
+assert_contains "${TMPDIR}/wp-codebox-file.out" "Backend: wp-codebox"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "run"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "--command"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "wordpress.run-php"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "--arg"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "--wp"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "6.9"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "${component}:/wordpress/wp-content/plugins/component"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_SETTINGS_JSON='{"test_runtime":"wp-codebox","wp_codebox_bin":"'"${TMPDIR}/stubs/wp-codebox.sh"'","playground_wordpress_version":"latest"}' \
+WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-settings-args.txt" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/Unit/ImportAgentAbilityTest.php > "${TMPDIR}/wp-codebox-settings.out"
+
+assert_contains "${TMPDIR}/wp-codebox-settings.out" "WP_CODEBOX_STUB"
+assert_contains "${TMPDIR}/wp-codebox-settings-args.txt" "latest"
 
 set +e
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
