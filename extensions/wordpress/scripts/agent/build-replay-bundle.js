@@ -420,7 +420,7 @@ function buildBundle(results, scenario, config, bundlePath, resultsPath, episode
 		}),
 		final_state: {
 			available: false,
-			reason: 'The current Playground PHP bench runner exits after scenario execution and does not export a restorable final site state.',
+			reason: 'The current WP Codebox bench command exits after scenario execution and does not export a restorable final site state.',
 		},
 		playground_review: reviewUrl ? {
 			available: true,

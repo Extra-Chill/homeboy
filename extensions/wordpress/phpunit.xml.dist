@@ -13,8 +13,7 @@
     </testsuites>
 
     <php>
-        <!-- Extension tests run via the Playground smoke test (scripts/test/playground-dropin-smoke.sh).
-             PHPUnit is invoked inside Playground, not on the host. This config is kept for
-             tooling compatibility but the bootstrap is handled by playground-runner.php. -->
+        <!-- Extension tests run via the WP Codebox test runner. This config is kept
+             for tooling compatibility; runtime bootstrap is handled by playground-runner.php. -->
     </php>
 </phpunit>

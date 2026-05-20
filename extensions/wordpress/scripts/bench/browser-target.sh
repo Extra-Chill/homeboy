@@ -81,7 +81,7 @@ homeboy_wordpress_emit_browser_target() {
             lifecycle: {
                 server: (if $base_url == "" then "not_started" else "external" end),
                 keepAlive: (if $base_url == "" then "none" else "caller" end),
-                note: (if $base_url == "" then "The Playground PHP bench runner does not keep an HTTP server alive after bench execution; provide baseUrl for an already-running target or use this as metadata only." else "The browser helper connects to the provided URL; the caller owns server lifetime." end)
+                note: (if $base_url == "" then "The WP Codebox bench command does not keep an HTTP server alive after bench execution; provide baseUrl for an already-running target or use this as metadata only." else "The browser helper connects to the provided URL; the caller owns server lifetime." end)
             },
             baseUrl: $base_url,
             adminUrl: $admin_url,

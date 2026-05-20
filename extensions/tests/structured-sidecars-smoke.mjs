@@ -68,9 +68,9 @@ const expectedSupport = {
 const supportEvidence = {
 	'wordpress/wordpress.json': {
 		'lint.findings': ['wordpress/scripts/lint/lint-runner.sh', 'HOMEBOY_LINT_FINDINGS_FILE'],
-		'test.results': ['wordpress/scripts/test/test-runner-playground.sh', 'HOMEBOY_TEST_RESULTS_FILE'],
-		'test.failures': ['wordpress/scripts/test/test-runner-playground.sh', 'HOMEBOY_TEST_FAILURES_FILE'],
-		'bench.results': ['wordpress/scripts/bench/bench-runner-playground.sh', 'HOMEBOY_BENCH_RESULTS_FILE'],
+		'test.results': ['wordpress/scripts/test/test-runner-wp-codebox.sh', 'HOMEBOY_TEST_RESULTS_FILE'],
+		'test.failures': ['wordpress/scripts/test/test-runner-wp-codebox.sh', 'HOMEBOY_TEST_FAILURES_FILE'],
+		'bench.results': ['wordpress/scripts/bench/bench-runner-wp-codebox.sh', 'HOMEBOY_BENCH_RESULTS_FILE'],
 		'trace.results': ['wordpress/scripts/trace/trace-runner.sh', 'HOMEBOY_TRACE_RESULTS_FILE'],
 	},
 	'nodejs/nodejs.json': {

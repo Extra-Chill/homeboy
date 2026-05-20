@@ -447,10 +447,9 @@ function pg_preload_wp_cli_namespaced_functions(): void {
  *     so `["MY_FLAG" => true]` renders as `define('MY_FLAG', true)` and
  *     not `define('MY_FLAG', 'true')`.
  *
- *     The dispatcher (test-runner-playground.sh / bench-runner-playground.sh)
- *     extracts these from the component's settings JSON (the
- *     `wp_config_defines` setting on the wordpress extension) and forwards
- *     them through the runner template via a sed substitution placeholder.
+ *     The WP Codebox runners extract these from the component's settings JSON
+ *     (the `wp_config_defines` setting on the wordpress extension) and forward
+ *     them through the runner template or bench command inputs.
  *
  *     Reserved constant names (DB_NAME, ABSPATH, table_prefix, etc — anything
  *     defined unconditionally in the canonical config above) cannot be

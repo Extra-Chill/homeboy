@@ -2,15 +2,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=playground-results-artifacts.sh
-source "${SCRIPT_DIR}/playground-results-artifacts.sh"
+# shellcheck source=bench-results-artifacts.sh
+source "${SCRIPT_DIR}/bench-results-artifacts.sh"
 
 if ! command -v jq >/dev/null 2>&1; then
     echo "ERROR: jq required for JSON assertions in this smoke." >&2
     exit 1
 fi
 
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/playground-results-artifacts.XXXXXX")
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/bench-results-artifacts.XXXXXX")
 cleanup() {
     rm -rf "$TMP_ROOT"
 }
@@ -40,7 +40,7 @@ cat > "$RESULTS_FILE" <<'JSON'
       },
       "artifacts": {
         "transcript": { "path": "artifacts/transcript.json", "kind": "json" },
-        "playground_url": { "path": "https://example.test", "kind": "url" }
+        "runtime_url": { "path": "https://example.test", "kind": "url" }
       }
     },
     {
@@ -54,7 +54,7 @@ cat > "$RESULTS_FILE" <<'JSON'
 }
 JSON
 
-homeboy_wordpress_emit_playground_results_artifacts "$RESULTS_FILE"
+homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE"
 
 JSONL_FILE="${TMP_ROOT}/results.jsonl"
 LEADERBOARD_FILE="${TMP_ROOT}/leaderboard.md"
@@ -102,4 +102,4 @@ if ! grep -q '| openai | gpt-5.5 | 2 | 50% | 1 | 0.5 | 867 |' "$LEADERBOARD_FILE
     exit 1
 fi
 
-echo "✓ Playground results artifacts smoke test PASSED"
+echo "✓ Bench results artifacts smoke test PASSED"

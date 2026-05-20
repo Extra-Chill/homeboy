@@ -92,7 +92,7 @@ if [ -f "composer.json" ]; then
     fi
 fi
 
-# Install npm dependencies (Playground CLI, ESLint).
+# Install npm dependencies (Blueprint validation helpers, ESLint).
 if [ -f "package.json" ]; then
     echo "Installing npm dependencies..."
     npm install --quiet --no-fund --no-audit 2>&1 || {

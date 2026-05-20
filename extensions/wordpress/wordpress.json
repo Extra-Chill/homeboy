@@ -474,16 +474,10 @@
             "version_header": "Requires at least:",
             "symbols": [
               { "name": "get_post_type_object", "kind": "function", "introduced": "3.0" },
-              { "name": "wp_json_encode", "kind": "function", "introduced": "4.1" },
               { "name": "register_rest_route", "kind": "function", "introduced": "4.4" },
-              { "name": "wp_parse_url", "kind": "function", "introduced": "4.4" },
-              { "name": "wp_generate_uuid4", "kind": "function", "introduced": "4.7" },
               { "name": "register_block_type", "kind": "function", "introduced": "5.0" },
               { "name": "has_blocks", "kind": "function", "introduced": "5.0" },
               { "name": "parse_blocks", "kind": "function", "introduced": "5.0" },
-              { "name": "wp_date", "kind": "function", "introduced": "5.3" },
-              { "name": "wp_timezone", "kind": "function", "introduced": "5.3" },
-              { "name": "wp_timezone_string", "kind": "function", "introduced": "5.3" },
               { "name": "wp_get_environment_type", "kind": "function", "introduced": "5.5" },
               { "name": "WP_REST_Server", "kind": "class", "introduced": "4.4" },
               { "name": "WP_REST_Request", "kind": "class", "introduced": "4.4" },
@@ -738,7 +732,7 @@
   "executable": {
     "runtime": {
       "setup_command": "bash {{extension_path}}/scripts/build/setup.sh",
-      "ready_check": "test -f {{extension_path}}/node_modules/.bin/wp-playground-cli",
+      "ready_check": "command -v wp-codebox >/dev/null 2>&1 || test -n \"${HOMEBOY_WP_CODEBOX_BIN:-}\"",
       "run_command": "bash {{extension_path}}/scripts/test/test-runner.sh"
     }
   },
@@ -872,49 +866,49 @@
       "label": "Playground blueprint",
       "type": "object",
       "default": {},
-      "description": "Blueprint JSON passed to wp-playground-cli --blueprint before bench workloads run. Use this for cold-boot scenarios that need plugins, themes, site options, or seeded content installed during Playground bootstrap. Empty object means stock WordPress."
+      "description": "Reserved cold-boot scenario blueprint setting. The WP Codebox bench runner currently fails fast when this is set so cold-boot support can be ported explicitly. Empty object means stock WordPress."
     },
     {
       "id": "playground_workloads",
-      "label": "Playground workloads",
+      "label": "Bench workloads",
       "type": "array",
       "default": [],
-      "description": "Config-declared WordPress Playground bench workloads run after the shared bootstrap, playground_blueprint, dependency mounts, and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file} or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata. Step returns use the same {metrics, artifacts, metadata} shape as Node.js bench workloads."
+      "description": "Config-declared WordPress bench workloads passed to wp-codebox bench-run after dependency mounts and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file}, {type: 'ability', ability|name, input}, or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata. Step returns use the same {metrics, artifacts, metadata} shape as Node.js bench workloads."
     },
     {
       "id": "playground_scenario_manifests",
       "label": "Playground scenario manifests",
       "type": "array",
       "default": [],
-      "description": "Scenario manifest files or inline manifest objects for WordPress Playground eval runs. Each manifest declares id, label, prompt or prompt_file, blueprint or blueprint_file, grader PHP file, tags, metadata, limits, and optional run steps. The runner compiles manifests into playground_workloads so existing Playground bench execution remains the only runner path. Relative paths resolve from the manifest file directory, or the component root for inline manifests."
+      "description": "Reserved scenario manifest setting. The WP Codebox bench runner currently fails fast when manifests are set so manifest compilation can be ported explicitly instead of falling back to a second runtime."
     },
     {
       "id": "bench_site_mode",
       "label": "Bench site mode",
       "type": "string",
       "default": "fresh",
-      "description": "WordPress bench boot shape. 'fresh' preserves the historical wp-phpunit install stage. 'installed' requires HOMEBOY_BENCH_SHARED_STATE, mounts its wordpress/ subdirectory at /wordpress before Playground install, prepares that persisted site on the first run, skips wp-phpunit install.php, and boots the site with wp-load.php for warm installed-site runs."
+      "description": "WordPress bench boot shape. 'fresh' uses the disposable WP Codebox runtime. 'installed' currently fails fast until a WP Codebox persisted-site contract lands."
     },
     {
       "id": "bench_browser_target",
       "label": "Bench browser target handoff",
       "type": "object",
       "default": {},
-      "description": "Optional browser bench target descriptor. Set {\"enabled\": true} to write HOMEBOY_BENCH_SHARED_STATE/browser-target.json. Include baseUrl/adminUrl for an already-running site; otherwise the file is metadata-only because the Playground PHP bench runner exits after workloads complete. Login supports method plus username/password or password_env; raw target files are handoff artifacts and must not be published in reports."
+      "description": "Optional browser bench target descriptor. Set {\"enabled\": true} to write HOMEBOY_BENCH_SHARED_STATE/browser-target.json. Include baseUrl/adminUrl for an already-running site; otherwise the file is metadata-only because the WP Codebox bench command exits after workloads complete. Login supports method plus username/password or password_env; raw target files are handoff artifacts and must not be published in reports."
     },
     {
       "id": "playground_wordpress_version",
-      "label": "Playground WordPress version",
+      "label": "WordPress runtime version",
       "type": "string",
       "default": "",
-      "description": "Optional WordPress core version passed to wp-playground-cli as --wp=<version> for Playground test and bench runners. Leave empty for the runner default, currently 6.9. Use this when a component needs classes or behavior from a newer WordPress core build."
+      "description": "Optional WordPress core version passed to WP Codebox test and bench runners. Leave empty for the runner default. Use this when a component needs classes or behavior from a newer WordPress core build."
     },
     {
       "id": "playground_wordpress_install_mode",
       "label": "Playground WordPress install mode",
       "type": "string",
       "default": "",
-      "description": "Optional pass-through for wp-playground-cli --wordpress-install-mode. Leave empty unless a bench needs a non-default Playground install policy; bench_site_mode chooses the normal default for fresh versus installed runs."
+      "description": "Legacy direct-Playground pass-through retained only for config compatibility. The WP Codebox bench runner ignores this setting."
     }
   ],
   "actions": [

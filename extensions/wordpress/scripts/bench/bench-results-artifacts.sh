@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 
-# Emit wp-rl-friendly artifacts from the WordPress Playground BenchResults
-# envelope without changing the core BenchResults contract.
+# Emit wp-rl-friendly artifacts from the WordPress BenchResults envelope without
+# changing the core BenchResults contract.
 
-homeboy_wordpress_playground_artifact_dir() {
+homeboy_wordpress_bench_artifact_dir() {
     local results_file="$1"
 
-    if [ -n "${HOMEBOY_PLAYGROUND_RESULTS_ARTIFACT_DIR:-}" ]; then
-        printf '%s\n' "$HOMEBOY_PLAYGROUND_RESULTS_ARTIFACT_DIR"
+    if [ -n "${HOMEBOY_BENCH_RESULTS_ARTIFACT_DIR:-${HOMEBOY_PLAYGROUND_RESULTS_ARTIFACT_DIR:-}}" ]; then
+        printf '%s\n' "${HOMEBOY_BENCH_RESULTS_ARTIFACT_DIR:-${HOMEBOY_PLAYGROUND_RESULTS_ARTIFACT_DIR:-}}"
         return 0
     fi
 
     dirname "$results_file"
 }
 
-homeboy_wordpress_playground_jsonl_filter() {
+homeboy_wordpress_bench_jsonl_filter() {
     jq -c \
         --arg env_provider "${HOMEBOY_BENCH_PROVIDER:-${HOMEBOY_PROVIDER:-}}" \
         --arg env_model "${HOMEBOY_BENCH_MODEL:-${HOMEBOY_MODEL:-}}" \
@@ -50,7 +50,7 @@ homeboy_wordpress_playground_jsonl_filter() {
         '
 }
 
-homeboy_wordpress_playground_leaderboard_filter() {
+homeboy_wordpress_bench_leaderboard_filter() {
     jq -r -s '
         def num_or_null: if type == "number" then . else null end;
         def fmt_num:
@@ -75,7 +75,7 @@ homeboy_wordpress_playground_leaderboard_filter() {
             avg_duration_ms: (map(.duration_ms | num_or_null) | map(select(. != null)) | if length == 0 then null else add / length end)
         }) | sort_by(-(.avg_reward // -1), .avg_duration_ms // 999999999, .provider, .model)) as $groups
         | [
-            "# Playground Scenario Leaderboard",
+            "# Bench Scenario Leaderboard",
             "",
             "| Provider | Model | Runs | Success | Errors | Avg reward | Avg duration ms |",
             "|---|---|---:|---:|---:|---:|---:|"
@@ -93,7 +93,7 @@ homeboy_wordpress_playground_leaderboard_filter() {
     '
 }
 
-homeboy_wordpress_emit_playground_results_artifacts() {
+homeboy_wordpress_emit_bench_results_artifacts() {
     local bench_results_file="$1"
     local artifact_dir
     local jsonl_file
@@ -103,24 +103,24 @@ homeboy_wordpress_emit_playground_results_artifacts() {
         return 0
     fi
 
-    artifact_dir="$(homeboy_wordpress_playground_artifact_dir "$bench_results_file")"
+    artifact_dir="$(homeboy_wordpress_bench_artifact_dir "$bench_results_file")"
     mkdir -p "$artifact_dir"
 
     jsonl_file="${artifact_dir}/results.jsonl"
     leaderboard_file="${artifact_dir}/leaderboard.md"
 
-    if ! homeboy_wordpress_playground_jsonl_filter < "$bench_results_file" > "$jsonl_file"; then
-        echo "ERROR: failed to emit Playground results JSONL artifact at $jsonl_file" >&2
+    if ! homeboy_wordpress_bench_jsonl_filter < "$bench_results_file" > "$jsonl_file"; then
+        echo "ERROR: failed to emit bench results JSONL artifact at $jsonl_file" >&2
         return 1
     fi
 
-    if ! homeboy_wordpress_playground_leaderboard_filter < "$jsonl_file" > "$leaderboard_file"; then
-        echo "ERROR: failed to emit Playground leaderboard artifact at $leaderboard_file" >&2
+    if ! homeboy_wordpress_bench_leaderboard_filter < "$jsonl_file" > "$leaderboard_file"; then
+        echo "ERROR: failed to emit bench leaderboard artifact at $leaderboard_file" >&2
         return 1
     fi
 
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: [bench:playground] Results JSONL: $jsonl_file"
-        echo "DEBUG: [bench:playground] Leaderboard: $leaderboard_file"
+        echo "DEBUG: [bench] Results JSONL: $jsonl_file"
+        echo "DEBUG: [bench] Leaderboard: $leaderboard_file"
     fi
 }
