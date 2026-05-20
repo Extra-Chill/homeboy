@@ -9,10 +9,11 @@ set -euo pipefail
 #
 # Resolution chain for each dependency slug:
 #   1. Direct path (if the value is an existing directory)
-#   2. homeboy component show → local_path (if homeboy is available)
-#   3. Git clone from GitHub org (shallow, cached across steps)
+#   2. Consumer composer.lock vendor package, when present and plugin-shaped
+#   3. homeboy component show → local_path (if homeboy is available)
+#   4. Git clone from GitHub org (shallow, cached across steps)
 #      Org inferred from: HOMEBOY_DEPENDENCY_GITHUB_ORG → git remote origin
-#   4. Warn and skip
+#   5. Warn and skip
 #
 # Settings deps take priority — they can be absolute paths or slugs.
 # Header deps are resolved through the same chain by slug.
@@ -111,6 +112,44 @@ homeboy_get_validation_dependency_slug() {
     fi
 
     printf '%s\n' "$dir_slug"
+}
+
+_homeboy_is_plugin_shaped_path() {
+    local plugin_path="${1:-}"
+
+    [ -z "$plugin_path" ] || [ ! -d "$plugin_path" ] && return 1
+
+    local main_file
+    main_file=$(find "$plugin_path" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
+    [ -n "$main_file" ]
+}
+
+_homeboy_resolve_composer_locked_dependency_path() {
+    local dependency="${1:-}"
+    local plugin_path="${2:-}"
+
+    [ -z "$dependency" ] || [ -z "$plugin_path" ] && return 1
+    [[ "$dependency" == */* ]] && return 1
+    [ -f "${plugin_path}/composer.lock" ] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+
+    local package_name
+    package_name=$(jq -r --arg slug "$dependency" '
+        [.packages[]?, .["packages-dev"][]?]
+        | .[]?
+        | .name? // empty
+        | select(split("/")[-1] == $slug)
+    ' "${plugin_path}/composer.lock" 2>/dev/null | head -1)
+
+    [ -n "$package_name" ] || return 1
+
+    local package_path="${plugin_path}/vendor/${package_name}"
+    if _homeboy_is_plugin_shaped_path "$package_path"; then
+        printf '%s\n' "$package_path"
+        return 0
+    fi
+
+    return 1
 }
 
 # Infer GitHub org from a git repo's remote.
@@ -292,7 +331,19 @@ homeboy_resolve_validation_dependency_path() {
         return 0
     fi
 
-    # 2. Homeboy component registry lookup
+    # 2. Prefer the consumer's Composer-locked plugin package when available.
+    # This keeps validation aligned with the dependency ref the component actually
+    # installed, instead of silently mounting a stale local registry checkout.
+    if [ -n "${_HOMEBOY_DEP_PLUGIN_PATH:-}" ]; then
+        local composer_resolved
+        composer_resolved=$(_homeboy_resolve_composer_locked_dependency_path "$dependency" "${_HOMEBOY_DEP_PLUGIN_PATH}" || true)
+        if [ -n "$composer_resolved" ] && [ -d "$composer_resolved" ]; then
+            printf '%s\n' "$composer_resolved"
+            return 0
+        fi
+    fi
+
+    # 3. Homeboy component registry lookup
     if command -v homeboy >/dev/null 2>&1; then
         local resolved
         resolved=$(homeboy component show "$dependency" 2>/dev/null | jq -r '.data.entity.local_path // empty' 2>/dev/null || true)
@@ -304,7 +355,7 @@ homeboy_resolve_validation_dependency_path() {
         fi
     fi
 
-    # 3. Git clone from GitHub org (for CI environments)
+    # 4. Git clone from GitHub org (for CI environments)
     #    Only attempt for slug-like values (no slashes, no absolute paths)
     if [[ "$dependency" != */* ]] && command -v git >/dev/null 2>&1; then
         local github_org="${HOMEBOY_DEPENDENCY_GITHUB_ORG:-}"

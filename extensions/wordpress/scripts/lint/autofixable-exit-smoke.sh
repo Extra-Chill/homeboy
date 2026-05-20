@@ -56,17 +56,24 @@ chmod +x "${EXTENSION_DIR}/vendor/bin/phpcs"
 
 run_lint() {
     local mode="$1"
+    local changed_since="${2:-}"
     : > "$OUTPUT_FILE"
     rm -f "$FINDINGS_FILE"
 
+    local -a env_args=(
+        "HOMEBOY_EXTENSION_PATH=$EXTENSION_DIR"
+        "HOMEBOY_COMPONENT_PATH=$COMPONENT_DIR"
+        "HOMEBOY_COMPONENT_ID=autofixable-fixture"
+        "HOMEBOY_LINT_FINDINGS_FILE=$FINDINGS_FILE"
+        "HOMEBOY_STEP=phpcs"
+        "HOMEBOY_SUMMARY_MODE=$mode"
+    )
+    if [ -n "$changed_since" ]; then
+        env_args+=("HOMEBOY_CHANGED_SINCE=$changed_since")
+    fi
+
     set +e
-    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
-    HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
-    HOMEBOY_COMPONENT_ID="autofixable-fixture" \
-    HOMEBOY_LINT_FINDINGS_FILE="$FINDINGS_FILE" \
-    HOMEBOY_STEP="phpcs" \
-    HOMEBOY_SUMMARY_MODE="$mode" \
-        "$RUNNER" >"$OUTPUT_FILE" 2>&1
+    env "${env_args[@]}" "$RUNNER" >"$OUTPUT_FILE" 2>&1
     local exit_code=$?
     set -e
 
@@ -82,7 +89,13 @@ run_lint() {
         exit 1
     fi
 
-    if ! grep -Fq "Run:  homeboy refactor --from lint --write autofixable-fixture" "$OUTPUT_FILE"; then
+    expected_command="Run:  homeboy refactor --from lint --write"
+    if [ -n "$changed_since" ]; then
+        expected_command="${expected_command} --changed-since ${changed_since}"
+    fi
+    expected_command="${expected_command} autofixable-fixture"
+
+    if ! grep -Fq "$expected_command" "$OUTPUT_FILE"; then
         echo "FAIL: refactor command missing (summary=${mode})" >&2
         sed 's/^/  /' "$OUTPUT_FILE" >&2
         exit 1
@@ -126,5 +139,6 @@ PY
 
 run_lint 1
 run_lint 0
+run_lint 1 origin/main
 
 echo "autofixable lint exit smoke passed"

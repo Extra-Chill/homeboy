@@ -10,12 +10,13 @@ COMPONENT_DIR="${TMPDIR}/intelligence"
 DATA_MACHINE_DIR="${TMPDIR}/data-machine"
 CLONED_DATA_MACHINE_DIR="${TMPDIR}/cache/data-machine"
 AGENTS_API_DIR="${TMPDIR}/agents-api"
+VENDORED_AGENTS_API_DIR="${COMPONENT_DIR}/vendor/automattic/agents-api"
 OPENAI_PROVIDER_DIR="${TMPDIR}/ai-provider-for-openai"
 BIN_DIR="${TMPDIR}/bin"
 CLONE_BIN_DIR="${TMPDIR}/clone-bin"
 FALLBACK_CACHE_DIR="${TMPDIR}/fallback-cache"
 
-mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$OPENAI_PROVIDER_DIR" "$BIN_DIR" "$CLONE_BIN_DIR" "$FALLBACK_CACHE_DIR"
+mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$VENDORED_AGENTS_API_DIR" "$OPENAI_PROVIDER_DIR" "$BIN_DIR" "$CLONE_BIN_DIR" "$FALLBACK_CACHE_DIR"
 
 cat > "${COMPONENT_DIR}/intelligence.php" <<'PHP'
 <?php
@@ -46,6 +47,23 @@ cat > "${AGENTS_API_DIR}/agents-api.php" <<'PHP'
  * Plugin Name: Agents API
  */
 PHP
+
+cat > "${VENDORED_AGENTS_API_DIR}/agents-api.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Agents API Locked Vendor Copy
+ */
+PHP
+
+cat > "${COMPONENT_DIR}/composer.lock" <<'JSON'
+{
+    "packages": [
+        {
+            "name": "automattic/agents-api"
+        }
+    ]
+}
+JSON
 
 cat > "${OPENAI_PROVIDER_DIR}/ai-provider-for-openai.php" <<'PHP'
 <?php
@@ -130,13 +148,19 @@ if ! grep -F -- "$DATA_MACHINE_DIR" <<< "$resolved" >/dev/null; then
     exit 1
 fi
 
-if ! grep -F -- "$AGENTS_API_DIR" <<< "$resolved" >/dev/null; then
-    echo "FAIL: transitive Requires Plugins dependency was not resolved" >&2
+if ! grep -F -- "$VENDORED_AGENTS_API_DIR" <<< "$resolved" >/dev/null; then
+    echo "FAIL: transitive Requires Plugins dependency should prefer composer-locked vendor copy" >&2
     printf '%s\n' "$resolved" >&2
     exit 1
 fi
 
-agents_api_line=$(grep -nF -- "$AGENTS_API_DIR" <<< "$resolved" | cut -d: -f1 | head -1)
+if grep -F -- "$AGENTS_API_DIR" <<< "$resolved" >/dev/null; then
+    echo "FAIL: stale local registry checkout should not override composer-locked vendor copy" >&2
+    printf '%s\n' "$resolved" >&2
+    exit 1
+fi
+
+agents_api_line=$(grep -nF -- "$VENDORED_AGENTS_API_DIR" <<< "$resolved" | cut -d: -f1 | head -1)
 data_machine_line=$(grep -nF -- "$DATA_MACHINE_DIR" <<< "$resolved" | cut -d: -f1 | head -1)
 if [ "$agents_api_line" -ge "$data_machine_line" ]; then
     echo "FAIL: transitive dependency should be emitted before dependent plugin" >&2
@@ -183,9 +207,9 @@ if grep -F -- "$CLONED_DATA_MACHINE_DIR" <<< "$merged_prepared" >/dev/null; then
     exit 1
 fi
 
-topological_resolved="${AGENTS_API_DIR}"$'\n'"${DATA_MACHINE_DIR}"
+topological_resolved="${VENDORED_AGENTS_API_DIR}"$'\n'"${DATA_MACHINE_DIR}"
 merged_topological=$(homeboy_merge_validation_dependency_paths "$prepared_paths" "$topological_resolved")
-agents_api_merged_line=$(grep -nF -- "$AGENTS_API_DIR" <<< "$merged_topological" | cut -d: -f1 | head -1)
+agents_api_merged_line=$(grep -nF -- "$VENDORED_AGENTS_API_DIR" <<< "$merged_topological" | cut -d: -f1 | head -1)
 data_machine_merged_line=$(grep -nF -- "$DATA_MACHINE_DIR" <<< "$merged_topological" | cut -d: -f1 | head -1)
 if [ "$agents_api_merged_line" -ge "$data_machine_merged_line" ]; then
     echo "FAIL: merge should preserve resolved transitive dependency order" >&2

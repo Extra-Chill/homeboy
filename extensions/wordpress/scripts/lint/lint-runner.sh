@@ -506,11 +506,15 @@ print(json.dumps(results))
     done
 
     # Run reserved keyword parameter name fixer ($default -> $default_value, etc.)
-    # MUST run on full plugin path (not per-file) because its two-pass architecture
-    # builds a rename manifest in Pass 1 (declarations) and applies it to call sites
-    # in Pass 2 (named arguments). Per-file invocation loses the manifest between
-    # processes, leaving call sites with stale parameter names.
-    run_fixer "reserved-param" "$RESERVED_PARAM_FIXER" "$PLUGIN_PATH"
+    # MUST run on full plugin path because its two-pass architecture builds a
+    # rename manifest in Pass 1 and applies it to call sites in Pass 2. In scoped
+    # fix-only mode, skip it rather than dirtying unrelated files outside the
+    # review scope.
+    if [ -n "${HOMEBOY_LINT_FILE:-}" ] || [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
+        echo "Skipping reserved-param fixer for scoped lint fix; it requires a full-component scan."
+    else
+        run_fixer "reserved-param" "$RESERVED_PARAM_FIXER" "$PLUGIN_PATH"
+    fi
 
     # Run phpcbf for remaining auto-fixable issues
     if [ -f "$PHPCBF_BIN" ]; then
@@ -751,7 +755,11 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
         echo ""
         echo "============================================"
         echo "AUTO-FIXABLE: ${fixable_count} lint finding(s) can be fixed automatically."
-        echo "  Run:  homeboy refactor --from lint --write ${fix_target}"
+        fix_scope_args=""
+        if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+            fix_scope_args=" --changed-since ${HOMEBOY_CHANGED_SINCE}"
+        fi
+        echo "  Run:  homeboy refactor --from lint --write${fix_scope_args} ${fix_target}"
         echo "============================================"
     fi
 
