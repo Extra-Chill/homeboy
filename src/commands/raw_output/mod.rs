@@ -1,4 +1,4 @@
-use crate::cli_surface::{CommandRawOutputMode, Commands};
+use crate::cli_surface::{CommandRawOutputMode, CommandResponseMode, Commands};
 
 use super::utils::{response as output, tty};
 use super::{changelog, docs, file, report, review, runs, trace, GlobalArgs};
@@ -6,6 +6,25 @@ use super::{changelog, docs, file, report, review, runs, trace, GlobalArgs};
 pub enum RawExecution {
     Handled(i32),
     Continue(Box<Commands>),
+}
+
+pub enum JsonCommandPreparation {
+    Handled(i32),
+    Continue(Box<Commands>),
+}
+
+pub fn prepare_json_command(
+    command: Commands,
+    global: &GlobalArgs,
+    mode: CommandResponseMode,
+) -> JsonCommandPreparation {
+    match mode {
+        CommandResponseMode::Json => JsonCommandPreparation::Continue(Box::new(command)),
+        CommandResponseMode::Raw(raw_mode) => match run_and_print(command, global, raw_mode) {
+            RawExecution::Handled(exit_code) => JsonCommandPreparation::Handled(exit_code),
+            RawExecution::Continue(command) => JsonCommandPreparation::Continue(command),
+        },
+    }
 }
 
 pub fn run_and_print(

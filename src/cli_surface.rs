@@ -159,7 +159,24 @@ pub enum CommandOutputArtifactPolicy {
     TraceJsonSummaryArtifact,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandResponsePlan {
+    pub mode: CommandResponseMode,
+    pub output_artifact_policy: CommandOutputArtifactPolicy,
+    pub print_json: bool,
+}
+
 impl Commands {
+    pub fn response_plan(&self, has_output_file: bool) -> CommandResponsePlan {
+        let mode = self.response_mode(has_output_file);
+
+        CommandResponsePlan {
+            mode,
+            output_artifact_policy: self.output_artifact_policy(has_output_file),
+            print_json: matches!(mode, CommandResponseMode::Json),
+        }
+    }
+
     pub fn supports_lab_runner(&self) -> bool {
         match self {
             Commands::Audit(_) => true,
@@ -353,6 +370,27 @@ mod tests {
         assert_eq!(
             Commands::List.response_mode(false),
             CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
+        );
+    }
+
+    #[test]
+    fn test_response_plan() {
+        assert_eq!(
+            parsed_command(&["homeboy", "status"]).response_plan(false),
+            CommandResponsePlan {
+                mode: CommandResponseMode::Json,
+                output_artifact_policy: CommandOutputArtifactPolicy::GenericEnvelope,
+                print_json: true,
+            }
+        );
+
+        assert_eq!(
+            parsed_command(&["homeboy", "review", "--report", "pr-comment"]).response_plan(false),
+            CommandResponsePlan {
+                mode: CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
+                output_artifact_policy: CommandOutputArtifactPolicy::ReviewStableArtifact,
+                print_json: false,
+            }
         );
     }
 
