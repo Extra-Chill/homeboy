@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::cli_surface::{CommandOutputArtifactPolicy, CommandResponseMode, Commands};
+use crate::cli_surface::{CommandOutputArtifactPolicy, Commands};
 
 use super::utils::response as output;
 use super::{review, trace, GlobalArgs};
@@ -16,7 +16,7 @@ pub fn run_and_print(
     global: &GlobalArgs,
     policy: CommandOutputArtifactPolicy,
     output_file: Option<&str>,
-    mode: CommandResponseMode,
+    print_json: bool,
 ) -> i32 {
     let json_run = run_json(command, global, policy);
 
@@ -24,7 +24,7 @@ pub fn run_and_print(
         write_to_file(&json_run, policy, path);
     }
 
-    if let CommandResponseMode::Json = mode {
+    if print_json {
         output::print_json_result(json_run.stdout_result, json_run.exit_code).ok();
     }
 
