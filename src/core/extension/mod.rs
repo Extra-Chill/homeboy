@@ -58,15 +58,16 @@ pub use lifecycle::{
 pub use maintenance::{exec_tool, update_all};
 pub use manifest::{
     ActionConfig, ActionType, AuditCapability, AutofixVerifyConfig, BenchConfig, BuildConfig,
-    CiCapability, CiJobFidelity, CiJobSpec, CiLocalContext, CiProfileSpec, CliAutoFlag,
-    CliAutoFlagCondition, CliConfig, CliHelpConfig, ComponentEnvConfig, DatabaseCliConfig,
-    DatabaseConfig, DeployCapability, DeployOverride, DeployVerification, DiscoveryConfig,
-    DiscoveryMarkerConfig, DocTarget, ExecutableCapability, ExtensionManifest, FeatureContextRule,
-    FileContainsCondition, HttpMethod, InputConfig, LintChangedFileRoute, LintConfig, OutputConfig,
-    OutputSchema, PlatformCapability, ProvidesConfig, RemotePathInferenceRule, RemotePathRootRule,
-    RequirementsConfig, RuntimeConfig, RuntimeRequirementsConfig, ScriptsConfig, SelectOption,
-    SettingConfig, SinceTagConfig, StructuredSidecarDeclaration, TestConfig, TestDriftConfig,
-    TestMappingConfig, TraceConfig, VersionPatternConfig,
+    CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
+    CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig, ComponentEnvConfig,
+    DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride, DeployVerification,
+    DiscoveryConfig, DiscoveryMarkerConfig, DocTarget, ExecutableCapability, ExtensionManifest,
+    FeatureContextRule, FileContainsCondition, HttpMethod, InputConfig, LintChangedFileRoute,
+    LintConfig, OutputConfig, OutputSchema, PlatformCapability, ProvidesConfig,
+    RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, RuntimeConfig,
+    RuntimeRequirementsConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig,
+    StructuredSidecarDeclaration, TestConfig, TestDriftConfig, TestMappingConfig, TraceConfig,
+    VersionPatternConfig,
 };
 pub use refactor_protocol::{
     run_refactor_script, AdjustedItem, ParsedItem, RelatedTests, ResolvedImports, RewrittenImport,

@@ -263,8 +263,8 @@ impl Default for CiJobFidelity {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct CiJobSpec {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub check_names: Vec<String>,
+    #[serde(flatten)]
+    pub mapping: CiJobMapping,
     pub command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
@@ -272,6 +272,12 @@ pub struct CiJobSpec {
     pub env: BTreeMap<String, String>,
     #[serde(flatten)]
     pub local_context: CiLocalContext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CiJobMapping {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

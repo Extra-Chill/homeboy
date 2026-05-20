@@ -4,6 +4,7 @@
 //! produce domain-specific result types. This module provides the unified output
 //! envelope and builder functions that assemble results into command-ready output.
 
+use crate::core::ci_profile::CiContext;
 use crate::core::extension::test::{
     CoverageOutput, DriftReport, TestAnalysis, TestBaselineComparison, TestCounts, TestScopeOutput,
     TestSummaryOutput,
@@ -68,10 +69,19 @@ pub struct TestCommandOutput {
     /// users see the actual PHPUnit/cargo output. (#1143)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_output: Option<RawTestOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_context: Option<CiContext>,
 }
 
 /// Build output from a main test workflow result.
 pub fn from_main_workflow(result: TestRunWorkflowResult) -> (TestCommandOutput, i32) {
+    from_main_workflow_with_ci_context(result, None)
+}
+
+pub fn from_main_workflow_with_ci_context(
+    result: TestRunWorkflowResult,
+    ci_context: Option<CiContext>,
+) -> (TestCommandOutput, i32) {
     let exit_code = result.exit_code;
     let phase = Some(test_phase_report(
         &result.status,
@@ -104,6 +114,7 @@ pub fn from_main_workflow(result: TestRunWorkflowResult) -> (TestCommandOutput, 
             test_scope: result.test_scope,
             summary: result.summary,
             raw_output: result.raw_output,
+            ci_context,
         },
         exit_code,
     )
@@ -132,6 +143,7 @@ pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i
             test_scope: None,
             summary: None,
             raw_output: None,
+            ci_context: None,
         },
         exit_code,
     )
@@ -172,6 +184,7 @@ pub fn from_auto_fix_drift_workflow(
             test_scope: None,
             summary: None,
             raw_output: None,
+            ci_context: None,
         },
         0,
     )

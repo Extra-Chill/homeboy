@@ -3,6 +3,7 @@
 //! Mirrors `core/extension/test/report.rs` — the command layer calls a single
 //! builder function to convert a workflow result into the command output tuple.
 
+use crate::core::ci_profile::CiContext;
 use crate::core::extension::lint::baseline::{BaselineComparison, LintFinding};
 use crate::core::extension::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
@@ -37,10 +38,19 @@ pub struct LintCommandOutput {
     pub lint_findings: Option<Vec<LintFinding>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<LintSummaryOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_context: Option<CiContext>,
 }
 
 /// Build output from a main lint workflow result.
 pub fn from_main_workflow(result: LintRunWorkflowResult) -> (LintCommandOutput, i32) {
+    from_main_workflow_with_ci_context(result, None)
+}
+
+pub fn from_main_workflow_with_ci_context(
+    result: LintRunWorkflowResult,
+    ci_context: Option<CiContext>,
+) -> (LintCommandOutput, i32) {
     // Exit code should reflect the computed status, not just the extension's
     // shell exit code. When findings exist but the extension exited 0, the
     // process must still exit non-zero so CI treats it as a failure (#696).
@@ -79,6 +89,7 @@ pub fn from_main_workflow(result: LintRunWorkflowResult) -> (LintCommandOutput, 
                 result.lint_findings
             },
             summary: result.summary,
+            ci_context,
         },
         exit_code,
     )
@@ -161,6 +172,7 @@ pub fn from_lint_fix(component_label: String, run: RefactorSourceRun) -> (LintCo
             baseline_comparison: None,
             lint_findings: None,
             summary: None,
+            ci_context: None,
         },
         exit_code,
     )

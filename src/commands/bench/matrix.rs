@@ -380,6 +380,7 @@ pub(super) fn run_single_rig(
                 .iter()
                 .flat_map(|output| output.diagnostics.clone())
                 .collect(),
+            ci_context: None,
         },
         exit_code,
     ))
@@ -527,10 +528,20 @@ fn run_component_with_rig_context(
         }
     };
 
-    Ok(extension_bench::from_main_workflow_with_rig(
-        workflow,
-        rig_snapshot,
-    ))
+    let ci_context =
+        ci_profile::ci_context_for_job(ci_profile_job.as_ref(), args.ci_profile.as_deref());
+    if ci_context.is_some() {
+        Ok(extension_bench::from_main_workflow_with_rig_and_ci_context(
+            workflow,
+            rig_snapshot,
+            ci_context,
+        ))
+    } else {
+        Ok(extension_bench::from_main_workflow_with_rig(
+            workflow,
+            rig_snapshot,
+        ))
+    }
 }
 
 fn resolve_ci_profile_job(
@@ -909,6 +920,7 @@ mod tests {
             rig_state: None,
             failure: None,
             diagnostics: Vec::new(),
+            ci_context: None,
         }
     }
 

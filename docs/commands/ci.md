@@ -67,6 +67,22 @@ Supported fidelity values are `local-equivalent`, `local-partial`, `remote-only`
 
 The JSON output uses command `ci.list` and includes an `inventory` object with `profiles`, `jobs`, and `discovered_jobs`.
 
-`ci run` uses command `ci.run` and includes the selected job/profile, per-job command output, per-job exit codes, and an aggregate `success` / `exit_code`.
+`ci run` uses command `ci.run` and includes the selected job/profile, per-job command output, per-job `ci_context`, per-job exit codes, and an aggregate `success` / `exit_code`.
+
+Command-native CI reproduction also includes `ci_context` when a CI selector is used. `homeboy lint --ci-job <ID>`, `homeboy test --ci-job <ID>`, and `homeboy bench --ci-profile <ID>` preserve the normal command output shape and add the selected job's mapping metadata:
+
+```json
+{
+  "ci_context": {
+    "profile": "pr",
+    "job_id": "unit",
+    "check_names": ["test-unit-jspi"],
+    "provider": "github-actions",
+    "workflow": "ci.yml",
+    "fidelity": "local-partial",
+    "limitations": ["CI matrix shards are not reproduced locally"]
+  }
+}
+```
 
 Refs: [#1977](https://github.com/Extra-Chill/homeboy/issues/1977)

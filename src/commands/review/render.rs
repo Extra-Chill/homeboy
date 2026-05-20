@@ -363,12 +363,13 @@ fn render_ci_body(out: &mut String, output: &CiRunOutput) {
 mod tests {
     use super::*;
 
-    use homeboy::core::ci_profile::{CiJobRunOutput, CiRunOutput, CiRunSelection};
+    use homeboy::core::ci_profile::{CiContext, CiJobRunOutput, CiRunOutput, CiRunSelection};
     use homeboy::core::code_audit::{
         AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity,
     };
     use homeboy::core::extension::lint::{LintCommandOutput, LintFinding};
     use homeboy::core::extension::test::{FailedTest, TestCommandOutput, TestCounts};
+    use homeboy::core::extension::CiJobMapping;
     use homeboy::core::extension::{PhaseReport, PhaseStatus, VerificationPhase};
     use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
 
@@ -459,6 +460,12 @@ mod tests {
     fn ci_job(id: &str, success: bool, exit_code: i32) -> CiJobRunOutput {
         CiJobRunOutput {
             id: id.to_string(),
+            ci_context: CiContext {
+                profile: Some("pr".to_string()),
+                job_id: id.to_string(),
+                mapping: CiJobMapping::default(),
+                local_context: Default::default(),
+            },
             command: "sh".to_string(),
             args: Vec::new(),
             success,
@@ -553,6 +560,7 @@ mod tests {
             baseline_comparison: None,
             lint_findings: Some(findings),
             summary: None,
+            ci_context: None,
         }
     }
 
@@ -583,6 +591,7 @@ mod tests {
             test_scope: None,
             summary: None,
             raw_output: None,
+            ci_context: None,
         }
     }
 
