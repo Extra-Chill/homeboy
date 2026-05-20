@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.97.0] - 2026-05-20
+
+### Added
+- expose terminal action workflow input
+
 ## [2.96.12] - 2026-05-20
 
 ### Fixed
