@@ -386,7 +386,7 @@ pub fn watch(options: TriageWatchOptions) -> Result<TriageWatchOutput> {
         .until
         .unwrap_or_else(|| "target-default".to_string());
     validate_watch_until(&until)?;
-    ensure_gh_ready().map_err(|message| Error::internal_unexpected(message))?;
+    ensure_gh_ready().map_err(Error::internal_unexpected)?;
 
     let started = Instant::now();
     let deadline = started + options.timeout;
