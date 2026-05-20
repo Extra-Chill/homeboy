@@ -199,4 +199,22 @@ if ! grep -F -- "$OPENAI_PROVIDER_DIR" <<< "$merged_topological" >/dev/null; the
     exit 1
 fi
 
+export_log=$(mktemp)
+HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$AGENTS_API_DIR" \
+HOMEBOY_SETTINGS_JSON='{"validation_dependencies":"agents-api"}' \
+PATH="${BIN_DIR}:$PATH" \
+homeboy_export_validation_dependency_paths "$COMPONENT_DIR" 2>"$export_log"
+export_output=$(cat "$export_log")
+if ! grep -F -- "Resolved dependency 'agents-api' via final validation dependency path: ${AGENTS_API_DIR}" <<< "$export_output" >/dev/null; then
+    echo "FAIL: exported dependency diagnostics should report the final selected path" >&2
+    printf '%s\n' "$export_output" >&2
+    exit 1
+fi
+
+if grep -F -- "Homeboy component registry" <<< "$export_output" >/dev/null; then
+    echo "FAIL: exported dependency diagnostics should not report discarded resolver candidates" >&2
+    printf '%s\n' "$export_output" >&2
+    exit 1
+fi
+
 echo "Validation dependency smoke passed"

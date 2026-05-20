@@ -203,6 +203,82 @@ _homeboy_known_dependency_github_org() {
     esac
 }
 
+_homeboy_git_dependency_summary() {
+    local repo_dir="${1:-}"
+
+    [ -n "$repo_dir" ] && git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+    local head_sha
+    head_sha=$(git -C "$repo_dir" rev-parse --short HEAD 2>/dev/null || true)
+    [ -n "$head_sha" ] || return 0
+
+    local branch
+    branch=$(git -C "$repo_dir" branch --show-current 2>/dev/null || true)
+    [ -n "$branch" ] || branch="detached"
+
+    local summary="HEAD ${head_sha} (${branch})"
+    local upstream
+    upstream=$(git -C "$repo_dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+    if [ -n "$upstream" ]; then
+        local upstream_sha
+        upstream_sha=$(git -C "$repo_dir" rev-parse --short "$upstream" 2>/dev/null || true)
+        if [ -n "$upstream_sha" ]; then
+            summary+="; upstream ${upstream}@${upstream_sha}"
+        else
+            summary+="; upstream ${upstream}"
+        fi
+
+        local divergence
+        divergence=$(git -C "$repo_dir" rev-list --left-right --count "HEAD...${upstream}" 2>/dev/null || true)
+        if [ -n "$divergence" ]; then
+            local ahead behind
+            read -r ahead behind <<< "$divergence"
+            summary+="; ahead ${ahead:-0}, behind ${behind:-0}"
+        fi
+    fi
+
+    printf '%s\n' "$summary"
+}
+
+_homeboy_warn_if_dependency_stale() {
+    local dependency="${1:-}"
+    local repo_dir="${2:-}"
+
+    [ "${HOMEBOY_SUPPRESS_DEPENDENCY_RESOLUTION_LOG:-}" = "1" ] && return 0
+    [ -n "$dependency" ] && [ -n "$repo_dir" ] && git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+    local upstream
+    upstream=$(git -C "$repo_dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+    [ -n "$upstream" ] || return 0
+
+    local divergence
+    divergence=$(git -C "$repo_dir" rev-list --left-right --count "HEAD...${upstream}" 2>/dev/null || true)
+    [ -n "$divergence" ] || return 0
+
+    local ahead behind
+    read -r ahead behind <<< "$divergence"
+    if [ "${behind:-0}" != "0" ]; then
+        echo "Warning: Resolved validation dependency '${dependency}' to local checkout '${repo_dir}', but it is behind ${upstream} by ${behind} commit(s). Update the checkout or pass an explicit dependency path when validating against a newer ref." >&2
+    fi
+}
+
+_homeboy_report_resolved_dependency() {
+    local dependency="${1:-}"
+    local source="${2:-}"
+    local resolved="${3:-}"
+
+    [ "${HOMEBOY_SUPPRESS_DEPENDENCY_RESOLUTION_LOG:-}" = "1" ] && return 0
+    [ -n "$dependency" ] && [ -n "$source" ] && [ -n "$resolved" ] || return 0
+
+    local git_summary
+    git_summary=$(_homeboy_git_dependency_summary "$resolved" || true)
+    if [ -n "$git_summary" ]; then
+        echo "Resolved dependency '${dependency}' via ${source}: ${resolved} (${git_summary})" >&2
+    else
+        echo "Resolved dependency '${dependency}' via ${source}: ${resolved}" >&2
+    fi
+}
+
 homeboy_resolve_validation_dependency_path() {
     local dependency="${1:-}"
 
@@ -210,6 +286,8 @@ homeboy_resolve_validation_dependency_path() {
 
     # 1. Direct path (absolute or relative directory)
     if [ -d "$dependency" ]; then
+        _homeboy_report_resolved_dependency "$dependency" "direct path" "$dependency"
+        _homeboy_warn_if_dependency_stale "$dependency" "$dependency"
         printf '%s\n' "$dependency"
         return 0
     fi
@@ -219,6 +297,8 @@ homeboy_resolve_validation_dependency_path() {
         local resolved
         resolved=$(homeboy component show "$dependency" 2>/dev/null | jq -r '.data.entity.local_path // empty' 2>/dev/null || true)
         if [ -n "$resolved" ] && [ -d "$resolved" ]; then
+            _homeboy_report_resolved_dependency "$dependency" "Homeboy component registry" "$resolved"
+            _homeboy_warn_if_dependency_stale "$dependency" "$resolved"
             printf '%s\n' "$resolved"
             return 0
         fi
@@ -240,7 +320,7 @@ homeboy_resolve_validation_dependency_path() {
             local cloned_path
             cloned_path=$(_homeboy_clone_dependency "$dependency" "$known_github_org" || true)
             if [ -n "$cloned_path" ] && [ -d "$cloned_path" ]; then
-                echo "Resolved dependency '$dependency' via git clone from ${known_github_org}/${dependency}" >&2
+                _homeboy_report_resolved_dependency "$dependency" "git clone from ${known_github_org}/${dependency}" "$cloned_path"
                 printf '%s\n' "$cloned_path"
                 return 0
             fi
@@ -250,7 +330,7 @@ homeboy_resolve_validation_dependency_path() {
             local cloned_path
             cloned_path=$(_homeboy_clone_dependency "$dependency" "$github_org" || true)
             if [ -n "$cloned_path" ] && [ -d "$cloned_path" ]; then
-                echo "Resolved dependency '$dependency' via git clone from ${github_org}/${dependency}" >&2
+                _homeboy_report_resolved_dependency "$dependency" "git clone from ${github_org}/${dependency}" "$cloned_path"
                 printf '%s\n' "$cloned_path"
                 return 0
             fi
@@ -435,7 +515,19 @@ homeboy_export_validation_dependency_paths() {
     local plugin_path="${1:-}"
     local existing_paths="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
     local resolved_paths
-    resolved_paths=$(homeboy_resolve_validation_dependency_paths "$plugin_path" || true)
+    resolved_paths=$(HOMEBOY_SUPPRESS_DEPENDENCY_RESOLUTION_LOG=1 homeboy_resolve_validation_dependency_paths "$plugin_path" || true)
 
-    export HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$(homeboy_merge_validation_dependency_paths "$existing_paths" "$resolved_paths")"
+    local merged_paths
+    merged_paths="$(homeboy_merge_validation_dependency_paths "$existing_paths" "$resolved_paths")"
+    export HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$merged_paths"
+
+    local dependency_path
+    local dependency_slug
+    while IFS= read -r dependency_path; do
+        [ -n "$dependency_path" ] || continue
+        [ -d "$dependency_path" ] || continue
+        dependency_slug=$(homeboy_get_validation_dependency_slug "$dependency_path" || basename "$dependency_path")
+        _homeboy_report_resolved_dependency "$dependency_slug" "final validation dependency path" "$dependency_path"
+        _homeboy_warn_if_dependency_stale "$dependency_slug" "$dependency_path"
+    done <<< "$merged_paths"
 }
