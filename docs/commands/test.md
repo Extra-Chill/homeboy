@@ -31,6 +31,7 @@ The `test` command resolves the component's linked extension with `test` capabil
 - `--setting-json <key=json>`: Override component settings with typed JSON values
 - `--path <PATH>`: Override component `local_path` for this run
 - `--changed-since <REF>`: Limit execution to impacted tests since a git ref
+- `--ci-job <ID>`: Run using env and passthrough args from a single extension-declared CI job whose `command` is `test`
 - `--analyze`: Cluster and summarize failures
 - `--json-summary`: Include compact structured summary in JSON output for CI wrappers
 
@@ -48,6 +49,9 @@ homeboy test my-component --skip-lint
 
 # Test with multiple setting overrides
 homeboy test my-component --setting database_type=mysql --setting mysql_database=test_db
+
+# Reproduce an extension-declared CI test job through the test workflow
+homeboy test my-component --ci-job unit
 ```
 
 ## Passthrough Arguments
@@ -63,6 +67,8 @@ homeboy test my-extension -- --filter=SomeTest --verbose
 ```
 
 Supported arguments depend on the underlying test framework.
+
+When `--ci-job <ID>` is used, args declared on that extension-owned CI job are forwarded before explicit CLI passthrough arguments, and job env is passed to the test runner. Homeboy validates that the selected job declares `command: "test"` before running it.
 
 ## Component Requirements
 

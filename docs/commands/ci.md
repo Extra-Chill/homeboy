@@ -32,6 +32,8 @@ homeboy ci run --path /path/to/repo --extension nodejs --profile pr
 
 `ci run` executes only jobs declared under the extension manifest's `ci.jobs` contract. It does not parse arbitrary provider YAML into runnable local commands. Commands run from the component root with the declared `args` and `env`; the command's exit code is captured in JSON and the overall command exits non-zero when any selected job fails.
 
+For command-native reproduction, `homeboy lint --ci-job <ID>` and `homeboy test --ci-job <ID>` select a single declared job whose `command` is `lint` or `test` respectively, then run through the normal Homeboy lint/test workflow with the job's declared local context applied.
+
 ## Manifest Shape
 
 Extensions can declare CI profiles with a `ci` block:
@@ -56,6 +58,8 @@ Extensions can declare CI profiles with a `ci` block:
   }
 }
 ```
+
+For `homeboy test --ci-job`, job `args` are forwarded as test-runner passthrough arguments before any explicit CLI passthrough arguments. For `homeboy lint --ci-job`, job `env` is applied to the lint runner; use extension settings or env-backed runner behavior for lint-specific variants.
 
 Supported fidelity values are `local-equivalent`, `local-partial`, `remote-only`, and `unknown`.
 

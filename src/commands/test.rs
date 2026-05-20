@@ -1,5 +1,6 @@
 use clap::Args;
 
+use homeboy::core::ci_profile::{self, CiResolvedJob};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::test as extension_test;
@@ -65,6 +66,10 @@ pub struct TestArgs {
     #[arg(long, value_name = "REF")]
     pub changed_since: Option<String>,
 
+    /// Run using env and passthrough args from a single extension-declared CI test job.
+    #[arg(long, value_name = "ID", conflicts_with = "drift")]
+    pub ci_job: Option<String>,
+
     #[command(flatten)]
     pub setting_args: SettingArgs,
 
@@ -104,7 +109,10 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         extension_overrides: args.extension_override.extensions.clone(),
     })?;
 
-    if !args.drift && source_ctx.component.has_script(ExtensionCapability::Test) {
+    if !args.drift
+        && args.ci_job.is_none()
+        && source_ctx.component.has_script(ExtensionCapability::Test)
+    {
         let observation = start_test_observation(
             &source_ctx.component_id,
             &source_ctx.source_path,
@@ -133,6 +141,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         extension_overrides: args.extension_override.extensions.clone(),
     })?;
     let effective_id = ctx.component_id.clone();
+    let ci_job = resolve_ci_job(args.ci_job.as_deref(), &ctx.component)?;
 
     // Drift detection mode — delegate to core drift workflow (read-only)
     // Fixes are owned by `homeboy refactor --from test --write`.
@@ -166,7 +175,8 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         "test {}",
         effective_id
     )));
-    let passthrough_args = filter_homeboy_flags(&args.args);
+    let mut passthrough_args = ci_job_passthrough_args(ci_job.as_ref());
+    passthrough_args.extend(filter_homeboy_flags(&args.args));
     let workflow = extension_test::run_main_test_workflow(
         &ctx.component,
         &ctx.source_path,
@@ -186,6 +196,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             },
             changed_since: args.changed_since.clone(),
             json_summary: args.json_summary,
+            ci_env: ci_profile::ci_job_env(ci_job.as_ref()),
             passthrough_args: passthrough_args.clone(),
         },
         &run_dir,
@@ -194,6 +205,32 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
     let workflow = finish_test_workflow_observation(observation, workflow)?;
 
     Ok(report::from_main_workflow(workflow))
+}
+
+fn resolve_ci_job(
+    job_id: Option<&str>,
+    component: &homeboy::core::component::Component,
+) -> homeboy::core::Result<Option<CiResolvedJob>> {
+    let Some(job_id) = job_id else {
+        return Ok(None);
+    };
+    let extension_ids = component
+        .extensions
+        .as_ref()
+        .map(|extensions| {
+            let mut ids: Vec<String> = extensions.keys().cloned().collect();
+            ids.sort();
+            ids
+        })
+        .unwrap_or_default();
+    let extension_id = ci_profile::select_extension_id(&extension_ids)?;
+    let job = ci_profile::resolve_job_for_extension(&extension_id, job_id)?;
+    ci_profile::validate_job_command(&job, "test")?;
+    Ok(Some(job))
+}
+
+fn ci_job_passthrough_args(job: Option<&CiResolvedJob>) -> Vec<String> {
+    job.map(|job| job.spec.args.clone()).unwrap_or_default()
 }
 
 struct TestObservation(ActiveObservation);
@@ -543,6 +580,14 @@ mod tests {
         ])
         .expect("parse sample args")
         .test
+    }
+
+    #[test]
+    fn parses_ci_job_flag() {
+        let cli = TestCli::try_parse_from(["test", "homeboy", "--ci-job", "unit"])
+            .expect("test should parse --ci-job");
+
+        assert_eq!(cli.test.ci_job.as_deref(), Some("unit"));
     }
 
     #[test]
