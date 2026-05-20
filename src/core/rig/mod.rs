@@ -58,7 +58,7 @@ pub use spec::{
     ComponentSpec, DiscoverSpec, NewerThanSpec, PatchOp, PipelineStep, RigResourcesSpec, RigSpec,
     ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp, SymlinkSpec, TimeSource,
     TraceExperimentArtifactSpec, TraceExperimentCommandSpec, TraceExperimentSpec,
-    TraceGuardrailSpec, TraceVariantSpec, WorkloadEntry, WorkloadSpec,
+    TraceGuardrailSpec, TraceProfileSpec, TraceVariantSpec, WorkloadEntry, WorkloadSpec,
 };
 pub use stack::{
     plan_stack_sync, run_component_sync, run_sync, RigStackPlanEntry, RigStackSyncEntry,

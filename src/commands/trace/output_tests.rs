@@ -287,6 +287,8 @@ fn trace_compare_exits_nonzero_for_guardrail_failures() {
         scenario_arg: None,
         compare_after: Some(after_path),
         rig: None,
+        profile: None,
+        profiles: false,
         setting_args: SettingArgs::default(),
         _json: HiddenJsonArgs::default(),
         json_summary: false,

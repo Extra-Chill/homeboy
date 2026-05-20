@@ -20,6 +20,8 @@ fn trace_args_for_rig(rig_id: &str, scenario: &str) -> TraceArgs {
         scenario_arg: None,
         compare_after: None,
         rig: Some(rig_id.to_string()),
+        profile: None,
+        profiles: false,
         setting_args: SettingArgs::default(),
         _json: HiddenJsonArgs::default(),
         json_summary: false,

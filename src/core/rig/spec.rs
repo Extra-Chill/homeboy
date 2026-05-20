@@ -85,6 +85,11 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub trace_variants: HashMap<String, TraceVariantSpec>,
 
+    /// Named trace profiles that resolve repeatable trace workflows to the
+    /// normal trace runner contract.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub trace_profiles: HashMap<String, TraceProfileSpec>,
+
     /// Named trace experiment plans that wrap a trace run with lifecycle
     /// commands, workload settings/env, and artifact collection.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -352,6 +357,48 @@ pub struct TraceVariantSpec {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trace_guardrails: Vec<TraceGuardrailSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceProfileSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rig: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlays: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, serde_json::Value>,
+}
+
+impl TraceProfileSpec {
+    pub fn string_settings(&self) -> Vec<(String, String)> {
+        self.settings
+            .iter()
+            .filter_map(|(key, value)| {
+                value
+                    .as_str()
+                    .map(|string| (key.clone(), string.to_string()))
+            })
+            .collect()
+    }
+
+    pub fn json_settings(&self) -> Vec<(String, serde_json::Value)> {
+        self.settings
+            .iter()
+            .filter(|(_, value)| !value.is_string())
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
