@@ -25,6 +25,7 @@ The `lint` command resolves the component's linked extension with `lint` capabil
 - `--glob <pattern>`: Lint only files matching glob pattern (e.g., "inc/**/*.php")
 - `--changed-only`: Lint only files modified in the working tree (staged, unstaged, untracked). This scope is file-scoped, not hunk-scoped; findings can come from unchanged lines inside those files.
 - `--changed-since <REF>`: Lint only files changed since a git ref
+- `--ci-job <ID>`: Run using env from a single extension-declared CI job whose `command` is `lint`
 - `--errors-only`: Show only errors, suppress warnings
 - `--summary`: Show compact summary instead of full output
 - `--sniffs <SNIFFS>`: Restrict to comma-separated linter sniffs or rules when supported
@@ -61,6 +62,9 @@ homeboy lint extrachill-api --glob "inc/**/*.php"
 
 # Lint with custom settings
 homeboy lint extrachill-api --setting some_option=value
+
+# Reproduce an extension-declared CI lint job through the lint workflow
+homeboy lint extrachill-api --ci-job lint-typecheck
 ```
 
 ## Extension Requirements
@@ -84,6 +88,8 @@ The following environment variables are set for lint runners:
 - `HOMEBOY_ERRORS_ONLY`: Set to `1` when `--errors-only` flag is used
 - `HOMEBOY_SETTINGS_JSON`: Merged settings as JSON string
 - `HOMEBOY_LINT_FINDINGS_FILE`: Path for extension to write structured lint findings JSON
+
+When `--ci-job <ID>` is used, env declared on that extension-owned CI job is also passed to the lint runner. Homeboy validates that the selected job declares `command: "lint"` before running it.
 
 ## Output
 

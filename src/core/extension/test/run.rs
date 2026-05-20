@@ -27,6 +27,7 @@ pub struct TestRunWorkflowArgs {
     pub baseline_flags: BaselineFlags,
     pub changed_since: Option<String>,
     pub json_summary: bool,
+    pub ci_env: Vec<(String, String)>,
     pub passthrough_args: Vec<String>,
 }
 
@@ -226,7 +227,7 @@ pub fn run_main_test_workflow(
         .and_then(|context| crate::core::extension::load_extension(&context.extension_id).ok())
         .and_then(|extension| extension.test.and_then(|test| test.result_parse));
 
-    let output = build_test_runner(
+    let runner = build_test_runner(
         component,
         args.path_override.clone(),
         &args.settings,
@@ -235,14 +236,19 @@ pub fn run_main_test_workflow(
         args.coverage_min,
         changed_test_files,
         run_dir,
-    )?
-    .env_if(
-        args.changed_since.is_some(),
-        "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
-        "1",
-    )
-    .script_args(&args.passthrough_args)
-    .run()?;
+    )?;
+    let runner = args
+        .ci_env
+        .iter()
+        .fold(runner, |runner, (key, value)| runner.env(key, value));
+    let output = runner
+        .env_if(
+            args.changed_since.is_some(),
+            "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
+            "1",
+        )
+        .script_args(&args.passthrough_args)
+        .run()?;
 
     let mut test_counts = parse_test_results_file(&results_file).or_else(|| {
         result_parse

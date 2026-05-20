@@ -36,6 +36,7 @@ fn test_command_args(root: &Path) -> TestArgs {
         write: false,
         since: "HEAD~10".to_string(),
         changed_since: None,
+        ci_job: None,
         setting_args: SettingArgs::default(),
         args: Vec::new(),
         _json: HiddenJsonArgs::default(),

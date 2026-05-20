@@ -33,6 +33,7 @@ pub struct LintRunWorkflowArgs {
     pub sniffs: Option<String>,
     pub exclude_sniffs: Option<String>,
     pub category: Option<String>,
+    pub ci_env: Vec<(String, String)>,
     pub baseline_flags: BaselineFlags,
     pub json_summary: bool,
 }
@@ -103,7 +104,7 @@ pub fn run_main_lint_workflow(
     let output = if let Some(runs) = scoped_runs {
         run_scoped_lint_runs(component, &args, run_dir, &runs)?
     } else {
-        build_lint_runner(
+        let runner = build_lint_runner(
             component,
             args.path_override.clone(),
             &args.settings,
@@ -116,14 +117,19 @@ pub fn run_main_lint_workflow(
             args.category.as_deref(),
             None,
             run_dir,
-        )?
-        .env_if(
-            args.changed_since.is_some(),
-            "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
-            "1",
-        )
-        .passthrough(!args.json_summary)
-        .run()?
+        )?;
+        let runner = args
+            .ci_env
+            .iter()
+            .fold(runner, |runner, (key, value)| runner.env(key, value));
+        runner
+            .env_if(
+                args.changed_since.is_some(),
+                "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
+                "1",
+            )
+            .passthrough(!args.json_summary)
+            .run()?
     };
 
     let lint_findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
@@ -379,7 +385,7 @@ fn run_scoped_lint_runs(
             &scoped_run_dir
         };
 
-        let output = build_lint_runner(
+        let runner = build_lint_runner(
             component,
             args.path_override.clone(),
             &args.settings,
@@ -392,14 +398,19 @@ fn run_scoped_lint_runs(
             args.category.as_deref(),
             run.step.as_deref(),
             active_run_dir,
-        )?
-        .env_if(
-            args.changed_since.is_some(),
-            "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
-            "1",
-        )
-        .passthrough(!args.json_summary)
-        .run()?;
+        )?;
+        let runner = args
+            .ci_env
+            .iter()
+            .fold(runner, |runner, (key, value)| runner.env(key, value));
+        let output = runner
+            .env_if(
+                args.changed_since.is_some(),
+                "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
+                "1",
+            )
+            .passthrough(!args.json_summary)
+            .run()?;
 
         if !output.success {
             success = false;
@@ -669,6 +680,7 @@ mod tests {
             sniffs: None,
             exclude_sniffs: None,
             category: None,
+            ci_env: Vec::new(),
             baseline_flags: BaselineFlags::default(),
             json_summary: false,
         }

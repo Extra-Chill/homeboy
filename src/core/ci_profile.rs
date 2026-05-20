@@ -84,6 +84,13 @@ pub struct CiJobRunOutput {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CiResolvedJob {
+    pub extension_id: String,
+    pub id: String,
+    pub spec: CiJobSpec,
+}
+
 pub fn list_for_extension(source_path: &Path, extension_id: &str) -> Result<CiInventory> {
     let extension = extension::load_extension(extension_id)?;
     Ok(list_from_manifest(source_path, extension_id, &extension))
@@ -132,6 +139,59 @@ pub fn run_for_extension(
 ) -> Result<CiRunOutput> {
     let extension = extension::load_extension(extension_id)?;
     run_from_manifest(source_path, extension_id, &extension, selection)
+}
+
+pub fn resolve_job_for_extension(extension_id: &str, job_id: &str) -> Result<CiResolvedJob> {
+    let extension = extension::load_extension(extension_id)?;
+    let ci = extension.ci.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "extension",
+            format!("extension '{extension_id}' does not declare CI jobs"),
+            Some(extension_id.to_string()),
+            None,
+        )
+    })?;
+    let spec = ci.jobs.get(job_id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "job",
+            format!("CI job '{job_id}' is not declared by extension '{extension_id}'"),
+            Some(job_id.to_string()),
+            Some(ci.jobs.keys().cloned().collect()),
+        )
+    })?;
+
+    Ok(CiResolvedJob {
+        extension_id: extension_id.to_string(),
+        id: job_id.to_string(),
+        spec: spec.clone(),
+    })
+}
+
+pub fn validate_job_command(job: &CiResolvedJob, expected_command: &str) -> Result<()> {
+    if job.spec.command == expected_command {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "ci-job",
+        format!(
+            "CI job '{}' declares command '{}', but this command only runs '{}' jobs",
+            job.id, job.spec.command, expected_command
+        ),
+        Some(job.id.clone()),
+        Some(vec![expected_command.to_string()]),
+    ))
+}
+
+pub fn ci_job_env(job: Option<&CiResolvedJob>) -> Vec<(String, String)> {
+    job.map(|job| {
+        job.spec
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn run_from_manifest(
@@ -467,6 +527,70 @@ mod tests {
             assert!(output.success);
             assert_eq!(output.jobs[0].stdout, "smoke");
         });
+    }
+
+    #[test]
+    fn test_resolve_job_for_extension() {
+        crate::test_support::with_isolated_home(|_home| {
+            let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+                "id": "test",
+                "name": "Test",
+                "version": "1.0.0",
+                "ci": {
+                    "jobs": {
+                        "unit": {
+                            "command": "test",
+                            "args": ["--unit"],
+                            "env": { "CI": "1" }
+                        }
+                    }
+                }
+            }))
+            .expect("parse manifest");
+            crate::core::extension::save_manifest(&manifest).expect("save extension");
+
+            let job = resolve_job_for_extension("test", "unit").expect("resolve CI job");
+
+            assert_eq!(job.extension_id, "test");
+            assert_eq!(job.id, "unit");
+            assert_eq!(job.spec.command, "test");
+            assert_eq!(job.spec.args, vec!["--unit"]);
+            assert_eq!(job.spec.env.get("CI").map(String::as_str), Some("1"));
+        });
+    }
+
+    #[test]
+    fn test_validate_job_command() {
+        let job = CiResolvedJob {
+            extension_id: "test".to_string(),
+            id: "unit".to_string(),
+            spec: CiJobSpec {
+                command: "test".to_string(),
+                ..CiJobSpec::default()
+            },
+        };
+
+        assert!(validate_job_command(&job, "test").is_ok());
+        assert!(validate_job_command(&job, "lint").is_err());
+    }
+
+    #[test]
+    fn test_ci_job_env() {
+        let job = CiResolvedJob {
+            extension_id: "test".to_string(),
+            id: "lint".to_string(),
+            spec: CiJobSpec {
+                command: "lint".to_string(),
+                env: BTreeMap::from([("CI".to_string(), "1".to_string())]),
+                ..CiJobSpec::default()
+            },
+        };
+
+        assert_eq!(
+            ci_job_env(Some(&job)),
+            vec![("CI".to_string(), "1".to_string())]
+        );
+        assert!(ci_job_env(None).is_empty());
     }
 
     #[test]

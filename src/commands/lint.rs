@@ -1,5 +1,6 @@
 use clap::Args;
 
+use homeboy::core::ci_profile::{self, CiResolvedJob};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::lint::{
@@ -47,6 +48,10 @@ pub struct LintArgs {
     /// Lint only files changed since a git ref (branch, tag, or SHA) — CI-friendly
     #[arg(long, conflicts_with = "changed_only")]
     pub changed_since: Option<String>,
+
+    /// Run using env from a single extension-declared CI lint job.
+    #[arg(long, value_name = "ID", conflicts_with = "fix")]
+    pub ci_job: Option<String>,
 
     /// Show only errors, suppress warnings
     #[arg(long)]
@@ -109,7 +114,10 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         extension_overrides: args.extension_override.extensions.clone(),
     })?;
 
-    if !args.fix && source_ctx.component.has_script(ExtensionCapability::Lint) {
+    if !args.fix
+        && args.ci_job.is_none()
+        && source_ctx.component.has_script(ExtensionCapability::Lint)
+    {
         let observation = LintObservation::start(
             source_ctx.component_id.clone(),
             &source_ctx.source_path,
@@ -137,6 +145,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         extension_overrides: args.extension_override.extensions.clone(),
     })?;
     let effective_id = ctx.component_id.clone();
+    let ci_job = resolve_ci_job(args.ci_job.as_deref(), &ctx.component)?;
 
     let stringified_settings = ctx.resolved_settings().string_lossy_overrides();
 
@@ -176,6 +185,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             sniffs: args.sniffs.clone(),
             exclude_sniffs: args.exclude_sniffs.clone(),
             category: args.category.clone(),
+            ci_env: ci_profile::ci_job_env(ci_job.as_ref()),
             baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
                 baseline: args.baseline_args.baseline,
                 ignore_baseline: args.baseline_args.ignore_baseline,
@@ -189,6 +199,28 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
     let workflow = finish_lint_workflow(observation, workflow)?;
 
     Ok(report::from_main_workflow(workflow))
+}
+
+fn resolve_ci_job(
+    job_id: Option<&str>,
+    component: &homeboy::core::component::Component,
+) -> homeboy::core::Result<Option<CiResolvedJob>> {
+    let Some(job_id) = job_id else {
+        return Ok(None);
+    };
+    let extension_ids = component
+        .extensions
+        .as_ref()
+        .map(|extensions| {
+            let mut ids: Vec<String> = extensions.keys().cloned().collect();
+            ids.sort();
+            ids
+        })
+        .unwrap_or_default();
+    let extension_id = ci_profile::select_extension_id(&extension_ids)?;
+    let job = ci_profile::resolve_job_for_extension(&extension_id, job_id)?;
+    ci_profile::validate_job_command(&job, "lint")?;
+    Ok(Some(job))
 }
 
 fn finish_lint_workflow(
@@ -377,6 +409,14 @@ mod tests {
             .expect("lint should parse --json-summary");
 
         assert!(cli.lint.json_summary);
+    }
+
+    #[test]
+    fn parses_ci_job_flag() {
+        let cli = TestCli::try_parse_from(["lint", "homeboy", "--ci-job", "lint-typecheck"])
+            .expect("lint should parse --ci-job");
+
+        assert_eq!(cli.lint.ci_job.as_deref(), Some("lint-typecheck"));
     }
 
     #[test]
