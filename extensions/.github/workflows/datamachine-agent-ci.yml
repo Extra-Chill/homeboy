@@ -52,7 +52,7 @@ name: Data Machine Agent CI (reusable)
       provider_plugin:
         description: |
           JSON object describing the AI provider plugin to mount and configure.
-          Defaults to the OpenAI provider preset when provider is openai.
+          WP Codebox handles the default provider runtime. Use this only for an explicit extra provider plugin.
           Supported keys: repo, ref, path, register_function, credentials.
           credentials maps Data Machine option names to bench env names.
         type: string
@@ -65,7 +65,7 @@ name: Data Machine Agent CI (reusable)
         type: string
         default: ""
       include_agent_runtime_dependencies:
-        description: "Include the standard WordPress agent runtime stack: Agents API, Data Machine, Data Machine Code, and the selected provider plugin."
+        description: "Include the standard WordPress agent runtime stack: Agents API, Data Machine, and Data Machine Code."
         type: boolean
         default: true
       wp_codebox_ref:
@@ -85,7 +85,7 @@ name: Data Machine Agent CI (reusable)
         type: string
         default: main
       openai_provider_ref:
-        description: Ref for WordPress/ai-provider-for-openai when provider is openai and include_agent_runtime_dependencies is true.
+        description: Legacy ref for explicit provider_plugin overrides that still checkout WordPress/ai-provider-for-openai.
         type: string
         default: trunk
       playground_wordpress:
@@ -398,10 +398,10 @@ jobs:
             if (gsub("^\\s+|\\s+$"; "") | length) == 0 then {} else fromjson end
             | if type == "object" then . else error("provider_plugin must be a JSON object") end
             | {
-                repo: (.repo // (if $provider == "openai" then "WordPress/ai-provider-for-openai" else "" end)),
-                ref: (.ref // (if $provider == "openai" then $openaiRef else "" end)),
+                repo: (.repo // ""),
+                ref: (.ref // ""),
                 path: (.path // "."),
-                register_function: (.register_function // (if $provider == "openai" then "WordPress\\OpenAiAiProvider\\register_provider" else "" end)),
+                register_function: (.register_function // ""),
                 credentials: (.credentials // (if $provider == "openai" then {connectors_ai_openai_api_key: "OPENAI_API_KEY"} else {} end))
               }
           ')"
@@ -533,7 +533,7 @@ jobs:
             if (gsub("^\\s+|\\s+$"; "") | length) == 0 then {} else fromjson end
             | if type == "object" then . else error("provider_plugin must be a JSON object") end
             | {
-                repo: (.repo // (if $provider == "openai" then "WordPress/ai-provider-for-openai" else "" end)),
+                repo: (.repo // ""),
                 path: (.path // ".")
               }
           ')"
@@ -630,10 +630,10 @@ jobs:
             if (gsub("^\\s+|\\s+$"; "") | length) == 0 then {} else fromjson end
             | if type == "object" then . else error("provider_plugin must be a JSON object") end
             | {
-                repo: (.repo // (if $provider == "openai" then "WordPress/ai-provider-for-openai" else "" end)),
-                ref: (.ref // (if $provider == "openai" then $openaiRef else "" end)),
+                repo: (.repo // ""),
+                ref: (.ref // ""),
                 path: (.path // "."),
-                register_function: (.register_function // (if $provider == "openai" then "WordPress\\OpenAiAiProvider\\register_provider" else "" end)),
+                register_function: (.register_function // ""),
                 credentials: (.credentials // (if $provider == "openai" then {connectors_ai_openai_api_key: "OPENAI_API_KEY"} else {} end))
               }
               | if (.credentials | type) == "object" then . else error("provider_plugin.credentials must be a JSON object") end
