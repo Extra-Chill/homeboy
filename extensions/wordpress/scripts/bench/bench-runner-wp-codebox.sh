@@ -442,7 +442,7 @@ if ! jq -e '.success == true and (.benchResults | type == "object")' "$WP_CODEBO
 fi
 
 mkdir -p "$(dirname "$RESULTS_FILE")"
-jq '.benchResults' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
+jq '.benchResults | del(.warmup_iterations)' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
 
 homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE"
 
