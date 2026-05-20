@@ -1,5 +1,7 @@
 use clap::{Args, Subcommand};
-use homeboy::core::triage::{self, TriageOptions, TriageOutput, TriageTarget};
+use homeboy::core::triage::{
+    self, TriageCommandOutput, TriageOptions, TriageTarget, TriageWatchOptions,
+};
 use homeboy::core::Error;
 use std::path::PathBuf;
 
@@ -61,6 +63,30 @@ pub struct TriageArgs {
     /// Maximum items fetched per repo for each item type.
     #[arg(long, global = true, default_value_t = 30)]
     limit: usize,
+
+    /// Watch a GitHub PR/issue ref like owner/repo#123 until a target state.
+    #[arg(long, global = true, value_name = "REF")]
+    watch: Vec<String>,
+
+    /// Target watch state: merged, closed, green, green-mergeable, failed, state-changed, or commit-pushed.
+    #[arg(long, global = true, value_name = "STATE")]
+    until: Option<String>,
+
+    /// Merge a PR through the GitHub REST API when green-mergeable is reached.
+    #[arg(long, global = true)]
+    auto_merge: bool,
+
+    /// Merge method used with --auto-merge.
+    #[arg(long, global = true, value_name = "METHOD", default_value = "squash", value_parser = ["squash", "rebase", "merge"])]
+    merge_method: String,
+
+    /// Maximum time to watch before exiting.
+    #[arg(long, global = true, value_name = "DURATION", default_value = "30m")]
+    timeout: String,
+
+    /// Delay between GitHub polls.
+    #[arg(long, global = true, value_name = "DURATION", default_value = "60s")]
+    poll_interval: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -89,7 +115,27 @@ enum TriageCommand {
     Workspace,
 }
 
-pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageOutput> {
+pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCommandOutput> {
+    if !args.watch.is_empty() {
+        let options = TriageWatchOptions {
+            refs: args.watch,
+            until: args.until.or_else(|| {
+                if args.auto_merge {
+                    Some("green-mergeable".to_string())
+                } else {
+                    None
+                }
+            }),
+            timeout: parse_watch_duration("timeout", &args.timeout)?,
+            poll_interval: parse_watch_duration("poll-interval", &args.poll_interval)?,
+            auto_merge: args.auto_merge,
+            merge_method: args.merge_method,
+        };
+        let output = triage::watch(options)?;
+        let exit_code = if output.target_reached { 0 } else { 1 };
+        return Ok((TriageCommandOutput::Watch(output), exit_code));
+    }
+
     let mut issue_numbers = args.issue;
     if let Some(path) = args.issues_from_file {
         issue_numbers.extend(triage::parse_issue_numbers_file(&path)?);
@@ -127,7 +173,48 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageOut
         limit: args.limit,
     };
 
-    Ok((triage::run(target, options)?, 0))
+    Ok((
+        TriageCommandOutput::Report(triage::run(target, options)?),
+        0,
+    ))
+}
+
+fn parse_watch_duration(name: &str, raw: &str) -> Result<std::time::Duration, Error> {
+    let trimmed = raw.trim();
+    let split = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    let (amount, unit) = trimmed.split_at(split);
+    let amount = amount.parse::<u64>().map_err(|_| {
+        Error::validation_invalid_argument(
+            format!("--{name}"),
+            "expected duration like 30s, 5m, or 1h",
+            Some(raw.to_string()),
+            None,
+        )
+    })?;
+    if amount == 0 {
+        return Err(Error::validation_invalid_argument(
+            format!("--{name}"),
+            "duration amount must be greater than zero",
+            Some(raw.to_string()),
+            None,
+        ));
+    }
+    let seconds = match unit {
+        "s" | "sec" | "secs" | "second" | "seconds" => amount,
+        "m" | "min" | "mins" | "minute" | "minutes" => amount * 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => amount * 60 * 60,
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                format!("--{name}"),
+                "duration unit must be one of s, m, or h",
+                Some(raw.to_string()),
+                None,
+            ))
+        }
+    };
+    Ok(std::time::Duration::from_secs(seconds))
 }
 
 fn resolve_component_target(
@@ -207,6 +294,27 @@ mod tests {
 
         assert!(cli.args.all);
         assert!(!cli.args.mine);
+    }
+
+    #[test]
+    fn watch_flags_parse_without_subcommand() {
+        let cli = TestCli::parse_from([
+            "triage",
+            "--watch",
+            "Extra-Chill/homeboy#2238",
+            "--until",
+            "green-mergeable",
+            "--timeout",
+            "5m",
+            "--poll-interval",
+            "30s",
+        ]);
+
+        assert_eq!(cli.args.watch, vec!["Extra-Chill/homeboy#2238"]);
+        assert_eq!(cli.args.until.as_deref(), Some("green-mergeable"));
+        assert_eq!(cli.args.timeout, "5m");
+        assert_eq!(cli.args.poll_interval, "30s");
+        assert!(cli.args.command.is_none());
     }
 
     #[test]
