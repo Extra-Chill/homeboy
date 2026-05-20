@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.95.2] - 2026-05-20
+
+### Fixed
+- verify deployed artifact paths robustly
+
 ## [2.95.1] - 2026-05-20
 
 ### Fixed
