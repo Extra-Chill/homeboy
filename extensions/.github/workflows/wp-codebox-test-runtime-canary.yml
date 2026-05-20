@@ -1,0 +1,55 @@
+name: WP Codebox test runtime canary
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/wp-codebox-test-runtime-canary.yml
+      - wordpress/scripts/test/**
+      - wordpress/tests/fixtures/test-db-activation-host/**
+      - wordpress/tests/fixtures/bench-db-activation-dep/**
+
+permissions:
+  contents: read
+
+jobs:
+  db-activation-smoke:
+    name: DB activation PHPUnit smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Homeboy Extensions
+        uses: actions/checkout@v4
+
+      - name: Checkout WP Codebox
+        uses: actions/checkout@v4
+        with:
+          repository: chubes4/wp-codebox
+          ref: main
+          path: .ci/wp-codebox
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Homeboy WordPress extension dependencies
+        working-directory: wordpress
+        run: |
+          set -euo pipefail
+          composer install --no-interaction --no-progress --prefer-dist
+          npm install
+
+      - name: Build WP Codebox
+        working-directory: .ci/wp-codebox
+        run: |
+          set -euo pipefail
+          npm install
+          npm run build
+
+      - name: Run WP Codebox-backed test runner canary
+        env:
+          HOMEBOY_WORDPRESS_TEST_RUNTIME: wp-codebox
+          HOMEBOY_WP_CODEBOX_BIN: ${{ github.workspace }}/.ci/wp-codebox/packages/cli/dist/index.js
+        run: bash wordpress/scripts/test/playground-db-activation-smoke.sh
