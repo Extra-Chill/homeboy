@@ -821,23 +821,16 @@
     "extension_script": "scripts/trace/trace-runner.sh"
   },
   "testing": {
-    "backend": "playground",
-    "description": "Plugin/theme PHPUnit currently runs inside WordPress Playground by default while issue #697 moves WordPress tests onto the WP Codebox substrate. Pure PHP smoke suites can use the host-smoke backend."
+    "backend": "wp-codebox",
+    "description": "Plugin/theme PHPUnit runs through WP Codebox by default. Use the host-smoke backend only for standalone tests/**/*-smoke.php scripts that run under host PHP without WordPress bootstrap."
   },
   "settings": [
-    {
-      "id": "test_runtime",
-      "label": "Test runtime",
-      "type": "string",
-      "default": "",
-      "description": "Transitional WordPress test runtime selector tracked by issue #697. Leave empty for the current default runner, or set 'wp-codebox' to exercise the WP Codebox parity path for the same PHPUnit mount/config translation."
-    },
     {
       "id": "test_backend",
       "label": "Test backend",
       "type": "string",
-      "default": "playground",
-      "description": "WordPress test backend. Use 'playground' for the current default PHPUnit backend, 'wp-codebox' for the transitional WP Codebox runtime path, or 'host-smoke' / 'host' for standalone tests/**/*-smoke.php scripts run under host PHP without WordPress bootstrap."
+      "default": "wp-codebox",
+      "description": "WordPress test backend. Use 'wp-codebox' for default PHPUnit execution, or 'host-smoke' / 'host' for standalone tests/**/*-smoke.php scripts that run under host PHP without WordPress bootstrap."
     },
     {
       "id": "validation_dependencies",
@@ -858,21 +851,21 @@
       "label": "wp-config additions",
       "type": "object",
       "default": {},
-      "description": "Map of CONSTANT_NAME => value appended to the Playground wp-tests-config.php as additional define() statements. Lets a component declare wp-config-level constants (mode flags, debug toggles, custom paths) without shipping a custom drop-in. Values preserve PHP type via var_export() — booleans, integers, and nulls round-trip cleanly. Reserved canonical names (DB_NAME, ABSPATH, etc.) cannot be overridden."
+      "description": "Map of CONSTANT_NAME => value appended to the WP Codebox wp-tests-config.php as additional define() statements. Lets a component declare wp-config-level constants (mode flags, debug toggles, custom paths) without shipping a custom drop-in. Values preserve PHP type via var_export() — booleans, integers, and nulls round-trip cleanly. Reserved canonical names (DB_NAME, ABSPATH, etc.) cannot be overridden."
     },
     {
       "id": "bench_env",
       "label": "Bench env passthrough",
       "type": "object",
       "default": {},
-      "description": "Map of NAME => value forwarded into Playground PHP-WASM as environment variables. Workloads (bench) and test fixtures (test runner) read them via getenv() / $_ENV. Required because host shell env doesn't cross the wp-playground-cli sandbox boundary; without this seam, getenv('MY_KNOB') returns false regardless of what the parent shell set. Values are coerced to strings (via json_encode for non-scalars) per PHP env-var convention. Component declares static defaults; matrix drivers can synthesize HOMEBOY_SETTINGS_JSON inline to override per-cell."
+      "description": "Map of NAME => value forwarded into the WordPress runtime as environment variables. Workloads (bench) and test fixtures (test runner) read them via getenv() / $_ENV. Required because host shell env doesn't cross the sandbox boundary; without this seam, getenv('MY_KNOB') returns false regardless of what the parent shell set. Values are coerced to strings (via json_encode for non-scalars) per PHP env-var convention. Component declares static defaults; matrix drivers can synthesize HOMEBOY_SETTINGS_JSON inline to override per-cell."
     },
     {
       "id": "phpunit_no_tests",
       "label": "No PHPUnit tests discovered",
       "type": "string",
       "default": "skipped",
-      "description": "How the Playground PHPUnit backend treats successful WordPress install/activation when discovery finds zero PHPUnit files. Use 'skipped' for components that intentionally test through smoke scripts, or 'failed' when the component expects PHPUnit coverage. Components with phpunit.xml(.dist) still fail on zero discovery."
+      "description": "How the WP Codebox PHPUnit backend treats successful WordPress install/activation when discovery finds zero PHPUnit files. Use 'skipped' for components that intentionally test through smoke scripts, or 'failed' when the component expects PHPUnit coverage. Components with phpunit.xml(.dist) still fail on zero discovery."
     },
     {
       "id": "playground_blueprint",

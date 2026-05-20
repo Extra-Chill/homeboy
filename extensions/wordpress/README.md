@@ -62,11 +62,11 @@ verbs also accept a project id to fan out across all of its components.
 
 ## Test runner
 
-The default backend boots WordPress inside Playground, mounts the
-component under `/wordpress/wp-content/plugins/<slug>` (or themes path for
-themes), and runs PHPUnit in-process. No `bootstrap.php` or `phpunit.xml`
-in the component is required — and **shipping one is rejected** with a
-clear error. The extension owns bootstrap.
+The default backend boots WordPress through WP Codebox, mounts the component
+under `/wordpress/wp-content/plugins/<slug>` (or themes path for themes), and
+runs PHPUnit in-process. No `bootstrap.php` or `phpunit.xml` in the component is
+required — and **shipping one is rejected** with a clear error. The extension
+owns bootstrap.
 
 A component needs:
 
@@ -75,7 +75,7 @@ A component needs:
 - A plugin header (`Plugin Name:`) or theme `style.css` with `Theme Name:`
   — the runner detects which is which.
 
-The Playground runner emits a structured log at
+The test runner emits a structured log at
 `<component>/.pg-test-result.txt` with `STAGE_BEGIN` / `STAGE_OK` /
 `STAGE_FAIL` / `STAGE_FATAL` / `NOTICE` markers across stages
 `boot → install → load_fixtures → load_deps → load_component → discover_tests
@@ -105,7 +105,7 @@ Available factories from the WordPress test framework: `user`, `post`,
 
 ### Host-smoke backend
 
-Pure PHP smoke suites that don't need WordPress can opt out of Playground:
+Pure PHP smoke suites that don't need WordPress can opt out of WP Codebox:
 
 ```bash
 homeboy component set <component-id> test_backend host-smoke
@@ -332,12 +332,11 @@ Configure per-component in the component's homeboy/component config under
 
 | Setting | Type | Default | Purpose |
 |---|---|---|---|
-| `test_runtime` | string | `""` | Transitional runtime selector tracked by #697; `wp-codebox` exercises the WP Codebox parity path while the default test runner remains Playground-backed |
-| `test_backend` | string | `playground` | `playground` (default) or `host-smoke` / `host` for standalone smoke scripts |
+| `test_backend` | string | `wp-codebox` | `wp-codebox` (default) or `host-smoke` / `host` for standalone non-WordPress smoke scripts |
 | `validation_dependencies` | string | `""` | Comma / newline / JSON list of local components to mount during PHPStan, autoload validation, and PHPUnit |
 | `user` | string | `""` | WP-CLI user (email/login/ID); appended as `--user` when set |
-| `wp_config_defines` | object | `{}` | `CONSTANT_NAME => value` map appended to Playground `wp-tests-config.php`; PHP type preserved via `var_export` |
-| `bench_env` | object | `{}` | `NAME => value` env vars forwarded into Playground PHP-WASM (workloads/fixtures read via `getenv()`) |
+| `wp_config_defines` | object | `{}` | `CONSTANT_NAME => value` map appended to the runtime `wp-tests-config.php`; PHP type preserved via `var_export` |
+| `bench_env` | object | `{}` | `NAME => value` env vars forwarded into the runtime (workloads/fixtures read via `getenv()`) |
 | `playground_blueprint` | object | `{}` | Blueprint JSON passed to `wp-playground-cli --blueprint` for cold-boot scenarios |
 | `playground_workloads` | array | `[]` | Declared bench workloads run after bootstrap, blueprint, deps, and component load |
 | `playground_file_mounts` | array | `[]` | Files from the component or validation dependencies mounted into explicit Playground paths |

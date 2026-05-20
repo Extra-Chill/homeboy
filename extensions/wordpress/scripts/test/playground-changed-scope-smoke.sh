@@ -18,12 +18,12 @@ assert_contains() {
     fi
 }
 
-assert_contains "$TEMPLATE" "{{CHANGED_TEST_FILES_JSON}}"
+assert_contains "$TEMPLATE" "{{CHANGED_TEST_FILES_JSON_B64}}"
 assert_contains "$TEMPLATE" "pg_filter_changed_test_files"
 assert_contains "$BOOTSTRAP" "function pg_filter_changed_test_files"
 assert_contains "$BOOTSTRAP" "SCOPED_TEST_FILES requested="
 assert_contains "$RUNNER" "CHANGED_TEST_FILES_JSON"
-assert_contains "$RUNNER" "{{CHANGED_TEST_FILES_JSON}}"
+assert_contains "$RUNNER" "{{CHANGED_TEST_FILES_JSON_B64}}"
 
 EXTENSION_PATH="${TMPDIR}/extension"
 PLUGIN_PATH="${TMPDIR}/component"
@@ -60,11 +60,11 @@ if [ -z "$wrapper" ] || [ ! -f "$wrapper" ]; then
     exit 1
 fi
 
-if ! grep -Fq '["tests/OnlyTest.php"]' "$wrapper"; then
-    echo "changed-test JSON was not substituted into wrapper" >&2
+if ! grep -Fq 'WyJ0ZXN0cy9Pbmx5VGVzdC5waHAiXQ==' "$wrapper"; then
+    echo "changed-test JSON was not base64-substituted into wrapper" >&2
     exit 1
 fi
-if grep -Fq '{{CHANGED_TEST_FILES_JSON}}' "$wrapper"; then
+if grep -Fq '{{CHANGED_TEST_FILES_JSON_B64}}' "$wrapper"; then
     echo "changed-test placeholder leaked into wrapper" >&2
     exit 1
 fi

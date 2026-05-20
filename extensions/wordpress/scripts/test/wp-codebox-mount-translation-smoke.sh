@@ -122,7 +122,6 @@ SETTINGS_JSON=$(jq -nc \
     --argjson wpConfig '{"WP_DEBUG":true,"CUSTOM_NUMBER":7}' \
     --argjson benchEnv '{"HOMEBOY_FLAG":"yes"}' \
     '{
-        test_runtime: "wp-codebox",
         playground_wordpress_version: "6.10",
         wp_config_defines: $wpConfig,
         bench_env: $benchEnv,

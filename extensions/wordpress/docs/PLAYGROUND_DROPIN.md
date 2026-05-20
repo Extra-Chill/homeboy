@@ -152,8 +152,8 @@ during build).
   means it must delegate to Playground's bundled SQLite for the initial
   schema.
 
-- **WP version pinning.** The Playground runner defaults to `--wp=6.9`, and the
-  `playground_wordpress_version` setting can pass a different `--wp=<version>`.
+- **WP version pinning.** The WordPress test runner defaults to `--wp=6.9`, and
+  the `playground_wordpress_version` setting can pass a different `--wp=<version>`.
   The selected WordPress version must
   match the `wp-phpunit` package version. Don't forget to update both when
   bumping WordPress. A mismatch often manifests as missing `WP_UnitTestCase`
@@ -163,8 +163,8 @@ during build).
 - **MDI-specific note.** Markdown Database Integration's production drop-in
   assumes its own plugin directory is at
   `wp-content/plugins/markdown-database-integration/` (to load its classes).
-  When testing MDI through the Playground backend, the MDI plugin itself is
-  mounted to that location by `test-runner-playground.sh`. You don't have
+  When testing MDI through the WordPress test backend, the MDI plugin itself is
+  mounted to that location by the runner. You don't have
   to configure anything special for this common case.
 
 ## Related

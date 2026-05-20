@@ -41,7 +41,7 @@ PHP
 
 cat > "${component}/tests/Unit/ImportAgentAbilityTest.php" <<'PHP'
 <?php
-// PHPUnit-shaped file; the playground backend owns execution.
+// PHPUnit-shaped file; the WP Codebox backend owns execution.
 PHP
 
 cat > "${component}/tests/helper.php" <<'PHP'
@@ -63,7 +63,28 @@ cat > "${TMPDIR}/stubs/wp-codebox.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "WP_CODEBOX_STUB"
-printf '%s\n' "$@" > "${WP_CODEBOX_ARGS_FILE}"
+echo "SELECTED=${HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE:-}"
+printf 'CHANGED=%s\n' "${HOMEBOY_CHANGED_TEST_FILES:-}"
+printf 'ARGS=%s\n' "$*"
+if [ -n "${WP_CODEBOX_ARGS_FILE:-}" ]; then
+    printf '%s\n' "$@" > "${WP_CODEBOX_ARGS_FILE}"
+fi
+component_path=""
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--mount" ]; then
+        shift
+        case "${1:-}" in
+            *:/wordpress/wp-content/plugins/component)
+                component_path="${1%:/wordpress/wp-content/plugins/component}"
+                ;;
+        esac
+    fi
+    shift || true
+done
+if [ -n "$component_path" ]; then
+    printf 'ALL TESTS PASSED\nTESTS: 1 FAILURES: 0 ERRORS: 0\n' > "${component_path}/.pg-test-result.txt"
+fi
+printf '{"execution":{"stdout":"OK (1 test, 1 assertion)\n","stderr":""}}\n'
 SH
 chmod +x "${TMPDIR}/stubs/wp-codebox.sh"
 
@@ -94,10 +115,10 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
-HOMEBOY_RUNTIME_TEST_RUNNER_PLAYGROUND="${TMPDIR}/stubs/playground.sh" \
+HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/Unit/ImportAgentAbilityTest.php --filter ImportAgent > "${TMPDIR}/phpunit-file.out"
 
-assert_contains "${TMPDIR}/phpunit-file.out" "PLAYGROUND_STUB"
+assert_contains "${TMPDIR}/phpunit-file.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/phpunit-file.out" "SELECTED=tests/Unit/ImportAgentAbilityTest.php"
 assert_contains "${TMPDIR}/phpunit-file.out" "ARGS=--filter ImportAgent"
 
@@ -105,11 +126,11 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
-HOMEBOY_RUNTIME_TEST_RUNNER_PLAYGROUND="${TMPDIR}/stubs/playground.sh" \
+HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
 HOMEBOY_CHANGED_TEST_FILES=$'tests/import-agent-ability-smoke.php\ntests/Unit/ImportAgentAbilityTest.php' \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/changed-mixed-files.out"
 
-assert_contains "${TMPDIR}/changed-mixed-files.out" "PLAYGROUND_STUB"
+assert_contains "${TMPDIR}/changed-mixed-files.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/changed-mixed-files.out" "CHANGED=tests/import-agent-ability-smoke.php"
 assert_not_contains "${TMPDIR}/changed-mixed-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
 
@@ -118,7 +139,6 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
-HOMEBOY_WORDPRESS_TEST_RUNTIME="wp-codebox" \
 HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/Unit/ImportAgentAbilityTest.php --filter ImportAgent > "${TMPDIR}/wp-codebox-file.out"
 
@@ -136,7 +156,7 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
-HOMEBOY_SETTINGS_JSON='{"test_runtime":"wp-codebox","wp_codebox_bin":"'"${TMPDIR}/stubs/wp-codebox.sh"'","playground_wordpress_version":"latest"}' \
+HOMEBOY_SETTINGS_JSON='{"wp_codebox_bin":"'"${TMPDIR}/stubs/wp-codebox.sh"'","playground_wordpress_version":"latest"}' \
 WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-settings-args.txt" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/Unit/ImportAgentAbilityTest.php > "${TMPDIR}/wp-codebox-settings.out"
 

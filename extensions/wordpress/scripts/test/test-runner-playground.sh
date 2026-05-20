@@ -7,9 +7,8 @@ set -euo pipefail
 # mounts the component under test, runs PHPUnit inside it, and emits
 # the same JSON result shape as test-runner.sh.
 #
-# This is the default WordPress PHPUnit backend until issue #697 completes the
-# WP Codebox test-runtime cutover. The host backend is reserved for standalone
-# smoke scripts that do not bootstrap WordPress.
+# This is the legacy direct Playground runner retained for parity checks while
+# WordPress test execution moves to WP Codebox.
 #
 # HOW IT WORKS:
 #
@@ -191,7 +190,6 @@ if [ ! -f "$PLAYGROUND_CLI" ]; then
     echo "Error: @wp-playground/cli not found at $PLAYGROUND_CLI"
     echo ""
     echo "Install it with: cd ${EXTENSION_PATH} && npm install"
-    echo "Or switch backends: homeboy component set <id> test_backend host"
     FAILED_STEP="Playground CLI setup"
     exit 1
 fi

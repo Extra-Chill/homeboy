@@ -1,11 +1,12 @@
 # Testing
 
-The WordPress extension runs PHPUnit inside [WordPress Playground][playground]
-(PHP-WASM + embedded SQLite) by default. There is no host PHP, MySQL, or
-WordPress installation to configure. Components only need a `tests/` directory
-with PHPUnit test files.
+The WordPress extension runs PHPUnit through [WP Codebox][wp-codebox] by
+default. WP Codebox owns the disposable WordPress runtime, mounts, command
+execution, logs, and test artifacts. There is no host PHP, MySQL, or WordPress
+installation to configure. Components only need a `tests/` directory with
+PHPUnit test files.
 
-[playground]: https://www.npmjs.com/package/@wp-playground/cli
+[wp-codebox]: https://github.com/chubes4/wp-codebox
 
 ## Running tests
 
@@ -20,9 +21,8 @@ homeboy test <project-id>
 HOMEBOY_DEBUG=1 homeboy test <component-id>
 ```
 
-Tests run through `scripts/test/test-runner.sh`, which dispatches to the
-configured backend. The default Playground runner (`test-runner-playground.sh`
-and `playground-runner.php`) mounts the component under
+Tests run through `scripts/test/test-runner.sh`, which dispatches to the WP
+Codebox runner for WordPress PHPUnit. The runner mounts the component under
 `/wordpress/wp-content/plugins/<slug>`, boots WordPress in-process, discovers
 test files, and runs PHPUnit.
 
@@ -41,8 +41,8 @@ rejected with a clear error.
 
 ## Host smoke backend
 
-Pure PHP smoke suites can opt out of Playground and run directly under host
-PHP:
+Pure PHP smoke suites can run directly under host PHP when they are genuinely
+standalone and do not require a WordPress bootstrap:
 
 ```bash
 homeboy component set <component-id> test_backend host-smoke
@@ -50,8 +50,9 @@ homeboy component set <component-id> test_backend host-smoke
 
 The host-smoke backend discovers `tests/**/*-smoke.php`, runs each script in a
 separate `php` process, emits `HOST_SMOKE_*` markers, and fails fast with the
-failing script name. It does not bootstrap WordPress, connect to MySQL, or start
-Playground.
+failing script name. It remains separate because these scripts are non-WordPress
+PHP checks by contract: they do not bootstrap WordPress, connect to MySQL, or
+start a sandbox runtime.
 
 ## Data Machine agent bundle validator
 
@@ -73,13 +74,11 @@ For full CI agent runs on the WP Codebox WordPress execution substrate, see
 
 ## WP Codebox test runtime status
 
-Issue #697 tracks the cutover from the direct Playground PHPUnit runner to WP
-Codebox-backed WordPress tests. Until that migration lands,
-`test_runtime: wp-codebox` is a parity path for the same component mounts,
-dependency mounts, drop-ins, file routing, WordPress version selection, and
-artifact parsing contract. The default WordPress test backend remains the direct
-Playground runner, while `host-smoke` remains available for standalone PHP smoke
-scripts that do not bootstrap WordPress.
+WordPress PHPUnit runs through WP Codebox by default. The WP Codebox path owns
+the same component mounts, dependency mounts, drop-ins, file routing, WordPress
+version selection, and artifact parsing contract that the direct Playground
+runner previously handled. `host-smoke` remains available for standalone PHP
+smoke scripts that do not bootstrap WordPress.
 
 ## Dependencies
 
