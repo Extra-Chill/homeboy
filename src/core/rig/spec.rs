@@ -723,7 +723,10 @@ mod tests {
         assert_eq!(
             profile.json_settings(),
             vec![
-                ("options".to_string(), serde_json::json!({ "headless": true })),
+                (
+                    "options".to_string(),
+                    serde_json::json!({ "headless": true })
+                ),
                 ("retry_count".to_string(), serde_json::json!(2))
             ]
         );

@@ -2,7 +2,7 @@ use clap::{Command, CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::commands::{
-    api, audit, auth, bench, build, changelog, changes, component, config, daemon, db, deploy,
+    api, audit, auth, bench, build, changelog, changes, ci, component, config, daemon, db, deploy,
     deps, doctor, extension, file, fleet, git, http, issues, lint, logs, observe, project,
     refactor, release, report, review, rig, runner, runs, self_cmd, server, ssh, stack, status,
     test, trace, triage, undo, upgrade, version,
@@ -62,6 +62,8 @@ pub enum Commands {
     /// Manage component dependencies
     #[command(visible_alias = "dependencies")]
     Deps(deps::DepsArgs),
+    /// Inspect CI reproduction profiles and discovered CI surfaces
+    Ci(ci::CiArgs),
     /// Read-only local diagnostics for Homeboy-adjacent work
     Doctor(doctor::DoctorArgs),
     /// Remote file operations
@@ -332,6 +334,7 @@ mod tests {
         assert!(surface.contains_path(&["self"]));
         assert!(surface.contains_path(&["self", "status"]));
         assert!(surface.contains_path(&["doctor", "resources"]));
+        assert!(surface.contains_path(&["ci", "list"]));
         assert!(surface.contains_path(&["observe"]));
     }
 
@@ -342,6 +345,7 @@ mod tests {
         assert!(surface.contains_path(&["self"]));
         assert!(surface.contains_path(&["self", "status"]));
         assert!(surface.contains_path(&["doctor", "resources"]));
+        assert!(surface.contains_path(&["ci", "list"]));
         assert!(surface.contains_path(&["observe"]));
     }
 
