@@ -122,36 +122,9 @@ fn job_summaries(jobs: &BTreeMap<String, CiJobSpec>) -> Vec<CiJobSummary> {
 
 fn discover_ci_jobs(source_path: &Path) -> Vec<DiscoveredCiJob> {
     let mut jobs = Vec::new();
-    jobs.extend(discover_package_scripts(source_path));
     jobs.extend(discover_github_workflows(source_path));
     jobs.extend(discover_buildkite_pipelines(source_path));
     jobs
-}
-
-fn discover_package_scripts(source_path: &Path) -> Vec<DiscoveredCiJob> {
-    let package_json = source_path.join("package.json");
-    let Ok(raw) = fs::read_to_string(package_json) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return Vec::new();
-    };
-    let Some(scripts) = value.get("scripts").and_then(|scripts| scripts.as_object()) else {
-        return Vec::new();
-    };
-
-    scripts
-        .keys()
-        .map(|script| DiscoveredCiJob {
-            id: format!("package-script:{script}"),
-            provider: "package-scripts".to_string(),
-            label: script.clone(),
-            local_context: unknown_discovered_context(
-                "Discovered from package metadata; no Homeboy profile maps this to a local CI-equivalent command yet.",
-            ),
-            workflow: None,
-        })
-        .collect()
 }
 
 fn discover_github_workflows(source_path: &Path) -> Vec<DiscoveredCiJob> {
@@ -273,19 +246,13 @@ mod tests {
     }
 
     #[test]
-    fn discovery_lists_package_scripts_and_ci_files_as_unknown() {
+    fn discovery_lists_ci_files_as_unknown() {
         let tmp = TempDir::new().expect("temp dir");
-        fs::write(
-            tmp.path().join("package.json"),
-            r#"{ "scripts": { "test": "vitest", "lint": "eslint ." } }"#,
-        )
-        .expect("write package");
         fs::create_dir_all(tmp.path().join(".github/workflows")).expect("mkdir workflows");
         fs::write(tmp.path().join(".github/workflows/ci.yml"), "name: CI").expect("write ci");
 
         let discovered = discover_ci_jobs(tmp.path());
 
-        assert!(discovered.iter().any(|job| job.id == "package-script:test"));
         assert!(discovered
             .iter()
             .any(|job| job.id == "github-actions:ci.yml"));

@@ -12,7 +12,7 @@ homeboy ci list --path /path/to/repo --extension nodejs
 
 - declared extension-owned CI profiles
 - declared extension-owned CI jobs
-- best-effort discovered CI surfaces such as `package.json` scripts, `.github/workflows/*.yml`, and `.buildkite/*.yml`
+- best-effort discovered CI surfaces such as `.github/workflows/*.yml` and `.buildkite/*.yml`
 
 Discovery is intentionally inventory-only. Homeboy does not infer runnable local equivalence from arbitrary CI YAML; runnable jobs come from explicit extension profile declarations.
 
