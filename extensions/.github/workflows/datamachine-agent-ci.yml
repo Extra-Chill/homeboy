@@ -550,8 +550,11 @@ jobs:
           ')"
           provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
           provider_plugin_path="$(jq -r '.path // "."' <<< "$provider_plugin_json")"
-          if [ -n "$provider_plugin_repo" ] && [ "$provider_plugin_path" != "." ]; then
-            provider_plugin_dir=".ci/${provider_plugin_repo#*/}/${provider_plugin_path}"
+          if [ -n "$provider_plugin_repo" ]; then
+            provider_plugin_dir=".ci/${provider_plugin_repo#*/}"
+            if [ "$provider_plugin_path" != "." ]; then
+              provider_plugin_dir="${provider_plugin_dir}/${provider_plugin_path}"
+            fi
             if [ -f "${provider_plugin_dir}/composer.json" ]; then
               composer install --working-dir="$provider_plugin_dir" --no-interaction --no-progress --prefer-dist
             fi
@@ -650,10 +653,13 @@ jobs:
           provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
           provider_plugin_path="$(jq -r '.path // "."' <<< "$provider_plugin_json")"
           provider_plugin_host_path=""
-          if [ -n "$provider_plugin_repo" ] && [ "$provider_plugin_path" != "." ]; then
+          if [ -n "$provider_plugin_repo" ]; then
             provider_plugin_repo_name="${provider_plugin_repo#*/}"
             provider_plugin_root="${GITHUB_WORKSPACE}/.ci/${provider_plugin_repo_name}"
-            provider_plugin_host_path="${provider_plugin_root}/${provider_plugin_path}"
+            provider_plugin_host_path="$provider_plugin_root"
+            if [ "$provider_plugin_path" != "." ]; then
+              provider_plugin_host_path="${provider_plugin_root}/${provider_plugin_path}"
+            fi
             if [ -d "$provider_plugin_host_path" ]; then
               filtered_validation_paths=()
               for validation_path in "${validation_paths[@]}"; do
