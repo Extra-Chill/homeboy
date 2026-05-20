@@ -2123,12 +2123,18 @@ if ( ! function_exists( 'homeboy_datamachine_agent_provision_workspace' ) ) {
                 return array( 'enabled' => true, 'success' => false, 'error' => 'workspace primary missing and runner_workspace.clone_url is empty' );
             }
 
+            $clone_input = array(
+                'url'  => $clone_url,
+                'name' => $repo,
+            );
+            $github_token_env = homeboy_datamachine_agent_scalar( $config, 'github_token_env', 'GITHUB_TOKEN' );
+            if ( '' !== $github_token_env && '' !== trim( (string) getenv( $github_token_env ) ) && preg_match( '#^https://github\.com/#', $clone_url ) ) {
+                $clone_input['auth_token_env'] = $github_token_env;
+            }
+
             $clone = wp_get_ability( 'datamachine/workspace-clone' )->execute(
                 array_filter(
-                    array(
-                        'url'  => $clone_url,
-                        'name' => $repo,
-                    ),
+                    $clone_input,
                     static fn( $value ) => '' !== $value
                 )
             );
