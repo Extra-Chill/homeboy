@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.92.0] - 2026-05-20
+
+### Added
+- wire wp-codebox agent runtime
+
 ## [2.91.0] - 2026-05-19
 
 ### Added
