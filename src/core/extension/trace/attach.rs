@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpStream};
+use std::process::Command;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::core::engine::run_dir::RunDir;
@@ -39,7 +40,7 @@ impl TraceAttachment {
             return Err(invalid_attachment(raw, "attachment target cannot be empty"));
         }
         match kind {
-            "logfile" | "fswatch" => Ok(Self {
+            "logfile" | "fswatch" | "systemd" => Ok(Self {
                 kind: kind.to_string(),
                 target: target.to_string(),
             }),
@@ -87,7 +88,7 @@ impl TraceAttachment {
             }
             _ => Err(invalid_attachment(
                 raw,
-                "supported attachment kinds are logfile, fswatch, pid, port, and http",
+                "supported attachment kinds are logfile, fswatch, pid, port, http, and systemd",
             )),
         }
     }
@@ -145,6 +146,7 @@ fn observe_trace_attachment(
         "pid" => observe_pid(&attachment.target),
         "port" => observe_port(&attachment.target),
         "http" => observe_http(&attachment.target),
+        "systemd" => observe_systemd(&attachment.target),
         _ => ("unsupported".to_string(), BTreeMap::new()),
     }
 }
@@ -244,6 +246,83 @@ fn observe_http(url: &str) -> (String, BTreeMap<String, serde_json::Value>) {
     }
 }
 
+fn observe_systemd(unit: &str) -> (String, BTreeMap<String, serde_json::Value>) {
+    let mut data = BTreeMap::new();
+    data.insert("unit".to_string(), serde_json::json!(unit));
+
+    let output = Command::new("systemctl")
+        .args([
+            "show",
+            unit,
+            "--no-pager",
+            "--property=Id,LoadState,ActiveState,SubState,MainPID,ExecMainStatus,Result,FragmentPath",
+        ])
+        .output();
+
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            data.insert("error".to_string(), serde_json::json!(error.to_string()));
+            return ("unavailable".to_string(), data);
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !stderr.is_empty() {
+            data.insert("error".to_string(), serde_json::json!(stderr));
+        }
+        data.insert(
+            "exit_code".to_string(),
+            serde_json::json!(output.status.code()),
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let fields = parse_systemctl_show(&stdout);
+    for (key, value) in &fields {
+        data.insert(key.to_string(), serde_json::json!(value));
+    }
+
+    let main_pid = fields
+        .get("MainPID")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    data.insert("main_pid".to_string(), serde_json::json!(main_pid));
+    if main_pid > 0 {
+        data.insert(
+            "main_pid_running".to_string(),
+            serde_json::json!(process_exists(main_pid)),
+        );
+    }
+
+    let load_state = fields.get("LoadState").map(String::as_str).unwrap_or("");
+    let active_state = fields.get("ActiveState").map(String::as_str).unwrap_or("");
+    let status = if load_state == "not-found" {
+        "missing".to_string()
+    } else if active_state == "active" {
+        "active".to_string()
+    } else if !active_state.is_empty() {
+        active_state.to_string()
+    } else if output.status.success() {
+        "observed".to_string()
+    } else {
+        "error".to_string()
+    };
+
+    (status, data)
+}
+
+fn parse_systemctl_show(output: &str) -> BTreeMap<String, String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
 pub(super) fn append_attach_observations(
     results: &mut TraceResults,
     run_dir: &RunDir,
@@ -318,16 +397,18 @@ mod tests {
             "pid:1234".to_string(),
             "port:8080".to_string(),
             "http://127.0.0.1:8080/health".to_string(),
+            "systemd:kimaki.service".to_string(),
         ])
         .unwrap();
 
-        assert_eq!(attachments.len(), 5);
+        assert_eq!(attachments.len(), 6);
         assert_eq!(attachments[0].kind, "logfile");
         assert_eq!(attachments[1].kind, "fswatch");
         assert_eq!(attachments[2].target, "1234");
         assert_eq!(attachments[3].target, "8080");
         assert_eq!(attachments[4].kind, "http");
-        assert!(TraceAttachment::parse_all(&["systemd:kimaki.service".to_string()]).is_err());
+        assert_eq!(attachments[5].kind, "systemd");
+        assert_eq!(attachments[5].target, "kimaki.service");
     }
 
     #[test]
@@ -360,7 +441,24 @@ mod tests {
                 .target,
             "http://127.0.0.1:8080/health"
         );
-        assert!(TraceAttachment::parse("systemd:kimaki.service").is_err());
+        assert_eq!(
+            TraceAttachment::parse("systemd:kimaki.service").unwrap(),
+            TraceAttachment {
+                kind: "systemd".to_string(),
+                target: "kimaki.service".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn systemctl_show_parser_extracts_unit_state_fields() {
+        let fields = parse_systemctl_show(
+            "Id=kimaki.service\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=1234\n",
+        );
+
+        assert_eq!(fields.get("Id"), Some(&"kimaki.service".to_string()));
+        assert_eq!(fields.get("ActiveState"), Some(&"active".to_string()));
+        assert_eq!(fields.get("MainPID"), Some(&"1234".to_string()));
     }
 
     #[test]
