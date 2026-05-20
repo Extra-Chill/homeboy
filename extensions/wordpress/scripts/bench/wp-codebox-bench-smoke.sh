@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Bench harness end-to-end smoke test.
+# WP Codebox bench harness end-to-end smoke test.
 #
 # Runs the fixture at wordpress/tests/fixtures/bench-noop/ through the bench
 # dispatcher and asserts that:
@@ -11,11 +11,10 @@
 #     (mean_ms, p50_ms, p95_ms, p99_ms, min_ms, max_ms).
 #
 # Manual integration test, not part of CI. Run after changes to:
-#   - bench-runner-playground.sh (the bash dispatcher)
-#   - playground-bench-runner.php (the PHP template)
-#   - scripts/lib/playground-bootstrap.php (any boot stage edit affects bench too)
+#   - bench-runner-wp-codebox.sh
+#   - wp-codebox bench-run / wordpress.bench
 #
-# Usage: bash wordpress/scripts/bench/playground-bench-smoke.sh
+# Usage: bash wordpress/scripts/bench/wp-codebox-bench-smoke.sh
 # Exit:  0 = harness round-trips end-to-end, non-zero = regression
 
 set -euo pipefail
@@ -29,22 +28,16 @@ if [ ! -d "$FIXTURE_DIR" ]; then
     exit 1
 fi
 
-if [ ! -f "${EXTENSION_PATH}/node_modules/.bin/wp-playground-cli" ]; then
-    echo "ERROR: @wp-playground/cli not installed." >&2
-    echo "Run: cd ${EXTENSION_PATH} && npm install" >&2
-    exit 1
-fi
-
-if [ ! -d "${EXTENSION_PATH}/vendor/wp-phpunit" ]; then
-    echo "ERROR: wp-phpunit not installed." >&2
-    echo "Run: cd ${EXTENSION_PATH} && composer install" >&2
+if [ -z "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && ! command -v wp-codebox >/dev/null 2>&1; then
+    echo "ERROR: wp-codebox not installed." >&2
+    echo "Set HOMEBOY_WP_CODEBOX_BIN or run wordpress/scripts/build/setup.sh" >&2
     exit 1
 fi
 
 RESULTS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/bench-smoke-results.XXXXXX")
 
 echo "============================================"
-echo "Playground bench harness smoke test"
+echo "WP Codebox bench harness smoke test"
 echo "============================================"
 echo "Fixture:    $FIXTURE_DIR"
 echo "Iterations: 5 (per workload)"
@@ -67,9 +60,7 @@ echo "--- Results envelope ---"
 cat "$RESULTS_TMPFILE"
 echo ""
 
-# Asserts: the envelope round-trips both fixtures with all six metric keys,
-# plus the synthetic `__bootstrap` scenario emitted by the bench runner
-# (homeboy-extensions#255).
+# Asserts: the envelope round-trips both fixtures with all six metric keys.
 # Plain bash so the smoke has no extra deps.
 require_field() {
     local field="$1"
@@ -82,23 +73,22 @@ require_field() {
 require_field "component_id"
 require_field "iterations"
 require_field "scenarios"
-require_field "__bootstrap"
 require_field "noop"
 require_field "array-fill-1k"
 for metric in mean_ms p50_ms p95_ms p99_ms min_ms max_ms; do
     require_field "$metric"
 done
 
-# Three scenarios expected: __bootstrap + the two fixture workloads.
+# Two scenarios expected: the two fixture workloads.
 # Count `"id":` occurrences.
 scenario_count=$(grep -c '"id":' "$RESULTS_TMPFILE" || true)
-if [ "$scenario_count" -ne 3 ]; then
-    echo "ERROR: expected 3 scenarios (__bootstrap + 2 fixtures), got $scenario_count" >&2
+if [ "$scenario_count" -ne 2 ]; then
+    echo "ERROR: expected 2 scenarios, got $scenario_count" >&2
     exit 1
 fi
 
 rm -f "$RESULTS_TMPFILE"
 
 echo "============================================"
-echo "✓ Bench harness smoke test PASSED"
+echo "✓ WP Codebox bench harness smoke test PASSED"
 echo "============================================"

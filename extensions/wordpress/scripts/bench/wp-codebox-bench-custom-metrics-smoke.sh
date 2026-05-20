@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Workload-provided custom metrics smoke test (homeboy-extensions#265).
+# WP Codebox workload-provided custom metrics smoke test (homeboy-extensions#265).
 #
 # Runs a fixture workload that returns:
 #   ['metrics' => ['rows' => 10], 'metadata' => ['phase' => 'warm']]
@@ -18,15 +18,9 @@ if [ ! -d "$FIXTURE_DIR" ]; then
     exit 1
 fi
 
-if [ ! -f "${EXTENSION_PATH}/node_modules/.bin/wp-playground-cli" ]; then
-    echo "ERROR: @wp-playground/cli not installed." >&2
-    echo "Run: cd ${EXTENSION_PATH} && npm install" >&2
-    exit 1
-fi
-
-if [ ! -d "${EXTENSION_PATH}/vendor/wp-phpunit" ]; then
-    echo "ERROR: wp-phpunit not installed." >&2
-    echo "Run: cd ${EXTENSION_PATH} && composer install" >&2
+if [ -z "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && ! command -v wp-codebox >/dev/null 2>&1; then
+    echo "ERROR: wp-codebox not installed." >&2
+    echo "Set HOMEBOY_WP_CODEBOX_BIN or run wordpress/scripts/build/setup.sh" >&2
     exit 1
 fi
 
@@ -44,7 +38,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "============================================"
-echo "Playground bench custom metrics smoke test"
+echo "WP Codebox bench custom metrics smoke test"
 echo "============================================"
 echo "Fixture:    $FIXTURE_DIR"
 echo "Iterations: 3 (per workload)"
@@ -68,11 +62,11 @@ cat "$RESULTS_TMPFILE"
 echo ""
 
 scenario_count=$(jq -r '.scenarios | length' "$RESULTS_TMPFILE")
-if [ "$scenario_count" -ne 3 ]; then
-    echo "ERROR: expected 3 scenarios (__bootstrap + 2 fixture workloads), got $scenario_count" >&2
+if [ "$scenario_count" -ne 2 ]; then
+    echo "ERROR: expected 2 fixture workload scenarios, got $scenario_count" >&2
     exit 1
 fi
-echo "✓ scenarios length == 3 (__bootstrap + 2 fixture workloads)"
+echo "✓ scenarios length == 2 fixture workloads"
 
 custom='.scenarios[] | select(.id == "custom-metrics")'
 
@@ -136,5 +130,5 @@ echo "✓ legacy arrays without metrics key are ignored"
 
 echo ""
 echo "============================================"
-echo "✓ Custom metrics smoke test PASSED"
+echo "✓ WP Codebox custom metrics smoke test PASSED"
 echo "============================================"

@@ -241,15 +241,21 @@ errors and PSR-4 violations block the build; lint findings do not.
 
 ## Bench runner
 
-All bench execution runs inside Playground, reusing the same shared
-bootstrap stages as the test runner (`scripts/lib/playground-bootstrap.php`).
-That shared boot path is the point: bench numbers only compare across
-runs if every run measured against the same `boot` and `install` code.
+Basic `tests/bench/*.php` workloads run through WP Codebox by default. WP
+Codebox owns the disposable WordPress runtime, component mount, command
+execution, and artifacts, and emits the same `BenchResults` envelope Homeboy
+core parses.
 
-Workloads are declared per component via the `playground_workloads`
-setting (see below). Each workload has steps (`{type: 'php', code|file}`
-or `{type: 'wp-cli', command}`) and returns `{metrics, artifacts,
-metadata}`.
+Advanced bench features still dispatch to the legacy direct Playground runner
+while #698 ports them one at a time: configured `playground_workloads`, scenario
+manifests, extra file mounts, custom `wp_config_defines`, `bench_env`, installed
+site mode, blueprints, and browser handoff descriptors.
+
+For the WP Codebox path, each file under `tests/bench/*.php` returns a callable.
+The callable may return numeric metrics directly or `{metrics, metadata}`.
+Configured workloads are still declared per component via the
+`playground_workloads` setting (see below) and remain on the legacy runner until
+their WP Codebox command mapping lands.
 
 The browser bench target is a two-extension handoff: the WordPress
 extension prepares/describes the WordPress target by writing
@@ -399,7 +405,7 @@ wordpress/
 ├── lib/                      # Node helpers: request profiler, Playground HTTP readiness
 ├── scripts/
 │   ├── audit/                # Detector setup + WP test smells
-│   ├── bench/                # Playground bench runner + workload smokes
+│   ├── bench/                # WP Codebox bench runner + legacy Playground smokes
 │   ├── build/                # build.sh, validate-build.sh, validate-psr4.sh
 │   ├── env/detect.sh         # component_env detector
 │   ├── lib/                  # Shared helpers (playground bootstrap, etc.)
