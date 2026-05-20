@@ -106,6 +106,12 @@ pub(super) fn deploy_artifact(
     verification: Option<&DeployVerification>,
     remote_owner: Option<&str>,
 ) -> Result<DeployResult> {
+    let mut vars = HashMap::new();
+    vars.insert(
+        TemplateVars::TARGET_DIR.to_string(),
+        remote_path.to_string(),
+    );
+
     // Step 1: Upload (directory or file)
     if local_path.is_dir() {
         let result = upload_directory(ssh_client, local_path, remote_path)?;
@@ -184,6 +190,9 @@ pub(super) fn deploy_artifact(
             return Ok(result);
         }
 
+        vars.insert("artifact".to_string(), artifact_filename.clone());
+        vars.insert("stagingArtifact".to_string(), upload_path.clone());
+
         // Step 2: Execute extract command if configured
         if let Some(cmd_template) = extract_command {
             // Defense-in-depth: refuse to clean known shared parent directories.
@@ -224,10 +233,6 @@ pub(super) fn deploy_artifact(
                 // Non-fatal — proceed with extraction anyway
             }
 
-            let mut vars = HashMap::new();
-            vars.insert("artifact".to_string(), artifact_filename);
-            vars.insert("targetDir".to_string(), remote_path.to_string());
-
             let rendered_cmd = render_extract_command(cmd_template, &vars);
 
             let extract_cmd = format!("cd {} && {}", shell::quote_path(remote_path), rendered_cmd);
@@ -260,11 +265,6 @@ pub(super) fn deploy_artifact(
         .as_ref()
         .and_then(|v| v.verify_command.as_ref().map(|cmd| (v, cmd)))
     {
-        let mut vars = HashMap::new();
-        vars.insert(
-            TemplateVars::TARGET_DIR.to_string(),
-            remote_path.to_string(),
-        );
         let verify_cmd = render_map(verify_cmd_template, &vars);
 
         let verify_output = ssh_client.execute(&verify_cmd);
@@ -291,7 +291,23 @@ fn render_extract_command(template: &str, vars: &HashMap<String, String>) -> Str
 
 #[cfg(test)]
 mod tests {
-    use super::{render_extract_command, DANGEROUS_PATH_SUFFIXES};
+    use super::{deploy_artifact, render_extract_command, DANGEROUS_PATH_SUFFIXES};
+    use crate::core::extension::DeployVerification;
+    use crate::core::server::SshClient;
+    use std::collections::HashMap;
+    use std::fs;
+
+    fn local_client() -> SshClient {
+        SshClient {
+            host: "localhost".to_string(),
+            user: "test".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: true,
+            env: HashMap::new(),
+        }
+    }
 
     #[test]
     fn test_deploy_artifact_extract_command_template_replaces_vars() {
@@ -310,5 +326,34 @@ mod tests {
     fn test_deploy_via_git_keeps_framework_safety_policy_external() {
         assert!(DANGEROUS_PATH_SUFFIXES.contains(&"/vendor"));
         assert!(!DANGEROUS_PATH_SUFFIXES.contains(&"/wp-content/plugins"));
+    }
+
+    #[test]
+    fn test_deploy_artifact_verification_gets_uploaded_artifact_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("artifact.zip");
+        let target = temp.path().join("target");
+        fs::write(&artifact, "artifact bytes").expect("artifact");
+
+        let verification = DeployVerification {
+            path_pattern: "target".to_string(),
+            verify_command: Some(
+                "test -f {{stagingArtifact}} && cmp -s {{stagingArtifact}} {{targetDir}}/.homeboy-artifact.zip && echo verified"
+                    .to_string(),
+            ),
+            verify_error_message: Some("missing {{stagingArtifact}} in {{targetDir}}".to_string()),
+        };
+
+        let result = deploy_artifact(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            Some("true"),
+            Some(&verification),
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy failed: {:?}", result.error);
     }
 }
