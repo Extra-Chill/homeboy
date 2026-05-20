@@ -10,14 +10,22 @@
 # Fallback: when PHPUnit crashes mid-run (e.g., a test calls exit()), the summary
 # line is never printed. In --testdox mode, we count ✔/✘ marks as a fallback.
 #
-# Usage: parse-test-results.sh <phpunit-output-file>
+# Usage: parse-test-results.sh <phpunit-output-file|wp-codebox-artifact-dir|wp-codebox-test-results.json>
 #
 # Writes JSON to HOMEBOY_TEST_RESULTS_FILE when the runtime helper is provided.
 
 set -euo pipefail
 
 OUTPUT_FILE="${1:-}"
-if [ -z "$OUTPUT_FILE" ] || [ ! -f "$OUTPUT_FILE" ]; then
+if [ -z "$OUTPUT_FILE" ]; then
+    exit 0
+fi
+
+if [ -d "$OUTPUT_FILE" ] && [ -f "$OUTPUT_FILE/files/test-results.json" ]; then
+    OUTPUT_FILE="$OUTPUT_FILE/files/test-results.json"
+fi
+
+if [ ! -f "$OUTPUT_FILE" ]; then
     exit 0
 fi
 
@@ -34,6 +42,56 @@ PASSED=0
 FAILED=0
 SKIPPED=0
 PARTIAL=""
+
+if printf '%s' "$OUTPUT" | grep -q '"schema"[[:space:]]*:[[:space:]]*"wp-codebox/test-results/v1"'; then
+    wp_codebox_counts=$(php -r '
+        $path = $argv[1];
+        $data = json_decode(file_get_contents($path), true);
+        if (!is_array($data) || ($data["schema"] ?? "") !== "wp-codebox/test-results/v1") {
+            exit(1);
+        }
+
+        $summary = is_array($data["summary"] ?? null) ? $data["summary"] : array();
+        $total = (int) ($summary["total"] ?? 0);
+        $passed = (int) ($summary["passed"] ?? 0);
+        $failed = (int) ($summary["failed"] ?? 0);
+        $skipped = (int) ($summary["skipped"] ?? 0);
+        $unknown = (int) ($summary["unknown"] ?? 0);
+
+        if ($total === 0 && !empty($data["suites"]) && is_array($data["suites"])) {
+            foreach ($data["suites"] as $suite) {
+                if (!is_array($suite)) {
+                    continue;
+                }
+                $total += (int) ($suite["tests"] ?? $suite["total"] ?? 0);
+                $passed += (int) ($suite["passed"] ?? 0);
+                $failed += (int) ($suite["failed"] ?? 0);
+                $skipped += (int) ($suite["skipped"] ?? 0);
+                $unknown += (int) ($suite["unknown"] ?? 0);
+            }
+        }
+
+        $partial = "";
+        if (($data["status"] ?? "") === "unknown" || $unknown > 0) {
+            $partial = "wp-codebox-unknown";
+        }
+
+        echo implode("\t", array($total, $passed, $failed, $skipped, $partial));
+    ' "$OUTPUT_FILE" 2>/dev/null || true)
+
+    if [ -z "$wp_codebox_counts" ]; then
+        exit 0
+    fi
+
+    IFS=$'\t' read -r TOTAL PASSED FAILED SKIPPED PARTIAL <<EOF
+$wp_codebox_counts
+EOF
+
+    if type homeboy_write_test_results >/dev/null 2>&1; then
+        homeboy_write_test_results "${TOTAL:-0}" "${PASSED:-0}" "${FAILED:-0}" "${SKIPPED:-0}" "${PARTIAL:-}"
+    fi
+    exit 0
+fi
 
 # Portable helper: extract the number after a label like "Tests: 42"
 # Usage: extract_count "label" "text"
