@@ -9,7 +9,7 @@
 //! 1. Optional caller-supplied banners for action-level signals.
 //! 2. Scope banner: `:zap:` for changed-since/changed-only, `:information_source:` for full.
 //! 3. Total findings line.
-//! 4. Three stage blocks in fixed order — audit, lint, test. Each stage:
+//! 4. Stage blocks in fixed order — audit, lint, test, optional ci. Each stage:
 //!    - icon + name header (`:white_check_mark:`, `:x:`, `:fast_forward:`)
 //!    - up to 10 finding bullets (top categories / sniff codes / failure summary)
 //!    - blockquote with the deep-dive hint
@@ -17,6 +17,7 @@
 
 use std::fmt::Write as _;
 
+use homeboy::core::ci_profile::CiRunOutput;
 use homeboy::core::code_audit::{AuditCommandOutput, AuditFinding, Severity};
 use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::{FailedTest, TestCommandOutput};
@@ -50,6 +51,10 @@ pub fn render_pr_comment_with_banners(
     render_lint_stage(&mut out, &output.lint);
     out.push('\n');
     render_test_stage(&mut out, &output.test);
+    if let Some(ref stage) = output.ci_profile {
+        out.push('\n');
+        render_ci_stage(&mut out, stage);
+    }
 
     out
 }
@@ -93,10 +98,15 @@ fn render_scope_banner(out: &mut String, output: &ReviewCommandOutput) {
 }
 
 fn render_total_findings(out: &mut String, output: &ReviewCommandOutput) {
-    let ran = [&output.audit.ran, &output.lint.ran, &output.test.ran]
-        .iter()
-        .filter(|r| ***r)
-        .count();
+    let ran = [output.audit.ran, output.lint.ran, output.test.ran]
+        .into_iter()
+        .filter(|ran| *ran)
+        .count()
+        + output
+            .ci_profile
+            .as_ref()
+            .map(|stage| usize::from(stage.ran))
+            .unwrap_or(0);
     let _ = writeln!(
         out,
         "**{}** finding(s) across {} stage(s)",
@@ -163,6 +173,14 @@ fn render_test_stage(out: &mut String, stage: &ReviewStage<TestCommandOutput>) {
     render_stage_header(out, stage);
     if let Some(ref output) = stage.output {
         render_test_body(out, output);
+    }
+    render_stage_hint(out, stage);
+}
+
+fn render_ci_stage(out: &mut String, stage: &ReviewStage<CiRunOutput>) {
+    render_stage_header(out, stage);
+    if let Some(ref output) = stage.output {
+        render_ci_body(out, output);
     }
     render_stage_hint(out, stage);
 }
@@ -334,10 +352,18 @@ fn render_failed_tests(out: &mut String, failed_tests: &[FailedTest]) {
     }
 }
 
+fn render_ci_body(out: &mut String, output: &CiRunOutput) {
+    for job in &output.jobs {
+        let marker = if job.success { "passed" } else { "failed" };
+        let _ = writeln!(out, "- `{}` — {} (exit {})", job.id, marker, job.exit_code);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use homeboy::core::ci_profile::{CiJobRunOutput, CiRunOutput, CiRunSelection};
     use homeboy::core::code_audit::{
         AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity,
     };
@@ -367,6 +393,7 @@ mod tests {
             audit: stage_audit_passing(),
             lint: stage_lint_passing(),
             test: stage_test_passing(0),
+            ci_profile: None,
         }
     }
 
@@ -406,6 +433,38 @@ mod tests {
             hint: "Deep dive: homeboy test my-comp".to_string(),
             skipped_reason: None,
             output: Some(test_with_counts(passed, 0, 0)),
+        }
+    }
+
+    fn stage_ci_with_jobs(jobs: Vec<CiJobRunOutput>) -> ReviewStage<CiRunOutput> {
+        let passed = jobs.iter().all(|job| job.success);
+        ReviewStage {
+            stage: "ci".to_string(),
+            ran: true,
+            passed,
+            exit_code: if passed { 0 } else { 1 },
+            finding_count: jobs.iter().filter(|job| !job.success).count(),
+            hint: "Deep dive: homeboy ci run my-comp --profile pr".to_string(),
+            skipped_reason: None,
+            output: Some(CiRunOutput {
+                extension_id: "test".to_string(),
+                selection: CiRunSelection::Profile("pr".to_string()),
+                jobs,
+                success: passed,
+                exit_code: if passed { 0 } else { 1 },
+            }),
+        }
+    }
+
+    fn ci_job(id: &str, success: bool, exit_code: i32) -> CiJobRunOutput {
+        CiJobRunOutput {
+            id: id.to_string(),
+            command: "sh".to_string(),
+            args: Vec::new(),
+            success,
+            exit_code,
+            stdout: String::new(),
+            stderr: String::new(),
         }
     }
 
@@ -622,6 +681,23 @@ mod tests {
     }
 
     #[test]
+    fn renders_optional_ci_stage() {
+        let mut env = passing_envelope();
+        env.summary.total_findings = 1;
+        env.ci_profile = Some(stage_ci_with_jobs(vec![
+            ci_job("lint", true, 0),
+            ci_job("unit", false, 1),
+        ]));
+
+        let md = render_pr_comment(&env);
+
+        assert!(md.contains("**1** finding(s) across 4 stage(s)"));
+        assert!(md.contains(":x: **ci**"));
+        assert!(md.contains("- `lint` — passed (exit 0)"));
+        assert!(md.contains("- `unit` — failed (exit 1)"));
+    }
+
+    #[test]
     fn renders_all_stages_skipped() {
         let env = ReviewCommandOutput {
             command: "review".to_string(),
@@ -644,6 +720,7 @@ mod tests {
             audit: stage_skipped("audit", "no files changed"),
             lint: stage_skipped("lint", "no files changed"),
             test: stage_skipped("test", "no files changed"),
+            ci_profile: None,
         };
         let md = render_pr_comment(&env);
         assert!(
