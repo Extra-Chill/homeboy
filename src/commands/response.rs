@@ -1,47 +1,20 @@
-use crate::cli_surface::{CommandRawOutputMode, CommandResponseMode, Commands};
+use crate::cli_surface::{CommandResponseMode, Commands};
 
-use super::utils::{response as output, tty};
+use super::utils::response as output;
 use super::GlobalArgs;
 
 pub fn run(command: Commands, global: &GlobalArgs, output_file: Option<&str>) -> i32 {
     let mode = command.response_mode(output_file.is_some());
     let output_artifact_policy = command.output_artifact_policy(output_file.is_some());
 
-    match mode {
-        CommandResponseMode::Json => {}
-        CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {
-            if !tty::require_tty_for_interactive() {
-                let err = homeboy::core::Error::validation_invalid_argument(
-                    "tty",
-                    "This command requires an interactive TTY. For non-interactive usage, run: homeboy ssh <target> -- <command...>",
-                    None,
-                    None,
-                );
-                output::print_result::<serde_json::Value>(Err(err)).ok();
-                return 2;
-            }
+    let command = if let CommandResponseMode::Raw(raw_mode) = mode {
+        match super::raw_output::run_and_print(command, global, raw_mode) {
+            super::raw_output::RawExecution::Handled(exit_code) => return exit_code,
+            super::raw_output::RawExecution::Continue(command) => *command,
         }
-        CommandResponseMode::Raw(CommandRawOutputMode::Markdown) => {}
-        CommandResponseMode::Raw(CommandRawOutputMode::PlainText) => {}
-    }
-
-    if let CommandResponseMode::Raw(
-        raw_mode @ (CommandRawOutputMode::Markdown | CommandRawOutputMode::PlainText),
-    ) = mode
-    {
-        let raw_result = super::raw_output::run(command, global, raw_mode)
-            .expect("markdown and plain-text modes should return raw output");
-        match raw_result {
-            Ok((content, exit_code)) => {
-                print!("{}", content);
-                return exit_code;
-            }
-            Err(err) => {
-                output::print_result::<serde_json::Value>(Err(err)).ok();
-                return 1;
-            }
-        }
-    }
+    } else {
+        command
+    };
 
     let json_run = super::output_artifact::run_json(command, global, output_artifact_policy);
 
