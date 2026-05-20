@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Parse PHPUnit test failures from output and write JSON to HOMEBOY_TEST_FAILURES_FILE.
 #
-# Usage: parse-test-failures.sh <phpunit_output_file> [component_path]
+# Usage: parse-test-failures.sh <phpunit_output_file|wp-codebox-artifact-dir|wp-codebox-test-results.json> [component_path]
 # Env:   HOMEBOY_TEST_FAILURES_FILE — path to write JSON output
 
 set -euo pipefail
@@ -10,7 +10,15 @@ PHPUNIT_OUTPUT_FILE="${1:-}"
 COMPONENT_PATH="${2:-}"
 FAILURES_FILE="${HOMEBOY_TEST_FAILURES_FILE:-}"
 
-if [ -z "$PHPUNIT_OUTPUT_FILE" ] || [ ! -f "$PHPUNIT_OUTPUT_FILE" ]; then
+if [ -z "$PHPUNIT_OUTPUT_FILE" ]; then
+    exit 0
+fi
+
+if [ -d "$PHPUNIT_OUTPUT_FILE" ] && [ -f "$PHPUNIT_OUTPUT_FILE/files/test-results.json" ]; then
+    PHPUNIT_OUTPUT_FILE="$PHPUNIT_OUTPUT_FILE/files/test-results.json"
+fi
+
+if [ ! -f "$PHPUNIT_OUTPUT_FILE" ]; then
     exit 0
 fi
 
