@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.17.3] - 2026-05-20
+
+### Fixed
+- handle nested changed tests
+
 ## [1.17.1] - 2026-05-19
 
 ### Fixed
