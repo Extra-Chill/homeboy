@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::core::error::{Error, Result};
 use crate::core::extension::{
@@ -53,6 +54,36 @@ pub struct DiscoveredCiJob {
     pub workflow: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CiRunSelection {
+    Job(String),
+    Profile(String),
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CiRunOutput {
+    pub extension_id: String,
+    pub selection: CiRunSelection,
+    pub jobs: Vec<CiJobRunOutput>,
+    pub success: bool,
+    pub exit_code: i32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CiJobRunOutput {
+    pub id: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    pub success: bool,
+    pub exit_code: i32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub stdout: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub stderr: String,
+}
+
 pub fn list_for_extension(source_path: &Path, extension_id: &str) -> Result<CiInventory> {
     let extension = extension::load_extension(extension_id)?;
     Ok(list_from_manifest(source_path, extension_id, &extension))
@@ -92,6 +123,107 @@ pub fn select_extension_id(extension_ids: &[String]) -> Result<String> {
             ]),
         )),
     }
+}
+
+pub fn run_for_extension(
+    source_path: &Path,
+    extension_id: &str,
+    selection: CiRunSelection,
+) -> Result<CiRunOutput> {
+    let extension = extension::load_extension(extension_id)?;
+    run_from_manifest(source_path, extension_id, &extension, selection)
+}
+
+pub fn run_from_manifest(
+    source_path: &Path,
+    extension_id: &str,
+    extension: &ExtensionManifest,
+    selection: CiRunSelection,
+) -> Result<CiRunOutput> {
+    let ci = extension.ci.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "extension",
+            format!("extension '{extension_id}' does not declare CI jobs"),
+            Some(extension_id.to_string()),
+            None,
+        )
+    })?;
+
+    let job_ids = match &selection {
+        CiRunSelection::Job(job_id) => vec![job_id.clone()],
+        CiRunSelection::Profile(profile_id) => ci
+            .profiles
+            .get(profile_id)
+            .map(|profile| profile.jobs.clone())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "profile",
+                    format!(
+                        "CI profile '{profile_id}' is not declared by extension '{extension_id}'"
+                    ),
+                    Some(profile_id.clone()),
+                    Some(ci.profiles.keys().cloned().collect()),
+                )
+            })?,
+    };
+
+    if job_ids.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "profile",
+            "CI profile does not declare any jobs",
+            match &selection {
+                CiRunSelection::Profile(profile_id) => Some(profile_id.clone()),
+                CiRunSelection::Job(job_id) => Some(job_id.clone()),
+            },
+            None,
+        ));
+    }
+
+    let mut jobs = Vec::new();
+    for job_id in job_ids {
+        let job = ci.jobs.get(&job_id).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "job",
+                format!("CI job '{job_id}' is not declared by extension '{extension_id}'"),
+                Some(job_id.clone()),
+                Some(ci.jobs.keys().cloned().collect()),
+            )
+        })?;
+        jobs.push(run_job(source_path, &job_id, job)?);
+    }
+
+    let success = jobs.iter().all(|job| job.success);
+    Ok(CiRunOutput {
+        extension_id: extension_id.to_string(),
+        selection,
+        exit_code: if success { 0 } else { 1 },
+        success,
+        jobs,
+    })
+}
+
+fn run_job(source_path: &Path, job_id: &str, job: &CiJobSpec) -> Result<CiJobRunOutput> {
+    let output = Command::new(&job.command)
+        .args(&job.args)
+        .envs(&job.env)
+        .current_dir(source_path)
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                format!("Failed to run CI job '{job_id}': {error}"),
+                Some("ci.run".to_string()),
+            )
+        })?;
+
+    Ok(CiJobRunOutput {
+        id: job_id.to_string(),
+        command: job.command.clone(),
+        args: job.args.clone(),
+        success: output.status.success(),
+        exit_code: output.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
 }
 
 fn profile_summaries(profiles: &BTreeMap<String, CiProfileSpec>) -> Vec<CiProfileSummary> {
@@ -277,5 +409,123 @@ mod tests {
 
         assert!(ci.profiles.is_empty());
         assert!(ci.jobs.is_empty());
+    }
+
+    #[test]
+    fn run_from_manifest_executes_declared_job() {
+        let tmp = TempDir::new().expect("temp dir");
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "Test",
+            "version": "1.0.0",
+            "ci": {
+                "jobs": {
+                    "smoke": {
+                        "command": "sh",
+                        "args": ["-c", "printf '%s' \"$CI_MESSAGE\""],
+                        "env": { "CI_MESSAGE": "ok" },
+                        "fidelity": "local-equivalent"
+                    }
+                }
+            }
+        }))
+        .expect("parse manifest");
+
+        let output = run_from_manifest(
+            tmp.path(),
+            "test",
+            &manifest,
+            CiRunSelection::Job("smoke".to_string()),
+        )
+        .expect("run job");
+
+        assert!(output.success);
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.jobs[0].stdout, "ok");
+    }
+
+    #[test]
+    fn test_run_for_extension() {
+        crate::test_support::with_isolated_home(|_home| {
+            let tmp = TempDir::new().expect("temp dir");
+            let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+                "id": "test",
+                "name": "Test",
+                "version": "1.0.0",
+                "ci": {
+                    "jobs": {
+                        "smoke": { "command": "sh", "args": ["-c", "printf smoke"] }
+                    }
+                }
+            }))
+            .expect("parse manifest");
+            crate::core::extension::save_manifest(&manifest).expect("save extension");
+
+            let output =
+                run_for_extension(tmp.path(), "test", CiRunSelection::Job("smoke".to_string()))
+                    .expect("run extension job");
+
+            assert!(output.success);
+            assert_eq!(output.jobs[0].stdout, "smoke");
+        });
+    }
+
+    #[test]
+    fn run_from_manifest_executes_profile_jobs() {
+        let tmp = TempDir::new().expect("temp dir");
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "Test",
+            "version": "1.0.0",
+            "ci": {
+                "profiles": {
+                    "pr": { "jobs": ["first", "second"] }
+                },
+                "jobs": {
+                    "first": { "command": "sh", "args": ["-c", "printf first"] },
+                    "second": { "command": "sh", "args": ["-c", "printf second"] }
+                }
+            }
+        }))
+        .expect("parse manifest");
+
+        let output = run_from_manifest(
+            tmp.path(),
+            "test",
+            &manifest,
+            CiRunSelection::Profile("pr".to_string()),
+        )
+        .expect("run profile");
+
+        assert!(output.success);
+        assert_eq!(output.jobs.len(), 2);
+        assert_eq!(output.jobs[0].stdout, "first");
+        assert_eq!(output.jobs[1].stdout, "second");
+    }
+
+    #[test]
+    fn run_from_manifest_reports_failed_job_as_output() {
+        let tmp = TempDir::new().expect("temp dir");
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "Test",
+            "version": "1.0.0",
+            "ci": {
+                "jobs": {
+                    "fail": { "command": "sh", "args": ["-c", "printf nope >&2; exit 7"] }
+                }
+            }
+        }))
+        .expect("parse manifest");
+
+        let output = run_from_manifest(
+            tmp.path(),
+            "test",
+            &manifest,
+            CiRunSelection::Job("fail".to_string()),
+        )
+        .expect("run job");
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, 1);
+        assert_eq!(output.jobs[0].exit_code, 7);
+        assert_eq!(output.jobs[0].stderr, "nope");
     }
 }
