@@ -324,11 +324,7 @@ impl RenameSpec {
             });
         }
 
-        // Deduplicate — remove variants where from matches a previous one.
-        // Sort by from length descending first so longer matches take priority.
-        variants.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
-        let mut seen = std::collections::HashSet::new();
-        variants.retain(|v| seen.insert(v.from.clone()));
+        deduplicate_variants(&mut variants);
 
         RenameSpec {
             from: from.to_string(),
@@ -358,6 +354,31 @@ impl RenameSpec {
             rename_context: RenameContext::All,
         }
     }
+
+    /// Add explicit caller-provided variant mappings.
+    ///
+    /// This keeps project/domain naming conventions out of core. Callers can map
+    /// any source spelling to any target spelling, such as acronym display names
+    /// or language-specific class prefixes, without teaching the rename engine
+    /// what those conventions mean.
+    pub fn with_explicit_variants(mut self, variants: Vec<(String, String)>) -> Self {
+        for (from, to) in variants {
+            self.variants.push(CaseVariant {
+                from,
+                to,
+                label: "explicit".to_string(),
+            });
+        }
+        deduplicate_variants(&mut self.variants);
+        self
+    }
+}
+
+fn deduplicate_variants(variants: &mut Vec<CaseVariant>) {
+    // Sort by from length descending first so longer matches take priority.
+    variants.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+    let mut seen = std::collections::HashSet::new();
+    variants.retain(|variant| seen.insert(variant.from.clone()));
 }
 
 /// A single reference found in the codebase.
@@ -2090,6 +2111,58 @@ mod tests {
             "Should rename plural kebab: {}",
             content
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_variants_handle_project_specific_acronyms() {
+        let dir = std::env::temp_dir().join("homeboy_explicit_variant_acronym_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join("plugin.php"),
+            concat!(
+                "// Display: Old API Client\n",
+                "final class Old_API_Client {}\n"
+            ),
+        )
+        .unwrap();
+
+        let spec = RenameSpec::new("old-client", "new-client", RenameScope::All)
+            .with_explicit_variants(vec![
+                ("Old API Client".to_string(), "New API Client".to_string()),
+                ("Old_API_Client".to_string(), "New_API_Client".to_string()),
+            ]);
+
+        let result = generate_renames(&spec, &dir);
+        assert_eq!(result.edits.len(), 1);
+        let content = &result.edits[0].new_content;
+
+        assert!(content.contains("New API Client"), "{}", content);
+        assert!(content.contains("New_API_Client"), "{}", content);
+        assert!(!content.contains("Old API Client"), "{}", content);
+        assert!(!content.contains("Old_API_Client"), "{}", content);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_artifacts_directory_is_skipped_by_default() {
+        let dir = std::env::temp_dir().join("homeboy_refactor_artifacts_skip_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("artifacts")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        std::fs::write(dir.join("src/lib.rs"), "fn old_client() {}\n").unwrap();
+        std::fs::write(dir.join("artifacts/output.rs"), "fn old_client() {}\n").unwrap();
+
+        let spec = RenameSpec::new("old-client", "new-client", RenameScope::All);
+        let result = generate_renames(&spec, &dir);
+
+        assert_eq!(result.edits.len(), 1);
+        assert_eq!(result.edits[0].file, "src/lib.rs");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
