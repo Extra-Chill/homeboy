@@ -12,7 +12,7 @@ fi
 RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/datamachine-agent-wp-codebox.XXXXXX")
 CONFIG_TMPFILE="$RUNTIME_DIR/config.json"
 RESULTS_TMPFILE="$RUNTIME_DIR/results.json"
-FAKE_WP_CODEBOX="$RUNTIME_DIR/wp-codebox"
+FAKE_WP_CODEBOX="$RUNTIME_DIR/wp-codebox.js"
 FAKE_ARGS_FILE="$RUNTIME_DIR/wp-codebox-args.txt"
 BUNDLE_DIR="$RUNTIME_DIR/bundle"
 AGENTS_API_DIR="$RUNTIME_DIR/agents-api"
@@ -27,32 +27,23 @@ trap cleanup EXIT
 mkdir -p "$BUNDLE_DIR" "$AGENTS_API_DIR" "$DATA_MACHINE_DIR" "$DATA_MACHINE_CODE_DIR"
 printf '{"agent":{"slug":"wp-codebox-smoke-agent"}}\n' > "$BUNDLE_DIR/manifest.json"
 
-cat > "$FAKE_WP_CODEBOX" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-args_file="${FAKE_WP_CODEBOX_ARGS_FILE:?}"
-printf '%s\n' "$@" > "$args_file"
-
-has_arg() {
-    local expected="$1"
-    shift
-    for arg in "$@"; do
-        if [ "$arg" = "$expected" ]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-has_arg agent-sandbox-run "$@"
-has_arg --json "$@"
-has_arg --secret-env "$@"
-has_arg HOMEBOY_DATAMACHINE_AGENT_CONFIG "$@"
-
-node - <<'NODE'
+cat > "$FAKE_WP_CODEBOX" <<'NODE'
+#!/usr/bin/env node
 const fs = require('node:fs')
 const path = require('node:path')
+
+const args = process.argv.slice(2)
+const argsFile = process.env.FAKE_WP_CODEBOX_ARGS_FILE
+if (!argsFile) {
+  throw new Error('FAKE_WP_CODEBOX_ARGS_FILE is required')
+}
+fs.writeFileSync(argsFile, `${args.join('\n')}\n`)
+
+for (const expected of ['agent-sandbox-run', '--json', '--secret-env', 'HOMEBOY_DATAMACHINE_AGENT_CONFIG']) {
+  if (!args.includes(expected)) {
+    throw new Error(`missing expected wp-codebox arg: ${expected}`)
+  }
+}
 
 const artifactRoot = path.join(path.dirname(process.env.FAKE_WP_CODEBOX_ARGS_FILE), 'wp-codebox-artifacts', 'runtime-smoke')
 const filesRoot = path.join(artifactRoot, 'files')
@@ -128,7 +119,6 @@ process.stdout.write(JSON.stringify({
   },
 }) + '\n')
 NODE
-SH
 chmod +x "$FAKE_WP_CODEBOX"
 
 jq -n \

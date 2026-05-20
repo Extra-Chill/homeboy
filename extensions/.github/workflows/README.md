@@ -128,6 +128,8 @@ jobs:
 ## Inputs worth calling out
 
 - `include_agent_runtime_dependencies` defaults to `true` and checks out the standard WordPress agent runtime stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin.
+- `agent_runtime` selects the sandbox runner. `homeboy` preserves the legacy Playground runner; `wp-codebox` checks out, builds, and runs `chubes4/wp-codebox` as the WordPress sandbox/runtime boundary.
+- `wp_codebox_ref` controls the `chubes4/wp-codebox` ref used when `agent_runtime: wp-codebox`.
 - `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref`, and `openai_provider_ref` control runtime dependency refs. `openai_provider_ref` defaults to `trunk` for the built-in OpenAI preset.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `credentials` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
