@@ -259,20 +259,27 @@ if [ -n "$SELECTED_TEST_FILE" ]; then
 fi
 SELECTED_TEST_FILE_B64=$(printf '%s' "$SELECTED_TEST_FILE_REL" | base64 | tr -d '\n')
 
-MOUNT_ARGS=()
-MOUNT_ARGS+=("--mount" "${PLUGIN_PATH}:/wordpress/wp-content/plugins/${PLUGIN_SLUG}")
+MOUNTS_JSON="[]"
+homeboy_wp_codebox_add_recipe_mount() {
+    local source="$1"
+    local target="$2"
+    local mode="${3:-readwrite}"
+    MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$source" --arg target "$target" --arg mode "$mode" '$mounts + [{source: $source, target: $target, mode: $mode}]')
+}
+
+homeboy_wp_codebox_add_recipe_mount "${PLUGIN_PATH}" "/wordpress/wp-content/plugins/${PLUGIN_SLUG}"
 
 if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
         [ -z "$dep_path" ] && continue
         dep_slug="$(homeboy_get_validation_dependency_slug "$dep_path" || basename "$dep_path")"
-        MOUNT_ARGS+=("--mount" "${dep_path}:/wordpress/wp-content/plugins/${dep_slug}")
+        homeboy_wp_codebox_add_recipe_mount "${dep_path}" "/wordpress/wp-content/plugins/${dep_slug}"
     done <<< "$DEPENDENCY_PATHS"
 fi
 
 PLUGIN_DB_PHP="${PLUGIN_PATH}/db.php"
 if [ -f "$PLUGIN_DB_PHP" ]; then
-    MOUNT_ARGS+=("--mount" "${PLUGIN_DB_PHP}:/wordpress/wp-content/db.php")
+    homeboy_wp_codebox_add_recipe_mount "${PLUGIN_DB_PHP}" "/wordpress/wp-content/db.php"
 fi
 
 if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
@@ -323,12 +330,12 @@ if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and lengt
             FAILED_STEP="WP Codebox file mount setup"
             exit 1
         fi
-        MOUNT_ARGS+=("--mount" "${mount_host}:${mount_to}")
+        homeboy_wp_codebox_add_recipe_mount "${mount_host}" "${mount_to}"
     done < <(printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -c '.[]')
 fi
 
 EXTENSION_MOUNT_PATH="$(homeboy_playground_resolve_mount_path "$EXTENSION_PATH")"
-MOUNT_ARGS+=("--mount" "${EXTENSION_MOUNT_PATH}:/homeboy-extension:readonly")
+homeboy_wp_codebox_add_recipe_mount "${EXTENSION_MOUNT_PATH}" "/homeboy-extension" "readonly"
 
 PLAYGROUND_DEP_MOUNTS=""
 if [ -n "$DEPENDENCY_PATHS" ]; then
@@ -384,13 +391,14 @@ echo "  Backend: wp-codebox (WordPress Playground runtime)"
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "  Wrapper: $WRAPPER_TMPFILE"
-    echo "  Mount args: ${MOUNT_ARGS[*]}"
+    echo "  Mounts: ${MOUNTS_JSON}"
     echo "  WordPress version: ${PLAYGROUND_WORDPRESS_VERSION}"
     echo "  Artifacts: ${ARTIFACTS_DIR}"
 fi
 
 WP_CODEBOX_TMPFILE=$(mktemp)
 PHPUNIT_STDOUT_TMPFILE=$(mktemp)
+RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-recipe.XXXXXX")
 wp_codebox_command=("$WP_CODEBOX_BIN")
 case "$WP_CODEBOX_BIN" in
     *.js)
@@ -398,31 +406,38 @@ case "$WP_CODEBOX_BIN" in
         ;;
 esac
 
+jq -n \
+    --arg wp "$PLAYGROUND_WORDPRESS_VERSION" \
+    --argjson mounts "$MOUNTS_JSON" \
+    --arg codeFile "$WRAPPER_TMPFILE" \
+    '{
+        schema: "wp-codebox/workspace-recipe/v1",
+        runtime: {wp: $wp, blueprint: {steps: []}},
+        inputs: {mounts: $mounts},
+        workflow: {steps: [{command: "wordpress.run-php", args: ["code-file=" + $codeFile, "bootstrap=none"]}]}
+    }' > "$RECIPE_FILE"
+
 set +e
-"${wp_codebox_command[@]}" run \
-    "${MOUNT_ARGS[@]}" \
-    --wp "$PLAYGROUND_WORDPRESS_VERSION" \
+"${wp_codebox_command[@]}" recipe-run \
+    --recipe "$RECIPE_FILE" \
     --artifacts "$ARTIFACTS_DIR" \
-    --command wordpress.run-php \
-    --arg "code-file=${WRAPPER_TMPFILE}" \
-    --arg "bootstrap=none" \
     --json \
     > "$WP_CODEBOX_TMPFILE" 2>&1
 wp_codebox_exit=$?
 set -e
 
-rm -f "$WRAPPER_TMPFILE"
+rm -f "$WRAPPER_TMPFILE" "$RECIPE_FILE"
 
 WP_CODEBOX_OUTPUT=$(cat "$WP_CODEBOX_TMPFILE")
 if [ -n "$WP_CODEBOX_OUTPUT" ]; then
-    jq -r '.execution.stdout // empty' "$WP_CODEBOX_TMPFILE" 2>/dev/null || cat "$WP_CODEBOX_TMPFILE"
+    jq -r '(.executions // [])[-1].stdout // empty' "$WP_CODEBOX_TMPFILE" 2>/dev/null || cat "$WP_CODEBOX_TMPFILE"
 fi
 
 PHPUNIT_OUTPUT=""
 if [ -f "$RESULT_FILE" ]; then
     PHPUNIT_OUTPUT=$(cat "$RESULT_FILE")
 fi
-PHPUNIT_STDOUT=$(jq -r '.execution.stdout // empty' "$WP_CODEBOX_TMPFILE" 2>/dev/null || true)
+PHPUNIT_STDOUT=$(jq -r '(.executions // [])[-1].stdout // empty' "$WP_CODEBOX_TMPFILE" 2>/dev/null || true)
 printf '%s\n' "$PHPUNIT_STDOUT" > "$PHPUNIT_STDOUT_TMPFILE"
 
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/test/parse-test-results.sh"
