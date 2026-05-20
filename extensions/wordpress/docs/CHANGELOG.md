@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.95.7] - 2026-05-20
+
+### Fixed
+- install wp-codebox during setup
+
 ## [2.95.6] - 2026-05-20
 
 ### Fixed
