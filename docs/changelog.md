@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.189.0] - 2026-05-20
+
+### Added
+- support systemd trace attachments
+- support explicit rename variants
+
 ## [0.188.15] - 2026-05-20
 
 ### Fixed
