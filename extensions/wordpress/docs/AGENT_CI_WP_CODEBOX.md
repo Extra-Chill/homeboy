@@ -130,10 +130,13 @@ The runner converts the agent config into a single WP Codebox sandbox run:
   status/diff, commits, pushes, and opens or reuses a fallback PR after the run.
 - `ability_tools` can expose additional WordPress abilities as tools during the
   agent run.
-- Host-side terminal actions are available through the WordPress extension's
-  `agent-terminal-actions` helper for runner-owned tools that must execute like a
-  real shell command. A `wp_cli` action runs `wp ...` through `bash -lc` with the
-  runtime root as the command boundary and returns exit code, stdout, and stderr.
+- `enable_terminal_actions` exposes host-side terminal actions through the
+  WordPress extension's `agent-terminal-actions` helper for runner-owned tools
+  that must execute like a real shell command. The default `run_wp_cli` tool runs
+  a `wp_cli` action as `wp ...` through `bash -lc` with the runtime root as the
+  command boundary and returns exit code, stdout, and stderr. Use
+  `wp_cli_tool_name` only when a consumer needs a different agent-facing tool
+  name.
 - `pipeline_step_patches` and `flow_step_patches` can adjust imported bundle
   step configuration before execution.
 - `fallback_pull_request` can open a PR when files were written but the agent did
@@ -159,7 +162,7 @@ knobs to `run-datamachine-agent.sh`:
 - GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.
-- Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`, `fallback_pull_request`.
+- Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `enable_terminal_actions`, `wp_cli_tool_name`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`, `fallback_pull_request`.
 
 `bundle_repo` is for cross-repo consumers. The shell runner clones the bundle
 repository, points `bundle_path` at the cloned bundle inside WP Codebox, and adds
