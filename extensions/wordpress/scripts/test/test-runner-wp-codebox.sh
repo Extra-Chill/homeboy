@@ -257,7 +257,6 @@ if [ -n "$SELECTED_TEST_FILE" ]; then
             ;;
     esac
 fi
-SELECTED_TEST_FILE_B64=$(printf '%s' "$SELECTED_TEST_FILE_REL" | base64 | tr -d '\n')
 
 MOUNTS_JSON="[]"
 homeboy_wp_codebox_add_recipe_mount() {
@@ -334,8 +333,8 @@ if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and lengt
     done < <(printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -c '.[]')
 fi
 
-EXTENSION_MOUNT_PATH="$(homeboy_playground_resolve_mount_path "$EXTENSION_PATH")"
-homeboy_wp_codebox_add_recipe_mount "${EXTENSION_MOUNT_PATH}" "/homeboy-extension" "readonly"
+EXTENSION_VENDOR_PATH="$(homeboy_playground_resolve_mount_path "${EXTENSION_PATH}/vendor")"
+homeboy_wp_codebox_add_recipe_mount "${EXTENSION_VENDOR_PATH}" "/wp-codebox-vendor" "readonly"
 
 PLAYGROUND_DEP_MOUNTS=""
 if [ -n "$DEPENDENCY_PATHS" ]; then
@@ -399,6 +398,8 @@ jq -n \
             "changed-tests-json=" + $changedTestsJson,
             "env-json=" + $envJson,
             "wp-config-defines-json=" + $definesJson,
+            "autoload-file=/wp-codebox-vendor/autoload.php",
+            "tests-dir=/wp-codebox-vendor/wp-phpunit/wp-phpunit",
             "dependency-mounts=" + ($dependencyMounts | split("\n") | map(select(. != "")) | join(","))
         ]}]}
     }' > "$RECIPE_FILE"
