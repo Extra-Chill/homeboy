@@ -29,6 +29,7 @@ Probes are declared on detailed `trace_workloads` entries:
           { "type": "file.watch", "path": "${components.app.path}/auth.json" },
           { "type": "port.snapshot", "port": 3000 },
           { "type": "http.poll", "url": "http://127.0.0.1:3000/health", "assert-status": 200 },
+          { "type": "http.egress", "host": "api.example.com", "capture": "body" },
           { "type": "cmd.run", "command": "kimaki", "args": ["send", "--thread", "123", "--prompt", "test"] }
         ]
       }
@@ -119,6 +120,27 @@ Events:
 - `http.error`: request failed.
 
 Data includes `url`, `status`, `latency_ms`, and `ok` when `assert-status` is configured.
+
+### `http.egress`
+
+Inputs:
+
+- `host`: destination host filter. Exact hosts, `*`, and `*.example.com` suffix patterns are supported.
+- `path`: optional path substring/glob-style filter.
+- `capture`: `summary`, `headers`, or `body`. Defaults to `summary`.
+- `max_body_bytes`: maximum inline request/response body bytes when `capture` is `body`. Defaults to `1048576`.
+- `redact_headers`: optional header names to redact. Defaults include `Authorization`, `Proxy-Authorization`, `x-api-key`, `Cookie`, and `Set-Cookie`.
+- `listen_port`: optional local proxy port. Defaults to an ephemeral port.
+
+Events:
+
+- `proxy.ready`: local proxy is listening; data includes `proxy_url` for `HTTP_PROXY` / `HTTPS_PROXY` injection.
+- `http.request`: proxied HTTP request matched the filters.
+- `http.response`: upstream HTTP response returned.
+- `http.connect`: HTTPS CONNECT tunnel matched the filters.
+- `http.error` / `proxy.error`: proxy or upstream failures.
+
+V1 is a portable local proxy. It captures HTTP bodies and forwards HTTPS CONNECT tunnels while recording metadata; it does not install a CA or decrypt TLS body content. Operators who need HTTPS body capture can still use the same probe envelope once a MITM/CA mechanism is added.
 
 ### `cmd.run`
 

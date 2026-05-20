@@ -17,11 +17,13 @@ use super::parsing::TraceEvent;
 
 mod cmd_run;
 mod file_watch;
+mod http_egress;
 mod http_poll;
 mod port_snapshot;
 
 use cmd_run::run_cmd_run;
 use file_watch::{file_state, run_file_watch, FileState};
+use http_egress::{default_redact_headers, run_http_egress, HttpEgressConfig};
 use http_poll::run_http_poll;
 use port_snapshot::{ports_for_snapshot, run_port_snapshot};
 
@@ -81,6 +83,20 @@ pub enum TraceProbeConfig {
         )]
         assert_status: Option<u16>,
     },
+    #[serde(rename = "http.egress")]
+    HttpEgress {
+        host: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default = "default_http_egress_capture")]
+        capture: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_body_bytes: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redact_headers: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        listen_port: Option<u16>,
+    },
     #[serde(rename = "cmd.run")]
     CmdRun {
         command: String,
@@ -121,6 +137,7 @@ enum RunningTraceProbeConfig {
         interval_ms: Option<u64>,
         assert_status: Option<u16>,
     },
+    HttpEgress(HttpEgressConfig),
     CmdRun {
         command: String,
         args: Vec<String>,
@@ -212,6 +229,23 @@ fn running_probe_config(config: &TraceProbeConfig) -> RunningTraceProbeConfig {
             interval_ms: *interval_ms,
             assert_status: *assert_status,
         },
+        TraceProbeConfig::HttpEgress {
+            host,
+            path,
+            capture,
+            max_body_bytes,
+            redact_headers,
+            listen_port,
+        } => RunningTraceProbeConfig::HttpEgress(HttpEgressConfig {
+            host: host.clone(),
+            path: path.clone(),
+            capture: capture.clone(),
+            max_body_bytes: max_body_bytes.unwrap_or(1024 * 1024),
+            redact_headers: redact_headers
+                .clone()
+                .unwrap_or_else(default_redact_headers),
+            listen_port: *listen_port,
+        }),
         TraceProbeConfig::CmdRun { command, args } => RunningTraceProbeConfig::CmdRun {
             command: command.clone(),
             args: args.clone(),
@@ -271,6 +305,28 @@ fn validate_probe(config: &TraceProbeConfig) -> Result<()> {
                     None,
                 )
             })?;
+        }
+        TraceProbeConfig::HttpEgress { host, capture, .. } => {
+            if host.trim().is_empty() {
+                return Err(Error::validation_invalid_argument(
+                    "trace_probes.host",
+                    "http.egress host cannot be empty".to_string(),
+                    None,
+                    None,
+                ));
+            }
+            if !matches!(capture.as_str(), "summary" | "headers" | "body") {
+                return Err(Error::validation_invalid_argument(
+                    "trace_probes.capture",
+                    "http.egress capture must be summary, headers, or body".to_string(),
+                    None,
+                    Some(vec![
+                        "summary".to_string(),
+                        "headers".to_string(),
+                        "body".to_string(),
+                    ]),
+                ));
+            }
         }
         TraceProbeConfig::CmdRun { command, .. } => {
             if command.trim().is_empty() {
@@ -347,10 +403,17 @@ fn run_probe(
             events,
             stop,
         ),
+        RunningTraceProbeConfig::HttpEgress(config) => {
+            run_http_egress(config, started_at, events, stop)
+        }
         RunningTraceProbeConfig::CmdRun { command, args } => {
             run_cmd_run(command, args, started_at, events, stop)
         }
     }
+}
+
+fn default_http_egress_capture() -> String {
+    "summary".to_string()
 }
 
 fn run_log_tail(

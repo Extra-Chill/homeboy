@@ -641,13 +641,14 @@ mod tests {
                     { "type": "file.watch", "path": "/tmp/auth.json", "interval_ms": 100 },
                     { "type": "port.snapshot", "port": 3000 },
                     { "type": "http.poll", "url": "http://127.0.0.1:3000/health", "assert-status": 200 },
+                    { "type": "http.egress", "host": "api.example.com", "capture": "headers" },
                     { "type": "cmd.run", "command": "kimaki", "args": ["--help"] }
                 ]
             }"#,
         )
         .expect("parse detailed workload probes");
 
-        assert_eq!(workload.trace_probes().len(), 6);
+        assert_eq!(workload.trace_probes().len(), 7);
         assert!(matches!(
             &workload.trace_probes()[0],
             TraceProbeConfig::LogTail { path, grep, .. }
@@ -675,6 +676,11 @@ mod tests {
         ));
         assert!(matches!(
             &workload.trace_probes()[5],
+            TraceProbeConfig::HttpEgress { host, capture, .. }
+                if host == "api.example.com" && capture == "headers"
+        ));
+        assert!(matches!(
+            &workload.trace_probes()[6],
             TraceProbeConfig::CmdRun { command, args }
                 if command == "kimaki" && args == &vec!["--help".to_string()]
         ));

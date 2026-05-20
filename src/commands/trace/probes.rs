@@ -80,6 +80,23 @@ fn expand_trace_probe(
             interval_ms: *interval_ms,
             assert_status: *assert_status,
         },
+        extension_trace::TraceProbeConfig::HttpEgress {
+            host,
+            path,
+            capture,
+            max_body_bytes,
+            redact_headers,
+            listen_port,
+        } => extension_trace::TraceProbeConfig::HttpEgress {
+            host: expand_trace_probe_value(context, host),
+            path: path
+                .as_ref()
+                .map(|path| expand_trace_probe_value(context, path)),
+            capture: capture.clone(),
+            max_body_bytes: *max_body_bytes,
+            redact_headers: redact_headers.clone(),
+            listen_port: *listen_port,
+        },
         extension_trace::TraceProbeConfig::CmdRun { command, args } => {
             extension_trace::TraceProbeConfig::CmdRun {
                 command: expand_trace_probe_value(context, command),
