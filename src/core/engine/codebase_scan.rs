@@ -26,7 +26,7 @@ pub const ALWAYS_SKIP_DIRS: &[&str] = &[
 
 /// Directories to skip only at root level (build output).
 /// At deeper levels (e.g., `scripts/build/`) they may contain source files.
-pub const ROOT_ONLY_SKIP_DIRS: &[&str] = &["build", "dist", "target", "cache", "tmp"];
+pub const ROOT_ONLY_SKIP_DIRS: &[&str] = &["artifacts", "build", "dist", "target", "cache", "tmp"];
 
 /// Common source file extensions across languages.
 pub const SOURCE_EXTENSIONS: &[&str] = &[

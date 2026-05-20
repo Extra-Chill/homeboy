@@ -91,6 +91,9 @@ enum RefactorCommand {
         /// Exclude files matching this glob (repeatable)
         #[arg(long, value_name = "GLOB")]
         exclude: Vec<String>,
+        /// Add an explicit variant mapping as FROM=TO (repeatable)
+        #[arg(long = "variant", value_name = "FROM=TO")]
+        variants: Vec<String>,
         /// Disable file/directory path renames (content edits only)
         #[arg(long)]
         no_file_renames: bool,
@@ -275,6 +278,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             literal,
             files,
             exclude,
+            variants,
             no_file_renames,
             context,
             write_mode,
@@ -286,6 +290,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             literal,
             &files,
             &exclude,
+            &variants,
             no_file_renames,
             &context,
             write_mode.write,
@@ -775,6 +780,7 @@ fn run_rename(
     literal: bool,
     include_globs: &[String],
     exclude_globs: &[String],
+    variants: &[String],
     no_file_renames: bool,
     context: &str,
     write: bool,
@@ -790,6 +796,7 @@ fn run_rename(
             literal,
             include_globs,
             exclude_globs,
+            variants,
             no_file_renames,
             context,
             write,
@@ -807,6 +814,7 @@ fn run_rename_single(
     literal: bool,
     include_globs: &[String],
     exclude_globs: &[String],
+    variants: &[String],
     no_file_renames: bool,
     context: &str,
     write: bool,
@@ -816,11 +824,13 @@ fn run_rename_single(
 
     let root = refactor::move_items::resolve_root(component_id, path)?;
 
+    let explicit_variants = parse_rename_variants(variants)?;
     let mut spec = if literal {
         RenameSpec::literal(from, to, scope.clone())
     } else {
         RenameSpec::new(from, to, scope.clone())
-    };
+    }
+    .with_explicit_variants(explicit_variants);
     spec.rename_context = rename_context;
     let targeting = RenameTargeting {
         include_globs: include_globs.to_vec(),
@@ -919,6 +929,36 @@ fn run_rename_single(
         },
         exit_code,
     ))
+}
+
+fn parse_rename_variants(values: &[String]) -> homeboy::core::Result<Vec<(String, String)>> {
+    values
+        .iter()
+        .map(|value| {
+            let (from, to) = value.split_once('=').ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "variant",
+                    format!("Invalid rename variant '{}'. Expected FROM=TO", value),
+                    Some(value.clone()),
+                    None,
+                )
+            })?;
+            let from = from.trim();
+            let to = to.trim();
+            if from.is_empty() || to.is_empty() {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "variant",
+                    format!(
+                        "Invalid rename variant '{}'. FROM and TO must be non-empty",
+                        value
+                    ),
+                    Some(value.clone()),
+                    None,
+                ));
+            }
+            Ok((from.to_string(), to.to_string()))
+        })
+        .collect()
 }
 
 fn run_add(
