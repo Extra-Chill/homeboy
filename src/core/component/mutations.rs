@@ -129,6 +129,76 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn write_component_repo(home: &tempfile::TempDir, id: &str) -> std::path::PathBuf {
+        let repo = home.path().join(id);
+        fs::create_dir_all(&repo).expect("repo dir");
+        fs::write(
+            repo.join("homeboy.json"),
+            format!(r#"{{"id":"{}","remote_path":"wp-content/plugins/{}"}}"#, id, id),
+        )
+        .expect("homeboy.json");
+
+        let component = Component::new(
+            id.to_string(),
+            repo.to_string_lossy().to_string(),
+            format!("wp-content/plugins/{}", id),
+            None,
+        );
+        inventory::write_standalone_registration(&component)
+            .expect("write standalone registration");
+
+        repo
+    }
+
+    #[test]
+    fn test_set_changelog_target() {
+        crate::test_support::with_isolated_home(|home| {
+            let repo = write_component_repo(home, "demo-plugin");
+
+            set_changelog_target("demo-plugin", "docs/changelog.md")
+                .expect("set changelog target");
+
+            let config: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(repo.join("homeboy.json")).expect("read homeboy.json"),
+            )
+            .expect("parse homeboy.json");
+            assert_eq!(
+                config.get("changelog_target").and_then(|value| value.as_str()),
+                Some("docs/changelog.md")
+            );
+        });
+    }
+
+    #[test]
+    fn test_delete_safe() {
+        crate::test_support::with_isolated_home(|home| {
+            let repo = write_component_repo(home, "demo-plugin");
+
+            delete_safe("demo-plugin").expect("delete component config");
+
+            assert!(!repo.join("homeboy.json").exists());
+        });
+    }
+
+    #[test]
+    fn test_rename() {
+        crate::test_support::with_isolated_home(|home| {
+            let repo = write_component_repo(home, "demo-plugin");
+
+            let renamed = rename("demo-plugin", "renamed-plugin").expect("rename component");
+
+            assert_eq!(renamed.id, "renamed-plugin");
+            let config: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(repo.join("homeboy.json")).expect("read homeboy.json"),
+            )
+            .expect("parse homeboy.json");
+            assert_eq!(
+                config.get("id").and_then(|value| value.as_str()),
+                Some("renamed-plugin")
+            );
+        });
+    }
+
     #[test]
     fn merge_local_path_updates_standalone_registration() {
         crate::test_support::with_isolated_home(|home| {
