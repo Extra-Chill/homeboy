@@ -127,8 +127,15 @@ PHP
 
     local wp_codebox_output
     wp_codebox_output=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-output.XXXXXX")
+    local wp_codebox_command=("$wp_codebox_bin")
+    case "$wp_codebox_bin" in
+        *.js)
+            wp_codebox_command=(node "$wp_codebox_bin")
+            ;;
+    esac
+
     HOMEBOY_DATAMACHINE_AGENT_CONFIG="$CONFIG_JSON" \
-        "$wp_codebox_bin" "${wp_codebox_args[@]}" \
+        "${wp_codebox_command[@]}" "${wp_codebox_args[@]}" \
         >"$wp_codebox_output"
 
     local wp_codebox_review_input="$RUNTIME_DIR/wp-codebox-review.json"
