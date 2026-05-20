@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.191.0] - 2026-05-20
+
+### Added
+- run declared CI jobs
+
+### Fixed
+- fail changed-since validation on stale deps
+
 ## [0.190.0] - 2026-05-20
 
 ### Added
