@@ -352,34 +352,6 @@ fi
 RESULT_FILE="${PLUGIN_PATH}/.pg-test-result.txt"
 rm -f "$RESULT_FILE"
 
-TEMPLATE="${SCRIPT_DIR}/playground-runner.php"
-if [ ! -f "$TEMPLATE" ]; then
-    echo "Error: playground-runner.php template not found at $TEMPLATE" >&2
-    FAILED_STEP="WP Codebox setup"
-    exit 1
-fi
-
-WRAPPER_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/wp-codebox-runner.XXXXXX")
-WRAPPER_RUNTIME_PATH="/homeboy-wp-codebox-runner.php"
-WP_CONFIG_DEFINES_DELIM=$(printf '\1')
-json_to_base64() {
-    printf '%s' "$1" | base64 | tr -d '\n'
-}
-WP_CONFIG_DEFINES_JSON_B64=$(json_to_base64 "$WP_CONFIG_DEFINES_JSON")
-BENCH_ENV_JSON_B64=$(json_to_base64 "$BENCH_ENV_JSON")
-CHANGED_TEST_FILES_JSON_B64=$(json_to_base64 "$CHANGED_TEST_FILES_JSON")
-
-sed \
-    -e "s|{{PLUGIN_SLUG}}|${PLUGIN_SLUG}|g" \
-    -e "s|{{PLAYGROUND_DEP_MOUNTS}}|${PLAYGROUND_DEP_MOUNTS}|g" \
-    -e "s|{{PHPUNIT_TEST_FILE_B64}}|${SELECTED_TEST_FILE_B64}|g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{WP_CONFIG_DEFINES_JSON_B64}}${WP_CONFIG_DEFINES_DELIM}${WP_CONFIG_DEFINES_JSON_B64}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON_B64}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON_B64}${WP_CONFIG_DEFINES_DELIM}g" \
-    -e "s${WP_CONFIG_DEFINES_DELIM}{{CHANGED_TEST_FILES_JSON_B64}}${WP_CONFIG_DEFINES_DELIM}${CHANGED_TEST_FILES_JSON_B64}${WP_CONFIG_DEFINES_DELIM}g" \
-    "$TEMPLATE" > "$WRAPPER_TMPFILE"
-
-homeboy_wp_codebox_add_recipe_mount "$WRAPPER_TMPFILE" "$WRAPPER_RUNTIME_PATH" "readonly"
-
 ARTIFACTS_DIR="${HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR:-}"
 if [ -z "$ARTIFACTS_DIR" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
     ARTIFACTS_DIR=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_artifacts_dir // empty' 2>/dev/null || true)
@@ -393,7 +365,6 @@ echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
 echo "  Backend: wp-codebox (WordPress Playground runtime)"
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-    echo "  Wrapper: $WRAPPER_TMPFILE"
     echo "  Mounts: ${MOUNTS_JSON}"
     echo "  WordPress version: ${PLAYGROUND_WORDPRESS_VERSION}"
     echo "  Artifacts: ${ARTIFACTS_DIR}"
@@ -412,12 +383,24 @@ esac
 jq -n \
     --arg wp "$PLAYGROUND_WORDPRESS_VERSION" \
     --argjson mounts "$MOUNTS_JSON" \
-    --arg codeFile "$WRAPPER_RUNTIME_PATH" \
+    --arg pluginSlug "$PLUGIN_SLUG" \
+    --arg selectedTestFile "$SELECTED_TEST_FILE_REL" \
+    --arg changedTestsJson "$CHANGED_TEST_FILES_JSON" \
+    --arg envJson "$BENCH_ENV_JSON" \
+    --arg definesJson "$WP_CONFIG_DEFINES_JSON" \
+    --arg dependencyMounts "$PLAYGROUND_DEP_MOUNTS" \
     '{
         schema: "wp-codebox/workspace-recipe/v1",
         runtime: {wp: $wp, blueprint: {steps: []}},
         inputs: {mounts: $mounts},
-        workflow: {steps: [{command: "wordpress.phpunit", args: ["code-file=" + $codeFile]}]}
+        workflow: {steps: [{command: "wordpress.phpunit", args: [
+            "plugin-slug=" + $pluginSlug,
+            "test-file=" + $selectedTestFile,
+            "changed-tests-json=" + $changedTestsJson,
+            "env-json=" + $envJson,
+            "wp-config-defines-json=" + $definesJson,
+            "dependency-mounts=" + ($dependencyMounts | split("\n") | map(select(. != "")) | join(","))
+        ]}]}
     }' > "$RECIPE_FILE"
 
 set +e
@@ -429,7 +412,7 @@ set +e
 wp_codebox_exit=$?
 set -e
 
-rm -f "$WRAPPER_TMPFILE" "$RECIPE_FILE"
+rm -f "$RECIPE_FILE"
 
 WP_CODEBOX_OUTPUT=$(cat "$WP_CODEBOX_TMPFILE")
 if [ -n "$WP_CODEBOX_OUTPUT" ]; then
