@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use homeboy::core::ci_profile::{self, CiResolvedJob};
 use homeboy::core::component::Component;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::invocation::InvocationRequirements;
@@ -439,6 +440,8 @@ fn run_component_with_rig_context(
     resolve_options.extension_overrides = args.extension_override.extensions.clone();
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
+    let ci_profile_job =
+        resolve_ci_profile_job(args.ci_profile.as_deref(), ctx.extension_id.as_deref())?;
 
     if let Some(snapshot) = rig_snapshot.as_mut() {
         let effective_path = ctx.source_path.to_string_lossy().into_owned();
@@ -494,7 +497,8 @@ fn run_component_with_rig_context(
             },
             regression_threshold_percent: args.regression_threshold,
             json_summary: args.json_summary,
-            passthrough_args: passthrough_args.to_vec(),
+            ci_env: ci_profile::ci_job_env(ci_profile_job.as_ref()),
+            passthrough_args: bench_passthrough_args(ci_profile_job.as_ref(), passthrough_args),
             scenario_ids: selected_scenarios,
             rig_id: rig_id.clone(),
             shared_state: shared_state_override.or_else(|| args.shared_state.clone()),
@@ -527,6 +531,29 @@ fn run_component_with_rig_context(
         workflow,
         rig_snapshot,
     ))
+}
+
+fn resolve_ci_profile_job(
+    profile_id: Option<&str>,
+    extension_id: Option<&str>,
+) -> homeboy::core::Result<Option<CiResolvedJob>> {
+    let Some(profile_id) = profile_id else {
+        return Ok(None);
+    };
+    let Some(extension_id) = extension_id else {
+        return Err(homeboy::core::Error::validation_missing_argument(vec![
+            "--extension <ID> or component bench extension".to_string(),
+        ]));
+    };
+    let jobs = ci_profile::resolve_profile_jobs_for_extension(extension_id, profile_id)?;
+    ci_profile::validate_single_profile_command(profile_id, &jobs, "bench")?;
+    Ok(jobs.into_iter().next())
+}
+
+fn bench_passthrough_args(job: Option<&CiResolvedJob>, cli_args: &[String]) -> Vec<String> {
+    let mut args = job.map(|job| job.spec.args.clone()).unwrap_or_default();
+    args.extend(cli_args.iter().cloned());
+    args
 }
 
 fn rig_workload_runtime_inputs(
@@ -663,6 +690,7 @@ mod tests {
             rig_concurrency: 1,
             scenario_ids: Vec::new(),
             profile: None,
+            ci_profile: None,
             ignore_default_baseline: false,
         };
 

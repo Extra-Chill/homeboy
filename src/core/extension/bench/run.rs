@@ -44,6 +44,7 @@ pub struct BenchRunWorkflowArgs {
     pub baseline_flags: BaselineFlags,
     pub regression_threshold_percent: f64,
     pub json_summary: bool,
+    pub ci_env: Vec<(String, String)>,
     pub passthrough_args: Vec<String>,
     /// Exact scenario ids selected by the CLI. Empty means run every
     /// discovered scenario.
@@ -175,6 +176,7 @@ pub fn run_bench_list_workflow(
             },
             regression_threshold_percent: 0.0,
             json_summary: false,
+            ci_env: Vec::new(),
             passthrough_args: args.passthrough_args,
             scenario_ids: Vec::new(),
             rig_id: None,
@@ -482,20 +484,7 @@ pub fn run_main_bench_workflow(
                 source_path,
                 run_dir,
                 true,
-                &[
-                    (
-                        "HOMEBOY_BENCH_ITERATIONS".to_string(),
-                        args.iterations.to_string(),
-                    ),
-                    (
-                        "HOMEBOY_BENCH_WARMUP_ITERATIONS".to_string(),
-                        args.warmup_iterations.unwrap_or(0).to_string(),
-                    ),
-                    (
-                        "HOMEBOY_BENCH_SCENARIOS".to_string(),
-                        args.scenario_ids.join(","),
-                    ),
-                ],
+                &bench_component_script_env(&args),
                 &args.passthrough_args,
             )?;
         let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
@@ -732,6 +721,25 @@ pub fn run_main_bench_workflow(
         failure,
         diagnostics,
     })
+}
+
+fn bench_component_script_env(args: &BenchRunWorkflowArgs) -> Vec<(String, String)> {
+    let mut env = vec![
+        (
+            "HOMEBOY_BENCH_ITERATIONS".to_string(),
+            args.iterations.to_string(),
+        ),
+        (
+            "HOMEBOY_BENCH_WARMUP_ITERATIONS".to_string(),
+            args.warmup_iterations.unwrap_or(0).to_string(),
+        ),
+        (
+            "HOMEBOY_BENCH_SCENARIOS".to_string(),
+            args.scenario_ids.join(","),
+        ),
+    ];
+    env.extend(args.ci_env.iter().cloned());
+    env
 }
 
 fn format_diagnostic_hint(diagnostic: &BenchDiagnostic) -> String {
@@ -1021,6 +1029,10 @@ fn build_runner(
     .passthrough(false)
     .stderr_passthrough(bench_progress_enabled());
 
+    for (key, value) in &args.ci_env {
+        runner = runner.env(key, value);
+    }
+
     if let Some(warmup_iterations) = args.warmup_iterations {
         runner = runner.env(
             "HOMEBOY_BENCH_WARMUP_ITERATIONS",
@@ -1303,6 +1315,7 @@ mod tests {
                 },
                 regression_threshold_percent: 5.0,
                 json_summary: false,
+                ci_env: Vec::new(),
                 passthrough_args: Vec::new(),
                 scenario_ids: Vec::new(),
                 rig_id: None,
@@ -1358,6 +1371,7 @@ mod tests {
             },
             regression_threshold_percent: 5.0,
             json_summary: false,
+            ci_env: Vec::new(),
             passthrough_args: Vec::new(),
             scenario_ids: vec!["boot".to_string()],
             rig_id: Some("studio".to_string()),

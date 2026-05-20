@@ -469,6 +469,7 @@ mod tests {
             rig_concurrency: 1,
             scenario_ids: Vec::new(),
             profile: None,
+            ci_profile: None,
             ignore_default_baseline: false,
         }
     }

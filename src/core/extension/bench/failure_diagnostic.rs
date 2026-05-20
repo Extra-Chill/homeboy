@@ -140,6 +140,7 @@ mod tests {
             },
             regression_threshold_percent: 5.0,
             json_summary: false,
+            ci_env: Vec::new(),
             passthrough_args: Vec::new(),
             scenario_ids: vec!["studio-agent-site-build".to_string()],
             rig_id: Some("studio-bfb".to_string()),

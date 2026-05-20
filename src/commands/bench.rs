@@ -240,6 +240,10 @@ pub struct BenchRunArgs {
     #[arg(long, value_name = "PROFILE")]
     profile: Option<String>,
 
+    /// Run using env and passthrough args from a single extension-declared CI bench profile.
+    #[arg(long, value_name = "ID", conflicts_with = "profile")]
+    ci_profile: Option<String>,
+
     /// Skip auto-upgrading single-rig runs into a comparison even when
     /// the rig spec declares `bench.default_baseline_rig`. Use with
     /// `--baseline` / `--ratchet` against a rig that normally

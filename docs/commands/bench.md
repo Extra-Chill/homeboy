@@ -74,11 +74,21 @@ the other capabilities.
   be repeated. Homeboy validates selected ids against discovery before
   execution and forwards the comma-separated selector to runners via
   `$HOMEBOY_BENCH_SCENARIOS`.
+- `--ci-profile <ID>`: Run using env and passthrough args from a single
+  extension-declared CI profile whose only job declares `command: "bench"`.
+  This keeps bench parity on the normal Homeboy bench workflow instead of
+  parsing arbitrary provider YAML into runnable commands.
 - `--ignore-default-baseline`: Skip automatic single-rig expansion when
   the rig declares `bench.default_baseline_rig`.
 
 Arguments after `--` are passed verbatim to the extension's bench runner
 script.
+
+When `--ci-profile <ID>` is used, args declared on that profile's bench job
+are forwarded before explicit CLI passthrough arguments, and job env is passed
+to the bench runner. Profiles with zero jobs, multiple jobs, or a non-`bench`
+job are rejected for command-native bench reproduction; use `homeboy ci run
+--profile <ID>` when you need to execute a multi-job CI profile directly.
 
 `homeboy bench` is resource-policy aware. If the current machine is already warm
 or hot according to `homeboy doctor resources`, Homeboy prints a stderr warning

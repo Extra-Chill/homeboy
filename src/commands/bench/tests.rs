@@ -284,6 +284,7 @@ fn run_args(component: Option<&str>, rig: Vec<String>, scenario_ids: Vec<String>
             rig_concurrency: 1,
             scenario_ids,
             profile: None,
+            ci_profile: None,
             ignore_default_baseline: false,
         },
     }
@@ -293,6 +294,14 @@ fn run_args_with_profile(component: Option<&str>, rig: Vec<String>, profile: &st
     let mut args = run_args(component, rig, Vec::new());
     args.run.profile = Some(profile.to_string());
     args
+}
+
+#[test]
+fn parses_ci_profile_flag() {
+    let cli = TestCli::try_parse_from(["bench", "homeboy", "--ci-profile", "perf"])
+        .expect("bench should parse --ci-profile");
+
+    assert_eq!(cli.bench.run.ci_profile.as_deref(), Some("perf"));
 }
 
 #[test]
