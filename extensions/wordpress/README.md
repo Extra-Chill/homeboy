@@ -241,21 +241,21 @@ errors and PSR-4 violations block the build; lint findings do not.
 
 ## Bench runner
 
-Basic `tests/bench/*.php` workloads run through WP Codebox by default. WP
-Codebox owns the disposable WordPress runtime, component mount, command
-execution, and artifacts, and emits the same `BenchResults` envelope Homeboy
-core parses.
+Bench workloads run through WP Codebox. WP Codebox owns the disposable WordPress
+runtime, component mount, command execution, and artifacts, and emits the same
+`BenchResults` envelope Homeboy core parses.
 
-Advanced bench features still dispatch to the legacy direct Playground runner
-while #698 ports them one at a time: configured `playground_workloads`, scenario
-manifests, extra file mounts, custom `wp_config_defines`, `bench_env`, installed
-site mode, blueprints, and browser handoff descriptors.
+Each file under `tests/bench/*.php` returns a callable. The callable may return
+numeric metrics directly or `{metrics, metadata, artifacts}`. Components may
+also declare configured workloads via `playground_workloads`; the WordPress
+runner maps those declarations onto `wp-codebox bench-run` inputs alongside
+`validation_dependencies`, `playground_file_mounts`, `wp_config_defines`,
+`bench_env`, shared-state mounts, and browser handoff descriptors.
 
-For the WP Codebox path, each file under `tests/bench/*.php` returns a callable.
-The callable may return numeric metrics directly or `{metrics, metadata}`.
-Configured workloads are still declared per component via the
-`playground_workloads` setting (see below) and remain on the legacy runner until
-their WP Codebox command mapping lands.
+Bootstrap-only Playground features no longer fall back to the legacy runner. A
+component that still relies on `playground_blueprint`, scenario manifests, or
+`bench_site_mode=installed` fails fast so the missing WP Codebox contract can be
+ported explicitly instead of hiding behind a second runtime.
 
 The browser bench target is a two-extension handoff: the WordPress
 extension prepares/describes the WordPress target by writing
@@ -343,12 +343,12 @@ Configure per-component in the component's homeboy/component config under
 | `user` | string | `""` | WP-CLI user (email/login/ID); appended as `--user` when set |
 | `wp_config_defines` | object | `{}` | `CONSTANT_NAME => value` map appended to the runtime `wp-tests-config.php`; PHP type preserved via `var_export` |
 | `bench_env` | object | `{}` | `NAME => value` env vars forwarded into the runtime (workloads/fixtures read via `getenv()`) |
-| `playground_blueprint` | object | `{}` | Blueprint JSON passed to `wp-playground-cli --blueprint` for cold-boot scenarios |
-| `playground_workloads` | array | `[]` | Declared bench workloads run after bootstrap, blueprint, deps, and component load |
-| `playground_file_mounts` | array | `[]` | Files from the component or validation dependencies mounted into explicit Playground paths |
-| `bench_site_mode` | string | `fresh` | `fresh` runs `wp-phpunit` install; `installed` mounts a persisted site under `HOMEBOY_BENCH_SHARED_STATE` |
+| `playground_blueprint` | object | `{}` | Reserved for cold-boot scenarios; current WP Codebox bench runner fails fast when set |
+| `playground_workloads` | array | `[]` | Declared bench workloads passed to `wp-codebox bench-run` after deps and component load |
+| `playground_file_mounts` | array | `[]` | Files from the component or validation dependencies mounted into explicit WordPress runtime paths |
+| `bench_site_mode` | string | `fresh` | `fresh` uses a disposable WP Codebox site; `installed` currently fails fast until a WP Codebox persisted-site contract lands |
 | `bench_browser_target` | object | `{}` | Browser bench target descriptor (see Bench runner above) |
-| `playground_wordpress_install_mode` | string | `""` | Pass-through for `wp-playground-cli --wordpress-install-mode` |
+| `playground_wordpress_install_mode` | string | `""` | Legacy direct-Playground pass-through; ignored by the WP Codebox bench runner |
 
 ## Blueprint Validation
 
