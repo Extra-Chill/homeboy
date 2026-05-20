@@ -55,3 +55,21 @@ jobs:
       HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
       HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
       PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
+
+  wp-codebox-runtime-smoke:
+    uses: ./.github/workflows/datamachine-agent-ci.yml
+    with:
+      bundle_path: tests/fixtures/datamachine-agent-self-smoke/bundles/self-smoke-agent
+      agent_slug: self-smoke-agent
+      pipeline_slug: self-smoke-pipeline
+      flow_slug: self-smoke-wp-codebox-flow
+      target_repo: Extra-Chill/homeboy-extensions
+      prompt: Exercise the WP Codebox agent runtime path in dry-run mode.
+      agent_runtime: wp-codebox
+      success_requires_pr: false
+      dry_run: true
+      engine_data_outputs: '{}'
+    secrets:
+      HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
+      HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
