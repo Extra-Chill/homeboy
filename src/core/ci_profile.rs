@@ -167,6 +167,69 @@ pub fn resolve_job_for_extension(extension_id: &str, job_id: &str) -> Result<CiR
     })
 }
 
+pub fn resolve_profile_jobs_for_extension(
+    extension_id: &str,
+    profile_id: &str,
+) -> Result<Vec<CiResolvedJob>> {
+    let extension = extension::load_extension(extension_id)?;
+    let ci = extension.ci.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "extension",
+            format!("extension '{extension_id}' does not declare CI jobs"),
+            Some(extension_id.to_string()),
+            None,
+        )
+    })?;
+    let profile = ci.profiles.get(profile_id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "profile",
+            format!("CI profile '{profile_id}' is not declared by extension '{extension_id}'"),
+            Some(profile_id.to_string()),
+            Some(ci.profiles.keys().cloned().collect()),
+        )
+    })?;
+
+    profile
+        .jobs
+        .iter()
+        .map(|job_id| {
+            let spec = ci.jobs.get(job_id).ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "job",
+                    format!("CI job '{job_id}' is not declared by extension '{extension_id}'"),
+                    Some(job_id.clone()),
+                    Some(ci.jobs.keys().cloned().collect()),
+                )
+            })?;
+            Ok(CiResolvedJob {
+                extension_id: extension_id.to_string(),
+                id: job_id.clone(),
+                spec: spec.clone(),
+            })
+        })
+        .collect()
+}
+
+pub fn validate_single_profile_command(
+    profile_id: &str,
+    jobs: &[CiResolvedJob],
+    expected_command: &str,
+) -> Result<()> {
+    if jobs.len() != 1 {
+        return Err(Error::validation_invalid_argument(
+            "ci-profile",
+            format!(
+                "CI profile '{profile_id}' declares {} jobs; this command requires exactly one '{expected_command}' job",
+                jobs.len()
+            ),
+            Some(profile_id.to_string()),
+            None,
+        ));
+    }
+
+    validate_job_command(&jobs[0], expected_command)
+}
+
 pub fn validate_job_command(job: &CiResolvedJob, expected_command: &str) -> Result<()> {
     if job.spec.command == expected_command {
         return Ok(());
@@ -557,6 +620,50 @@ mod tests {
             assert_eq!(job.spec.args, vec!["--unit"]);
             assert_eq!(job.spec.env.get("CI").map(String::as_str), Some("1"));
         });
+    }
+
+    #[test]
+    fn test_resolve_profile_jobs_for_extension() {
+        crate::test_support::with_isolated_home(|_home| {
+            let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+                "id": "test",
+                "name": "Test",
+                "version": "1.0.0",
+                "ci": {
+                    "profiles": {
+                        "perf": { "jobs": ["bench"] }
+                    },
+                    "jobs": {
+                        "bench": { "command": "bench", "args": ["--fast"] }
+                    }
+                }
+            }))
+            .expect("parse manifest");
+            crate::core::extension::save_manifest(&manifest).expect("save extension");
+
+            let jobs = resolve_profile_jobs_for_extension("test", "perf")
+                .expect("resolve CI profile jobs");
+
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].id, "bench");
+            assert_eq!(jobs[0].spec.args, vec!["--fast"]);
+        });
+    }
+
+    #[test]
+    fn test_validate_single_profile_command() {
+        let job = CiResolvedJob {
+            extension_id: "test".to_string(),
+            id: "bench".to_string(),
+            spec: CiJobSpec {
+                command: "bench".to_string(),
+                ..CiJobSpec::default()
+            },
+        };
+
+        assert!(validate_single_profile_command("perf", &[job.clone()], "bench").is_ok());
+        assert!(validate_single_profile_command("perf", &[job], "test").is_err());
+        assert!(validate_single_profile_command("perf", &[], "bench").is_err());
     }
 
     #[test]
