@@ -92,37 +92,72 @@ PHP
         exit 1
     fi
 
-    local wp_codebox_args=(
-        agent-sandbox-run
-        --agents-api "$agents_api_path"
-        --data-machine "$data_machine_path"
-        --data-machine-code "$data_machine_code_path"
-        --task "$WORKLOAD_LABEL"
-        --code-file "$workload_wrapper"
-        --wp "$PLAYGROUND_WORDPRESS_VERSION"
-        --artifacts "$artifacts_dir"
-        --json
-        --mount "$EXTENSION_PATH:/homeboy-extension:readonly"
-    )
+    local recipe_file
+    recipe_file=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-agent-recipe.XXXXXX")
+
+    local extra_plugins_json mounts_json secret_env_json provider_slugs_csv
+    extra_plugins_json=$(jq -nc \
+        --arg agents "$agents_api_path" \
+        --arg datamachine "$data_machine_path" \
+        --arg code "$data_machine_code_path" \
+        '[
+            {source: $agents, slug: "agents-api", activate: false},
+            {source: $datamachine, slug: "data-machine", activate: false},
+            {source: $code, slug: "data-machine-code", activate: false}
+        ]')
+    mounts_json=$(jq -nc --arg source "$EXTENSION_PATH" '[{source: $source, target: "/homeboy-extension", mode: "readonly"}]')
+    provider_slugs_csv=""
 
     if [ -n "$BUNDLE_PATH" ]; then
-        wp_codebox_args+=(--mount "$BUNDLE_PATH:$BUNDLE_GUEST_PATH:readonly")
+        mounts_json=$(jq -nc --argjson mounts "$mounts_json" --arg source "$BUNDLE_PATH" --arg target "$BUNDLE_GUEST_PATH" '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
     fi
 
     local extra_mount
     while IFS= read -r extra_mount; do
-        wp_codebox_args+=(--mount "$extra_mount")
+        IFS=: read -r mount_source mount_target mount_mode <<<"$extra_mount"
+        [ -n "$mount_source" ] && [ -n "$mount_target" ] || continue
+        mount_mode="${mount_mode:-readwrite}"
+        mounts_json=$(jq -nc --argjson mounts "$mounts_json" --arg source "$mount_source" --arg target "$mount_target" --arg mode "$mount_mode" '$mounts + [{source: $source, target: $target, mode: $mode}]')
     done < <(jq -r '.wp_codebox_mounts? // [] | .[]? | select(type == "string" and . != "")' <<<"$CONFIG_JSON")
 
-    local provider_plugin_path
+    local provider_plugin_path provider_slug
     while IFS= read -r provider_plugin_path; do
-        wp_codebox_args+=(--provider-plugin "$provider_plugin_path")
+        provider_slug=$(basename "$provider_plugin_path")
+        if [ -n "$provider_slugs_csv" ]; then
+            provider_slugs_csv="${provider_slugs_csv},${provider_slug}"
+        else
+            provider_slugs_csv="$provider_slug"
+        fi
+        extra_plugins_json=$(jq -nc --argjson plugins "$extra_plugins_json" --arg source "$provider_plugin_path" --arg slug "$provider_slug" '$plugins + [{source: $source, slug: $slug, activate: false}]')
     done < <(jq -r '.provider_plugin_paths? // [] | .[]? | select(type == "string" and . != "")' <<<"$CONFIG_JSON")
 
+    secret_env_json="[]"
     local secret_env_name
     while IFS= read -r secret_env_name; do
-        wp_codebox_args+=(--secret-env "$secret_env_name")
+        secret_env_json=$(jq -nc --argjson names "$secret_env_json" --arg name "$secret_env_name" '$names + [$name]')
     done < <(homeboy_datamachine_agent_wp_codebox_secret_env_names)
+
+    jq -n \
+        --arg wp "$PLAYGROUND_WORDPRESS_VERSION" \
+        --argjson extraPlugins "$extra_plugins_json" \
+        --argjson mounts "$mounts_json" \
+        --argjson secretEnv "$secret_env_json" \
+        --arg task "$WORKLOAD_LABEL" \
+        --arg codeFile "$workload_wrapper" \
+        --arg providerSlugs "$provider_slugs_csv" \
+        '{
+            schema: "wp-codebox/workspace-recipe/v1",
+            runtime: {wp: $wp, blueprint: {steps: []}},
+            inputs: {extraPlugins: $extraPlugins, mounts: $mounts, secretEnv: $secretEnv},
+            workflow: {steps: [{command: "wp-codebox.agent-sandbox-run", args: ["task=" + $task, "code-file=" + $codeFile, "provider-plugin-slugs=" + $providerSlugs]}]}
+        }' >"$recipe_file"
+
+    local wp_codebox_args=(
+        recipe-run
+        --recipe "$recipe_file"
+        --artifacts "$artifacts_dir"
+        --json
+    )
 
     local wp_codebox_output
     wp_codebox_output=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-output.XXXXXX")
@@ -133,9 +168,18 @@ PHP
             ;;
     esac
 
+    set +e
     HOMEBOY_DATAMACHINE_AGENT_CONFIG="$CONFIG_JSON" \
         "${wp_codebox_command[@]}" "${wp_codebox_args[@]}" \
         >"$wp_codebox_output"
+    local wp_codebox_exit=$?
+    set -e
+    rm -f "$recipe_file"
+
+    if [ $wp_codebox_exit -ne 0 ]; then
+        cat "$wp_codebox_output" >&2
+        exit $wp_codebox_exit
+    fi
 
     local wp_codebox_review_input="$RUNTIME_DIR/wp-codebox-review.json"
     local wp_codebox_changed_files_input="$RUNTIME_DIR/wp-codebox-changed-files.json"
@@ -195,7 +239,7 @@ PHP
         --slurpfile wpCodeboxArtifacts "$wp_codebox_artifacts_json" \
         '
         def parsed_workload:
-            ($run[0].execution.stdout? // "{}" | fromjson? // {}) as $outer
+            (($run[0].executions // [])[-1].stdout? // "{}" | fromjson? // {}) as $outer
             | ($outer.output? // "{}" | fromjson? // {});
         def artifact_entry($path; $kind; $label):
             { path: $path, kind: $kind, label: $label };
