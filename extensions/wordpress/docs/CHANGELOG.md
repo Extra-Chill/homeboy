@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.95.6] - 2026-05-20
+
+### Fixed
+- default tests to wp-codebox
+
 ## [2.95.5] - 2026-05-20
 
 ### Fixed
