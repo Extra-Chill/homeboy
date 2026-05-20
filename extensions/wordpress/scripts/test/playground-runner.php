@@ -2,9 +2,8 @@
 /**
  * Playground test runner template.
  *
- * This file is rendered by scripts/test/test-runner-playground.sh via sed
- * substitution of {{PLUGIN_SLUG}} and {{PLAYGROUND_DEP_MOUNTS}} before being
- * mounted into the Playground VFS as /runner.php.
+ * This file is rendered by scripts/test/test-runner-wp-codebox.sh via sed
+ * substitution, then executed inside WP Codebox with wordpress.run-php.
  *
  * DIAGNOSTICS CONTRACT
  *

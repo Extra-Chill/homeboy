@@ -98,18 +98,20 @@ tests/fixtures/dropin-coexistence/
     └── DropInCoexistenceTest.php      # Asserts coexistence end-to-end
 ```
 
-The smoke-test runner script runs this fixture and checks all three
-invariants:
+The WP Codebox test runner runs this fixture and checks all three invariants:
 
 ```bash
-bash wordpress/scripts/test/playground-dropin-smoke.sh
+HOMEBOY_COMPONENT_ID=dropin-coexistence \
+HOMEBOY_COMPONENT_PATH=wordpress/tests/fixtures/dropin-coexistence \
+HOMEBOY_EXTENSION_PATH=wordpress \
+bash wordpress/scripts/test/test-runner.sh
 ```
 
 Expected output:
 
 ```
 OK (3 tests, 8 assertions)
-✓ Drop-in coexistence smoke test PASSED
+ALL TESTS PASSED
 ```
 
 The three assertions cover:
@@ -125,8 +127,8 @@ The three assertions cover:
 
 Run the smoke test after:
 
-- Changes to `scripts/test/test-runner-playground.sh` (the bash dispatcher)
-- Changes to `scripts/test/playground-runner.php` (the template)
+- Changes to `scripts/test/test-runner-wp-codebox.sh` (the WP Codebox dispatcher)
+- Changes to `scripts/test/playground-runner.php` (the runtime template)
 - Upgrading `@wp-playground/cli` (upstream may change the mu-plugin guard)
 
 ## Upstream contract

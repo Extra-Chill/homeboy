@@ -3,7 +3,7 @@
  * Integration test: custom db.php drop-in coexists with Playground's built-in
  * SQLite integration.
  *
- * Runs via: wordpress/scripts/test/playground-dropin-smoke.sh
+ * Runs via the WordPress extension WP Codebox test runner.
  *
  * @package Homeboy\WordPress\Tests\Fixtures
  */

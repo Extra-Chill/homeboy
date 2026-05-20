@@ -318,9 +318,8 @@ SOME TESTS FAILED         result.wasSuccessful() == false
 ```
 
 Stages run in order: `boot → install → load_fixtures → load_deps →
-load_component → discover_tests → load_tests → run_tests`. The bash runner
-parses these markers to classify failures; see `test-runner-playground.sh`
-for the full classification table.
+load_component → discover_tests → load_tests → run_tests`. The WP Codebox test
+runner parses these markers to classify failures.
 
 ## Browser bench target handoff
 
@@ -382,9 +381,8 @@ The v1 file shape is:
 
 Use `baseUrl` / `adminUrl` when an installed or persisted site is already served
 by the caller. If `baseUrl` is omitted, the target file is **metadata only**:
-the current Playground PHP runner runs `wp-playground-cli php` and exits after
-workloads complete, so it does not keep a browser-usable HTTP server alive for a
-later Playwright phase.
+the WP Codebox bench command exits after workloads complete, so it does not keep
+a browser-usable HTTP server alive for a later Playwright phase.
 
 Credentials may be supplied directly or via an environment variable indirection:
 

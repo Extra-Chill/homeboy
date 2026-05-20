@@ -782,7 +782,6 @@ jobs:
               model: $model,
               provider_register_function: $providerRegisterFunction,
               provider_credentials: $providerCredentials,
-              agent_runtime: "wp-codebox",
               wp_codebox_bin: $wpCodeboxBin,
               wp_codebox_components: {
                 agents_api: ($componentPath + "/.ci/agents-api"),

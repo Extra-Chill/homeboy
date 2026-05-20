@@ -433,7 +433,6 @@ if [ "$ENABLE_TERMINAL_ACTIONS" = "1" ]; then
         }' <<<"$CONFIG_JSON")
 fi
 
-CONFIG_JSON=$(jq -c '. + { agent_runtime: "wp-codebox" }' <<<"$CONFIG_JSON")
 homeboy_datamachine_agent_wp_codebox_run
 
 if [ -n "$TERMINAL_SERVER_PID" ]; then

@@ -2,10 +2,10 @@
 
 Homeboy extension that gives WordPress plugins and themes a complete
 `test → lint → build → bench → trace → audit` pipeline with zero in-component
-configuration. PHPUnit runs inside [WordPress Playground][playground]
-(PHP-WASM + embedded SQLite) by default, so there is no host PHP, MySQL, or
-local WordPress install to manage.
+configuration. PHPUnit and benchmark workloads run through [WP Codebox][wp-codebox]
+by default, so there is no host PHP, MySQL, or local WordPress install to manage.
 
+[wp-codebox]: https://github.com/chubes4/wp-codebox
 [playground]: https://www.npmjs.com/package/@wp-playground/cli
 
 ## What this extension provides
@@ -15,10 +15,10 @@ extension scripts for these verbs:
 
 | Homeboy verb | What it does | Entry script |
 |---|---|---|
-| `test` | PHPUnit inside Playground (default) or host-PHP smoke scripts | `scripts/test/test-runner.sh` |
+| `test` | PHPUnit via WP Codebox (default) or host-PHP smoke scripts | `scripts/test/test-runner.sh` |
 | `lint` | PHPCS + PHPStan (PHP) and ESLint (JS/TS) | `scripts/lint/lint-runner.sh` |
 | `build` | Production ZIP with composer `--no-dev`, asset build, syntax check | `scripts/build/build.sh` |
-| `bench` | Benchmark workloads inside Playground; optional browser handoff | `scripts/bench/bench-runner.sh` |
+| `bench` | Benchmark workloads via WP Codebox; optional browser handoff | `scripts/bench/bench-runner.sh` |
 | `trace` | Project-owned scenario traces | `scripts/trace/trace-runner.sh` |
 | `audit` | Detector rules over PHP for lifecycle / role tagging | `scripts/audit/setup-references.sh` + rules in `wordpress.json` |
 | `fingerprint` | File-shape fingerprinting for change detection | `scripts/fingerprint.sh` |
@@ -405,7 +405,7 @@ wordpress/
 ├── lib/                      # Node helpers: request profiler, Playground HTTP readiness
 ├── scripts/
 │   ├── audit/                # Detector setup + WP test smells
-│   ├── bench/                # WP Codebox bench runner + legacy Playground smokes
+│   ├── bench/                # WP Codebox bench runner + result artifact helpers
 │   ├── build/                # build.sh, validate-build.sh, validate-psr4.sh
 │   ├── env/detect.sh         # component_env detector
 │   ├── lib/                  # Shared helpers (playground bootstrap, etc.)
@@ -431,8 +431,8 @@ wordpress/
 ## Requirements
 
 - **bash 4.0+** (macOS users: `brew install bash`; system bash 3.2 is rejected at runtime)
-- **PHP** — host PHP only required for the `host-smoke` backend, lint, build, and audit verbs. PHPUnit itself runs inside Playground (PHP-WASM)
-- **Node.js 18.12+** (Playground CLI + ESLint)
+- **PHP** — host PHP only required for the `host-smoke` backend, lint, build, and audit verbs. PHPUnit itself runs through WP Codebox.
+- **Node.js 18.12+** (WP Codebox tooling, Playground blueprint validation, and ESLint)
 - **Composer** (PHP toolchain install)
 
 PHP toolchain pins (from `composer.json`): PHPUnit `^9.0`,

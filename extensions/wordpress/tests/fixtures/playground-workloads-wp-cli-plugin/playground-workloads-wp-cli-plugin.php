@@ -3,7 +3,7 @@
  * Plugin Name: Playground Workloads WP-CLI Plugin Fixture
  *
  * Minimal under-test plugin used by
- * scripts/bench/playground-bench-wp-cli-plugin-install-smoke.sh.
+ * WP Codebox configured workload smoke coverage.
  *
  * The fixture itself does nothing at runtime. The smoke supplies a
  * configured workload that uses the wp-cli step type to install and

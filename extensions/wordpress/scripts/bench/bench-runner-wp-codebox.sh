@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 BENCH_HELPER_SH="${HOMEBOY_RUNTIME_BENCH_HELPER_SH:-${HOME}/.homeboy/runtime/bench-helper.sh}"
-PLAYGROUND_RESULTS_ARTIFACTS_HELPER="${SCRIPT_DIR}/playground-results-artifacts.sh"
+BENCH_RESULTS_ARTIFACTS_HELPER="${SCRIPT_DIR}/bench-results-artifacts.sh"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 BENCH_BROWSER_TARGET_HELPER="${SCRIPT_DIR}/browser-target.sh"
 
@@ -31,8 +31,8 @@ else
     echo "ERROR: Homeboy bench helper not found at ${BENCH_HELPER_SH}" >&2
     exit 2
 fi
-# shellcheck source=playground-results-artifacts.sh
-source "$PLAYGROUND_RESULTS_ARTIFACTS_HELPER"
+# shellcheck source=bench-results-artifacts.sh
+source "$BENCH_RESULTS_ARTIFACTS_HELPER"
 # shellcheck source=../lib/validation-dependencies.sh
 if [ -f "$DEPENDENCY_HELPER" ]; then
     source "$DEPENDENCY_HELPER"
@@ -189,7 +189,7 @@ if [ ! -d "$BENCH_DIR" ] && ! printf '%s' "$PLAYGROUND_WORKLOADS_JSON" | jq -e '
     echo "Warning: No bench workloads found for ${PLUGIN_PATH}" >&2
     if [ -n "${HOMEBOY_BENCH_RESULTS_FILE:-}" ]; then
         homeboy_write_empty_bench_results "$COMPONENT_ID" 0 "$RESULTS_FILE"
-        homeboy_wordpress_emit_playground_results_artifacts "$RESULTS_FILE"
+        homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE"
     fi
     exit 0
 fi
@@ -233,6 +233,6 @@ fi
 mkdir -p "$(dirname "$RESULTS_FILE")"
 jq '.benchResults' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
 
-homeboy_wordpress_emit_playground_results_artifacts "$RESULTS_FILE"
+homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE"
 
 rm -f "$WP_CODEBOX_TMPFILE"
