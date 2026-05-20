@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.188.14] - 2026-05-20
+
+### Changed
+- split JSON output dispatch
+- plan command response execution
+
+### Fixed
+- render staged artifact in deploy verification
+
 ## [0.188.13] - 2026-05-20
 
 ### Changed
