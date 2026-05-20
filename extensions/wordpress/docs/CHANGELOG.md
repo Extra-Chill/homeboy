@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.95.1] - 2026-05-20
+
+### Fixed
+- suppress empty PHPStan raw output
+
 ## [2.95.0] - 2026-05-20
 
 ### Added
