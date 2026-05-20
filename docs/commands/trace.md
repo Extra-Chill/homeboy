@@ -100,6 +100,7 @@ Supported v1 attachment kinds:
 - `pid:<n>` records whether a local process exists before and after the scenario.
 - `port:<n>` checks whether `127.0.0.1:<n>` accepts TCP connections before and after the scenario.
 - `http:<url>` or a direct `http://` / `https://` URL performs a local HTTP GET before and after the scenario and records the response status or connection error.
+- `systemd:<unit>` records local `systemctl show` unit state before and after the scenario, including load/active/sub states and the unit main PID when available. It observes an already-running local unit only; it does not start, stop, restart, or SSH to the unit host.
 
 Example:
 
@@ -108,10 +109,11 @@ homeboy trace wp-coding-agents auth-multi-session-race \
   --attach logfile:/root/.kimaki/kimaki.log \
   --attach fswatch:/home/opencode/.local/share/opencode/auth.json \
   --attach pid:3679661 \
+  --attach systemd:kimaki.service \
   --attach http://127.0.0.1:46227/health
 ```
 
-Core also exports the parsed attachments to the runner through `HOMEBOY_TRACE_ATTACHMENTS` so extension-owned scenarios can correlate their own events with the same observation surfaces. `fswatch` attachments are deduplicated with explicit `file.watch` rig probes for the same path. V1 intentionally omits `systemd:` and remote attach targets; those require reliable platform-specific probes.
+Core also exports the parsed attachments to the runner through `HOMEBOY_TRACE_ATTACHMENTS` so extension-owned scenarios can correlate their own events with the same observation surfaces. `fswatch` attachments are deduplicated with explicit `file.watch` rig probes for the same path. `systemd:` attachments require local `systemctl`; on non-systemd hosts the timeline records the attachment as unavailable instead of failing the trace. Remote/SSH attach targets remain out of scope.
 
 ## Spans
 
