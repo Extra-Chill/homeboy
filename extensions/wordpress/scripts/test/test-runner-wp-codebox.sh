@@ -360,6 +360,7 @@ if [ ! -f "$TEMPLATE" ]; then
 fi
 
 WRAPPER_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/wp-codebox-runner.XXXXXX")
+WRAPPER_RUNTIME_PATH="/homeboy-wp-codebox-runner.php"
 WP_CONFIG_DEFINES_DELIM=$(printf '\1')
 json_to_base64() {
     printf '%s' "$1" | base64 | tr -d '\n'
@@ -376,6 +377,8 @@ sed \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{BENCH_ENV_JSON_B64}}${WP_CONFIG_DEFINES_DELIM}${BENCH_ENV_JSON_B64}${WP_CONFIG_DEFINES_DELIM}g" \
     -e "s${WP_CONFIG_DEFINES_DELIM}{{CHANGED_TEST_FILES_JSON_B64}}${WP_CONFIG_DEFINES_DELIM}${CHANGED_TEST_FILES_JSON_B64}${WP_CONFIG_DEFINES_DELIM}g" \
     "$TEMPLATE" > "$WRAPPER_TMPFILE"
+
+homeboy_wp_codebox_add_recipe_mount "$WRAPPER_TMPFILE" "$WRAPPER_RUNTIME_PATH" "readonly"
 
 ARTIFACTS_DIR="${HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR:-}"
 if [ -z "$ARTIFACTS_DIR" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
@@ -409,7 +412,7 @@ esac
 jq -n \
     --arg wp "$PLAYGROUND_WORDPRESS_VERSION" \
     --argjson mounts "$MOUNTS_JSON" \
-    --arg codeFile "$WRAPPER_TMPFILE" \
+    --arg codeFile "$WRAPPER_RUNTIME_PATH" \
     '{
         schema: "wp-codebox/workspace-recipe/v1",
         runtime: {wp: $wp, blueprint: {steps: []}},
