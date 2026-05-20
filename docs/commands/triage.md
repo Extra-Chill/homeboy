@@ -38,6 +38,31 @@ component-first, target-first, environment, and workspace commands.
 - `--failing-checks` — restrict PRs to failing-check items
 - `--drilldown` — include compact failing check names and URLs
 
+## Watch Mode
+
+`triage --watch` observes one or more GitHub PR/issue refs until they reach a target state. Snapshot triage remains read-only; watch mode only mutates GitHub when `--auto-merge` is explicitly passed.
+
+```sh
+homeboy triage --watch Extra-Chill/homeboy#2238 --until merged
+homeboy triage --watch Extra-Chill/homeboy#2238 --until green-mergeable --auto-merge
+homeboy triage --watch https://github.com/Extra-Chill/homeboy#2238 --until closed --timeout 10m --poll-interval 30s
+```
+
+Supported `--until` states:
+
+- default — `merged` for PRs and `closed` for issues when `--until` is omitted
+- `merged` — PR is merged
+- `closed` — issue or PR is closed, including merged PRs
+- `green` — PR checks report success
+- `green-mergeable` — PR checks report success, merge state is clean, and the PR is not draft
+- `failed` — PR checks report failure
+- `state-changed` — item state changes after the initial poll
+- `commit-pushed` — PR head SHA changes after the initial poll
+
+Watch output is structured JSON with `command: "triage.watch"`, final watched target states, and an `events` array. Events include `watch.started`, `item.state_changed`, `pr.commit.pushed`, `pr.ci.transitioned`, `pr.merged`, optional `pr.merge_requested`, and `watch.exit`.
+
+`--auto-merge` uses the GitHub REST merge endpoint with `--merge-method squash` by default. When `--auto-merge` is passed without `--until`, Homeboy watches for `green-mergeable`. This avoids depending on `gh pr merge`'s GraphQL path for the actual merge operation.
+
 ## Output Signals
 
 Surfaced issues include comment activity when GitHub returns it:
