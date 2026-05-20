@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.96.4] - 2026-05-20
+
+### Fixed
+- pass app token to runner workspace clones
+
 ## [2.96.3] - 2026-05-20
 
 ### Fixed
