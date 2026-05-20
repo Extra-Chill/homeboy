@@ -435,6 +435,9 @@ fn execute_artifact_deploy(
     // installed binary over a stale build artifact. This handles the case where
     // `homeboy upgrade` installed a new binary but the build artifact is from a
     // previous version — without this, `deploy --shared` would push the old binary.
+    let cleanup_local_artifact =
+        downloaded_artifact.is_none() && !config.skip_build && !is_self_deploy(component);
+
     let artifact_path = if is_self_deploy(component) {
         match prefer_installed_binary(&artifact_path) {
             Some(installed) => installed,
@@ -479,6 +482,10 @@ fn execute_artifact_deploy(
             exit_code,
             ..
         }) => {
+            if cleanup_local_artifact {
+                cleanup_deploy_build_artifact(component, &artifact_path);
+            }
+
             if let Ok(Some(summary)) = cleanup_build_dependencies(component, config) {
                 log_status!("deploy", "Cleanup: {}", summary);
             }
@@ -521,6 +528,58 @@ fn execute_artifact_deploy(
         )
         .with_remote_path(install_dir.to_string())
         .with_build_exit_code(build_exit_code),
+    }
+}
+
+/// Remove the local build artifact created for a deploy.
+///
+/// `homeboy build` intentionally leaves a package for humans to inspect. During
+/// `homeboy deploy`, that same package is transient plumbing and should not
+/// leave a clean checkout dirty after the upload succeeds.
+fn cleanup_deploy_build_artifact(component: &Component, artifact_path: &Path) {
+    let local_path = Path::new(&component.local_path);
+    if !artifact_path.starts_with(local_path) || !artifact_path.exists() || !artifact_path.is_file()
+    {
+        return;
+    }
+
+    let size_before = artifact_path.metadata().map(|m| m.len()).unwrap_or(0);
+    match std::fs::remove_file(artifact_path) {
+        Ok(()) => {
+            log_status!(
+                "cleanup",
+                "Removed deploy artifact {} (freed {})",
+                artifact_path.display(),
+                format_bytes(size_before)
+            );
+            cleanup_empty_artifact_dirs(local_path, artifact_path.parent());
+        }
+        Err(err) => {
+            log_status!(
+                "cleanup",
+                "Warning: failed to remove deploy artifact {}: {}",
+                artifact_path.display(),
+                err
+            );
+        }
+    }
+}
+
+fn cleanup_empty_artifact_dirs(local_path: &Path, start_dir: Option<&Path>) {
+    let Some(mut dir) = start_dir else {
+        return;
+    };
+
+    while dir.starts_with(local_path) && dir != local_path {
+        match std::fs::remove_dir(dir) {
+            Ok(()) => {
+                dir = match dir.parent() {
+                    Some(parent) => parent,
+                    None => break,
+                };
+            }
+            Err(_) => break,
+        }
     }
 }
 
@@ -660,7 +719,10 @@ fn cleanup_build_dependencies(
 
 #[cfg(test)]
 mod tests {
-    use super::{failed_component_deploy_result, should_try_download_release_artifact};
+    use super::{
+        cleanup_deploy_build_artifact, failed_component_deploy_result,
+        should_try_download_release_artifact,
+    };
     use crate::core::component::Component;
     use crate::core::deploy::types::DeployConfig;
 
@@ -715,5 +777,63 @@ mod tests {
         assert!(!should_try_download_release_artifact(
             &component, &config, false, false
         ));
+    }
+
+    #[test]
+    fn cleanup_deploy_build_artifact_removes_zip_and_empty_build_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let build_dir = temp.path().join("build");
+        std::fs::create_dir_all(&build_dir).expect("mkdir build");
+        let artifact = build_dir.join("example.zip");
+        std::fs::write(&artifact, b"zip").expect("write artifact");
+        let component = Component {
+            id: "example".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+
+        cleanup_deploy_build_artifact(&component, &artifact);
+
+        assert!(!artifact.exists());
+        assert!(!build_dir.exists());
+    }
+
+    #[test]
+    fn cleanup_deploy_build_artifact_preserves_non_empty_build_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let build_dir = temp.path().join("build");
+        std::fs::create_dir_all(&build_dir).expect("mkdir build");
+        let artifact = build_dir.join("example.zip");
+        let sibling = build_dir.join("keep.txt");
+        std::fs::write(&artifact, b"zip").expect("write artifact");
+        std::fs::write(&sibling, b"keep").expect("write sibling");
+        let component = Component {
+            id: "example".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+
+        cleanup_deploy_build_artifact(&component, &artifact);
+
+        assert!(!artifact.exists());
+        assert!(build_dir.exists());
+        assert!(sibling.exists());
+    }
+
+    #[test]
+    fn cleanup_deploy_build_artifact_ignores_paths_outside_component() {
+        let component_dir = tempfile::tempdir().expect("component dir");
+        let outside_dir = tempfile::tempdir().expect("outside dir");
+        let artifact = outside_dir.path().join("example.zip");
+        std::fs::write(&artifact, b"zip").expect("write artifact");
+        let component = Component {
+            id: "example".to_string(),
+            local_path: component_dir.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+
+        cleanup_deploy_build_artifact(&component, &artifact);
+
+        assert!(artifact.exists());
     }
 }
