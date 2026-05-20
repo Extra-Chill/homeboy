@@ -71,10 +71,8 @@ toolchain, mounts the standard agent runtime and any additional validation
 dependencies under `.ci/<repo>`, builds a runner config, and calls
 `wordpress/scripts/agent/run-datamachine-agent.sh`.
 
-The reusable workflow still exposes `agent_runtime` while #696 removes the
-legacy direct runner path. Use `agent_runtime: wp-codebox` for current agent CI
-work. Treat `agent_runtime: homeboy` as compatibility for older callers, not as a
-new integration target.
+The reusable workflow always uses WP Codebox for agent CI. Callers cannot select
+the legacy direct runner path.
 
 ## Fully Custom Agents
 
@@ -103,19 +101,20 @@ Consumers can customize:
 
 ## WP Codebox contract
 
-The runner converts the agent config into a single WordPress workload envelope:
+The runner converts the agent config into a single WP Codebox sandbox run:
 
 - `component_path` points at the consumer checkout.
 - `bundle_path` points at the Data Machine agent bundle.
+- The workflow checks out and builds WP Codebox whenever `run_agent` is true.
 - `include_agent_runtime_dependencies` mounts the standard Data Machine agent
   runtime before consumer-supplied `validation_dependencies`.
 - `playground_file_mounts` adds fixture files such as the CI driver plugin. The
   setting name is inherited from the previous direct-runner contract and is kept
   as part of the current workflow input surface.
 - `bench_env` forwards credentials and the serialized runner config into the
-  WordPress runtime.
+  sandbox.
 - `workload_run_before` and `workload_run_after` attach setup and verifier hooks
-  around the agent run inside the same WordPress scenario.
+  around the agent run inside the same sandbox scenario.
 - `transcript_dir` controls where exported conversation artifacts are written.
 - `success_requires_pr` can require the agent to open or reuse a pull request.
 - `tool_recorders` can force tool parameters and project tool results into
@@ -140,12 +139,12 @@ The runner converts the agent config into a single WordPress workload envelope:
 - `fallback_pull_request` can open a PR when files were written but the agent did
   not explicitly call the PR tool.
 
-Inside WordPress, `datamachine-agent-workload.php` installs the bundle,
+Inside WP Codebox, `datamachine-agent-workload.php` installs the bundle,
 configures the provider, starts the Data Machine flow, drains queued work,
 records tool results, exports the transcript, and writes a Homeboy scenario
-result. In WP Codebox mode, the workflow checks out and builds `chubes4/wp-codebox`,
-passes the runner config to the WP Codebox CLI, mounts provider/runtime plugins,
-and reads back the generated artifacts from the run workspace.
+result. The workflow passes the runner config to the WP Codebox CLI, mounts
+provider/runtime plugins, and reads back generated artifacts from the run
+workspace.
 
 ## Runner config surface
 
@@ -156,17 +155,17 @@ knobs to `run-datamachine-agent.sh`:
 - Bundle location: `bundle_path`, `bundle_repo`, `bundle_ref`, `bundle_path_in_repo`.
 - Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
 - Provider plugin: `provider_plugin`, with OpenAI defaults preserved when omitted for `provider: openai`.
-- WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `playground_wordpress`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`.
+- WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `playground_wordpress`, `wp_codebox_ref`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`.
 - GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.
 - Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`, `fallback_pull_request`.
 
 `bundle_repo` is for cross-repo consumers. The shell runner clones the bundle
-repository, points `bundle_path` at the cloned bundle inside the WordPress
-substrate, and adds that checkout to the mounted validation dependencies. This
-lets a repository such as `agents-api` run a bundle owned by `docs-agent` without
-copying the bundle or maintaining a bespoke runner script.
+repository, points `bundle_path` at the cloned bundle inside WP Codebox, and adds
+that checkout to the mounted validation dependencies. This lets a repository such
+as `agents-api` run a bundle owned by `docs-agent` without copying the bundle or
+maintaining a bespoke runner script.
 
 `tool_recorders` are the main migration path for custom bootstrap files that only
 wrap GitHub tools. A recorder can attach forced parameters, capture selected input

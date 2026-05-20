@@ -65,7 +65,6 @@ jobs:
       flow_slug: self-smoke-wp-codebox-flow
       target_repo: Extra-Chill/homeboy-extensions
       prompt: Exercise the WP Codebox agent runtime path in dry-run mode.
-      agent_runtime: wp-codebox
       success_requires_pr: false
       dry_run: true
       engine_data_outputs: '{}'

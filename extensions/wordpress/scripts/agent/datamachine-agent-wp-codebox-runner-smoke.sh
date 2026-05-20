@@ -127,7 +127,6 @@ jq -n \
     --arg dataMachine "$DATA_MACHINE_DIR" \
     --arg dataMachineCode "$DATA_MACHINE_CODE_DIR" \
     '{
-        agent_runtime: "wp-codebox",
         component_id: "wp-codebox-smoke-component",
         component_path: env.PWD,
         bundle_host_path: $bundle,

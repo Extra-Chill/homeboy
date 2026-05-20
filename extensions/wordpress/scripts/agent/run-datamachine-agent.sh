@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORKLOAD_PATH="$SCRIPT_DIR/datamachine-agent-workload.php"
-WORKLOAD_PLAYGROUND_PATH="/homeboy-extension/scripts/agent/datamachine-agent-workload.php"
 REPLAY_BUNDLE_BUILDER="$SCRIPT_DIR/build-replay-bundle.js"
 
 homeboy_datamachine_agent_bundle_clone_url() {
@@ -394,7 +393,6 @@ fi
 WORKLOAD_ID=$(jq -r '.workload_id // "datamachine-agent"' "$CONFIG_PATH")
 WORKLOAD_LABEL=$(jq -r '.workload_label // "Run Data Machine agent"' "$CONFIG_PATH")
 PLAYGROUND_WORDPRESS_VERSION=$(jq -r '.playground_wordpress_version // "7.0"' "$CONFIG_PATH")
-BENCH_WARMUP_ITERATIONS=$(jq -r '.bench_warmup_iterations // 0' "$CONFIG_PATH")
 ENABLE_TERMINAL_ACTIONS=$(jq -r 'if (.enable_terminal_actions // .enable_wp_cli_tool // false) then "1" else "0" end' <<<"$CONFIG_JSON")
 if [ "$ENABLE_TERMINAL_ACTIONS" = "1" ]; then
     if [ -z "$RUNTIME_DIR" ]; then
@@ -435,48 +433,8 @@ if [ "$ENABLE_TERMINAL_ACTIONS" = "1" ]; then
         }' <<<"$CONFIG_JSON")
 fi
 
-AGENT_RUNTIME=$(jq -r '.agent_runtime // env.HOMEBOY_DATAMACHINE_AGENT_RUNTIME // "homeboy"' <<<"$CONFIG_JSON")
-if [ "$AGENT_RUNTIME" = "wp-codebox" ]; then
-    homeboy_datamachine_agent_wp_codebox_run
-else
-SETTINGS_JSON=$(jq -nc \
-    --arg workloadPath "$WORKLOAD_PLAYGROUND_PATH" \
-    --arg workloadId "$WORKLOAD_ID" \
-    --arg workloadLabel "$WORKLOAD_LABEL" \
-    --arg wordpressVersion "$PLAYGROUND_WORDPRESS_VERSION" \
-    --argjson config "$CONFIG_JSON" \
-    --argjson warmup "$BENCH_WARMUP_ITERATIONS" \
-    '{
-        workload_run_before: ($config.workload_run_before // $config.bootstrap_run // []),
-        workload_run_after: ($config.workload_run_after // []),
-        validation_dependencies: ($config.validation_dependencies // $config.dependencies // []),
-        playground_wordpress_version: $wordpressVersion,
-        wp_config_defines: ($config.wp_config_defines // {}),
-        playground_file_mounts: ($config.playground_file_mounts // []),
-        playground_blueprint: ($config.playground_blueprint // {}),
-        bench_site_mode: ($config.bench_site_mode // "fresh"),
-        bench_warmup_iterations: $warmup,
-        bench_env: (($config.bench_env // {}) + { HOMEBOY_DATAMACHINE_AGENT_CONFIG: ($config | tojson) }),
-        playground_workloads: [
-            {
-                id: $workloadId,
-                label: $workloadLabel,
-                run: (($config.workload_run_before // $config.bootstrap_run // []) + [
-                    { type: "php", file: $workloadPath }
-                ] + ($config.workload_run_after // []))
-            }
-        ]
-    }')
-
-HOMEBOY_BENCH_RESULTS_FILE="$RESULTS_FILE" \
-HOMEBOY_BENCH_ITERATIONS=1 \
-HOMEBOY_BENCH_WARMUP_ITERATIONS="$BENCH_WARMUP_ITERATIONS" \
-HOMEBOY_COMPONENT_ID="$COMPONENT_ID" \
-HOMEBOY_COMPONENT_PATH="$COMPONENT_PATH" \
-HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
-HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
-    bash "$EXTENSION_PATH/scripts/bench/bench-runner.sh"
-fi
+CONFIG_JSON=$(jq -c '. + { agent_runtime: "wp-codebox" }' <<<"$CONFIG_JSON")
+homeboy_datamachine_agent_wp_codebox_run
 
 if [ -n "$TERMINAL_SERVER_PID" ]; then
     kill "$TERMINAL_SERVER_PID" >/dev/null 2>&1 || true

@@ -46,9 +46,8 @@ evidence.
 `datamachine-agent-ci.yml` wraps the common GitHub Actions shape for running a
 Data Machine agent bundle in a disposable WordPress execution substrate.
 Consumers provide bundle and flow identifiers, a prompt, and optional output
-projections. New and maintained agent runs should use the WP Codebox substrate;
-the legacy direct Playground runner remains only as a transition path until
-issue #696 removes `agent_runtime`.
+projections. Agent runs use the WP Codebox substrate; the legacy direct
+Playground runner is no longer selectable by callers.
 See [`wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
 for the WP Codebox contract, runtime surface, and evaluation notes.
 
@@ -129,9 +128,8 @@ jobs:
 
 ## Inputs worth calling out
 
+- Agent CI always runs through WP Codebox. The workflow checks out and builds `chubes4/wp-codebox` whenever `run_agent` is true; `wp_codebox_ref` controls the ref.
 - `include_agent_runtime_dependencies` defaults to `true` and checks out the standard WordPress agent runtime stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin.
-- `agent_runtime` is a transitional compatibility switch tracked by #696. Use `wp-codebox` for the WP Codebox substrate; `homeboy` keeps the legacy direct runner available until that issue deletes the switch.
-- `wp_codebox_ref` controls the `chubes4/wp-codebox` ref used by the WP Codebox substrate.
 - `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref`, and `openai_provider_ref` control runtime dependency refs. `openai_provider_ref` defaults to `trunk` for the built-in OpenAI preset.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `credentials` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.

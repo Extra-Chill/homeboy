@@ -68,12 +68,8 @@ name: Data Machine Agent CI (reusable)
         description: "Include the standard WordPress agent runtime stack: Agents API, Data Machine, Data Machine Code, and the selected provider plugin."
         type: boolean
         default: true
-      agent_runtime:
-        description: Transitional agent sandbox selector. Use `wp-codebox` for the WP Codebox substrate; `homeboy` remains only for legacy runner compatibility until issue #696 removes the switch.
-        type: string
-        default: homeboy
       wp_codebox_ref:
-        description: Ref for chubes4/wp-codebox when the agent runtime uses the WP Codebox substrate.
+        description: Ref for chubes4/wp-codebox. Agent CI always checks out and builds WP Codebox when run_agent is true.
         type: string
         default: main
       agents_api_ref:
@@ -388,7 +384,6 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           VALIDATION_DEPENDENCIES: ${{ inputs.validation_dependencies }}
           INCLUDE_AGENT_RUNTIME_DEPENDENCIES: ${{ inputs.include_agent_runtime_dependencies }}
-          AGENT_RUNTIME: ${{ inputs.agent_runtime }}
           WP_CODEBOX_REF: ${{ inputs.wp_codebox_ref }}
           AGENTS_API_REF: ${{ inputs.agents_api_ref }}
           DATA_MACHINE_REF: ${{ inputs.data_machine_ref }}
@@ -412,10 +407,7 @@ jobs:
           ')"
           provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
           provider_plugin_ref="$(jq -r '.ref // ""' <<< "$provider_plugin_json")"
-          case "$AGENT_RUNTIME" in
-            homeboy|wp-codebox) ;;
-            *) echo "agent_runtime must be homeboy or wp-codebox, got: $AGENT_RUNTIME" >&2; exit 1 ;;
-          esac
+          dependency_entries+=("chubes4/wp-codebox@${WP_CODEBOX_REF}")
           if [ "$INCLUDE_AGENT_RUNTIME_DEPENDENCIES" = "true" ]; then
             dependency_entries+=("Automattic/agents-api@${AGENTS_API_REF}")
             dependency_entries+=("Extra-Chill/data-machine@${DATA_MACHINE_REF}")
@@ -427,9 +419,6 @@ jobs:
                 dependency_entries+=("${provider_plugin_repo}")
               fi
             fi
-          fi
-          if [ "$AGENT_RUNTIME" = "wp-codebox" ]; then
-            dependency_entries+=("chubes4/wp-codebox@${WP_CODEBOX_REF}")
           fi
           if [ -n "$VALIDATION_DEPENDENCIES" ]; then
             IFS=',' read -ra extra_entries <<< "$VALIDATION_DEPENDENCIES"
@@ -518,7 +507,7 @@ jobs:
           npm install
 
       - name: Build WP Codebox runtime dependency
-        if: ${{ inputs.run_agent && inputs.agent_runtime == 'wp-codebox' }}
+        if: ${{ inputs.run_agent }}
         working-directory: .ci/wp-codebox
         run: |
           set -euo pipefail
@@ -579,7 +568,6 @@ jobs:
           PROMPT: ${{ inputs.prompt }}
           PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
-          AGENT_RUNTIME: ${{ inputs.agent_runtime }}
           PLAYGROUND_WORDPRESS: ${{ inputs.playground_wordpress }}
           SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
           SUCCESS_COMPLETION_OUTCOMES: ${{ inputs.success_completion_outcomes }}
@@ -699,11 +687,8 @@ jobs:
           provider_register_function="$(jq -r '.register_function // ""' <<< "$provider_plugin_json")"
           provider_credentials_json="$(jq -c '.credentials // {}' <<< "$provider_plugin_json")"
           provider_bench_env_json="{}"
-          wp_codebox_bin=""
-          if [ "$AGENT_RUNTIME" = "wp-codebox" ]; then
-            wp_codebox_bin="${GITHUB_WORKSPACE}/.ci/wp-codebox/packages/cli/dist/index.js"
-            [ -f "$wp_codebox_bin" ] || { echo "WP Codebox CLI build missing at $wp_codebox_bin" >&2; exit 1; }
-          fi
+          wp_codebox_bin="${GITHUB_WORKSPACE}/.ci/wp-codebox/packages/cli/dist/index.js"
+          [ -f "$wp_codebox_bin" ] || { echo "WP Codebox CLI build missing at $wp_codebox_bin" >&2; exit 1; }
           while IFS= read -r provider_env_name; do
             [ -n "$provider_env_name" ] || continue
             case "$provider_env_name" in
@@ -727,7 +712,6 @@ jobs:
             --arg prompt "$PROMPT" \
             --arg provider "$PROVIDER" \
             --arg model "$MODEL" \
-            --arg agentRuntime "$AGENT_RUNTIME" \
             --arg wpCodeboxBin "$wp_codebox_bin" \
             --arg providerPluginHostPath "$provider_plugin_host_path" \
             --arg engineKey "$ENGINE_KEY" \
@@ -798,7 +782,7 @@ jobs:
               model: $model,
               provider_register_function: $providerRegisterFunction,
               provider_credentials: $providerCredentials,
-              agent_runtime: $agentRuntime,
+              agent_runtime: "wp-codebox",
               wp_codebox_bin: $wpCodeboxBin,
               wp_codebox_components: {
                 agents_api: ($componentPath + "/.ci/agents-api"),
