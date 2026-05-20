@@ -117,6 +117,11 @@ pub fn run_main_lint_workflow(
             None,
             run_dir,
         )?
+        .env_if(
+            args.changed_since.is_some(),
+            "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
+            "1",
+        )
         .passthrough(!args.json_summary)
         .run()?
     };
@@ -388,6 +393,11 @@ fn run_scoped_lint_runs(
             run.step.as_deref(),
             active_run_dir,
         )?
+        .env_if(
+            args.changed_since.is_some(),
+            "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
+            "1",
+        )
         .passthrough(!args.json_summary)
         .run()?;
 

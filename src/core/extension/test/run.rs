@@ -236,6 +236,11 @@ pub fn run_main_test_workflow(
         changed_test_files,
         run_dir,
     )?
+    .env_if(
+        args.changed_since.is_some(),
+        "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
+        "1",
+    )
     .script_args(&args.passthrough_args)
     .run()?;
 
