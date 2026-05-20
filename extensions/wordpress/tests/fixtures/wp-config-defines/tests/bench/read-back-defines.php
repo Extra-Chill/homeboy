@@ -11,8 +11,8 @@
  *         "WP_CONFIG_FIXTURE_BOOL": true
  *     }
  *
- * After pg_run_boot_stage() runs, those should be defined as PHP constants
- * with their original types (var_export round-trip).
+ * After WP Codebox boots the WordPress runtime, those should be defined as PHP
+ * constants with their original types (var_export round-trip).
  *
  * Writes the read-back values to <shared-state>/defines-read-back.log so
  * the smoke script can grep for them outside Playground.

@@ -409,9 +409,9 @@ wordpress/
 │   ├── bench/                # WP Codebox bench runner + result artifact helpers
 │   ├── build/                # build.sh, validate-build.sh, validate-psr4.sh
 │   ├── env/detect.sh         # component_env detector
-│   ├── lib/                  # Shared helpers (playground bootstrap, etc.)
+│   ├── lib/                  # Shared runner helpers
 │   ├── lint/                 # lint-runner.sh, eslint-runner.sh, phpstan-runner.sh
-│   ├── test/                 # test-runner*.sh, playground-runner.php, parsers, smokes
+│   ├── test/                 # test-runner*.sh, parsers, smokes
 │   ├── trace/                # trace-runner.sh
 │   ├── validation/           # syntax / PSR-4 / dependency validators
 │   ├── fingerprint.sh

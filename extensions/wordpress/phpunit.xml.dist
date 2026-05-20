@@ -14,6 +14,6 @@
 
     <php>
         <!-- Extension tests run via the WP Codebox test runner. This config is kept
-             for tooling compatibility; runtime bootstrap is handled by playground-runner.php. -->
+             for tooling compatibility; runtime bootstrap is handled by WP Codebox. -->
     </php>
 </phpunit>

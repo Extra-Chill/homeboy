@@ -13,7 +13,7 @@ FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
-PLAYGROUND_PATHS_HELPER="${SCRIPT_DIR}/../lib/playground-paths.sh"
+WP_CODEBOX_PATHS_HELPER="${SCRIPT_DIR}/../lib/wp-codebox-paths.sh"
 
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
@@ -30,8 +30,8 @@ fi
 if [ -f "$PHP_PREFLIGHT_HELPER" ]; then
     source "$PHP_PREFLIGHT_HELPER"
 fi
-# shellcheck source=../lib/playground-paths.sh
-source "$PLAYGROUND_PATHS_HELPER"
+# shellcheck source=../lib/wp-codebox-paths.sh
+source "$WP_CODEBOX_PATHS_HELPER"
 # shellcheck source=/dev/null
 if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
     source "$FAILURE_TRAP_HELPER"
@@ -333,7 +333,7 @@ if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and lengt
     done < <(printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -c '.[]')
 fi
 
-EXTENSION_VENDOR_PATH="$(homeboy_playground_resolve_mount_path "${EXTENSION_PATH}/vendor")"
+EXTENSION_VENDOR_PATH="$(homeboy_wp_codebox_resolve_mount_path "${EXTENSION_PATH}/vendor")"
 homeboy_wp_codebox_add_recipe_mount "${EXTENSION_VENDOR_PATH}" "/wp-codebox-vendor" "readonly"
 
 PLAYGROUND_DEP_MOUNTS=""

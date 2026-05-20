@@ -9,10 +9,10 @@
  * during muplugins_loaded — before wp-phpunit's install.php created those
  * tables — and the dep activation fataled with "no such table: wptests_*".
  *
- * Post-#431 the runner splits load and activation: load_deps inside
- * muplugins_loaded only require_once's the entry file; pg_run_activation_stage
- * fires the activation hook AFTER pg_run_install_stage returns, so the
- * tables exist by the time `add_option()` and `get_users()` run.
+ * Post-#431 the runtime splits load and activation: dependency loading inside
+ * muplugins_loaded only require_once's the entry file; activation fires after
+ * wp-phpunit creates the test schema, so the tables exist by the time
+ * `add_option()` and `get_users()` run.
  *
  * If this workload sees the dep's plugins_loaded flag set AND the activation
  * option present, both the load-ordering fix (#426/#427) AND the activation-

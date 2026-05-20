@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-# Resolve a host path before mounting it into WordPress Playground. Playground's
+# Resolve a host path before mounting it into WP Codebox. WordPress Playground's
 # PHP-WASM VFS does not reliably expose symlinked mount roots unless the host
 # path is resolved first.
-homeboy_playground_resolve_mount_path() {
+homeboy_wp_codebox_resolve_mount_path() {
     local host_path="$1"
 
     if [ -d "$host_path" ]; then
