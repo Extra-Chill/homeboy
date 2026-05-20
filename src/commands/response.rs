@@ -1,6 +1,5 @@
 use crate::cli_surface::{CommandResponseMode, Commands};
 
-use super::utils::response as output;
 use super::GlobalArgs;
 
 pub fn run(command: Commands, global: &GlobalArgs, output_file: Option<&str>) -> i32 {
@@ -16,15 +15,11 @@ pub fn run(command: Commands, global: &GlobalArgs, output_file: Option<&str>) ->
         command
     };
 
-    let json_run = super::output_artifact::run_json(command, global, output_artifact_policy);
-
-    if let Some(path) = output_file {
-        super::output_artifact::write_to_file(&json_run, output_artifact_policy, path);
-    }
-
-    if let CommandResponseMode::Json = mode {
-        output::print_json_result(json_run.stdout_result, json_run.exit_code).ok();
-    }
-
-    json_run.exit_code
+    super::output_artifact::run_and_print(
+        command,
+        global,
+        output_artifact_policy,
+        output_file,
+        mode,
+    )
 }
