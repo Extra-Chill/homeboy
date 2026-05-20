@@ -8,6 +8,7 @@
 - [cargo](cargo.md) — run Cargo commands via Rust extension routing
 - [changelog](changelog.md)
 - [changes](changes.md)
+- [ci](ci.md) — CI reproduction profiles and shallow CI surface discovery
 - [component](component.md)
 - [config](config.md)
 - [daemon](daemon.md) — local-only HTTP API daemon

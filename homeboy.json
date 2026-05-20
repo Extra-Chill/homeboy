@@ -80,6 +80,7 @@
         "structural::src/commands/report.rs::HighItemCount",
         "structural::src/commands/runs.rs::GodFile",
         "structural::src/commands/trace.rs::GodFile",
+        "structural::src/commands/trace/tests.rs::GodFile",
         "structural::src/core/code_audit/conventions.rs::GodFile",
         "structural::src/core/code_audit/core_fingerprint.rs::GodFile",
         "structural::src/core/code_audit/core_fingerprint.rs::HighItemCount",

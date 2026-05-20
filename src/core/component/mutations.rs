@@ -134,7 +134,10 @@ mod tests {
         fs::create_dir_all(&repo).expect("repo dir");
         fs::write(
             repo.join("homeboy.json"),
-            format!(r#"{{"id":"{}","remote_path":"wp-content/plugins/{}"}}"#, id, id),
+            format!(
+                r#"{{"id":"{}","remote_path":"wp-content/plugins/{}"}}"#,
+                id, id
+            ),
         )
         .expect("homeboy.json");
 
@@ -155,15 +158,16 @@ mod tests {
         crate::test_support::with_isolated_home(|home| {
             let repo = write_component_repo(home, "demo-plugin");
 
-            set_changelog_target("demo-plugin", "docs/changelog.md")
-                .expect("set changelog target");
+            set_changelog_target("demo-plugin", "docs/changelog.md").expect("set changelog target");
 
             let config: serde_json::Value = serde_json::from_str(
                 &fs::read_to_string(repo.join("homeboy.json")).expect("read homeboy.json"),
             )
             .expect("parse homeboy.json");
             assert_eq!(
-                config.get("changelog_target").and_then(|value| value.as_str()),
+                config
+                    .get("changelog_target")
+                    .and_then(|value| value.as_str()),
                 Some("docs/changelog.md")
             );
         });
@@ -239,13 +243,17 @@ mod tests {
             let loaded = crate::core::component::load("agents-api").expect("load component");
             assert_eq!(loaded.local_path, new_repo.to_string_lossy());
 
-            let registration_path = home.path().join(".config/homeboy/components/agents-api.json");
+            let registration_path = home
+                .path()
+                .join(".config/homeboy/components/agents-api.json");
             let registration: serde_json::Value = serde_json::from_str(
                 &fs::read_to_string(registration_path).expect("read registration"),
             )
             .expect("parse registration");
             assert_eq!(
-                registration.get("local_path").and_then(|value| value.as_str()),
+                registration
+                    .get("local_path")
+                    .and_then(|value| value.as_str()),
                 Some(new_repo.to_string_lossy().as_ref())
             );
         });
