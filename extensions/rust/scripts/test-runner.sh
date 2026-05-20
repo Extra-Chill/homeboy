@@ -206,6 +206,7 @@ TEST_ARGS=(
 # We extract module paths from file paths (e.g., src/commands/audit.rs → commands::audit).
 SCOPE_FILTER_ARGS=()
 SCOPE_INTEGRATION_ARGS=()
+SCOPE_FALLBACK_FULL=false
 if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     while IFS= read -r test_file; do
         [ -z "$test_file" ] && continue
@@ -230,6 +231,9 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
         source_module="${module_path%_test}"
         if [[ "$test_file" == tests/*_test.rs ]] && { [ -f "${PROJECT_PATH}/src/${source_module}.rs" ] || [ -f "${PROJECT_PATH}/src/${source_module}/mod.rs" ]; }; then
             module_path="${source_module}::${test_module}"
+        elif [[ "$test_file" == tests/*/*.rs ]]; then
+            SCOPE_FALLBACK_FULL=true
+            continue
         fi
         module_path="${module_path//\//::}"       # replace / with ::
         if [ -n "$module_path" ]; then
@@ -237,7 +241,9 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
         fi
     done <<< "${HOMEBOY_CHANGED_TEST_FILES}"
 
-    if [ ${#SCOPE_INTEGRATION_ARGS[@]} -gt 0 ] && [ ${#SCOPE_FILTER_ARGS[@]} -gt 0 ]; then
+    if [ "$SCOPE_FALLBACK_FULL" = true ]; then
+        echo "Changed files include nested tests without a direct Cargo target; running full cargo test."
+    elif [ ${#SCOPE_INTEGRATION_ARGS[@]} -gt 0 ] && [ ${#SCOPE_FILTER_ARGS[@]} -gt 0 ]; then
         echo "Changed files include integration and inline tests; running full cargo test."
     elif [ ${#SCOPE_INTEGRATION_ARGS[@]} -gt 0 ]; then
         for test_target in "${SCOPE_INTEGRATION_ARGS[@]}"; do

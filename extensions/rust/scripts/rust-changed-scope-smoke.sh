@@ -146,3 +146,23 @@ if [[ "$OUTPUT" != *"2 passed"* ]]; then
     printf 'Expected full fallback to run both inline tests. Output:\n%s\n' "$OUTPUT" >&2
     exit 1
 fi
+
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_CHANGED_TEST_FILES='tests/core/unknown_nested_test.rs' \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+
+if [[ "$OUTPUT" != *"Changed files include nested tests without a direct Cargo target; running full cargo test."* ]]; then
+    printf 'Expected nested test fallback to full cargo test. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+if [[ "$OUTPUT" != *"2 passed"* || "$OUTPUT" != *"1 passed"* ]]; then
+    printf 'Expected full fallback to run top-level and inline tests. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
