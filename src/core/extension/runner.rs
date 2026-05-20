@@ -3,8 +3,11 @@ use std::path::{Path, PathBuf};
 use crate::core::component::Component;
 use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
 use crate::core::engine::resource;
-use crate::core::error::Result;
+use crate::core::error::{Error, Result};
 use crate::core::server::CommandOutput;
+
+const STRICT_VALIDATION_DEPENDENCIES_ENV: &str = "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES";
+const STALE_VALIDATION_DEPENDENCY_PREFIX: &str = "Resolved validation dependency";
 
 /// Output from a extension runner script execution.
 pub struct RunnerOutput {
@@ -209,6 +212,19 @@ impl ExtensionRunner {
         );
 
         let output = self.execute_script(&prepared.execution.extension_path, &env_vars)?;
+        if self.strict_validation_dependencies() {
+            if let Some(message) =
+                stale_validation_dependency_message(&output.stdout, &output.stderr)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "validation_dependencies",
+                    format!("stale validation dependency blocks CI parity: {}", message),
+                    None,
+                    None,
+                ));
+            }
+        }
+
         if let (Some(run_dir_path), Some(child_resource)) =
             (&self.run_dir_path, output.child_resource.as_ref())
         {
@@ -235,6 +251,12 @@ impl ExtensionRunner {
         };
         let run_dir = crate::core::engine::run_dir::RunDir::from_existing(path.clone())?;
         InvocationGuard::acquire(&run_dir, &self.invocation_requirements).map(Some)
+    }
+
+    fn strict_validation_dependencies(&self) -> bool {
+        self.env_vars.iter().any(|(key, value)| {
+            key == STRICT_VALIDATION_DEPENDENCIES_ENV && matches!(value.as_str(), "1" | "true")
+        })
     }
 
     fn prepare_env_vars(
@@ -273,6 +295,19 @@ impl ExtensionRunner {
             },
         )
     }
+}
+
+fn stale_validation_dependency_message(stdout: &str, stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .find(|line| {
+            line.contains(STALE_VALIDATION_DEPENDENCY_PREFIX)
+                && line.contains(" is behind ")
+                && line.contains("commit(s)")
+        })
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -318,5 +353,23 @@ mod tests {
         let runner = ExtensionRunner::for_context(context()).stderr_passthrough(true);
 
         assert!(runner.stderr_passthrough);
+    }
+
+    #[test]
+    fn detects_stale_validation_dependency_warning() {
+        let stderr = "Resolved validation dependency 'data-machine' to local checkout '/tmp/data-machine', but it is behind origin/main by 3 commit(s). Update the checkout or pass an explicit dependency path.";
+
+        let message = stale_validation_dependency_message("", stderr).expect("stale dependency");
+
+        assert!(message.contains("data-machine"));
+        assert!(message.contains("behind origin/main by 3 commit(s)"));
+    }
+
+    #[test]
+    fn ignores_non_stale_validation_dependency_output() {
+        let stderr =
+            "Resolved validation dependency 'data-machine' to local checkout '/tmp/data-machine'.";
+
+        assert!(stale_validation_dependency_message("", stderr).is_none());
     }
 }
