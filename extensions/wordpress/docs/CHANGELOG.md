@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.96.1] - 2026-05-20
+
+### Fixed
+- route bench settings through wp-codebox
+
 ## [2.96.0] - 2026-05-20
 
 ### Added
