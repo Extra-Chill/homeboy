@@ -1,6 +1,7 @@
 //! Trace command output envelopes.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::baseline::TraceBaselineComparison;
 use super::overlay_lock::TraceOverlayLockRecord;
@@ -42,6 +43,8 @@ pub struct TraceRunOutput {
     pub baseline_comparison: Option<TraceBaselineComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hints: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<TraceResolvedProfileOutput>,
 }
 
 #[derive(Serialize)]
@@ -64,6 +67,8 @@ pub struct TraceRunSummaryOutput {
     pub span_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hints: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<TraceResolvedProfileOutput>,
 }
 
 #[derive(Serialize)]
@@ -73,6 +78,32 @@ pub struct TraceListOutput {
     pub component_id: String,
     pub count: usize,
     pub scenarios: Vec<super::parsing::TraceScenario>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<TraceProfileListItem>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct TraceResolvedProfileOutput {
+    pub id: String,
+    pub rig_id: Option<String>,
+    pub component: String,
+    pub scenario: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlays: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct TraceProfileListItem {
+    pub id: String,
+    pub rig_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -120,6 +151,8 @@ pub struct TraceAggregateOutput {
     pub classification_summaries: Vec<TraceClassificationSummaryOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unmatched_span_metadata_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<TraceResolvedProfileOutput>,
 }
 
 #[derive(Serialize, Clone)]
@@ -368,6 +401,7 @@ pub fn from_main_workflow_outputs(
                 .map(|r| r.span_results.len())
                 .unwrap_or(0),
             hints: result.hints,
+            profile: None,
         };
         return (
             TraceCommandOutput::Summary(output),
@@ -400,6 +434,7 @@ fn from_run_workflow_result(
         overlays: result.overlays,
         baseline_comparison: result.baseline_comparison,
         hints: result.hints,
+        profile: None,
     }))
 }
 
@@ -519,6 +554,7 @@ pub fn from_list_workflow(component: String, list: TraceList) -> (TraceCommandOu
             component_id: list.component_id,
             count,
             scenarios: list.scenarios,
+            profiles: Vec::new(),
         }),
         0,
     )

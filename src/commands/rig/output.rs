@@ -190,6 +190,7 @@ mod tests {
                 bench_workloads: Default::default(),
                 trace_workloads: Default::default(),
                 trace_variants: Default::default(),
+                trace_profiles: Default::default(),
                 trace_experiments: Default::default(),
                 trace_guardrails: Default::default(),
                 bench_profiles: Default::default(),

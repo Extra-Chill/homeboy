@@ -20,7 +20,47 @@ homeboy trace compare-variant --rig studio --scenario studio-app-create-site --r
 homeboy trace <component> <scenario> --report=markdown
 homeboy trace <component> <scenario> --baseline
 homeboy trace <component> <scenario> --ratchet
+homeboy trace --profile studio-window-close
+homeboy trace list --profiles
 ```
+
+## Profiles
+
+Trace profiles are named shortcuts declared in rig specs. They resolve to the same runner contract as a normal `homeboy trace` invocation; Homeboy fills unset CLI fields from the profile before resolving the component, rig workloads, overlays, variants, and settings.
+
+```jsonc
+{
+  "trace_profiles": {
+    "studio-window-close": {
+      "component": "studio",
+      "scenario": "close-window-running-site",
+      "settings": {
+        "window_title": "Studio",
+        "retry_count": 2
+      },
+      "overlays": ["overlays/window-lifecycle.patch"],
+      "variants": ["fresh-install-mode"]
+    }
+  }
+}
+```
+
+Run the profile directly:
+
+```sh
+homeboy trace --profile studio-window-close
+```
+
+When `--rig` is omitted, Homeboy searches installed rig specs and requires the profile id to be unique. Pass `--rig <rig-id>` to scope lookup when multiple rigs declare the same profile id. CLI flags override profile fields, so `homeboy trace --profile studio-window-close --scenario close-window-retry` keeps the profile's component/settings while replacing the scenario.
+
+List installed profiles:
+
+```sh
+homeboy trace list --profiles
+homeboy trace list --profiles --rig studio
+```
+
+JSON run, summary, and aggregate outputs include a `profile` object with the resolved profile id, rig id, component, scenario, overlays, variants, and settings used for the invocation.
 
 ## Extension Manifest
 

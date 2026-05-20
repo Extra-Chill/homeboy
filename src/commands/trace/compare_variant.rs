@@ -295,6 +295,7 @@ impl TraceCompareVariantAggregateBuilder {
             focus_spans,
             classification_summaries,
             unmatched_span_metadata_ids: Vec::new(),
+            profile: None,
         }
     }
 }

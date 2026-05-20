@@ -72,6 +72,12 @@ pub struct TraceArgs {
     /// Run trace against a rig-pinned component path after `rig check` passes.
     #[arg(long, value_name = "RIG_ID")]
     pub rig: Option<String>,
+    /// Use a named trace profile declared by a rig.
+    #[arg(long, value_name = "PROFILE_ID")]
+    pub profile: Option<String>,
+    /// With `trace list`, list named trace profiles instead of scenarios.
+    #[arg(long = "profiles")]
+    pub profiles: bool,
     #[command(flatten)]
     pub setting_args: SettingArgs,
     #[command(flatten)]
@@ -190,6 +196,18 @@ pub fn run_markdown(args: TraceArgs, global: &GlobalArgs) -> CmdResult<String> {
         TraceCommandOutput::Compare(compare) => Ok((render_compare_markdown(&compare), exit_code)),
         TraceCommandOutput::Matrix(matrix) => Ok((render_matrix_markdown(&matrix), exit_code)),
         TraceCommandOutput::List(list) => {
+            if !list.profiles.is_empty() || list.command == "trace.list.profiles" {
+                let mut markdown = "# Trace Profiles\n\n".to_string();
+                for profile in list.profiles {
+                    markdown.push_str(&format!("- `{}`", profile.id));
+                    markdown.push_str(&format!(" in rig `{}`", profile.rig_id));
+                    if let Some(scenario) = profile.scenario {
+                        markdown.push_str(&format!(": `{}`", scenario));
+                    }
+                    markdown.push('\n');
+                }
+                return Ok((markdown, exit_code));
+            }
             let mut markdown = format!("# Trace Scenarios: `{}`\n\n", list.component_id);
             for scenario in list.scenarios {
                 markdown.push_str(&format!("- `{}`", scenario.id));
@@ -247,7 +265,14 @@ pub fn run_json_with_output_artifact(
     }
 }
 
-fn run_outputs(args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<TraceCommandOutput>)> {
+fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<TraceCommandOutput>)> {
+    if args.profiles && args.comp.component.as_deref() == Some("list") {
+        let output = run_list_profiles(args.rig.as_deref())?;
+        return Ok(((output, None), 0));
+    }
+
+    resolve_trace_profile_args(&mut args)?;
+
     if args.comp.component.as_deref() == Some("overlay-locks") {
         let (output, exit_code) = run_overlay_locks(args)?;
         return Ok(((output, None), exit_code));
@@ -296,13 +321,19 @@ fn run_outputs(args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<TraceCo
     }
 
     let summary_only = args.json_summary;
+    let profile = resolved_profile_output_for_args(&args);
     let execution = execute_trace_run(args)?;
 
-    let (stdout_output, artifact_output, exit_code) = extension_trace::from_main_workflow_outputs(
-        execution.workflow,
-        execution.rig_state,
-        summary_only,
-    );
+    let (mut stdout_output, mut artifact_output, exit_code) =
+        extension_trace::from_main_workflow_outputs(
+            execution.workflow,
+            execution.rig_state,
+            summary_only,
+        );
+    attach_profile_output(&mut stdout_output, profile.clone());
+    if let Some(output) = artifact_output.as_mut() {
+        attach_profile_output(output, profile);
+    }
     Ok(((stdout_output, artifact_output), exit_code))
 }
 
@@ -739,6 +770,7 @@ fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
         focus_spans,
         classification_summaries,
         unmatched_span_metadata_ids,
+        profile: resolved_profile_output_for_args(&args),
     };
 
     Ok((TraceCommandOutput::Aggregate(output), exit_code))
@@ -981,6 +1013,178 @@ struct TraceRigContext {
     rig_spec: RigSpec,
     rig_package_root: Option<PathBuf>,
     rig_config_root: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+struct ResolvedTraceProfile {
+    rig_id: String,
+    profile: rig::TraceProfileSpec,
+}
+
+fn resolve_trace_profile_args(args: &mut TraceArgs) -> homeboy::core::Result<()> {
+    let Some(profile_id) = args.profile.as_deref() else {
+        return Ok(());
+    };
+    let resolved = resolve_trace_profile(profile_id, args.rig.as_deref())?;
+    if args.comp.component.is_none() {
+        args.comp.component = resolved.profile.component.clone();
+    }
+    if args.scenario.is_none() && args.scenario_arg.is_none() {
+        args.scenario = resolved.profile.scenario.clone();
+    }
+    if args.rig.is_none() {
+        args.rig = resolved
+            .profile
+            .rig
+            .clone()
+            .or_else(|| Some(resolved.rig_id.clone()));
+    }
+    if args.comp.component.is_none() {
+        if let Some(rig_id) = args.rig.as_deref() {
+            let rig_spec = rig::load(rig_id)?;
+            if rig_spec.components.len() == 1 {
+                args.comp.component = rig_spec.components.keys().next().cloned();
+            }
+        }
+    }
+
+    let mut settings = resolved.profile.string_settings();
+    settings.extend(args.setting_args.setting.clone());
+    args.setting_args.setting = settings;
+
+    let mut setting_json = resolved.profile.json_settings();
+    setting_json.extend(args.setting_args.setting_json.clone());
+    args.setting_args.setting_json = setting_json;
+
+    let mut overlays = resolved.profile.overlays.clone();
+    overlays.extend(args.overlays.clone());
+    args.overlays = overlays;
+
+    let mut variants = resolved.profile.variants.clone();
+    variants.extend(args.variants.clone());
+    args.variants = variants;
+    Ok(())
+}
+
+fn resolve_trace_profile(
+    profile_id: &str,
+    rig_id: Option<&str>,
+) -> homeboy::core::Result<ResolvedTraceProfile> {
+    if let Some(rig_id) = rig_id {
+        let rig_spec = rig::load(rig_id)?;
+        let profile = rig_spec.trace_profiles.get(profile_id).ok_or_else(|| {
+            let available = rig_spec.trace_profiles.keys().cloned().collect::<Vec<_>>();
+            homeboy::core::Error::validation_invalid_argument(
+                "--profile",
+                format!("unknown trace profile '{}' in rig '{}'", profile_id, rig_id),
+                available
+                    .is_empty()
+                    .then_some("the selected rig declares no trace profiles".to_string()),
+                (!available.is_empty()).then_some(available),
+            )
+        })?;
+        return Ok(ResolvedTraceProfile {
+            rig_id: rig_id.to_string(),
+            profile: profile.clone(),
+        });
+    }
+
+    let matches = rig::list()?
+        .into_iter()
+        .filter_map(|rig_spec| {
+            rig_spec
+                .trace_profiles
+                .get(profile_id)
+                .cloned()
+                .map(|profile| ResolvedTraceProfile {
+                    rig_id: rig_spec.id,
+                    profile,
+                })
+        })
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [resolved] => Ok(resolved.clone()),
+        [] => Err(homeboy::core::Error::validation_invalid_argument(
+            "--profile",
+            format!("unknown trace profile '{}'", profile_id),
+            Some("declare the profile in a rig spec or pass --rig to scope lookup".to_string()),
+            None,
+        )),
+        many => Err(homeboy::core::Error::validation_invalid_argument(
+            "--profile",
+            format!(
+                "trace profile '{}' is declared by multiple rigs",
+                profile_id
+            ),
+            Some("pass --rig to choose one profile definition".to_string()),
+            Some(many.iter().map(|profile| profile.rig_id.clone()).collect()),
+        )),
+    }
+}
+
+fn resolved_profile_output_for_args(
+    args: &TraceArgs,
+) -> Option<extension_trace::TraceResolvedProfileOutput> {
+    let profile_id = args.profile.clone()?;
+    let scenario = trace_scenario(args).ok()?.to_string();
+    Some(extension_trace::TraceResolvedProfileOutput {
+        id: profile_id,
+        rig_id: args.rig.clone(),
+        component: args.comp.component.clone().unwrap_or_default(),
+        scenario,
+        overlays: args.overlays.clone(),
+        variants: args.variants.clone(),
+        settings: args
+            .setting_args
+            .setting
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .chain(args.setting_args.setting_json.iter().cloned())
+            .collect(),
+    })
+}
+
+fn attach_profile_output(
+    output: &mut TraceCommandOutput,
+    profile: Option<extension_trace::TraceResolvedProfileOutput>,
+) {
+    let Some(profile) = profile else {
+        return;
+    };
+    match output {
+        TraceCommandOutput::Run(run) => run.profile = Some(profile),
+        TraceCommandOutput::Summary(summary) => summary.profile = Some(profile),
+        TraceCommandOutput::Aggregate(aggregate) => aggregate.profile = Some(profile),
+        _ => {}
+    }
+}
+
+fn run_list_profiles(rig_id: Option<&str>) -> homeboy::core::Result<TraceCommandOutput> {
+    let rigs = match rig_id {
+        Some(rig_id) => vec![rig::load(rig_id)?],
+        None => rig::list()?,
+    };
+    let mut profiles = Vec::new();
+    for rig_spec in rigs {
+        for (id, profile) in rig_spec.trace_profiles {
+            profiles.push(extension_trace::TraceProfileListItem {
+                id,
+                rig_id: rig_spec.id.clone(),
+                component: profile.component,
+                scenario: profile.scenario,
+            });
+        }
+    }
+    profiles.sort_by(|a, b| a.rig_id.cmp(&b.rig_id).then(a.id.cmp(&b.id)));
+    Ok(TraceCommandOutput::List(extension_trace::TraceListOutput {
+        command: "trace.list.profiles",
+        component: "profiles".to_string(),
+        component_id: "profiles".to_string(),
+        count: profiles.len(),
+        scenarios: Vec::new(),
+        profiles,
+    }))
 }
 
 fn load_rig_context(rig_id: Option<&str>) -> homeboy::core::Result<Option<TraceRigContext>> {

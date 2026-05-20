@@ -25,6 +25,80 @@ fn aggregate_samples(durations: &[u64]) -> Vec<TraceAggregateSpanSample> {
         .collect()
 }
 
+fn trace_args_for_profile(profile: &str) -> TraceArgs {
+    TraceArgs {
+        comp: PositionalComponentArgs {
+            component: None,
+            path: None,
+        },
+        component_arg: None,
+        scenario: None,
+        scenario_arg: None,
+        compare_after: None,
+        rig: None,
+        profile: Some(profile.to_string()),
+        profiles: false,
+        setting_args: SettingArgs::default(),
+        _json: HiddenJsonArgs::default(),
+        json_summary: false,
+        report: None,
+        experiment: None,
+        repeat: 1,
+        aggregate: None,
+        schedule: TraceSchedule::Grouped,
+        focus_spans: Vec::new(),
+        spans: Vec::new(),
+        phases: Vec::new(),
+        attachments: Vec::new(),
+        phase_preset: None,
+        baseline_args: BaselineArgs::default(),
+        regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        overlays: Vec::new(),
+        variants: Vec::new(),
+        matrix: TraceVariantMatrixMode::None,
+        output_dir: None,
+        keep_overlay: false,
+        stale: false,
+        force: false,
+    }
+}
+
+fn write_trace_rig_with_profile(
+    home: &tempfile::TempDir,
+    rig_id: &str,
+    component_id: &str,
+    path: &std::path::Path,
+) {
+    let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+    fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+    fs::write(
+        rig_dir.join(format!("{}.json", rig_id)),
+        format!(
+            r#"{{
+                    "components": {{
+                        "{component_id}": {{ "path": "{}" }}
+                    }},
+                    "trace_workloads": {{ "nodejs": [
+                        "${{components.{component_id}.path}}/close-window-running-site.trace.mjs"
+                    ] }},
+                    "trace_profiles": {{
+                        "studio-window-close": {{
+                            "component": "{component_id}",
+                            "scenario": "close-window-running-site",
+                            "settings": {{
+                                "window_title": "Studio",
+                                "retry_count": 2
+                            }}
+                        }}
+                    }}
+                }}"#,
+            path.display()
+        ),
+    )
+    .expect("write rig");
+}
+
 #[test]
 fn rig_component_path_and_trace_env_are_threaded() {
     let component_dir = tempfile::TempDir::new().expect("component dir");
@@ -100,6 +174,8 @@ fn rig_trace_list_uses_rig_default_component_and_workloads() {
             scenario_arg: None,
             compare_after: None,
             rig: Some("studio-rig".to_string()),
+            profile: None,
+            profiles: false,
             setting_args: SettingArgs::default(),
             _json: HiddenJsonArgs::default(),
             json_summary: false,
@@ -144,6 +220,123 @@ fn rig_trace_list_uses_rig_default_component_and_workloads() {
             }
             _ => panic!("expected list output"),
         }
+    });
+}
+
+#[test]
+fn trace_profile_resolves_to_normal_trace_run() {
+    with_isolated_home(|home| {
+        write_trace_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig_with_profile(home, "studio-rig", "studio", component_dir.path());
+
+        let ((output, _artifact_output), exit_code) =
+            run_outputs(trace_args_for_profile("studio-window-close"))
+                .expect("profile trace should run");
+
+        assert_eq!(exit_code, 0);
+        let TraceCommandOutput::Run(run) = output else {
+            panic!("expected run output");
+        };
+        let profile = run.profile.expect("resolved profile metadata");
+        assert_eq!(profile.id, "studio-window-close");
+        assert_eq!(profile.rig_id.as_deref(), Some("studio-rig"));
+        assert_eq!(profile.component, "studio");
+        assert_eq!(profile.scenario, "close-window-running-site");
+        assert_eq!(
+            profile.settings.get("window_title"),
+            Some(&serde_json::Value::String("Studio".to_string()))
+        );
+        assert_eq!(
+            profile.settings.get("retry_count"),
+            Some(&serde_json::json!(2))
+        );
+    });
+}
+
+#[test]
+fn trace_profile_cli_fields_override_profile_fields() {
+    with_isolated_home(|home| {
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig_with_profile(home, "studio-rig", "studio", component_dir.path());
+        let mut args = trace_args_for_profile("studio-window-close");
+        args.scenario = Some("close-window-retry".to_string());
+        args.setting_args
+            .setting
+            .push(("window_title".to_string(), "Studio Dev".to_string()));
+
+        resolve_trace_profile_args(&mut args).expect("profile resolves");
+
+        assert_eq!(args.comp.component.as_deref(), Some("studio"));
+        assert_eq!(args.scenario.as_deref(), Some("close-window-retry"));
+        assert_eq!(args.rig.as_deref(), Some("studio-rig"));
+        assert_eq!(
+            args.setting_args.setting,
+            vec![
+                ("window_title".to_string(), "Studio".to_string()),
+                ("window_title".to_string(), "Studio Dev".to_string())
+            ]
+        );
+    });
+}
+
+#[test]
+fn trace_list_profiles_lists_rig_profiles() {
+    with_isolated_home(|home| {
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig_with_profile(home, "studio-rig", "studio", component_dir.path());
+
+        let ((output, _artifact_output), exit_code) = run_outputs(TraceArgs {
+            comp: PositionalComponentArgs {
+                component: Some("list".to_string()),
+                path: None,
+            },
+            component_arg: None,
+            scenario: None,
+            scenario_arg: None,
+            compare_after: None,
+            rig: None,
+            profile: None,
+            profiles: true,
+            setting_args: SettingArgs::default(),
+            _json: HiddenJsonArgs::default(),
+            json_summary: false,
+            report: None,
+            experiment: None,
+            repeat: 1,
+            aggregate: None,
+            schedule: TraceSchedule::Grouped,
+            focus_spans: Vec::new(),
+            spans: Vec::new(),
+            phases: Vec::new(),
+            attachments: Vec::new(),
+            phase_preset: None,
+            baseline_args: BaselineArgs::default(),
+            regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+            regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+            overlays: Vec::new(),
+            variants: Vec::new(),
+            matrix: TraceVariantMatrixMode::None,
+            output_dir: None,
+            keep_overlay: false,
+            stale: false,
+            force: false,
+        })
+        .expect("profile list should run");
+
+        assert_eq!(exit_code, 0);
+        let TraceCommandOutput::List(list) = output else {
+            panic!("expected list output");
+        };
+        assert_eq!(list.command, "trace.list.profiles");
+        assert_eq!(list.count, 1);
+        assert_eq!(list.profiles[0].id, "studio-window-close");
+        assert_eq!(list.profiles[0].rig_id, "studio-rig");
+        assert_eq!(list.profiles[0].component.as_deref(), Some("studio"));
+        assert_eq!(
+            list.profiles[0].scenario.as_deref(),
+            Some("close-window-running-site")
+        );
     });
 }
 
@@ -199,6 +392,8 @@ fn rig_trace_list_uses_scoped_workload_preflight() {
             scenario_arg: None,
             compare_after: None,
             rig: Some("studio-rig".to_string()),
+            profile: None,
+            profiles: false,
             setting_args: SettingArgs::default(),
             _json: HiddenJsonArgs::default(),
             json_summary: false,
@@ -254,6 +449,8 @@ fn rig_trace_run_uses_rig_owned_workload_extension_without_component_link() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -316,6 +513,8 @@ fn trace_run_persists_observation_history() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -401,6 +600,8 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -488,6 +689,8 @@ fn trace_repeat_loads_span_metadata_and_reports_unknown_ids() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -664,6 +867,8 @@ fn trace_repeat_reports_overlay_touched_files_at_top_level() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -741,6 +946,8 @@ fn trace_run_resolves_named_variants_and_reports_unknown_names() {
             scenario_arg: None,
             compare_after: None,
             rig: Some("studio-rig".to_string()),
+            profile: None,
+            profiles: false,
             setting_args: SettingArgs::default(),
             _json: HiddenJsonArgs::default(),
             json_summary: false,
@@ -850,6 +1057,8 @@ fn trace_compare_variant_writes_experiment_bundle() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -925,6 +1134,8 @@ fn trace_compare_variant_resolves_named_variants() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -1015,6 +1226,8 @@ fn trace_compare_variant_reports_unknown_named_variants() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -1074,6 +1287,8 @@ fn trace_run_expands_phase_chain_into_adjacent_and_total_spans() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -1152,6 +1367,8 @@ fn trace_run_expands_named_workload_phase_preset() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("preset-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -1221,6 +1438,8 @@ fn trace_aggregate_spans_uses_workload_default_phase_preset() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("preset-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
@@ -1354,6 +1573,7 @@ fn aggregate_markdown_includes_percentile_columns() {
         focus_spans: Vec::new(),
         classification_summaries: Vec::new(),
         unmatched_span_metadata_ids: Vec::new(),
+        profile: None,
     };
 
     let markdown = render_aggregate_markdown(&aggregate);
@@ -1412,6 +1632,8 @@ fn failed_trace_run_persists_observation_history() {
                 scenario_arg: None,
                 compare_after: None,
                 rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
                 setting_args: SettingArgs::default(),
                 _json: HiddenJsonArgs::default(),
                 json_summary: false,
