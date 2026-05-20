@@ -80,7 +80,8 @@ Each dependency entry may be either:
 WordPress bench runs can declare Playground workloads in extension settings when
 the workload should be configured by the repo instead of living under
 `tests/bench/*.php`. Configured workloads run after the existing Playground
-bootstrap, `playground_blueprint`, dependency mounts, and component load.
+bootstrap, `playground_blueprint`, dependency mounts, and component load through
+a generated WP Codebox recipe.
 
 ```json
 {
@@ -347,7 +348,7 @@ for the dedicated agent sandbox guide.
 
 Repos can declare first-class scenario manifests and let the WordPress runner
 compile them into `playground_workloads`. This keeps eval/RL-style scenarios on
-the existing Playground bench execution path instead of adding a second runner.
+the WP Codebox recipe execution path instead of adding a second runner.
 
 ```json
 {
@@ -392,8 +393,7 @@ Supported fields:
 - `prompt` or `prompt_file`: prompt text is copied into scenario metadata. File
   references resolve relative to the manifest file.
 - `blueprint` or `blueprint_file`: inline object or JSON file passed to
-  Playground as the run blueprint. Multiple manifests in one run must use the
-  same blueprint because the existing Playground process boots once.
+  WP Codebox as part of the generated recipe runtime blueprint.
 - `run`: existing `playground_workloads` steps for the model or agent action
   loop. The supported step types are still `php`, `ability`, and `wp-cli`.
 - `grader` or `grader_file`: PHP file appended after `run`, so grading happens

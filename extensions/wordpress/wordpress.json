@@ -866,21 +866,21 @@
       "label": "Playground blueprint",
       "type": "object",
       "default": {},
-      "description": "Reserved cold-boot scenario blueprint setting. The WP Codebox bench runner currently fails fast when this is set so cold-boot support can be ported explicitly. Empty object means stock WordPress."
+      "description": "Runtime blueprint merged into the generated WP Codebox bench recipe. Empty object means stock WordPress."
     },
     {
       "id": "playground_workloads",
       "label": "Bench workloads",
       "type": "array",
       "default": [],
-      "description": "Config-declared WordPress bench workloads passed to wp-codebox bench-run after dependency mounts and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file}, {type: 'ability', ability|name, input}, or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata. Step returns use the same {metrics, artifacts, metadata} shape as Node.js bench workloads."
+      "description": "Config-declared WordPress bench workloads passed to wordpress.bench through the generated WP Codebox recipe after dependency mounts and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file}, {type: 'ability', ability|name, input}, or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata. Step returns use the same {metrics, artifacts, metadata} shape as Node.js bench workloads."
     },
     {
       "id": "playground_scenario_manifests",
       "label": "Playground scenario manifests",
       "type": "array",
       "default": [],
-      "description": "Reserved scenario manifest setting. The WP Codebox bench runner currently fails fast when manifests are set so manifest compilation can be ported explicitly instead of falling back to a second runtime."
+      "description": "Scenario manifest files or inline objects compiled into wordpress.bench workloads in the generated WP Codebox recipe. Prompt, blueprint, grader, rules, tags, limits, and metadata are preserved in BenchResults metadata."
     },
     {
       "id": "bench_site_mode",

@@ -61,12 +61,172 @@ fi
 settings_json="${HOMEBOY_SETTINGS_JSON:-}"
 [ -n "$settings_json" ] || settings_json="{}"
 
-if printf '%s' "$settings_json" | jq -e '((.playground_blueprint // {}) | length > 0) or ((.playground_scenario_manifests // .scenario_manifests // []) | length > 0) or ((.bench_site_mode // "fresh") == "installed")' >/dev/null 2>&1; then
-    echo "Error: this bench configuration uses Playground-only bootstrap features that no longer dispatch to the legacy runner." >&2
-    echo "       Port the setting to wp-codebox first: playground_blueprint, scenario manifests, or bench_site_mode=installed." >&2
+if printf '%s' "$settings_json" | jq -e '((.bench_site_mode // "fresh") == "installed")' >/dev/null 2>&1; then
+    echo "Error: bench_site_mode=installed requires a persisted-site WP Codebox recipe contract." >&2
     FAILED_STEP="WP Codebox bench configuration"
     exit 1
 fi
+
+homeboy_wp_codebox_resolve_host_path() {
+    local base_dir="$1"
+    local path_value="$2"
+    if [[ "$path_value" = /* ]]; then
+        printf '%s\n' "$path_value"
+    else
+        printf '%s\n' "${base_dir}/${path_value}"
+    fi
+}
+
+homeboy_wp_codebox_component_relative_path() {
+    local host_path="$1"
+    if [[ "$host_path" = "$PLUGIN_PATH"/* ]]; then
+        printf '%s\n' "${host_path#"$PLUGIN_PATH/"}"
+    else
+        echo "Error: scenario manifest file references must stay under component root: $host_path" >&2
+        FAILED_STEP="Scenario manifest setup"
+        exit 1
+    fi
+}
+
+homeboy_wp_codebox_compile_scenario_manifests() {
+    local entries_json
+    entries_json=$(printf '%s' "$settings_json" | jq -c '
+        .playground_scenario_manifests // .scenario_manifests // []
+        | if type == "array" then . elif type == "string" or type == "object" then [.] else [] end
+    ' 2>/dev/null || echo '[]')
+
+    SCENARIO_MANIFEST_WORKLOADS_JSON="[]"
+    SCENARIO_MANIFEST_BLUEPRINT_JSON="{}"
+    if ! printf '%s' "$entries_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local index=0
+    while IFS= read -r manifest_entry; do
+        [ -n "$manifest_entry" ] || continue
+        local entry_type manifest_json manifest_host manifest_dir manifest_rel
+        entry_type=$(printf '%s' "$manifest_entry" | jq -r 'type')
+        manifest_dir="$PLUGIN_PATH"
+        manifest_rel=""
+        if [ "$entry_type" = "string" ]; then
+            local manifest_ref
+            manifest_ref=$(printf '%s' "$manifest_entry" | jq -r '.')
+            manifest_host=$(homeboy_wp_codebox_resolve_host_path "$PLUGIN_PATH" "$manifest_ref")
+            if [ ! -f "$manifest_host" ]; then
+                echo "Error: scenario manifest not found: $manifest_host" >&2
+                FAILED_STEP="Scenario manifest setup"
+                exit 1
+            fi
+            manifest_dir=$(dirname "$manifest_host")
+            manifest_rel=$(homeboy_wp_codebox_component_relative_path "$manifest_host")
+            manifest_json=$(jq -c '.' "$manifest_host")
+        elif [ "$entry_type" = "object" ]; then
+            manifest_json=$(printf '%s' "$manifest_entry" | jq -c '.')
+        else
+            echo "Error: playground_scenario_manifests[$index] must be a path string or object" >&2
+            FAILED_STEP="Scenario manifest setup"
+            exit 1
+        fi
+
+        local prompt prompt_file_ref prompt_file_host prompt_file_rel
+        prompt=$(printf '%s' "$manifest_json" | jq -r 'if (.prompt? | type) == "string" then .prompt else empty end')
+        prompt_file_ref=$(printf '%s' "$manifest_json" | jq -r 'if ((.prompt_file? // .prompt_path?) | type) == "string" then (.prompt_file // .prompt_path) else empty end')
+        prompt_file_rel=""
+        if [ -z "$prompt" ] && [ -n "$prompt_file_ref" ]; then
+            prompt_file_host=$(homeboy_wp_codebox_resolve_host_path "$manifest_dir" "$prompt_file_ref")
+            if [ ! -f "$prompt_file_host" ]; then
+                echo "Error: scenario prompt file not found: $prompt_file_host" >&2
+                FAILED_STEP="Scenario manifest setup"
+                exit 1
+            fi
+            prompt=$(<"$prompt_file_host")
+            prompt_file_rel=$(homeboy_wp_codebox_component_relative_path "$prompt_file_host")
+        fi
+
+        local blueprint_json blueprint_ref blueprint_host blueprint_rel
+        blueprint_json="{}"
+        blueprint_rel=""
+        if printf '%s' "$manifest_json" | jq -e '(.blueprint? | type) == "object"' >/dev/null 2>&1; then
+            blueprint_json=$(printf '%s' "$manifest_json" | jq -c '.blueprint')
+        else
+            blueprint_ref=$(printf '%s' "$manifest_json" | jq -r 'if ((.blueprint? // .blueprint_file?) | type) == "string" then (.blueprint // .blueprint_file) else empty end')
+            if [ -n "$blueprint_ref" ]; then
+                blueprint_host=$(homeboy_wp_codebox_resolve_host_path "$manifest_dir" "$blueprint_ref")
+                if [ ! -f "$blueprint_host" ]; then
+                    echo "Error: scenario blueprint file not found: $blueprint_host" >&2
+                    FAILED_STEP="Scenario manifest setup"
+                    exit 1
+                fi
+                blueprint_json=$(jq -c '.' "$blueprint_host")
+                blueprint_rel=$(homeboy_wp_codebox_component_relative_path "$blueprint_host")
+            fi
+        fi
+        if printf '%s' "$blueprint_json" | jq -e 'length > 0' >/dev/null 2>&1; then
+            SCENARIO_MANIFEST_BLUEPRINT_JSON=$(jq -nc --argjson base "$SCENARIO_MANIFEST_BLUEPRINT_JSON" --argjson next "$blueprint_json" '
+                ($base + $next) | .steps = (($base.steps // []) + ($next.steps // []))
+            ')
+        fi
+
+        local grader_ref grader_host grader_rel run_json
+        grader_ref=$(printf '%s' "$manifest_json" | jq -r 'if ((.grader? // .grader_file?) | type) == "string" then (.grader // .grader_file) else empty end')
+        grader_rel=""
+        if [ -n "$grader_ref" ]; then
+            grader_host=$(homeboy_wp_codebox_resolve_host_path "$manifest_dir" "$grader_ref")
+            if [ ! -f "$grader_host" ]; then
+                echo "Error: scenario grader file not found: $grader_host" >&2
+                FAILED_STEP="Scenario manifest setup"
+                exit 1
+            fi
+            grader_rel=$(homeboy_wp_codebox_component_relative_path "$grader_host")
+        fi
+
+        run_json=$(printf '%s' "$manifest_json" | jq -c 'if (.run? | type) == "array" then .run else [] end')
+        if [ -n "$grader_rel" ]; then
+            run_json=$(jq -nc --argjson run "$run_json" --arg grader "$grader_rel" '$run + [{type: "php", file: $grader}]')
+        fi
+        if ! printf '%s' "$run_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+            echo "Error: scenario manifest requires run steps or a grader PHP file" >&2
+            FAILED_STEP="Scenario manifest setup"
+            exit 1
+        fi
+
+        local workload_json
+        workload_json=$(jq -nc \
+            --argjson manifest "$manifest_json" \
+            --argjson run "$run_json" \
+            --arg prompt "$prompt" \
+            --arg manifestFile "$manifest_rel" \
+            --arg promptFile "$prompt_file_rel" \
+            --arg blueprintFile "$blueprint_rel" \
+            --arg graderFile "$grader_rel" \
+            '($manifest.metadata // {}) as $metadata |
+            {
+                id: ($manifest.id // $manifest.label),
+                label: $manifest.label,
+                run: $run,
+                tags: ($manifest.tags // []),
+                artifacts: ($manifest.artifacts // {}),
+                metadata: ($metadata + {
+                    scenario_manifest: $manifestFile,
+                    prompt: $prompt,
+                    prompt_file: $promptFile,
+                    blueprint_file: $blueprintFile,
+                    grader_file: $graderFile,
+                    limits: ($manifest.limits // {}),
+                    rules: ($manifest.rules // {}),
+                    general_rules: ($manifest.general_rules // $manifest.rules.general // []),
+                    task_rules: ($manifest.task_rules // $manifest.rules.task_specific // []),
+                    probes: ($manifest.probes // {})
+                })
+            }
+            | if .label == null then del(.label) else . end
+            | .metadata |= with_entries(select(.value != "" and .value != {}))')
+        SCENARIO_MANIFEST_WORKLOADS_JSON=$(jq -nc --argjson workloads "$SCENARIO_MANIFEST_WORKLOADS_JSON" --argjson workload "$workload_json" '$workloads + [$workload]')
+        index=$((index + 1))
+    done < <(printf '%s' "$entries_json" | jq -c '.[]')
+}
+
+homeboy_wp_codebox_compile_scenario_manifests
 
 PLAYGROUND_WORDPRESS_VERSION="7.0"
 if [ "$settings_json" != "{}" ]; then
@@ -111,20 +271,23 @@ if [ "$settings_json" != "{}" ]; then
     BENCH_ENV_JSON=$(printf '%s' "$settings_json" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
     PLAYGROUND_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.playground_workloads // []' 2>/dev/null || echo "[]")
 fi
+PLAYGROUND_WORKLOADS_JSON=$(jq -nc --argjson declared "$PLAYGROUND_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$declared + $scenarios')
 
-MOUNT_ARGS=()
-DEPENDENCY_ARGS=()
+EXTRA_PLUGINS_JSON=$(jq -nc --arg source "$PLUGIN_PATH" --arg slug "$PLUGIN_SLUG" '[{source: $source, slug: $slug, activate: false}]')
+MOUNTS_JSON="[]"
+DEPENDENCY_SLUGS=()
 if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
         [ -n "$dep_path" ] || continue
         dep_slug="$(homeboy_get_validation_dependency_slug "$dep_path" || basename "$dep_path")"
-        DEPENDENCY_ARGS+=("--dependency" "${dep_path}:${dep_slug}")
+        DEPENDENCY_SLUGS+=("$dep_slug")
+        EXTRA_PLUGINS_JSON=$(jq -nc --argjson plugins "$EXTRA_PLUGINS_JSON" --arg source "$dep_path" --arg slug "$dep_slug" '$plugins + [{source: $source, slug: $slug, activate: false}]')
     done <<< "$DEPENDENCY_PATHS"
 fi
 
 PLUGIN_DB_PHP="${PLUGIN_PATH}/db.php"
 if [ -f "$PLUGIN_DB_PHP" ]; then
-    MOUNT_ARGS+=("--mount" "${PLUGIN_DB_PHP}:/wordpress/wp-content/db.php")
+    MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$PLUGIN_DB_PHP" '$mounts + [{source: $source, target: "/wordpress/wp-content/db.php", mode: "readonly"}]')
 fi
 
 PLAYGROUND_FILE_MOUNTS_JSON="[]"
@@ -167,14 +330,14 @@ if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and lengt
             FAILED_STEP="WP Codebox file mount setup"
             exit 1
         fi
-        MOUNT_ARGS+=("--mount" "${mount_host}:${mount_to}")
+        MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$mount_host" --arg target "$mount_to" '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
     done < <(printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -c '.[]')
 fi
 
 SHARED_STATE_HOST="${HOMEBOY_BENCH_SHARED_STATE:-}"
 if [ -n "$SHARED_STATE_HOST" ]; then
     mkdir -p "$SHARED_STATE_HOST"
-    MOUNT_ARGS+=("--mount" "${SHARED_STATE_HOST}:/bench-shared-state")
+    MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$SHARED_STATE_HOST" '$mounts + [{source: $source, target: "/bench-shared-state", mode: "readwrite"}]')
     BENCH_ENV_JSON=$(jq -nc --argjson env "$BENCH_ENV_JSON" --arg shared "/bench-shared-state" --arg instance "${HOMEBOY_BENCH_INSTANCE_ID:-0}" --arg concurrency "${HOMEBOY_BENCH_CONCURRENCY:-1}" '$env + {HOMEBOY_BENCH_SHARED_STATE: $shared, HOMEBOY_BENCH_INSTANCE_ID: $instance, HOMEBOY_BENCH_CONCURRENCY: $concurrency}')
     WP_CONFIG_DEFINES_JSON=$(jq -nc --argjson defines "$WP_CONFIG_DEFINES_JSON" --arg shared "/bench-shared-state" --arg instance "${HOMEBOY_BENCH_INSTANCE_ID:-0}" --arg concurrency "${HOMEBOY_BENCH_CONCURRENCY:-1}" '$defines + {HOMEBOY_BENCH_SHARED_STATE: $shared, HOMEBOY_BENCH_INSTANCE_ID: $instance, HOMEBOY_BENCH_CONCURRENCY: $concurrency}')
 fi
@@ -198,20 +361,68 @@ echo "Running bench workloads via WP Codebox..."
 echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
 echo "  Backend: wp-codebox (WordPress Playground runtime)"
 
+DEPENDENCY_SLUGS_CSV=""
+if [ ${#DEPENDENCY_SLUGS[@]} -gt 0 ]; then
+    DEPENDENCY_SLUGS_CSV=$(IFS=,; printf '%s' "${DEPENDENCY_SLUGS[*]}")
+fi
+
+PLAYGROUND_BLUEPRINT_JSON="{}"
+if [ "$settings_json" != "{}" ]; then
+    PLAYGROUND_BLUEPRINT_JSON=$(printf '%s' "$settings_json" | jq -c '.playground_blueprint // {}' 2>/dev/null || echo "{}")
+fi
+RUNTIME_BLUEPRINT_JSON=$(jq -nc \
+    --argjson base "$PLAYGROUND_BLUEPRINT_JSON" \
+    --argjson scenario "$SCENARIO_MANIFEST_BLUEPRINT_JSON" \
+    --argjson defines "$WP_CONFIG_DEFINES_JSON" '
+    ($base + $scenario) as $merged |
+    ($merged.steps // []) as $steps |
+    if ($defines | length) > 0 then
+        $merged + {steps: ($steps + [{step: "defineWpConfigConsts", consts: $defines}])}
+    else
+        $merged + {steps: $steps}
+    end
+')
+
+WORKFLOW_STEP_JSON=$(jq -nc \
+    --arg component "$COMPONENT_ID" \
+    --arg slug "$PLUGIN_SLUG" \
+    --arg iterations "$ITERATIONS" \
+    --arg warmup "$WARMUP_ITERATIONS" \
+    --arg dependencySlugs "$DEPENDENCY_SLUGS_CSV" \
+    --argjson env "$BENCH_ENV_JSON" \
+    --argjson workloads "$PLAYGROUND_WORKLOADS_JSON" '
+    {
+        command: "wordpress.bench",
+        args: [
+            "component-id=" + $component,
+            "plugin-slug=" + $slug,
+            "iterations=" + $iterations,
+            "warmup=" + $warmup,
+            "dependency-slugs=" + $dependencySlugs,
+            "env-json=" + ($env | tostring),
+            "workloads-json=" + ($workloads | tostring)
+        ]
+    }
+')
+
+RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-recipe.XXXXXX")
+jq -n \
+    --arg wp "$PLAYGROUND_WORDPRESS_VERSION" \
+    --argjson blueprint "$RUNTIME_BLUEPRINT_JSON" \
+    --argjson extraPlugins "$EXTRA_PLUGINS_JSON" \
+    --argjson mounts "$MOUNTS_JSON" \
+    --argjson step "$WORKFLOW_STEP_JSON" \
+    '{
+        schema: "wp-codebox/workspace-recipe/v1",
+        runtime: {wp: $wp, blueprint: $blueprint},
+        inputs: {extraPlugins: $extraPlugins, mounts: $mounts},
+        workflow: {steps: [$step]}
+    }' > "$RECIPE_FILE"
+
 WP_CODEBOX_TMPFILE=$(mktemp)
 set +e
-"${wp_codebox_command[@]}" bench-run \
-    --component "$PLUGIN_PATH" \
-    --component-id "$COMPONENT_ID" \
-    --plugin-slug "$PLUGIN_SLUG" \
-    "${DEPENDENCY_ARGS[@]}" \
-    "${MOUNT_ARGS[@]}" \
-    --env-json "$BENCH_ENV_JSON" \
-    --wp-config-defines-json "$WP_CONFIG_DEFINES_JSON" \
-    --workloads-json "$PLAYGROUND_WORKLOADS_JSON" \
-    --iterations "$ITERATIONS" \
-    --warmup "$WARMUP_ITERATIONS" \
-    --wp "$PLAYGROUND_WORDPRESS_VERSION" \
+"${wp_codebox_command[@]}" recipe-run \
+    --recipe "$RECIPE_FILE" \
     --artifacts "$ARTIFACTS_DIR" \
     --json \
     > "$WP_CODEBOX_TMPFILE" 2>&1
@@ -236,3 +447,4 @@ jq '.benchResults' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
 homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE"
 
 rm -f "$WP_CODEBOX_TMPFILE"
+rm -f "$RECIPE_FILE"
