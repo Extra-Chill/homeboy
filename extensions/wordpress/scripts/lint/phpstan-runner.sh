@@ -852,7 +852,11 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         if [ -n "$parsed_output" ]; then
             echo ""
             echo "$parsed_output"
-        elif [ -n "$json_output" ]; then
+        elif [ -n "$json_output" ] && echo "$json_output" | php -r '
+            $json = json_decode(file_get_contents("php://stdin"), true);
+            if (!$json) exit(0);
+            exit((int) ($json["totals"]["file_errors"] ?? 0) > 0 ? 0 : 1);
+        ' 2>/dev/null; then
             # Fallback: show raw JSON when PHP parsing fails
             echo ""
             echo "ERRORS (raw):"

@@ -137,6 +137,7 @@ run_phpstan
 assert_contains "--level=7" "full-component PHPStan run defaults to level 7"
 assert_not_contains "--baseline" "full-component PHPStan run avoids removed --baseline flag"
 assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan-baseline.neon" "full-component PHPStan config includes component baseline via neon"
+assert_file_not_contains "$OUTPUT_FILE" "ERRORS (raw)" "zero-error PHPStan JSON should not be printed as raw errors"
 
 HOMEBOY_LINT_GLOB='{main.php,assets/app.js,includes/extra.php}' run_phpstan
 assert_contains "${COMPONENT_DIR}/main.php" "glob scope includes matching PHP source file"
