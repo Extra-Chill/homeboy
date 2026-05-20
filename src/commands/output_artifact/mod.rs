@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::cli_surface::{CommandOutputArtifactPolicy, Commands};
+use crate::cli_surface::{CommandOutputArtifactPolicy, CommandResponseMode, Commands};
 
 use super::utils::response as output;
 use super::{review, trace, GlobalArgs};
@@ -9,6 +9,26 @@ pub struct JsonCommandRun {
     pub stdout_result: homeboy::core::Result<Value>,
     pub exit_code: i32,
     pub output_file_result: Option<homeboy::core::Result<Value>>,
+}
+
+pub fn run_and_print(
+    command: Commands,
+    global: &GlobalArgs,
+    policy: CommandOutputArtifactPolicy,
+    output_file: Option<&str>,
+    mode: CommandResponseMode,
+) -> i32 {
+    let json_run = run_json(command, global, policy);
+
+    if let Some(path) = output_file {
+        write_to_file(&json_run, policy, path);
+    }
+
+    if let CommandResponseMode::Json = mode {
+        output::print_json_result(json_run.stdout_result, json_run.exit_code).ok();
+    }
+
+    json_run.exit_code
 }
 
 pub fn run_json(
