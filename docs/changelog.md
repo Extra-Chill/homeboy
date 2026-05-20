@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.188.15] - 2026-05-20
+
+### Fixed
+- let homeboy own release creation
+
 ## [0.188.14] - 2026-05-20
 
 ### Changed
