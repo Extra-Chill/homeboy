@@ -20,6 +20,6 @@ pub fn run(command: Commands, global: &GlobalArgs, output_file: Option<&str>) ->
         global,
         output_artifact_policy,
         output_file,
-        mode,
+        matches!(mode, CommandResponseMode::Json),
     )
 }
