@@ -22,12 +22,7 @@ fn run_markdown(command: Commands, global: &GlobalArgs) -> homeboy::core::Result
         Commands::Trace(args) => trace::run_markdown(args, global),
         Commands::Runs(args) => runs::run_markdown(args, global),
         Commands::Report(args) => report::run_markdown(args),
-        _ => Err(homeboy::core::Error::validation_invalid_argument(
-            "output_mode",
-            "Command does not support markdown output",
-            None,
-            None,
-        )),
+        _ => unsupported_output("markdown"),
     }
 }
 
@@ -39,13 +34,17 @@ fn run_plain_text(command: Commands, global: &GlobalArgs) -> homeboy::core::Resu
                 "Unexpected output type for raw mode",
             )),
         },
-        _ => Err(homeboy::core::Error::validation_invalid_argument(
-            "output_mode",
-            "Command does not support plain text output",
-            None,
-            None,
-        )),
+        _ => unsupported_output("plain text"),
     }
+}
+
+fn unsupported_output(mode: &str) -> homeboy::core::Result<(String, i32)> {
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "output_mode",
+        format!("Command does not support {mode} output"),
+        None,
+        None,
+    ))
 }
 
 #[cfg(test)]
