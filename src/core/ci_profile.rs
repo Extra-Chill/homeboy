@@ -6,7 +6,7 @@ use std::process::Command;
 
 use crate::core::error::{Error, Result};
 use crate::core::extension::{
-    self, CiJobFidelity, CiJobSpec, CiLocalContext, CiProfileSpec, ExtensionManifest,
+    self, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec, ExtensionManifest,
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -28,8 +28,8 @@ pub struct CiProfileSummary {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CiJobSummary {
     pub id: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub check_names: Vec<String>,
+    #[serde(flatten)]
+    pub mapping: CiJobMapping,
     pub command: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
@@ -37,10 +37,6 @@ pub struct CiJobSummary {
     pub env: BTreeMap<String, String>,
     #[serde(flatten)]
     pub local_context: CiLocalContext,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -73,6 +69,7 @@ pub struct CiRunOutput {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CiJobRunOutput {
     pub id: String,
+    pub ci_context: CiContext,
     pub command: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
@@ -89,6 +86,17 @@ pub struct CiResolvedJob {
     pub extension_id: String,
     pub id: String,
     pub spec: CiJobSpec,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CiContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    pub job_id: String,
+    #[serde(flatten)]
+    pub mapping: CiJobMapping,
+    #[serde(flatten)]
+    pub local_context: CiLocalContext,
 }
 
 pub fn list_for_extension(source_path: &Path, extension_id: &str) -> Result<CiInventory> {
@@ -257,6 +265,10 @@ pub fn ci_job_env(job: Option<&CiResolvedJob>) -> Vec<(String, String)> {
     .unwrap_or_default()
 }
 
+pub fn ci_context_for_job(job: Option<&CiResolvedJob>, profile: Option<&str>) -> Option<CiContext> {
+    job.map(|job| ci_context(&job.id, &job.spec, profile))
+}
+
 pub fn run_from_manifest(
     source_path: &Path,
     extension_id: &str,
@@ -271,6 +283,11 @@ pub fn run_from_manifest(
             None,
         )
     })?;
+
+    let profile_id = match &selection {
+        CiRunSelection::Profile(profile_id) => Some(profile_id.clone()),
+        CiRunSelection::Job(_) => None,
+    };
 
     let job_ids = match &selection {
         CiRunSelection::Job(job_id) => vec![job_id.clone()],
@@ -312,7 +329,7 @@ pub fn run_from_manifest(
                 Some(ci.jobs.keys().cloned().collect()),
             )
         })?;
-        jobs.push(run_job(source_path, &job_id, job)?);
+        jobs.push(run_job(source_path, &job_id, job, profile_id.as_deref())?);
     }
 
     let success = jobs.iter().all(|job| job.success);
@@ -325,7 +342,12 @@ pub fn run_from_manifest(
     })
 }
 
-fn run_job(source_path: &Path, job_id: &str, job: &CiJobSpec) -> Result<CiJobRunOutput> {
+fn run_job(
+    source_path: &Path,
+    job_id: &str,
+    job: &CiJobSpec,
+    profile: Option<&str>,
+) -> Result<CiJobRunOutput> {
     let output = Command::new(&job.command)
         .args(&job.args)
         .envs(&job.env)
@@ -340,6 +362,7 @@ fn run_job(source_path: &Path, job_id: &str, job: &CiJobSpec) -> Result<CiJobRun
 
     Ok(CiJobRunOutput {
         id: job_id.to_string(),
+        ci_context: ci_context(job_id, job, profile),
         command: job.command.clone(),
         args: job.args.clone(),
         success: output.status.success(),
@@ -347,6 +370,15 @@ fn run_job(source_path: &Path, job_id: &str, job: &CiJobSpec) -> Result<CiJobRun
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     })
+}
+
+fn ci_context(job_id: &str, job: &CiJobSpec, profile: Option<&str>) -> CiContext {
+    CiContext {
+        profile: profile.map(ToString::to_string),
+        job_id: job_id.to_string(),
+        mapping: job.mapping.clone(),
+        local_context: job.local_context.clone(),
+    }
 }
 
 fn profile_summaries(profiles: &BTreeMap<String, CiProfileSpec>) -> Vec<CiProfileSummary> {
@@ -364,13 +396,11 @@ fn job_summaries(jobs: &BTreeMap<String, CiJobSpec>) -> Vec<CiJobSummary> {
     jobs.iter()
         .map(|(id, job)| CiJobSummary {
             id: id.clone(),
-            check_names: job.check_names.clone(),
+            mapping: job.mapping.clone(),
             command: job.command.clone(),
             args: job.args.clone(),
             env: job.env.clone(),
             local_context: job.local_context.clone(),
-            provider: job.provider.clone(),
-            workflow: job.workflow.clone(),
         })
         .collect()
 }
@@ -701,6 +731,37 @@ mod tests {
     }
 
     #[test]
+    fn test_ci_context_for_job() {
+        let job = CiResolvedJob {
+            extension_id: "test".to_string(),
+            id: "unit".to_string(),
+            spec: CiJobSpec {
+                mapping: CiJobMapping {
+                    check_names: vec!["Unit tests".to_string()],
+                    provider: Some("github-actions".to_string()),
+                    workflow: Some("ci.yml".to_string()),
+                },
+                command: "test".to_string(),
+                local_context: CiLocalContext {
+                    fidelity: CiJobFidelity::LocalPartial,
+                    limitations: vec!["matrix shard not reproduced".to_string()],
+                },
+                ..CiJobSpec::default()
+            },
+        };
+
+        let context = ci_context_for_job(Some(&job), Some("pr")).expect("context");
+
+        assert_eq!(context.profile.as_deref(), Some("pr"));
+        assert_eq!(context.job_id, "unit");
+        assert_eq!(context.mapping.check_names, vec!["Unit tests"]);
+        assert_eq!(context.mapping.provider.as_deref(), Some("github-actions"));
+        assert_eq!(context.mapping.workflow.as_deref(), Some("ci.yml"));
+        assert_eq!(context.local_context.fidelity, CiJobFidelity::LocalPartial);
+        assert_eq!(context.local_context.limitations.len(), 1);
+    }
+
+    #[test]
     fn run_from_manifest_executes_profile_jobs() {
         let tmp = TempDir::new().expect("temp dir");
         let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
@@ -728,6 +789,8 @@ mod tests {
 
         assert!(output.success);
         assert_eq!(output.jobs.len(), 2);
+        assert_eq!(output.jobs[0].ci_context.profile.as_deref(), Some("pr"));
+        assert_eq!(output.jobs[0].ci_context.job_id, "first");
         assert_eq!(output.jobs[0].stdout, "first");
         assert_eq!(output.jobs[1].stdout, "second");
     }

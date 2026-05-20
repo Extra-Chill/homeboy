@@ -11,6 +11,7 @@ use super::distribution::BenchRunDistribution;
 use super::parsing::{BenchMetricPhase, BenchResults, BenchScenario};
 use super::run::{BenchRunFailure, BenchRunWorkflowResult};
 use crate::core::budget::BudgetFinding;
+use crate::core::ci_profile::CiContext;
 use crate::core::rig::RigStateSnapshot;
 
 #[derive(Serialize)]
@@ -42,6 +43,8 @@ pub struct BenchCommandOutput {
     pub failure: Option<BenchRunFailure>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_context: Option<CiContext>,
 }
 
 pub fn from_main_workflow(result: BenchRunWorkflowResult) -> (BenchCommandOutput, i32) {
@@ -55,6 +58,14 @@ pub fn from_main_workflow(result: BenchRunWorkflowResult) -> (BenchCommandOutput
 pub fn from_main_workflow_with_rig(
     result: BenchRunWorkflowResult,
     rig_state: Option<RigStateSnapshot>,
+) -> (BenchCommandOutput, i32) {
+    from_main_workflow_with_rig_and_ci_context(result, rig_state, None)
+}
+
+pub fn from_main_workflow_with_rig_and_ci_context(
+    result: BenchRunWorkflowResult,
+    rig_state: Option<RigStateSnapshot>,
+    ci_context: Option<CiContext>,
 ) -> (BenchCommandOutput, i32) {
     let exit_code = result.exit_code;
     let budget_findings = result
@@ -82,6 +93,7 @@ pub fn from_main_workflow_with_rig(
             rig_state,
             failure: result.failure,
             diagnostics: result.diagnostics,
+            ci_context,
         },
         exit_code,
     )

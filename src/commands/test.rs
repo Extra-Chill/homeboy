@@ -204,7 +204,10 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
     resource_run.write_to_run_dir(&run_dir)?;
     let workflow = finish_test_workflow_observation(observation, workflow)?;
 
-    Ok(report::from_main_workflow(workflow))
+    Ok(report::from_main_workflow_with_ci_context(
+        workflow,
+        ci_profile::ci_context_for_job(ci_job.as_ref(), None),
+    ))
 }
 
 fn resolve_ci_job(
