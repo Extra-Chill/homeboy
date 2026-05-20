@@ -376,7 +376,6 @@ JSON
             executable: None,
             platform: None,
             component_env: None,
-            ci: None,
             runtime: None,
             cli: None,
             build: None,

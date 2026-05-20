@@ -61,7 +61,6 @@ fn family(command: &Commands) -> JsonCommandFamily {
         | Commands::Stack(_)
         | Commands::Undo(_) => JsonCommandFamily::Workspace,
         Commands::Status(_)
-        | Commands::Ci(_)
         | Commands::Ssh(_)
         | Commands::Server(_)
         | Commands::Db(_)

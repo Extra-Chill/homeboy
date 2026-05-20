@@ -335,7 +335,6 @@ pub mod bench;
 pub mod build;
 pub mod changelog;
 pub mod changes;
-pub mod ci;
 pub mod cli;
 pub mod component;
 pub mod config;
