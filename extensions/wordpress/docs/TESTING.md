@@ -68,8 +68,18 @@ dot-path assertions against the manifest or example runner config. `bundle_dir`
 and `example_runner_config` are resolved relative to the spec file's parent
 directory so specs can live at repo root or under `tests/`.
 
-For full CI agent runs inside WordPress Playground, see
-[`AGENT_CI_PLAYGROUND.md`](AGENT_CI_PLAYGROUND.md).
+For full CI agent runs on the WP Codebox WordPress execution substrate, see
+[`AGENT_CI_WP_CODEBOX.md`](AGENT_CI_WP_CODEBOX.md).
+
+## WP Codebox test runtime status
+
+Issue #697 tracks the cutover from the direct Playground PHPUnit runner to WP
+Codebox-backed WordPress tests. Until that migration lands,
+`test_runtime: wp-codebox` is a parity path for the same component mounts,
+dependency mounts, drop-ins, file routing, WordPress version selection, and
+artifact parsing contract. The default WordPress test backend remains the direct
+Playground runner, while `host-smoke` remains available for standalone PHP smoke
+scripts that do not bootstrap WordPress.
 
 ## Dependencies
 

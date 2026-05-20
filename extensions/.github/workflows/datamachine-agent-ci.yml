@@ -69,11 +69,11 @@ name: Data Machine Agent CI (reusable)
         type: boolean
         default: true
       agent_runtime:
-        description: Agent sandbox runtime. Use `homeboy` for the legacy Playground runner or `wp-codebox` for the WP Codebox runtime adapter.
+        description: Transitional agent sandbox selector. Use `wp-codebox` for the WP Codebox substrate; `homeboy` remains only for legacy runner compatibility until issue #696 removes the switch.
         type: string
         default: homeboy
       wp_codebox_ref:
-        description: Ref for chubes4/wp-codebox when agent_runtime is wp-codebox.
+        description: Ref for chubes4/wp-codebox when the agent runtime uses the WP Codebox substrate.
         type: string
         default: main
       agents_api_ref:
@@ -183,14 +183,14 @@ name: Data Machine Agent CI (reusable)
         description: |
           JSON array appended to the runner config playground_file_mounts after
           the default ci-driver fixture mount. Use for plugin drop-ins,
-          must-use plugin mounts, or any consumer-specific Playground file
+          must-use plugin mounts, or any consumer-specific WordPress sandbox file
           placement. Default '[]' means no extra mounts.
         type: string
         default: "[]"
       workload_run_before:
         description: |
           JSON array of pre-run hooks executed before the main bench workload
-          inside Playground. Each entry is { type, file } the same way
+          inside the WordPress sandbox. Each entry is { type, file } the same way
           playground_workloads[*].run entries are. Default '[]' means no
           pre-run hook.
         type: string
@@ -198,7 +198,7 @@ name: Data Machine Agent CI (reusable)
       workload_run_after:
         description: |
           JSON array of post-run hooks executed after the agent workload inside
-          the same Playground scenario. Use this for verifier probes that assert
+          the same WordPress scenario. Use this for verifier probes that assert
           the agent left WordPress in a valid state. Default '[]' means no
           post-run hook.
         type: string

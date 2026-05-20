@@ -338,8 +338,9 @@ Set `HOMEBOY_PLAYGROUND_RESULTS_ARTIFACT_DIR` to write these derived artifacts
 to a specific directory. Otherwise they are written beside
 `HOMEBOY_BENCH_RESULTS_FILE`.
 
-The same workload contract powers Data Machine agent CI in Playground. See
-[`../../wordpress/docs/AGENT_CI_PLAYGROUND.md`](../../wordpress/docs/AGENT_CI_PLAYGROUND.md)
+The same workload contract powers Data Machine agent CI on the WP Codebox
+WordPress substrate. See
+[`../../wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
 for the dedicated agent sandbox guide.
 
 ## Playground Scenario Manifests

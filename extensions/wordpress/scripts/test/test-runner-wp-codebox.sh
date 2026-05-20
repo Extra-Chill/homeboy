@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Opt-in WP Codebox-backed WordPress PHPUnit runner.
+# WP Codebox-backed WordPress PHPUnit runner.
 #
-# This keeps the legacy Playground runner as the default, but translates the
-# same component/dependency/drop-in/file-mount/config/env/version contract into
-# wp-codebox run arguments when HOMEBOY_WORDPRESS_TEST_RUNTIME=wp-codebox or
-# test_runtime=wp-codebox is selected.
+# Issue #697 tracks making this the default WordPress test substrate. Until that
+# lands, this runner translates the same component/dependency/drop-in/file-mount/
+# config/env/version contract into wp-codebox run arguments when
+# HOMEBOY_WORDPRESS_TEST_RUNTIME=wp-codebox or test_runtime=wp-codebox is
+# selected.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"

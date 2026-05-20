@@ -44,11 +44,13 @@ mark with `if: always()` after the validation job starts producing reviewer
 evidence.
 
 `datamachine-agent-ci.yml` wraps the common GitHub Actions shape for running a
-Data Machine agent bundle in WordPress Playground. Consumers provide bundle and
-flow identifiers, a prompt, and optional output projections. By default the
-workflow brings the standard WordPress agent runtime dependencies.
-See [`wordpress/docs/AGENT_CI_PLAYGROUND.md`](../../wordpress/docs/AGENT_CI_PLAYGROUND.md)
-for the full Playground sandbox model, runtime contract, and evaluation notes.
+Data Machine agent bundle in a disposable WordPress execution substrate.
+Consumers provide bundle and flow identifiers, a prompt, and optional output
+projections. New and maintained agent runs should use the WP Codebox substrate;
+the legacy direct Playground runner remains only as a transition path until
+issue #696 removes `agent_runtime`.
+See [`wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
+for the WP Codebox contract, runtime surface, and evaluation notes.
 
 The reusable workflow exposes `engine_data_json` as one combined JSON object.
 Dynamic per-key `workflow_call` outputs are not possible in GitHub Actions, so
@@ -75,9 +77,9 @@ jobs:
     secrets: inherit
 ```
 
-## World Creator migration example
+## World Creator agent example
 
-Workflows that need additional WordPress Playground configuration can pass
+Workflows that need additional WordPress sandbox configuration can pass
 JSON-string inputs through to the runner config without changing the reusable
 workflow. This shape covers the `world-of-wordpress` migration that needs MDI
 primary mode, a `db.php` drop-in mount, pre-run bootstrap work, daily memory,
@@ -128,13 +130,13 @@ jobs:
 ## Inputs worth calling out
 
 - `include_agent_runtime_dependencies` defaults to `true` and checks out the standard WordPress agent runtime stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin.
-- `agent_runtime` selects the sandbox runner. `homeboy` preserves the legacy Playground runner; `wp-codebox` checks out, builds, and runs `chubes4/wp-codebox` as the WordPress sandbox/runtime boundary.
-- `wp_codebox_ref` controls the `chubes4/wp-codebox` ref used when `agent_runtime: wp-codebox`.
+- `agent_runtime` is a transitional compatibility switch tracked by #696. Use `wp-codebox` for the WP Codebox substrate; `homeboy` keeps the legacy direct runner available until that issue deletes the switch.
+- `wp_codebox_ref` controls the `chubes4/wp-codebox` ref used by the WP Codebox substrate.
 - `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref`, and `openai_provider_ref` control runtime dependency refs. `openai_provider_ref` defaults to `trunk` for the built-in OpenAI preset.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `credentials` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
 - `bundle_path` is resolved relative to the consumer checkout.
-- `bundle_repo`, `bundle_ref`, and `bundle_path_in_repo` let a consumer run against a bundle stored in another repository. The runner clones that repository before mounting the bundle into Playground.
+- `bundle_repo`, `bundle_ref`, and `bundle_path_in_repo` let a consumer run against a bundle stored in another repository. The runner clones that repository before mounting the bundle into the WordPress substrate.
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`.
 - `allowed_repos` is a JSON array of `OWNER/REPO` entries exposed to the injected GitHub profile. It defaults to `[target_repo]`.
 - `engine_key` and `tool_results_key` control where built-in GitHub tool captures and fallback PR data are written in `metadata.engine_data`.
@@ -142,11 +144,11 @@ jobs:
 - `transcript_artifact_name` controls artifact upload. An empty value skips upload.
 - `extra_wp_config_defines` must be a JSON object and is merged into the runner config `wp_config_defines`.
 - `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`, and `extra_required_abilities` must be JSON arrays.
-- `workload_run_after` runs post-agent Playground verifier hooks in the same scenario, so consumers can assert the agent left WordPress in a valid state.
+- `workload_run_after` runs post-agent verifier hooks in the same WordPress scenario, so consumers can assert the agent left WordPress in a valid state.
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
 - `tool_recorders` configures tool-result projection, forced parameters, and engine-data capture. It must be a JSON array.
 - `pipeline_step_patches` and `flow_step_patches` modify imported bundle step config before the flow runs. They must be JSON arrays.
-- `runner_workspace` provisions a Data Machine Code worktree before the agent runs. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for opt-in runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner inspects, commits, pushes, and opens/reuses a fallback PR for captured workspace changes after completion.
+- `runner_workspace` provisions a Data Machine Code worktree before the agent runs. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner inspects, commits, pushes, and opens/reuses a fallback PR for captured workspace changes after completion.
 - `runner_workspace.capture_changes` defaults to `true` only when `expose_to_agent: false`; set it explicitly to disable hidden-mode publication or to enable runner-owned capture while still exposing the workspace handle.
 - `fallback_pull_request` opens or reuses a PR when files were written but the agent did not call the PR tool. It must be a JSON object.
 
@@ -154,7 +156,7 @@ jobs:
 
 Consumers such as `docs-agent` can keep the agent bundle in one repository while
 running it against another repository. The reusable workflow handles the bundle
-checkout and passes tool recorder config to the Playground runner.
+checkout and passes tool recorder config to the WordPress runner.
 
 ```yaml
 jobs:

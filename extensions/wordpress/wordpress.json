@@ -822,7 +822,7 @@
   },
   "testing": {
     "backend": "playground",
-    "description": "Plugin/theme PHPUnit runs inside WordPress Playground by default. Pure PHP smoke suites can opt into the host-smoke backend. The WP Codebox runtime is opt-in through test_runtime."
+    "description": "Plugin/theme PHPUnit currently runs inside WordPress Playground by default while issue #697 moves WordPress tests onto the WP Codebox substrate. Pure PHP smoke suites can use the host-smoke backend."
   },
   "settings": [
     {
@@ -830,14 +830,14 @@
       "label": "Test runtime",
       "type": "string",
       "default": "",
-      "description": "Optional WordPress test runtime selector. Leave empty for the current runner. Use 'wp-codebox' to run the same PHPUnit mount/config translation through WP Codebox without changing the default backend."
+      "description": "Transitional WordPress test runtime selector tracked by issue #697. Leave empty for the current default runner, or set 'wp-codebox' to exercise the WP Codebox parity path for the same PHPUnit mount/config translation."
     },
     {
       "id": "test_backend",
       "label": "Test backend",
       "type": "string",
       "default": "playground",
-      "description": "WordPress test backend. Use 'playground' for PHPUnit inside WordPress Playground, 'wp-codebox' for the opt-in WP Codebox runtime, or 'host-smoke' / 'host' for standalone tests/**/*-smoke.php scripts run under host PHP without WordPress bootstrap."
+      "description": "WordPress test backend. Use 'playground' for the current default PHPUnit backend, 'wp-codebox' for the transitional WP Codebox runtime path, or 'host-smoke' / 'host' for standalone tests/**/*-smoke.php scripts run under host PHP without WordPress bootstrap."
     },
     {
       "id": "validation_dependencies",

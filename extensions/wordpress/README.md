@@ -142,7 +142,7 @@ Playground's built-in SQLite mu-plugin detects it and steps aside. See
 coexistence mechanism.
 
 For everything else about testing — debug markers, level overrides,
-phpunit.xml consumption, known gaps — see
+phpunit.xml consumption, current WP Codebox parity status, known gaps — see
 [`docs/TESTING.md`](docs/TESTING.md).
 
 ## Lint runner
@@ -332,6 +332,7 @@ Configure per-component in the component's homeboy/component config under
 
 | Setting | Type | Default | Purpose |
 |---|---|---|---|
+| `test_runtime` | string | `""` | Transitional runtime selector tracked by #697; `wp-codebox` exercises the WP Codebox parity path while the default test runner remains Playground-backed |
 | `test_backend` | string | `playground` | `playground` (default) or `host-smoke` / `host` for standalone smoke scripts |
 | `validation_dependencies` | string | `""` | Comma / newline / JSON list of local components to mount during PHPStan, autoload validation, and PHPUnit |
 | `user` | string | `""` | WP-CLI user (email/login/ID); appended as `--user` when set |
@@ -457,6 +458,6 @@ at the root to grandfather pre-existing findings (see PHPStan above).
 ## Further reading
 
 - [`docs/TESTING.md`](docs/TESTING.md) — canonical test/lint/bench reference, debug markers, sanctioned suppressions, browser-target schema, known gaps
-- [`docs/AGENT_CI_PLAYGROUND.md`](docs/AGENT_CI_PLAYGROUND.md) — running Data Machine agents in WordPress Playground CI and why Playground is the agent sandbox
+- [`docs/AGENT_CI_WP_CODEBOX.md`](docs/AGENT_CI_WP_CODEBOX.md) — running Data Machine agents on the WP Codebox WordPress execution substrate
 - [`docs/PLAYGROUND_DROPIN.md`](docs/PLAYGROUND_DROPIN.md) — `db.php` coexistence with Playground SQLite
 - [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — release history

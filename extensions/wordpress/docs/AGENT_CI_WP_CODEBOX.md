@@ -1,15 +1,15 @@
-# Data Machine Agent CI in WordPress Playground
+# Data Machine Agent CI on WP Codebox
 
-Homeboy can run a Data Machine agent bundle inside WordPress Playground from
-GitHub Actions. The reusable workflow gives agent repos one CI entry point for
-booting WordPress, loading dependencies, running the agent, collecting
-transcripts, and asserting the expected outcome.
+Homeboy can run a Data Machine agent bundle inside the WP Codebox WordPress
+execution substrate from GitHub Actions. The reusable workflow gives agent repos
+one CI entry point for booting WordPress, loading dependencies, running the
+agent, collecting transcripts, and asserting the expected outcome.
 
-## Why Playground is the sandbox
+## Why WP Codebox is the substrate
 
-WordPress Playground gives agent CI a disposable WordPress runtime instead of a
-long-lived server, local database, or per-repo test harness. Each run starts from
-a declared environment and exits with structured Homeboy artifacts.
+WP Codebox gives agent CI a disposable WordPress runtime instead of a long-lived
+server, local database, or per-repo test harness. Each run starts from a declared
+environment and exits with structured Homeboy artifacts.
 
 ```text
 GitHub Actions workflow
@@ -18,8 +18,11 @@ GitHub Actions workflow
 Homeboy WordPress extension
         |
         v
-WordPress Playground
-  PHP-WASM + embedded SQLite + mounted plugins
+WP Codebox WordPress runtime
+  disposable site + mounted plugins
+        |
+        v
+WP Codebox command boundary
         |
         v
 Data Machine agent runtime
@@ -30,7 +33,8 @@ That shape is useful for agents because the model still interacts with real
 WordPress APIs while the host stays small and repeatable:
 
 - No host MySQL, local WordPress install, or component-owned PHPUnit bootstrap.
-- Runtime dependencies are mounted into the same Playground site as the bundle.
+- Runtime dependencies are mounted into the same WP Codebox WordPress workspace
+  as the bundle.
 - The reusable workflow can bring the standard WordPress agent runtime stack by
   default, so consumers do not repeat Agents API, Data Machine, Data Machine
   Code, or provider plugin refs in every workflow.
@@ -67,6 +71,11 @@ toolchain, mounts the standard agent runtime and any additional validation
 dependencies under `.ci/<repo>`, builds a runner config, and calls
 `wordpress/scripts/agent/run-datamachine-agent.sh`.
 
+The reusable workflow still exposes `agent_runtime` while #696 removes the
+legacy direct runner path. Use `agent_runtime: wp-codebox` for current agent CI
+work. Treat `agent_runtime: homeboy` as compatibility for older callers, not as a
+new integration target.
+
 ## Fully Custom Agents
 
 The reusable workflow does not hard-code a specific agent. A consumer supplies a
@@ -92,19 +101,21 @@ Consumers can customize:
 - Success criteria through `success_requires_pr`, completion outcomes,
   engine-data projections, artifacts, and verifier jobs.
 
-## Runtime contract
+## WP Codebox contract
 
-The runner converts the agent config into a single Playground bench workload:
+The runner converts the agent config into a single WordPress workload envelope:
 
 - `component_path` points at the consumer checkout.
 - `bundle_path` points at the Data Machine agent bundle.
 - `include_agent_runtime_dependencies` mounts the standard Data Machine agent
   runtime before consumer-supplied `validation_dependencies`.
-- `playground_file_mounts` adds fixture files such as the CI driver plugin.
-- `bench_env` forwards credentials and the serialized runner config into
-  PHP-WASM.
+- `playground_file_mounts` adds fixture files such as the CI driver plugin. The
+  setting name is inherited from the previous direct-runner contract and is kept
+  as part of the current workflow input surface.
+- `bench_env` forwards credentials and the serialized runner config into the
+  WordPress runtime.
 - `workload_run_before` and `workload_run_after` attach setup and verifier hooks
-  around the agent run inside the same Playground scenario.
+  around the agent run inside the same WordPress scenario.
 - `transcript_dir` controls where exported conversation artifacts are written.
 - `success_requires_pr` can require the agent to open or reuse a pull request.
 - `tool_recorders` can force tool parameters and project tool results into
@@ -114,7 +125,7 @@ The runner converts the agent config into a single Playground bench workload:
 - `runner_workspace` can provision a Data Machine Code worktree. The default
   mode prepends the workspace handle to the agent prompt so current consumers
   can explicitly ask the agent to work in that checkout and open a PR.
-- `runner_workspace.expose_to_agent: false` is an opt-in runner-owned capture
+- `runner_workspace.expose_to_agent: false` enables runner-owned capture
   mode. It preserves the natural task prompt, keeps workspace tool calls scoped
   to the provisioned handle when those tools are used, then captures final git
   status/diff, commits, pushes, and opens or reuses a fallback PR after the run.
@@ -129,9 +140,12 @@ The runner converts the agent config into a single Playground bench workload:
 - `fallback_pull_request` can open a PR when files were written but the agent did
   not explicitly call the PR tool.
 
-Inside Playground, `datamachine-agent-workload.php` installs the bundle, configures
-the provider, starts the Data Machine flow, drains queued work, records tool
-results, exports the transcript, and writes a Homeboy scenario result.
+Inside WordPress, `datamachine-agent-workload.php` installs the bundle,
+configures the provider, starts the Data Machine flow, drains queued work,
+records tool results, exports the transcript, and writes a Homeboy scenario
+result. In WP Codebox mode, the workflow checks out and builds `chubes4/wp-codebox`,
+passes the runner config to the WP Codebox CLI, mounts provider/runtime plugins,
+and reads back the generated artifacts from the run workspace.
 
 ## Runner config surface
 
@@ -149,10 +163,10 @@ knobs to `run-datamachine-agent.sh`:
 - Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`, `fallback_pull_request`.
 
 `bundle_repo` is for cross-repo consumers. The shell runner clones the bundle
-repository, points `bundle_path` at the cloned bundle inside Playground, and adds
-that checkout to the mounted validation dependencies. This lets a repository such
-as `agents-api` run a bundle owned by `docs-agent` without copying the bundle or
-maintaining a bespoke runner script.
+repository, points `bundle_path` at the cloned bundle inside the WordPress
+substrate, and adds that checkout to the mounted validation dependencies. This
+lets a repository such as `agents-api` run a bundle owned by `docs-agent` without
+copying the bundle or maintaining a bespoke runner script.
 
 `tool_recorders` are the main migration path for custom bootstrap files that only
 wrap GitHub tools. A recorder can attach forced parameters, capture selected input
@@ -219,25 +233,24 @@ consumer-specific assertions such as a generated PR URL, published artifact path
 or scenario result field.
 
 Set `replay_bundle_artifact_name` to publish a redacted replay bundle alongside
-the run. The bundle snapshots the scenario envelope, initial Playground
-blueprint, prompt, runner config, provider/model/seed metadata, transcript/action
-log references, and grader metadata. The runner also attaches
+the run. The bundle snapshots the scenario envelope, initial WordPress state,
+prompt, runner config, provider/model/seed metadata, transcript/action log
+references, and grader metadata. The runner also attaches
 `artifacts.replay_bundle.path` and `metadata.playground_review` to the scenario
 result JSON so downstream JSONL publishers can link failure rows back to the
-bundle.
+bundle. The metadata key keeps the historical name until the artifact schema is
+renamed.
 
-Final-state Playground review URLs are only emitted when the caller supplies a
-hosted review URL in runner config or scenario metadata. The current Playground
-PHP bench runner exits after scenario execution and does not export a restorable
-site state, so the default bundle records `playground_review.available=false`
-and `final_state.available=false` rather than pretending an encoded initial
-blueprint is a final-state replay.
+Final-state review URLs are only emitted when the caller supplies a hosted review
+URL in runner config or scenario metadata. The default bundle records
+`playground_review.available=false` and `final_state.available=false` rather than
+pretending an encoded initial blueprint is a final-state replay.
 
 ## Why this can support agent evaluation
 
 The same contract is close to an agent evaluation environment:
 
-- Initial state: Playground blueprint, mounted dependencies, bundle files, and
+- Initial state: WordPress blueprint, mounted dependencies, bundle files, and
   configured WordPress constants.
 - Actions: registered abilities, WP-CLI commands, GitHub tools, and Data Machine
   pipeline steps.
@@ -252,7 +265,7 @@ proxy goals. For example, reward a verified diff plus passing checks rather than
 only rewarding that a pull request URL exists. Mock or scope external services
 when reproducibility matters.
 
-Playground grader workloads should return the shared reward payload used by the
+WordPress grader workloads should return the shared reward payload used by the
 bench runner:
 
 ```json
@@ -280,8 +293,8 @@ metrics such as `reward_mean`, while the structured details remain in
 
 - `.github/workflows/datamachine-agent-ci.yml` is the reusable workflow.
 - `.github/workflows/README.md` documents workflow inputs and examples.
-- `wordpress/scripts/agent/run-datamachine-agent.sh` builds the Playground
-  workload config.
+- `wordpress/scripts/agent/run-datamachine-agent.sh` builds the WordPress
+  workload config and dispatches the selected runtime.
 - `wordpress/scripts/agent/datamachine-agent-workload.php` runs the agent inside
   WordPress.
 - `wordpress/tests/fixtures/datamachine-agent-ci-driver/` provides the stable

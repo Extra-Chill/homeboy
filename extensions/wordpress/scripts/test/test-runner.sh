@@ -3,9 +3,10 @@ set -euo pipefail
 
 # Test runner router for WordPress Homeboy extension.
 #
-# Plugin/theme tests run inside WordPress Playground by default. Core-dev
-# checkouts (wordpress-develop) dispatch to WordPress core's native PHPUnit
-# runner. Pure host-PHP smoke suites can opt into the host-smoke backend.
+# Plugin/theme tests run inside WordPress Playground by default while #697 moves
+# the WordPress test substrate to WP Codebox. Core-dev checkouts
+# (wordpress-develop) dispatch to WordPress core's native PHPUnit runner. Pure
+# host-PHP smoke suites use the host-smoke backend.
 
 # Bash 4.0+ required — lint-runner.sh (called during test runs) uses
 # associative arrays which are bash 4+ only. Fail early with a clear

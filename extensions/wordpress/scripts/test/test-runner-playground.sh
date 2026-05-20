@@ -7,8 +7,9 @@ set -euo pipefail
 # mounts the component under test, runs PHPUnit inside it, and emits
 # the same JSON result shape as test-runner.sh.
 #
-# This is the "playground" backend — opt-in, not the default.
-# The host backend (test-runner.sh) remains the default.
+# This is the default WordPress PHPUnit backend until issue #697 completes the
+# WP Codebox test-runtime cutover. The host backend is reserved for standalone
+# smoke scripts that do not bootstrap WordPress.
 #
 # HOW IT WORKS:
 #
