@@ -153,6 +153,10 @@ name: Data Machine Agent CI (reusable)
         description: Comma-separated OWNER/REPO entries for the Homeboy app token. Defaults to target_repo.
         type: string
         default: ""
+      require_homeboy_app_token:
+        description: Fail before running the agent when Homeboy app credentials are unavailable.
+        type: boolean
+        default: false
       allowed_repos:
         description: JSON array of OWNER/REPO strings the injected GitHub profile may access. Defaults to [target_repo].
         type: string
@@ -332,6 +336,18 @@ jobs:
           else
             printf 'available=false\n' >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Require Homeboy app credentials
+        if: ${{ inputs.run_agent && ! inputs.dry_run && inputs.require_homeboy_app_token && steps.homeboy-app-creds.outputs.available != 'true' }}
+        run: |
+          set -euo pipefail
+          cat >&2 <<'EOF'
+          HOMEBOY_APP_ID and HOMEBOY_APP_PRIVATE_KEY are required for this Data Machine agent run.
+          The workflow was configured with require_homeboy_app_token=true so repository-scoped
+          GITHUB_TOKEN fallback is not allowed. Add the Homeboy app secrets to the caller repo
+          or organization and rerun the workflow.
+          EOF
+          exit 1
 
       - name: Resolve Homeboy app token scope
         id: token-scope
