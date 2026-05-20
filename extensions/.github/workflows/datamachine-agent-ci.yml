@@ -228,6 +228,14 @@ name: Data Machine Agent CI (reusable)
         description: JSON array of existing tool recorder configs for field projection, forced parameters, and tool result capture.
         type: string
         default: "[]"
+      enable_terminal_actions:
+        description: Expose runner-owned terminal tools such as run_wp_cli to the agent.
+        type: boolean
+        default: false
+      wp_cli_tool_name:
+        description: Tool name used when enable_terminal_actions registers the WP-CLI terminal tool.
+        type: string
+        default: run_wp_cli
       pipeline_step_patches:
         description: JSON array of patches applied to imported pipeline step configs before the flow runs.
         type: string
@@ -592,6 +600,8 @@ jobs:
           TOOL_RESULTS_KEY: ${{ inputs.tool_results_key }}
           ABILITY_TOOLS: ${{ inputs.ability_tools }}
           TOOL_RECORDERS: ${{ inputs.tool_recorders }}
+          ENABLE_TERMINAL_ACTIONS: ${{ inputs.enable_terminal_actions }}
+          WP_CLI_TOOL_NAME: ${{ inputs.wp_cli_tool_name }}
           PIPELINE_STEP_PATCHES: ${{ inputs.pipeline_step_patches }}
           FLOW_STEP_PATCHES: ${{ inputs.flow_step_patches }}
           RUNNER_WORKSPACE_CONFIG: ${{ inputs.runner_workspace }}
@@ -724,6 +734,7 @@ jobs:
             --arg githubRunAttempt "$GITHUB_RUN_ATTEMPT_VALUE" \
             --arg executeWorkflowPath "$execute_workflow_guest_path" \
             --arg providerRegisterFunction "$provider_register_function" \
+            --arg wpCliToolName "$WP_CLI_TOOL_NAME" \
             --argjson validationDependencies "$validation_json" \
             --argjson providerCredentials "$provider_credentials_json" \
             --argjson providerBenchEnv "$provider_bench_env_json" \
@@ -745,6 +756,7 @@ jobs:
             --argjson allowedRepos "$allowed_repos_json" \
             --argjson abilityTools "$ability_tools_json" \
             --argjson toolRecorders "$tool_recorders_json" \
+            --argjson enableTerminalActions "$ENABLE_TERMINAL_ACTIONS" \
             --argjson pipelineStepPatches "$pipeline_step_patches_json" \
             --argjson flowStepPatches "$flow_step_patches_json" \
             --argjson runnerWorkspace "$runner_workspace_json" \
@@ -796,6 +808,8 @@ jobs:
               allowed_repos: (if ($allowedRepos | length) > 0 then $allowedRepos else [$targetRepo] end),
               engine_key: $engineKey,
               tool_results_key: $toolResultsKey,
+              enable_terminal_actions: $enableTerminalActions,
+              wp_cli_tool_name: $wpCliToolName,
               max_turns: $maxTurns,
               prompt: $prompt,
               step_budget: $stepBudget,
