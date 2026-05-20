@@ -128,7 +128,7 @@ The three assertions cover:
 Run the smoke test after:
 
 - Changes to `scripts/test/test-runner-wp-codebox.sh` (the WP Codebox dispatcher)
-- Changes to `scripts/test/playground-runner.php` (the runtime template)
+- Changes to WP Codebox's WordPress runtime commands
 - Upgrading `@wp-playground/cli` (upstream may change the mu-plugin guard)
 
 ## Upstream contract

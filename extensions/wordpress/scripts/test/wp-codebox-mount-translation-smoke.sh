@@ -65,26 +65,19 @@ if (step?.command !== 'wordpress.phpunit') {
   throw new Error(`unexpected recipe command: ${step?.command}`)
 }
 
-const codeFileArg = (step.args || []).find((arg) => arg.startsWith('code-file='))
-if (!codeFileArg) {
-  throw new Error('missing code-file arg')
-}
-const wrapper = codeFileArg.slice('code-file='.length)
-if (!fs.existsSync(wrapper)) {
-  throw new Error(`wrapper code file missing: ${wrapper}`)
-}
-
 const mounts = recipe.inputs?.mounts || []
-const wrapperSource = fs.readFileSync(wrapper, 'utf8')
 for (const expected of [
-  Buffer.from('tests/OnlyTest.php').toString('base64'),
-  Buffer.from(JSON.stringify({ WP_DEBUG: true, CUSTOM_NUMBER: 7 })).toString('base64'),
-  Buffer.from(JSON.stringify({ HOMEBOY_FLAG: 'yes' })).toString('base64'),
-  Buffer.from(JSON.stringify(['tests/OnlyTest.php'])).toString('base64'),
-  '/wordpress/wp-content/plugins/dep-plugin',
+  'plugin-slug=example',
+  'test-file=tests/OnlyTest.php',
+  'changed-tests-json=["tests/OnlyTest.php"]',
+  'env-json={"HOMEBOY_FLAG":"yes"}',
+  'wp-config-defines-json={"WP_DEBUG":true,"CUSTOM_NUMBER":7}',
+  'autoload-file=/wp-codebox-vendor/autoload.php',
+  'tests-dir=/wp-codebox-vendor/wp-phpunit/wp-phpunit',
+  'dependency-mounts=/wordpress/wp-content/plugins/dep-plugin',
 ]) {
-  if (!wrapperSource.includes(expected)) {
-    throw new Error(`wrapper missing substituted value: ${expected}`)
+  if (!(step.args || []).includes(expected)) {
+    throw new Error(`step args missing expected value: ${expected}\nactual:\n${(step.args || []).join('\n')}`)
   }
 }
 
@@ -150,8 +143,8 @@ REQUIRED_MOUNTS_JSON=$(jq -nc \
     --arg dropin "${PLUGIN_PATH}/db.php:/wordpress/wp-content/db.php" \
     --arg componentExtra "${PLUGIN_PATH}/config/component-extra.php:/wordpress/wp-content/component-extra.php" \
     --arg depExtra "${DEP_PATH}/fixtures/dep-extra.php:/wordpress/wp-content/dep-extra.php" \
-    --arg extension "${EXTENSION_PATH}:/homeboy-extension:readonly" \
-    '[$component, $dep, $dropin, $componentExtra, $depExtra, $extension]')
+    --arg vendor "${EXTENSION_PATH}/vendor:/wp-codebox-vendor:readonly" \
+    '[$component, $dep, $dropin, $componentExtra, $depExtra, $vendor]')
 export REQUIRED_MOUNTS_JSON
 
 bash -n "$SCRIPT_DIR/test-runner-wp-codebox.sh"

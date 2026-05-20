@@ -49,16 +49,6 @@ cat > "${component}/tests/helper.php" <<'PHP'
 // Not a standalone smoke script or PHPUnit test case.
 PHP
 
-cat > "${TMPDIR}/stubs/playground.sh" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-echo "PLAYGROUND_STUB"
-echo "SELECTED=${HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE:-}"
-printf 'CHANGED=%s\n' "${HOMEBOY_CHANGED_TEST_FILES:-}"
-printf 'ARGS=%s\n' "$*"
-SH
-chmod +x "${TMPDIR}/stubs/playground.sh"
-
 cat > "${TMPDIR}/stubs/wp-codebox.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -70,21 +60,25 @@ if [ -n "${WP_CODEBOX_ARGS_FILE:-}" ]; then
     printf '%s\n' "$@" > "${WP_CODEBOX_ARGS_FILE}"
 fi
 component_path=""
+recipe_path=""
 while [ "$#" -gt 0 ]; do
-    if [ "$1" = "--mount" ]; then
+    if [ "$1" = "--recipe" ]; then
         shift
-        case "${1:-}" in
-            *:/wordpress/wp-content/plugins/component)
-                component_path="${1%:/wordpress/wp-content/plugins/component}"
-                ;;
-        esac
+        recipe_path="${1:-}"
     fi
     shift || true
 done
+if [ -n "$recipe_path" ] && [ -f "$recipe_path" ]; then
+    if [ -n "${WP_CODEBOX_ARGS_FILE:-}" ]; then
+        printf '\n--- recipe ---\n' >> "${WP_CODEBOX_ARGS_FILE}"
+        cat "$recipe_path" >> "${WP_CODEBOX_ARGS_FILE}"
+    fi
+    component_path="$(jq -r '.inputs.mounts[]? | select(.target == "/wordpress/wp-content/plugins/component") | .source' "$recipe_path" | head -n 1)"
+fi
 if [ -n "$component_path" ]; then
     printf 'ALL TESTS PASSED\nTESTS: 1 FAILURES: 0 ERRORS: 0\n' > "${component_path}/.pg-test-result.txt"
 fi
-printf '{"execution":{"stdout":"OK (1 test, 1 assertion)\n","stderr":""}}\n'
+printf '{"success":true,"executions":[{"stdout":"OK (1 test, 1 assertion)\n","stderr":""}]}\n'
 SH
 chmod +x "${TMPDIR}/stubs/wp-codebox.sh"
 
@@ -96,20 +90,19 @@ HOMEBOY_COMPONENT_SHAPE="plugin" \
 
 assert_contains "${TMPDIR}/smoke-file.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
 assert_contains "${TMPDIR}/smoke-file.out" "standalone smoke ran"
-assert_not_contains "${TMPDIR}/smoke-file.out" "PLAYGROUND_STUB"
+assert_not_contains "${TMPDIR}/smoke-file.out" "WP_CODEBOX_STUB"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
-HOMEBOY_RUNTIME_TEST_RUNNER_PLAYGROUND="${TMPDIR}/stubs/playground.sh" \
 HOMEBOY_CHANGED_TEST_FILES=$'tests/import-agent-ability-smoke.php\ntests/queue-routing-smoke.php' \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/changed-smoke-files.out"
 
 assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/queue-routing-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_SUMMARY:passed=2 failed=0"
-assert_not_contains "${TMPDIR}/changed-smoke-files.out" "PLAYGROUND_STUB"
+assert_not_contains "${TMPDIR}/changed-smoke-files.out" "WP_CODEBOX_STUB"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
@@ -144,13 +137,12 @@ HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
 
 assert_contains "${TMPDIR}/wp-codebox-file.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/wp-codebox-file.out" "Backend: wp-codebox"
-assert_contains "${TMPDIR}/wp-codebox-args.txt" "run"
-assert_contains "${TMPDIR}/wp-codebox-args.txt" "--command"
-assert_contains "${TMPDIR}/wp-codebox-args.txt" "wordpress.run-php"
-assert_contains "${TMPDIR}/wp-codebox-args.txt" "--arg"
-assert_contains "${TMPDIR}/wp-codebox-args.txt" "--wp"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "recipe-run"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "--recipe"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "wordpress.phpunit"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" "autoload-file=/wp-codebox-vendor/autoload.php"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "6.9"
-assert_contains "${TMPDIR}/wp-codebox-args.txt" "${component}:/wordpress/wp-content/plugins/component"
+assert_contains "${TMPDIR}/wp-codebox-args.txt" '"target": "/wordpress/wp-content/plugins/component"'
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
