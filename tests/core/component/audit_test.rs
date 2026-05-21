@@ -1,4 +1,4 @@
-use homeboy::core::component::AuditConfig;
+use homeboy::core::component::{AuditConfig, MutatingResourceAccessConfig};
 
 #[test]
 fn is_empty_reports_only_empty_rule_sets() {
@@ -20,6 +20,11 @@ fn test_merge() {
         lifecycle_path_globs: vec!["lifecycle/*.php".to_string()],
         utility_suffixes: vec!["Verifier".to_string()],
         convention_exception_globs: vec!["generated/**".to_string()],
+        mutating_resource_access: MutatingResourceAccessConfig {
+            handler_registration_markers: vec!["route(".to_string()],
+            access_helper_markers: vec!["owns_resource".to_string()],
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -29,6 +34,12 @@ fn test_merge() {
         lifecycle_path_globs: vec!["lifecycle/*.php".to_string(), "bin/*".to_string()],
         utility_suffixes: vec!["Verifier".to_string(), "Resolver".to_string()],
         convention_exception_globs: vec!["generated/**".to_string(), "fixtures/**".to_string()],
+        mutating_resource_access: MutatingResourceAccessConfig {
+            handler_registration_markers: vec!["route(".to_string(), "command(".to_string()],
+            access_helper_markers: vec!["owns_resource".to_string(), "can_access".to_string()],
+            mutator_markers: vec!["delete(".to_string()],
+            ..Default::default()
+        },
         ..Default::default()
     });
 
@@ -48,5 +59,17 @@ fn test_merge() {
     assert_eq!(
         config.convention_exception_globs,
         vec!["generated/**", "fixtures/**"]
+    );
+    assert_eq!(
+        config.mutating_resource_access.handler_registration_markers,
+        vec!["route(", "command("]
+    );
+    assert_eq!(
+        config.mutating_resource_access.access_helper_markers,
+        vec!["owns_resource", "can_access"]
+    );
+    assert_eq!(
+        config.mutating_resource_access.mutator_markers,
+        vec!["delete("]
     );
 }
