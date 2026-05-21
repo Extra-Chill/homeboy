@@ -236,6 +236,38 @@ mod tests {
     }
 
     #[test]
+    fn test_run() {
+        let fp = fp(r#"
+route('/things/(?P<thing_id>\\d+)', ['methods' => 'WRITE', 'callback' => 'update_thing']);
+route('/things/(?P<thing_id>\\d+)/delete', ['methods' => 'DELETE', 'callback' => 'delete_thing']);
+route('/things/(?P<thing_id>\\d+)/clone', ['methods' => 'WRITE', 'callback' => 'clone_thing']);
+
+public function update_thing($request) {
+    $thing_id = $request['thing_id'];
+    save_resource($thing_id);
+}
+
+public function delete_thing($request) {
+    $thing_id = $request['thing_id'];
+    Access::owns_resource($thing_id);
+    delete_resource($thing_id);
+}
+
+public function clone_thing($request) {
+    $thing_id = $request['thing_id'];
+    CheckedAbility::run($thing_id);
+    save_resource($thing_id);
+}
+"#);
+
+        let findings = run(&[&fp], &config());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::MutatingResourceAccess);
+        assert!(findings[0].description.contains("update_thing"));
+    }
+
+    #[test]
     fn flags_mutating_registered_handler_without_access_check() {
         let fp = fp(r#"
 route('/things/(?P<thing_id>\\d+)', ['methods' => 'WRITE', 'callback' => 'update_thing']);
@@ -310,5 +342,130 @@ public function helper($thing_id) {
 "#);
 
         assert!(run(&[&fp], &config()).is_empty());
+    }
+
+    #[test]
+    fn test_infer_access_helper_markers() {
+        let mut config = config();
+        config.access_helper_markers.clear();
+        let resource_patterns = config
+            .resource_identifier_patterns
+            .iter()
+            .map(|pattern| Regex::new(pattern).unwrap())
+            .collect::<Vec<_>>();
+        let content = r#"
+public function update_thing($request) {
+    $thing_id = $request['thing_id'];
+    can_edit_resource($thing_id);
+    save_resource($thing_id);
+}
+
+public function helper($request) {
+    can_edit_resource($request);
+}
+
+public function rename_thing($request) {
+    $thing_id = $request['thing_id'];
+    format_resource($thing_id);
+    save_resource($thing_id);
+}
+"#;
+        let blocks = extract_handler_blocks(content);
+
+        let markers = infer_access_helper_markers(&blocks, &config, &resource_patterns);
+
+        assert_eq!(markers, vec!["can_edit_resource("]);
+    }
+
+    #[test]
+    fn test_access_like_name() {
+        assert!(access_like_name("Access::owns_resource"));
+        assert!(access_like_name("authorize_delete"));
+        assert!(access_like_name("can_edit_resource"));
+        assert!(access_like_name("PermissionGate::allowed"));
+        assert!(!access_like_name("save_resource"));
+        assert!(!access_like_name("format_resource"));
+    }
+
+    #[test]
+    fn test_handler_is_registered_mutator() {
+        let config = config();
+        let content = r#"
+route('/things/(?P<thing_id>\\d+)', ['methods' => 'WRITE', 'callback' => 'update_thing']);
+
+public function update_thing($request) {
+    $thing_id = $request['thing_id'];
+    save_resource($thing_id);
+}
+
+// Keep the non-mutating registration outside the fixed-size mutating window.
+// ................................................................................
+// ................................................................................
+// ................................................................................
+// ................................................................................
+// ................................................................................
+// ................................................................................
+// ................................................................................
+// ................................................................................
+route('/things/(?P<thing_id>\\d+)', ['methods' => 'READ', 'callback' => 'read_thing']);
+"#;
+
+        assert!(handler_is_registered_mutator(
+            content,
+            "update_thing",
+            &config
+        ));
+        assert!(!handler_is_registered_mutator(
+            content,
+            "read_thing",
+            &config
+        ));
+        assert!(!handler_is_registered_mutator(
+            content,
+            "missing_thing",
+            &config
+        ));
+    }
+
+    #[test]
+    fn test_extract_handler_blocks() {
+        let content = r#"
+public function update_thing($request) {
+    if ($request['thing_id']) {
+        save_resource($request['thing_id']);
+    }
+}
+
+private static function helper($thing_id) {
+    return $thing_id;
+}
+"#;
+
+        let blocks = extract_handler_blocks(content);
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].name, "update_thing");
+        assert!(blocks[0].body.contains("save_resource"));
+        assert_eq!(blocks[1].name, "helper");
+    }
+
+    #[test]
+    fn contains_any_matches_non_empty_markers() {
+        assert!(contains_any(
+            "Access::owns_resource($thing_id);",
+            &["owns_resource".to_string()]
+        ));
+        assert!(!contains_any(
+            "Access::owns_resource($thing_id);",
+            &[String::new(), "can_edit_resource".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_contains_any_regex() {
+        let patterns = vec![Regex::new(r"\b[a-z_]*_id\b").unwrap()];
+
+        assert!(contains_any_regex("$thing_id = 1;", &patterns));
+        assert!(!contains_any_regex("$thing = 1;", &patterns));
     }
 }
