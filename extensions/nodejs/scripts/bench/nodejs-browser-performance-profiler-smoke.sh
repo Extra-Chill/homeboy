@@ -11,7 +11,9 @@ const {
   collectBrowserPerformanceProfile,
   compareBrowserPerformanceProfiles,
   formatBrowserPerformanceReport,
+  formatBrowserPerformanceSummaryMarkdown,
   runBrowserActions,
+  summarizeBrowserPerformanceProfile,
 } = await import(process.argv[2]);
 
 class FakePage {
@@ -178,6 +180,17 @@ assert.equal(profile.largest_contentful_paint[0].start_time_ms, 84);
 assert.equal(profile.layout_shifts[0].value, 0.02);
 assert.equal(profile.long_tasks[0].duration_ms, 51);
 assert.ok(profile.phases.load);
+
+const summary = summarizeBrowserPerformanceProfile(profile);
+assert.equal(summary.summary.request_count, 1);
+assert.equal(summary.summary.long_task_count, 1);
+assert.equal(summary.summary.failed_request_count, 0);
+assert.equal(summary.summary.largest_request_ms > 0, true);
+assert.equal(summary.bottlenecks.some((entry) => entry.kind === 'network' && entry.phase === 'load'), true);
+assert.equal(summary.bottlenecks.some((entry) => entry.kind === 'long-task'), true);
+const summaryMarkdown = formatBrowserPerformanceSummaryMarkdown(summary, { title: 'Smoke trace bottlenecks' });
+assert.match(summaryMarkdown, /# Smoke trace bottlenecks/);
+assert.match(summaryMarkdown, /## Bottlenecks/);
 
 const candidate = JSON.parse(JSON.stringify(profile));
 candidate.summary.load_event_ms = 150;
