@@ -478,6 +478,15 @@ if echo "$PHPUNIT_OUTPUT" | grep -q "SOME TESTS FAILED"; then
     exit ${wp_codebox_exit:-1}
 fi
 
+if echo "$PHPUNIT_STDOUT" | grep -q 'Error in bootstrap script:'; then
+    FAILED_STEP="PHPUnit bootstrap failure (wp-codebox)"
+    FAILURE_OUTPUT=$(echo "$PHPUNIT_STDOUT" | grep 'Error in bootstrap script:' | head -1)
+    dump_diagnostics "PHPUNIT BOOTSTRAP FAILURE"
+    write_phpunit_discovery_result failed "phpunit-bootstrap-failure" "PHPUnit bootstrap failed before executing tests."
+    rm -f "$RESULT_FILE"
+    exit 1
+fi
+
 if [ $wp_codebox_exit -ne 0 ] && echo "$PHPUNIT_STDOUT" | grep -qE '^(FAILURES|ERRORS)!'; then
     FAILED_STEP="PHPUnit tests (wp-codebox backend)"
     FAILURE_REPLAY_MODE="none"

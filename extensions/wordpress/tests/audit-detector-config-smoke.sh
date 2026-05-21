@@ -315,11 +315,19 @@ literal_rule = next(
 )
 literal_pattern = literal_rule["literal_pattern"].replace("{value}", re.escape("tool_call"))
 literal_regex = re.compile(literal_pattern, re.MULTILINE)
+exclude_patterns = [
+    pattern.replace("{value}", re.escape("tool_call"))
+    for pattern in literal_rule.get("exclude_match_context_patterns", [])
+]
+exclude_regexes = [re.compile(pattern, re.MULTILINE) for pattern in exclude_patterns]
 fixture = (fixture_dir / "src/Runtime/class-demo-event.php").read_text(encoding="utf-8")
 matches = [match.group(0) for match in literal_regex.finditer(fixture)]
 
-require(any("===" in match for match in matches), "constant-backed slug detector should still flag comparisons")
-require(not any(match.strip() == "'tool_call'" for match in matches), "detector must not match a bare literal everywhere")
+require(matches, "constant-backed slug detector literal pattern must match slug literals")
+require(literal_regex.search("self::TOOL_CALL === 'tool_call'"), "constant-backed slug detector should still flag comparisons")
+require(not any(regex.search("self::TOOL_CALL === 'tool_call'") for regex in exclude_regexes), "comparison duplicate must not be excluded")
+require(any(regex.search("'tool_call' =>") for regex in exclude_regexes), "array/protocol key literal must be excluded by context")
+require(any(regex.search("do_action( 'tool_call'") for regex in exclude_regexes), "event-name literal must be excluded by context")
 require("'tool_call' =>" in fixture, "fixture should include array/protocol key literal")
 require("do_action( 'tool_call'" in fixture, "fixture should include event-name literal")
 
