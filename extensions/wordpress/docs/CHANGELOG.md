@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.100.0] - 2026-05-21
+
+### Added
+- add scenario verifier hooks
+
 ## [2.99.2] - 2026-05-21
 
 ### Fixed
