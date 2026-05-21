@@ -345,6 +345,7 @@ impl AuditExecutionPlan {
                         AuditFinding::ConstantBackedSlugLiteral,
                         AuditFinding::OptionScopeDrift,
                         AuditFinding::ProxyScopeDrift,
+                        AuditFinding::ConfigRoundtripAsymmetry,
                     ],
                 ),
                 run_core_boundary_leaks: Self::family_enabled(
