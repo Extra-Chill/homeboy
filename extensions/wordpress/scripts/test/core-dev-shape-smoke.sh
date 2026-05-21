@@ -75,14 +75,69 @@ HOMEBOY_COMPONENT_PATH="$FIXTURE" \
 HOMEBOY_COMPONENT_SHAPE="core-dev" \
 HOMEBOY_CORE_DEV_DRY_RUN=1 \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/test-explicit.out"
-assert_contains "${TMPDIR}/test-explicit.out" "core-dev test runner selected"
+assert_contains "${TMPDIR}/test-explicit.out" "core-dev WP Codebox test runner selected"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="wordpress-develop" \
 HOMEBOY_COMPONENT_PATH="$FIXTURE" \
 HOMEBOY_CORE_DEV_DRY_RUN=1 \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/test-detected.out"
-assert_contains "${TMPDIR}/test-detected.out" "core-dev test runner selected"
+assert_contains "${TMPDIR}/test-detected.out" "core-dev WP Codebox test runner selected"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="wordpress-develop" \
+HOMEBOY_COMPONENT_PATH="$FIXTURE" \
+HOMEBOY_COMPONENT_SHAPE="core-dev" \
+HOMEBOY_WORDPRESS_TEST_BACKEND="core-native" \
+HOMEBOY_CORE_DEV_DRY_RUN=1 \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/test-native.out"
+assert_contains "${TMPDIR}/test-native.out" "core-dev test runner selected"
+
+CORE_WP_CODEBOX_FIXTURE="${TMPDIR}/core-wp-codebox-fixture"
+cp -R "$FIXTURE" "$CORE_WP_CODEBOX_FIXTURE"
+mkdir -p "${CORE_WP_CODEBOX_FIXTURE}/vendor" "${CORE_WP_CODEBOX_FIXTURE}/tests/phpunit/tests"
+cat > "${CORE_WP_CODEBOX_FIXTURE}/tests/phpunit/tests/basic.php" <<'PHP'
+<?php
+final class Basic_Core_Smoke_Test extends WP_UnitTestCase {
+    public function test_smoke(): void {
+        $this->assertTrue( true );
+    }
+}
+PHP
+
+cat > "${TMPDIR}/wp-codebox-core-stub.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+recipe_path=""
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--recipe" ]; then
+        shift
+        recipe_path="${1:-}"
+    fi
+    shift || true
+done
+if [ -n "${WP_CODEBOX_ARGS_FILE:-}" ] && [ -f "$recipe_path" ]; then
+    cat "$recipe_path" > "$WP_CODEBOX_ARGS_FILE"
+fi
+core_src="$(jq -r '.inputs.mounts[] | select(.target == "/wordpress") | .source' "$recipe_path" | head -n 1)"
+printf 'STAGE_BEGIN:run_tests\nALL TESTS PASSED\nTESTS: 1 FAILURES: 0 ERRORS: 0\n' > "${core_src}/.pg-test-result.txt"
+printf '{"success":true,"executions":[{"command":"wordpress.core-phpunit","stdout":"OK (1 test, 1 assertion)\n","stderr":""}]}\n'
+SH
+chmod +x "${TMPDIR}/wp-codebox-core-stub.sh"
+
+WP_CODEBOX_ARGS_FILE="${TMPDIR}/core-wp-codebox-recipe.json" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="wordpress-develop" \
+HOMEBOY_COMPONENT_PATH="$CORE_WP_CODEBOX_FIXTURE" \
+HOMEBOY_COMPONENT_SHAPE="core-dev" \
+HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/wp-codebox-core-stub.sh" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/phpunit/tests/basic.php > "${TMPDIR}/test-wp-codebox.out"
+assert_contains "${TMPDIR}/test-wp-codebox.out" "Running WordPress core PHPUnit tests via WP Codebox"
+assert_contains "${TMPDIR}/test-wp-codebox.out" "WordPress core WP Codebox test run complete"
+assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" "wordpress.core-phpunit"
+assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" '"target": "/wordpress"'
+assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" '"target": "/wordpress/tests/phpunit"'
+assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" 'test-file=tests/phpunit/tests/basic.php'
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="wordpress-develop" \

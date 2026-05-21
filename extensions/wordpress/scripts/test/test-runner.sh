@@ -29,6 +29,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST_SMOKE_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE:-${SCRIPT_DIR}/test-runner-host-smoke.sh}"
 WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-wp-codebox.sh}"
+CORE_WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_CORE_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-core-dev-wp-codebox.sh}"
 
 # Resolve execution context and export env vars that the WordPress test runners expect.
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
@@ -78,6 +79,25 @@ if [ -z "$COMPONENT_SHAPE" ]; then
     if homeboy_detect_component "${COMPONENT_PATH:-$(pwd)}"; then
         COMPONENT_SHAPE="$HOMEBOY_COMPONENT_TYPE"
     fi
+fi
+
+if [ "$COMPONENT_SHAPE" = "core-dev" ]; then
+    case "$TEST_BACKEND" in
+        ""|wp-codebox)
+            if [ -n "$TARGET_FILE" ]; then
+                HOMEBOY_WORDPRESS_CORE_PHPUNIT_TEST_FILE="$TARGET_FILE" exec bash "$CORE_WP_CODEBOX_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+            fi
+            exec bash "$CORE_WP_CODEBOX_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+            ;;
+        native|core|core-native)
+            exec bash "${SCRIPT_DIR}/test-runner-core-dev.sh" "${PASSTHROUGH_ARGS[@]}"
+            ;;
+        *)
+            echo "ERROR: Unsupported WordPress core-dev test backend: ${TEST_BACKEND}" >&2
+            echo "Supported core-dev backends: wp-codebox, native, core-native" >&2
+            exit 2
+            ;;
+    esac
 fi
 
 homeboy_wordpress_rel_test_file() {
@@ -191,23 +211,16 @@ if [ -n "$TARGET_FILE" ]; then
     esac
 fi
 
-case "$COMPONENT_SHAPE" in
-    core-dev)
-        exec bash "${SCRIPT_DIR}/test-runner-core-dev.sh" "${PASSTHROUGH_ARGS[@]}"
+case "$TEST_BACKEND" in
+    host|host-smoke)
+        exec bash "$HOST_SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+        ;;
+    ""|wp-codebox)
+        exec bash "$WP_CODEBOX_RUNNER" "${PASSTHROUGH_ARGS[@]}"
         ;;
     *)
-        case "$TEST_BACKEND" in
-            host|host-smoke)
-                exec bash "$HOST_SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
-                ;;
-            ""|wp-codebox)
-                exec bash "$WP_CODEBOX_RUNNER" "${PASSTHROUGH_ARGS[@]}"
-                ;;
-            *)
-                echo "ERROR: Unsupported WordPress test backend: ${TEST_BACKEND}" >&2
-                echo "Supported backends: wp-codebox, host, host-smoke" >&2
-                exit 2
-                ;;
-        esac
+        echo "ERROR: Unsupported WordPress test backend: ${TEST_BACKEND}" >&2
+        echo "Supported backends: wp-codebox, host, host-smoke" >&2
+        exit 2
         ;;
 esac
