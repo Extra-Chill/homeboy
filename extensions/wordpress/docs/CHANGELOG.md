@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.97.5] - 2026-05-21
+
+### Fixed
+- avoid activating php ai client in wp-codebox
+
 ## [2.97.4] - 2026-05-21
 
 ### Fixed
