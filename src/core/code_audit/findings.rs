@@ -87,7 +87,8 @@ impl AuditFinding {
             | AuditFinding::OrphanedInternal
             | AuditFinding::LayerOwnershipViolation
             | AuditFinding::DeprecationAge
-            | AuditFinding::DeadGuard => FindingConfidence::Graph,
+            | AuditFinding::DeadGuard
+            | AuditFinding::MutatingResourceAccess => FindingConfidence::Graph,
 
             // Convention, naming, body-shape, and similarity findings require judgment.
             _ => FindingConfidence::Heuristic,

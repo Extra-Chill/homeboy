@@ -38,6 +38,7 @@ mod idiomatic;
 pub(crate) mod impact;
 pub(crate) mod import_matching;
 mod layer_ownership;
+mod mutating_resource_access;
 pub(crate) mod naming;
 mod parallel_runner_setup;
 mod repeated_literal_shape;
@@ -153,6 +154,7 @@ pub(crate) struct AuditExecutionPlan {
     pub(crate) run_dead_guard: bool,
     pub(crate) run_requested_detectors: bool,
     pub(crate) run_core_boundary_leaks: bool,
+    pub(crate) run_mutating_resource_access: bool,
     pub(crate) run_global_env_guard: bool,
     pub(crate) run_shared_scaffolding: bool,
     pub(crate) run_parallel_runner_setup: bool,
@@ -186,6 +188,7 @@ impl AuditExecutionPlan {
                 run_dead_guard: true,
                 run_requested_detectors: true,
                 run_core_boundary_leaks: true,
+                run_mutating_resource_access: true,
                 run_global_env_guard: true,
                 run_shared_scaffolding: true,
                 run_parallel_runner_setup: true,
@@ -344,6 +347,11 @@ impl AuditExecutionPlan {
                     exclude,
                     &[AuditFinding::CoreBoundaryLeak],
                 ),
+                run_mutating_resource_access: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::MutatingResourceAccess],
+                ),
                 run_global_env_guard: Self::family_enabled(
                     only,
                     exclude,
@@ -404,6 +412,10 @@ impl AuditExecutionPlan {
             ("dead_guard", self.run_dead_guard),
             ("requested_detectors", self.run_requested_detectors),
             ("core_boundary_leaks", self.run_core_boundary_leaks),
+            (
+                "mutating_resource_access",
+                self.run_mutating_resource_access,
+            ),
             ("global_env_guard", self.run_global_env_guard),
             ("shared_scaffolding", self.run_shared_scaffolding),
             ("parallel_runner_setup", self.run_parallel_runner_setup),
@@ -458,6 +470,7 @@ impl AuditExecutionPlan {
             || self.run_dead_guard
             || self.run_requested_detectors
             || self.run_core_boundary_leaks
+            || self.run_mutating_resource_access
             || self.run_global_env_guard
             || self.run_shared_scaffolding
             || self.run_parallel_runner_setup
@@ -1166,6 +1179,21 @@ fn audit_internal(
             core_boundary_findings.len()
         );
         all_findings.extend(core_boundary_findings);
+    }
+
+    // Phase 4t3: Configured mutating handler/resource access detection.
+    let mutating_access_findings = if plan.run_mutating_resource_access {
+        mutating_resource_access::run(&all_fingerprints, &audit_config.mutating_resource_access)
+    } else {
+        Vec::new()
+    };
+    if !mutating_access_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Mutating resource access: {} finding(s) (resource mutations without configured access checks)",
+            mutating_access_findings.len()
+        );
+        all_findings.extend(mutating_access_findings);
     }
 
     // Phase 4v: Process-global environment mutation guard consistency in tests.
