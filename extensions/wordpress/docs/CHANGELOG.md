@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.99.1] - 2026-05-21
+
+### Fixed
+- pass multisite mode to wp-codebox tests
+
 ## [2.99.0] - 2026-05-21
 
 ### Added
