@@ -269,6 +269,9 @@ pub enum AuditFinding {
     /// Public endpoint exposes registry/config metadata through a raw getter
     /// while a permission-aware resolver/helper exists nearby.
     PublicRegistryExposure,
+    /// Request-derived redirect destination reaches a configured redirect sink
+    /// before configured URL validation dominates the sink path.
+    RedirectValidation,
 }
 
 impl AuditFinding {
@@ -338,6 +341,7 @@ impl AuditFinding {
             "factory_seam_bypass",
             "internal_proxy_scope_missing",
             "public_registry_exposure",
+            "redirect_validation",
         ]
     }
 }

@@ -1,6 +1,6 @@
 use homeboy::core::component::{
     AuditConfig, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
-    MutatingResourceAccessConfig, PublicRegistryExposureConfig,
+    MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
 };
 
 #[test]
@@ -48,6 +48,14 @@ fn test_merge() {
             route_context_lines: Some(12),
             ..Default::default()
         },
+        redirect_validation: RedirectValidationConfig {
+            request_names: vec!["return_to".to_string()],
+            request_source_markers: vec!["query.".to_string()],
+            request_source_patterns: vec!["input\\.".to_string()],
+            redirect_sinks: vec!["redirect(".to_string()],
+            validation_markers: vec!["validate_redirect".to_string()],
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -91,6 +99,15 @@ fn test_merge() {
             route_context_lines: Some(6),
             resolver_path_contains: vec!["src/policy/".to_string()],
             resolver_same_namespace: true,
+            ..Default::default()
+        },
+        redirect_validation: RedirectValidationConfig {
+            request_names: vec!["return_to".to_string(), "callback_url".to_string()],
+            request_source_markers: vec!["query.".to_string(), "body.".to_string()],
+            request_source_patterns: vec!["input\\.".to_string(), "form\\.".to_string()],
+            redirect_sinks: vec!["redirect(".to_string(), "Location:".to_string()],
+            validation_markers: vec!["validate_redirect".to_string()],
+            file_extensions: vec!["php".to_string()],
             ..Default::default()
         },
         ..Default::default()
@@ -150,4 +167,21 @@ fn test_merge() {
         vec!["src/policy/"]
     );
     assert!(config.public_registry_exposure.resolver_same_namespace);
+    assert_eq!(
+        config.redirect_validation.request_names,
+        vec!["return_to", "callback_url"]
+    );
+    assert_eq!(
+        config.redirect_validation.request_source_markers,
+        vec!["query.", "body."]
+    );
+    assert_eq!(
+        config.redirect_validation.request_source_patterns,
+        vec!["input\\.", "form\\."]
+    );
+    assert_eq!(
+        config.redirect_validation.redirect_sinks,
+        vec!["redirect(", "Location:"]
+    );
+    assert_eq!(config.redirect_validation.file_extensions, vec!["php"]);
 }

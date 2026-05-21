@@ -15,7 +15,8 @@ pub use audit::{
     AuditConfig, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
     ConventionTagGlob, CoreBoundaryLeakConfig, DuplicationDetectorConfig, KnownSymbolEntry,
     KnownSymbolHeaderVersionProvider, KnownSymbolKind, KnownSymbolVersionedEntry,
-    MutatingResourceAccessConfig, PublicRegistryExposureConfig, RequestedDetectorRule,
+    MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
+    RequestedDetectorRule,
     RequestedDetectorRuleBody, RequiredRegexScope,
 };
 pub use inventory::{

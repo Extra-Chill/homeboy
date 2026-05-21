@@ -45,6 +45,10 @@ pub struct AuditConfig {
         skip_serializing_if = "MutatingResourceAccessConfig::is_empty"
     )]
     pub mutating_resource_access: MutatingResourceAccessConfig,
+    /// Configurable checks for request-derived redirect destinations that are
+    /// used before URL validation dominates the redirect sink.
+    #[serde(default, skip_serializing_if = "RedirectValidationConfig::is_empty")]
+    pub redirect_validation: RedirectValidationConfig,
     /// Extension-owned call-name lists used by the duplication /
     /// parallel-implementation detector to filter out language- and
     /// framework-specific noise. Core never interprets these strings; they
@@ -195,6 +199,67 @@ impl PublicRegistryExposureConfig {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RedirectValidationConfig {
+    /// Line substrings that identify configured request parameter names whose
+    /// values may become redirect destinations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_names: Vec<String>,
+    /// Line substrings that identify reads from request/user-input sources.
+    /// Components or extensions own ecosystem-specific source syntax; core only
+    /// matches configured markers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_source_markers: Vec<String>,
+    /// Regex patterns that identify reads from request/user-input sources.
+    /// Invalid patterns are ignored by the detector.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_source_patterns: Vec<String>,
+    /// Function names, method names, or line substrings that perform redirects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirect_sinks: Vec<String>,
+    /// Function names, method names, or line substrings that validate/allowlist
+    /// redirect destinations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_markers: Vec<String>,
+    /// Optional path-extension filter, without leading dots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_extensions: Vec<String>,
+    /// Path substrings that opt files out of this detector.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_path_contains: Vec<String>,
+}
+
+impl RedirectValidationConfig {
+    pub fn is_empty(&self) -> bool {
+        self.request_names.is_empty()
+            && self.request_source_markers.is_empty()
+            && self.request_source_patterns.is_empty()
+            && self.redirect_sinks.is_empty()
+            && self.validation_markers.is_empty()
+            && self.file_extensions.is_empty()
+            && self.exclude_path_contains.is_empty()
+    }
+
+    fn merge(&mut self, other: &RedirectValidationConfig) {
+        extend_unique(&mut self.request_names, &other.request_names);
+        extend_unique(
+            &mut self.request_source_markers,
+            &other.request_source_markers,
+        );
+        extend_unique(
+            &mut self.request_source_patterns,
+            &other.request_source_patterns,
+        );
+        extend_unique(&mut self.redirect_sinks, &other.redirect_sinks);
+        extend_unique(&mut self.validation_markers, &other.validation_markers);
+        extend_unique(&mut self.file_extensions, &other.file_extensions);
+        extend_unique(
+            &mut self.exclude_path_contains,
+            &other.exclude_path_contains,
+        );
+    }
 }
 
 /// Extension-supplied call-name lists for the parallel-implementation /
@@ -503,6 +568,23 @@ pub enum RequestedDetectorRuleBody {
         description: String,
         suggestion: String,
     },
+    /// Compare configured import/export/copy key allowlists against keys that
+    /// appear in behavior-bearing read/write sites. Core only compares captured
+    /// strings; the component owns the regexes and runtime-key exclusions.
+    ConfigRoundtripKeys {
+        object: String,
+        export_pattern: String,
+        import_pattern: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        copy_patterns: Vec<String>,
+        behavior_pattern: String,
+        #[serde(default = "default_config_roundtrip_key_capture")]
+        key_capture: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude_key_patterns: Vec<String>,
+        description: String,
+        suggestion: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -527,6 +609,10 @@ fn default_requested_detector_convention() -> String {
     "requested_detectors".to_string()
 }
 
+fn default_config_roundtrip_key_capture() -> String {
+    "key".to_string()
+}
+
 impl AuditConfig {
     pub fn is_empty(&self) -> bool {
         self.runtime_entrypoint_extends.is_empty()
@@ -540,6 +626,7 @@ impl AuditConfig {
             && self.requested_detectors.is_empty()
             && self.core_boundary_leaks.is_empty()
             && self.mutating_resource_access.is_empty()
+            && self.redirect_validation.is_empty()
             && self.duplication_detector.is_empty()
             && self.public_registry_exposure.is_empty()
             && self.config_key_usage.is_empty()
@@ -569,6 +656,7 @@ impl AuditConfig {
         self.core_boundary_leaks.merge(&other.core_boundary_leaks);
         self.mutating_resource_access
             .merge(&other.mutating_resource_access);
+        self.redirect_validation.merge(&other.redirect_validation);
         self.duplication_detector.merge(&other.duplication_detector);
         self.public_registry_exposure
             .merge(&other.public_registry_exposure);

@@ -257,3 +257,67 @@ config keys and import/export schema drift checks.
 
 Templates support regex capture names and `{line}`. `derived_absence` also exposes
 `{value}` and `{label}`.
+
+## Redirect Validation Dominance
+
+`audit.redirect_validation` configures a warning-level security-adjacent detector for request-derived redirect destinations. Core stays framework-agnostic: components or extensions provide the request parameter markers, request source markers or regex patterns, redirect sink markers, and validation/allowlist markers for their runtime.
+
+Example:
+
+```json
+{
+  "audit": {
+    "redirect_validation": {
+      "request_names": ["'redirect_uri'", "'return_to'", "'callback_url'"],
+      "request_source_markers": ["query.", "body.", "$_GET[", "$_POST["],
+      "request_source_patterns": ["\\brequest\\.(query|body)\\."],
+      "redirect_sinks": ["redirect_to(", "Location:"],
+      "validation_markers": ["allow_redirect_destination", "validate_redirect_destination"],
+      "file_extensions": ["php"]
+    }
+  }
+}
+```
+
+The detector tracks variables assigned from configured request-name markers on lines that also include configured request source markers or patterns, then reports `redirect_validation` when a configured redirect sink uses the variable before a configured validation marker dominates that sink by line order and block depth. This is a heuristic line/block-depth check, not CFG evidence, so findings require reviewer judgment.
+
+## Requested Config Round-Trip Key Detector
+
+Extensions and components can configure a generic requested detector that compares
+config-object key sets across export/import/copy allowlists and behavior-bearing
+read/write sites. Homeboy core only evaluates the configured regexes and compares
+captured key strings; framework-specific semantics and intentional runtime-only key
+exclusions belong in the extension or component config.
+
+```json
+{
+  "audit_rules": {
+    "requested_detectors": [
+      {
+        "id": "flow-step-config-roundtrip",
+        "kind": "config_roundtrip_asymmetry",
+        "severity": "warning",
+        "convention": "requested_detectors",
+        "language": "php",
+        "file_extensions": ["php"],
+        "type": "config_roundtrip_keys",
+        "object": "flow step config",
+        "export_pattern": "'(?P<key>[a-z_]+)'\\s*=>\\s*\\$config\\[",
+        "import_pattern": "\\$config\\['(?P<key>[a-z_]+)'\\]\\s*=",
+        "copy_patterns": ["\\$copy\\['(?P<key>[a-z_]+)'\\]\\s*="],
+        "behavior_pattern": "\\$config\\['(?P<key>[a-z_]+)'\\]",
+        "exclude_key_patterns": ["^runtime_"],
+        "description": "{object} key `{key}` is missing from {missing} round-trip side(s)",
+        "suggestion": "Review `{key}` and add it to the missing allowlist, or exclude it as runtime-only."
+      }
+    ]
+  }
+}
+```
+
+The detector emits `config_roundtrip_asymmetry` when a behavior-bearing key is
+absent from export or import, or when export/import key allowlists disagree for a
+key not excluded by `exclude_key_patterns`. When `copy_patterns` is configured,
+copy allowlists participate in the same comparison. Template variables include
+`object`, `key`, `missing`, `line`, `export_count`, `import_count`, `copy_count`,
+and `behavior_count`.
