@@ -818,6 +818,53 @@
     "backend": "wp-codebox",
     "description": "Plugin/theme PHPUnit runs through WP Codebox by default. Use the host-smoke backend only for standalone tests/**/*-smoke.php scripts that run under host PHP without WordPress bootstrap."
   },
+  "ci": {
+    "profiles": {
+      "pr": {
+        "label": "Pull request checks",
+        "jobs": ["lint", "wp-codebox-phpunit"]
+      },
+      "wp-codebox-runtime": {
+        "label": "WP Codebox runtime checks",
+        "jobs": ["wp-codebox-phpunit", "wp-codebox-bench"]
+      }
+    },
+    "jobs": {
+      "lint": {
+        "check_names": ["Lint", "PHP lint", "WordPress lint"],
+        "command": "lint",
+        "env": { "CI": "1" },
+        "provider": "github-actions",
+        "workflow": "homeboy.yml",
+        "fidelity": "local-equivalent",
+        "limitations": []
+      },
+      "wp-codebox-phpunit": {
+        "check_names": ["DB activation PHPUnit smoke", "WP Codebox PHPUnit", "WordPress PHPUnit"],
+        "command": "test",
+        "env": {
+          "CI": "1",
+          "HOMEBOY_WORDPRESS_TEST_BACKEND": "wp-codebox"
+        },
+        "provider": "github-actions",
+        "workflow": "wp-codebox-test-runtime-canary.yml",
+        "fidelity": "local-partial",
+        "limitations": ["Runs the local WP Codebox-backed WordPress test runner; CI checkout/setup details such as a freshly built external wp-codebox checkout are not reproduced by the profile itself."]
+      },
+      "wp-codebox-bench": {
+        "check_names": ["WP Codebox bench", "WordPress bench"],
+        "command": "bench",
+        "env": {
+          "CI": "1",
+          "HOMEBOY_BENCH_ITERATIONS": "3"
+        },
+        "provider": "github-actions",
+        "workflow": "homeboy.yml",
+        "fidelity": "local-partial",
+        "limitations": ["Runs local WP Codebox bench recipes for the current component; provider matrices, hosted runner hardware, and remote artifacts are not reproduced."]
+      }
+    }
+  },
   "settings": [
     {
       "id": "test_backend",
