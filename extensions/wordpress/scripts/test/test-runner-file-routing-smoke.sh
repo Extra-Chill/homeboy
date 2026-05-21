@@ -76,6 +76,11 @@ if [ -n "$recipe_path" ] && [ -f "$recipe_path" ]; then
     component_path="$(jq -r '.inputs.mounts[]? | select(.target == "/wordpress/wp-content/plugins/component") | .source' "$recipe_path" | head -n 1)"
 fi
 if [ -n "$component_path" ]; then
+    if [ "${WP_CODEBOX_STUB_REGISTRATION_DRIFT:-}" = "1" ]; then
+        printf 'SOME TESTS FAILED\nTESTS: 4 FAILURES: 3 ERRORS: 1\n' > "${component_path}/.pg-test-result.txt"
+        printf '%s\n' '{"success":false,"executions":[{"stdout":"Abilities not registered during plugin boot: datamachine/get-flows, datamachine/create-flow\\nAbility category '\''datamachine-content'\'' should be registered during plugin boot\\nUnexpected incorrect usage notice for WP_Abilities_Registry::get_registered.\\nAbility \\\"datamachine/execute-workflow\\\" not found.\\nFailed asserting that an array has the key '\''image_generation'\''.\\nFailed asserting that an array has the key '\''web_fetch'\''.\\n","stderr":""}]}'
+        exit 1
+    fi
     printf 'ALL TESTS PASSED\nTESTS: 1 FAILURES: 0 ERRORS: 0\n' > "${component_path}/.pg-test-result.txt"
 fi
 printf '{"success":true,"executions":[{"stdout":"OK (1 test, 1 assertion)\n","stderr":""}]}\n'
@@ -154,6 +159,27 @@ WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-settings-args.txt" \
 
 assert_contains "${TMPDIR}/wp-codebox-settings.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/wp-codebox-settings-args.txt" "latest"
+
+set +e
+WP_CODEBOX_STUB_REGISTRATION_DRIFT=1 \
+HOMEBOY_CHANGED_SINCE="origin/main" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/registration-drift.out" 2>&1
+status=$?
+set -e
+
+if [ "$status" -ne 1 ]; then
+    echo "Expected registration drift preflight to exit 1, got $status" >&2
+    sed 's/^/  /' "${TMPDIR}/registration-drift.out" >&2
+    exit 1
+fi
+assert_contains "${TMPDIR}/registration-drift.out" "HARNESS PREFLIGHT FAILURE: WordPress bootstrap registration drift"
+assert_contains "${TMPDIR}/registration-drift.out" "Changed-since PHPUnit hit broad missing registration drift"
+assert_contains "${TMPDIR}/registration-drift.out" "changed-since: origin/main"
 
 set +e
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \

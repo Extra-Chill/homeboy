@@ -488,6 +488,43 @@ dump_diagnostics() {
     fi
 }
 
+is_changed_since_registration_drift() {
+    if [ -z "${HOMEBOY_CHANGED_SINCE:-}" ]; then
+        return 1
+    fi
+
+    local registration_output
+    registration_output="${PHPUNIT_STDOUT}
+${WP_CODEBOX_OUTPUT}"
+
+    if echo "$registration_output" | grep -qE "Abilities not registered during plugin boot|Ability category '.+' should be registered during plugin boot|WP_Abilities_Registry::get_registered|Ability .* not found"; then
+        return 0
+    fi
+
+    local drift_count
+    drift_count=$(echo "$registration_output" | grep -Ec "Failed asserting that an array has the key '([^']+)'." || true)
+    if [ "${drift_count:-0}" -ge 3 ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+dump_registration_drift_preflight() {
+    local registration_output
+    registration_output="${PHPUNIT_STDOUT}
+${WP_CODEBOX_OUTPUT}"
+
+    dump_diagnostics "HARNESS PREFLIGHT FAILURE: WordPress bootstrap registration drift"
+    echo ""
+    echo "Changed-since PHPUnit hit broad missing registration drift in the WordPress test runtime."
+    echo "This is reported as one harness/preflight failure so unrelated ability, task, and tool tests do not mask the branch signal."
+    echo "  changed-since: ${HOMEBOY_CHANGED_SINCE}"
+    echo ""
+    echo "--- Registration drift evidence ---"
+    echo "$registration_output" | grep -E "Abilities not registered during plugin boot|Ability category '.+' should be registered during plugin boot|WP_Abilities_Registry::get_registered|Ability .* not found|Failed asserting that an array has the key '([^']+)'." | head -20 || true
+}
+
 if echo "$PHPUNIT_OUTPUT" | grep -qE '^STAGE_(FAIL|FATAL):'; then
     FAILED_STAGE_LINE=$(echo "$PHPUNIT_OUTPUT" | grep -E '^STAGE_(FAIL|FATAL):' | head -1)
     FAILED_STAGE_DETAIL=$(echo "$FAILED_STAGE_LINE" | sed -E 's/^STAGE_(FAIL|FATAL)://')
@@ -496,6 +533,15 @@ if echo "$PHPUNIT_OUTPUT" | grep -qE '^STAGE_(FAIL|FATAL):'; then
     dump_diagnostics "BOOTSTRAP FAILURE: $FAILED_STAGE_DETAIL"
     rm -f "$RESULT_FILE"
     exit ${wp_codebox_exit:-1}
+fi
+
+if [ $wp_codebox_exit -ne 0 ] && is_changed_since_registration_drift; then
+    FAILED_STEP="WordPress PHPUnit harness preflight (registration drift)"
+    FAILURE_OUTPUT="Changed-since WordPress PHPUnit detected broad missing registration drift."
+    dump_registration_drift_preflight
+    write_phpunit_discovery_result failed "wordpress-registration-drift" "Changed-since WordPress PHPUnit detected broad missing registration drift in the test runtime."
+    rm -f "$RESULT_FILE"
+    exit 1
 fi
 
 if echo "$PHPUNIT_OUTPUT" | grep -q "SOME TESTS FAILED"; then
