@@ -150,7 +150,7 @@ jq -n \
     '{
         component_id: "wp-codebox-smoke-component",
         component_path: env.PWD,
-        bundle_host_path: $bundle,
+        bundle_path: $bundle,
         agent_slug: "wp-codebox-smoke-agent",
         flow_slug: "wp-codebox-smoke-flow",
         workload_id: "wp-codebox-runner-smoke",
