@@ -87,6 +87,8 @@
         "structural::src/core/code_audit/duplication.rs::GodFile",
         "structural::src/core/code_audit/duplication.rs::HighItemCount",
         "structural::src/core/code_audit/mod.rs::GodFile",
+        "structural::src/core/code_audit/requested_detectors.rs::GodFile",
+        "structural::src/core/code_audit/requested_detectors.rs::HighItemCount",
         "structural::src/core/code_audit/test_coverage.rs::GodFile",
         "structural::src/core/config.rs::GodFile",
         "structural::src/core/config.rs::HighItemCount",

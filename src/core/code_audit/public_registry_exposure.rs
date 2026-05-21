@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_public_route_raw_getter_when_resolver_exists_in_namespace() {
+    fn test_run() {
         let route = fp(
             "src/api/routes.php",
             Some("Vendor\\Package\\Api"),
