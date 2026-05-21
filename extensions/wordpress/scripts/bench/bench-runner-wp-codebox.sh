@@ -167,7 +167,7 @@ homeboy_wp_codebox_compile_scenario_manifests() {
             ')
         fi
 
-        local grader_ref grader_host grader_rel run_json
+        local grader_ref grader_host grader_rel run_json verifier_refs_json verifier_rels_json
         grader_ref=$(printf '%s' "$manifest_json" | jq -r 'if ((.grader? // .grader_file?) | type) == "string" then (.grader // .grader_file) else empty end')
         grader_rel=""
         if [ -n "$grader_ref" ]; then
@@ -180,12 +180,38 @@ homeboy_wp_codebox_compile_scenario_manifests() {
             grader_rel=$(homeboy_wp_codebox_component_relative_path "$grader_host")
         fi
 
+        verifier_refs_json=$(printf '%s' "$manifest_json" | jq -c '
+            [
+                if ((.verifier? // .verifier_file?) | type) == "string" then (.verifier // .verifier_file) else empty end,
+                if (.verifier_files? | type) == "array" then .verifier_files[] else empty end,
+                if (.verifiers? | type) == "array" then .verifiers[] else empty end
+            ] | map(select(type == "string" and . != ""))
+        ')
+        verifier_rels_json="[]"
+        if printf '%s' "$verifier_refs_json" | jq -e 'length > 0' >/dev/null 2>&1; then
+            local verifier_ref verifier_host verifier_rel
+            while IFS= read -r verifier_ref; do
+                [ -n "$verifier_ref" ] || continue
+                verifier_host=$(homeboy_wp_codebox_resolve_host_path "$manifest_dir" "$verifier_ref")
+                if [ ! -f "$verifier_host" ]; then
+                    echo "Error: scenario verifier file not found: $verifier_host" >&2
+                    FAILED_STEP="Scenario manifest setup"
+                    exit 1
+                fi
+                verifier_rel=$(homeboy_wp_codebox_component_relative_path "$verifier_host")
+                verifier_rels_json=$(jq -nc --argjson verifiers "$verifier_rels_json" --arg verifier "$verifier_rel" '$verifiers + [$verifier]')
+            done < <(printf '%s' "$verifier_refs_json" | jq -r '.[]')
+        fi
+
         run_json=$(printf '%s' "$manifest_json" | jq -c 'if (.run? | type) == "array" then .run else [] end')
         if [ -n "$grader_rel" ]; then
             run_json=$(jq -nc --argjson run "$run_json" --arg grader "$grader_rel" '$run + [{type: "php", file: $grader}]')
         fi
+        if printf '%s' "$verifier_rels_json" | jq -e 'length > 0' >/dev/null 2>&1; then
+            run_json=$(jq -nc --argjson run "$run_json" --argjson verifiers "$verifier_rels_json" '$run + ($verifiers | map({type: "php", file: .}))')
+        fi
         if ! printf '%s' "$run_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
-            echo "Error: scenario manifest requires run steps or a grader PHP file" >&2
+            echo "Error: scenario manifest requires run steps, a grader PHP file, or verifier PHP files" >&2
             FAILED_STEP="Scenario manifest setup"
             exit 1
         fi
@@ -199,6 +225,7 @@ homeboy_wp_codebox_compile_scenario_manifests() {
             --arg promptFile "$prompt_file_rel" \
             --arg blueprintFile "$blueprint_rel" \
             --arg graderFile "$grader_rel" \
+            --argjson verifierFiles "$verifier_rels_json" \
             '($manifest.metadata // {}) as $metadata |
             {
                 id: ($manifest.id // $manifest.label),
@@ -212,6 +239,9 @@ homeboy_wp_codebox_compile_scenario_manifests() {
                     prompt_file: $promptFile,
                     blueprint_file: $blueprintFile,
                     grader_file: $graderFile,
+                    verifier_files: $verifierFiles,
+                    forbidden_mutations: ($manifest.forbidden_mutations // []),
+                    required_active_plugins: ($manifest.required_active_plugins // []),
                     limits: ($manifest.limits // {}),
                     rules: ($manifest.rules // {}),
                     general_rules: ($manifest.general_rules // $manifest.rules.general // []),

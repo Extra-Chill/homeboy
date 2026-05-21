@@ -4,6 +4,9 @@
   "prompt_file": "prompt.md",
   "blueprint": "blueprint.json",
   "grader": "grader.php",
+  "verifier_files": ["verifier.php"],
+  "forbidden_mutations": ["scenarios/**"],
+  "required_active_plugins": ["playground-scenario-manifest/playground-scenario-manifest.php"],
   "tags": ["blocks", "markup", "medium"],
   "rules": {
     "general": ["wordpress_editable_blocks"],
@@ -24,8 +27,8 @@
   },
   "run": [
     {
-      "type": "wp-cli",
-      "command": "wp option update scenario_manifest_subject navigation --autoload=no"
+      "type": "php",
+      "file": "scenarios/setup.php"
     }
   ],
   "metadata": {
