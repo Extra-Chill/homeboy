@@ -245,6 +245,22 @@ pub enum AuditFinding {
     DirectAggregateConstruction,
     /// Configured ecosystem/language/framework term appears in core-owned source.
     CoreBoundaryLeak,
+    /// Config-like key/value is written, migrated, or surfaced by an accessor
+    /// without a corresponding production read/consumer.
+    ConfigKeyWriteOnly,
+    /// Config/schema key appears in one side of a round-trip path but not the other.
+    ConfigRoundtripAsymmetry,
+    /// Public metadata endpoint reads a raw registry/config source without the
+    /// project-local resolver/policy companion.
+    PublicRegistryResolverBypass,
+    /// Mutating resource handler lacks the configured ownership/access companion.
+    MutatingResourceOwnershipMissing,
+    /// Request-derived redirect destination lacks a dominating validation companion.
+    UndominatedRedirectParam,
+    /// Direct construction bypasses a configured factory/filter/resolver seam.
+    FactorySeamBypass,
+    /// Internal REST/API proxy call lacks a configured namespace or scope guard.
+    InternalProxyScopeMissing,
 }
 
 impl AuditFinding {
@@ -304,6 +320,13 @@ impl AuditFinding {
             "repeated_enum_dispatch_contract",
             "direct_aggregate_construction",
             "core_boundary_leak",
+            "config_key_write_only",
+            "config_roundtrip_asymmetry",
+            "public_registry_resolver_bypass",
+            "mutating_resource_ownership_missing",
+            "undominated_redirect_param",
+            "factory_seam_bypass",
+            "internal_proxy_scope_missing",
         ]
     }
 }

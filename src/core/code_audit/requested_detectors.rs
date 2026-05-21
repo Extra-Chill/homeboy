@@ -4,7 +4,9 @@ use regex::{Captures, Regex};
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
-use crate::core::component::{AuditConfig, RequestedDetectorRule, RequestedDetectorRuleBody};
+use crate::core::component::{
+    AuditConfig, RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope,
+};
 
 use super::comment_blocks;
 use super::conventions::{AuditFinding, Language};
@@ -17,6 +19,15 @@ struct DerivedValue {
     value: String,
     label: String,
     file: String,
+}
+
+#[derive(Debug, Clone)]
+struct DerivedValueSite {
+    value: String,
+    label: String,
+    file: String,
+    line: usize,
+    captures: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +110,40 @@ fn run_rule(rule: &RequestedDetectorRule, fingerprints: &[&FileFingerprint]) -> 
             description,
             suggestion,
         ),
+        RequestedDetectorRuleBody::RequiredRegex {
+            pattern,
+            required_pattern,
+            required_scope,
+            description,
+            suggestion,
+        } => run_required_regex_rule(
+            rule,
+            fingerprints,
+            pattern,
+            required_pattern,
+            required_scope,
+            description,
+            suggestion,
+        ),
+        RequestedDetectorRuleBody::DerivedAbsence {
+            source_pattern,
+            value_capture,
+            label,
+            required_pattern,
+            exclude_required_path_contains,
+            description,
+            suggestion,
+        } => run_derived_absence_rule(
+            rule,
+            fingerprints,
+            source_pattern,
+            value_capture,
+            label,
+            required_pattern,
+            exclude_required_path_contains,
+            description,
+            suggestion,
+        ),
     }
 }
 
@@ -175,6 +220,72 @@ fn run_comment_regex_rule(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn run_required_regex_rule(
+    rule: &RequestedDetectorRule,
+    fingerprints: &[&FileFingerprint],
+    pattern: &str,
+    required_pattern: &str,
+    required_scope: &RequiredRegexScope,
+    description: &str,
+    suggestion: &str,
+) -> Vec<Finding> {
+    let Ok(regex) = Regex::new(pattern) else {
+        return Vec::new();
+    };
+
+    let mut findings = Vec::new();
+    for fp in eligible_files(rule, fingerprints) {
+        for captures in regex.captures_iter(&fp.content) {
+            let concrete_required_pattern =
+                render_template(required_pattern, Some(&captures), |_| String::new());
+            let Ok(required_regex) = Regex::new(&concrete_required_pattern) else {
+                continue;
+            };
+            if required_match_exists(
+                &required_regex,
+                required_scope,
+                fp,
+                &captures,
+                &eligible_files(rule, fingerprints),
+            ) {
+                continue;
+            }
+            findings.push(finding_from_captures(
+                rule,
+                fp,
+                &captures,
+                description,
+                suggestion,
+            ));
+        }
+    }
+    findings
+}
+
+fn required_match_exists(
+    required_regex: &Regex,
+    required_scope: &RequiredRegexScope,
+    fp: &FileFingerprint,
+    captures: &Captures,
+    eligible: &[&FileFingerprint],
+) -> bool {
+    match required_scope {
+        RequiredRegexScope::SameFile => required_regex.is_match(&fp.content),
+        RequiredRegexScope::BeforeMatch => captures
+            .get(0)
+            .map(|match_| required_regex.is_match(&fp.content[..match_.start()]))
+            .unwrap_or(false),
+        RequiredRegexScope::AfterMatch => captures
+            .get(0)
+            .map(|match_| required_regex.is_match(&fp.content[match_.end()..]))
+            .unwrap_or(false),
+        RequiredRegexScope::AnyEligibleFile => eligible
+            .iter()
+            .any(|candidate| required_regex.is_match(&candidate.content)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_derived_literal_rule(
     rule: &RequestedDetectorRule,
     fingerprints: &[&FileFingerprint],
@@ -248,6 +359,60 @@ fn run_derived_literal_rule(
     sites
         .into_values()
         .map(|site| finding_from_derived_literal_site(rule, &site, description, suggestion))
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_derived_absence_rule(
+    rule: &RequestedDetectorRule,
+    fingerprints: &[&FileFingerprint],
+    source_pattern: &str,
+    value_capture: &str,
+    label: &str,
+    required_pattern: &str,
+    exclude_required_path_contains: &[String],
+    description: &str,
+    suggestion: &str,
+) -> Vec<Finding> {
+    let Ok(source_regex) = Regex::new(source_pattern) else {
+        return Vec::new();
+    };
+
+    let sources = collect_derived_values_with_captures(
+        &source_regex,
+        eligible_files(rule, fingerprints),
+        value_capture,
+        label,
+    );
+    if sources.is_empty() {
+        return Vec::new();
+    }
+
+    sources
+        .into_iter()
+        .filter_map(|source| {
+            let concrete_pattern = render_template_from_values(
+                required_pattern,
+                &source.captures,
+                |name| match name {
+                    "value" => source.value.clone(),
+                    "label" => source.label.clone(),
+                    _ => String::new(),
+                },
+            );
+            let required_regex = Regex::new(&concrete_pattern).ok()?;
+            let has_required_match = eligible_files(rule, fingerprints)
+                .into_iter()
+                .filter(|fp| fp.relative_path != source.file)
+                .filter(|fp| {
+                    !exclude_required_path_contains
+                        .iter()
+                        .any(|needle| fp.relative_path.contains(needle))
+                })
+                .any(|fp| required_regex.is_match(&fp.content));
+            (!has_required_match)
+                .then(|| finding_from_derived_absence_site(rule, &source, description, suggestion))
+        })
         .collect()
 }
 
@@ -329,6 +494,32 @@ fn run_scoped_proxy_rule(
         }
     }
     findings
+}
+
+fn collect_derived_values_with_captures(
+    source_regex: &Regex,
+    files: Vec<&FileFingerprint>,
+    value_capture: &str,
+    label_template: &str,
+) -> Vec<DerivedValueSite> {
+    let mut values = Vec::new();
+    for fp in files {
+        for captures in source_regex.captures_iter(&fp.content) {
+            let value = capture_value(&captures, value_capture);
+            if value.is_empty() {
+                continue;
+            }
+            let offset = captures.get(0).map(|m| m.start()).unwrap_or(0);
+            values.push(DerivedValueSite {
+                label: render_template(label_template, Some(&captures), |_| String::new()),
+                value,
+                file: fp.relative_path.clone(),
+                line: line_of_offset(&fp.content, offset),
+                captures: capture_values(source_regex, &captures),
+            });
+        }
+    }
+    values
 }
 
 fn eligible_files<'a>(
@@ -425,6 +616,28 @@ fn finding_from_derived_literal_site(
         "line" => site.line.to_string(),
         "value" => site.value.clone(),
         "label" => label.clone(),
+        _ => String::new(),
+    };
+    Finding {
+        convention: rule.convention.clone(),
+        severity: severity_from_config(&rule.severity),
+        file: site.file.clone(),
+        description: render_template_from_values(description, &site.captures, extra),
+        suggestion: render_template_from_values(suggestion, &site.captures, extra),
+        kind: AuditFinding::from_str(&rule.kind).unwrap_or(AuditFinding::LegacyComment),
+    }
+}
+
+fn finding_from_derived_absence_site(
+    rule: &RequestedDetectorRule,
+    site: &DerivedValueSite,
+    description: &str,
+    suggestion: &str,
+) -> Finding {
+    let extra = |name: &str| match name {
+        "line" => site.line.to_string(),
+        "value" => site.value.clone(),
+        "label" => site.label.clone(),
         _ => String::new(),
     };
     Finding {
@@ -791,10 +1004,13 @@ function run( $input ) {
             file_extensions: vec!["php".to_string()],
             exclude_path_contains: vec![],
             rule: RequestedDetectorRuleBody::ScopedProxy {
-                claim_pattern: r#"(?i)\b(internal API|internal API namespace|/acme/v1)\b"#.to_string(),
+                claim_pattern: r#"(?i)\b(internal API|internal API namespace|/acme/v1)\b"#
+                    .to_string(),
                 sink_pattern: r#"\b(?P<sink>forward_internal_request)\s*\("#.to_string(),
                 target_pattern: r#"\$input\s*\[\s*['\"]path['\"]\s*\]"#.to_string(),
-                allowlist_pattern: r#"(?i)(str_starts_with|preg_match)\s*\([^;]*(/acme/v1|allowed_prefixes|allowlist)"#.to_string(),
+                allowlist_pattern:
+                    r#"(?i)(str_starts_with|preg_match)\s*\([^;]*(/acme/v1|allowed_prefixes|allowlist)"#
+                        .to_string(),
                 description: "Proxy scope drift at line {line}: scoped docs feed `{sink}` from request input without a matching allowlist".to_string(),
                 suggestion: "Add an allowlist/prefix check for the documented scope or document the proxy as general-purpose.".to_string(),
             },
@@ -809,5 +1025,132 @@ function run( $input ) {
         assert_eq!(findings[0].kind, AuditFinding::ProxyScopeDrift);
         assert_eq!(findings[0].file, "src/internal_proxy.php");
         assert!(findings[0].description.contains("forward_internal_request"));
+    }
+
+    #[test]
+    fn required_regex_rules_flag_missing_before_match_companion() {
+        let unsafe_redirect = php_fp(
+            "src/auth.php",
+            r#"<?php
+$redirect_uri = $_GET['redirect_uri'];
+if ( ! $agent ) {
+    wp_redirect( $redirect_uri );
+}
+if ( validate_redirect_destination( $redirect_uri ) ) {
+    wp_redirect( $redirect_uri );
+}
+"#,
+        );
+        let rule = RequestedDetectorRule {
+            id: "redirect-dominance".to_string(),
+            kind: "undominated_redirect_param".to_string(),
+            severity: "warning".to_string(),
+            convention: "requested_detectors".to_string(),
+            language: Some("php".to_string()),
+            file_extensions: vec!["php".to_string()],
+            exclude_path_contains: vec![],
+            rule: RequestedDetectorRuleBody::RequiredRegex {
+                pattern: r#"wp_redirect\s*\(\s*\$(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s*\)"#.to_string(),
+                required_pattern: r#"validate_[A-Za-z0-9_]+\s*\([^;]*\${var}"#.to_string(),
+                required_scope: RequiredRegexScope::BeforeMatch,
+                description: "Redirect at line {line} uses `${var}` before validation dominates it"
+                    .to_string(),
+                suggestion: "Validate `${var}` before every redirect branch.".to_string(),
+            },
+        };
+
+        let findings = run(&[&unsafe_redirect], &config(rule));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::UndominatedRedirectParam);
+        assert!(findings[0].description.contains("$redirect_uri"));
+    }
+
+    #[test]
+    fn required_regex_rules_can_search_any_eligible_file() {
+        let route = php_fp(
+            "src/routes.php",
+            r#"<?php
+register_public_endpoint( 'tools', function() {
+    return ToolRegistry::get_global_tools();
+} );
+"#,
+        );
+        let resolver = php_fp(
+            "src/policy.php",
+            r#"<?php
+final class ToolPolicyResolver { public function resolve() {} }
+"#,
+        );
+        let rule = RequestedDetectorRule {
+            id: "public-registry-resolver".to_string(),
+            kind: "public_registry_resolver_bypass".to_string(),
+            severity: "warning".to_string(),
+            convention: "requested_detectors".to_string(),
+            language: Some("php".to_string()),
+            file_extensions: vec!["php".to_string()],
+            exclude_path_contains: vec![],
+            rule: RequestedDetectorRuleBody::RequiredRegex {
+                pattern: r#"register_public_endpoint[\s\S]*?get_global_tools\s*\("#.to_string(),
+                required_pattern: r#"ToolPolicyResolver"#.to_string(),
+                required_scope: RequiredRegexScope::AnyEligibleFile,
+                description: "Public registry path at line {line} has no policy resolver in the eligible corpus".to_string(),
+                suggestion: "Route public registry output through the project policy resolver.".to_string(),
+            },
+        };
+
+        assert!(run(&[&route, &resolver], &config(rule)).is_empty());
+    }
+
+    #[test]
+    fn derived_absence_rules_flag_values_without_required_corpus_match() {
+        let writer = php_fp(
+            "src/builder.php",
+            r#"<?php
+$config['enabled_tools'] = array();
+$config['user_message'] = 'hello';
+"#,
+        );
+        let reader = php_fp(
+            "src/execution.php",
+            r#"<?php
+if ( isset( $config['user_message'] ) ) {
+    display( $config['user_message'] );
+}
+"#,
+        );
+        let test_mirror = php_fp(
+            "tests/execution_test.php",
+            r#"<?php
+$this->assertSame( array(), $config['enabled_tools'] );
+"#,
+        );
+        let rule = RequestedDetectorRule {
+            id: "config-write-only".to_string(),
+            kind: "config_key_write_only".to_string(),
+            severity: "warning".to_string(),
+            convention: "requested_detectors".to_string(),
+            language: Some("php".to_string()),
+            file_extensions: vec!["php".to_string()],
+            exclude_path_contains: vec![],
+            rule: RequestedDetectorRuleBody::DerivedAbsence {
+                source_pattern:
+                    r#"\$config\s*\[\s*['\"](?P<key>[A-Za-z_][A-Za-z0-9_]*)['\"]\s*\]\s*="#
+                        .to_string(),
+                value_capture: "key".to_string(),
+                label: "config key `{key}`".to_string(),
+                required_pattern: r#"\$config\s*\[\s*['\"]{value}['\"]\s*\]"#.to_string(),
+                exclude_required_path_contains: vec!["tests/".to_string()],
+                description: "{label} written at line {line} has no non-test consumer".to_string(),
+                suggestion:
+                    "Consume `{value}` in production code or remove the stale config write."
+                        .to_string(),
+            },
+        };
+
+        let findings = run(&[&writer, &reader, &test_mirror], &config(rule));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::ConfigKeyWriteOnly);
+        assert!(findings[0].description.contains("enabled_tools"));
+        assert!(!findings[0].description.contains("user_message"));
     }
 }

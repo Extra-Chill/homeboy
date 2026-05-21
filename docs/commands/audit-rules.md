@@ -36,7 +36,7 @@ Use one of:
 
 These findings participate in baseline comparisons like any other audit finding.
 
-## Requested Detectors
+# Requested Detector Rules
 
 `audit_rules.requested_detectors` lets an extension provide generic text detectors
 without baking ecosystem terms into Homeboy core. Core owns the matching primitive;
@@ -81,3 +81,64 @@ Finding output:
 - `convention`: defaults to `requested_detectors`
 - `kind`: `proxy_scope_drift`
 - severity: configured by the rule, usually warning
+
+## Required Regex
+
+Use `type: "required_regex"` when a risky candidate match must have a companion
+match in a defined scope.
+
+```json
+{
+  "audit_rules": {
+    "requested_detectors": [
+      {
+        "id": "redirect-dominance",
+        "kind": "undominated_redirect_param",
+        "language": "php",
+        "file_extensions": ["php"],
+        "type": "required_regex",
+        "pattern": "wp_redirect\\s*\\(\\s*\\$(?P<var>[A-Za-z_][A-Za-z0-9_]*)",
+        "required_pattern": "validate_[A-Za-z0-9_]+\\s*\\([^;]*\\${var}",
+        "required_scope": "before_match",
+        "description": "Redirect at line {line} uses `${var}` before validation dominates it",
+        "suggestion": "Validate `${var}` before every redirect branch."
+      }
+    ]
+  }
+}
+```
+
+Supported scopes are `same_file`, `before_match`, `after_match`, and
+`any_eligible_file`.
+
+## Derived Absence
+
+Use `type: "derived_absence"` when values collected from one shape must appear in
+a second shape elsewhere in the eligible corpus. This is useful for write-only
+config keys and import/export schema drift checks.
+
+```json
+{
+  "audit_rules": {
+    "requested_detectors": [
+      {
+        "id": "config-write-only",
+        "kind": "config_key_write_only",
+        "language": "php",
+        "file_extensions": ["php"],
+        "type": "derived_absence",
+        "source_pattern": "\\$config\\s*\\[\\s*['\"](?P<key>[A-Za-z_][A-Za-z0-9_]*)['\"]\\s*\\]\\s*=",
+        "value_capture": "key",
+        "label": "config key `{key}`",
+        "required_pattern": "\\$config\\s*\\[\\s*['\"]{value}['\"]\\s*\\]",
+        "exclude_required_path_contains": ["tests/", "fixtures/"],
+        "description": "{label} written at line {line} has no non-test consumer",
+        "suggestion": "Consume `{value}` in production code or remove the stale config write."
+      }
+    ]
+  }
+}
+```
+
+Templates support regex capture names and `{line}`. `derived_absence` also exposes
+`{value}` and `{label}`.
