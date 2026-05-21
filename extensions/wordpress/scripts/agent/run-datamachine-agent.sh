@@ -417,10 +417,18 @@ if [ -n "$BUNDLE_REPO" ]; then
         )' <<<"$CONFIG_JSON")
 else
     BUNDLE_HOST_PATH=$(jq -r '.bundle_host_path // empty' "$CONFIG_PATH")
+    BUNDLE_PATH_IS_HOST_PATH=0
+    if [ -z "$BUNDLE_HOST_PATH" ]; then
+        BUNDLE_CONFIG_PATH=$(jq -r '.bundle_path // empty' "$CONFIG_PATH")
+        if [ -n "$BUNDLE_CONFIG_PATH" ] && [ -d "$BUNDLE_CONFIG_PATH" ]; then
+            BUNDLE_HOST_PATH="$BUNDLE_CONFIG_PATH"
+            BUNDLE_PATH_IS_HOST_PATH=1
+        fi
+    fi
     if [ -n "$BUNDLE_HOST_PATH" ]; then
         BUNDLE_PATH="$BUNDLE_HOST_PATH"
         BUNDLE_GUEST_SLUG="$(basename "$(cd "$BUNDLE_PATH" && pwd)")"
-        BUNDLE_GUEST_PATH=$(jq -r --arg fallback "/wordpress/wp-content/plugins/${BUNDLE_GUEST_SLUG}" '.bundle_path // $fallback' "$CONFIG_PATH")
+        BUNDLE_GUEST_PATH=$(jq -r --arg fallback "/wordpress/wp-content/plugins/${BUNDLE_GUEST_SLUG}" --argjson bundlePathIsHostPath "$BUNDLE_PATH_IS_HOST_PATH" 'if $bundlePathIsHostPath then $fallback else (.bundle_path // $fallback) end' "$CONFIG_PATH")
         CONFIG_JSON=$(jq -c \
             --arg bundlePath "$BUNDLE_PATH" \
             --arg bundleGuestPath "$BUNDLE_GUEST_PATH" \
