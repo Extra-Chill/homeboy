@@ -48,18 +48,83 @@ if [ "$TEST_TYPE" = "xcodebuild" ]; then
     WORKSPACE=$(find "$COMPONENT_PATH" -maxdepth 1 -name "*.xcworkspace" | head -1)
     PROJECT=$(find "$COMPONENT_PATH" -maxdepth 1 -name "*.xcodeproj" | head -1)
 
+    XCODE_OUTPUT="$(mktemp)"
+    trap 'rm -f "$XCODE_OUTPUT"' EXIT
     if [ -n "$WORKSPACE" ]; then
-        xcodebuild test -workspace "$WORKSPACE" -scheme "$(basename "$WORKSPACE" .xcworkspace)" -destination 'platform=macOS' "$@"
+        set +e
+        xcodebuild test -workspace "$WORKSPACE" -scheme "$(basename "$WORKSPACE" .xcworkspace)" -destination 'platform=macOS' "$@" 2>&1 | tee "$XCODE_OUTPUT"
+        XCODE_EXIT=${PIPESTATUS[0]}
+        set -e
     elif [ -n "$PROJECT" ]; then
-        xcodebuild test -project "$PROJECT" -scheme "$(basename "$PROJECT" .xcodeproj)" -destination 'platform=macOS' "$@"
+        set +e
+        xcodebuild test -project "$PROJECT" -scheme "$(basename "$PROJECT" .xcodeproj)" -destination 'platform=macOS' "$@" 2>&1 | tee "$XCODE_OUTPUT"
+        XCODE_EXIT=${PIPESTATUS[0]}
+        set -e
     else
         echo "Error: No Xcode project or workspace found"
         exit 1
     fi
+
+    if [ "$XCODE_EXIT" -ne 0 ] && [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
+        python3 - "$COMPONENT_PATH" "$XCODE_OUTPUT" "$HOMEBOY_TEST_FAILURES_FILE" <<'PY'
+import hashlib
+import json
+import re
+import sys
+
+component, output_file, target = sys.argv[1:]
+with open(output_file, encoding="utf-8") as handle:
+    lines = handle.read().splitlines()
+
+failures = []
+pattern = re.compile(r"Test Case '-\[(?P<suite>[^ ]+) (?P<test>[^\]]+)\]' failed(?: \((?P<seconds>[^)]+)\))?\.")
+for raw in lines:
+    match = pattern.search(raw)
+    if not match:
+        continue
+    suite = match.group("suite")
+    test = match.group("test")
+    test_id = f"{suite}.{test}"
+    identity = f"swift:xctest:{test_id}"
+    failures.append({
+        "test_id": test_id,
+        "suite": suite,
+        "file": None,
+        "line": None,
+        "message": raw.strip(),
+        "failure_type": "test_failure",
+        "fingerprint": hashlib.sha256(identity.encode()).hexdigest(),
+        "stdout_excerpt": "\n".join(lines)[-4000:],
+        "stderr_excerpt": "",
+    })
+
+if not failures:
+    identity = "swift:xcodebuild:failed"
+    failures.append({
+        "test_id": "xcodebuild test",
+        "suite": None,
+        "file": None,
+        "line": None,
+        "message": "xcodebuild test failed before XCTest failures could be parsed",
+        "failure_type": "infrastructure",
+        "fingerprint": hashlib.sha256(identity.encode()).hexdigest(),
+        "stdout_excerpt": "\n".join(lines)[-4000:],
+        "stderr_excerpt": "",
+    })
+
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(failures, handle, indent=2)
+    handle.write("\n")
+PY
+    fi
+    exit "$XCODE_EXIT"
 else
     # Script mode - run .swift files directly
     TESTS_RUN=0
     TESTS_FAILED=0
+    FAILURES_FILE="$(mktemp)"
+    : > "$FAILURES_FILE"
+    trap 'rm -f "$FAILURES_FILE"' EXIT
 
     for test_file in "$TEST_DIR"/*.swift; do
         if [ -f "$test_file" ]; then
@@ -67,11 +132,16 @@ else
             TEST_NAME=$(basename "$test_file")
             echo "Running: $TEST_NAME"
 
-            if swift "$test_file" "$TEST_DIR" 2>&1; then
+            TEST_OUTPUT="$(mktemp)"
+            if swift "$test_file" "$TEST_DIR" > "$TEST_OUTPUT" 2>&1; then
+                cat "$TEST_OUTPUT"
                 echo "  PASS"
+                rm -f "$TEST_OUTPUT"
             else
+                cat "$TEST_OUTPUT"
                 echo "  FAIL"
                 TESTS_FAILED=$((TESTS_FAILED + 1))
+                printf '%s\t%s\n' "$TEST_NAME" "$TEST_OUTPUT" >> "$FAILURES_FILE"
             fi
         fi
     done
@@ -85,6 +155,45 @@ else
     echo "Results: $((TESTS_RUN - TESTS_FAILED))/$TESTS_RUN tests passed"
 
     if [ $TESTS_FAILED -gt 0 ]; then
+        if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
+            python3 - "$FAILURES_FILE" "$HOMEBOY_TEST_FAILURES_FILE" <<'PY'
+import hashlib
+import json
+import sys
+
+failures_file, target = sys.argv[1:]
+failures = []
+with open(failures_file, encoding="utf-8") as handle:
+    for raw in handle:
+        name, _, output_path = raw.rstrip("\n").partition("\t")
+        if not name or not output_path:
+            continue
+        try:
+            with open(output_path, encoding="utf-8") as output_handle:
+                output = output_handle.read()
+        except OSError:
+            output = ""
+        identity = f"swift:script:{name}"
+        failures.append({
+            "test_id": name,
+            "suite": "script",
+            "file": f"tests/{name}",
+            "line": None,
+            "message": f"Swift script test failed: {name}",
+            "failure_type": "test_failure",
+            "fingerprint": hashlib.sha256(identity.encode()).hexdigest(),
+            "stdout_excerpt": output[-4000:],
+            "stderr_excerpt": "",
+        })
+
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(failures, handle, indent=2)
+    handle.write("\n")
+PY
+        fi
+        while IFS=$'\t' read -r _ output_path; do
+            [ -n "$output_path" ] && rm -f "$output_path"
+        done < "$FAILURES_FILE"
         exit 1
     fi
 fi

@@ -9,9 +9,9 @@
     "capabilities": ["fingerprint", "refactor", "format", "validate"]
   },
   "structured_sidecars": {
-    "lint.findings": false,
+    "lint.findings": true,
     "test.results": true,
-    "test.failures": false,
+    "test.failures": true,
     "test.coverage": false,
     "bench.results": true,
     "annotations": true

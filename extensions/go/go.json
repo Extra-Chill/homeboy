@@ -10,9 +10,9 @@
     "capabilities": ["fingerprint", "format", "validate"]
   },
   "structured_sidecars": {
-    "lint.findings": false,
+    "lint.findings": true,
     "test.results": false,
-    "test.failures": false,
+    "test.failures": true,
     "test.coverage": false,
     "annotations": false
   },

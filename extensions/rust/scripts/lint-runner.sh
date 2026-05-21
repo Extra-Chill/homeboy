@@ -104,6 +104,109 @@ write_fix_results_sidecar() {
     fi
 }
 
+write_lint_findings_from_output() {
+    local tool="$1"
+    local output_file="$2"
+
+    if [ -z "${HOMEBOY_LINT_FINDINGS_FILE:-}" ] || [ ! -f "$output_file" ]; then
+        return 0
+    fi
+
+    python3 - "$PROJECT_PATH" "$tool" "$output_file" "$HOMEBOY_LINT_FINDINGS_FILE" <<'PY'
+import hashlib
+import json
+import os
+import re
+import sys
+
+project, tool, output_file, target = sys.argv[1:]
+try:
+    with open(target, encoding="utf-8") as handle:
+        findings = json.load(handle)
+        if not isinstance(findings, list):
+            findings = []
+except (OSError, json.JSONDecodeError):
+    findings = []
+
+def excerpt(file, line):
+    try:
+        with open(os.path.join(project, file), encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+        if 1 <= line <= len(lines):
+            return lines[line - 1][:240]
+    except OSError:
+        return None
+    return None
+
+with open(output_file, encoding="utf-8") as handle:
+    lines = handle.read().splitlines()
+
+if tool == "rustfmt":
+    pattern = re.compile(r"^Diff in (?P<file>.+) at line (?P<line>\d+):")
+    for raw in lines:
+        match = pattern.match(raw)
+        if not match:
+            continue
+        file = match.group("file")
+        if os.path.isabs(file):
+            file = os.path.relpath(file, project)
+        line = int(match.group("line"))
+        identity = f"rust:rustfmt:{file}:{line}"
+        findings.append({
+            "id": identity,
+            "file": file,
+            "line": line,
+            "column": 1,
+            "severity": "warning",
+            "source": "rustfmt",
+            "code": "formatting",
+            "category": "format",
+            "message": "File needs formatting",
+            "fixable": True,
+            "fingerprint": hashlib.sha1(identity.encode()).hexdigest(),
+            "excerpt": excerpt(file, line),
+        })
+elif tool == "clippy":
+    pending = None
+    diagnostic = re.compile(r"^(?P<severity>warning|error)(\[(?P<code>[^\]]+)\])?: (?P<message>.+)$")
+    location = re.compile(r"^\s+--> (?P<file>[^:\n]+):(?P<line>\d+):(?P<column>\d+)")
+    for raw in lines:
+        match = diagnostic.match(raw)
+        if match:
+            pending = match.groupdict()
+            continue
+        match = location.match(raw)
+        if not match or not pending:
+            continue
+        file = match.group("file")
+        line = int(match.group("line"))
+        column = int(match.group("column"))
+        code = pending.get("code") or "clippy"
+        message = pending.get("message") or "clippy finding"
+        severity = pending.get("severity") or "warning"
+        identity = f"rust:clippy:{file}:{line}:{column}:{code}:{message}"
+        findings.append({
+            "id": identity,
+            "file": file,
+            "line": line,
+            "column": column,
+            "severity": severity,
+            "source": "clippy",
+            "code": code,
+            "category": "correctness",
+            "message": message,
+            "fixable": False,
+            "fingerprint": hashlib.sha1(identity.encode()).hexdigest(),
+            "excerpt": excerpt(file, line),
+        })
+        pending = None
+
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(findings, handle, indent=2)
+    handle.write("\n")
+PY
+}
+
 trap write_fix_results_sidecar EXIT
 
 # Verify this is a Rust project
@@ -179,6 +282,13 @@ if should_run_step "fmt"; then
         if [ $FMT_EXIT -eq 0 ]; then
             echo "cargo fmt: passed"
         else
+            if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
+                FMT_FINDINGS_TMP="$(mktemp)"
+                printf '%s\n' "$FMT_OUTPUT" > "$FMT_FINDINGS_TMP"
+                write_lint_findings_from_output "rustfmt" "$FMT_FINDINGS_TMP"
+                rm -f "$FMT_FINDINGS_TMP"
+            fi
+
             if [ "${HOMEBOY_SUMMARY_MODE:-}" = "1" ]; then
                 # Count files with formatting issues
                 FILE_COUNT=$(echo "$FMT_OUTPUT" | grep -c "^Diff in" || true)
@@ -320,6 +430,13 @@ if should_run_step "clippy"; then
         if [ -n "$CLIPPY_BEFORE" ]; then
             rm -f "$CLIPPY_BEFORE"
         fi
+        if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
+            CLIPPY_FINDINGS_TMP="$(mktemp)"
+            printf '%s\n' "$CLIPPY_OUTPUT" > "$CLIPPY_FINDINGS_TMP"
+            write_lint_findings_from_output "clippy" "$CLIPPY_FINDINGS_TMP"
+            rm -f "$CLIPPY_FINDINGS_TMP"
+        fi
+
         if [ "${HOMEBOY_SUMMARY_MODE:-}" = "1" ]; then
             WARNING_COUNT=$(echo "$CLIPPY_OUTPUT" | grep -c "^warning\[" || true)
             ERROR_COUNT=$(echo "$CLIPPY_OUTPUT" | grep -c "^error\[" || true)
