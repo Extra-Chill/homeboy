@@ -95,9 +95,15 @@ fi
 # Install npm dependencies (Blueprint validation helpers, ESLint).
 if [ -f "package.json" ]; then
     echo "Installing npm dependencies..."
-    npm install --quiet --no-fund --no-audit 2>&1 || {
-        echo "Warning: npm install failed — extension Node tooling may not be available"
-    }
+    if [ -f "package-lock.json" ]; then
+        npm ci --quiet --no-fund --no-audit 2>&1 || {
+            echo "Warning: npm ci failed — extension Node tooling may not be available"
+        }
+    else
+        npm install --quiet --no-fund --no-audit 2>&1 || {
+            echo "Warning: npm install failed — extension Node tooling may not be available"
+        }
+    fi
 fi
 
 install_wp_codebox

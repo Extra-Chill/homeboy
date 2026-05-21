@@ -75,7 +75,7 @@ if [ -z "$BLUEPRINT" ]; then
 fi
 if [ ! -f "$PLAYGROUND_CLI" ]; then
     echo "Error: @wp-playground/cli not found at $PLAYGROUND_CLI" >&2
-    echo "Install it with: cd ${EXTENSION_PATH} && npm install" >&2
+    echo "Install it with: cd ${EXTENSION_PATH} && npm ci" >&2
     exit 2
 fi
 if [ -n "$ARTIFACT_DIR" ]; then
