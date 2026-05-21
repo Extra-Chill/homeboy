@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.197.0] - 2026-05-21
+
+### Added
+- detect config roundtrip key asymmetry
+- detect write-only config keys
+- detect mutating resource access gaps
+
+### Changed
+- Warn on request redirect validation gaps
+
 ## [0.196.0] - 2026-05-21
 
 ### Added
