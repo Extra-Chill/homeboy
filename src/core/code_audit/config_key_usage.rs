@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn flags_written_accessor_backed_key_without_production_read() {
+    fn test_run() {
         let files = vec![
             fp("src/builder.rs", "set_config('enabled_items', values);"),
             fp(
@@ -236,6 +236,92 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, AuditFinding::WriteOnlyConfigKey);
         assert!(findings[0].description.contains("enabled_items"));
+    }
+
+    #[test]
+    fn test_run_rule() {
+        let files = vec![fp("src/builder.rs", "set_config('enabled_items', values);")];
+        let refs = files.iter().collect::<Vec<_>>();
+
+        let findings = run_rule(&refs, &rule());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file, "src/builder.rs");
+    }
+
+    #[test]
+    fn test_is_eligible_path() {
+        let rule = rule();
+
+        assert!(is_eligible_path("src/builder.rs", &rule));
+        assert!(!is_eligible_path("fixtures/builder.rs", &rule));
+    }
+
+    #[test]
+    fn test_collect_pattern_evidence() {
+        let file = fp(
+            "src/builder.rs",
+            "first\nset_config('enabled_items', values);",
+        );
+        let mut records = Vec::new();
+
+        collect_pattern_evidence(&file, &rule().write_patterns, |key, site, symbol| {
+            records.push((key, site.file, site.line, symbol));
+        });
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, "enabled_items");
+        assert_eq!(records[0].1, "src/builder.rs");
+        assert_eq!(records[0].2, 2);
+        assert_eq!(records[0].3, None);
+    }
+
+    #[test]
+    fn test_collect_accessor_symbol_reads() {
+        let files = vec![
+            fp(
+                "src/config.rs",
+                "fn enabled_items() { get_config('enabled_items') }",
+            ),
+            fp("src/runtime.rs", "let items = enabled_items();"),
+        ];
+        let refs = files.iter().collect::<Vec<_>>();
+        let mut evidence_by_key = BTreeMap::new();
+        evidence_by_key.insert(
+            "enabled_items".to_string(),
+            KeyEvidence {
+                accessors: vec![EvidenceSite {
+                    file: "src/config.rs".to_string(),
+                    line: 1,
+                }],
+                accessor_symbols: BTreeSet::from(["enabled_items".to_string()]),
+                ..Default::default()
+            },
+        );
+
+        collect_accessor_symbol_reads(&refs, &mut evidence_by_key);
+
+        let evidence = evidence_by_key.get("enabled_items").unwrap();
+        assert_eq!(evidence.reads.len(), 1);
+        assert_eq!(evidence.reads[0].file, "src/runtime.rs");
+    }
+
+    #[test]
+    fn test_finding_for() {
+        let evidence = KeyEvidence {
+            writes: vec![EvidenceSite {
+                file: "src/builder.rs".to_string(),
+                line: 3,
+            }],
+            ..Default::default()
+        };
+
+        let finding = finding_for(&rule(), "enabled_items", &evidence).unwrap();
+
+        assert_eq!(finding.kind, AuditFinding::WriteOnlyConfigKey);
+        assert_eq!(finding.severity, Severity::Warning);
+        assert!(finding.description.contains("enabled_items"));
+        assert!(finding.description.contains("src/builder.rs:3"));
     }
 
     #[test]

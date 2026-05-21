@@ -479,6 +479,7 @@ pub fn discover_conventions_with_config(
         });
         let utility_like = helper_like && is_utility_like_file(fp, audit_config);
         let convention_exempt = is_convention_exception(fp, audit_config);
+        let skip_member_requirements = helper_like || convention_exempt;
 
         let mut deviations = Vec::new();
 
@@ -502,52 +503,52 @@ pub fn discover_conventions_with_config(
 
         // Check missing methods
         for expected in &expected_methods {
-            if helper_like || convention_exempt {
+            if skip_member_requirements {
                 continue;
             }
             if !fp.methods.contains(expected) {
-                deviations.push(Deviation {
-                    kind: AuditFinding::MissingMethod,
-                    description: format!("Missing method: {}", expected),
-                    suggestion: format!(
-                        "Add {}() to match the convention in {}",
-                        expected, group_name
-                    ),
-                });
+                deviations.push(member_requirement_deviation(
+                    AuditFinding::MissingMethod,
+                    "Missing method",
+                    "Add",
+                    expected,
+                    "()",
+                    group_name,
+                ));
             }
         }
 
         // Check missing registrations
         for expected in &expected_registrations {
-            if helper_like || convention_exempt {
+            if skip_member_requirements {
                 continue;
             }
             if !fp.registrations.contains(expected) {
-                deviations.push(Deviation {
-                    kind: AuditFinding::MissingRegistration,
-                    description: format!("Missing registration: {}", expected),
-                    suggestion: format!(
-                        "Add {} call to match the convention in {}",
-                        expected, group_name
-                    ),
-                });
+                deviations.push(member_requirement_deviation(
+                    AuditFinding::MissingRegistration,
+                    "Missing registration",
+                    "Add",
+                    expected,
+                    " call",
+                    group_name,
+                ));
             }
         }
 
         // Check missing interfaces/traits
         for expected in &expected_interfaces {
-            if helper_like || convention_exempt {
+            if skip_member_requirements {
                 continue;
             }
             if !fp.implements.contains(expected) {
-                deviations.push(Deviation {
-                    kind: AuditFinding::MissingInterface,
-                    description: format!("Missing interface: {}", expected),
-                    suggestion: format!(
-                        "Implement {} to match the convention in {}",
-                        expected, group_name
-                    ),
-                });
+                deviations.push(member_requirement_deviation(
+                    AuditFinding::MissingInterface,
+                    "Missing interface",
+                    "Implement",
+                    expected,
+                    "",
+                    group_name,
+                ));
             }
         }
 
@@ -636,6 +637,24 @@ pub fn discover_conventions_with_config(
         total_files: total,
         confidence,
     })
+}
+
+fn member_requirement_deviation(
+    kind: AuditFinding,
+    description_label: &str,
+    suggestion_verb: &str,
+    expected: &str,
+    expected_suffix: &str,
+    group_name: &str,
+) -> Deviation {
+    Deviation {
+        kind,
+        description: format!("{}: {}", description_label, expected),
+        suggestion: format!(
+            "{} {}{} to match the convention in {}",
+            suggestion_verb, expected, expected_suffix, group_name
+        ),
+    }
 }
 
 fn declared_trait_name(fp: &FileFingerprint) -> Option<String> {
@@ -1000,6 +1019,96 @@ mod tests {
         assert_eq!(Language::from_extension("ts"), Language::TypeScript);
         assert_eq!(Language::from_extension("jsx"), Language::JavaScript);
         assert_eq!(Language::from_extension("txt"), Language::Unknown);
+    }
+
+    #[test]
+    fn test_from_path() {
+        assert_eq!(Language::from_path(Path::new("src/lib.rs")), Language::Rust);
+        assert_eq!(
+            Language::from_path(Path::new("src/app.tsx")),
+            Language::TypeScript
+        );
+        assert_eq!(Language::from_path(Path::new("README")), Language::Unknown);
+    }
+
+    #[test]
+    fn test_all_names() {
+        assert!(AuditFinding::all_names().contains(&"write_only_config_key"));
+        assert!(AuditFinding::all_names().contains(&"core_boundary_leak"));
+    }
+
+    #[test]
+    fn test_discover_conventions_with_config() {
+        let fingerprints = vec![
+            FileFingerprint {
+                relative_path: "abilities/CreateAbility.php".to_string(),
+                language: Language::Php,
+                methods: vec!["execute".to_string(), "register".to_string()],
+                type_name: Some("CreateAbility".to_string()),
+                ..Default::default()
+            },
+            FileFingerprint {
+                relative_path: "abilities/UpdateAbility.php".to_string(),
+                language: Language::Php,
+                methods: vec!["execute".to_string(), "register".to_string()],
+                type_name: Some("UpdateAbility".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let convention = discover_conventions_with_config(
+            "Abilities",
+            "abilities/*.php",
+            &fingerprints,
+            &AuditConfig::default(),
+        )
+        .unwrap();
+
+        let mut expected_methods = convention.expected_methods.clone();
+        expected_methods.sort();
+        assert_eq!(expected_methods, vec!["execute", "register"]);
+        assert_eq!(convention.conforming.len(), 2);
+        assert!(convention.outliers.is_empty());
+    }
+
+    #[test]
+    fn test_check_signature_consistency() {
+        let mut conventions = vec![Convention {
+            name: "No Methods".to_string(),
+            glob: "src/*.rs".to_string(),
+            expected_methods: Vec::new(),
+            expected_registrations: Vec::new(),
+            expected_interfaces: Vec::new(),
+            expected_namespace: None,
+            expected_imports: Vec::new(),
+            conforming: vec!["src/a.rs".to_string()],
+            outliers: Vec::new(),
+            total_files: 1,
+            confidence: 1.0,
+        }];
+
+        check_signature_consistency(&mut conventions, Path::new("."), &AuditConfig::default());
+
+        assert!(conventions[0].outliers.is_empty());
+    }
+
+    #[test]
+    fn test_member_requirement_deviation() {
+        let deviation = member_requirement_deviation(
+            AuditFinding::MissingMethod,
+            "Missing method",
+            "Add",
+            "execute",
+            "()",
+            "Abilities",
+        );
+
+        assert_eq!(deviation.kind, AuditFinding::MissingMethod);
+        assert_eq!(deviation.description, "Missing method: execute");
+        assert_eq!(
+            deviation.suggestion,
+            "Add execute() to match the convention in Abilities"
+        );
     }
 
     #[test]
