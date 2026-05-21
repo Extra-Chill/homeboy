@@ -21,6 +21,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WP_FILESYSTEM_FIXER="${SCRIPT_DIR}/wp-filesystem-fixer.php"
 SHORT_TERNARY_FIXER="${SCRIPT_DIR}/short-ternary-fixer.php"
+LONELY_IF_FIXER="${SCRIPT_DIR}/lonely-if-fixer.php"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -167,5 +168,31 @@ assert_grep "file_get_contents\( dirname\( __DIR__ \) \. '/docs/agent-bundles.md
 
 # Sanity check: the file is still valid PHP.
 php -l "${TMPDIR}/repro/tests/agent-bundle-installed-artifact-smoke.php" > /dev/null
+
+# === Bug 3: PHP fixers must skip single non-PHP file paths ===
+
+rm -rf "${TMPDIR}"/*
+mkdir -p "${TMPDIR}/assets"
+
+cat > "${TMPDIR}/assets/HandlerModel.js" <<'JS'
+export default function normalize( config, normalized, key ) {
+	if ( config.type === 'object' ) {
+		normalized[ key ] = {};
+	} else {
+		if ( config.type === 'checkbox' ) {
+			normalized[ key ] = !! normalized[ key ];
+		}
+	}
+}
+JS
+
+php "$LONELY_IF_FIXER" "${TMPDIR}/assets/HandlerModel.js" > /dev/null
+
+assert_grep '} else {' "${TMPDIR}/assets/HandlerModel.js" \
+	"single-file PHP fixer input must skip JavaScript files"
+assert_grep 'if \( config\.type === '\''checkbox'\'' \)' "${TMPDIR}/assets/HandlerModel.js" \
+	"JavaScript nested if must not become PHP elseif"
+assert_not_grep 'elseif' "${TMPDIR}/assets/HandlerModel.js" \
+	"JavaScript file must not contain PHP elseif after lonely-if fixer"
 
 echo "OK: fixer test harness skip + short-ternary call guard regression smoke passed"

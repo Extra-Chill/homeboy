@@ -34,7 +34,7 @@ function fixer_process_path($path, callable $callback) {
                 $total_fixes += $fixes;
             }
         }
-    } else {
+    } elseif (pathinfo($path, PATHINFO_EXTENSION) === 'php') {
         $total_fixes = $callback($path);
         if ($total_fixes > 0) {
             $files_fixed = 1;
