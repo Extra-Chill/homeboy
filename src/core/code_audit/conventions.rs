@@ -264,6 +264,9 @@ pub enum AuditFinding {
     FactorySeamBypass,
     /// Internal REST/API proxy call lacks a configured namespace or scope guard.
     InternalProxyScopeMissing,
+    /// Public endpoint exposes registry/config metadata through a raw getter
+    /// while a permission-aware resolver/helper exists nearby.
+    PublicRegistryExposure,
 }
 
 impl AuditFinding {
@@ -331,6 +334,7 @@ impl AuditFinding {
             "undominated_redirect_param",
             "factory_seam_bypass",
             "internal_proxy_scope_missing",
+            "public_registry_exposure",
         ]
     }
 }

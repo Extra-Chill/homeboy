@@ -104,8 +104,8 @@ Example:
       "allowlist_pattern": "(?i)(str_starts_with|preg_match)\\s*\\([^;]*(/acme/v1|allowed_prefixes|allowlist)",
       "description": "Proxy scope drift at line {line}: scoped docs feed `{sink}` from request input without a matching allowlist",
       "suggestion": "Add an allowlist/prefix check for the documented scope or document the proxy as general-purpose."
-      }
-    ]
+    }
+  ]
   }
 }
 ```
@@ -115,6 +115,39 @@ Finding output:
 - `convention`: defaults to `requested_detectors`
 - `kind`: `proxy_scope_drift`
 - severity: configured by the rule, usually warning
+
+## Public registry exposure
+
+`audit.public_registry_exposure` detects public endpoint windows that return raw
+registry/config/status metadata getters while a permission-aware resolver or
+helper exists in an explicitly configured resolver scope. The rule is generic:
+projects provide route markers, public-access markers, raw getter regexes,
+resolver regexes, route-window sizing, resolver proximity settings, and
+allowlists. Homeboy only correlates those configured signals.
+
+```json
+{
+  "audit": {
+    "public_registry_exposure": {
+      "route_markers": ["register_route("],
+      "public_access_markers": ["allow_public"],
+      "raw_getter_patterns": ["get_[A-Za-z_]*registry\\(\\)"],
+      "permission_aware_resolver_patterns": ["PermissionAware[A-Za-z_]*Resolver"],
+      "route_context_lines": 8,
+      "resolver_path_contains": ["src/policy/", "src/resolvers/"],
+      "resolver_same_namespace": true,
+      "allow_path_contains": ["public-discovery"],
+      "allow_line_contains": ["homeboy-audit: allow-public-registry-exposure"]
+    }
+  }
+}
+```
+
+Finding output:
+
+- `convention`: `public_registry_exposure`
+- `kind`: `public_registry_exposure`
+- severity: warning
 
 ## Required Regex
 

@@ -41,6 +41,7 @@ mod layer_ownership;
 mod mutating_resource_access;
 pub(crate) mod naming;
 mod parallel_runner_setup;
+mod public_registry_exposure;
 mod repeated_literal_shape;
 pub mod report;
 mod requested_detectors;
@@ -160,6 +161,7 @@ pub(crate) struct AuditExecutionPlan {
     pub(crate) run_parallel_runner_setup: bool,
     pub(crate) run_enum_dispatch_contracts: bool,
     pub(crate) run_aggregate_construction: bool,
+    pub(crate) run_public_registry_exposure: bool,
 }
 
 impl AuditExecutionPlan {
@@ -194,6 +196,7 @@ impl AuditExecutionPlan {
                 run_parallel_runner_setup: true,
                 run_enum_dispatch_contracts: true,
                 run_aggregate_construction: true,
+                run_public_registry_exposure: true,
             },
         )
     }
@@ -376,6 +379,11 @@ impl AuditExecutionPlan {
                     exclude,
                     &[AuditFinding::DirectAggregateConstruction],
                 ),
+                run_public_registry_exposure: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::PublicRegistryExposure],
+                ),
             },
         )
     }
@@ -420,6 +428,10 @@ impl AuditExecutionPlan {
             ("parallel_runner_setup", self.run_parallel_runner_setup),
             ("enum_dispatch_contracts", self.run_enum_dispatch_contracts),
             ("aggregate_construction", self.run_aggregate_construction),
+            (
+                "public_registry_exposure",
+                self.run_public_registry_exposure,
+            ),
         ]
         .into_iter()
         .map(|(name, enabled)| {
@@ -475,6 +487,7 @@ impl AuditExecutionPlan {
             || self.run_parallel_runner_setup
             || self.run_enum_dispatch_contracts
             || self.run_aggregate_construction
+            || self.run_public_registry_exposure
     }
 }
 
@@ -1270,6 +1283,22 @@ fn audit_internal(
             aggregate_construction_findings.len()
         );
         all_findings.extend(aggregate_construction_findings);
+    }
+
+    // Phase 4y: Public metadata routes returning raw registry/config getters
+    // while a permission-aware resolver/helper exists in the same area.
+    let public_registry_findings = if plan.run_public_registry_exposure {
+        public_registry_exposure::run(&all_fingerprints, &audit_config.public_registry_exposure)
+    } else {
+        Vec::new()
+    };
+    if !public_registry_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Public registry exposure: {} finding(s) (public metadata routes bypassing resolvers)",
+            public_registry_findings.len()
+        );
+        all_findings.extend(public_registry_findings);
     }
 
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,

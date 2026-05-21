@@ -14,8 +14,8 @@ pub mod versioning;
 pub use audit::{
     AuditConfig, ConventionTagGlob, CoreBoundaryLeakConfig, DuplicationDetectorConfig,
     KnownSymbolEntry, KnownSymbolHeaderVersionProvider, KnownSymbolKind, KnownSymbolVersionedEntry,
-    MutatingResourceAccessConfig, RequestedDetectorRule, RequestedDetectorRuleBody,
-    RequiredRegexScope,
+    MutatingResourceAccessConfig, PublicRegistryExposureConfig, RequestedDetectorRule,
+    RequestedDetectorRuleBody, RequiredRegexScope,
 };
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,
