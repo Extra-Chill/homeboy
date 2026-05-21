@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.97.6] - 2026-05-21
+
+### Fixed
+- lock wordpress npm dependencies
+
 ## [2.97.5] - 2026-05-21
 
 ### Fixed
