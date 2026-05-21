@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.97.4] - 2026-05-21
+
+### Fixed
+- mount default openai runtime for wp-codebox agents
+- map host bundle paths for wp-codebox agents
+
 ## [2.97.3] - 2026-05-21
 
 ### Fixed
