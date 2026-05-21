@@ -47,7 +47,7 @@ install_wp_codebox() {
     git -C "${repo_dir}" fetch --quiet origin "${ref}"
     git -C "${repo_dir}" checkout --quiet FETCH_HEAD
 
-    npm --prefix "${repo_dir}" install --quiet --no-fund --no-audit
+    npm --prefix "${repo_dir}" install --quiet --no-fund --no-audit --omit=optional
     npm --prefix "${repo_dir}" run build --silent
 
     cat > "${bin_path}" <<EOF

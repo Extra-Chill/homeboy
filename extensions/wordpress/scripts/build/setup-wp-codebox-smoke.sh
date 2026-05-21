@@ -5,6 +5,7 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR}"' EXIT
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+NODE_BIN_DIR="$(dirname "$(command -v node)")"
 FAKE_BIN="${TMPDIR}/bin"
 HOME_DIR="${TMPDIR}/home"
 EXTENSION_DIR="${TMPDIR}/extension"
@@ -44,6 +45,10 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         install)
+            if [[ " $* " != *" --omit=optional "* ]]; then
+                printf 'expected wp-codebox install to omit optional dependencies: %s\n' "$*" >&2
+                exit 1
+            fi
             exit 0
             ;;
         run)
@@ -62,7 +67,7 @@ chmod +x "${FAKE_BIN}/npm"
 (
     cd "${EXTENSION_DIR}"
     HOME="${HOME_DIR}" \
-    PATH="${FAKE_BIN}:${PATH}" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
     GITHUB_ENV="${GITHUB_ENV_FILE}" \
     HOMEBOY_WP_CODEBOX_SOURCE="https://example.test/wp-codebox.git" \
     HOMEBOY_WP_CODEBOX_REF="main" \
