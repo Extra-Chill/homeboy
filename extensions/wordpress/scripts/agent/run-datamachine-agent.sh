@@ -107,7 +107,7 @@ PHP
         --arg code "$data_machine_code_path" \
         '[
             {source: $agents, slug: "agents-api", activate: false},
-            (if $wpAiClient != "" then {source: $wpAiClient, slug: "php-ai-client", pluginFile: "php-ai-client/plugin.php"} else empty end),
+            (if $wpAiClient != "" then {source: $wpAiClient, slug: "php-ai-client", activate: false} else empty end),
             {source: $datamachine, slug: "data-machine", activate: false},
             {source: $code, slug: "data-machine-code", activate: false}
         ]')
