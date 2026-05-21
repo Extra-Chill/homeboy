@@ -14,7 +14,7 @@ struct HandlerBlock<'a> {
     start_offset: usize,
 }
 
-pub(super) fn run(
+pub(in crate::core::code_audit) fn run(
     fingerprints: &[&FileFingerprint],
     config: &MutatingResourceAccessConfig,
 ) -> Vec<Finding> {

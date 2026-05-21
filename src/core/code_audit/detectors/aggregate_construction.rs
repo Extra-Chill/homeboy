@@ -14,7 +14,7 @@ const MIN_OCCURRENCES: usize = 3;
 const MIN_FILES: usize = 2;
 const MIN_SHARED_FIELDS: usize = 2;
 
-pub(super) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     detect_direct_aggregate_construction(fingerprints)
 }
 

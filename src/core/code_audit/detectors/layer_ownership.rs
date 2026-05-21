@@ -12,7 +12,7 @@ use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 
 #[cfg(test)]
-#[path = "../../../tests/core/code_audit/layer_ownership_test.rs"]
+#[path = "../../../../tests/core/code_audit/detectors/layer_ownership_test.rs"]
 mod layer_ownership_test;
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -41,7 +41,7 @@ pub struct LayerAllow {
     pub glob: String,
 }
 
-pub(super) fn run(root: &Path) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(root: &Path) -> Vec<Finding> {
     analyze_layer_ownership(root)
 }
 

@@ -10,7 +10,7 @@ use super::fingerprint::FileFingerprint;
 
 const DEFAULT_ROUTE_CONTEXT_LINES: usize = 8;
 
-pub(super) fn run(
+pub(in crate::core::code_audit) fn run(
     fingerprints: &[&FileFingerprint],
     config: &PublicRegistryExposureConfig,
 ) -> Vec<Finding> {

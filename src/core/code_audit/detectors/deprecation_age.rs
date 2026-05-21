@@ -57,7 +57,10 @@ static SYMBOL_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 
-pub(super) fn run(fingerprints: &[&FileFingerprint], root: &Path) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(
+    fingerprints: &[&FileFingerprint],
+    root: &Path,
+) -> Vec<Finding> {
     let Some(current) = detect_current_version(root) else {
         return Vec::new();
     };

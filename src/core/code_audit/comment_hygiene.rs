@@ -5,9 +5,9 @@
 //! module so this file stays focused on the simple per-line passes.
 
 use super::conventions::{AuditFinding, Language};
+use super::detectors::upstream_workaround;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
-use super::upstream_workaround;
 
 const TODO_MARKERS: &[&str] = &["TODO", "FIXME", "HACK", "XXX"];
 const LEGACY_MARKERS: &[&str] = &[

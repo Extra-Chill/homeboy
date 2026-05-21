@@ -54,7 +54,10 @@ struct ConfigRoundtripKeySets {
     behavior: BTreeMap<String, Vec<ConfigKeySite>>,
 }
 
-pub(super) fn run(fingerprints: &[&FileFingerprint], audit_config: &AuditConfig) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(
+    fingerprints: &[&FileFingerprint],
+    audit_config: &AuditConfig,
+) -> Vec<Finding> {
     if audit_config.requested_detectors.is_empty() {
         return Vec::new();
     }

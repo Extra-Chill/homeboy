@@ -44,7 +44,7 @@ const AVG_LITERAL_LOC: usize = 4;
 /// Estimated helper size (function definition + body).
 const HELPER_LOC: usize = 6;
 
-pub(super) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     detect_repeated_literal_shapes(fingerprints)
 }
 

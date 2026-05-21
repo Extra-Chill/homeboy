@@ -15,7 +15,7 @@ const MIN_GROUP_SIZE: usize = 2;
 const MIN_SHARED_PHASES: usize = 2;
 const MIN_SHARED_CONTRACT_CALLS: usize = 2;
 
-pub(super) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     detect_parallel_runner_setup(fingerprints)
 }
 

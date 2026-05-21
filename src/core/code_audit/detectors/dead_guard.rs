@@ -76,7 +76,7 @@ struct Guard {
     offset: usize,
 }
 
-pub(super) fn run_with_config(
+pub(in crate::core::code_audit) fn run_with_config(
     fingerprints: &[&FileFingerprint],
     root: &Path,
     audit_config: &AuditConfig,

@@ -38,7 +38,7 @@ const SUBTREE_DEPTH: usize = 2;
 /// Used only for the "estimated LOC reduction" annotation.
 const AVG_METHOD_LOC: usize = 8;
 
-pub(super) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     detect_shared_scaffolding(fingerprints)
 }
 

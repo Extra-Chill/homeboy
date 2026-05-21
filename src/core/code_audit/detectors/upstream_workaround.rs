@@ -117,7 +117,7 @@ static VERSION_COMPARE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Run both upstream-workaround tiers across the fingerprint set. Vendored
 /// paths (`/vendor/`, `/node_modules/`) are skipped — `LegacyComment` and
 /// `TodoMarker` still scan vendor files; only this rule is conservative.
-pub(super) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let mut findings = Vec::new();
     for fp in fingerprints {
         if is_vendored_path(&fp.relative_path) {

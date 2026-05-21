@@ -11,7 +11,7 @@ use super::findings::{Finding, Severity};
 use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use crate::core::extension::{self, ExtensionManifest};
 
-#[path = "test_quality.rs"]
+#[path = "../test_quality.rs"]
 mod test_quality;
 
 #[derive(Debug, Clone, serde::Deserialize, Default)]
@@ -61,7 +61,7 @@ struct TopologyArtifact {
     shape: Option<String>,
 }
 
-pub(super) fn run(root: &Path) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(root: &Path) -> Vec<Finding> {
     let mut findings = analyze_test_topology(root);
     findings.extend(test_quality::run(root));
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
