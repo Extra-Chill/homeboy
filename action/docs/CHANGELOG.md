@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.0] - 2026-05-21
+
+### Added
+- import observation bundles
+
 ## [2.6.0] - 2026-05-18
 
 ### Added
