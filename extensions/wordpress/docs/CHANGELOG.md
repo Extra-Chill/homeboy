@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.99.2] - 2026-05-21
+
+### Fixed
+- classify wordpress changed-since registration drift
+
 ## [2.99.1] - 2026-05-21
 
 ### Fixed
