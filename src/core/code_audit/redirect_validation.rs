@@ -14,14 +14,6 @@ static ASSIGNMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?:(?:\$|let\s+|const\s+|var\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=|([A-Za-z_][A-Za-z0-9_]*)\s*:=)"#)
         .expect("request assignment regex compiles")
 });
-static PHP_REQUEST_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\$_(?:GET|POST|REQUEST|SERVER)\s*\["#).expect("php request regex compiles")
-});
-static GENERIC_REQUEST_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\b(?:request|req|params|query|body|form|search_params|url_search_params)\b"#)
-        .expect("generic request regex compiles")
-});
-
 #[derive(Debug, Clone)]
 struct TrackedRedirectValue {
     variable: String,
@@ -40,6 +32,7 @@ pub(super) fn run(
     config: &RedirectValidationConfig,
 ) -> Vec<Finding> {
     if config.request_names.is_empty()
+        || (config.request_source_markers.is_empty() && config.request_source_patterns.is_empty())
         || config.redirect_sinks.is_empty()
         || config.validation_markers.is_empty()
     {
@@ -106,8 +99,8 @@ fn tracked_value_from_line(
     let request_name = config
         .request_names
         .iter()
-        .find(|name| line_contains_name(line, name))?;
-    if !looks_request_derived(line) {
+        .find(|name| marker_matches(line, std::slice::from_ref(name)))?;
+    if !looks_request_derived(line, config) {
         return None;
     }
     let captures = ASSIGNMENT_RE.captures(line)?;
@@ -176,8 +169,9 @@ fn eligible_file(fp: &FileFingerprint, config: &RedirectValidationConfig) -> boo
         .any(|allowed| allowed == extension)
 }
 
-fn looks_request_derived(line: &str) -> bool {
-    PHP_REQUEST_RE.is_match(line) || GENERIC_REQUEST_RE.is_match(line)
+fn looks_request_derived(line: &str, config: &RedirectValidationConfig) -> bool {
+    marker_matches(line, &config.request_source_markers)
+        || patterns_match(line, &config.request_source_patterns)
 }
 
 fn redirect_uses_value(line: &str, variable: &str, config: &RedirectValidationConfig) -> bool {
@@ -190,11 +184,13 @@ fn marker_matches(line: &str, markers: &[String]) -> bool {
         .any(|marker| !marker.is_empty() && line.contains(marker))
 }
 
-fn line_contains_name(line: &str, name: &str) -> bool {
-    line.contains(&format!("'{name}'"))
-        || line.contains(&format!("\"{name}\""))
-        || line.contains(&format!("[{name}]"))
-        || line.contains(&format!(".{name}"))
+fn patterns_match(line: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| {
+        !pattern.is_empty()
+            && Regex::new(pattern)
+                .ok()
+                .is_some_and(|regex| regex.is_match(line))
+    })
 }
 
 fn line_mentions_variable(line: &str, variable: &str) -> bool {
@@ -249,12 +245,196 @@ mod tests {
 
     fn config() -> RedirectValidationConfig {
         RedirectValidationConfig {
-            request_names: vec!["redirect_uri".to_string(), "return_to".to_string()],
+            request_names: vec!["'redirect_uri'".to_string(), "'return_to'".to_string()],
+            request_source_markers: vec![
+                "$_GET[".to_string(),
+                "$_REQUEST[".to_string(),
+                "$_POST[".to_string(),
+            ],
+            request_source_patterns: vec![r#"\brequest\.(query|body)\."#.to_string()],
             redirect_sinks: vec!["redirect_to(".to_string(), "Location:".to_string()],
             validation_markers: vec!["allow_redirect_destination".to_string()],
             file_extensions: vec!["php".to_string()],
             exclude_path_contains: Vec::new(),
         }
+    }
+
+    #[test]
+    fn test_run() {
+        let fp = php_fp(
+            "src/Auth.php",
+            r#"<?php
+$redirect_uri = $_GET['redirect_uri'];
+redirect_to($redirect_uri);
+"#,
+        );
+
+        let findings = run(&[&fp], &config());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::RedirectValidation);
+        assert_eq!(findings[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn test_tracked_value_from_line() {
+        let value = tracked_value_from_line("$return_to = $_REQUEST['return_to'];", 12, &config())
+            .expect("request assignment should be tracked");
+
+        assert_eq!(value.variable, "return_to");
+        assert_eq!(value.request_name, "'return_to'");
+        assert_eq!(value.source_line, 12);
+        assert!(tracked_value_from_line("$safe = get_default_url();", 13, &config()).is_none());
+    }
+
+    #[test]
+    fn test_validation_sites_for() {
+        let lines = [
+            "$redirect_uri = $_GET['redirect_uri'];",
+            "if ($ok) {",
+            "    allow_redirect_destination($redirect_uri);",
+            "}",
+        ];
+        let value = TrackedRedirectValue {
+            variable: "redirect_uri".to_string(),
+            request_name: "redirect_uri".to_string(),
+            source_line: 1,
+        };
+
+        let sites = validation_sites_for(&lines, &value, &config());
+
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].line, 3);
+        assert_eq!(sites[0].block_path, vec![1]);
+    }
+
+    #[test]
+    fn test_validation_dominates() {
+        let validations = vec![ValidationSite {
+            line: 3,
+            block_path: vec![1],
+        }];
+
+        assert!(validation_dominates(4, &[1, 2], &validations));
+        assert!(!validation_dominates(4, &[2], &validations));
+        assert!(!validation_dominates(3, &[1], &validations));
+    }
+
+    #[test]
+    fn test_eligible_file() {
+        let mut config = config();
+        config.exclude_path_contains = vec!["vendor/".to_string()];
+
+        assert!(eligible_file(&php_fp("src/Auth.php", ""), &config));
+        assert!(!eligible_file(&php_fp("vendor/Auth.php", ""), &config));
+        assert!(!eligible_file(&php_fp("src/Auth.rs", ""), &config));
+    }
+
+    #[test]
+    fn test_looks_request_derived() {
+        let config = config();
+
+        assert!(looks_request_derived(
+            "$url = $_POST['redirect_uri'];",
+            &config
+        ));
+        assert!(looks_request_derived(
+            "const url = request.query.redirect_uri;",
+            &config
+        ));
+        assert!(!looks_request_derived(
+            "const url = configuredRedirect;",
+            &config
+        ));
+    }
+
+    #[test]
+    fn test_redirect_uses_value() {
+        let config = config();
+
+        assert!(redirect_uses_value(
+            "redirect_to($redirect_uri);",
+            "redirect_uri",
+            &config
+        ));
+        assert!(redirect_uses_value(
+            "redirect_to(redirect_uri);",
+            "redirect_uri",
+            &config
+        ));
+        assert!(!redirect_uses_value(
+            "render($redirect_uri);",
+            "redirect_uri",
+            &config
+        ));
+    }
+
+    #[test]
+    fn test_marker_matches() {
+        assert!(marker_matches(
+            "redirect_to($url);",
+            &["redirect_to(".to_string()]
+        ));
+        assert!(!marker_matches("redirect_to($url);", &[String::new()]));
+        assert!(!marker_matches(
+            "render($url);",
+            &["redirect_to(".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_patterns_match() {
+        let patterns = vec![r#"\bcontext\.input\."#.to_string(), "(".to_string()];
+
+        assert!(patterns_match("const url = context.input.return_to;", &patterns));
+        assert!(!patterns_match("const url = context.output.return_to;", &patterns));
+    }
+
+    #[test]
+    fn test_marker_matches_request_names_only_as_configured_substrings() {
+        let names = vec!["['redirect_uri']".to_string(), ".return_to".to_string()];
+
+        assert!(marker_matches("$_GET['redirect_uri']", &names));
+        assert!(marker_matches("request.query.return_to", &names));
+        assert!(!marker_matches("redirect_uri_backup", &names));
+    }
+
+    #[test]
+    fn test_line_mentions_variable() {
+        assert!(line_mentions_variable(
+            "redirect_to($redirect_uri);",
+            "redirect_uri"
+        ));
+        assert!(line_mentions_variable(
+            "redirect_to(redirect_uri);",
+            "redirect_uri"
+        ));
+        assert!(!line_mentions_variable(
+            "redirect_to(redirect_uri_backup);",
+            "redirect_uri"
+        ));
+    }
+
+    #[test]
+    fn test_block_paths_for() {
+        let lines = [
+            "if ($ok) {",
+            "    while ($next) {",
+            "        run();",
+            "    }",
+            "}",
+        ];
+
+        assert_eq!(
+            block_paths_for(&lines),
+            vec![
+                Vec::<usize>::new(),
+                vec![1],
+                vec![1, 2],
+                vec![1],
+                Vec::new()
+            ]
+        );
     }
 
     #[test]
