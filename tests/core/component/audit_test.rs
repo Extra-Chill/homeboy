@@ -1,6 +1,6 @@
 use homeboy::core::component::{
     AuditConfig, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
-    MutatingResourceAccessConfig, RedirectValidationConfig,
+    MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
 };
 
 #[test]
@@ -40,6 +40,12 @@ fn test_merge() {
         mutating_resource_access: MutatingResourceAccessConfig {
             handler_registration_markers: vec!["route(".to_string()],
             access_helper_markers: vec!["owns_resource".to_string()],
+            ..Default::default()
+        },
+        public_registry_exposure: PublicRegistryExposureConfig {
+            route_markers: vec!["route(".to_string()],
+            public_access_markers: vec!["allow_public".to_string()],
+            route_context_lines: Some(12),
             ..Default::default()
         },
         redirect_validation: RedirectValidationConfig {
@@ -85,6 +91,16 @@ fn test_merge() {
             mutator_markers: vec!["delete(".to_string()],
             ..Default::default()
         },
+        public_registry_exposure: PublicRegistryExposureConfig {
+            route_markers: vec!["route(".to_string(), "endpoint(".to_string()],
+            public_access_markers: vec!["allow_public".to_string()],
+            raw_getter_patterns: vec!["raw_registry".to_string()],
+            permission_aware_resolver_patterns: vec!["PolicyResolver".to_string()],
+            route_context_lines: Some(6),
+            resolver_path_contains: vec!["src/policy/".to_string()],
+            resolver_same_namespace: true,
+            ..Default::default()
+        },
         redirect_validation: RedirectValidationConfig {
             request_names: vec!["return_to".to_string(), "callback_url".to_string()],
             request_source_markers: vec!["query.".to_string(), "body.".to_string()],
@@ -127,6 +143,30 @@ fn test_merge() {
         config.mutating_resource_access.mutator_markers,
         vec!["delete("]
     );
+    assert_eq!(
+        config.public_registry_exposure.route_markers,
+        vec!["route(", "endpoint("]
+    );
+    assert_eq!(
+        config.public_registry_exposure.public_access_markers,
+        vec!["allow_public"]
+    );
+    assert_eq!(
+        config.public_registry_exposure.raw_getter_patterns,
+        vec!["raw_registry"]
+    );
+    assert_eq!(
+        config
+            .public_registry_exposure
+            .permission_aware_resolver_patterns,
+        vec!["PolicyResolver"]
+    );
+    assert_eq!(config.public_registry_exposure.route_context_lines, Some(6));
+    assert_eq!(
+        config.public_registry_exposure.resolver_path_contains,
+        vec!["src/policy/"]
+    );
+    assert!(config.public_registry_exposure.resolver_same_namespace);
     assert_eq!(
         config.redirect_validation.request_names,
         vec!["return_to", "callback_url"]

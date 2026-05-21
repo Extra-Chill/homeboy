@@ -15,8 +15,8 @@ pub use audit::{
     AuditConfig, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
     ConventionTagGlob, CoreBoundaryLeakConfig, DuplicationDetectorConfig, KnownSymbolEntry,
     KnownSymbolHeaderVersionProvider, KnownSymbolKind, KnownSymbolVersionedEntry,
-    MutatingResourceAccessConfig, RedirectValidationConfig, RequestedDetectorRule,
-    RequestedDetectorRuleBody, RequiredRegexScope,
+    MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
+    RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope,
 };
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,
