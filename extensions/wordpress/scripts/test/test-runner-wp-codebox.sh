@@ -335,6 +335,8 @@ fi
 
 EXTENSION_VENDOR_PATH="$(homeboy_wp_codebox_resolve_mount_path "${EXTENSION_PATH}/vendor")"
 homeboy_wp_codebox_add_recipe_mount "${EXTENSION_VENDOR_PATH}" "/wp-codebox-vendor" "readonly"
+EXTENSION_MOUNT_PATH="$(homeboy_wp_codebox_resolve_mount_path "${EXTENSION_PATH}")"
+homeboy_wp_codebox_add_recipe_mount "${EXTENSION_MOUNT_PATH}" "/homeboy-extension" "readonly"
 
 PLAYGROUND_DEP_MOUNTS=""
 if [ -n "$DEPENDENCY_PATHS" ]; then

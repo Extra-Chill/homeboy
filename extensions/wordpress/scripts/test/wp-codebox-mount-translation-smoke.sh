@@ -144,7 +144,8 @@ REQUIRED_MOUNTS_JSON=$(jq -nc \
     --arg componentExtra "${PLUGIN_PATH}/config/component-extra.php:/wordpress/wp-content/component-extra.php" \
     --arg depExtra "${DEP_PATH}/fixtures/dep-extra.php:/wordpress/wp-content/dep-extra.php" \
     --arg vendor "${EXTENSION_PATH}/vendor:/wp-codebox-vendor:readonly" \
-    '[$component, $dep, $dropin, $componentExtra, $depExtra, $vendor]')
+    --arg extension "${EXTENSION_PATH}:/homeboy-extension:readonly" \
+    '[$component, $dep, $dropin, $componentExtra, $depExtra, $vendor, $extension]')
 export REQUIRED_MOUNTS_JSON
 
 bash -n "$SCRIPT_DIR/test-runner-wp-codebox.sh"
