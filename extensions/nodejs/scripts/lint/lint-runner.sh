@@ -69,7 +69,18 @@ done
 # Resolve the lint command.
 USE_ESLINT_JSON=0
 if [ -n "${HOMEBOY_NODE_LINT_COMMAND:-}" ]; then
-    LINT_CMD="$HOMEBOY_NODE_LINT_COMMAND"
+    if [ "$HOMEBOY_NODE_LINT_COMMAND" = "__homeboy_typecheck" ]; then
+        if homeboy_has_npm_script "typecheck"; then
+            LINT_CMD="$PKG_RUN typecheck"
+        else
+            FAILED_STEP="No typecheck script defined"
+            FAILURE_OUTPUT="CI job requested typecheck, but package.json does not define scripts.typecheck. Set HOMEBOY_NODE_LINT_COMMAND to a project-specific command or add scripts.typecheck."
+            echo "[]" > "$FINDINGS_FILE"
+            exit 1
+        fi
+    else
+        LINT_CMD="$HOMEBOY_NODE_LINT_COMMAND"
+    fi
 elif [ "$FIX_MODE" = "1" ] && homeboy_has_npm_script "lint:fix"; then
     LINT_CMD="$PKG_RUN lint:fix"
 elif homeboy_has_npm_script "lint"; then

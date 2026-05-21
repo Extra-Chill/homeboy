@@ -61,6 +61,59 @@
       "description": "npm script to run when homeboy test receives passthrough test args, for example 'test:unit'"
     }
   ],
+  "ci": {
+    "profiles": {
+      "pr": {
+        "label": "Pull request checks",
+        "jobs": ["lint", "typecheck", "test", "build"]
+      },
+      "baseline": {
+        "label": "Baseline local reproduction",
+        "jobs": ["lint", "test", "build"]
+      }
+    },
+    "jobs": {
+      "lint": {
+        "check_names": ["Lint", "lint"],
+        "command": "lint",
+        "env": { "CI": "1" },
+        "provider": "github-actions",
+        "workflow": "ci.yml",
+        "fidelity": "local-equivalent",
+        "limitations": []
+      },
+      "typecheck": {
+        "check_names": ["Typecheck", "Lint and typecheck", "typecheck"],
+        "command": "lint",
+        "env": {
+          "CI": "1",
+          "HOMEBOY_NODE_LINT_COMMAND": "__homeboy_typecheck"
+        },
+        "provider": "github-actions",
+        "workflow": "ci.yml",
+        "fidelity": "local-partial",
+        "limitations": ["Requires a package.json scripts.typecheck command; alternate project-specific typecheck script names are not inferred."]
+      },
+      "test": {
+        "check_names": ["Test", "Tests", "test"],
+        "command": "test",
+        "env": { "CI": "1" },
+        "provider": "github-actions",
+        "workflow": "ci.yml",
+        "fidelity": "local-equivalent",
+        "limitations": []
+      },
+      "build": {
+        "check_names": ["Build", "build"],
+        "command": "build",
+        "env": { "CI": "1" },
+        "provider": "github-actions",
+        "workflow": "ci.yml",
+        "fidelity": "local-equivalent",
+        "limitations": []
+      }
+    }
+  },
   "audit": {
     "feature_patterns": [
       "app\\.get\\(['\"]([^'\"]+)['\"]",
