@@ -22,7 +22,7 @@ struct EnvMutationSite<'a> {
     line: usize,
 }
 
-pub(super) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let mut by_var: HashMap<String, Vec<EnvMutationSite<'_>>> = HashMap::new();
     for fp in fingerprints {
         if fp.language != Language::Rust || !is_test_file(&fp.relative_path) {

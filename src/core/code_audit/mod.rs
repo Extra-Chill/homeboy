@@ -11,7 +11,6 @@
 //! 5. Producing actionable findings for outliers
 //! 6. Analyzing structural complexity (god files, high item counts)
 
-mod aggregate_construction;
 pub mod baseline;
 mod checks;
 pub mod codebase_map;
@@ -19,56 +18,42 @@ mod comment_blocks;
 mod comment_hygiene;
 pub mod compare;
 mod compiler_warnings;
-mod config_key_usage;
 pub(crate) mod conventions;
-mod core_boundary_leak;
 pub(crate) mod core_fingerprint;
 mod dead_code;
-mod dead_guard;
-mod deprecation_age;
+mod detectors;
 mod discovery;
 pub mod docs_audit;
 mod duplication;
-mod enum_dispatch_contracts;
-mod facade_passthrough;
-mod field_patterns;
 mod findings;
 pub mod fingerprint;
-mod global_env_guard;
 mod idiomatic;
 pub(crate) mod impact;
 pub(crate) mod import_matching;
-mod layer_ownership;
-mod mutating_resource_access;
 pub(crate) mod naming;
-mod parallel_runner_setup;
-mod public_registry_exposure;
-mod redirect_validation;
-mod repeated_literal_shape;
 pub mod report;
-mod requested_detectors;
 mod requirements;
 pub mod run;
-mod rust_test_wiring;
 mod shadow_modules;
-mod shared_scaffolding;
 mod signatures;
 mod source_locations;
 mod structural;
-mod test_coverage;
 pub(crate) mod test_mapping;
-mod test_topology;
-mod test_vacuity;
-mod upstream_workaround;
 pub(crate) mod walker;
-mod wrapper_inference;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
 use std::path::Path;
 
-use self::layer_ownership::run as run_layer_ownership;
+use self::detectors::layer_ownership::run as run_layer_ownership;
+use self::detectors::{
+    aggregate_construction, config_key_usage, core_boundary_leak, dead_guard, deprecation_age,
+    enum_dispatch_contracts, facade_passthrough, field_patterns, global_env_guard,
+    mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
+    repeated_literal_shape, requested_detectors, rust_test_wiring, shared_scaffolding,
+    test_coverage, test_topology, wrapper_inference,
+};
 
 pub use checks::{CheckResult, CheckStatus};
 pub use compare::{
@@ -2004,7 +1989,7 @@ mod tests {
         )
         .unwrap();
 
-        let findings = layer_ownership::run(&dir);
+        let findings = detectors::layer_ownership::run(&dir);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].convention, "layer_ownership");
 

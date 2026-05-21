@@ -27,7 +27,7 @@ struct ValidationSite {
     block_path: Vec<usize>,
 }
 
-pub(super) fn run(
+pub(in crate::core::code_audit) fn run(
     fingerprints: &[&FileFingerprint],
     config: &RedirectValidationConfig,
 ) -> Vec<Finding> {

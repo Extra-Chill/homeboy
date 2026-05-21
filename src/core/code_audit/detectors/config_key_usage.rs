@@ -30,7 +30,10 @@ struct EvidenceSite {
     line: usize,
 }
 
-pub(super) fn run(fingerprints: &[&FileFingerprint], rules: &[ConfigKeyUsageRule]) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(
+    fingerprints: &[&FileFingerprint],
+    rules: &[ConfigKeyUsageRule],
+) -> Vec<Finding> {
     if rules.is_empty() {
         return Vec::new();
     }

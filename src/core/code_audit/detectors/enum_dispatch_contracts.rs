@@ -15,7 +15,7 @@ use super::findings::{Finding, Severity};
 
 const MIN_MATCHES: usize = 2;
 
-pub(super) fn run(root: &Path) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(root: &Path) -> Vec<Finding> {
     let config = ScanConfig {
         extensions: ExtensionFilter::Only(vec!["rs".to_string()]),
         ..Default::default()

@@ -11,7 +11,7 @@ use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 
-pub(super) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     const MIN_PUBLIC_METHODS: usize = 3;
     const DELEGATE_RATIO_THRESHOLD: f32 = 0.70;
 

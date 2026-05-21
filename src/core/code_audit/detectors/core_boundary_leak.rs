@@ -8,7 +8,7 @@ use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 
-pub(super) fn run(
+pub(in crate::core::code_audit) fn run(
     fingerprints: &[&FileFingerprint],
     config: &CoreBoundaryLeakConfig,
 ) -> Vec<Finding> {
