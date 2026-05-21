@@ -927,7 +927,7 @@
       "label": "Playground scenario manifests",
       "type": "array",
       "default": [],
-      "description": "Scenario manifest files or inline objects compiled into wordpress.bench workloads in the generated WP Codebox recipe. Prompt, blueprint, grader, rules, tags, limits, and metadata are preserved in BenchResults metadata."
+      "description": "Scenario manifest files or inline objects compiled into wordpress.bench workloads in the generated WP Codebox recipe. Prompt, blueprint, grader, verifier hooks, rules, tags, limits, policy metadata, and metadata are preserved in BenchResults metadata."
     },
     {
       "id": "bench_site_mode",

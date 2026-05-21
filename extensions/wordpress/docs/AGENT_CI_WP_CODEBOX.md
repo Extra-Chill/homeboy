@@ -291,6 +291,24 @@ per-check scores bounded by their `max_score`. The runner exposes aggregate
 metrics such as `reward_mean`, while the structured details remain in
 `metadata.grade` for JSONL consumers.
 
+Scenario manifests can keep visible grading and hidden verification separate:
+
+```json
+{
+  "grader_file": "graders/visible-grade.php",
+  "verifier_files": ["verifiers/no-grader-mutation.php"],
+  "forbidden_mutations": ["graders/**", "scenarios/**"],
+  "required_active_plugins": ["data-machine/data-machine.php"]
+}
+```
+
+The bench runner appends verifier PHP files after the manifest `run` steps and
+grader file. Verifiers return the same reward payload shape as graders, so
+hidden policy failures appear in `metadata.grade` and downstream JSONL rows.
+Use graders for task-visible success criteria, verifiers for anti-tamper checks
+and environment policy checks, and the `forbidden_mutations` /
+`required_active_plugins` metadata fields to describe the policy being enforced.
+
 ## Related files
 
 - `.github/workflows/datamachine-agent-ci.yml` is the reusable workflow.
