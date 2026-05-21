@@ -36,6 +36,54 @@ Use one of:
 
 These findings participate in baseline comparisons like any other audit finding.
 
+## Config Key Usage Rules
+
+`audit.config_key_usage.rules` lets a component provide language/framework-specific regexes for config keys that are written, migrated, or exposed by accessors. Homeboy core only correlates configured captures across fingerprints; it does not know what a given key means.
+
+Example:
+
+```json
+{
+  "audit": {
+    "config_key_usage": {
+      "rules": [
+        {
+          "id": "workflow-config",
+          "exclude_path_contains": ["fixtures/", "vendor/"],
+          "write_patterns": [
+            {
+              "pattern": "set_config\\(\\s*['\"](?P<key>[a-z_]+)['\"]"
+            }
+          ],
+          "accessor_patterns": [
+            {
+              "pattern": "function\\s+(?P<symbol>[a-z_]+)\\(.*get_config\\(\\s*['\"](?P<key>[a-z_]+)['\"]",
+              "symbol_capture": "symbol"
+            }
+          ],
+          "read_patterns": [
+            {
+              "pattern": "read_config\\(\\s*['\"](?P<key>[a-z_]+)['\"]"
+            }
+          ],
+          "accessor_symbol_read_patterns": [
+            "\\b{symbol}\\s*\\("
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+Finding output:
+
+- `convention`: `config_key_usage:<rule id>`
+- `kind`: `write_only_config_key`
+- severity: warning
+
+Reads in test paths do not satisfy the rule. If an accessor pattern captures `symbol_capture`, Homeboy can treat non-test references to that symbol outside the accessor definition file as production reads. By default, symbols must appear as full identifier tokens on non-comment lines; `accessor_symbol_read_patterns` can provide component-owned regex templates when a language or framework needs stricter call syntax. `{symbol}` is replaced with the escaped accessor symbol.
+
 ## Mutating Resource Access
 
 `audit.mutating_resource_access` is a generic marker-driven detector for handler

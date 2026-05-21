@@ -1,5 +1,6 @@
 use homeboy::core::component::{
-    AuditConfig, MutatingResourceAccessConfig, PublicRegistryExposureConfig,
+    AuditConfig, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
+    MutatingResourceAccessConfig, PublicRegistryExposureConfig,
 };
 
 #[test]
@@ -21,6 +22,20 @@ fn test_merge() {
         runtime_entrypoint_markers: vec!["@runtime-entrypoint".to_string()],
         lifecycle_path_globs: vec!["lifecycle/*.php".to_string()],
         utility_suffixes: vec!["Verifier".to_string()],
+        config_key_usage: ConfigKeyUsageConfig {
+            rules: vec![ConfigKeyUsageRule {
+                id: "generic-config".to_string(),
+                exclude_path_contains: vec!["fixtures/".to_string()],
+                write_patterns: vec![ConfigKeyUsagePattern {
+                    pattern: "set_config".to_string(),
+                    key_capture: "key".to_string(),
+                    symbol_capture: None,
+                }],
+                accessor_patterns: vec![],
+                read_patterns: vec![],
+                accessor_symbol_read_patterns: vec![],
+            }],
+        },
         convention_exception_globs: vec!["generated/**".to_string()],
         mutating_resource_access: MutatingResourceAccessConfig {
             handler_registration_markers: vec!["route(".to_string()],
@@ -41,6 +56,26 @@ fn test_merge() {
         runtime_entrypoint_markers: vec!["@runtime-entrypoint".to_string(), "@queued".to_string()],
         lifecycle_path_globs: vec!["lifecycle/*.php".to_string(), "bin/*".to_string()],
         utility_suffixes: vec!["Verifier".to_string(), "Resolver".to_string()],
+        config_key_usage: ConfigKeyUsageConfig {
+            rules: vec![
+                ConfigKeyUsageRule {
+                    id: "generic-config".to_string(),
+                    exclude_path_contains: vec![],
+                    write_patterns: vec![],
+                    accessor_patterns: vec![],
+                    read_patterns: vec![],
+                    accessor_symbol_read_patterns: vec![],
+                },
+                ConfigKeyUsageRule {
+                    id: "state-config".to_string(),
+                    exclude_path_contains: vec![],
+                    write_patterns: vec![],
+                    accessor_patterns: vec![],
+                    read_patterns: vec![],
+                    accessor_symbol_read_patterns: vec![],
+                },
+            ],
+        },
         convention_exception_globs: vec!["generated/**".to_string(), "fixtures/**".to_string()],
         mutating_resource_access: MutatingResourceAccessConfig {
             handler_registration_markers: vec!["route(".to_string(), "command(".to_string()],
@@ -74,6 +109,7 @@ fn test_merge() {
         vec!["lifecycle/*.php", "bin/*"]
     );
     assert_eq!(config.utility_suffixes, vec!["Verifier", "Resolver"]);
+    assert_eq!(config.config_key_usage.rules.len(), 2);
     assert_eq!(
         config.convention_exception_globs,
         vec!["generated/**", "fixtures/**"]
