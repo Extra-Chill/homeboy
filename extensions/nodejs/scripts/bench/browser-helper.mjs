@@ -331,6 +331,87 @@ export function formatBrowserPerformanceDiffMarkdown(diff, options = {}) {
     return `${lines.join('\n')}\n`;
 }
 
+export function summarizeBrowserPerformanceProfile(profile, options = {}) {
+    const config = normalizeTraceSummaryOptions(options);
+    const scopedProfile = scopeBrowserPerformanceProfile(profile, { phaseNames: config.phaseNames });
+    const network = scopedProfile.network || [];
+    const resources = scopedProfile.resources || [];
+    const longTasks = scopedProfile.long_tasks || [];
+    const failedRequests = network.filter((entry) => entry.failed || finiteNumber(entry.status) >= 400);
+    const slowestRequests = network
+        .filter((entry) => finiteNumber(entry.duration_ms) > 0)
+        .sort((a, b) => finiteNumber(b.duration_ms) - finiteNumber(a.duration_ms))
+        .slice(0, config.maxItems);
+    const transferFamilies = summarizeTransferFamilies(resources, config.maxItems);
+    const bottlenecks = [
+        ...slowestRequests.map((entry) => bottleneck('network', profilePhaseName(scopedProfile, entry, 'start_time_ms'), `${entry.method || 'GET'} ${entry.url || 'unknown'} took ${formatValue(finiteNumber(entry.duration_ms), 'ms')}`, {
+            ...requestDetail(entry),
+            initiator: requestInitiator(entry, resources),
+        })),
+        ...failedRequests.slice(0, config.maxItems).map((entry) => bottleneck('failed-request', profilePhaseName(scopedProfile, entry, 'start_time_ms'), `${entry.method || 'GET'} ${entry.url || 'unknown'} failed with ${entry.status ?? entry.failure_text ?? 'unknown error'}`, requestDetail(entry))),
+        ...longTasks
+            .filter((entry) => finiteNumber(entry.duration_ms) >= config.longTaskThresholdMs)
+            .sort((a, b) => finiteNumber(b.duration_ms) - finiteNumber(a.duration_ms))
+            .slice(0, config.maxItems)
+            .map((entry) => bottleneck('long-task', profilePhaseName(scopedProfile, entry, 'start_time_ms'), `Main thread was busy for ${formatValue(finiteNumber(entry.duration_ms), 'ms')}`, {
+                start_time_ms: finiteNumber(entry.start_time_ms),
+                duration_ms: finiteNumber(entry.duration_ms),
+                name: entry.name || '',
+            })),
+        ...transferFamilies.map((family) => bottleneck('transfer', 'all', `${family.family} transferred ${formatBytes(family.transfer_bytes)} across ${family.count} resource(s)`, family)),
+        ...paintBottlenecks(scopedProfile),
+        ...errorBottlenecks(scopedProfile),
+    ].slice(0, config.maxBottlenecks);
+
+    return stableJson({
+        schema_version: 1,
+        summary: {
+            request_count: network.length,
+            failed_request_count: failedRequests.length,
+            long_task_count: longTasks.length,
+            largest_request_ms: maxValue(network, 'duration_ms'),
+            total_transfer_bytes: totalTransferBytes(scopedProfile),
+            console_error_count: (scopedProfile.console_messages || []).filter(isConsoleError).length,
+            page_error_count: (scopedProfile.page_errors || []).length,
+            largest_contentful_paint_ms: profileMetric(scopedProfile, 'largest_contentful_paint_ms'),
+            cumulative_layout_shift: profileMetric(scopedProfile, 'cumulative_layout_shift'),
+        },
+        phase_scope: config.phaseNames,
+        bottlenecks,
+    });
+}
+
+export function formatBrowserPerformanceSummaryMarkdown(summary, options = {}) {
+    const title = options.title || 'Browser trace bottlenecks';
+    const maxRows = Number.isInteger(options.maxRows) && options.maxRows > 0 ? options.maxRows : 12;
+    const metrics = summary?.summary || {};
+    const lines = [`# ${title}`, '', '## Summary', ''];
+
+    lines.push('| Metric | Value |');
+    lines.push('| --- | ---: |');
+    lines.push(`| Requests | ${formatNumber(metrics.request_count)} |`);
+    lines.push(`| Failed requests | ${formatNumber(metrics.failed_request_count)} |`);
+    lines.push(`| Long tasks | ${formatNumber(metrics.long_task_count)} |`);
+    lines.push(`| Largest request | ${formatValue(metrics.largest_request_ms, 'ms')} |`);
+    lines.push(`| Total transfer | ${formatValue(metrics.total_transfer_bytes, 'bytes')} |`);
+    lines.push(`| Console errors | ${formatNumber(metrics.console_error_count)} |`);
+    lines.push(`| Page errors | ${formatNumber(metrics.page_error_count)} |`);
+    lines.push(`| Largest contentful paint | ${formatValue(metrics.largest_contentful_paint_ms, 'ms')} |`);
+    lines.push(`| Cumulative layout shift | ${formatNumber(metrics.cumulative_layout_shift)} |`);
+
+    const bottlenecks = Array.isArray(summary?.bottlenecks) ? summary.bottlenecks : [];
+    if (bottlenecks.length > 0) {
+        lines.push('', '## Bottlenecks', '', '| Kind | Phase | Message |');
+        lines.push('| --- | --- | --- |');
+        for (const row of bottlenecks.slice(0, maxRows)) {
+            lines.push(`| ${escapeMarkdownCell(row.kind)} | ${escapeMarkdownCell(row.phase || 'all')} | ${escapeMarkdownCell(row.message)} |`);
+        }
+        if (bottlenecks.length > maxRows) lines.push(`| ... | | ${bottlenecks.length - maxRows} more |`);
+    }
+
+    return `${lines.join('\n')}\n`;
+}
+
 export function formatBrowserPerformanceReport(comparison, options = {}) {
     return formatBrowserPerformanceDiffMarkdown(comparison, { title: options.title || 'Browser performance comparison', ...options });
 }
@@ -355,10 +436,12 @@ export async function runBrowserBench(options) {
     let context;
     let page;
     let tracePath;
+    let performanceController;
 
     const mark = async (name) => {
         const key = `${sanitizeMetricName(name)}_ms`;
         metrics[key] = performance.now() - start;
+        if (performanceController) await performanceController.markPhase(name);
         return metrics[key];
     };
 
@@ -371,6 +454,7 @@ export async function runBrowserBench(options) {
         }
         page = await context.newPage();
         attachPageObservers(page, network, consoleMessages, requestStarts);
+        performanceController = await installBrowserPerformanceObservers(page);
 
         const actionFailureOptions = {
             mark,
@@ -396,6 +480,33 @@ export async function runBrowserBench(options) {
 
         Object.assign(metrics, await collectNavigationMetrics(page));
         Object.assign(metrics, collectNetworkMetrics(network));
+
+        const performanceProfile = await performanceController.collect();
+        const profilePath = join(config.artifactsDir, `${config.id}-browser-profile.json`);
+        await writeJson(profilePath, performanceProfile);
+        artifacts.browserProfile = {
+            path: profilePath,
+            kind: 'browser-performance-profile',
+            label: 'Browser performance profile',
+        };
+
+        const traceSummary = summarizeBrowserPerformanceProfile(performanceProfile);
+        Object.assign(metrics, collectBrowserSummaryMetrics(traceSummary));
+        const traceSummaryPath = join(config.artifactsDir, `${config.id}-trace-summary.json`);
+        await writeJson(traceSummaryPath, traceSummary);
+        artifacts.traceSummary = {
+            path: traceSummaryPath,
+            kind: 'browser-trace-summary',
+            label: 'Browser trace bottleneck summary',
+        };
+
+        const traceSummaryMarkdownPath = join(config.artifactsDir, `${config.id}-trace-summary.md`);
+        await writeFile(traceSummaryMarkdownPath, formatBrowserPerformanceSummaryMarkdown(traceSummary, { title: `${config.id} browser trace bottlenecks` }));
+        artifacts.traceSummaryMarkdown = {
+            path: traceSummaryMarkdownPath,
+            kind: 'browser-trace-summary-markdown',
+            label: 'Browser trace bottleneck summary markdown',
+        };
 
         if (config.screenshot) {
             const screenshotPath = join(config.artifactsDir, `${config.id}-screenshot.png`);
@@ -803,6 +914,99 @@ function collectNetworkMetrics(network) {
         browser_failed_request_count: network.filter((entry) => entry.failed).length,
         browser_slowest_request_ms: durations.length > 0 ? Math.max(...durations) : 0,
     };
+}
+
+function collectBrowserSummaryMetrics(traceSummary) {
+    const summary = traceSummary.summary || {};
+    return {
+        browser_long_task_count: finiteNumber(summary.long_task_count),
+        browser_trace_bottleneck_count: Array.isArray(traceSummary.bottlenecks) ? traceSummary.bottlenecks.length : 0,
+        browser_transfer_bytes: finiteNumber(summary.total_transfer_bytes),
+        browser_console_error_count: finiteNumber(summary.console_error_count),
+        browser_page_error_count: finiteNumber(summary.page_error_count),
+        browser_largest_contentful_paint_ms: finiteNumber(summary.largest_contentful_paint_ms),
+        browser_cumulative_layout_shift: finiteNumber(summary.cumulative_layout_shift),
+    };
+}
+
+function normalizeTraceSummaryOptions(options) {
+    return {
+        phaseNames: normalizePhaseNames(options.phases ?? options.phase ?? options.phaseName),
+        maxItems: Number.isInteger(options.maxItems) && options.maxItems > 0 ? options.maxItems : 5,
+        maxBottlenecks: Number.isInteger(options.maxBottlenecks) && options.maxBottlenecks > 0 ? options.maxBottlenecks : 20,
+        longTaskThresholdMs: Number.isFinite(options.longTaskThresholdMs) ? options.longTaskThresholdMs : 50,
+    };
+}
+
+function bottleneck(kind, phase, message, data) {
+    return stableJson({ kind, phase: phase || 'all', message, data });
+}
+
+function summarizeTransferFamilies(resources, maxItems) {
+    const families = new Map();
+    for (const entry of resources) {
+        const family = resourceFamily(entry);
+        const current = families.get(family) || { family, count: 0, transfer_bytes: 0, duration_ms: 0 };
+        current.count += 1;
+        current.transfer_bytes += finiteNumber(entry.transfer_size);
+        current.duration_ms += finiteNumber(entry.duration);
+        families.set(family, current);
+    }
+    return [...families.values()]
+        .map((entry) => stableJson({ ...entry, transfer_bytes: roundNumber(entry.transfer_bytes), duration_ms: roundNumber(entry.duration_ms) }))
+        .filter((entry) => entry.transfer_bytes > 0)
+        .sort((a, b) => b.transfer_bytes - a.transfer_bytes || a.family.localeCompare(b.family))
+        .slice(0, maxItems);
+}
+
+function resourceFamily(entry) {
+    const initiator = entry.initiator_type || entry.initiatorType || '';
+    if (initiator) return initiator;
+    const url = entry.name || entry.url || '';
+    const extension = String(url).split('?')[0].match(/\.([a-z0-9]+)$/i)?.[1];
+    return extension ? extension.toLowerCase() : 'other';
+}
+
+function requestInitiator(request, resources) {
+    const resource = (resources || []).find((entry) => entry.name === request.url);
+    return resource ? resourceFamily(resource) : request.resource_type || '';
+}
+
+function paintBottlenecks(profile) {
+    const rows = [];
+    const lcpMs = profileMetric(profile, 'largest_contentful_paint_ms');
+    if (lcpMs > 0) {
+        rows.push(bottleneck('paint', profilePhaseName(profile, { start_time_ms: lcpMs }, 'start_time_ms'), `Largest contentful paint at ${formatValue(lcpMs, 'ms')}`, { largest_contentful_paint_ms: lcpMs }));
+    }
+    const cls = profileMetric(profile, 'cumulative_layout_shift');
+    if (cls > 0) {
+        rows.push(bottleneck('layout-shift', 'all', `Cumulative layout shift is ${formatNumber(cls)}`, { cumulative_layout_shift: cls }));
+    }
+    return rows;
+}
+
+function errorBottlenecks(profile) {
+    const consoleErrors = (profile.console_messages || []).filter(isConsoleError);
+    const pageErrors = profile.page_errors || [];
+    const rows = [];
+    if (consoleErrors.length > 0) {
+        rows.push(bottleneck('console-error', 'all', `${consoleErrors.length} console error(s) recorded`, { count: consoleErrors.length, examples: consoleErrors.slice(0, 3).map(consoleMessageKey) }));
+    }
+    if (pageErrors.length > 0) {
+        rows.push(bottleneck('page-error', 'all', `${pageErrors.length} page error(s) recorded`, { count: pageErrors.length, examples: pageErrors.slice(0, 3).map(errorKey) }));
+    }
+    return rows;
+}
+
+function profilePhaseName(profile, entry, ...timeKeys) {
+    const phases = Object.entries(profile.phases || {});
+    const start = firstFinite(...timeKeys.map((key) => entry[key]));
+    for (const [name, phase] of phases) {
+        const phaseStart = finiteNumber(phase.start_time_ms);
+        const phaseEnd = phase.end_time_ms === null || phase.end_time_ms === undefined ? Infinity : finiteNumber(phase.end_time_ms);
+        if (start >= phaseStart && start <= phaseEnd) return name;
+    }
+    return 'all';
 }
 
 function normalizeBrowserPerformanceOptions(options) {

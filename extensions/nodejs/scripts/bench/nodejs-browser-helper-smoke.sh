@@ -172,6 +172,9 @@ const expected = {
   screenshot: 'screenshot',
   network: 'network-log',
   console: 'console-log',
+  browserProfile: 'browser-performance-profile',
+  traceSummary: 'browser-trace-summary',
+  traceSummaryMarkdown: 'browser-trace-summary-markdown',
 };
 for (const [key, kind] of Object.entries(expected)) {
   const artifact = artifacts[key];
@@ -190,6 +193,22 @@ if (!consoleMessages.some((entry) => entry.text === 'browser-helper-smoke')) {
   throw new Error('console log did not record page console message');
 }
 if (path.extname(artifacts.trace.path) !== '.zip') throw new Error('trace artifact should be a zip');
+
+const traceSummary = JSON.parse(fs.readFileSync(artifacts.traceSummary.path, 'utf8'));
+if (traceSummary.summary.request_count < 3) throw new Error('trace summary did not count browser requests');
+if (traceSummary.summary.failed_request_count < 1) throw new Error('trace summary did not count failed requests');
+if (!traceSummary.bottlenecks.some((entry) => entry.kind === 'failed-request')) {
+  throw new Error('trace summary did not report failed request bottleneck');
+}
+const traceSummaryMarkdown = fs.readFileSync(artifacts.traceSummaryMarkdown.path, 'utf8');
+if (!traceSummaryMarkdown.includes('Browser trace bottlenecks') && !traceSummaryMarkdown.includes('browser trace bottlenecks')) {
+  throw new Error('trace summary markdown did not include expected title');
+}
+for (const key of ['browser_trace_bottleneck_count', 'browser_transfer_bytes', 'browser_console_error_count']) {
+  if (typeof metrics[key] !== 'number' || !Number.isFinite(metrics[key])) {
+    throw new Error(`missing numeric summary metric ${key}`);
+  }
+}
 EOF
 
 if ! grep -q 'HOMEBOY_NODEJS_BROWSER_BENCH_HELPER' "$SCRIPT_DIR/bench-runner.sh"; then
