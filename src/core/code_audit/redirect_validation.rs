@@ -349,6 +349,20 @@ redirect_to($redirect_uri);
     }
 
     #[test]
+    fn test_patterns_match() {
+        let patterns = vec![r#"\bcontext\.input\."#.to_string(), "(".to_string()];
+
+        assert!(patterns_match(
+            "const url = context.input.return_to;",
+            &patterns
+        ));
+        assert!(!patterns_match(
+            "const url = context.output.return_to;",
+            &patterns
+        ));
+    }
+
+    #[test]
     fn test_redirect_uses_value() {
         let config = config();
 
@@ -380,14 +394,6 @@ redirect_to($redirect_uri);
             "render($url);",
             &["redirect_to(".to_string()]
         ));
-    }
-
-    #[test]
-    fn test_patterns_match() {
-        let patterns = vec![r#"\bcontext\.input\."#.to_string(), "(".to_string()];
-
-        assert!(patterns_match("const url = context.input.return_to;", &patterns));
-        assert!(!patterns_match("const url = context.output.return_to;", &patterns));
     }
 
     #[test]
