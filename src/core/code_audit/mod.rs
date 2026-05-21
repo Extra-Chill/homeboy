@@ -42,6 +42,7 @@ mod layer_ownership;
 mod mutating_resource_access;
 pub(crate) mod naming;
 mod parallel_runner_setup;
+mod redirect_validation;
 mod repeated_literal_shape;
 pub mod report;
 mod requested_detectors;
@@ -156,6 +157,7 @@ pub(crate) struct AuditExecutionPlan {
     pub(crate) run_requested_detectors: bool,
     pub(crate) run_core_boundary_leaks: bool,
     pub(crate) run_mutating_resource_access: bool,
+    pub(crate) run_redirect_validation: bool,
     pub(crate) run_global_env_guard: bool,
     pub(crate) run_shared_scaffolding: bool,
     pub(crate) run_parallel_runner_setup: bool,
@@ -191,6 +193,7 @@ impl AuditExecutionPlan {
                 run_requested_detectors: true,
                 run_core_boundary_leaks: true,
                 run_mutating_resource_access: true,
+                run_redirect_validation: true,
                 run_global_env_guard: true,
                 run_shared_scaffolding: true,
                 run_parallel_runner_setup: true,
@@ -354,6 +357,11 @@ impl AuditExecutionPlan {
                     exclude,
                     &[AuditFinding::MutatingResourceAccess],
                 ),
+                run_redirect_validation: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::RedirectValidation],
+                ),
                 run_global_env_guard: Self::family_enabled(
                     only,
                     exclude,
@@ -423,6 +431,7 @@ impl AuditExecutionPlan {
                 "mutating_resource_access",
                 self.run_mutating_resource_access,
             ),
+            ("redirect_validation", self.run_redirect_validation),
             ("global_env_guard", self.run_global_env_guard),
             ("shared_scaffolding", self.run_shared_scaffolding),
             ("parallel_runner_setup", self.run_parallel_runner_setup),
@@ -479,6 +488,7 @@ impl AuditExecutionPlan {
             || self.run_requested_detectors
             || self.run_core_boundary_leaks
             || self.run_mutating_resource_access
+            || self.run_redirect_validation
             || self.run_global_env_guard
             || self.run_shared_scaffolding
             || self.run_parallel_runner_setup
@@ -1218,6 +1228,21 @@ fn audit_internal(
             mutating_access_findings.len()
         );
         all_findings.extend(mutating_access_findings);
+    }
+
+    // Phase 4t4: Configured redirect-destination dominance checks.
+    let redirect_validation_findings = if plan.run_redirect_validation {
+        redirect_validation::run(&all_fingerprints, &audit_config.redirect_validation)
+    } else {
+        Vec::new()
+    };
+    if !redirect_validation_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Redirect validation: {} finding(s) (request-derived redirects without dominating validation)",
+            redirect_validation_findings.len()
+        );
+        all_findings.extend(redirect_validation_findings);
     }
 
     // Phase 4v: Process-global environment mutation guard consistency in tests.

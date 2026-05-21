@@ -266,6 +266,9 @@ pub enum AuditFinding {
     FactorySeamBypass,
     /// Internal REST/API proxy call lacks a configured namespace or scope guard.
     InternalProxyScopeMissing,
+    /// Request-derived redirect destination reaches a configured redirect sink
+    /// before configured URL validation dominates the sink path.
+    RedirectValidation,
 }
 
 impl AuditFinding {
@@ -334,6 +337,7 @@ impl AuditFinding {
             "undominated_redirect_param",
             "factory_seam_bypass",
             "internal_proxy_scope_missing",
+            "redirect_validation",
         ]
     }
 }
