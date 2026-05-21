@@ -458,10 +458,10 @@ pub(crate) fn run_git_tag(
     }
 
     if local_tag_commit.is_some() || remote_tag_commit.is_some() {
-        let short_sha = |commit: &str| &commit[..8.min(commit.len())];
+        let short_sha = |commit: &str| commit[..8.min(commit.len())].to_string();
         let tag_state = |commit: Option<&str>| {
             commit
-                .map(|sha| short_sha(sha).to_string())
+                .map(&short_sha)
                 .unwrap_or_else(|| "absent".to_string())
         };
         let github_release = component
