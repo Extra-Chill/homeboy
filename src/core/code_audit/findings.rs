@@ -302,6 +302,10 @@ mod tests {
             AuditFinding::OrphanedTest.confidence(),
             FindingConfidence::Heuristic
         );
+        assert_eq!(
+            AuditFinding::RedirectValidation.confidence(),
+            FindingConfidence::Heuristic
+        );
         assert!(AuditFinding::CompilerWarning
             .confidence()
             .allows_automated_refactor());

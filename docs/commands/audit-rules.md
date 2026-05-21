@@ -225,6 +225,29 @@ config keys and import/export schema drift checks.
 Templates support regex capture names and `{line}`. `derived_absence` also exposes
 `{value}` and `{label}`.
 
+## Redirect Validation Dominance
+
+`audit.redirect_validation` configures a warning-level security-adjacent detector for request-derived redirect destinations. Core stays framework-agnostic: components or extensions provide the request parameter markers, request source markers or regex patterns, redirect sink markers, and validation/allowlist markers for their runtime.
+
+Example:
+
+```json
+{
+  "audit": {
+    "redirect_validation": {
+      "request_names": ["'redirect_uri'", "'return_to'", "'callback_url'"],
+      "request_source_markers": ["query.", "body.", "$_GET[", "$_POST["],
+      "request_source_patterns": ["\\brequest\\.(query|body)\\."],
+      "redirect_sinks": ["redirect_to(", "Location:"],
+      "validation_markers": ["allow_redirect_destination", "validate_redirect_destination"],
+      "file_extensions": ["php"]
+    }
+  }
+}
+```
+
+The detector tracks variables assigned from configured request-name markers on lines that also include configured request source markers or patterns, then reports `redirect_validation` when a configured redirect sink uses the variable before a configured validation marker dominates that sink by line order and block depth. This is a heuristic line/block-depth check, not CFG evidence, so findings require reviewer judgment.
+
 ## Requested Config Round-Trip Key Detector
 
 Extensions and components can configure a generic requested detector that compares
