@@ -45,17 +45,7 @@ pub(super) fn run(
             continue;
         }
 
-        let handler_blocks = extract_handler_blocks(&fp.content);
-        let inferred_access_markers =
-            infer_access_helper_markers(&handler_blocks, config, &resource_patterns);
-        let mut access_markers = config.access_helper_markers.clone();
-        for marker in inferred_access_markers {
-            if !access_markers.contains(&marker) {
-                access_markers.push(marker);
-            }
-        }
-
-        for block in handler_blocks {
+        for block in extract_handler_blocks(&fp.content) {
             if !contains_any(block.body, &config.mutating_operation_markers)
                 && !handler_is_registered_mutator(&fp.content, &block.name, config)
             {
@@ -66,7 +56,7 @@ pub(super) fn run(
             {
                 continue;
             }
-            if contains_any(block.body, &access_markers)
+            if contains_any(block.body, &config.access_helper_markers)
                 || contains_any(block.body, &config.trusted_delegation_markers)
             {
                 continue;
@@ -91,48 +81,6 @@ pub(super) fn run(
 
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
-}
-
-fn infer_access_helper_markers(
-    blocks: &[HandlerBlock<'_>],
-    config: &MutatingResourceAccessConfig,
-    resource_patterns: &[Regex],
-) -> Vec<String> {
-    let Ok(call_regex) = Regex::new(r"([A-Za-z_\\][A-Za-z0-9_:\\>]*?)\s*\(") else {
-        return Vec::new();
-    };
-
-    let mut markers = Vec::new();
-    for block in blocks {
-        if !contains_any_regex(block.body, resource_patterns)
-            || !contains_any(block.body, &config.mutator_markers)
-        {
-            continue;
-        }
-        for captures in call_regex.captures_iter(block.body) {
-            let Some(call) = captures.get(1).map(|m| m.as_str()) else {
-                continue;
-            };
-            if access_like_name(call) {
-                let marker = format!("{}(", call);
-                if !markers.contains(&marker) {
-                    markers.push(marker);
-                }
-            }
-        }
-    }
-    markers
-}
-
-fn access_like_name(call: &str) -> bool {
-    let normalized = call.to_ascii_lowercase();
-    normalized.contains("own")
-        || normalized.contains("access")
-        || normalized.contains("authoriz")
-        || normalized.contains("permission")
-        || normalized.contains("permit")
-        || normalized.contains("allowed")
-        || normalized.contains("can_")
 }
 
 fn handler_is_registered_mutator(
@@ -308,9 +256,36 @@ public function clone_thing($request) {
     }
 
     #[test]
-    fn infers_access_helper_from_sibling_handler_call_shape() {
+    fn does_not_infer_access_helper_from_sibling_handler_call_shape() {
         let mut config = config();
         config.access_helper_markers.clear();
+        let fp = fp(r#"
+route('/things/(?P<thing_id>\\d+)', ['methods' => 'WRITE', 'callback' => 'update_thing']);
+route('/things/(?P<thing_id>\\d+)/rename', ['methods' => 'WRITE', 'callback' => 'rename_thing']);
+
+public function update_thing($request) {
+    $thing_id = $request['thing_id'];
+    can_edit_resource($thing_id);
+    save_resource($thing_id);
+}
+
+public function rename_thing($request) {
+    $thing_id = $request['thing_id'];
+    save_resource($thing_id);
+}
+"#);
+
+        let findings = run(&[&fp], &config);
+
+        assert_eq!(findings.len(), 2);
+        assert!(findings[0].description.contains("rename_thing"));
+        assert!(findings[1].description.contains("update_thing"));
+    }
+
+    #[test]
+    fn accepts_configured_access_helper_marker_only() {
+        let mut config = config();
+        config.access_helper_markers = vec!["can_edit_resource(".to_string()];
         let fp = fp(r#"
 route('/things/(?P<thing_id>\\d+)', ['methods' => 'WRITE', 'callback' => 'update_thing']);
 route('/things/(?P<thing_id>\\d+)/rename', ['methods' => 'WRITE', 'callback' => 'rename_thing']);
@@ -342,49 +317,6 @@ public function helper($thing_id) {
 "#);
 
         assert!(run(&[&fp], &config()).is_empty());
-    }
-
-    #[test]
-    fn test_infer_access_helper_markers() {
-        let mut config = config();
-        config.access_helper_markers.clear();
-        let resource_patterns = config
-            .resource_identifier_patterns
-            .iter()
-            .map(|pattern| Regex::new(pattern).unwrap())
-            .collect::<Vec<_>>();
-        let content = r#"
-public function update_thing($request) {
-    $thing_id = $request['thing_id'];
-    can_edit_resource($thing_id);
-    save_resource($thing_id);
-}
-
-public function helper($request) {
-    can_edit_resource($request);
-}
-
-public function rename_thing($request) {
-    $thing_id = $request['thing_id'];
-    format_resource($thing_id);
-    save_resource($thing_id);
-}
-"#;
-        let blocks = extract_handler_blocks(content);
-
-        let markers = infer_access_helper_markers(&blocks, &config, &resource_patterns);
-
-        assert_eq!(markers, vec!["can_edit_resource("]);
-    }
-
-    #[test]
-    fn test_access_like_name() {
-        assert!(access_like_name("Access::owns_resource"));
-        assert!(access_like_name("authorize_delete"));
-        assert!(access_like_name("can_edit_resource"));
-        assert!(access_like_name("PermissionGate::allowed"));
-        assert!(!access_like_name("save_resource"));
-        assert!(!access_like_name("format_resource"));
     }
 
     #[test]

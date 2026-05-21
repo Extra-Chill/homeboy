@@ -65,9 +65,9 @@ Finding output:
 - `kind`: `mutating_resource_access`
 - severity: warning
 
-Use `access_helper_markers` for direct ownership/access checks in the handler.
-Use `trusted_delegation_markers` for helper or ability paths that the component
-has verified enforce equivalent ownership/access checks.
+Only configured `access_helper_markers` and `trusted_delegation_markers` suppress
+findings. Core treats both lists as opaque markers and does not infer access
+helpers from function names.
 
 # Requested Detector Rules
 
