@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.100.3] - 2026-05-21
+
+### Fixed
+- skip non-php files in php fixers
+
 ## [2.100.2] - 2026-05-21
 
 ### Fixed
