@@ -54,7 +54,10 @@ recorder.recordAssertion('json-poll-port-known', jsonResult.status === 'matched'
 let requestCount = 0;
 const server = createServer((_, res) => {
     requestCount += 1;
-    res.statusCode = requestCount <= 2 ? 502 : requestCount === 3 ? 503 : 200;
+    res.statusCode = requestCount <= 2 ? 502 : requestCount === 3 ? 302 : 200;
+    if (res.statusCode === 302) {
+        res.setHeader('Location', '/wp-admin/install.php');
+    }
     res.end('ok');
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -67,10 +70,10 @@ try {
         timeoutMs: 1000,
         onEvent,
     });
-    const expectedHistory = JSON.stringify([{ status: 502, count: 2 }, { status: 503, count: 1 }, { status: 200, count: 1 }]);
-    const actualHistory = JSON.stringify(httpResult.status_history.map(({ status, count }) => ({ status, count })));
+    const expectedHistory = JSON.stringify([{ status: 502, count: 2 }, { status: 302, count: 1, location: '/wp-admin/install.php' }, { status: 200, count: 1 }]);
+    const actualHistoryWithLocation = JSON.stringify(httpResult.status_history.map(({ status, count, location }) => ({ status, count, ...(location ? { location } : {}) })));
     recorder.recordAssertion('http-poll-ready', httpResult.status === 'ready' && httpResult.http_status === 200 ? 'pass' : 'fail', `http poll returned ${httpResult.status}`);
-    recorder.recordAssertion('http-status-history', actualHistory === expectedHistory && httpResult.last_non_ready_status === 503 ? 'pass' : 'fail', `http status history was ${actualHistory}`);
+    recorder.recordAssertion('http-status-history', actualHistoryWithLocation === expectedHistory && httpResult.last_non_ready_status === 302 ? 'pass' : 'fail', `http status history was ${actualHistoryWithLocation}`);
 } finally {
     await new Promise((resolve) => server.close(resolve));
 }
