@@ -338,6 +338,7 @@ impl AuditExecutionPlan {
                         AuditFinding::JsonLikeExactMatch,
                         AuditFinding::ConstantBackedSlugLiteral,
                         AuditFinding::OptionScopeDrift,
+                        AuditFinding::ProxyScopeDrift,
                     ],
                 ),
                 run_core_boundary_leaks: Self::family_enabled(

@@ -73,7 +73,7 @@ fn run_rule(fingerprints: &[&FileFingerprint], rule: &ConfigKeyUsageRule) -> Vec
         });
     }
 
-    collect_accessor_symbol_reads(&eligible, &mut evidence_by_key);
+    collect_accessor_symbol_reads(&eligible, rule, &mut evidence_by_key);
 
     evidence_by_key
         .into_iter()
@@ -129,6 +129,7 @@ fn collect_pattern_evidence(
 
 fn collect_accessor_symbol_reads(
     fingerprints: &[&FileFingerprint],
+    rule: &ConfigKeyUsageRule,
     evidence_by_key: &mut BTreeMap<String, KeyEvidence>,
 ) {
     for evidence in evidence_by_key.values_mut() {
@@ -149,7 +150,7 @@ fn collect_accessor_symbol_reads(
                 if definition_files.contains(fp.relative_path.as_str()) {
                     continue;
                 }
-                if let Some(offset) = fp.content.find(&symbol) {
+                if let Some(offset) = first_accessor_symbol_read_offset(fp, rule, &symbol) {
                     evidence.reads.push(EvidenceSite {
                         file: fp.relative_path.clone(),
                         line: line_of_offset(&fp.content, offset),
@@ -158,6 +159,67 @@ fn collect_accessor_symbol_reads(
             }
         }
     }
+}
+
+fn first_accessor_symbol_read_offset(
+    fp: &FileFingerprint,
+    rule: &ConfigKeyUsageRule,
+    symbol: &str,
+) -> Option<usize> {
+    if !rule.accessor_symbol_read_patterns.is_empty() {
+        let escaped_symbol = regex::escape(symbol);
+        for pattern in &rule.accessor_symbol_read_patterns {
+            let pattern = pattern.replace("{symbol}", &escaped_symbol);
+            let Ok(regex) = Regex::new(&pattern) else {
+                continue;
+            };
+            if let Some(found) = regex.find(&fp.content) {
+                return Some(found.start());
+            }
+        }
+        return None;
+    }
+
+    first_identifier_reference_offset(&fp.content, symbol)
+}
+
+fn first_identifier_reference_offset(content: &str, symbol: &str) -> Option<usize> {
+    let mut search_start = 0;
+    while let Some(relative_offset) = content[search_start..].find(symbol) {
+        let offset = search_start + relative_offset;
+        let end = offset + symbol.len();
+        if has_identifier_boundaries(content, offset, end) && !is_comment_only_line(content, offset)
+        {
+            return Some(offset);
+        }
+        search_start = end;
+    }
+    None
+}
+
+fn has_identifier_boundaries(content: &str, start: usize, end: usize) -> bool {
+    !content[..start]
+        .chars()
+        .next_back()
+        .is_some_and(is_identifier_char)
+        && !content[end..]
+            .chars()
+            .next()
+            .is_some_and(is_identifier_char)
+}
+
+fn is_identifier_char(value: char) -> bool {
+    value == '_' || value.is_ascii_alphanumeric()
+}
+
+fn is_comment_only_line(content: &str, offset: usize) -> bool {
+    let line_start = content[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let prefix = content[line_start..offset].trim_start();
+    prefix.starts_with("//")
+        || prefix.starts_with('#')
+        || prefix.starts_with("/*")
+        || prefix.starts_with('*')
+        || prefix.starts_with("<!--")
 }
 
 fn finding_for(rule: &ConfigKeyUsageRule, key: &str, evidence: &KeyEvidence) -> Option<Finding> {
@@ -216,6 +278,14 @@ mod tests {
                 key_capture: "key".to_string(),
                 symbol_capture: None,
             }],
+            accessor_symbol_read_patterns: vec![],
+        }
+    }
+
+    fn rule_with_symbol_read_pattern(pattern: &str) -> ConfigKeyUsageRule {
+        ConfigKeyUsageRule {
+            accessor_symbol_read_patterns: vec![pattern.to_string()],
+            ..rule()
         }
     }
 
@@ -299,11 +369,87 @@ mod tests {
             },
         );
 
-        collect_accessor_symbol_reads(&refs, &mut evidence_by_key);
+        collect_accessor_symbol_reads(&refs, &rule(), &mut evidence_by_key);
 
         let evidence = evidence_by_key.get("enabled_items").unwrap();
         assert_eq!(evidence.reads.len(), 1);
         assert_eq!(evidence.reads[0].file, "src/runtime.rs");
+    }
+
+    #[test]
+    fn test_first_accessor_symbol_read_offset() {
+        let rule = rule();
+
+        assert_eq!(
+            first_accessor_symbol_read_offset(
+                &fp("src/runtime.rs", "let items = enabled_items();"),
+                &rule,
+                "enabled_items",
+            ),
+            Some(12)
+        );
+        assert_eq!(
+            first_accessor_symbol_read_offset(
+                &fp("src/runtime.rs", "let items = disabled_enabled_items_flag;"),
+                &rule,
+                "enabled_items",
+            ),
+            None
+        );
+        assert_eq!(
+            first_accessor_symbol_read_offset(
+                &fp("src/runtime.rs", "// enabled_items is mentioned in docs"),
+                &rule,
+                "enabled_items",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_first_identifier_reference_offset() {
+        assert_eq!(
+            first_identifier_reference_offset("prefix_enabled_items", "enabled_items"),
+            None
+        );
+        assert_eq!(
+            first_identifier_reference_offset("enabled_items_suffix", "enabled_items"),
+            None
+        );
+        assert_eq!(
+            first_identifier_reference_offset("call enabled_items now", "enabled_items"),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn test_has_identifier_boundaries() {
+        assert!(has_identifier_boundaries("call enabled_items();", 5, 18));
+        assert!(!has_identifier_boundaries(
+            "call enabled_items_extra();",
+            5,
+            18
+        ));
+        assert!(!has_identifier_boundaries(
+            "call get_enabled_items();",
+            9,
+            22
+        ));
+    }
+
+    #[test]
+    fn test_is_identifier_char() {
+        assert!(is_identifier_char('a'));
+        assert!(is_identifier_char('7'));
+        assert!(is_identifier_char('_'));
+        assert!(!is_identifier_char('-'));
+    }
+
+    #[test]
+    fn test_is_comment_only_line() {
+        assert!(is_comment_only_line("// enabled_items", 3));
+        assert!(is_comment_only_line("   # enabled_items", 5));
+        assert!(!is_comment_only_line("let items = enabled_items();", 12));
     }
 
     #[test]
@@ -350,6 +496,52 @@ mod tests {
         let refs = files.iter().collect::<Vec<_>>();
 
         assert!(run(&refs, &[rule()]).is_empty());
+    }
+
+    #[test]
+    fn accessor_symbol_comments_do_not_satisfy_key() {
+        let files = vec![
+            fp(
+                "src/config.rs",
+                "fn enabled_items() { get_config('enabled_items') }",
+            ),
+            fp(
+                "src/runtime.rs",
+                "// enabled_items() documents the accessor",
+            ),
+        ];
+        let refs = files.iter().collect::<Vec<_>>();
+
+        assert_eq!(run(&refs, &[rule()]).len(), 1);
+    }
+
+    #[test]
+    fn accessor_symbol_partial_identifier_does_not_satisfy_key() {
+        let files = vec![
+            fp(
+                "src/config.rs",
+                "fn enabled_items() { get_config('enabled_items') }",
+            ),
+            fp("src/runtime.rs", "let value = enabled_items_cached();"),
+        ];
+        let refs = files.iter().collect::<Vec<_>>();
+
+        assert_eq!(run(&refs, &[rule()]).len(), 1);
+    }
+
+    #[test]
+    fn configured_accessor_symbol_read_pattern_satisfies_key() {
+        let files = vec![
+            fp(
+                "src/config.rs",
+                "fn enabled_items() { get_config('enabled_items') }",
+            ),
+            fp("src/runtime.rs", "call_accessor(enabled_items);"),
+        ];
+        let refs = files.iter().collect::<Vec<_>>();
+        let rule = rule_with_symbol_read_pattern(r#"call_accessor\(\s*{symbol}\s*\)"#);
+
+        assert!(run(&refs, &[rule]).is_empty());
     }
 
     #[test]

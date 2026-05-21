@@ -32,6 +32,7 @@ fn test_merge() {
                 }],
                 accessor_patterns: vec![],
                 read_patterns: vec![],
+                accessor_symbol_read_patterns: vec![],
             }],
         },
         convention_exception_globs: vec!["generated/**".to_string()],
@@ -51,6 +52,7 @@ fn test_merge() {
                     write_patterns: vec![],
                     accessor_patterns: vec![],
                     read_patterns: vec![],
+                    accessor_symbol_read_patterns: vec![],
                 },
                 ConfigKeyUsageRule {
                     id: "state-config".to_string(),
@@ -58,6 +60,7 @@ fn test_merge() {
                     write_patterns: vec![],
                     accessor_patterns: vec![],
                     read_patterns: vec![],
+                    accessor_symbol_read_patterns: vec![],
                 },
             ],
         },

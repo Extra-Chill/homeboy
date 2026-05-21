@@ -86,6 +86,10 @@ pub struct ConfigKeyUsageRule {
     /// Regexes that capture non-test runtime/display reads of keys.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_patterns: Vec<ConfigKeyUsagePattern>,
+    /// Optional regex templates that match references to accessor symbols.
+    /// `{symbol}` is replaced with the escaped captured accessor symbol.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accessor_symbol_read_patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -314,6 +318,53 @@ pub enum RequestedDetectorRuleBody {
         description: String,
         suggestion: String,
     },
+    /// Flag files whose docs/schema claim a scoped internal proxy but whose
+    /// implementation forwards request-controlled targets without an explicit
+    /// allowlist/prefix marker. All markers are extension-owned regexes.
+    ScopedProxy {
+        claim_pattern: String,
+        sink_pattern: String,
+        target_pattern: String,
+        allowlist_pattern: String,
+        description: String,
+        suggestion: String,
+    },
+    /// Emit a finding when a regex match is not accompanied by another regex in
+    /// a configured text scope. Core does not interpret either pattern.
+    RequiredRegex {
+        pattern: String,
+        required_pattern: String,
+        #[serde(default)]
+        required_scope: RequiredRegexScope,
+        description: String,
+        suggestion: String,
+    },
+    /// Collect values with one regex, then emit findings for values that do not
+    /// have a corresponding required match elsewhere in the eligible corpus.
+    DerivedAbsence {
+        source_pattern: String,
+        value_capture: String,
+        label: String,
+        required_pattern: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude_required_path_contains: Vec<String>,
+        description: String,
+        suggestion: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredRegexScope {
+    /// Search the whole file containing the candidate match.
+    #[default]
+    SameFile,
+    /// Search only text before the candidate match in the same file.
+    BeforeMatch,
+    /// Search only text after the candidate match in the same file.
+    AfterMatch,
+    /// Search the full eligible file corpus.
+    AnyEligibleFile,
 }
 
 fn default_requested_detector_severity() -> String {

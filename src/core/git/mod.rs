@@ -29,10 +29,11 @@ pub use operations::{
     changes_project_filtered, cherry_pick, cherry_pick_at, commit, commit_at, commit_from_json,
     detect_baseline_with_version, execute_git_for_release, fetch_and_fast_forward,
     fetch_and_get_behind_count, get_head_commit, get_repo_snapshot, get_tag_commit, pull, pull_at,
-    pull_bulk, push, push_at, push_bulk, rebase, rebase_at, short_head_revision_at, status,
-    status_at, status_bulk, tag, tag_at, tag_exists_locally, tag_exists_on_remote, BaselineInfo,
-    BaselineSource, ChangelogInfo, ChangesOutput, CherryPickOptions, CommitJsonOutput,
-    CommitOptions, GitOutput, PushOptions, RebaseOptions, RepoBaselineSnapshot, RepoSnapshot,
+    pull_bulk, push, push_at, push_bulk, rebase, rebase_at, remote_tag_commit,
+    short_head_revision_at, status, status_at, status_bulk, tag, tag_at, tag_exists_locally,
+    tag_exists_on_remote, BaselineInfo, BaselineSource, ChangelogInfo, ChangesOutput,
+    CherryPickOptions, CommitJsonOutput, CommitOptions, GitOutput, PushOptions, RebaseOptions,
+    RepoBaselineSnapshot, RepoSnapshot,
 };
 pub use pr_policy::{
     evaluate_merge_policy, evaluate_open_policy, PrPolicyContext, PrPolicyDecision, PrPolicyFile,
