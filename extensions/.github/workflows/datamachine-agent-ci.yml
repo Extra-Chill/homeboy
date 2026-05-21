@@ -84,6 +84,10 @@ name: Data Machine Agent CI (reusable)
         description: Ref for Extra-Chill/data-machine-code when include_agent_runtime_dependencies is true.
         type: string
         default: main
+      php_ai_client_ref:
+        description: Ref for WordPress/php-ai-client when mounting the default OpenAI provider runtime.
+        type: string
+        default: trunk
       openai_provider_ref:
         description: Legacy ref for explicit provider_plugin overrides that still checkout WordPress/ai-provider-for-openai.
         type: string
@@ -412,6 +416,7 @@ jobs:
           AGENTS_API_REF: ${{ inputs.agents_api_ref }}
           DATA_MACHINE_REF: ${{ inputs.data_machine_ref }}
           DATA_MACHINE_CODE_REF: ${{ inputs.data_machine_code_ref }}
+          PHP_AI_CLIENT_REF: ${{ inputs.php_ai_client_ref }}
           OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
           PROVIDER: ${{ inputs.provider }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
@@ -436,6 +441,10 @@ jobs:
             dependency_entries+=("Automattic/agents-api@${AGENTS_API_REF}")
             dependency_entries+=("Extra-Chill/data-machine@${DATA_MACHINE_REF}")
             dependency_entries+=("Extra-Chill/data-machine-code@${DATA_MACHINE_CODE_REF}")
+            if [ "$PROVIDER" = "openai" ] && [ -z "$provider_plugin_repo" ]; then
+              dependency_entries+=("WordPress/php-ai-client@${PHP_AI_CLIENT_REF}")
+              dependency_entries+=("WordPress/ai-provider-for-openai@${OPENAI_PROVIDER_REF}")
+            fi
             if [ -n "$provider_plugin_repo" ]; then
               if [ -n "$provider_plugin_ref" ]; then
                 dependency_entries+=("${provider_plugin_repo}@${provider_plugin_ref}")
@@ -667,6 +676,13 @@ jobs:
           provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
           provider_plugin_path="$(jq -r '.path // "."' <<< "$provider_plugin_json")"
           provider_plugin_host_path=""
+          wp_ai_client_host_path=""
+          if [ -d "${GITHUB_WORKSPACE}/.ci/php-ai-client" ]; then
+            wp_ai_client_host_path="${GITHUB_WORKSPACE}/.ci/php-ai-client"
+          fi
+          if [ -z "$provider_plugin_repo" ] && [ "$PROVIDER" = "openai" ] && [ -d "${GITHUB_WORKSPACE}/.ci/ai-provider-for-openai" ]; then
+            provider_plugin_host_path="${GITHUB_WORKSPACE}/.ci/ai-provider-for-openai"
+          fi
           if [ -n "$provider_plugin_repo" ]; then
             provider_plugin_repo_name="${provider_plugin_repo#*/}"
             provider_plugin_root="${GITHUB_WORKSPACE}/.ci/${provider_plugin_repo_name}"
@@ -740,6 +756,7 @@ jobs:
             --arg model "$MODEL" \
             --arg wpCodeboxBin "$wp_codebox_bin" \
             --arg providerPluginHostPath "$provider_plugin_host_path" \
+            --arg wpAiClientHostPath "$wp_ai_client_host_path" \
             --arg engineKey "$ENGINE_KEY" \
             --arg toolResultsKey "$TOOL_RESULTS_KEY" \
             --arg playgroundWordPress "$PLAYGROUND_WORDPRESS" \
@@ -815,7 +832,7 @@ jobs:
                 agents_api: ($componentPath + "/.ci/agents-api"),
                 data_machine: ($componentPath + "/.ci/data-machine"),
                 data_machine_code: ($componentPath + "/.ci/data-machine-code")
-              },
+              } + (if $wpAiClientHostPath != "" then {wp_ai_client: $wpAiClientHostPath} else {} end),
               provider_plugin_paths: (if $providerPluginHostPath != "" then [$providerPluginHostPath] else [] end),
               github_token_env: "HOMEBOY_GITHUB_APP_TOKEN",
               github_repository_token_env: "GITHUB_TOKEN",
