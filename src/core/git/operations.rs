@@ -1613,6 +1613,44 @@ mod tests {
     }
 
     #[test]
+    fn test_remote_tag_commit() {
+        let (_dir, path) = init_repo_with_initial_commit();
+        let remote = tempfile::TempDir::new().expect("remote tempdir");
+
+        Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git init bare remote");
+        Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("remote path"),
+            ])
+            .current_dir(&path)
+            .output()
+            .expect("git remote add");
+        Command::new("git")
+            .args(["tag", "v1.2.3"])
+            .current_dir(&path)
+            .output()
+            .expect("git tag");
+        Command::new("git")
+            .args(["push", "origin", "v1.2.3"])
+            .current_dir(&path)
+            .output()
+            .expect("git push tag");
+
+        let head = get_head_commit(&path).expect("head commit");
+        let remote_tag = remote_tag_commit(&path, "v1.2.3").expect("remote tag lookup");
+
+        assert_eq!(remote_tag.as_deref(), Some(head.as_str()));
+        assert_eq!(remote_tag_commit(&path, "v9.9.9").unwrap(), None);
+    }
+
+    #[test]
     fn rebase_against_self_is_a_noop_success() {
         let (_dir, path) = init_repo_with_initial_commit();
 
