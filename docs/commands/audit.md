@@ -8,7 +8,7 @@ homeboy audit <component-id|path> [options]
 
 ## Description
 
-Audit a component's codebase for convention drift, structural complexity, dead code, duplication, and test coverage gaps. The audit engine fingerprints source files, discovers conventions (patterns most files follow), detects outliers, and produces actionable findings.
+Audit a component's codebase for convention drift, structural complexity, dead code, duplication, configured detector drift, and test coverage gaps. The audit engine fingerprints source files, discovers conventions (patterns most files follow), detects outliers, and produces actionable findings.
 
 Works with registered components (by ID) or raw filesystem paths.
 
@@ -40,6 +40,7 @@ The audit runs in 6 phases:
    - **4e: Dead code** — Unused params, unreferenced exports, orphaned internals
    - **4f: Test coverage gaps** — Missing test files, uncovered methods, orphaned tests (requires extension `test_mapping` config)
    - **4h: Layer ownership** — Optional architecture/layer ownership rule violations (`layer_ownership_violation`)
+   - **4t: Requested detectors** — Extension/component-owned regex detector packs, including generic config round-trip key asymmetry (`config_roundtrip_asymmetry`)
 5. **Report** — Aggregate findings, compute alignment score
 6. **Cross-directory conventions** — Detect patterns shared by sibling subdirectories
 
