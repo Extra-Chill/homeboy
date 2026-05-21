@@ -240,6 +240,8 @@ pub enum AuditFinding {
     /// Direct aggregate/struct literals are repeated even though a canonical
     /// construction seam exists for the same type.
     DirectAggregateConstruction,
+    /// Configured key has write/migration/accessor evidence but no non-test read.
+    WriteOnlyConfigKey,
     /// Configured ecosystem/language/framework term appears in core-owned source.
     CoreBoundaryLeak,
 }
@@ -299,6 +301,7 @@ impl AuditFinding {
             "parallel_runner_setup",
             "repeated_enum_dispatch_contract",
             "direct_aggregate_construction",
+            "write_only_config_key",
             "core_boundary_leak",
         ]
     }

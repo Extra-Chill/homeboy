@@ -19,6 +19,7 @@ mod comment_blocks;
 mod comment_hygiene;
 pub mod compare;
 mod compiler_warnings;
+mod config_key_usage;
 pub(crate) mod conventions;
 mod core_boundary_leak;
 pub(crate) mod core_fingerprint;
@@ -158,6 +159,7 @@ pub(crate) struct AuditExecutionPlan {
     pub(crate) run_parallel_runner_setup: bool,
     pub(crate) run_enum_dispatch_contracts: bool,
     pub(crate) run_aggregate_construction: bool,
+    pub(crate) run_config_key_usage: bool,
 }
 
 impl AuditExecutionPlan {
@@ -191,6 +193,7 @@ impl AuditExecutionPlan {
                 run_parallel_runner_setup: true,
                 run_enum_dispatch_contracts: true,
                 run_aggregate_construction: true,
+                run_config_key_usage: true,
             },
         )
     }
@@ -367,6 +370,11 @@ impl AuditExecutionPlan {
                     exclude,
                     &[AuditFinding::DirectAggregateConstruction],
                 ),
+                run_config_key_usage: Self::family_enabled(
+                    only,
+                    exclude,
+                    &[AuditFinding::WriteOnlyConfigKey],
+                ),
             },
         )
     }
@@ -407,6 +415,7 @@ impl AuditExecutionPlan {
             ("parallel_runner_setup", self.run_parallel_runner_setup),
             ("enum_dispatch_contracts", self.run_enum_dispatch_contracts),
             ("aggregate_construction", self.run_aggregate_construction),
+            ("config_key_usage", self.run_config_key_usage),
         ]
         .into_iter()
         .map(|(name, enabled)| {
@@ -461,6 +470,7 @@ impl AuditExecutionPlan {
             || self.run_parallel_runner_setup
             || self.run_enum_dispatch_contracts
             || self.run_aggregate_construction
+            || self.run_config_key_usage
     }
 }
 
@@ -1149,6 +1159,21 @@ fn audit_internal(
             requested_findings.len()
         );
         all_findings.extend(requested_findings);
+    }
+
+    // Phase 4t1: Component-owned config-key write/accessor/read correlation.
+    let config_key_findings = if plan.run_config_key_usage {
+        config_key_usage::run(&all_fingerprints, &audit_config.config_key_usage.rules)
+    } else {
+        Vec::new()
+    };
+    if !config_key_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Config key usage: {} finding(s) (write/accessor evidence without production reads)",
+            config_key_findings.len()
+        );
+        all_findings.extend(config_key_findings);
     }
 
     // Phase 4t2: Configured core-boundary ecosystem leak detection.
