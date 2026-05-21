@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.196.0] - 2026-05-21
+
+### Added
+- add correlated requested detector rules
+- detect scoped proxy audit drift
+
+### Fixed
+- explain divergent release tag recovery
+
 ## [0.195.1] - 2026-05-21
 
 ### Fixed
