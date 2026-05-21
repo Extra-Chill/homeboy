@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.97.2] - 2026-05-21
+
+### Fixed
+- accept opened agent PR as success
+
 ## [2.97.1] - 2026-05-21
 
 ### Fixed
