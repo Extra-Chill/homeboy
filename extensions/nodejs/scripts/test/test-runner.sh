@@ -152,7 +152,6 @@ TEST_EXIT=${PIPESTATUS[0]}
 set -e
 
 OUTPUT="$(cat "$OUTPUT_FILE")"
-rm -f "$OUTPUT_FILE"
 
 # ── Parse result counts by runner detection ──
 # Runners we recognize, in priority order. Each match block sets
@@ -191,12 +190,17 @@ write_node_failure_json() {
     [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] || return 0
     [ -n "$FAILED_TEST_NAME" ] || return 0
 
-    node - "$HOMEBOY_TEST_FAILURES_FILE" "$FAILED_TEST_NAME" "$FAILED_TEST_FILE" "$FAILED_ERROR_TYPE" "$FAILED_MESSAGE" "$TOTAL" "$PASSED" <<'JS'
+    HOMEBOY_NODE_TEST_OUTPUT="$OUTPUT" node - "$HOMEBOY_TEST_FAILURES_FILE" "$FAILED_TEST_NAME" "$FAILED_TEST_FILE" "$FAILED_ERROR_TYPE" "$FAILED_MESSAGE" "$TOTAL" "$PASSED" <<'JS'
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 
 const [file, testName, testFile, errorType, message, total, passed] = process.argv.slice(2);
 const parsedTotal = Number.parseInt(total || '0', 10) || 0;
 const parsedPassed = Number.parseInt(passed || '0', 10) || 0;
+const stdout = process.env.HOMEBOY_NODE_TEST_OUTPUT || '';
+const fingerprintInput = [testName, testFile, errorType, message].join('\0');
+const fingerprint = crypto.createHash('sha256').update(fingerprintInput).digest('hex');
+const stdoutExcerpt = stdout.split(/\r?\n/).slice(-40).join('\n');
 
 fs.writeFileSync(file, JSON.stringify({
   total: parsedTotal,
@@ -206,7 +210,15 @@ fs.writeFileSync(file, JSON.stringify({
       test_name: testName,
       test_file: testFile,
       error_type: errorType,
+      test_id: testName,
+      suite: '',
+      file: testFile,
+      line: 0,
       message,
+      failure_type: errorType,
+      fingerprint,
+      stdout_excerpt: stdoutExcerpt,
+      stderr_excerpt: '',
       source_file: testFile,
       source_line: 0
     }
@@ -307,6 +319,7 @@ if type homeboy_write_test_results >/dev/null 2>&1; then
 fi
 
 write_node_failure_json
+rm -f "$OUTPUT_FILE"
 
 if [ $TEST_EXIT -ne 0 ]; then
     FAILED_STEP="Tests failed (exit $TEST_EXIT)"

@@ -94,6 +94,13 @@ assert.equal(
 );
 assert.equal(failures.failures[0].test_file, 'src/test/version-detect.spec.ts');
 assert.equal(failures.failures[0].error_type, 'vitest_timeout');
+assert.equal(failures.failures[0].test_id, failures.failures[0].test_name);
+assert.equal(failures.failures[0].file, failures.failures[0].test_file);
+assert.equal(failures.failures[0].failure_type, failures.failures[0].error_type);
+assert.equal(failures.failures[0].line, 0);
+assert.equal(failures.failures[0].stderr_excerpt, '');
+assert.match(failures.failures[0].fingerprint, /^[a-f0-9]{64}$/);
+assert.match(failures.failures[0].stdout_excerpt, /FAIL src\/test\/version-detect\.spec\.ts/);
 assert.match(failures.failures[0].message, /Test timed out in 30000ms/);
 assert.match(failures.failures[0].message, /Nx task: playground-wordpress:test:vite/);
 JS
