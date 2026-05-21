@@ -12,9 +12,9 @@ set -euo pipefail
 # In fix mode (HOMEBOY_FIX_ONLY=1), prefers `lint:fix` script if defined,
 # otherwise falls back to `eslint . --fix`.
 #
-# Output: writes a LintFinding[] JSON array to HOMEBOY_LINT_FINDINGS_FILE.
-# Each finding has `id`, `message`, `category` (matches LintFinding struct
-# in homeboy/src/core/extension/lint/baseline.rs).
+# Output: writes a normalized LintFinding[] JSON array to
+# HOMEBOY_LINT_FINDINGS_FILE. Core consumes `id`, `message`, and `category`;
+# richer fields remain available through the flattened metadata map.
 #
 # We try to consume ESLint's machine-readable JSON output (--format=json)
 # when ESLint is the runner. For arbitrary `npm run lint` scripts the user
@@ -137,10 +137,28 @@ if [ $USE_ESLINT_JSON -eq 1 ] && [ -s "$OUTPUT_FILE" ]; then
     # only if HOMEBOY_LINT_INCLUDE_WARNINGS=1 (matches Rust extension's
     # ratchet-friendly default).
     INCLUDE_WARNINGS="${HOMEBOY_LINT_INCLUDE_WARNINGS:-0}"
-    node - "$OUTPUT_FILE" "$FINDINGS_FILE" "$INCLUDE_WARNINGS" <<'NODEJS'
+    node - "$OUTPUT_FILE" "$FINDINGS_FILE" "$INCLUDE_WARNINGS" "$PROJECT_PATH" <<'NODEJS'
+const crypto = require('node:crypto');
 const fs = require('node:fs');
-const [, , inputFile, outputFile, includeWarningsFlag] = process.argv;
+const path = require('node:path');
+const [, , inputFile, outputFile, includeWarningsFlag, projectPath] = process.argv;
 const includeWarnings = includeWarningsFlag === '1';
+
+function relativeFile(filePath) {
+    if (!filePath) return undefined;
+    const absolute = path.resolve(filePath);
+    const relative = path.relative(projectPath, absolute).replaceAll(path.sep, '/');
+    return relative && !relative.startsWith('..') ? relative : absolute;
+}
+
+function readExcerpt(filePath, line) {
+    if (!filePath || !Number.isFinite(line) || line <= 0) return undefined;
+    try {
+        return fs.readFileSync(filePath, 'utf8').split(/\r?\n/)[line - 1]?.trim() || undefined;
+    } catch {
+        return undefined;
+    }
+}
 
 let raw;
 try {
@@ -172,13 +190,28 @@ for (const file of report) {
     for (const msg of file.messages || []) {
         if (!includeWarnings && msg.severity !== 2) continue;
         const rule = msg.ruleId || 'parse-error';
-        const loc = `${file.filePath}:${msg.line || 0}:${msg.column || 0}`;
+        const relative = relativeFile(file.filePath);
+        const line = Number(msg.line || 0);
+        const column = Number(msg.column || 0);
+        const loc = `${relative || file.filePath}:${line}:${column}`;
+        const id = `eslint:${rule}:${loc}`;
+        const severity = msg.severity === 2 ? 'error' : 'warning';
+        const excerpt = readExcerpt(file.filePath, line);
         findings.push({
             // Stable fingerprint id: rule + path + 1-based line. Matches
             // baseline expectations — same finding twice deduplicates.
-            id: `eslint:${rule}:${loc}`,
+            id,
+            file: relative,
+            line,
+            column,
+            severity,
+            source: 'eslint',
+            code: rule,
             message: msg.message || '(no message)',
-            category: msg.severity === 2 ? 'error' : 'warning',
+            category: severity,
+            fixable: Boolean(msg.fix),
+            fingerprint: crypto.createHash('sha1').update(id).digest('hex'),
+            ...(excerpt ? { excerpt } : {}),
         });
     }
 }
