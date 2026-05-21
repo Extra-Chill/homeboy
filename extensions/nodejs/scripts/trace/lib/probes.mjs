@@ -46,8 +46,8 @@ export async function pollHttp(url, options = {}) {
 
         if (response.ok) {
             const elapsedMs = Date.now() - startedAt;
-            const data = { url, status: response.status };
-            recordHttpStatus(statusHistory, response.status, elapsedMs);
+            const data = httpStatusEventData(url, response);
+            recordHttpStatus(statusHistory, response.status, elapsedMs, response.location);
             if (first) await emit(options.onEvent, source, 'http.first_response', data);
             if (first || response.status !== lastStatus) await emit(options.onEvent, source, 'http.status', data);
             lastStatus = response.status;
@@ -232,7 +232,7 @@ function httpStatus(url, timeoutMs) {
         const transport = parsed.protocol === 'https:' ? httpsRequest : httpRequest;
         const req = transport(parsed, { method: 'GET', timeout: timeoutMs }, (res) => {
             res.resume();
-            res.on('end', () => resolve({ ok: true, status: res.statusCode || 0 }));
+            res.on('end', () => resolve({ ok: true, status: res.statusCode || 0, location: redirectLocation(res) }));
         });
         req.on('timeout', () => {
             req.destroy(new Error(`request timed out after ${timeoutMs}ms`));
@@ -242,16 +242,31 @@ function httpStatus(url, timeoutMs) {
     });
 }
 
-function recordHttpStatus(history, status, elapsedMs = undefined) {
+function redirectLocation(res) {
+    const status = Number(res.statusCode || 0);
+    if (status < 300 || status > 399) return undefined;
+    const location = res.headers.location;
+    return typeof location === 'string' && location ? location : undefined;
+}
+
+function httpStatusEventData(url, response) {
+    const data = { url, status: response.status };
+    if (response.location) data.location = response.location;
+    return data;
+}
+
+function recordHttpStatus(history, status, elapsedMs = undefined, location = undefined) {
     const normalizedStatus = Number(status);
     const last = history.at(-1);
     if (last && last.status === normalizedStatus) {
         last.count += 1;
         if (elapsedMs !== undefined) last.last_seen_ms = elapsedMs;
+        if (location) last.location = location;
         return last;
     }
 
     const entry = { status: normalizedStatus, count: 1 };
+    if (location) entry.location = location;
     if (elapsedMs !== undefined) {
         entry.first_seen_ms = elapsedMs;
         entry.last_seen_ms = elapsedMs;
