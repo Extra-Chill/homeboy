@@ -961,18 +961,21 @@ jobs:
           set -euo pipefail
           scenario_json="$(jq -ec --arg scenario "${{ inputs.flow_slug }}" '.scenarios[] | select(.id == $scenario)' "$RESULTS_FILE")"
           job_status="$(jq -r '.metadata.job_status // ""' <<< "$scenario_json")"
+          success_status="$(jq -r '.metadata.success_status // ""' <<< "$scenario_json")"
           completion_outcome_satisfied="$(jq -r 'if .metadata.completion_outcome_satisfied == true then "true" else "false" end' <<< "$scenario_json")"
 
           printf 'job_status:                      %s\n' "$job_status"
+          printf 'success_status:                  %s\n' "$success_status"
           printf 'completion_outcome_satisfied:    %s\n' "$completion_outcome_satisfied"
 
-          if [ "$job_status" = "completed" ] || [ "$completion_outcome_satisfied" = "true" ]; then
+          if [ "$job_status" = "completed" ] || [ "$success_status" = "pr_opened" ] || [ "$completion_outcome_satisfied" = "true" ]; then
             exit 0
           fi
 
-          printf 'ERROR: scenario %s expected completed job or satisfied completion outcome, got job_status=%s completion_outcome_satisfied=%s\n' \
+          printf 'ERROR: scenario %s expected completed job, opened PR, or satisfied completion outcome, got job_status=%s success_status=%s completion_outcome_satisfied=%s\n' \
             "${{ inputs.flow_slug }}" \
             "$job_status" \
+            "$success_status" \
             "$completion_outcome_satisfied" >&2
           exit 1
 

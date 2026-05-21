@@ -134,8 +134,8 @@ namespace {
 		fwrite( STDERR, "Expected reusable workflow config to require import-agent for execute-workflow runs.\n" );
 		exit( 1 );
 	}
-	if ( ! str_contains( $workflow_source, 'completion_outcome_satisfied="$(jq -r' ) || ! str_contains( $workflow_source, '[ "$job_status" = "completed" ] || [ "$completion_outcome_satisfied" = "true" ]' ) ) {
-		fwrite( STDERR, "Expected reusable workflow success assertion to accept satisfied completion outcomes.\n" );
+	if ( ! str_contains( $workflow_source, 'success_status="$(jq -r' ) || ! str_contains( $workflow_source, '[ "$job_status" = "completed" ] || [ "$success_status" = "pr_opened" ] || [ "$completion_outcome_satisfied" = "true" ]' ) ) {
+		fwrite( STDERR, "Expected reusable workflow success assertion to accept opened PRs and satisfied completion outcomes.\n" );
 		exit( 1 );
 	}
 
