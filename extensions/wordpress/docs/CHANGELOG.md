@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.97.1] - 2026-05-21
+
+### Fixed
+- mount wordpress extension in wp-codebox tests
+
 ## [2.97.0] - 2026-05-20
 
 ### Added
