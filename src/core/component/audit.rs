@@ -420,6 +420,23 @@ pub enum RequestedDetectorRuleBody {
         description: String,
         suggestion: String,
     },
+    /// Compare configured import/export/copy key allowlists against keys that
+    /// appear in behavior-bearing read/write sites. Core only compares captured
+    /// strings; the component owns the regexes and runtime-key exclusions.
+    ConfigRoundtripKeys {
+        object: String,
+        export_pattern: String,
+        import_pattern: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        copy_patterns: Vec<String>,
+        behavior_pattern: String,
+        #[serde(default = "default_config_roundtrip_key_capture")]
+        key_capture: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude_key_patterns: Vec<String>,
+        description: String,
+        suggestion: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -442,6 +459,10 @@ fn default_requested_detector_severity() -> String {
 
 fn default_requested_detector_convention() -> String {
     "requested_detectors".to_string()
+}
+
+fn default_config_roundtrip_key_capture() -> String {
+    "key".to_string()
 }
 
 impl AuditConfig {
