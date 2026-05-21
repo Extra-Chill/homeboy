@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.5.1] - 2026-05-21
+
+### Fixed
+- normalize sidecar contracts across extensions
+
 ## [1.5.0] - 2026-05-12
 
 ### Added
