@@ -68,3 +68,111 @@ Finding output:
 Use `access_helper_markers` for direct ownership/access checks in the handler.
 Use `trusted_delegation_markers` for helper or ability paths that the component
 has verified enforce equivalent ownership/access checks.
+
+# Requested Detector Rules
+
+`audit_rules.requested_detectors` lets an extension provide generic text detectors
+without baking ecosystem terms into Homeboy core. Core owns the matching primitive;
+the component supplies the sink, scope, and allowlist markers.
+
+### Scoped Proxy Drift
+
+Use `type: "scoped_proxy"` when docs/schema describe a helper as scoped to an
+internal namespace but the implementation forwards request-controlled paths to a
+local proxy sink. The detector flags files that match all of:
+
+- `claim_pattern`: docs/schema text that claims an internal namespace or scoped API
+- `target_pattern`: request input used as the forwarded target/path
+- `sink_pattern`: the local forwarding call
+- no `allowlist_pattern`: prefix/allowlist validation for the documented scope
+
+Example:
+
+```json
+{
+  "requested_detectors": [
+    {
+      "id": "internal-proxy-scope",
+      "kind": "proxy_scope_drift",
+      "severity": "warning",
+      "language": "php",
+      "file_extensions": ["php"],
+      "type": "scoped_proxy",
+      "claim_pattern": "(?i)\\b(internal API|/acme/v1)\\b",
+      "target_pattern": "\\$input\\s*\\[\\s*['\"]path['\"]\\s*\\]",
+      "sink_pattern": "\\b(?P<sink>forward_internal_request)\\s*\\(",
+      "allowlist_pattern": "(?i)(str_starts_with|preg_match)\\s*\\([^;]*(/acme/v1|allowed_prefixes|allowlist)",
+      "description": "Proxy scope drift at line {line}: scoped docs feed `{sink}` from request input without a matching allowlist",
+      "suggestion": "Add an allowlist/prefix check for the documented scope or document the proxy as general-purpose."
+      }
+    ]
+  }
+}
+```
+
+Finding output:
+
+- `convention`: defaults to `requested_detectors`
+- `kind`: `proxy_scope_drift`
+- severity: configured by the rule, usually warning
+
+## Required Regex
+
+Use `type: "required_regex"` when a risky candidate match must have a companion
+match in a defined scope.
+
+```json
+{
+  "audit_rules": {
+    "requested_detectors": [
+      {
+        "id": "redirect-dominance",
+        "kind": "undominated_redirect_param",
+        "language": "php",
+        "file_extensions": ["php"],
+        "type": "required_regex",
+        "pattern": "wp_redirect\\s*\\(\\s*\\$(?P<var>[A-Za-z_][A-Za-z0-9_]*)",
+        "required_pattern": "validate_[A-Za-z0-9_]+\\s*\\([^;]*\\${var}",
+        "required_scope": "before_match",
+        "description": "Redirect at line {line} uses `${var}` before validation dominates it",
+        "suggestion": "Validate `${var}` before every redirect branch."
+      }
+    ]
+  }
+}
+```
+
+Supported scopes are `same_file`, `before_match`, `after_match`, and
+`any_eligible_file`.
+
+## Derived Absence
+
+Use `type: "derived_absence"` when values collected from one shape must appear in
+a second shape elsewhere in the eligible corpus. This is useful for write-only
+config keys and import/export schema drift checks.
+
+```json
+{
+  "audit_rules": {
+    "requested_detectors": [
+      {
+        "id": "config-write-only",
+        "kind": "config_key_write_only",
+        "language": "php",
+        "file_extensions": ["php"],
+        "type": "derived_absence",
+        "source_pattern": "\\$config\\s*\\[\\s*['\"](?P<key>[A-Za-z_][A-Za-z0-9_]*)['\"]\\s*\\]\\s*=",
+        "value_capture": "key",
+        "label": "config key `{key}`",
+        "required_pattern": "\\$config\\s*\\[\\s*['\"]{value}['\"]\\s*\\]",
+        "exclude_required_path_contains": ["tests/", "fixtures/"],
+        "description": "{label} written at line {line} has no non-test consumer",
+        "suggestion": "Consume `{value}` in production code or remove the stale config write."
+      }
+    ]
+  }
+}
+```
+
+Templates support regex capture names and `{line}`. `derived_absence` also exposes
+`{value}` and `{label}`.

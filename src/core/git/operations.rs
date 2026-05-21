@@ -1131,18 +1131,30 @@ pub fn tag_at(
 
 /// Check if a tag exists on the remote.
 pub fn tag_exists_on_remote(path: &str, tag_name: &str) -> Result<bool> {
-    Ok(crate::core::engine::command::run_in_optional(
+    Ok(remote_tag_commit(path, tag_name)?.is_some())
+}
+
+/// Get the commit SHA a remote tag points to, if it exists.
+pub fn remote_tag_commit(path: &str, tag_name: &str) -> Result<Option<String>> {
+    let peeled_ref = format!("refs/tags/{}^{{}}", tag_name);
+    if let Some(commit) = remote_ref_commit(path, &peeled_ref) {
+        return Ok(Some(commit));
+    }
+
+    Ok(remote_ref_commit(path, &format!("refs/tags/{}", tag_name)))
+}
+
+fn remote_ref_commit(path: &str, ref_name: &str) -> Option<String> {
+    crate::core::engine::command::run_in_optional(
         path,
         "git",
-        &[
-            "ls-remote",
-            "--tags",
-            "origin",
-            &format!("refs/tags/{}", tag_name),
-        ],
+        &["ls-remote", "--tags", "origin", ref_name],
     )
-    .map(|s| !s.is_empty())
-    .unwrap_or(false))
+    .and_then(|output| {
+        output
+            .lines()
+            .find_map(|line| line.split_whitespace().next().map(str::to_string))
+    })
 }
 
 /// Check if a tag exists locally.
@@ -1598,6 +1610,44 @@ mod tests {
         assert_eq!(out.component_id, "explicit-changes");
         assert_eq!(out.path, path);
         assert!(out.success);
+    }
+
+    #[test]
+    fn test_remote_tag_commit() {
+        let (_dir, path) = init_repo_with_initial_commit();
+        let remote = tempfile::TempDir::new().expect("remote tempdir");
+
+        Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git init bare remote");
+        Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("remote path"),
+            ])
+            .current_dir(&path)
+            .output()
+            .expect("git remote add");
+        Command::new("git")
+            .args(["tag", "v1.2.3"])
+            .current_dir(&path)
+            .output()
+            .expect("git tag");
+        Command::new("git")
+            .args(["push", "origin", "v1.2.3"])
+            .current_dir(&path)
+            .output()
+            .expect("git push tag");
+
+        let head = get_head_commit(&path).expect("head commit");
+        let remote_tag = remote_tag_commit(&path, "v1.2.3").expect("remote tag lookup");
+
+        assert_eq!(remote_tag.as_deref(), Some(head.as_str()));
+        assert_eq!(remote_tag_commit(&path, "v9.9.9").unwrap(), None);
     }
 
     #[test]

@@ -225,6 +225,9 @@ pub enum AuditFinding {
     /// Comments/docblocks promise network/site-option storage while nearby code
     /// uses single-site get_option/update_option calls.
     OptionScopeDrift,
+    /// Docs/schema claim a scoped internal proxy while implementation forwards
+    /// request-controlled targets without an explicit allowlist/prefix marker.
+    ProxyScopeDrift,
     /// Tests mutate process-global environment variables without using the
     /// shared guard for that variable.
     GlobalEnvMutationGuard,
@@ -245,6 +248,22 @@ pub enum AuditFinding {
     /// Configured mutating handler/resource-id path lacks a direct ownership or
     /// access check, or a trusted delegation marker known to enforce one.
     MutatingResourceAccess,
+    /// Config-like key/value is written, migrated, or surfaced by an accessor
+    /// without a corresponding production read/consumer.
+    ConfigKeyWriteOnly,
+    /// Config/schema key appears in one side of a round-trip path but not the other.
+    ConfigRoundtripAsymmetry,
+    /// Public metadata endpoint reads a raw registry/config source without the
+    /// project-local resolver/policy companion.
+    PublicRegistryResolverBypass,
+    /// Mutating resource handler lacks the configured ownership/access companion.
+    MutatingResourceOwnershipMissing,
+    /// Request-derived redirect destination lacks a dominating validation companion.
+    UndominatedRedirectParam,
+    /// Direct construction bypasses a configured factory/filter/resolver seam.
+    FactorySeamBypass,
+    /// Internal REST/API proxy call lacks a configured namespace or scope guard.
+    InternalProxyScopeMissing,
 }
 
 impl AuditFinding {
@@ -297,6 +316,7 @@ impl AuditFinding {
             "json_like_exact_match",
             "constant_backed_slug_literal",
             "option_scope_drift",
+            "proxy_scope_drift",
             "global_env_mutation_guard",
             "unwired_nested_rust_test",
             "parallel_runner_setup",
@@ -304,6 +324,13 @@ impl AuditFinding {
             "direct_aggregate_construction",
             "core_boundary_leak",
             "mutating_resource_access",
+            "config_key_write_only",
+            "config_roundtrip_asymmetry",
+            "public_registry_resolver_bypass",
+            "mutating_resource_ownership_missing",
+            "undominated_redirect_param",
+            "factory_seam_bypass",
+            "internal_proxy_scope_missing",
         ]
     }
 }

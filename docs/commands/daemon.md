@@ -48,9 +48,14 @@ contract and return the same JSON envelope shape as other daemon responses.
 - `GET /runs?kind=bench|audit&component=<id>&rig=<id>&status=<status>&limit=<n>`
 - `GET /runs/:id`
 - `GET /runs/:id/artifacts`
+- `GET /runs/:id/artifacts/:artifact_id/content`
 - `GET /runs/:id/findings?tool=<tool>&file=<path>&fingerprint=<id>&limit=<n>`
 - `GET /audit/runs?component=<id>&rig=<id>&status=<status>&limit=<n>`
 - `GET /bench/runs?component=<id>&rig=<id>&status=<status>&limit=<n>`
+- `GET /jobs`
+- `GET /jobs/:id`
+- `GET /jobs/:id/events`
+- `POST /jobs/:id/cancel`
 
 The run readers expose persisted observation-store evidence from previous
 analysis runs. They do not start audit, lint, test, bench, rig, or stack work.
@@ -62,12 +67,15 @@ endpoint should reuse that implementation rather than duplicating comparison
 logic in the HTTP API contract.
 
 The analysis entry points `POST /audit`, `POST /lint`, `POST /test`, and
-`POST /bench` are reserved by the contract, but intentionally return a daemon
-HTTP analysis-enqueue blocker until the existing `src/core/api_jobs.rs` job
-model is wired into daemon routes.
+`POST /bench` enqueue daemon jobs. Clients inspect those jobs through
+`GET /jobs/:id` and `GET /jobs/:id/events` instead of parsing terminal output.
 
 Mutating operations such as deploy, release, rig up/down, stack apply, git
 writes, and SSH execution are not exposed by this daemon slice.
+
+See [Headless Daemon API Contract](../architecture/headless-daemon-api.md) for
+the headless client contract, job/event shape, mutating capability model, and
+preview/apply rules for future write endpoints.
 
 ## Related
 
