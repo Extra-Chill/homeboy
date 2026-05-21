@@ -1131,18 +1131,30 @@ pub fn tag_at(
 
 /// Check if a tag exists on the remote.
 pub fn tag_exists_on_remote(path: &str, tag_name: &str) -> Result<bool> {
-    Ok(crate::core::engine::command::run_in_optional(
+    Ok(remote_tag_commit(path, tag_name)?.is_some())
+}
+
+/// Get the commit SHA a remote tag points to, if it exists.
+pub fn remote_tag_commit(path: &str, tag_name: &str) -> Result<Option<String>> {
+    let peeled_ref = format!("refs/tags/{}^{{}}", tag_name);
+    if let Some(commit) = remote_ref_commit(path, &peeled_ref) {
+        return Ok(Some(commit));
+    }
+
+    Ok(remote_ref_commit(path, &format!("refs/tags/{}", tag_name)))
+}
+
+fn remote_ref_commit(path: &str, ref_name: &str) -> Option<String> {
+    crate::core::engine::command::run_in_optional(
         path,
         "git",
-        &[
-            "ls-remote",
-            "--tags",
-            "origin",
-            &format!("refs/tags/{}", tag_name),
-        ],
+        &["ls-remote", "--tags", "origin", ref_name],
     )
-    .map(|s| !s.is_empty())
-    .unwrap_or(false))
+    .and_then(|output| {
+        output
+            .lines()
+            .find_map(|line| line.split_whitespace().next().map(str::to_string))
+    })
 }
 
 /// Check if a tag exists locally.
