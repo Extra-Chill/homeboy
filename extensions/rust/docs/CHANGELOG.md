@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.17.4] - 2026-05-21
+
+### Fixed
+- normalize sidecar contracts across extensions
+
 ## [1.17.3] - 2026-05-20
 
 ### Fixed
