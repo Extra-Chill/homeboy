@@ -10,8 +10,32 @@ FAKE_BIN="${TMPDIR}/bin"
 HOME_DIR="${TMPDIR}/home"
 EXTENSION_DIR="${TMPDIR}/extension"
 GITHUB_ENV_FILE="${TMPDIR}/github-env"
+SOURCE_GITHUB_ENV_FILE="${TMPDIR}/source-github-env"
+ARTIFACT_ROOT="${TMPDIR}/artifact-root"
+ARTIFACT_PATH="${TMPDIR}/wp-codebox-cli-linux-x64.tar.gz"
 
-mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}"
+mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}" "${ARTIFACT_ROOT}/wp-codebox-cli/bin"
+
+cat > "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'wp-codebox release stub'
+SH
+chmod +x "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox"
+tar -czf "${ARTIFACT_PATH}" -C "${ARTIFACT_ROOT}" wp-codebox-cli
+
+cat > "${FAKE_BIN}/curl" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "\$#" -lt 4 ] || [ "\${3}" != "-o" ]; then
+    printf 'unexpected curl invocation: %s\n' "\$*" >&2
+    exit 1
+fi
+
+cp "${ARTIFACT_PATH}" "\${4}"
+SH
+chmod +x "${FAKE_BIN}/curl"
 
 cat > "${FAKE_BIN}/git" <<'SH'
 #!/usr/bin/env bash
@@ -46,14 +70,14 @@ while [ "$#" -gt 0 ]; do
             ;;
         install)
             if [[ " $* " != *" --omit=optional "* ]]; then
-                printf 'expected wp-codebox install to omit optional dependencies: %s\n' "$*" >&2
+                printf 'expected wp-codebox source install to omit optional dependencies: %s\n' "$*" >&2
                 exit 1
             fi
             exit 0
             ;;
         run)
             mkdir -p "${prefix}/packages/cli/dist"
-            printf '%s\n' 'console.log("wp-codebox stub")' > "${prefix}/packages/cli/dist/index.js"
+            printf '%s\n' 'console.log("wp-codebox source stub")' > "${prefix}/packages/cli/dist/index.js"
             exit 0
             ;;
         *)
@@ -69,8 +93,7 @@ chmod +x "${FAKE_BIN}/npm"
     HOME="${HOME_DIR}" \
     PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
     GITHUB_ENV="${GITHUB_ENV_FILE}" \
-    HOMEBOY_WP_CODEBOX_SOURCE="https://example.test/wp-codebox.git" \
-    HOMEBOY_WP_CODEBOX_REF="main" \
+    HOMEBOY_WP_CODEBOX_DOWNLOAD_URL="https://example.test/wp-codebox-cli-linux-x64.tar.gz" \
     bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/setup.out"
 )
 
@@ -86,8 +109,27 @@ if [ ! -x "${wp_codebox_bin}" ]; then
     exit 1
 fi
 
-if [ "$("${wp_codebox_bin}")" != "wp-codebox stub" ]; then
-    echo "Expected wp-codebox wrapper to execute built CLI" >&2
+if [ "$("${wp_codebox_bin}")" != "wp-codebox release stub" ]; then
+    echo "Expected wp-codebox wrapper to execute release artifact CLI" >&2
+    exit 1
+fi
+
+(
+    cd "${EXTENSION_DIR}"
+    HOME="${HOME_DIR}" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GITHUB_ENV="${SOURCE_GITHUB_ENV_FILE}" \
+    HOMEBOY_WP_CODEBOX_INSTALL_MODE="source" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/source-install" \
+    HOMEBOY_WP_CODEBOX_SOURCE="https://example.test/wp-codebox.git" \
+    HOMEBOY_WP_CODEBOX_REF="main" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/source-setup.out"
+)
+
+source_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${SOURCE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+
+if [ "$("${source_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
+    echo "Expected source fallback wrapper to execute built CLI" >&2
     exit 1
 fi
 

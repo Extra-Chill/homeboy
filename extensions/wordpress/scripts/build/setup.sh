@@ -28,13 +28,63 @@ install_wp_codebox() {
         return 0
     fi
 
-    local source ref install_root repo_dir bin_dir bin_path
-    source="${HOMEBOY_WP_CODEBOX_SOURCE:-https://github.com/chubes4/wp-codebox.git}"
-    ref="${HOMEBOY_WP_CODEBOX_REF:-main}"
+    local install_mode install_root bin_dir bin_path platform arch artifact_name download_url artifact_path extract_dir
+    install_mode="${HOMEBOY_WP_CODEBOX_INSTALL_MODE:-release}"
     install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
-    repo_dir="${install_root}/source"
     bin_dir="${HOME}/.local/bin"
     bin_path="${bin_dir}/wp-codebox"
+
+    if [ "${install_mode}" != "source" ]; then
+        platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        arch="$(uname -m)"
+        case "${platform}" in
+            darwin) platform="macos" ;;
+        esac
+        case "${arch}" in
+            x86_64|amd64) arch="x64" ;;
+            aarch64) arch="arm64" ;;
+        esac
+
+        artifact_name="wp-codebox-cli-${platform}-${arch}.tar.gz"
+        download_url="${HOMEBOY_WP_CODEBOX_DOWNLOAD_URL:-https://github.com/chubes4/wp-codebox/releases/latest/download/${artifact_name}}"
+        artifact_path="${install_root}/${artifact_name}"
+        extract_dir="${install_root}/release"
+
+        echo "Installing WP Codebox CLI from release artifact (${download_url})..."
+        mkdir -p "${install_root}" "${bin_dir}"
+
+        if command -v curl >/dev/null 2>&1 && curl -fsSL "${download_url}" -o "${artifact_path}"; then
+            rm -rf "${extract_dir}"
+            mkdir -p "${extract_dir}"
+            tar -xzf "${artifact_path}" -C "${extract_dir}"
+
+            if [ ! -x "${extract_dir}/wp-codebox-cli/bin/wp-codebox" ]; then
+                echo "Downloaded WP Codebox artifact did not contain an executable bin/wp-codebox" >&2
+                exit 1
+            fi
+
+            cat > "${bin_path}" <<EOF
+#!/usr/bin/env bash
+exec "${extract_dir}/wp-codebox-cli/bin/wp-codebox" "\$@"
+EOF
+            chmod +x "${bin_path}"
+
+            if [ -n "${GITHUB_ENV:-}" ]; then
+                echo "HOMEBOY_WP_CODEBOX_BIN=${bin_path}" >> "${GITHUB_ENV}"
+                echo "PATH=${bin_dir}:${PATH}" >> "${GITHUB_ENV}"
+            fi
+
+            echo "WP Codebox installed: ${bin_path}"
+            return 0
+        fi
+
+        echo "WP Codebox release artifact unavailable; falling back to source install" >&2
+    fi
+
+    local source ref repo_dir
+    source="${HOMEBOY_WP_CODEBOX_SOURCE:-https://github.com/chubes4/wp-codebox.git}"
+    ref="${HOMEBOY_WP_CODEBOX_REF:-main}"
+    repo_dir="${install_root}/source"
 
     echo "Installing WP Codebox CLI (${source}@${ref})..."
     mkdir -p "${install_root}" "${bin_dir}"
