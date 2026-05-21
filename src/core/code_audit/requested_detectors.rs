@@ -82,6 +82,23 @@ fn run_rule(rule: &RequestedDetectorRule, fingerprints: &[&FileFingerprint]) -> 
             description,
             suggestion,
         ),
+        RequestedDetectorRuleBody::ScopedProxy {
+            claim_pattern,
+            sink_pattern,
+            target_pattern,
+            allowlist_pattern,
+            description,
+            suggestion,
+        } => run_scoped_proxy_rule(
+            rule,
+            fingerprints,
+            claim_pattern,
+            sink_pattern,
+            target_pattern,
+            allowlist_pattern,
+            description,
+            suggestion,
+        ),
     }
 }
 
@@ -267,6 +284,51 @@ fn collect_derived_values(
         }
     }
     values
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_scoped_proxy_rule(
+    rule: &RequestedDetectorRule,
+    fingerprints: &[&FileFingerprint],
+    claim_pattern: &str,
+    sink_pattern: &str,
+    target_pattern: &str,
+    allowlist_pattern: &str,
+    description: &str,
+    suggestion: &str,
+) -> Vec<Finding> {
+    let Ok(claim_regex) = Regex::new(claim_pattern) else {
+        return Vec::new();
+    };
+    let Ok(sink_regex) = Regex::new(sink_pattern) else {
+        return Vec::new();
+    };
+    let Ok(target_regex) = Regex::new(target_pattern) else {
+        return Vec::new();
+    };
+    let Ok(allowlist_regex) = Regex::new(allowlist_pattern) else {
+        return Vec::new();
+    };
+
+    let mut findings = Vec::new();
+    for fp in eligible_files(rule, fingerprints) {
+        if !claim_regex.is_match(&fp.content)
+            || !target_regex.is_match(&fp.content)
+            || allowlist_regex.is_match(&fp.content)
+        {
+            continue;
+        }
+        for captures in sink_regex.captures_iter(&fp.content) {
+            findings.push(finding_from_captures(
+                rule,
+                fp,
+                &captures,
+                description,
+                suggestion,
+            ));
+        }
+    }
+    findings
 }
 
 fn eligible_files<'a>(
@@ -683,5 +745,69 @@ write_local_option( 'local_setting', true );
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, AuditFinding::OptionScopeDrift);
         assert!(findings[0].description.contains("write_local_option"));
+    }
+
+    #[test]
+    fn scoped_proxy_rules_flag_scoped_claim_without_allowlist() {
+        let unsafe_proxy = php_fp(
+            "src/internal_proxy.php",
+            r#"<?php
+/** Query the Acme internal API namespace. */
+function run( $input ) {
+    $target = $input['path'];
+    return forward_internal_request( $target );
+}
+"#,
+        );
+        let allowed_proxy = php_fp(
+            "src/allowed_proxy.php",
+            r#"<?php
+/** Query the Acme internal API namespace. */
+function run( $input ) {
+    $target = $input['path'];
+    if ( ! str_starts_with( $target, '/acme/v1/' ) ) {
+        return null;
+    }
+    return forward_internal_request( $target );
+}
+"#,
+        );
+        let general_proxy = php_fp(
+            "src/general_proxy.php",
+            r#"<?php
+/** Query any local API path. */
+function run( $input ) {
+    $target = $input['path'];
+    return forward_internal_request( $target );
+}
+"#,
+        );
+        let rule = RequestedDetectorRule {
+            id: "internal-proxy-scope".to_string(),
+            kind: "proxy_scope_drift".to_string(),
+            severity: "warning".to_string(),
+            convention: "requested_detectors".to_string(),
+            language: Some("php".to_string()),
+            file_extensions: vec!["php".to_string()],
+            exclude_path_contains: vec![],
+            rule: RequestedDetectorRuleBody::ScopedProxy {
+                claim_pattern: r#"(?i)\b(internal API|internal API namespace|/acme/v1)\b"#.to_string(),
+                sink_pattern: r#"\b(?P<sink>forward_internal_request)\s*\("#.to_string(),
+                target_pattern: r#"\$input\s*\[\s*['\"]path['\"]\s*\]"#.to_string(),
+                allowlist_pattern: r#"(?i)(str_starts_with|preg_match)\s*\([^;]*(/acme/v1|allowed_prefixes|allowlist)"#.to_string(),
+                description: "Proxy scope drift at line {line}: scoped docs feed `{sink}` from request input without a matching allowlist".to_string(),
+                suggestion: "Add an allowlist/prefix check for the documented scope or document the proxy as general-purpose.".to_string(),
+            },
+        };
+
+        let findings = run(
+            &[&unsafe_proxy, &allowed_proxy, &general_proxy],
+            &config(rule),
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::ProxyScopeDrift);
+        assert_eq!(findings[0].file, "src/internal_proxy.php");
+        assert!(findings[0].description.contains("forward_internal_request"));
     }
 }

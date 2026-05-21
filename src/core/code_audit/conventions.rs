@@ -225,6 +225,9 @@ pub enum AuditFinding {
     /// Comments/docblocks promise network/site-option storage while nearby code
     /// uses single-site get_option/update_option calls.
     OptionScopeDrift,
+    /// Docs/schema claim a scoped internal proxy while implementation forwards
+    /// request-controlled targets without an explicit allowlist/prefix marker.
+    ProxyScopeDrift,
     /// Tests mutate process-global environment variables without using the
     /// shared guard for that variable.
     GlobalEnvMutationGuard,
@@ -294,6 +297,7 @@ impl AuditFinding {
             "json_like_exact_match",
             "constant_backed_slug_literal",
             "option_scope_drift",
+            "proxy_scope_drift",
             "global_env_mutation_guard",
             "unwired_nested_rust_test",
             "parallel_runner_setup",

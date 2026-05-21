@@ -257,6 +257,17 @@ pub enum RequestedDetectorRuleBody {
         description: String,
         suggestion: String,
     },
+    /// Flag files whose docs/schema claim a scoped internal proxy but whose
+    /// implementation forwards request-controlled targets without an explicit
+    /// allowlist/prefix marker. All markers are extension-owned regexes.
+    ScopedProxy {
+        claim_pattern: String,
+        sink_pattern: String,
+        target_pattern: String,
+        allowlist_pattern: String,
+        description: String,
+        suggestion: String,
+    },
 }
 
 fn default_requested_detector_severity() -> String {
