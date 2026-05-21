@@ -966,6 +966,35 @@ fn constrain_lint_fix_changes(
     })
 }
 
+fn lint_finding_scope_files(findings: &[crate::core::extension::lint::LintFinding]) -> Vec<String> {
+    let mut files = BTreeSet::new();
+    for finding in findings {
+        let Some(file) = finding.file.as_deref() else {
+            continue;
+        };
+        if let Some(normalized) = normalize_relative_release_path(file) {
+            files.insert(normalized);
+        }
+    }
+    files.into_iter().collect()
+}
+
+fn lint_scope_glob(root_str: &str, files: &[String]) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+
+    let abs_files: Vec<String> = files
+        .iter()
+        .map(|file| format!("{}/{}", root_str, file))
+        .collect();
+    if abs_files.len() == 1 {
+        Some(abs_files[0].clone())
+    } else {
+        Some(format!("{{{}}}", abs_files.join(",")))
+    }
+}
+
 fn release_owned_file_paths(component: &Component) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
 
@@ -1025,34 +1054,26 @@ fn run_lint_stage(
     let findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
     let fix_sidecars = auto::AutofixSidecarFiles::for_run_dir(run_dir);
 
-    let selected_files = options.selected_files.as_deref().or(changed_files);
-    if selected_files.is_some_and(|files| files.is_empty()) {
+    let requested_scope_files = options.selected_files.as_deref().or(changed_files);
+    if requested_scope_files.is_some_and(|files| files.is_empty()) {
         return Ok(empty_lint_stage());
     }
-    let effective_glob = if let Some(changed_files) = selected_files {
-        let abs_files: Vec<String> = changed_files
-            .iter()
-            .map(|f| format!("{}/{}", root_str, f))
-            .collect();
-        if abs_files.len() == 1 {
-            Some(abs_files[0].clone())
-        } else {
-            Some(format!("{{{}}}", abs_files.join(",")))
-        }
+    let diagnostic_glob = if let Some(files) = requested_scope_files {
+        lint_scope_glob(&root_str, files)
     } else {
         options.glob.clone()
     };
 
     // Helper: build the lint runner with the current stage options.
     // Used by both the diagnostic pass and the fix-only pass.
-    let build_lint_runner = || {
+    let build_lint_runner = |effective_glob: Option<&str>| {
         extension::lint::build_lint_runner(
             component,
             None,
             settings,
             false,
             options.file.as_deref(),
-            effective_glob.as_deref(),
+            effective_glob,
             options.errors_only,
             options.sniffs.as_deref(),
             options.exclude_sniffs.as_deref(),
@@ -1091,7 +1112,7 @@ fn run_lint_stage(
         cached_findings
     } else {
         // No cached findings — run the diagnostic pass.
-        build_lint_runner()?.run()?;
+        build_lint_runner(diagnostic_glob.as_deref())?.run()?;
 
         crate::core::extension::lint::baseline::parse_findings_file(&findings_file)
             .unwrap_or_default()
@@ -1101,6 +1122,23 @@ fn run_lint_stage(
     // The engine controls fix application. The extension's fix-mode
     // invocation runs ONLY the fixers, not the diagnostic pass. The engine
     // tracks what changed via undo snapshots and git diff.
+    let finding_scope_files = if requested_scope_files.is_none() && options.glob.is_none() {
+        lint_finding_scope_files(&lint_findings)
+    } else {
+        Vec::new()
+    };
+    let fix_scope_files = requested_scope_files.or_else(|| {
+        if finding_scope_files.is_empty() {
+            None
+        } else {
+            Some(finding_scope_files.as_slice())
+        }
+    });
+    let fix_glob = if let Some(files) = fix_scope_files {
+        lint_scope_glob(&root_str, files)
+    } else {
+        options.glob.clone()
+    };
     let (stage_changed_files, fix_results, stage_warnings) = if write && !lint_findings.is_empty() {
         let before_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
 
@@ -1121,14 +1159,16 @@ fn run_lint_stage(
         // fixers and skips its own validation pass (the engine validates
         // separately via the diagnose phase). Auto-fixing lives exclusively
         // under `homeboy refactor` — there is no other entry point.
-        let fix_output = build_lint_runner()?.env("HOMEBOY_FIX_ONLY", "1").run();
+        let fix_output = build_lint_runner(fix_glob.as_deref())?
+            .env("HOMEBOY_FIX_ONLY", "1")
+            .run();
         restore_release_owned_files(root, &release_owned)?;
         fix_output?;
 
         let after_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
         let scope_outcome = constrain_lint_fix_changes(
             root,
-            selected_files,
+            fix_scope_files,
             &before_dirty,
             after_dirty,
             &release_owned,
@@ -1759,6 +1799,37 @@ mod tests {
             .any(|warning| warning.contains("outside selected scope")));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lint_finding_scope_files_normalizes_reported_files() {
+        let findings = vec![
+            crate::core::extension::lint::LintFinding {
+                file: Some("src/b.php".to_string()),
+                ..Default::default()
+            },
+            crate::core::extension::lint::LintFinding {
+                file: Some("./src/a.php".to_string()),
+                ..Default::default()
+            },
+            crate::core::extension::lint::LintFinding {
+                file: Some("src/b.php".to_string()),
+                ..Default::default()
+            },
+            crate::core::extension::lint::LintFinding {
+                file: Some("../outside.php".to_string()),
+                ..Default::default()
+            },
+            crate::core::extension::lint::LintFinding {
+                file: None,
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            lint_finding_scope_files(&findings),
+            vec!["src/a.php".to_string(), "src/b.php".to_string()]
+        );
     }
 
     #[test]
