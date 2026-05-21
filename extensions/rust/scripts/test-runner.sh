@@ -277,7 +277,6 @@ if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
 fi
 
 TEST_OUTPUT=$(cat "$TEST_TMPFILE")
-rm -f "$TEST_TMPFILE"
 
 
 if [ $TEST_EXIT -eq 0 ]; then
@@ -289,6 +288,7 @@ if [ $TEST_EXIT -eq 0 ]; then
     fi
     echo ""
     echo "Rust tests passed"
+    rm -f "$TEST_TMPFILE"
 else
     # Extract failure details
     SUMMARY=$(echo "$TEST_OUTPUT" | grep -E "^test result:" | tail -1 || true)
@@ -299,8 +299,69 @@ else
         echo "$SUMMARY"
     fi
 
+    if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
+        python3 - "$PROJECT_PATH" "$TEST_TMPFILE" "$HOMEBOY_TEST_FAILURES_FILE" <<'PY'
+import hashlib
+import json
+import os
+import re
+import sys
+
+project, output_file, target = sys.argv[1:]
+with open(output_file, encoding="utf-8") as handle:
+    lines = handle.read().splitlines()
+
+failed = []
+for raw in lines:
+    match = re.match(r"^test (?P<name>.+) \.\.\. FAILED$", raw)
+    if match:
+        failed.append(match.group("name"))
+
+if not failed:
+    for raw in lines:
+        match = re.match(r"^---- (?P<name>.+) stdout ----$", raw)
+        if match:
+            failed.append(match.group("name"))
+
+failures = []
+for name in dict.fromkeys(failed):
+    message = f"Rust test failed: {name}"
+    identity = f"rust:test:{name}"
+    failures.append({
+        "test_id": name,
+        "suite": None,
+        "file": None,
+        "line": None,
+        "message": message,
+        "failure_type": "test_failure",
+        "fingerprint": hashlib.sha256(identity.encode()).hexdigest(),
+        "stdout_excerpt": "\n".join(lines)[-4000:],
+        "stderr_excerpt": "",
+    })
+
+if not failures:
+    identity = "rust:cargo-test:failed"
+    failures.append({
+        "test_id": "cargo test",
+        "suite": None,
+        "file": None,
+        "line": None,
+        "message": "cargo test failed before individual test failures could be parsed",
+        "failure_type": "infrastructure",
+        "fingerprint": hashlib.sha256(identity.encode()).hexdigest(),
+        "stdout_excerpt": "\n".join(lines)[-4000:],
+        "stderr_excerpt": "",
+    })
+
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(failures, handle, indent=2)
+    handle.write("\n")
+PY
+    fi
+
     FAILED_STEP="cargo test"
     FAILURE_REPLAY_MODE="none"
+    rm -f "$TEST_TMPFILE"
     exit $TEST_EXIT
 fi
 
@@ -321,7 +382,10 @@ if [ "$TOTAL_PASSED" -eq 0 ]; then
         if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
             FAILED_STEP="cargo test"
             FAILURE_REPLAY_MODE="none"
+            rm -f "$TEST_TMPFILE"
             exit 1
         fi
     fi
 fi
+
+rm -f "$TEST_TMPFILE"

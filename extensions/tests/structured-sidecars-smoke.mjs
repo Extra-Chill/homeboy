@@ -42,24 +42,24 @@ const expectedSupport = {
 		annotations: false,
 	},
 	'rust/rust.json': {
-		'lint.findings': false,
+		'lint.findings': true,
 		'test.results': true,
-		'test.failures': false,
+		'test.failures': true,
 		'test.coverage': false,
 		'bench.results': true,
 		annotations: true,
 	},
 	'swift/swift.json': {
-		'lint.findings': false,
+		'lint.findings': true,
 		'test.results': false,
-		'test.failures': false,
+		'test.failures': true,
 		'test.coverage': false,
 		annotations: false,
 	},
 	'go/go.json': {
-		'lint.findings': false,
+		'lint.findings': true,
 		'test.results': false,
-		'test.failures': false,
+		'test.failures': true,
 		'test.coverage': false,
 		annotations: false,
 	},
@@ -82,9 +82,19 @@ const supportEvidence = {
 		'trace.artifacts': ['nodejs/scripts/trace/trace-runner.sh', 'HOMEBOY_TRACE_ARTIFACT_DIR'],
 	},
 	'rust/rust.json': {
+		'lint.findings': ['rust/scripts/lint-runner.sh', 'HOMEBOY_LINT_FINDINGS_FILE'],
 		'test.results': ['rust/scripts/test-runner.sh', 'HOMEBOY_TEST_RESULTS_FILE'],
+		'test.failures': ['rust/scripts/test-runner.sh', 'HOMEBOY_TEST_FAILURES_FILE'],
 		'bench.results': ['rust/scripts/bench/bench-runner.sh', 'HOMEBOY_BENCH_RESULTS_FILE'],
 		annotations: ['rust/scripts/lint-runner.sh', 'HOMEBOY_ANNOTATIONS_DIR'],
+	},
+	'swift/swift.json': {
+		'lint.findings': ['swift/scripts/lint-runner.sh', 'HOMEBOY_LINT_FINDINGS_FILE'],
+		'test.failures': ['swift/scripts/test-runner.sh', 'HOMEBOY_TEST_FAILURES_FILE'],
+	},
+	'go/go.json': {
+		'lint.findings': ['go/scripts/lint-runner.sh', 'HOMEBOY_LINT_FINDINGS_FILE'],
+		'test.failures': ['go/scripts/test-runner.sh', 'HOMEBOY_TEST_FAILURES_FILE'],
 	},
 };
 
