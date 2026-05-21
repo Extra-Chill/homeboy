@@ -38,6 +38,13 @@ pub struct AuditConfig {
     /// Configurable ecosystem-term checks for core-owned source boundaries.
     #[serde(default, skip_serializing_if = "CoreBoundaryLeakConfig::is_empty")]
     pub core_boundary_leaks: CoreBoundaryLeakConfig,
+    /// Component-owned markers for mutating handler/resource-id paths that must
+    /// perform an ownership/access check before mutating the resource.
+    #[serde(
+        default,
+        skip_serializing_if = "MutatingResourceAccessConfig::is_empty"
+    )]
+    pub mutating_resource_access: MutatingResourceAccessConfig,
     /// Extension-owned call-name lists used by the duplication /
     /// parallel-implementation detector to filter out language- and
     /// framework-specific noise. Core never interprets these strings; they
@@ -157,6 +164,68 @@ pub struct CoreBoundaryLeakConfig {
     /// Path substrings treated as example-only when not otherwise allowlisted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub example_path_contains: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct MutatingResourceAccessConfig {
+    /// Source markers that identify files containing runtime handler registrations.
+    /// Examples are framework-specific registration function names. Core treats
+    /// them as opaque substrings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handler_registration_markers: Vec<String>,
+    /// Markers that identify mutating routes/handlers, such as HTTP method
+    /// constants, command verbs, or operation labels. Core treats them as opaque
+    /// substrings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutating_operation_markers: Vec<String>,
+    /// Regexes that identify resource IDs used by handlers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_identifier_patterns: Vec<String>,
+    /// Substrings that identify direct ownership/access checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub access_helper_markers: Vec<String>,
+    /// Substrings that identify trusted delegation paths known by the component
+    /// to enforce ownership/access checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_delegation_markers: Vec<String>,
+    /// Substrings that identify resource mutation inside a handler body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutator_markers: Vec<String>,
+}
+
+impl MutatingResourceAccessConfig {
+    pub fn is_empty(&self) -> bool {
+        self.handler_registration_markers.is_empty()
+            && self.mutating_operation_markers.is_empty()
+            && self.resource_identifier_patterns.is_empty()
+            && self.access_helper_markers.is_empty()
+            && self.trusted_delegation_markers.is_empty()
+            && self.mutator_markers.is_empty()
+    }
+
+    fn merge(&mut self, other: &MutatingResourceAccessConfig) {
+        extend_unique(
+            &mut self.handler_registration_markers,
+            &other.handler_registration_markers,
+        );
+        extend_unique(
+            &mut self.mutating_operation_markers,
+            &other.mutating_operation_markers,
+        );
+        extend_unique(
+            &mut self.resource_identifier_patterns,
+            &other.resource_identifier_patterns,
+        );
+        extend_unique(
+            &mut self.access_helper_markers,
+            &other.access_helper_markers,
+        );
+        extend_unique(
+            &mut self.trusted_delegation_markers,
+            &other.trusted_delegation_markers,
+        );
+        extend_unique(&mut self.mutator_markers, &other.mutator_markers);
+    }
 }
 
 impl CoreBoundaryLeakConfig {
@@ -387,6 +456,7 @@ impl AuditConfig {
             && self.known_symbols.is_empty()
             && self.requested_detectors.is_empty()
             && self.core_boundary_leaks.is_empty()
+            && self.mutating_resource_access.is_empty()
             && self.duplication_detector.is_empty()
             && self.config_key_usage.is_empty()
     }
@@ -413,6 +483,8 @@ impl AuditConfig {
         extend_unique(&mut self.convention_tag_globs, &other.convention_tag_globs);
         self.known_symbols.merge(&other.known_symbols);
         self.core_boundary_leaks.merge(&other.core_boundary_leaks);
+        self.mutating_resource_access
+            .merge(&other.mutating_resource_access);
         self.duplication_detector.merge(&other.duplication_detector);
         self.config_key_usage.merge(&other.config_key_usage);
         for rule in &other.requested_detectors {

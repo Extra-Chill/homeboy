@@ -84,6 +84,39 @@ Finding output:
 
 Reads in test paths do not satisfy the rule. If an accessor pattern captures `symbol_capture`, Homeboy can treat non-test references to that symbol outside the accessor definition file as production reads. By default, symbols must appear as full identifier tokens on non-comment lines; `accessor_symbol_read_patterns` can provide component-owned regex templates when a language or framework needs stricter call syntax. `{symbol}` is replaced with the escaped accessor symbol.
 
+## Mutating Resource Access
+
+`audit.mutating_resource_access` is a generic marker-driven detector for handler
+paths that mutate resource identifiers without a configured ownership/access
+check. Homeboy core does not know any framework names; components or extensions
+provide the registration markers, mutating operation markers, resource-id regexes,
+accepted access helpers, trusted delegation markers, and mutator markers.
+
+```json
+{
+  "audit": {
+    "mutating_resource_access": {
+      "handler_registration_markers": ["route("],
+      "mutating_operation_markers": ["POST", "PATCH", "DELETE", "EDITABLE"],
+      "resource_identifier_patterns": ["\\b(flow_id|pipeline_id|agent_id|post_id)\\b"],
+      "access_helper_markers": ["PermissionHelper::owns_agent_resource", "can_access_agent"],
+      "trusted_delegation_markers": ["CheckedAbility"],
+      "mutator_markers": ["update_", "delete_", "save_"]
+    }
+  }
+}
+```
+
+Finding output:
+
+- `convention`: `mutating_resource_access`
+- `kind`: `mutating_resource_access`
+- severity: warning
+
+Only configured `access_helper_markers` and `trusted_delegation_markers` suppress
+findings. Core treats both lists as opaque markers and does not infer access
+helpers from function names.
+
 # Requested Detector Rules
 
 `audit_rules.requested_detectors` lets an extension provide generic text detectors
@@ -119,8 +152,9 @@ Example:
       "allowlist_pattern": "(?i)(str_starts_with|preg_match)\\s*\\([^;]*(/acme/v1|allowed_prefixes|allowlist)",
       "description": "Proxy scope drift at line {line}: scoped docs feed `{sink}` from request input without a matching allowlist",
       "suggestion": "Add an allowlist/prefix check for the documented scope or document the proxy as general-purpose."
-    }
-  ]
+      }
+    ]
+  }
 }
 ```
 

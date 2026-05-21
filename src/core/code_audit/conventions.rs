@@ -247,6 +247,9 @@ pub enum AuditFinding {
     WriteOnlyConfigKey,
     /// Configured ecosystem/language/framework term appears in core-owned source.
     CoreBoundaryLeak,
+    /// Configured mutating handler/resource-id path lacks a direct ownership or
+    /// access check, or a trusted delegation marker known to enforce one.
+    MutatingResourceAccess,
     /// Config-like key/value is written, migrated, or surfaced by an accessor
     /// without a corresponding production read/consumer.
     ConfigKeyWriteOnly,
@@ -323,6 +326,7 @@ impl AuditFinding {
             "direct_aggregate_construction",
             "write_only_config_key",
             "core_boundary_leak",
+            "mutating_resource_access",
             "config_key_write_only",
             "config_roundtrip_asymmetry",
             "public_registry_resolver_bypass",
