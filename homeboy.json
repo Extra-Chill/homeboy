@@ -11,8 +11,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-19T19:16:02Z",
-      "item_count": 519,
+      "created_at": "2026-05-21T19:08:09Z",
+      "item_count": 520,
       "known_fingerprints": [
         "dead_code::src/commands/utils/response.rs::UnreferencedExport",
         "dead_code::src/commands/utils/tty.rs::UnreferencedExport",
@@ -51,7 +51,6 @@
         "intra-method-duplication::src/commands/status.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/code_audit/codebase_map.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/code_audit/codebase_map.rs::IntraMethodDuplicate",
-        "intra-method-duplication::src/core/code_audit/conventions.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/code_audit/core_fingerprint.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/code_audit/core_fingerprint.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/code_audit/core_fingerprint.rs::IntraMethodDuplicate",
@@ -87,7 +86,10 @@
         "structural::src/core/code_audit/duplication.rs::GodFile",
         "structural::src/core/code_audit/duplication.rs::HighItemCount",
         "structural::src/core/code_audit/mod.rs::GodFile",
+        "structural::src/core/code_audit/requested_detectors.rs::GodFile",
+        "structural::src/core/code_audit/requested_detectors.rs::HighItemCount",
         "structural::src/core/code_audit/test_coverage.rs::GodFile",
+        "structural::src/core/code_audit::DirectorySprawl",
         "structural::src/core/config.rs::GodFile",
         "structural::src/core/config.rs::HighItemCount",
         "structural::src/core/defaults.rs::HighItemCount",
@@ -120,10 +122,6 @@
         "structural::src/core/triage.rs::HighItemCount",
         "test_coverage::src/core/code_audit/baseline.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/checks.rs::MissingTestMethod",
-        "test_coverage::src/core/code_audit/conventions.rs::MissingTestMethod",
-        "test_coverage::src/core/code_audit/conventions.rs::MissingTestMethod",
-        "test_coverage::src/core/code_audit/conventions.rs::MissingTestMethod",
-        "test_coverage::src/core/code_audit/conventions.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/core_fingerprint.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/core_fingerprint.rs::MissingTestMethod",
         "test_coverage::src/core/code_audit/dead_code.rs::MissingTestMethod",
@@ -263,6 +261,7 @@
         "test_coverage::src/core/engine/validate_write.rs::MissingTestMethod",
         "test_coverage::src/core/extension/bench/parsing.rs::MissingTestMethod",
         "test_coverage::src/core/extension/bench/report.rs::MissingTestMethod",
+        "test_coverage::src/core/extension/bench/report.rs::MissingTestMethod",
         "test_coverage::src/core/extension/exec_context.rs::MissingTestFile",
         "test_coverage::src/core/extension/execution.rs::MissingTestMethod",
         "test_coverage::src/core/extension/execution.rs::MissingTestMethod",
@@ -330,6 +329,7 @@
         "test_coverage::src/core/extension/test/report.rs::MissingTestMethod",
         "test_coverage::src/core/extension/test/report.rs::MissingTestMethod",
         "test_coverage::src/core/extension/test/report.rs::MissingTestMethod",
+        "test_coverage::src/core/extension/test/report.rs::MissingTestMethod",
         "test_coverage::src/core/extension/test/run.rs::MissingTestMethod",
         "test_coverage::src/core/extension/trace/overlay.rs::MissingTestMethod",
         "test_coverage::src/core/extension/update_check.rs::MissingTestMethod",
@@ -351,7 +351,6 @@
         "test_coverage::src/core/git/github.rs::MissingTestMethod",
         "test_coverage::src/core/git/github.rs::MissingTestMethod",
         "test_coverage::src/core/git/github.rs::MissingTestMethod",
-        "test_coverage::src/core/git/operations.rs::MissingTestMethod",
         "test_coverage::src/core/git/operations.rs::MissingTestMethod",
         "test_coverage::src/core/git/operations.rs::MissingTestMethod",
         "test_coverage::src/core/git/operations.rs::MissingTestMethod",
@@ -537,7 +536,7 @@
         "test_coverage::src/core/upgrade/update_check.rs::MissingTestMethod"
       ],
       "metadata": {
-        "alignment_score": 0.8799999952316284,
+        "alignment_score": 0.8888888955116272,
         "known_outliers": [
           "src/core/observation/records/triage_items.rs",
           "src/core/observation/records/run_status.rs",
