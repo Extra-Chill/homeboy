@@ -245,9 +245,35 @@ append_split_command_sections() {
   done
 }
 
+append_observation_artifact_guidance() {
+  local ci_artifact="${HOMEBOY_CI_RESULTS_ARTIFACT:-}"
+  local observation_artifact="${HOMEBOY_OBSERVATIONS_ARTIFACT:-}"
+  local run_url="${GITHUB_RUN_URL:-}"
+
+  [ -n "${ci_artifact}${observation_artifact}" ] || return 0
+
+  SECTION_BODY+="<details><summary>Artifacts and drill-down</summary>"$'\n\n'
+
+  if [ -n "${ci_artifact}" ]; then
+    SECTION_BODY+="- CI results artifact: \`${ci_artifact}\` contains immediate command JSON for this action invocation."$'\n'
+  fi
+
+  if [ -n "${observation_artifact}" ]; then
+    SECTION_BODY+="- Observation artifact: \`${observation_artifact}\` contains exported Homeboy run history for deeper queries."$'\n'
+    SECTION_BODY+="- Drill-down: download the observation artifact, then run \`homeboy runs import <dir>\`, \`homeboy runs list\`, and \`homeboy runs findings <run-id>\`."$'\n'
+  fi
+
+  if [ -n "${run_url}" ]; then
+    SECTION_BODY+="- Artifacts are attached to the workflow run: ${run_url}"$'\n'
+  fi
+
+  SECTION_BODY+=$'\n</details>\n\n'
+}
+
 build_section_body() {
   SECTION_BODY="### ${SECTION_TITLE}"$'\n\n'
   append_review_report_section
+  append_observation_artifact_guidance
 }
 
 # Build the shared `tooling` section body written at the bottom of every

@@ -84,6 +84,10 @@ inputs:
     description: 'Duration window to export Homeboy observations after command execution (e.g. "24h", "7d", "30m"). Export is best-effort and non-fatal.'
     required: false
     default: '24h'
+  import-observations:
+    description: 'Download and import earlier homeboy-observations artifacts from the same workflow run before command execution. Import is best-effort and non-fatal.'
+    required: false
+    default: 'false'
 
   # ── Environment setup ──
   auto-setup:
@@ -444,6 +448,21 @@ runs:
           echo "active=true" >> "${GITHUB_OUTPUT}"
         fi
 
+    - name: Download Homeboy observations
+      if: steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != '' && inputs.import-observations == 'true'
+      continue-on-error: true
+      uses: actions/download-artifact@v4
+      with:
+        pattern: homeboy-observations-*
+        path: homeboy-observations-import
+
+    - name: Import Homeboy observations
+      if: steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != '' && inputs.import-observations == 'true'
+      shell: bash
+      env:
+        HOMEBOY_OBSERVATION_IMPORT_DIR: ${{ github.workspace }}/homeboy-observations-import
+      run: bash ${{ github.action_path }}/scripts/core/import-observations.sh
+
     - name: Run Homeboy commands
       id: run-commands
       continue-on-error: true
@@ -713,6 +732,9 @@ runs:
         COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
         COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key }}
         COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title }}
+        HOMEBOY_CI_RESULTS_ARTIFACT: ${{ steps.artifact-names.outputs.homeboy-ci-results }}
+        HOMEBOY_OBSERVATIONS_ARTIFACT: ${{ steps.artifact-names.outputs.homeboy-observations }}
+        GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: bash ${{ github.action_path }}/scripts/pr/post-pr-comment.sh
 
     # ── Phase 8: Auto-issue filing ──

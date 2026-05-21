@@ -120,6 +120,8 @@ Bench runs write the exact `homeboy bench --output` payload to `homeboy-ci-resul
 
 Homeboy Action also runs `homeboy runs export --since 24h --output homeboy-observations` after command execution and uploads the result as a separate `homeboy-observations-<component>-<commands>-<job>-<os>-<runtime>` artifact. This export is best-effort: if the current Homeboy version does not support observation export or no observations exist, the CI result is unchanged.
 
+Set `import-observations: true` on jobs that should consume observation bundles uploaded by earlier jobs in the same workflow run. The action downloads `homeboy-observations-*` artifacts, imports each downloaded bundle with `homeboy runs import <dir>`, and continues cleanly when no matching artifacts exist.
+
 Artifact boundaries:
 
 - `homeboy-ci-results-<component>-<commands>-<job>-<os>-<runtime>`: immediate structured command outputs used for pass/fail decisions and PR rendering, such as `bench.json`.
@@ -175,6 +177,7 @@ Use these outputs to gate downstream jobs:
 | `regression-threshold` | No | | Bench regression threshold passed to `homeboy bench --regression-threshold` |
 | `differential-gating` | No | `false` | On PRs, compare `audit`/`test` counts against the base SHA and fail only when the PR is worse. Opt-in; `lint` still gates on exit code. PR autofix is skipped while enabled. |
 | `observation-window` | No | `24h` | Duration window passed to best-effort `homeboy runs export --since` for the separate matrix-safe observations artifact. |
+| `import-observations` | No | `false` | Download and best-effort import earlier `homeboy-observations-*` artifacts from the same workflow run before command execution. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
 | `node-version` | No | | Node.js version (sets up via `actions/setup-node`) |
 | `autofix` | No | `false` | On PR failures, run safe autofixes, commit, push, and re-run checks |

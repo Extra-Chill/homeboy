@@ -698,6 +698,12 @@ build_observation_export_command() {
   printf 'homeboy runs export --since %s --output %s\n' "${since_window}" "${output_dir}"
 }
 
+build_observation_import_command() {
+  local import_dir="$1"
+
+  printf 'homeboy runs import %s\n' "${import_dir}"
+}
+
 command_output_stem() {
   local cmd="$1"
   local stem

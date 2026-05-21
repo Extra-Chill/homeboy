@@ -203,6 +203,11 @@ assert_equals \
   "$(build_observation_export_command "24h" "/tmp/workspace/homeboy-observations")" \
   "observation export uses separate output directory"
 
+assert_equals \
+  "homeboy runs import /tmp/workspace/homeboy-observations-import/job" \
+  "$(build_observation_import_command "/tmp/workspace/homeboy-observations-import/job")" \
+  "observation import uses downloaded bundle directory"
+
 PR_HEAD_REPO="some-contributor/homeboy-action"
 GITHUB_REPOSITORY="Extra-Chill/homeboy-action"
 GITHUB_HEAD_REF="feat/fork-pr"
