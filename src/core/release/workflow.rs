@@ -282,6 +282,10 @@ fn format_tag(version: &str, monorepo: Option<&git::MonorepoContext>) -> String 
     }
 }
 
+fn short_sha(commit: &str) -> &str {
+    &commit[..8.min(commit.len())]
+}
+
 fn extract_new_version_from_plan(plan: &ReleasePlan) -> Option<String> {
     plan.plan
         .steps
@@ -385,6 +389,53 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
         git::tag_exists_locally(&component.local_path, &tag_name).unwrap_or(false);
     let tag_exists_remote =
         git::tag_exists_on_remote(&component.local_path, &tag_name).unwrap_or(false);
+    let head_commit = git::get_head_commit(&component.local_path)?;
+    let local_tag_commit = if tag_exists_local {
+        Some(git::get_tag_commit(&component.local_path, &tag_name)?)
+    } else {
+        None
+    };
+    let remote_tag_commit = git::remote_tag_commit(&component.local_path, &tag_name)?;
+
+    if local_tag_commit
+        .as_deref()
+        .is_some_and(|commit| commit != head_commit)
+        || remote_tag_commit
+            .as_deref()
+            .is_some_and(|commit| commit != head_commit)
+    {
+        return Err(Error::validation_invalid_argument(
+            "tag",
+            format!("Tag '{}' exists but does not point to HEAD", tag_name),
+            Some(format!(
+                "local tag points to {}, origin tag points to {}, HEAD is {}",
+                local_tag_commit
+                    .as_deref()
+                    .map(short_sha)
+                    .unwrap_or("<missing>"),
+                remote_tag_commit
+                    .as_deref()
+                    .map(short_sha)
+                    .unwrap_or("<missing>"),
+                short_sha(&head_commit)
+            )),
+            Some(vec![
+                format!(
+                    "Inspect the existing tag before recovery: git show --no-patch --decorate {}",
+                    tag_name
+                ),
+                format!(
+                    "If the existing tag is valid, create a new releasable commit and run: homeboy release {}",
+                    input.component_id
+                ),
+                format!(
+                    "If the tag is an abandoned partial release, delete the GitHub release/tag explicitly, then run: homeboy release {} --recover",
+                    input.component_id
+                ),
+            ]),
+        ));
+    }
+
     let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
 
     let mut actions = Vec::new();
