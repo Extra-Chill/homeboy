@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.99.0] - 2026-05-21
+
+### Added
+- declare ci reproduction profiles
+
 ## [2.98.0] - 2026-05-21
 
 ### Added
