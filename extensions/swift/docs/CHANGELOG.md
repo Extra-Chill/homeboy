@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.6.1] - 2026-05-21
+
+### Fixed
+- normalize sidecar contracts across extensions
+
 ## [2.6.0] - 2026-05-19
 
 ### Added
