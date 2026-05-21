@@ -1,5 +1,4 @@
 node_modules/
-package-lock.json
 vendor/
 
 # Transient runner artifacts (written through Playground VFS mount)

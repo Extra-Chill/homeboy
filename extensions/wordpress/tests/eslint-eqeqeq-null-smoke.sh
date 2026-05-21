@@ -25,7 +25,7 @@ ESLINT_BIN="$EXTENSION_DIR/node_modules/.bin/eslint"
 ESLINT_CONFIG="$EXTENSION_DIR/.eslintrc.json"
 
 if [ ! -x "$ESLINT_BIN" ]; then
-    echo "Skipping: $ESLINT_BIN not found (run \`npm install\` in $EXTENSION_DIR)" >&2
+    echo "Skipping: $ESLINT_BIN not found (run \`npm ci\` in $EXTENSION_DIR)" >&2
     exit 0
 fi
 

@@ -42,7 +42,7 @@ fi
 
 if [ ! -f "${EXTENSION_PATH}/node_modules/.bin/wp-playground-cli" ]; then
     echo "ERROR: @wp-playground/cli not installed." >&2
-    echo "Run: cd ${EXTENSION_PATH} && npm install" >&2
+    echo "Run: cd ${EXTENSION_PATH} && npm ci" >&2
     exit 1
 fi
 
