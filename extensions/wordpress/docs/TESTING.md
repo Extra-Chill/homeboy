@@ -519,6 +519,10 @@ if (result.status === 'process_exited') {
 - **WP version defaults to 6.9.** Override `playground_wordpress_version` to pass
   a different `--wp=<version>` to Playground. Mismatched versions produce
   missing-class errors.
+- **Multisite is opt-in.** Set `HOMEBOY_PLAYGROUND_MULTISITE=1`,
+  `HOMEBOY_WORDPRESS_MULTISITE=1`, or `playground.multisite: true` in settings.
+  Plugin tests also auto-enable multisite when the plugin header declares
+  `Network: true`.
 - **Partial phpunit.xml consumption.** The runner reads `<testsuite>` and
   `<exclude>` entries from `phpunit.xml.dist` only; other elements are
   ignored.

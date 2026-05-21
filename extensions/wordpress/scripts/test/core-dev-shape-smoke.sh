@@ -130,6 +130,7 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="wordpress-develop" \
 HOMEBOY_COMPONENT_PATH="$CORE_WP_CODEBOX_FIXTURE" \
 HOMEBOY_COMPONENT_SHAPE="core-dev" \
+HOMEBOY_WORDPRESS_MULTISITE=1 \
 HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/wp-codebox-core-stub.sh" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/phpunit/tests/basic.php > "${TMPDIR}/test-wp-codebox.out"
 assert_contains "${TMPDIR}/test-wp-codebox.out" "Running WordPress core PHPUnit tests via WP Codebox"
@@ -138,6 +139,7 @@ assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" "wordpress.core-phpunit"
 assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" '"target": "/wordpress"'
 assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" '"target": "/wordpress/tests/phpunit"'
 assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" 'test-file=tests/phpunit/tests/basic.php'
+assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" 'multisite=1'
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="wordpress-develop" \

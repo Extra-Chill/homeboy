@@ -19,6 +19,7 @@ cat > "${PLUGIN_PATH}/tests/OnlyTest.php" <<'PHP'
 class OnlyTest extends WP_UnitTestCase {}
 PHP
 printf '<?php // component drop-in\n' > "${PLUGIN_PATH}/db.php"
+printf '<?php /*\nPlugin Name: Example\nNetwork: true\n*/\n' > "${PLUGIN_PATH}/example.php"
 printf 'component-extra\n' > "${PLUGIN_PATH}/config/component-extra.php"
 printf '<?php /*\nPlugin Name: Dep Plugin\n*/\n' > "${DEP_PATH}/dep-plugin.php"
 printf 'dependency-extra\n' > "${DEP_PATH}/fixtures/dep-extra.php"
@@ -75,6 +76,7 @@ for (const expected of [
   'autoload-file=/wp-codebox-vendor/autoload.php',
   'tests-dir=/wp-codebox-vendor/wp-phpunit/wp-phpunit',
   'dependency-mounts=/wordpress/wp-content/plugins/dep-plugin',
+  'multisite=1',
 ]) {
   if (!(step.args || []).includes(expected)) {
     throw new Error(`step args missing expected value: ${expected}\nactual:\n${(step.args || []).join('\n')}`)

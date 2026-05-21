@@ -105,12 +105,21 @@ fi
 
 WP_CONFIG_DEFINES_JSON="{}"
 PLAYGROUND_WORDPRESS_VERSION="6.9"
+PLAYGROUND_MULTISITE="${HOMEBOY_WORDPRESS_MULTISITE:-}"
 if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     [ -n "$extracted" ] && WP_CONFIG_DEFINES_JSON="$extracted"
 
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground_wordpress_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && PLAYGROUND_WORDPRESS_VERSION="$extracted"
+
+    if [ -z "$PLAYGROUND_MULTISITE" ]; then
+        extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground.multisite // .wp_codebox_multisite // .multisite // empty' 2>/dev/null || true)
+        [ -n "$extracted" ] && [ "$extracted" != "null" ] && PLAYGROUND_MULTISITE="$extracted"
+    fi
+fi
+if [ -n "${HOMEBOY_PLAYGROUND_MULTISITE+x}" ]; then
+    PLAYGROUND_MULTISITE="$HOMEBOY_PLAYGROUND_MULTISITE"
 fi
 
 MOUNTS_JSON=$(jq -nc \
@@ -151,6 +160,7 @@ jq -n \
     --arg selectedTestFile "$SELECTED_TEST_FILE" \
     --arg changedTestsJson "$CHANGED_TEST_FILES_JSON" \
     --arg definesJson "$WP_CONFIG_DEFINES_JSON" \
+    --arg multisite "$PLAYGROUND_MULTISITE" \
     '{
         schema: "wp-codebox/workspace-recipe/v1",
         runtime: {wp: $wp, blueprint: {steps: []}},
@@ -162,7 +172,8 @@ jq -n \
             "autoload-file=/wordpress/vendor/autoload.php",
             "test-file=" + $selectedTestFile,
             "changed-tests-json=" + $changedTestsJson,
-            "wp-config-defines-json=" + $definesJson
+            "wp-config-defines-json=" + $definesJson,
+            "multisite=" + (if (($multisite | ascii_downcase) as $v | $v == "1" or $v == "true" or $v == "yes" or $v == "on") then "1" else "0" end)
         ]}]}
     }' > "$RECIPE_FILE"
 

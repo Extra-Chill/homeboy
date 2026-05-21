@@ -52,6 +52,17 @@ else
     PLUGIN_SLUG="$(basename "$PLUGIN_PATH")"
 fi
 
+detect_network_plugin_header() {
+    local main_file
+    for main_file in "${PLUGIN_PATH}"/*.php; do
+        [ -f "$main_file" ] || continue
+        if grep -q '^[[:space:]]*Plugin Name:' "$main_file" && grep -qi '^[[:space:]]*Network:[[:space:]]*true[[:space:]]*$' "$main_file"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 component_has_composer_test_script() {
     [ -f "${PLUGIN_PATH}/composer.json" ] || return 1
 
@@ -211,6 +222,7 @@ BENCH_ENV_JSON="{}"
 PLAYGROUND_FILE_MOUNTS_JSON="[]"
 PHPUNIT_NO_TESTS="skipped"
 PLAYGROUND_WORDPRESS_VERSION="6.9"
+PLAYGROUND_MULTISITE=""
 if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     [ -n "$extracted" ] && WP_CONFIG_DEFINES_JSON="$extracted"
@@ -226,6 +238,18 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
 
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground_wordpress_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && PLAYGROUND_WORDPRESS_VERSION="$extracted"
+
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground.multisite // .wp_codebox_multisite // .multisite // empty' 2>/dev/null || true)
+    [ -n "$extracted" ] && [ "$extracted" != "null" ] && PLAYGROUND_MULTISITE="$extracted"
+fi
+if [ -n "${HOMEBOY_WORDPRESS_MULTISITE+x}" ]; then
+    PLAYGROUND_MULTISITE="$HOMEBOY_WORDPRESS_MULTISITE"
+fi
+if [ -n "${HOMEBOY_PLAYGROUND_MULTISITE+x}" ]; then
+    PLAYGROUND_MULTISITE="$HOMEBOY_PLAYGROUND_MULTISITE"
+fi
+if [ -z "$PLAYGROUND_MULTISITE" ] && detect_network_plugin_header; then
+    PLAYGROUND_MULTISITE="1"
 fi
 
 CHANGED_TEST_FILES_JSON="[]"
@@ -368,6 +392,7 @@ echo "  Backend: wp-codebox (WordPress Playground runtime)"
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "  Mounts: ${MOUNTS_JSON}"
     echo "  WordPress version: ${PLAYGROUND_WORDPRESS_VERSION}"
+    echo "  Multisite: ${PLAYGROUND_MULTISITE:-0}"
     echo "  Artifacts: ${ARTIFACTS_DIR}"
 fi
 
@@ -390,6 +415,7 @@ jq -n \
     --arg envJson "$BENCH_ENV_JSON" \
     --arg definesJson "$WP_CONFIG_DEFINES_JSON" \
     --arg dependencyMounts "$PLAYGROUND_DEP_MOUNTS" \
+    --arg multisite "$PLAYGROUND_MULTISITE" \
     '{
         schema: "wp-codebox/workspace-recipe/v1",
         runtime: {wp: $wp, blueprint: {steps: []}},
@@ -402,7 +428,8 @@ jq -n \
             "wp-config-defines-json=" + $definesJson,
             "autoload-file=/wp-codebox-vendor/autoload.php",
             "tests-dir=/wp-codebox-vendor/wp-phpunit/wp-phpunit",
-            "dependency-mounts=" + ($dependencyMounts | split("\n") | map(select(. != "")) | join(","))
+            "dependency-mounts=" + ($dependencyMounts | split("\n") | map(select(. != "")) | join(",")),
+            "multisite=" + (if (($multisite | ascii_downcase) as $v | $v == "1" or $v == "true" or $v == "yes" or $v == "on") then "1" else "0" end)
         ]}]}
     }' > "$RECIPE_FILE"
 
