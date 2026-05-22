@@ -331,6 +331,28 @@ require(any(regex.search("do_action( 'tool_call'") for regex in exclude_regexes)
 require("'tool_call' =>" in fixture, "fixture should include array/protocol key literal")
 require("do_action( 'tool_call'" in fixture, "fixture should include event-name literal")
 
+i18n_literal_pattern = literal_rule["literal_pattern"].replace("{value}", re.escape("data-machine"))
+i18n_literal_regex = re.compile(i18n_literal_pattern, re.MULTILINE)
+i18n_exclude_patterns = [
+    pattern.replace("{value}", re.escape("data-machine"))
+    for pattern in literal_rule.get("exclude_match_context_patterns", [])
+]
+i18n_exclude_regexes = [re.compile(pattern, re.MULTILINE) for pattern in i18n_exclude_patterns]
+i18n_fixture = (fixture_dir / "src/Runtime/class-demo-i18n-text-domain.php").read_text(encoding="utf-8")
+
+require(i18n_literal_regex.search("__( 'Flow', 'data-machine' )"),
+        "constant-backed slug detector literal pattern must match i18n text-domain literals before context exclusion")
+require(any(regex.search("__( 'Flow', 'data-machine' )") for regex in i18n_exclude_regexes),
+        "i18n text-domain literal must be excluded by context")
+require(i18n_literal_regex.search("self::TEXT_DOMAIN === 'data-machine'"),
+        "constant-backed slug detector should still flag non-i18n duplicate slug literals")
+require(not any(regex.search("self::TEXT_DOMAIN === 'data-machine'") for regex in i18n_exclude_regexes),
+        "non-i18n duplicate slug literal must not be excluded")
+require("__( 'Flow', 'data-machine' )" in i18n_fixture,
+        "i18n fixture should include a WordPress translation text-domain literal")
+require("self::TEXT_DOMAIN === 'data-machine'" in i18n_fixture,
+        "i18n fixture should include a real duplicate slug literal")
+
 # Issue #425 — source_pattern must not match `class` in docblock prose.
 # Pre-fix, `(?s).*?` between `class <name>` and `const` would let
 # `class has no knowledge` from the docblock match as the class name and
@@ -340,6 +362,15 @@ require("do_action( 'tool_call'" in fixture, "fixture should include event-name 
 # brace before `const` so the match has to live inside a real class body.
 source_pattern = literal_rule["source_pattern"]
 source_regex = re.compile(source_pattern)
+i18n_source_matches = list(source_regex.finditer(i18n_fixture))
+require(
+    len(i18n_source_matches) == 1,
+    f"source_pattern must find the i18n fixture text-domain constant, got {len(i18n_source_matches)}",
+)
+require(
+    i18n_source_matches[0].group("value") == "data-machine",
+    f"source_pattern must capture the i18n fixture constant value, got {i18n_source_matches[0].group('value')!r}",
+)
 recurring_fixture = (fixture_dir / "src/Runtime/class-demo-recurring-scheduler.php").read_text(encoding="utf-8")
 require(
     "This class has no knowledge" in recurring_fixture,

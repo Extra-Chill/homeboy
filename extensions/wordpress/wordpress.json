@@ -563,7 +563,8 @@
             "\\bdo_action\\s*\\(\\s*['\\\"]{value}['\\\"]",
             "\\bapply_filters\\s*\\(\\s*['\\\"]{value}['\\\"]",
             "\\bdo_action_ref_array\\s*\\(\\s*['\\\"]{value}['\\\"]",
-            "\\bapply_filters_ref_array\\s*\\(\\s*['\\\"]{value}['\\\"]"
+            "\\bapply_filters_ref_array\\s*\\(\\s*['\\\"]{value}['\\\"]",
+            "\\b(?:__|_e|_x|_ex|_n|_nx|_n_noop|_nx_noop|esc_html__|esc_html_e|esc_html_x|esc_attr__|esc_attr_e|esc_attr_x|translate|translate_with_gettext_context)\\s*\\([^;]*,\\s*['\\\"]{value}['\\\"]\\s*\\)"
           ],
           "description": "Raw slug literal `{value}` at line {line} duplicates constant {label}",
           "suggestion": "Use {label} instead of repeating the literal slug so the constant remains the source of truth."
