@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.197.2] - 2026-05-22
+
+### Changed
+- ratchet core agnostic baseline
+
+### Fixed
+- split code audit detectors
+
 ## [0.197.1] - 2026-05-21
 
 ### Fixed
