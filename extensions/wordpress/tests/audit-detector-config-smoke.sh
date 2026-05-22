@@ -79,6 +79,8 @@ for pattern in [
     "**/class-*-artifact.php",
     "**/class-*-artifacts.php",
     "**/*Constants.php",
+    "**/*Policy.php",
+    "**/Policy/*AccessPolicy.php",
     "**/*Resolver.php",
     "**/*Result.php",
     "**/*Sanitizer.php",
@@ -233,6 +235,7 @@ require(not matches_any("src/Context/class-demo-context-injection-policy.php", g
 # missing register()/register_routes()/rest_api_init signals still report there.
 api_helper_roles = {
     "src/Api/WebhookAuthResolver.php": "wordpress:php-role:contract",
+    "src/Api/ToolAccessPolicy.php": "wordpress:php-role:configuration",
     "src/Api/WebhookVerificationResult.php": "wordpress:php-role:result",
     "src/Api/WebhookVerifier.php": "wordpress:php-role:service",
 }
@@ -286,6 +289,7 @@ for path in [
     "src/Context/class-demo-context-conflict-resolver.php",
     "src/Context/class-demo-context-injection-policy.php",
     "src/Api/WebhookAuthResolver.php",
+    "src/Api/ToolAccessPolicy.php",
     "src/Api/WebhookVerificationResult.php",
     "src/Api/WebhookVerifier.php",
     "src/Abilities/FileConstants.php",
@@ -519,6 +523,7 @@ for relative in [
     "src/Options/class-demo-single-site-noise.php",
     "src/Options/class-demo-opt-out-marker.php",
     "src/Api/WebhookAuthResolver.php",
+    "src/Api/ToolAccessPolicy.php",
     "src/Api/WebhookVerificationResult.php",
     "src/Api/WebhookVerifier.php",
     "src/Api/WebhookRoutes.php",
