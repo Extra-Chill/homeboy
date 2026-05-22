@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.100.6] - 2026-05-22
+
+### Fixed
+- skip API helper roles in registration audit
+
 ## [2.100.5] - 2026-05-22
 
 ### Fixed
