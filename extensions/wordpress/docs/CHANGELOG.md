@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.100.5] - 2026-05-22
+
+### Fixed
+- reduce ability helper naming noise
+
 ## [2.100.4] - 2026-05-22
 
 ### Fixed
