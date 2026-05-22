@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.6.2] - 2026-05-22
+
+### Fixed
+- make coverage completeness audit advisory
+
 ## [2.6.1] - 2026-05-21
 
 ### Fixed
