@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.17.5] - 2026-05-22
+
+### Fixed
+- make coverage completeness audit advisory
+
 ## [1.17.4] - 2026-05-21
 
 ### Fixed
