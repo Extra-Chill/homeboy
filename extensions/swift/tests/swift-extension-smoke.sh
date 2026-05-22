@@ -38,10 +38,11 @@ labels = audit.get("feature_labels", {})
 for label in ["Classes", "Structs", "Enums", "Protocols", "Functions"]:
     assert_true(label in labels.values(), f"missing feature label: {label}")
 
-mapping = audit.get("test_mapping", {})
+assert_true("test_mapping" not in audit, "audit test_mapping must stay disabled so historical coverage gaps are advisory")
+mapping = manifest.get("test", {}).get("drift", {})
 assert_true("tests" in mapping.get("test_dirs", []), "missing lowercase tests dir")
 assert_true("Tests" in mapping.get("test_dirs", []), "missing uppercase Tests dir")
-assert_true(mapping.get("test_file_pattern") == "{dir}/{name}Tests.{ext}", "unexpected test file pattern")
+assert_true(mapping.get("inline_tests") is False, "swift tests should not be inline")
 
 capabilities = provides.get("capabilities", [])
 assert_true("fingerprint" in capabilities, "missing fingerprint capability")

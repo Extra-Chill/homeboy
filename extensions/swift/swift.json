@@ -40,14 +40,6 @@
       "enum\\s+": "Enums",
       "protocol\\s+": "Protocols",
       "func\\s+": "Functions"
-    },
-    "test_mapping": {
-      "source_dirs": [".", "Sources"],
-      "test_dirs": ["tests", "Tests"],
-      "test_file_pattern": "{dir}/{name}Tests.{ext}",
-      "method_prefix": "test",
-      "inline_tests": false,
-      "critical_patterns": ["Sources/", "App/", "Homeboy/"]
     }
   },
   "settings": [

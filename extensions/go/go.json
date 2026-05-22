@@ -79,14 +79,6 @@
         "heading": "## Interfaces",
         "template": "- `{name}` — `{source_file}` (line {line})"
       }
-    },
-    "test_mapping": {
-      "source_dirs": ["."],
-      "test_dirs": ["."],
-      "test_file_pattern": "{dir}/{name}_test.{ext}",
-      "method_prefix": "Test",
-      "inline_tests": false,
-      "critical_patterns": ["cmd/", "pkg/", "internal/"]
     }
   },
   "docs": [

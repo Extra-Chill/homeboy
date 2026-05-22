@@ -102,6 +102,11 @@ for (const manifestPath of manifestPaths) {
 	const manifest = JSON.parse(await readFile(path.join(root, manifestPath), 'utf8'));
 	assert.equal(typeof manifest.structured_sidecars, 'object', `${manifestPath} declares structured_sidecars`);
 	assert.equal(Array.isArray(manifest.structured_sidecars), false, `${manifestPath} sidecars must be an object`);
+	assert.equal(manifest.audit?.test_mapping, undefined, `${manifestPath} keeps structural test coverage out of audit findings`);
+
+	if (manifestPath !== 'nodejs/nodejs.json') {
+		assert.equal(typeof manifest.test?.drift, 'object', `${manifestPath} keeps changed-test drift guidance configured`);
+	}
 
 	for (const key of requiredKeys) {
 		assert.equal(typeof manifest.structured_sidecars[key], 'boolean', `${manifestPath} declares ${key}`);
