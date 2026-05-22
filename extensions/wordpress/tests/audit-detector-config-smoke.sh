@@ -22,7 +22,7 @@ def require(condition, message):
         raise SystemExit(message)
 
 utility_suffixes = set(rules.get("utility_suffixes", []))
-for suffix in ["Authenticator", "Base", "Contract", "Credential", "Handlers", "Interface", "Projector", "Store", "Lock", "Policy", "Result", "Secret", "Service", "Token", "Value", "Package"]:
+for suffix in ["Authenticator", "Base", "Constants", "Contract", "Credential", "Handlers", "Interface", "Projector", "Sanitizer", "Scheduler", "Store", "Lock", "Policy", "Result", "Secret", "Service", "Token", "Value", "Package"]:
     require(suffix in utility_suffixes, f"missing PHP role utility suffix: {suffix}")
 
 exception_globs = set(rules.get("convention_exception_globs", []))
@@ -44,10 +44,13 @@ for pattern in [
     "**/class-*-registry.php",
     "**/class-*-adopter.php",
     "**/class-*-resolver.php",
+    "**/class-*-sanitizer.php",
     "**/class-*-authenticator.php",
     "**/class-*-service.php",
+    "**/class-*-scheduler.php",
     "**/class-*-policy.php",
     "**/class-*-config.php",
+    "**/class-*-constants.php",
     "**/class-*-token.php",
     "**/class-*-credential.php",
     "**/class-*-result.php",
@@ -57,6 +60,9 @@ for pattern in [
     "**/class-*-lock.php",
     "**/class-*-artifact.php",
     "**/class-*-artifacts.php",
+    "**/*Constants.php",
+    "**/*Sanitizer.php",
+    "**/*Scheduler.php",
 ]:
     require(pattern in exception_globs, f"missing PHP role exception glob: {pattern}")
 
@@ -203,6 +209,25 @@ require(matches_any("src/Context/class-demo-context-injection-policy.php", globs
 require(not matches_any("src/Context/class-demo-context-injection-policy.php", globs_for("wordpress:php-role:contract")),
         "context injection policy fixture must not be tagged as contract role")
 
+# Broad Abilities directories can contain support classes. Ability-like classes
+# stay in the untagged Ability convention; helper/service/configuration classes
+# get split out so they are not forced to carry an Ability suffix.
+for path in [
+    "src/Abilities/CreateAbility.php",
+    "src/Abilities/UpdateAbility.php",
+    "src/Abilities/FlowThing.php",
+]:
+    for tag in required_tags:
+        require(not matches_any(path, globs_for(tag)),
+                f"ability convention fixture {path} must remain untagged (matched {tag})")
+
+require(matches_any("src/Abilities/FileConstants.php", globs_for("wordpress:php-role:configuration")),
+        "ability constants fixture must be tagged as configuration role")
+require(matches_any("src/Abilities/BlockSanitizer.php", globs_for("wordpress:php-role:service")),
+        "ability sanitizer fixture must be tagged as service role")
+require(matches_any("src/Abilities/PipelineBatchScheduler.php", globs_for("wordpress:php-role:service")),
+        "ability scheduler fixture must be tagged as service role")
+
 # v0.157.0 best-effort fallback: every off-role file must also be in convention_exception_globs.
 for path in [
     "src/Identity/class-demo-identity-store.php",
@@ -216,6 +241,9 @@ for path in [
     "src/Auth/class-demo-token-authenticator.php",
     "src/Context/class-demo-context-conflict-resolver.php",
     "src/Context/class-demo-context-injection-policy.php",
+    "src/Abilities/FileConstants.php",
+    "src/Abilities/BlockSanitizer.php",
+    "src/Abilities/PipelineBatchScheduler.php",
 ]:
     require(matches_any(path, exception_globs),
             f"off-role file {path} must also be exempt for v0.157.0 fallback")
@@ -431,6 +459,15 @@ for relative in [
     "src/Auth/class-demo-token-authenticator.php",
     "src/Context/class-demo-context-conflict-resolver.php",
     "src/Context/class-demo-context-injection-policy.php",
+    "src/Abilities/CreateAbility.php",
+    "src/Abilities/UpdateAbility.php",
+    "src/Abilities/FileConstants.php",
+    "src/Abilities/BlockSanitizer.php",
+    "src/Abilities/PipelineBatchScheduler.php",
+    "src/Abilities/FlowThing.php",
+    "src/AbilityMismatch/class-demo-create-ability.php",
+    "src/AbilityMismatch/class-demo-update-ability.php",
+    "src/AbilityMismatch/class-demo-flow-thing.php",
     "src/Options/class-demo-network-drift.php",
     "src/Options/class-demo-single-site-noise.php",
     "src/Options/class-demo-opt-out-marker.php",
@@ -438,4 +475,44 @@ for relative in [
     require((fixture_dir / relative).exists(), f"missing audit detector fixture: {relative}")
 
 print("wordpress audit detector config smoke passed")
+PY
+
+AUDIT_JSON="$(mktemp "${TMPDIR:-/tmp}/homeboy-audit-detector-config.XXXXXX.json")"
+trap 'rm -f "$AUDIT_JSON"' EXIT
+set +e
+homeboy audit --force-hot --path "$FIXTURE_DIR" --extension wordpress --only naming_mismatch --output "$AUDIT_JSON" >/dev/null
+audit_status=$?
+set -e
+if [ "$audit_status" -gt 1 ]; then
+	exit "$audit_status"
+fi
+
+python3 - "$AUDIT_JSON" <<'PY'
+import json
+import sys
+
+audit_path = sys.argv[1]
+with open(audit_path, encoding="utf-8") as handle:
+    data = json.load(handle)
+
+findings = data.get("data", {}).get("findings", [])
+naming_files = {
+    finding.get("file")
+    for finding in findings
+    if finding.get("kind") == "naming_mismatch"
+}
+
+expected = "src/AbilityMismatch/class-demo-flow-thing.php"
+if expected not in naming_files:
+    raise SystemExit(f"expected true naming_mismatch for {expected}, got {sorted(naming_files)}")
+
+for skipped in [
+    "src/Abilities/FileConstants.php",
+    "src/Abilities/BlockSanitizer.php",
+    "src/Abilities/PipelineBatchScheduler.php",
+]:
+    if skipped in naming_files:
+        raise SystemExit(f"helper/service class should not be a naming_mismatch: {skipped}")
+
+print("wordpress audit naming mismatch fixture smoke passed")
 PY
