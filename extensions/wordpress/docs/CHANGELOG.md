@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.100.4] - 2026-05-22
+
+### Fixed
+- make coverage completeness audit advisory
+- ignore i18n text domains in slug audit
+
 ## [2.100.3] - 2026-05-21
 
 ### Fixed
