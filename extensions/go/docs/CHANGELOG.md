@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.5.2] - 2026-05-22
+
+### Fixed
+- make coverage completeness audit advisory
+
 ## [1.5.1] - 2026-05-21
 
 ### Fixed
