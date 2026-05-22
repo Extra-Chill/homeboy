@@ -83,15 +83,38 @@ fi
 run_audit() {
     local fixture_path="$1"
     local out_path="$2"
-    "${HOMEBOY_BIN}" audit --path "${fixture_path}" --output "${out_path}" --force-hot >/dev/null
+    "${HOMEBOY_BIN}" audit --path "${fixture_path}" --extension wordpress --output "${out_path}" --force-hot >/dev/null
 }
 
 FALLBACK_REPORT="$(mktemp -t audit-fallback.XXXXXX.json)"
 WP_ONLY_REPORT="$(mktemp -t audit-wp-only.XXXXXX.json)"
-trap 'rm -f "${FALLBACK_REPORT}" "${WP_ONLY_REPORT}"' EXIT
+TMP_FIXTURE_ROOT="$(mktemp -d -t audit-dead-guard-fixtures.XXXXXX)"
+trap 'rm -f "${FALLBACK_REPORT}" "${WP_ONLY_REPORT}"; rm -rf "${TMP_FIXTURE_ROOT}"' EXIT
 
-run_audit "${FALLBACK_FIXTURE}" "${FALLBACK_REPORT}"
-run_audit "${WP_ONLY_FIXTURE}" "${WP_ONLY_REPORT}"
+copy_fixture_with_component_config() {
+    local source_fixture="$1"
+    local target_fixture="$2"
+    local component_id="$3"
+
+    mkdir -p "${target_fixture}"
+    cp -R "${source_fixture}/." "${target_fixture}/"
+    cat > "${target_fixture}/homeboy.json" <<JSON
+{
+  "id": "${component_id}",
+  "extensions": {
+    "wordpress": {}
+  }
+}
+JSON
+}
+
+FALLBACK_AUDIT_FIXTURE="${TMP_FIXTURE_ROOT}/fallback"
+WP_ONLY_AUDIT_FIXTURE="${TMP_FIXTURE_ROOT}/wp-only"
+copy_fixture_with_component_config "${FALLBACK_FIXTURE}" "${FALLBACK_AUDIT_FIXTURE}" "audit-dead-guard-fallback"
+copy_fixture_with_component_config "${WP_ONLY_FIXTURE}" "${WP_ONLY_AUDIT_FIXTURE}" "audit-dead-guard-wp-only"
+
+run_audit "${FALLBACK_AUDIT_FIXTURE}" "${FALLBACK_REPORT}"
+run_audit "${WP_ONLY_AUDIT_FIXTURE}" "${WP_ONLY_REPORT}"
 
 python3 - "$FALLBACK_REPORT" "$WP_ONLY_REPORT" <<'PY'
 import json

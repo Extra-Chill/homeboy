@@ -490,6 +490,9 @@
           "get_param"
         ],
         "plumbing_calls": [
+          "get_error_message",
+          "is_wp_error",
+          "wp_get_ability",
           "WP_REST_Response",
           "rest_ensure_response"
         ]

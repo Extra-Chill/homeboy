@@ -52,6 +52,9 @@ for call in ["array", "empty", "get_param"]:
 for call in ["WP_REST_Response", "rest_ensure_response"]:
     require(call in set(duplication_detector.get("plumbing_calls", [])),
             f"WordPress REST response wrapper must be plumbing in parallel-implementation signal: {call}")
+for call in ["wp_get_ability", "is_wp_error", "get_error_message"]:
+    require(call in set(duplication_detector.get("plumbing_calls", [])),
+            f"WordPress ability CLI boilerplate must be plumbing in parallel-implementation signal: {call}")
 
 # v0.157.0 best-effort — off-role file suffixes must be exempt from sibling-method conventions.
 for pattern in [
