@@ -8,7 +8,7 @@ The extension uses these generic knobs Homeboy already exposes:
 
 - `audit.detector_rules.lifecycle_path_globs` for non-production guard contexts such as tests, smokes, shims, stubs, and fallback files.
 - `audit.detector_rules.utility_suffixes` for PHP role suffixes that should not be forced into a sibling class convention when a dominant naming suffix exists.
-- `audit.detector_rules.convention_exception_globs` for procedural helper files such as `register-*.php` and `*-functions.php`, plus PHP role-suffix file globs (`class-*-store.php`, `class-*-registry.php`, `class-*-result.php`, etc.) that fully exempt those files from missing-method/registration/interface checks.
+- `audit.detector_rules.convention_exception_globs` for procedural helper files such as `register-*.php` and `*-functions.php`, plus PHP role-suffix file globs (`class-*-store.php`, `class-*-registry.php`, `class-*-result.php`, PSR-4 `*Resolver.php`, `*Result.php`, `*Verifier.php`, etc.) that fully exempt those files from missing-method/registration/interface checks.
 - A narrower `wordpress-constant-backed-slug-literal` pattern that only reports comparison contexts, not array keys or event/protocol names.
 
 ## Role-Aware Convention Grouping (`convention_tag_globs`)

@@ -22,7 +22,7 @@ def require(condition, message):
         raise SystemExit(message)
 
 utility_suffixes = set(rules.get("utility_suffixes", []))
-for suffix in ["Authenticator", "Base", "Constants", "Contract", "Credential", "Handlers", "Interface", "Projector", "Sanitizer", "Scheduler", "Store", "Lock", "Policy", "Result", "Secret", "Service", "Token", "Value", "Package"]:
+for suffix in ["Authenticator", "Base", "Constants", "Contract", "Credential", "Handlers", "Interface", "Projector", "Sanitizer", "Scheduler", "Store", "Lock", "Policy", "Result", "Secret", "Service", "Token", "Value", "Package", "Verifier"]:
     require(suffix in utility_suffixes, f"missing PHP role utility suffix: {suffix}")
 
 exception_globs = set(rules.get("convention_exception_globs", []))
@@ -61,8 +61,11 @@ for pattern in [
     "**/class-*-artifact.php",
     "**/class-*-artifacts.php",
     "**/*Constants.php",
+    "**/*Resolver.php",
+    "**/*Result.php",
     "**/*Sanitizer.php",
     "**/*Scheduler.php",
+    "**/*Verifier.php",
 ]:
     require(pattern in exception_globs, f"missing PHP role exception glob: {pattern}")
 
@@ -209,6 +212,32 @@ require(matches_any("src/Context/class-demo-context-injection-policy.php", globs
 require(not matches_any("src/Context/class-demo-context-injection-policy.php", globs_for("wordpress:php-role:contract")),
         "context injection policy fixture must not be tagged as contract role")
 
+# PSR-4 API fixture: helper/value/resolver classes can live beside real REST
+# route/controller classes under broad Api namespaces. Only the helper roles are
+# exempt/tagged; route-like classes remain in the normal convention group so
+# missing register()/register_routes()/rest_api_init signals still report there.
+api_helper_roles = {
+    "src/Api/WebhookAuthResolver.php": "wordpress:php-role:contract",
+    "src/Api/WebhookVerificationResult.php": "wordpress:php-role:result",
+    "src/Api/WebhookVerifier.php": "wordpress:php-role:service",
+}
+for path, tag in api_helper_roles.items():
+    require(matches_any(path, exception_globs),
+            f"PSR-4 API helper {path} must be exempt from registrar/controller conventions")
+    require(matches_any(path, globs_for(tag)),
+            f"PSR-4 API helper {path} must be tagged as {tag}")
+
+for path in [
+    "src/Api/WebhookRoutes.php",
+    "src/Api/WebhookController.php",
+    "src/Api/WebhookStatusController.php",
+]:
+    require(not matches_any(path, exception_globs),
+            f"route/controller fixture {path} must not be exempt from registration audits")
+    for tag in required_tags:
+        require(not matches_any(path, globs_for(tag)),
+                f"route/controller fixture {path} must stay in normal convention group (matched {tag})")
+
 # Broad Abilities directories can contain support classes. Ability-like classes
 # stay in the untagged Ability convention; helper/service/configuration classes
 # get split out so they are not forced to carry an Ability suffix.
@@ -241,6 +270,9 @@ for path in [
     "src/Auth/class-demo-token-authenticator.php",
     "src/Context/class-demo-context-conflict-resolver.php",
     "src/Context/class-demo-context-injection-policy.php",
+    "src/Api/WebhookAuthResolver.php",
+    "src/Api/WebhookVerificationResult.php",
+    "src/Api/WebhookVerifier.php",
     "src/Abilities/FileConstants.php",
     "src/Abilities/BlockSanitizer.php",
     "src/Abilities/PipelineBatchScheduler.php",
@@ -471,6 +503,12 @@ for relative in [
     "src/Options/class-demo-network-drift.php",
     "src/Options/class-demo-single-site-noise.php",
     "src/Options/class-demo-opt-out-marker.php",
+    "src/Api/WebhookAuthResolver.php",
+    "src/Api/WebhookVerificationResult.php",
+    "src/Api/WebhookVerifier.php",
+    "src/Api/WebhookRoutes.php",
+    "src/Api/WebhookController.php",
+    "src/Api/WebhookStatusController.php",
 ]:
     require((fixture_dir / relative).exists(), f"missing audit detector fixture: {relative}")
 
