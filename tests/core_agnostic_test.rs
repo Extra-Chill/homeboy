@@ -188,27 +188,27 @@ const BASELINE: &[ViolationKey] = &[
         term: "WP_CLI",
     },
     ViolationKey {
-        path: "src/core/code_audit/dead_guard.rs",
+        path: "src/core/code_audit/detectors/dead_guard.rs",
         term: "composer",
     },
     ViolationKey {
-        path: "src/core/code_audit/dead_guard.rs",
+        path: "src/core/code_audit/detectors/dead_guard.rs",
         term: "composer.json",
     },
     ViolationKey {
-        path: "src/core/code_audit/dead_guard.rs",
+        path: "src/core/code_audit/detectors/dead_guard.rs",
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/deprecation_age.rs",
+        path: "src/core/code_audit/detectors/deprecation_age.rs",
         term: "composer",
     },
     ViolationKey {
-        path: "src/core/code_audit/deprecation_age.rs",
+        path: "src/core/code_audit/detectors/deprecation_age.rs",
         term: "composer.json",
     },
     ViolationKey {
-        path: "src/core/code_audit/deprecation_age.rs",
+        path: "src/core/code_audit/detectors/deprecation_age.rs",
         term: "php",
     },
     ViolationKey {
@@ -224,19 +224,19 @@ const BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/field_patterns.rs",
+        path: "src/core/code_audit/detectors/field_patterns.rs",
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/repeated_literal_shape.rs",
+        path: "src/core/code_audit/detectors/repeated_literal_shape.rs",
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/requested_detectors.rs",
+        path: "src/core/code_audit/detectors/requested_detectors.rs",
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/requested_detectors.rs",
+        path: "src/core/code_audit/detectors/requested_detectors.rs",
         term: "rust",
     },
     ViolationKey {
@@ -252,7 +252,7 @@ const BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/shared_scaffolding.rs",
+        path: "src/core/code_audit/detectors/shared_scaffolding.rs",
         term: "php",
     },
     ViolationKey {
@@ -260,7 +260,7 @@ const BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/upstream_workaround.rs",
+        path: "src/core/code_audit/detectors/upstream_workaround.rs",
         term: "wordpress",
     },
     ViolationKey {
@@ -268,7 +268,7 @@ const BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/wrapper_inference.rs",
+        path: "src/core/code_audit/detectors/wrapper_inference.rs",
         term: "php",
     },
     ViolationKey {
@@ -344,72 +344,12 @@ const BASELINE: &[ViolationKey] = &[
         term: "npm",
     },
     ViolationKey {
-        path: "src/core/engine/format_write.rs",
-        term: "Cargo.toml",
-    },
-    ViolationKey {
-        path: "src/core/engine/format_write.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/engine/format_write.rs",
-        term: "composer",
-    },
-    ViolationKey {
-        path: "src/core/engine/format_write.rs",
-        term: "composer.json",
-    },
-    ViolationKey {
-        path: "src/core/engine/format_write.rs",
-        term: "gofmt",
-    },
-    ViolationKey {
-        path: "src/core/engine/format_write.rs",
-        term: "npx",
-    },
-    ViolationKey {
-        path: "src/core/engine/format_write.rs",
-        term: "package.json",
-    },
-    ViolationKey {
-        path: "src/core/engine/format_write.rs",
-        term: "phpcbf",
-    },
-    ViolationKey {
-        path: "src/core/engine/format_write.rs",
-        term: "tsconfig.json",
-    },
-    ViolationKey {
         path: "src/core/engine/symbol_graph.rs",
         term: "php",
     },
     ViolationKey {
         path: "src/core/engine/symbol_graph.rs",
         term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/engine/validate_write.rs",
-        term: "Cargo.toml",
-    },
-    ViolationKey {
-        path: "src/core/engine/validate_write.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/engine/validate_write.rs",
-        term: "go vet",
-    },
-    ViolationKey {
-        path: "src/core/engine/validate_write.rs",
-        term: "npx",
-    },
-    ViolationKey {
-        path: "src/core/engine/validate_write.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/engine/validate_write.rs",
-        term: "tsconfig.json",
     },
     ViolationKey {
         path: "src/core/extension/grammar.rs",
