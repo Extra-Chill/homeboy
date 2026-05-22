@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.100.8] - 2026-05-22
+
+### Fixed
+- exempt callback policy adapters from interface audits
+
 ## [2.100.7] - 2026-05-22
 
 ### Fixed
