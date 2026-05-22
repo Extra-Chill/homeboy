@@ -16,10 +16,14 @@ manifest_path = Path(sys.argv[1])
 fixture_dir = Path(sys.argv[2])
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 rules = manifest["audit"]["detector_rules"]
+audit = manifest["audit"]
 
 def require(condition, message):
     if not condition:
         raise SystemExit(message)
+
+def matches_any(path, patterns):
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 utility_suffixes = set(rules.get("utility_suffixes", []))
 for suffix in ["Authenticator", "Base", "Constants", "Contract", "Credential", "Handlers", "Interface", "Projector", "Sanitizer", "Scheduler", "Store", "Lock", "Policy", "Result", "Secret", "Service", "Token", "Value", "Package", "Verifier"]:
@@ -29,6 +33,17 @@ exception_globs = set(rules.get("convention_exception_globs", []))
 require("**/register.php" in exception_globs, "procedural register.php loaders must be convention-exempt")
 require("**/register-*.php" in exception_globs, "procedural register helpers must be convention-exempt")
 require("**/*-functions.php" in exception_globs, "procedural functions files must be convention-exempt")
+
+ignore_claim_patterns = audit.get("ignore_claim_patterns", [])
+for path in [
+    "daily/YYYY/MM/DD.md",
+    "wp-content/plugins/<slug>/README.md",
+    "records/{id}/index.md",
+]:
+    require(matches_any(path, ignore_claim_patterns),
+            f"placeholder doc reference must be ignored by docs audit: {path}")
+require(not matches_any("docs/missing-real-file.md", ignore_claim_patterns),
+        "real broken doc references must not be hidden by placeholder ignore patterns")
 
 duplication_detector = rules.get("duplication_detector", {})
 for call in ["array", "empty", "get_param"]:
@@ -136,9 +151,6 @@ def globs_for(tag):
         if entry["tag"] == tag:
             return entry["globs"]
     return []
-
-def matches_any(path, patterns):
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 # Identity fixture: store contract gets contract tag; value objects get no tag.
 identity_store = "src/Identity/class-demo-identity-store.php"
