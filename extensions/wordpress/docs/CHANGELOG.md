@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.100.7] - 2026-05-22
+
+### Fixed
+- filter WordPress ability CLI boilerplate
+- ignore placeholder doc references
+
 ## [2.100.6] - 2026-05-22
 
 ### Fixed
