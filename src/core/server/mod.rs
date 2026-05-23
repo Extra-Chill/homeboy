@@ -51,6 +51,26 @@ pub struct Server {
     /// Values support `$PATH`-style expansion — the shell handles it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<ServerRunner>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerRunner {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homeboy_path: Option<String>,
+    #[serde(default)]
+    pub daemon: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub resources: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,6 +127,24 @@ impl ConfigEntity for Server {
             .filter(|p| p.server_id.as_deref() == Some(id))
             .map(|p| p.id.clone())
             .collect())
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self
+            .runner
+            .as_ref()
+            .and_then(|runner| runner.concurrency_limit)
+            == Some(0)
+        {
+            return Err(Error::validation_invalid_argument(
+                "runner.concurrency_limit",
+                "runner.concurrency_limit must be greater than zero",
+                None,
+                None,
+            ));
+        }
+
+        Ok(())
     }
 }
 

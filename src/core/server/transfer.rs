@@ -497,6 +497,7 @@ mod tests {
             kind: None,
             auth: None,
             env: HashMap::new(),
+            runner: None,
         })
         .expect("save server");
     }

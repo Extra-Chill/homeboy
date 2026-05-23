@@ -102,6 +102,31 @@ enum RunnerCommand {
         #[arg(long)]
         artifact_policy: Option<String>,
     },
+    /// Enable runner capability on an existing SSH server
+    Enable {
+        /// Server ID to make runner-capable
+        server_id: String,
+
+        /// Root directory where this server checks out or owns workspaces
+        #[arg(long)]
+        workspace_root: Option<String>,
+
+        /// Homeboy binary path on the server machine
+        #[arg(long)]
+        homeboy_path: Option<String>,
+
+        /// Prefer daemon-backed execution for future runner commands
+        #[arg(long)]
+        daemon: bool,
+
+        /// Maximum concurrent workflows this server should accept
+        #[arg(long)]
+        concurrency_limit: Option<usize>,
+
+        /// Artifact retention/copying policy label for future execution commands
+        #[arg(long)]
+        artifact_policy: Option<String>,
+    },
     /// List all configured runners
     List,
     /// Display runner configuration
@@ -256,6 +281,23 @@ pub fn run(
             concurrency_limit,
             artifact_policy,
         })),
+        RunnerCommand::Enable {
+            server_id,
+            workspace_root,
+            homeboy_path,
+            daemon,
+            concurrency_limit,
+            artifact_policy,
+        } => map_registry(enable(
+            &server_id,
+            RunnerEnableInput {
+                workspace_root,
+                homeboy_path,
+                daemon,
+                concurrency_limit,
+                artifact_policy,
+            },
+        )),
         RunnerCommand::List => map_registry(list()),
         RunnerCommand::Show { id } => map_registry(show(&id)),
         RunnerCommand::Set { args } => map_registry(set(args)),
@@ -334,6 +376,14 @@ struct RunnerAddInput {
     artifact_policy: Option<String>,
 }
 
+struct RunnerEnableInput {
+    workspace_root: Option<String>,
+    homeboy_path: Option<String>,
+    daemon: bool,
+    concurrency_limit: Option<usize>,
+    artifact_policy: Option<String>,
+}
+
 fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
     let json_spec = if let Some(spec) = input.json {
         spec
@@ -399,6 +449,36 @@ fn list() -> CmdResult<RunnerOutput> {
         RunnerOutput {
             command: "runner.list".to_string(),
             entities: runner::list()?,
+            ..Default::default()
+        },
+        0,
+    ))
+}
+
+fn enable(server_id: &str, input: RunnerEnableInput) -> CmdResult<RunnerOutput> {
+    let mut spec = serde_json::Map::new();
+    if let Some(workspace_root) = input.workspace_root {
+        spec.insert("workspace_root".to_string(), workspace_root.into());
+    }
+    if let Some(homeboy_path) = input.homeboy_path {
+        spec.insert("homeboy_path".to_string(), homeboy_path.into());
+    }
+    if input.daemon {
+        spec.insert("daemon".to_string(), true.into());
+    }
+    if let Some(concurrency_limit) = input.concurrency_limit {
+        spec.insert("concurrency_limit".to_string(), concurrency_limit.into());
+    }
+    if let Some(artifact_policy) = input.artifact_policy {
+        spec.insert("artifact_policy".to_string(), artifact_policy.into());
+    }
+    let runner = runner::enable_server_runner(server_id, Value::Object(spec))?;
+    Ok((
+        RunnerOutput {
+            command: "runner.enable".to_string(),
+            id: Some(runner.id.clone()),
+            entity: Some(runner),
+            updated_fields: vec!["runner".to_string()],
             ..Default::default()
         },
         0,

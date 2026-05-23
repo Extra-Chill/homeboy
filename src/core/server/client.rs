@@ -1266,6 +1266,7 @@ mod tests {
                 },
             }),
             env: HashMap::new(),
+            runner: None,
         };
 
         let client = SshClient::from_server(&server, "bastion").expect("client");
@@ -1326,6 +1327,7 @@ mod tests {
                 },
             }),
             env: HashMap::new(),
+            runner: None,
         };
 
         let client = SshClient::from_server(&server, "local").expect("client");

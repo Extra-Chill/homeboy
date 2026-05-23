@@ -630,6 +630,7 @@ mod tests {
             kind: None,
             auth: None,
             env: HashMap::new(),
+            runner: None,
         };
 
         let tunnel = open_loopback_tunnel(&server, 49100, "127.0.0.1", 49200);
