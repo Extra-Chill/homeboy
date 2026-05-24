@@ -19,11 +19,16 @@ Works with registered components (by ID) or raw filesystem paths.
 ## Options
 
 - `--conventions`: Only show discovered conventions (skip findings)
+- `--extension <ID>`: One-shot extension override for the current invocation; repeat to layer multiple extension hints
+- `--only <kind>`: Restrict findings to one or more finding kinds; repeat for multiple kinds
+- `--exclude <kind>`: Exclude one or more finding kinds; repeat for multiple kinds
 - `--baseline`: Save current audit state as baseline for future comparisons
 - `--ignore-baseline`: Skip baseline comparison even if a baseline exists
+- `--ratchet`: Auto-update the baseline when the current run improves on it
 - `--path <PATH>`: Override `local_path` for this audit run (use a workspace clone or temp checkout)
 - `--changed-since <REF>`: Restrict findings to files changed since a git ref
 - `--json-summary`: Return compact machine-readable summary (`audit.summary`) for CI wrappers
+- `--fixability`: Include automated-fixability metadata by running the refactor planner after audit completes
 
 ## Audit Pipeline
 
@@ -99,11 +104,21 @@ homeboy audit /path/to/project
 # Show only conventions (no findings)
 homeboy audit homeboy --conventions
 
+# Drill into or suppress specific finding kinds
+homeboy audit homeboy --only missing_test_file
+homeboy audit homeboy --exclude near_duplicate_file
+
 # Save baseline after a cleanup sprint
 homeboy audit my-plugin --baseline
 
+# Let a cleanup sprint ratchet an improved baseline forward
+homeboy audit my-plugin --ratchet
+
 # Audit a workspace clone instead of local_path
 homeboy audit my-plugin --path /var/lib/datamachine/workspace/my-plugin
+
+# Force a one-shot extension when the checkout has no registered component
+homeboy audit --path /path/to/worktree --extension rust
 ```
 
 ## JSON Output

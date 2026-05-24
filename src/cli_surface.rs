@@ -339,6 +339,62 @@ mod tests {
         Cli::try_parse_from(args).expect("CLI args should parse")
     }
 
+    fn command_doc(command: &str) -> String {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(root.join("docs/commands").join(format!("{command}.md")))
+            .unwrap_or_else(|error| panic!("failed to read docs for {command}: {error}"))
+    }
+
+    fn root_command(command: &str) -> clap::Command {
+        Cli::command()
+            .find_subcommand(command)
+            .unwrap_or_else(|| panic!("missing command {command}"))
+            .clone()
+    }
+
+    fn visible_child_names(command: &clap::Command) -> Vec<String> {
+        command
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+            .map(|subcommand| subcommand.get_name().to_string())
+            .collect()
+    }
+
+    fn visible_long_flags(command: &clap::Command) -> Vec<String> {
+        let mut flags: Vec<String> = command
+            .get_arguments()
+            .filter(|arg| !arg.is_hide_set())
+            .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+            .collect();
+        flags.sort();
+        flags.dedup();
+        flags
+    }
+
+    fn assert_docs_cover_subcommands(command_name: &str) {
+        let command = root_command(command_name);
+        let docs = command_doc(command_name);
+
+        for subcommand in visible_child_names(&command) {
+            assert!(
+                docs.contains(&format!("`{subcommand}")),
+                "docs/commands/{command_name}.md does not document `{subcommand}` from live help"
+            );
+        }
+    }
+
+    fn assert_docs_cover_flags(command_name: &str) {
+        let command = root_command(command_name);
+        let docs = command_doc(command_name);
+
+        for flag in visible_long_flags(&command) {
+            assert!(
+                docs.contains(&flag),
+                "docs/commands/{command_name}.md does not document `{flag}` from live help"
+            );
+        }
+    }
+
     #[test]
     fn test_current_command_surface() {
         let surface = current_command_surface();
@@ -367,6 +423,41 @@ mod tests {
 
         assert!(surface.contains_path(&["self"]));
         assert!(!surface.contains_path(&["self", "missing"]));
+    }
+
+    #[test]
+    fn docs_cover_high_use_command_surfaces() {
+        for command in ["runner", "rig"] {
+            assert_docs_cover_subcommands(command);
+        }
+
+        assert_docs_cover_flags("audit");
+    }
+
+    #[test]
+    fn documented_command_forms_parse() {
+        for args in [
+            ["homeboy", "refactor", "homeboy", "--all"].as_slice(),
+            [
+                "homeboy",
+                "report",
+                "failure-digest",
+                "--output-dir",
+                ".",
+                "--results",
+                "{\"review\":\"fail\"}",
+            ]
+            .as_slice(),
+            ["homeboy", "rig", "repair", "studio"].as_slice(),
+            ["homeboy", "runner", "doctor", "local"].as_slice(),
+            ["homeboy", "runner", "connect", "homeboy-lab"].as_slice(),
+            ["homeboy", "runner", "status", "homeboy-lab"].as_slice(),
+            ["homeboy", "runner", "disconnect", "homeboy-lab"].as_slice(),
+        ] {
+            Cli::try_parse_from(args).unwrap_or_else(|error| {
+                panic!("documented command form failed to parse: {args:?}\n{error}")
+            });
+        }
     }
 
     #[test]

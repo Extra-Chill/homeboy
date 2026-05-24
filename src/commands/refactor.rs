@@ -30,6 +30,10 @@ pub struct RefactorArgs {
     #[arg(long = "from", value_name = "SOURCE", action = clap::ArgAction::Append)]
     from: Vec<String>,
 
+    /// Compatibility alias for `--from all`
+    #[arg(long = "all")]
+    all: bool,
+
     /// Only include files changed since a git ref (branch, tag, or SHA)
     #[arg(long)]
     changed_since: Option<String>,
@@ -262,6 +266,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             &args.component_ids,
             &args.components,
             &args.from,
+            args.all,
             args.changed_since.as_deref(),
             &args.only,
             &args.exclude,
@@ -679,6 +684,7 @@ fn run_refactor_sources(
     component_ids: &[String],
     components: &[String],
     from: &[String],
+    all: bool,
     changed_since: Option<&str>,
     only: &[String],
     exclude: &[String],
@@ -689,11 +695,12 @@ fn run_refactor_sources(
     git_identity: Option<&str>,
 ) -> CmdResult<RefactorOutput> {
     let targets = resolve_top_level_targets(comp, component_ids, components)?;
+    let requested_sources = requested_refactor_sources(from, all);
     run_across_targets("sources", targets, |component_id, path| {
         run_refactor_sources_single(
             component_id,
             path,
-            from,
+            &requested_sources,
             changed_since,
             only,
             exclude,
@@ -704,6 +711,18 @@ fn run_refactor_sources(
             git_identity,
         )
     })
+}
+
+fn requested_refactor_sources(from: &[String], all: bool) -> Vec<String> {
+    let mut sources = from.to_vec();
+    if all
+        && !sources
+            .iter()
+            .any(|source| source.eq_ignore_ascii_case("all"))
+    {
+        sources.push("all".to_string());
+    }
+    sources
 }
 
 #[allow(clippy::too_many_arguments)]
