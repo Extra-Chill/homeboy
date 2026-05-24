@@ -766,6 +766,7 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
     # Write annotations sidecar JSON for CI inline comments
     if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
         echo "$json_output" | php -r '
+            ini_set("memory_limit", "-1");
             $json = json_decode(file_get_contents("php://stdin"), true);
             if (!$json || empty($json["files"])) exit;
             $componentPath = $argv[1] ?? "";
@@ -800,6 +801,7 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
     # Category is derived from the top-level PHPCS source namespace.
     if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
         echo "$json_output" | php -r '
+            ini_set("memory_limit", "-1");
             $json = json_decode(file_get_contents("php://stdin"), true);
             if (!$json || empty($json["files"])) {
                 file_put_contents($argv[2], "[]");
