@@ -43,7 +43,10 @@ pub(super) fn execute_release_plan_step(
         "version" => executor::run_version(
             context.component,
             &mut context.state,
-            &context.options.bump_type,
+            step.inputs
+                .get("bump")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&context.options.bump_type),
         )
         .map(Some),
         "release.prepare" => Ok(Some(
@@ -410,7 +413,7 @@ mod tests {
         execute_release_plan_step, release_step_is_plan_only, release_step_is_show_stopper,
         ReleaseExecutionContext,
     };
-    use crate::core::component::Component;
+    use crate::core::component::{Component, VersionTarget};
     use crate::core::plan::PlanStep;
     use crate::core::release::types::{
         ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
@@ -755,6 +758,62 @@ mod tests {
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
         assert!(changelog_path.exists());
+    }
+
+    #[test]
+    fn version_step_uses_planned_bump_input() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("plugin.php"),
+            "<?php\n/*\nPlugin Name: Fixture\nVersion: 0.6.12\n*/\n",
+        )
+        .expect("write plugin");
+        std::fs::write(
+            temp.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## Unreleased\n\n- Planned bump fixture\n",
+        )
+        .expect("write changelog");
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            changelog_target: Some("CHANGELOG.md".to_string()),
+            version_targets: Some(vec![VersionTarget {
+                file: "plugin.php".to_string(),
+                pattern: Some(r"(?:Version|version)[:=]\s+([0-9]+\.[0-9]+\.[0-9]+)".to_string()),
+            }]),
+            ..Default::default()
+        };
+        let options = ReleaseOptions {
+            bump_type: "patch".to_string(),
+            ..Default::default()
+        };
+        let mut context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+        let mut step = plan_step("version");
+        step.inputs
+            .insert("bump".to_string(), serde_json::json!("minor"));
+
+        let result = execute_release_plan_step(&step, &mut context)
+            .expect("dispatch")
+            .expect("result");
+
+        assert_eq!(result.status, ReleaseStepStatus::Success);
+        assert_eq!(
+            result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("new_version"))
+                .and_then(|value| value.as_str()),
+            Some("0.7.0")
+        );
+        let plugin = std::fs::read_to_string(temp.path().join("plugin.php")).expect("read plugin");
+        assert!(plugin.contains("Version: 0.7.0"));
     }
 
     #[test]
