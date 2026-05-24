@@ -13,6 +13,7 @@
 //! - Repeated config fields across multiple builder/options types
 
 #[rustfmt::skip]
+use super::fingerprint::FileFingerprint;
 mod field_patterns_data_contracts {
     const TYPE_NAMES: &[&str] = &["Component", "Convention", "DirectoryConvention", "FileFingerprint", "Insertion", "MapClass", "NewFile", "Project", "RawComponent"];
     const TYPE_SUFFIXES: &[&str] = &["Args", "Buckets", "CommandInput", "Detail", "Drift", "EditOp", "Entry", "Flags", "Group", "Options", "Output", "Overrides", "Report", "Result", "SeverityCounts", "Snapshot", "Status", "Summary"];
