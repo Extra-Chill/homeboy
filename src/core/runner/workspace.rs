@@ -15,6 +15,8 @@ use super::{load, Runner, RunnerKind};
 const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
     ".git/**",
+    "._*",
+    "**/._*",
     ".env",
     ".env.*",
     "*.pem",
@@ -369,7 +371,7 @@ fn materialize_snapshot_local(
     excludes: &[&str],
 ) -> Result<()> {
     let command = format!(
-        "rm -rf {dest} && mkdir -p {dest} && tar -C {src} {exclude} -cf - . | tar -C {dest} -xf -",
+        "rm -rf {dest} && mkdir -p {dest} && COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | tar -C {dest} -xf -",
         src = shell::quote_arg(&local_path.display().to_string()),
         dest = shell::quote_arg(remote_path),
         exclude = tar_exclude_args(excludes),
@@ -390,7 +392,7 @@ fn materialize_snapshot_ssh(
         dest = shell::quote_arg(remote_path),
     );
     let command = format!(
-        "tar -C {src} {exclude} -cf - . | ssh {ssh_args} {remote} {remote_command}",
+        "COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | ssh {ssh_args} {remote} {remote_command}",
         src = shell::quote_arg(&local_path.display().to_string()),
         exclude = tar_exclude_args(excludes),
         ssh_args = ssh_args(client),
@@ -559,6 +561,11 @@ mod tests {
             Path::new("/repo/target/debug/homeboy"),
             DEFAULT_EXCLUDES
         ));
+        assert!(is_excluded(
+            root,
+            Path::new("/repo/src/__tests__/._index.js"),
+            DEFAULT_EXCLUDES
+        ));
         assert!(!is_excluded(
             root,
             Path::new("/repo/src/main.rs"),
@@ -574,6 +581,7 @@ mod tests {
             fs::create_dir_all(source.path().join("src")).expect("src dir");
             fs::create_dir_all(source.path().join("target/debug")).expect("target dir");
             fs::write(source.path().join("src/main.rs"), "fn main() {}\n").expect("source file");
+            fs::write(source.path().join("src/._main.rs"), "appledouble").expect("sidecar file");
             fs::write(source.path().join(".env.local"), "SECRET=1\n").expect("secret file");
             fs::write(source.path().join("target/debug/homeboy"), "binary").expect("build file");
 
@@ -599,6 +607,9 @@ mod tests {
             assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
             assert_eq!(output.files, 1);
             assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
+            assert!(!Path::new(&output.remote_path)
+                .join("src/._main.rs")
+                .exists());
             assert!(!Path::new(&output.remote_path).join(".env.local").exists());
             assert!(!Path::new(&output.remote_path)
                 .join("target/debug/homeboy")

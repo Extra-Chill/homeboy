@@ -15,6 +15,8 @@ const DEFAULT_SYNC_EXCLUDES: &[&str] = &[
     ".homeboy/",
     ".datamachine/",
     ".DS_Store",
+    "._*",
+    "**/._*",
     ".env",
     ".env.*",
 ];
