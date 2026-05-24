@@ -146,7 +146,6 @@ pub(crate) fn analyze_wrappers(fingerprints: &[&FileFingerprint], root: &Path) -
     findings
 }
 
-#[allow(dead_code)]
 pub(in crate::core::code_audit) fn run(
     fingerprints: &[&FileFingerprint],
     root: &Path,

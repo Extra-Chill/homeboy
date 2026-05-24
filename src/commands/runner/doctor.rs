@@ -204,8 +204,8 @@ mod target {
                     )
                 })?;
                 let server = server::load(server_id)?;
-                let client =
-                    SshClient::from_server(&server, server_id)?.with_env_overlay(&runner.env);
+                let mut client = SshClient::from_server(&server, server_id)?;
+                client.env.extend(runner.env.clone());
                 Ok(RunnerTarget::Ssh {
                     id: runner_id.to_string(),
                     runner,

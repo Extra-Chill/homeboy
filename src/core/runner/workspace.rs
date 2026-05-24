@@ -435,7 +435,8 @@ fn ssh_client_for_runner(runner: &Runner) -> Result<(Server, SshClient)> {
         )
     })?;
     let server = server::load(server_id)?;
-    let client = SshClient::from_server(&server, server_id)?.with_env_overlay(&runner.env);
+    let mut client = SshClient::from_server(&server, server_id)?;
+    client.env.extend(runner.env.clone());
     Ok((server, client))
 }
 
