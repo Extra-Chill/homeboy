@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.197.4] - 2026-05-24
+
+### Changed
+- Simplify command output routing
+- Extract shared source command plumbing
+
+### Fixed
+- reduce intra-method duplicate blocks
+- derive audit detector selection from plan
+- share rig json config loaders
+- derive trace run identity from plans
+- back release plan compatibility with HomeboyPlan
+
 ## [0.197.3] - 2026-05-24
 
 ### Changed
