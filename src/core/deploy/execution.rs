@@ -252,25 +252,27 @@ fn execute_file_deploy(
     let local_path = Path::new(&component.local_path);
 
     if !local_path.exists() {
-        return ComponentDeployResult::failed(
+        let error = format!("Source file does not exist: {}", component.local_path);
+        return failed_file_deploy_result(
             component,
             base_path,
-            local_version,
-            remote_version,
-            format!("Source file does not exist: {}", component.local_path),
+            &local_version,
+            &remote_version,
+            error,
         );
     }
 
     if !local_path.is_file() {
-        return ComponentDeployResult::failed(
+        let error = format!(
+            "Component '{}' has deploy_strategy 'file' but local_path is not a file: {}",
+            component.id, component.local_path
+        );
+        return failed_file_deploy_result(
             component,
             base_path,
-            local_version,
-            remote_version,
-            format!(
-                "Component '{}' has deploy_strategy 'file' but local_path is not a file: {}",
-                component.id, component.local_path
-            ),
+            &local_version,
+            &remote_version,
+            error,
         );
     }
 
@@ -363,6 +365,22 @@ fn execute_file_deploy(
         )
         .with_remote_path(install_dir.to_string()),
     }
+}
+
+fn failed_file_deploy_result(
+    component: &Component,
+    base_path: &str,
+    local_version: &Option<String>,
+    remote_version: &Option<String>,
+    error: String,
+) -> ComponentDeployResult {
+    ComponentDeployResult::failed(
+        component,
+        base_path,
+        local_version.clone(),
+        remote_version.clone(),
+        error,
+    )
 }
 
 /// Deploy a component via artifact upload (rsync / extension override).
