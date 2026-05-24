@@ -18,7 +18,8 @@
 use std::fmt::Write as _;
 
 use homeboy::core::ci_profile::CiRunOutput;
-use homeboy::core::code_audit::{AuditCommandOutput, AuditFinding, Severity};
+use homeboy::core::code_audit::report::AuditSummaryFinding;
+use homeboy::core::code_audit::{AuditCommandOutput, AuditFinding, Finding, Severity};
 use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::{FailedTest, TestCommandOutput};
 use homeboy::core::top_n::top_n_by;
@@ -234,42 +235,44 @@ struct AuditFindingLine {
     suggestion: String,
 }
 
+impl From<&Finding> for AuditFindingLine {
+    fn from(finding: &Finding) -> Self {
+        Self {
+            file: finding.file.clone(),
+            kind: finding.kind.clone(),
+            severity: finding.severity.clone(),
+            description: finding.description.clone(),
+            suggestion: finding.suggestion.clone(),
+        }
+    }
+}
+
+impl From<&AuditSummaryFinding> for AuditFindingLine {
+    fn from(finding: &AuditSummaryFinding) -> Self {
+        Self {
+            file: finding.file.clone(),
+            kind: finding.kind.clone(),
+            severity: finding.severity.clone(),
+            description: finding.description.clone(),
+            suggestion: finding.suggestion.clone(),
+        }
+    }
+}
+
 /// Pull actionable audit finding details. PR comments should answer "where and
 /// why?" without forcing the reviewer to run the deep-dive command first.
 fn audit_findings(output: &AuditCommandOutput) -> Vec<AuditFindingLine> {
     match output {
-        AuditCommandOutput::Full { result, .. } => result
-            .findings
-            .iter()
-            .map(|f| AuditFindingLine {
-                file: f.file.clone(),
-                kind: f.kind.clone(),
-                severity: f.severity.clone(),
-                description: f.description.clone(),
-                suggestion: f.suggestion.clone(),
-            })
-            .collect(),
-        AuditCommandOutput::Compared { result, .. } => result
-            .findings
-            .iter()
-            .map(|f| AuditFindingLine {
-                file: f.file.clone(),
-                kind: f.kind.clone(),
-                severity: f.severity.clone(),
-                description: f.description.clone(),
-                suggestion: f.suggestion.clone(),
-            })
-            .collect(),
+        AuditCommandOutput::Full { result, .. } => {
+            result.findings.iter().map(AuditFindingLine::from).collect()
+        }
+        AuditCommandOutput::Compared { result, .. } => {
+            result.findings.iter().map(AuditFindingLine::from).collect()
+        }
         AuditCommandOutput::Summary(summary) => summary
             .top_findings
             .iter()
-            .map(|f| AuditFindingLine {
-                file: f.file.clone(),
-                kind: f.kind.clone(),
-                severity: f.severity.clone(),
-                description: f.description.clone(),
-                suggestion: f.suggestion.clone(),
-            })
+            .map(AuditFindingLine::from)
             .collect(),
         AuditCommandOutput::BaselineSaved { .. } => Vec::new(),
         AuditCommandOutput::Conventions { .. } => Vec::new(),

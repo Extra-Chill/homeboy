@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use homeboy::core::observation::ArtifactRecord;
@@ -153,24 +154,8 @@ fn collect_runner_download_cleanup(
 
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         plan.directory_count += usize::from(path != root);
-        for entry in fs::read_dir(path).map_err(|err| {
-            crate::core::Error::internal_io(
-                err.to_string(),
-                Some(format!(
-                    "read runner artifact cache directory {}",
-                    path.display()
-                )),
-            )
-        })? {
-            let entry = entry.map_err(|err| {
-                crate::core::Error::internal_io(
-                    err.to_string(),
-                    Some(format!(
-                        "read runner artifact cache directory {}",
-                        path.display()
-                    )),
-                )
-            })?;
+        for entry in fs::read_dir(path).map_err(|err| runner_cache_directory_error(path, err))? {
+            let entry = entry.map_err(|err| runner_cache_directory_error(path, err))?;
             collect_runner_download_cleanup(root, &entry.path(), plan)?;
         }
     } else {
@@ -179,6 +164,16 @@ fn collect_runner_download_cleanup(
     }
 
     Ok(())
+}
+
+fn runner_cache_directory_error(path: &Path, err: io::Error) -> crate::core::Error {
+    crate::core::Error::internal_io(
+        err.to_string(),
+        Some(format!(
+            "read runner artifact cache directory {}",
+            path.display()
+        )),
+    )
 }
 
 fn remove_runner_download_root(root: &Path) -> crate::core::Result<()> {

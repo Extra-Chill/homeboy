@@ -84,16 +84,14 @@ pub fn collect_exec(
         }) {
             Ok(r) => r,
             Err(e) => {
-                summary.failed += 1;
-                results.push(FleetExecProjectResult {
-                    project_id: proj.id.clone(),
-                    server_id: server_id.clone(),
-                    base_path: proj.base_path.clone(),
-                    command: command_string.clone(),
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                    ..Default::default()
-                });
+                record_failed_project_result(
+                    &mut results,
+                    &mut summary,
+                    proj,
+                    &server_id,
+                    &command_string,
+                    &e,
+                );
                 continue;
             }
         };
@@ -102,16 +100,14 @@ pub fn collect_exec(
             match SshClient::from_server(&resolve_result.server, &resolve_result.server_id) {
                 Ok(c) => c,
                 Err(e) => {
-                    summary.failed += 1;
-                    results.push(FleetExecProjectResult {
-                        project_id: proj.id.clone(),
-                        server_id: server_id.clone(),
-                        base_path: proj.base_path.clone(),
-                        command: command_string.clone(),
-                        status: "failed".to_string(),
-                        error: Some(e.to_string()),
-                        ..Default::default()
-                    });
+                    record_failed_project_result(
+                        &mut results,
+                        &mut summary,
+                        proj,
+                        &server_id,
+                        &command_string,
+                        &e,
+                    );
                     continue;
                 }
             };
@@ -163,4 +159,33 @@ fn planned_command(project: &Project, command_string: &str) -> String {
         Some(bp) => format!("cd {} && {}", shell::quote_path(bp), command_string),
         None => command_string.to_string(),
     }
+}
+
+fn failed_project_result(
+    project: &Project,
+    server_id: &Option<String>,
+    command: &str,
+    error: &crate::core::Error,
+) -> FleetExecProjectResult {
+    FleetExecProjectResult {
+        project_id: project.id.clone(),
+        server_id: server_id.clone(),
+        base_path: project.base_path.clone(),
+        command: command.to_string(),
+        status: "failed".to_string(),
+        error: Some(error.to_string()),
+        ..Default::default()
+    }
+}
+
+fn record_failed_project_result(
+    results: &mut Vec<FleetExecProjectResult>,
+    summary: &mut FleetExecSummary,
+    project: &Project,
+    server_id: &Option<String>,
+    command: &str,
+    error: &crate::core::Error,
+) {
+    summary.failed += 1;
+    results.push(failed_project_result(project, server_id, command, error));
 }
