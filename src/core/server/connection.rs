@@ -72,15 +72,7 @@ fn resolve_internal(
     // --project flag: force project resolution
     if let Some(project_id) = &args.project {
         let project = project::load(project_id)?;
-        let base_path = project.base_path.clone();
-        let (server_id, server) = resolve_from_project(&project)?;
-        return Ok((
-            "project".to_string(),
-            Some(project.id),
-            server_id,
-            server,
-            base_path,
-        ));
+        return resolve_project_context(project);
     }
 
     // --server flag: force server resolution
@@ -93,15 +85,7 @@ fn resolve_internal(
     let id = args.id.as_ref().unwrap(); // Safe: validated above
 
     if let Ok(project) = project::load(id) {
-        let base_path = project.base_path.clone();
-        let (server_id, server) = resolve_from_project(&project)?;
-        return Ok((
-            "project".to_string(),
-            Some(project.id),
-            server_id,
-            server,
-            base_path,
-        ));
+        return resolve_project_context(project);
     }
 
     if let Ok(server) = super::load(id) {
@@ -113,6 +97,20 @@ fn resolve_internal(
         "No matching project or server",
         Some(id.clone()),
         Some(vec!["project".to_string(), "server".to_string()]),
+    ))
+}
+
+fn resolve_project_context(
+    project: Project,
+) -> Result<(String, Option<String>, String, Server, Option<String>)> {
+    let base_path = project.base_path.clone();
+    let (server_id, server) = resolve_from_project(&project)?;
+    Ok((
+        "project".to_string(),
+        Some(project.id),
+        server_id,
+        server,
+        base_path,
     ))
 }
 
