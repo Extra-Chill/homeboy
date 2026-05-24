@@ -121,75 +121,213 @@ pub(crate) struct AuditWithAnalysis {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AuditExecutionPlan {
+    /// Authoritative detector-family execution contract. `run_*` helpers below
+    /// derive from this plan so callers do not maintain parallel selector state.
     pub(crate) plan: HomeboyPlan,
-    pub(crate) run_conventions: bool,
-    pub(crate) run_structural: bool,
-    pub(crate) run_duplication: bool,
-    pub(crate) run_dead_code: bool,
-    pub(crate) run_comment_hygiene: bool,
-    pub(crate) run_test_coverage: bool,
-    pub(crate) run_layer_ownership: bool,
-    pub(crate) run_test_topology: bool,
-    pub(crate) run_rust_test_wiring: bool,
-    pub(crate) run_docs: bool,
-    pub(crate) run_compiler_warnings: bool,
-    pub(crate) run_wrapper_inference: bool,
-    pub(crate) run_shadow_modules: bool,
-    pub(crate) run_field_patterns: bool,
-    pub(crate) run_facade_passthrough: bool,
-    pub(crate) run_literal_shapes: bool,
-    pub(crate) run_deprecation_age: bool,
-    pub(crate) run_dead_guard: bool,
-    pub(crate) run_requested_detectors: bool,
-    pub(crate) run_core_boundary_leaks: bool,
-    pub(crate) run_mutating_resource_access: bool,
-    pub(crate) run_redirect_validation: bool,
-    pub(crate) run_global_env_guard: bool,
-    pub(crate) run_shared_scaffolding: bool,
-    pub(crate) run_parallel_runner_setup: bool,
-    pub(crate) run_enum_dispatch_contracts: bool,
-    pub(crate) run_aggregate_construction: bool,
-    pub(crate) run_public_registry_exposure: bool,
-    pub(crate) run_config_key_usage: bool,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct DetectorFamily {
+    id: &'static str,
+    findings: &'static [AuditFinding],
+    requires_discovery: bool,
+}
+
+const DETECTOR_FAMILIES: &[DetectorFamily] = &[
+    DetectorFamily {
+        id: "conventions",
+        findings: &[
+            AuditFinding::MissingMethod,
+            AuditFinding::ExtraMethod,
+            AuditFinding::MissingRegistration,
+            AuditFinding::DifferentRegistration,
+            AuditFinding::MissingInterface,
+            AuditFinding::NamingMismatch,
+            AuditFinding::SignatureMismatch,
+            AuditFinding::NamespaceMismatch,
+            AuditFinding::MissingImport,
+        ],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "structural",
+        findings: &[
+            AuditFinding::GodFile,
+            AuditFinding::HighItemCount,
+            AuditFinding::DirectorySprawl,
+        ],
+        requires_discovery: false,
+    },
+    DetectorFamily {
+        id: "duplication",
+        findings: &[
+            AuditFinding::DuplicateFunction,
+            AuditFinding::IntraMethodDuplicate,
+            AuditFinding::NearDuplicate,
+            AuditFinding::ParallelImplementation,
+        ],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "dead_code",
+        findings: &[
+            AuditFinding::UnusedParameter,
+            AuditFinding::IgnoredParameter,
+            AuditFinding::DeadCodeMarker,
+            AuditFinding::UnreferencedExport,
+            AuditFinding::OrphanedInternal,
+        ],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "comment_hygiene",
+        findings: &[AuditFinding::TodoMarker, AuditFinding::LegacyComment],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "test_coverage",
+        findings: &[
+            AuditFinding::MissingTestFile,
+            AuditFinding::MissingTestMethod,
+            AuditFinding::OrphanedTest,
+            AuditFinding::VacuousTest,
+        ],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "layer_ownership",
+        findings: &[AuditFinding::LayerOwnershipViolation],
+        requires_discovery: false,
+    },
+    DetectorFamily {
+        id: "test_topology",
+        findings: &[
+            AuditFinding::InlineTestModule,
+            AuditFinding::ScatteredTestFile,
+            AuditFinding::VacuousTest,
+        ],
+        requires_discovery: false,
+    },
+    DetectorFamily {
+        id: "rust_test_wiring",
+        findings: &[AuditFinding::UnwiredNestedRustTest],
+        requires_discovery: false,
+    },
+    DetectorFamily {
+        id: "docs",
+        findings: &[
+            AuditFinding::BrokenDocReference,
+            AuditFinding::UndocumentedFeature,
+            AuditFinding::StaleDocReference,
+        ],
+        requires_discovery: false,
+    },
+    DetectorFamily {
+        id: "compiler_warnings",
+        findings: &[AuditFinding::CompilerWarning],
+        requires_discovery: false,
+    },
+    DetectorFamily {
+        id: "wrapper_inference",
+        findings: &[AuditFinding::MissingWrapperDeclaration],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "shadow_modules",
+        findings: &[AuditFinding::ShadowModule],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "field_patterns",
+        findings: &[AuditFinding::RepeatedFieldPattern],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "facade_passthrough",
+        findings: &[AuditFinding::FacadePassthrough],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "literal_shapes",
+        findings: &[AuditFinding::RepeatedLiteralShape],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "deprecation_age",
+        findings: &[AuditFinding::DeprecationAge],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "dead_guard",
+        findings: &[AuditFinding::DeadGuard],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "requested_detectors",
+        findings: &[
+            AuditFinding::JsonLikeExactMatch,
+            AuditFinding::ConstantBackedSlugLiteral,
+            AuditFinding::OptionScopeDrift,
+            AuditFinding::ProxyScopeDrift,
+            AuditFinding::ConfigRoundtripAsymmetry,
+        ],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "core_boundary_leaks",
+        findings: &[AuditFinding::CoreBoundaryLeak],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "mutating_resource_access",
+        findings: &[AuditFinding::MutatingResourceAccess],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "redirect_validation",
+        findings: &[AuditFinding::RedirectValidation],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "global_env_guard",
+        findings: &[AuditFinding::GlobalEnvMutationGuard],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "shared_scaffolding",
+        findings: &[AuditFinding::SharedScaffolding],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "parallel_runner_setup",
+        findings: &[AuditFinding::ParallelRunnerSetup],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "enum_dispatch_contracts",
+        findings: &[AuditFinding::RepeatedEnumDispatchContract],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "aggregate_construction",
+        findings: &[AuditFinding::DirectAggregateConstruction],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "public_registry_exposure",
+        findings: &[AuditFinding::PublicRegistryExposure],
+        requires_discovery: true,
+    },
+    DetectorFamily {
+        id: "config_key_usage",
+        findings: &[AuditFinding::WriteOnlyConfigKey],
+        requires_discovery: true,
+    },
+];
 
 impl AuditExecutionPlan {
     pub(crate) fn full() -> Self {
-        Self::with_generic_plan(
-            "full",
-            Self {
-                plan: HomeboyPlan::for_description(PlanKind::Audit, "audit"),
-                run_conventions: true,
-                run_structural: true,
-                run_duplication: true,
-                run_dead_code: true,
-                run_comment_hygiene: true,
-                run_test_coverage: true,
-                run_layer_ownership: true,
-                run_test_topology: true,
-                run_rust_test_wiring: true,
-                run_docs: true,
-                run_compiler_warnings: true,
-                run_wrapper_inference: true,
-                run_shadow_modules: true,
-                run_field_patterns: true,
-                run_facade_passthrough: true,
-                run_literal_shapes: true,
-                run_deprecation_age: true,
-                run_dead_guard: true,
-                run_requested_detectors: true,
-                run_core_boundary_leaks: true,
-                run_mutating_resource_access: true,
-                run_redirect_validation: true,
-                run_global_env_guard: true,
-                run_shared_scaffolding: true,
-                run_parallel_runner_setup: true,
-                run_enum_dispatch_contracts: true,
-                run_aggregate_construction: true,
-                run_public_registry_exposure: true,
-                run_config_key_usage: true,
-            },
-        )
+        Self::from_enabled_families("full", |family| family_enabled(&[], &[], family.findings))
     }
 
     pub(crate) fn from_filters(only: &[AuditFinding], exclude: &[AuditFinding]) -> Self {
@@ -197,304 +335,187 @@ impl AuditExecutionPlan {
             return Self::full();
         }
 
-        Self::with_generic_plan(
-            "filtered",
-            Self {
-                plan: HomeboyPlan::for_description(PlanKind::Audit, "audit"),
-                run_conventions: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[
-                        AuditFinding::MissingMethod,
-                        AuditFinding::ExtraMethod,
-                        AuditFinding::MissingRegistration,
-                        AuditFinding::DifferentRegistration,
-                        AuditFinding::MissingInterface,
-                        AuditFinding::NamingMismatch,
-                        AuditFinding::SignatureMismatch,
-                        AuditFinding::NamespaceMismatch,
-                        AuditFinding::MissingImport,
-                    ],
-                ),
-                run_structural: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[
-                        AuditFinding::GodFile,
-                        AuditFinding::HighItemCount,
-                        AuditFinding::DirectorySprawl,
-                    ],
-                ),
-                run_duplication: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[
-                        AuditFinding::DuplicateFunction,
-                        AuditFinding::IntraMethodDuplicate,
-                        AuditFinding::NearDuplicate,
-                        AuditFinding::ParallelImplementation,
-                    ],
-                ),
-                run_dead_code: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[
-                        AuditFinding::UnusedParameter,
-                        AuditFinding::IgnoredParameter,
-                        AuditFinding::DeadCodeMarker,
-                        AuditFinding::UnreferencedExport,
-                        AuditFinding::OrphanedInternal,
-                    ],
-                ),
-                run_comment_hygiene: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::TodoMarker, AuditFinding::LegacyComment],
-                ),
-                run_test_coverage: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[
-                        AuditFinding::MissingTestFile,
-                        AuditFinding::MissingTestMethod,
-                        AuditFinding::OrphanedTest,
-                        AuditFinding::VacuousTest,
-                    ],
-                ),
-                run_layer_ownership: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::LayerOwnershipViolation],
-                ),
-                run_test_topology: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[
-                        AuditFinding::InlineTestModule,
-                        AuditFinding::ScatteredTestFile,
-                        AuditFinding::VacuousTest,
-                    ],
-                ),
-                run_rust_test_wiring: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::UnwiredNestedRustTest],
-                ),
-                run_docs: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[
-                        AuditFinding::BrokenDocReference,
-                        AuditFinding::UndocumentedFeature,
-                        AuditFinding::StaleDocReference,
-                    ],
-                ),
-                run_compiler_warnings: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::CompilerWarning],
-                ),
-                run_wrapper_inference: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::MissingWrapperDeclaration],
-                ),
-                run_shadow_modules: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::ShadowModule],
-                ),
-                run_field_patterns: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::RepeatedFieldPattern],
-                ),
-                run_facade_passthrough: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::FacadePassthrough],
-                ),
-                run_literal_shapes: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::RepeatedLiteralShape],
-                ),
-                run_deprecation_age: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::DeprecationAge],
-                ),
-                run_dead_guard: Self::family_enabled(only, exclude, &[AuditFinding::DeadGuard]),
-                run_requested_detectors: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[
-                        AuditFinding::JsonLikeExactMatch,
-                        AuditFinding::ConstantBackedSlugLiteral,
-                        AuditFinding::OptionScopeDrift,
-                        AuditFinding::ProxyScopeDrift,
-                        AuditFinding::ConfigRoundtripAsymmetry,
-                    ],
-                ),
-                run_core_boundary_leaks: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::CoreBoundaryLeak],
-                ),
-                run_mutating_resource_access: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::MutatingResourceAccess],
-                ),
-                run_redirect_validation: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::RedirectValidation],
-                ),
-                run_global_env_guard: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::GlobalEnvMutationGuard],
-                ),
-                run_shared_scaffolding: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::SharedScaffolding],
-                ),
-                run_parallel_runner_setup: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::ParallelRunnerSetup],
-                ),
-                run_enum_dispatch_contracts: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::RepeatedEnumDispatchContract],
-                ),
-                run_aggregate_construction: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::DirectAggregateConstruction],
-                ),
-                run_public_registry_exposure: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::PublicRegistryExposure],
-                ),
-                run_config_key_usage: Self::family_enabled(
-                    only,
-                    exclude,
-                    &[AuditFinding::WriteOnlyConfigKey],
-                ),
-            },
-        )
-    }
-
-    fn with_generic_plan(mode: &str, mut audit: Self) -> Self {
-        audit.plan = HomeboyPlan::builder_for_description(PlanKind::Audit, "audit execution")
-            .mode(mode)
-            .steps(audit.detector_steps())
-            .summarize_disabled_as_skipped()
-            .build();
-        audit
-    }
-
-    fn detector_steps(&self) -> Vec<PlanStep> {
-        [
-            ("conventions", self.run_conventions),
-            ("structural", self.run_structural),
-            ("duplication", self.run_duplication),
-            ("dead_code", self.run_dead_code),
-            ("comment_hygiene", self.run_comment_hygiene),
-            ("test_coverage", self.run_test_coverage),
-            ("layer_ownership", self.run_layer_ownership),
-            ("test_topology", self.run_test_topology),
-            ("rust_test_wiring", self.run_rust_test_wiring),
-            ("docs", self.run_docs),
-            ("compiler_warnings", self.run_compiler_warnings),
-            ("wrapper_inference", self.run_wrapper_inference),
-            ("shadow_modules", self.run_shadow_modules),
-            ("field_patterns", self.run_field_patterns),
-            ("facade_passthrough", self.run_facade_passthrough),
-            ("literal_shapes", self.run_literal_shapes),
-            ("deprecation_age", self.run_deprecation_age),
-            ("dead_guard", self.run_dead_guard),
-            ("requested_detectors", self.run_requested_detectors),
-            ("core_boundary_leaks", self.run_core_boundary_leaks),
-            (
-                "mutating_resource_access",
-                self.run_mutating_resource_access,
-            ),
-            ("redirect_validation", self.run_redirect_validation),
-            ("global_env_guard", self.run_global_env_guard),
-            ("shared_scaffolding", self.run_shared_scaffolding),
-            ("parallel_runner_setup", self.run_parallel_runner_setup),
-            ("enum_dispatch_contracts", self.run_enum_dispatch_contracts),
-            ("aggregate_construction", self.run_aggregate_construction),
-            (
-                "public_registry_exposure",
-                self.run_public_registry_exposure,
-            ),
-            ("config_key_usage", self.run_config_key_usage),
-        ]
-        .into_iter()
-        .map(|(name, enabled)| {
-            let builder = PlanStep::builder(
-                format!("audit.{name}"),
-                format!("audit.detector.{name}"),
-                if enabled {
-                    PlanStepStatus::Ready
-                } else {
-                    PlanStepStatus::Disabled
-                },
-            )
-            .label(name.replace('_', " "));
-
-            if enabled {
-                builder
-            } else {
-                builder.skip_reason("filtered")
-            }
-            .build()
+        Self::from_enabled_families("filtered", |family| {
+            family_enabled(only, exclude, family.findings)
         })
-        .collect()
     }
 
-    fn family_enabled(
-        only: &[AuditFinding],
-        exclude: &[AuditFinding],
-        emitted: &[AuditFinding],
-    ) -> bool {
-        let requested = only.is_empty() || emitted.iter().any(|kind| only.contains(kind));
-        let fully_excluded = emitted.iter().all(|kind| exclude.contains(kind));
+    fn from_enabled_families(mode: &str, is_enabled: impl Fn(&DetectorFamily) -> bool) -> Self {
+        let steps: Vec<PlanStep> = DETECTOR_FAMILIES
+            .iter()
+            .map(|family| detector_step(family.id, is_enabled(family)))
+            .collect();
 
-        requested && !fully_excluded
+        Self {
+            plan: HomeboyPlan::builder_for_description(PlanKind::Audit, "audit execution")
+                .mode(mode)
+                .steps(steps)
+                .summarize_disabled_as_skipped()
+                .build(),
+        }
+    }
+
+    fn detector_enabled(&self, id: &str) -> bool {
+        let step_id = detector_step_id(id);
+        self.plan
+            .steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .is_some_and(|step| step.status == PlanStepStatus::Ready)
+    }
+
+    pub(crate) fn run_structural(&self) -> bool {
+        self.detector_enabled("structural")
+    }
+
+    pub(crate) fn run_duplication(&self) -> bool {
+        self.detector_enabled("duplication")
+    }
+
+    pub(crate) fn run_dead_code(&self) -> bool {
+        self.detector_enabled("dead_code")
+    }
+
+    pub(crate) fn run_comment_hygiene(&self) -> bool {
+        self.detector_enabled("comment_hygiene")
+    }
+
+    pub(crate) fn run_test_coverage(&self) -> bool {
+        self.detector_enabled("test_coverage")
+    }
+
+    pub(crate) fn run_layer_ownership(&self) -> bool {
+        self.detector_enabled("layer_ownership")
+    }
+
+    pub(crate) fn run_test_topology(&self) -> bool {
+        self.detector_enabled("test_topology")
+    }
+
+    pub(crate) fn run_rust_test_wiring(&self) -> bool {
+        self.detector_enabled("rust_test_wiring")
+    }
+
+    pub(crate) fn run_docs(&self) -> bool {
+        self.detector_enabled("docs")
+    }
+
+    pub(crate) fn run_compiler_warnings(&self) -> bool {
+        self.detector_enabled("compiler_warnings")
+    }
+
+    pub(crate) fn run_wrapper_inference(&self) -> bool {
+        self.detector_enabled("wrapper_inference")
+    }
+
+    pub(crate) fn run_shadow_modules(&self) -> bool {
+        self.detector_enabled("shadow_modules")
+    }
+
+    pub(crate) fn run_field_patterns(&self) -> bool {
+        self.detector_enabled("field_patterns")
+    }
+
+    pub(crate) fn run_facade_passthrough(&self) -> bool {
+        self.detector_enabled("facade_passthrough")
+    }
+
+    pub(crate) fn run_literal_shapes(&self) -> bool {
+        self.detector_enabled("literal_shapes")
+    }
+
+    pub(crate) fn run_deprecation_age(&self) -> bool {
+        self.detector_enabled("deprecation_age")
+    }
+
+    pub(crate) fn run_dead_guard(&self) -> bool {
+        self.detector_enabled("dead_guard")
+    }
+
+    pub(crate) fn run_requested_detectors(&self) -> bool {
+        self.detector_enabled("requested_detectors")
+    }
+
+    pub(crate) fn run_core_boundary_leaks(&self) -> bool {
+        self.detector_enabled("core_boundary_leaks")
+    }
+
+    pub(crate) fn run_mutating_resource_access(&self) -> bool {
+        self.detector_enabled("mutating_resource_access")
+    }
+
+    pub(crate) fn run_redirect_validation(&self) -> bool {
+        self.detector_enabled("redirect_validation")
+    }
+
+    pub(crate) fn run_global_env_guard(&self) -> bool {
+        self.detector_enabled("global_env_guard")
+    }
+
+    pub(crate) fn run_shared_scaffolding(&self) -> bool {
+        self.detector_enabled("shared_scaffolding")
+    }
+
+    pub(crate) fn run_parallel_runner_setup(&self) -> bool {
+        self.detector_enabled("parallel_runner_setup")
+    }
+
+    pub(crate) fn run_enum_dispatch_contracts(&self) -> bool {
+        self.detector_enabled("enum_dispatch_contracts")
+    }
+
+    pub(crate) fn run_aggregate_construction(&self) -> bool {
+        self.detector_enabled("aggregate_construction")
+    }
+
+    pub(crate) fn run_public_registry_exposure(&self) -> bool {
+        self.detector_enabled("public_registry_exposure")
+    }
+
+    pub(crate) fn run_config_key_usage(&self) -> bool {
+        self.detector_enabled("config_key_usage")
     }
 
     fn requires_discovery(&self) -> bool {
-        self.run_conventions
-            || self.run_duplication
-            || self.run_dead_code
-            || self.run_comment_hygiene
-            || self.run_test_coverage
-            || self.run_wrapper_inference
-            || self.run_shadow_modules
-            || self.run_facade_passthrough
-            || self.run_literal_shapes
-            || self.run_deprecation_age
-            || self.run_dead_guard
-            || self.run_requested_detectors
-            || self.run_core_boundary_leaks
-            || self.run_mutating_resource_access
-            || self.run_redirect_validation
-            || self.run_global_env_guard
-            || self.run_shared_scaffolding
-            || self.run_parallel_runner_setup
-            || self.run_enum_dispatch_contracts
-            || self.run_aggregate_construction
-            || self.run_public_registry_exposure
-            || self.run_config_key_usage
+        DETECTOR_FAMILIES
+            .iter()
+            .any(|family| family.requires_discovery && self.detector_enabled(family.id))
     }
+}
+
+fn detector_step_id(name: &str) -> String {
+    format!("audit.{name}")
+}
+
+fn detector_step(name: &str, enabled: bool) -> PlanStep {
+    let builder = PlanStep::builder(
+        detector_step_id(name),
+        format!("audit.detector.{name}"),
+        if enabled {
+            PlanStepStatus::Ready
+        } else {
+            PlanStepStatus::Disabled
+        },
+    )
+    .label(name.replace('_', " "));
+
+    if enabled {
+        builder
+    } else {
+        builder.skip_reason("filtered")
+    }
+    .build()
+}
+
+fn family_enabled(
+    only: &[AuditFinding],
+    exclude: &[AuditFinding],
+    emitted: &[AuditFinding],
+) -> bool {
+    let requested = only.is_empty() || emitted.iter().any(|kind| only.contains(kind));
+    let fully_excluded = emitted.iter().all(|kind| exclude.contains(kind));
+
+    requested && !fully_excluded
 }
 
 /// A cross-directory convention: a pattern that sibling subdirectories share.
@@ -805,7 +826,7 @@ fn audit_internal(
     let mut all_findings = findings::build_findings(&check_results);
 
     // Phase 4b: Structural complexity analysis (god files, high item counts)
-    let structural_findings = if plan.run_structural {
+    let structural_findings = if plan.run_structural() {
         structural::analyze_structure(root)
     } else {
         Vec::new()
@@ -835,12 +856,12 @@ fn audit_internal(
     let convention_methods =
         build_convention_method_set(&discovered_conventions, &all_fingerprints);
 
-    let duplication_findings = if plan.run_duplication {
+    let duplication_findings = if plan.run_duplication() {
         duplication::detect_duplicates(&all_fingerprints, &convention_methods)
     } else {
         Vec::new()
     };
-    let duplicate_groups = if plan.run_duplication {
+    let duplicate_groups = if plan.run_duplication() {
         duplication::detect_duplicate_groups(&all_fingerprints)
     } else {
         Vec::new()
@@ -856,7 +877,7 @@ fn audit_internal(
     }
 
     // Phase 4c2: Intra-method duplication (duplicated blocks within a single method)
-    let intra_dup_findings = if plan.run_duplication {
+    let intra_dup_findings = if plan.run_duplication() {
         duplication::detect_intra_method_duplicates(&all_fingerprints)
     } else {
         Vec::new()
@@ -871,7 +892,7 @@ fn audit_internal(
     }
 
     // Phase 4d: Near-duplicate detection (structural similarity)
-    let near_dup_findings = if plan.run_duplication {
+    let near_dup_findings = if plan.run_duplication() {
         duplication::detect_near_duplicates(&all_fingerprints)
     } else {
         Vec::new()
@@ -886,7 +907,7 @@ fn audit_internal(
     }
 
     // Phase 4d2: Parallel implementation detection (similar call patterns across files)
-    let parallel_findings = if plan.run_duplication {
+    let parallel_findings = if plan.run_duplication() {
         duplication::detect_parallel_implementations(
             &all_fingerprints,
             &convention_methods,
@@ -909,12 +930,12 @@ fn audit_internal(
     // Reference dependencies (e.g. WordPress core, plugin dependencies) are fingerprinted
     // and included in the cross-reference set so that functions called via framework hooks,
     // callbacks, or inherited methods are recognized as referenced.
-    let ref_fingerprints = if plan.run_dead_code {
+    let ref_fingerprints = if plan.run_dead_code() {
         fingerprint_reference_paths(reference_paths)
     } else {
         Vec::new()
     };
-    let component_ref_fingerprints = if plan.run_dead_code {
+    let component_ref_fingerprints = if plan.run_dead_code() {
         fingerprint_component_reference_files(root)
     } else {
         Vec::new()
@@ -923,7 +944,7 @@ fn audit_internal(
         .iter()
         .chain(component_ref_fingerprints.iter())
         .collect();
-    let dead_code_findings = if plan.run_dead_code {
+    let dead_code_findings = if plan.run_dead_code() {
         dead_code::analyze_dead_code_with_config(&all_fingerprints, &ref_fp_refs, &audit_config)
     } else {
         Vec::new()
@@ -938,7 +959,7 @@ fn audit_internal(
     }
 
     // Phase 4f: Comment hygiene detection (TODO/FIXME/HACK + stale phrasing)
-    let comment_findings = if plan.run_comment_hygiene {
+    let comment_findings = if plan.run_comment_hygiene() {
         comment_hygiene::run(&all_fingerprints)
     } else {
         Vec::new()
@@ -954,7 +975,7 @@ fn audit_internal(
 
     // Phase 4g: Structural test coverage gap detection
     // Look up the extension's test mapping config for the component.
-    if plan.run_test_coverage {
+    if plan.run_test_coverage() {
         if let Ok(comp) = component::load(component_id) {
             if let Some(extensions) = &comp.extensions {
                 for ext_id in extensions.keys() {
@@ -982,7 +1003,7 @@ fn audit_internal(
     }
 
     // Phase 4h: Architecture/layer ownership rule checks (optional config)
-    let layer_findings = if plan.run_layer_ownership {
+    let layer_findings = if plan.run_layer_ownership() {
         run_layer_ownership(root)
     } else {
         Vec::new()
@@ -997,7 +1018,7 @@ fn audit_internal(
     }
 
     // Phase 4i: Test topology checks (extension-driven classification + central policy)
-    let topology_findings = if plan.run_test_topology {
+    let topology_findings = if plan.run_test_topology() {
         test_topology::run(root)
     } else {
         Vec::new()
@@ -1014,7 +1035,7 @@ fn audit_internal(
     // Phase 4i2: Rust nested test harness wiring checks. Cargo only
     // auto-discovers direct `tests/*.rs` integration tests; nested tests need
     // explicit `#[path = "..."]` wiring from a source module.
-    let rust_test_wiring_findings = if plan.run_rust_test_wiring {
+    let rust_test_wiring_findings = if plan.run_rust_test_wiring() {
         rust_test_wiring::run(root)
     } else {
         Vec::new()
@@ -1029,7 +1050,7 @@ fn audit_internal(
     }
 
     // Phase 4j: Documentation drift detection (broken/stale references in markdown)
-    let doc_findings = if plan.run_docs {
+    let doc_findings = if plan.run_docs() {
         detect_doc_drift(root, component_id)
     } else {
         Vec::new()
@@ -1045,7 +1066,7 @@ fn audit_internal(
 
     // Phase 4l: Compiler warnings (dead code, unused imports, unused variables)
     // Runs extension-owned warning scripts and maps their output to findings.
-    let compiler_findings = if plan.run_compiler_warnings {
+    let compiler_findings = if plan.run_compiler_warnings() {
         compiler_warnings::run(root)
     } else {
         Vec::new()
@@ -1062,7 +1083,7 @@ fn audit_internal(
     // Phase 4m: Wrapper-to-implementation inference
     // Detects wrapper files missing explicit declarations of what they wrap.
     // Uses configurable call pattern tracing to infer the implementation target.
-    let wrapper_findings = if plan.run_wrapper_inference {
+    let wrapper_findings = if plan.run_wrapper_inference() {
         wrapper_inference::analyze_wrappers(&all_fingerprints, root)
     } else {
         Vec::new()
@@ -1077,7 +1098,7 @@ fn audit_internal(
     }
 
     // Phase 4n: Shadow module detection — directories that are near-copies.
-    let shadow_findings = if plan.run_shadow_modules {
+    let shadow_findings = if plan.run_shadow_modules() {
         shadow_modules::run(&all_fingerprints)
     } else {
         Vec::new()
@@ -1092,7 +1113,7 @@ fn audit_internal(
     }
 
     // Phase 4o: Repeated struct field pattern detection.
-    let field_pattern_findings = if plan.run_field_patterns {
+    let field_pattern_findings = if plan.run_field_patterns() {
         field_patterns::run(root)
     } else {
         Vec::new()
@@ -1108,7 +1129,7 @@ fn audit_internal(
 
     // Phase 4t: Facade-passthrough detection — classes whose public methods
     // mostly delegate to an inner member without adding behavior.
-    let facade_findings = if plan.run_facade_passthrough {
+    let facade_findings = if plan.run_facade_passthrough() {
         facade_passthrough::run(&all_fingerprints)
     } else {
         Vec::new()
@@ -1123,7 +1144,7 @@ fn audit_internal(
     }
 
     // Phase 4u: Repeated inline array literal shape detection.
-    let literal_shape_findings = if plan.run_literal_shapes {
+    let literal_shape_findings = if plan.run_literal_shapes() {
         repeated_literal_shape::run(&all_fingerprints)
     } else {
         Vec::new()
@@ -1138,7 +1159,7 @@ fn audit_internal(
     }
 
     // Phase 4r: Deprecation age detection
-    let deprecation_findings = if plan.run_deprecation_age {
+    let deprecation_findings = if plan.run_deprecation_age() {
         deprecation_age::run(&all_fingerprints, root)
     } else {
         Vec::new()
@@ -1155,7 +1176,7 @@ fn audit_internal(
     // Phase 4q: Dead guard detection — flag function_exists/class_exists/defined
     // guards on symbols guaranteed to exist given plugin requirements, composer
     // dependencies, and bootstrap requires.
-    let dead_guard_findings = if plan.run_dead_guard {
+    let dead_guard_findings = if plan.run_dead_guard() {
         dead_guard::run_with_config(&all_fingerprints, root, &audit_config)
     } else {
         Vec::new()
@@ -1170,7 +1191,7 @@ fn audit_internal(
     }
 
     // Phase 4t: Extension-owned requested detector rule packs.
-    let requested_findings = if plan.run_requested_detectors {
+    let requested_findings = if plan.run_requested_detectors() {
         requested_detectors::run(&all_fingerprints, &audit_config)
     } else {
         Vec::new()
@@ -1185,7 +1206,7 @@ fn audit_internal(
     }
 
     // Phase 4t1: Component-owned config-key write/accessor/read correlation.
-    let config_key_findings = if plan.run_config_key_usage {
+    let config_key_findings = if plan.run_config_key_usage() {
         config_key_usage::run(&all_fingerprints, &audit_config.config_key_usage.rules)
     } else {
         Vec::new()
@@ -1200,7 +1221,7 @@ fn audit_internal(
     }
 
     // Phase 4t2: Configured core-boundary ecosystem leak detection.
-    let core_boundary_findings = if plan.run_core_boundary_leaks {
+    let core_boundary_findings = if plan.run_core_boundary_leaks() {
         core_boundary_leak::run(&all_fingerprints, &audit_config.core_boundary_leaks)
     } else {
         Vec::new()
@@ -1215,7 +1236,7 @@ fn audit_internal(
     }
 
     // Phase 4t3: Configured mutating handler/resource access detection.
-    let mutating_access_findings = if plan.run_mutating_resource_access {
+    let mutating_access_findings = if plan.run_mutating_resource_access() {
         mutating_resource_access::run(&all_fingerprints, &audit_config.mutating_resource_access)
     } else {
         Vec::new()
@@ -1230,7 +1251,7 @@ fn audit_internal(
     }
 
     // Phase 4t4: Configured redirect-destination dominance checks.
-    let redirect_validation_findings = if plan.run_redirect_validation {
+    let redirect_validation_findings = if plan.run_redirect_validation() {
         redirect_validation::run(&all_fingerprints, &audit_config.redirect_validation)
     } else {
         Vec::new()
@@ -1245,7 +1266,7 @@ fn audit_internal(
     }
 
     // Phase 4v: Process-global environment mutation guard consistency in tests.
-    let env_guard_findings = if plan.run_global_env_guard {
+    let env_guard_findings = if plan.run_global_env_guard() {
         global_env_guard::run(&all_fingerprints)
     } else {
         Vec::new()
@@ -1261,7 +1282,7 @@ fn audit_internal(
 
     // Phase 4s: Shared scaffolding detection — groups of classes sharing the
     // same method-shape AND high body similarity, candidates for a shared base.
-    let scaffolding_findings = if plan.run_shared_scaffolding {
+    let scaffolding_findings = if plan.run_shared_scaffolding() {
         shared_scaffolding::run(&all_fingerprints)
     } else {
         Vec::new()
@@ -1277,7 +1298,7 @@ fn audit_internal(
 
     // Phase 4w: Parallel runner setup detection — command-family files that
     // assemble the same generic execution contract independently.
-    let parallel_runner_findings = if plan.run_parallel_runner_setup {
+    let parallel_runner_findings = if plan.run_parallel_runner_setup() {
         parallel_runner_setup::run(&all_fingerprints)
     } else {
         Vec::new()
@@ -1292,7 +1313,7 @@ fn audit_internal(
     }
 
     // Phase 4w: Repeated enum-dispatch contract detection.
-    let enum_dispatch_findings = if plan.run_enum_dispatch_contracts {
+    let enum_dispatch_findings = if plan.run_enum_dispatch_contracts() {
         enum_dispatch_contracts::run(root)
     } else {
         Vec::new()
@@ -1307,7 +1328,7 @@ fn audit_internal(
     }
 
     // Phase 4x: Direct aggregate construction despite canonical construction seams.
-    let aggregate_construction_findings = if plan.run_aggregate_construction {
+    let aggregate_construction_findings = if plan.run_aggregate_construction() {
         aggregate_construction::run(&all_fingerprints)
     } else {
         Vec::new()
@@ -1323,7 +1344,7 @@ fn audit_internal(
 
     // Phase 4y: Public metadata routes returning raw registry/config getters
     // while a permission-aware resolver/helper exists in the same area.
-    let public_registry_findings = if plan.run_public_registry_exposure {
+    let public_registry_findings = if plan.run_public_registry_exposure() {
         public_registry_exposure::run(&all_fingerprints, &audit_config.public_registry_exposure)
     } else {
         Vec::new()
@@ -1489,7 +1510,7 @@ fn audit_root_only(
 ) -> CodeAuditResult {
     let mut findings = Vec::new();
 
-    if plan.run_structural {
+    if plan.run_structural() {
         let structural_findings = structural::analyze_structure(root);
         if !structural_findings.is_empty() {
             log_status!(
@@ -1501,7 +1522,7 @@ fn audit_root_only(
         }
     }
 
-    if plan.run_layer_ownership {
+    if plan.run_layer_ownership() {
         let layer_findings = run_layer_ownership(root);
         if !layer_findings.is_empty() {
             log_status!(
@@ -1513,7 +1534,7 @@ fn audit_root_only(
         }
     }
 
-    if plan.run_test_topology {
+    if plan.run_test_topology() {
         let topology_findings = test_topology::run(root);
         if !topology_findings.is_empty() {
             log_status!(
@@ -1525,7 +1546,7 @@ fn audit_root_only(
         }
     }
 
-    if plan.run_rust_test_wiring {
+    if plan.run_rust_test_wiring() {
         let rust_test_wiring_findings = rust_test_wiring::run(root);
         if !rust_test_wiring_findings.is_empty() {
             log_status!(
@@ -1537,7 +1558,7 @@ fn audit_root_only(
         }
     }
 
-    if plan.run_docs {
+    if plan.run_docs() {
         let doc_findings = detect_doc_drift(root, component_id);
         if !doc_findings.is_empty() {
             log_status!(
@@ -1549,7 +1570,7 @@ fn audit_root_only(
         }
     }
 
-    if plan.run_compiler_warnings {
+    if plan.run_compiler_warnings() {
         let compiler_findings = compiler_warnings::run(root);
         if !compiler_findings.is_empty() {
             log_status!(
@@ -1561,7 +1582,7 @@ fn audit_root_only(
         }
     }
 
-    if plan.run_field_patterns {
+    if plan.run_field_patterns() {
         let field_pattern_findings = field_patterns::run(root);
         if !field_pattern_findings.is_empty() {
             log_status!(
@@ -1950,11 +1971,11 @@ mod tests {
         let plan = AuditExecutionPlan::from_filters(&[AuditFinding::VacuousTest], &[]);
 
         assert!(
-            plan.run_test_coverage,
+            plan.run_test_coverage(),
             "coverage detector also emits vacuous_test for mapped tests"
         );
         assert!(
-            plan.run_test_topology,
+            plan.run_test_topology(),
             "test topology/test quality detector emits standalone vacuous_test findings"
         );
     }
