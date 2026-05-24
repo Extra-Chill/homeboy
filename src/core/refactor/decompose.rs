@@ -33,7 +33,7 @@ pub struct DecomposeAuditImpact {
     pub likely_findings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecomposeGroup {
     pub name: String,
     pub suggested_target: String,
@@ -131,9 +131,24 @@ fn decompose_group_step(group: &DecomposeGroup) -> PlanStep {
         PlanValues::new()
             .string("group", group.name.clone())
             .string("suggested_target", group.suggested_target.clone())
-            .json("item_names", &group.item_names),
+            .json("item_names", &group.item_names)
+            .json("group_payload", group),
     )
     .build()
+}
+
+impl DecomposePlan {
+    pub fn planned_groups(&self) -> Vec<DecomposeGroup> {
+        decompose_groups_from_plan(&self.plan)
+    }
+}
+
+fn decompose_groups_from_plan(plan: &HomeboyPlan) -> Vec<DecomposeGroup> {
+    plan.steps
+        .iter()
+        .filter_map(|step| step.inputs.get("group_payload"))
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect()
 }
 
 pub fn apply_plan(plan: &DecomposePlan, root: &Path, write: bool) -> Result<Vec<MoveResult>> {
@@ -177,7 +192,7 @@ fn generate_source_module_index(plan: &DecomposePlan, root: &Path) {
 
     // Build submodule entries from the plan groups
     let submodules: Vec<super::move_items::ModuleIndexEntry> = plan
-        .groups
+        .planned_groups()
         .iter()
         .filter_map(|group| {
             // Derive module name from the target path
@@ -254,7 +269,7 @@ fn remove_conflicting_use_imports(content: &str, submodule_names: &[&str]) -> St
 pub fn apply_plan_skeletons(plan: &DecomposePlan, root: &Path) -> Result<Vec<String>> {
     let mut created = Vec::new();
 
-    for group in &plan.groups {
+    for group in plan.planned_groups() {
         let path = root.join(&group.suggested_target);
         if path.exists() {
             continue;
@@ -281,7 +296,7 @@ pub fn apply_plan_skeletons(plan: &DecomposePlan, root: &Path) -> Result<Vec<Str
                 Some(format!("write {}", path.display())),
             )
         })?;
-        created.push(group.suggested_target.clone());
+        created.push(group.suggested_target);
     }
 
     Ok(created)
@@ -290,7 +305,7 @@ pub fn apply_plan_skeletons(plan: &DecomposePlan, root: &Path) -> Result<Vec<Str
 fn run_moves(plan: &DecomposePlan, root: &Path, write: bool) -> Result<Vec<MoveResult>> {
     let mut results = Vec::new();
 
-    for group in &plan.groups {
+    for group in plan.planned_groups() {
         let mut seen = HashSet::new();
         let deduped_item_names: Vec<&str> = group
             .item_names
@@ -1784,6 +1799,32 @@ mod tests {
             source: String::new(),
             visibility: String::new(),
         }
+    }
+
+    #[test]
+    fn planned_groups_are_projected_from_homeboy_plan_steps() {
+        let groups = vec![DecomposeGroup {
+            name: "helpers".to_string(),
+            suggested_target: "src/helpers.rs".to_string(),
+            item_names: vec!["format_label".to_string()],
+        }];
+        let plan = DecomposePlan {
+            plan: decompose_homeboy_plan("src/lib.rs", "grouped", 1, &groups, &[]),
+            file: "src/lib.rs".to_string(),
+            strategy: "grouped".to_string(),
+            total_items: 1,
+            groups: groups.clone(),
+            projected_audit_impact: DecomposeAuditImpact {
+                estimated_new_files: 1,
+                estimated_new_test_files: 0,
+                recommended_test_files: Vec::new(),
+                likely_findings: Vec::new(),
+            },
+            checklist: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        assert_eq!(plan.planned_groups(), groups);
     }
 
     #[test]

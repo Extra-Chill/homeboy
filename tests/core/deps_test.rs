@@ -181,6 +181,8 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
     let plan = deps::stack_plan_from_components("chubes4/html-to-blocks-converter", &components).unwrap();
 
     assert_eq!(plan.step_count, 2);
+    assert_eq!(plan.step_count, plan.plan.steps.len());
+    assert_eq!(plan.planned_steps(), plan.steps);
     assert_eq!(plan.steps[0].downstream, "block-format-bridge");
     assert_eq!(plan.steps[0].package, "chubes4/html-to-blocks-converter");
     assert_eq!(

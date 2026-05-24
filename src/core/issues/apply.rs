@@ -19,9 +19,10 @@ use super::tracker::{CloseReason, Tracker};
 /// long as we produced a result; callers inspect `failed_count` to decide
 /// whether to exit non-zero.
 pub fn apply_plan(plan: ReconcilePlan, tracker: &dyn Tracker) -> Result<ReconcileResult> {
-    let mut executions: Vec<ReconcileExecution> = Vec::with_capacity(plan.actions.len());
+    let actions = plan.planned_actions();
+    let mut executions: Vec<ReconcileExecution> = Vec::with_capacity(actions.len());
 
-    for action in &plan.actions {
+    for action in &actions {
         let exec = execute_action(action, tracker);
         executions.push(exec);
     }
