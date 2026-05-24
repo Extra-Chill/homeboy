@@ -102,10 +102,38 @@ JSON
 
 SOURCE_REPORT="$(extract_fix_report_from_output "${OUTPUT_DIR}")"
 
+REAL_REF_OUTPUT_DIR="${TMP_DIR}/real-refactor-output"
+mkdir -p "${REAL_REF_OUTPUT_DIR}"
+cat > "${REAL_REF_OUTPUT_DIR}/fix.json" <<'JSON'
+{
+  "success": false,
+  "data": {
+    "applied": true,
+    "changed_files": [
+      "src/core/code_audit/detectors/field_patterns.rs"
+    ],
+    "collected_edits": [
+      {
+        "action": "insert",
+        "file": "src/core/code_audit/detectors/field_patterns.rs",
+        "rule_id": "missingimport",
+        "source": "audit"
+      }
+    ],
+    "command": "refactor.sources",
+    "files_modified": 1
+  }
+}
+JSON
+
+REAL_REF_REPORT="$(extract_fix_report_from_output "${REAL_REF_OUTPUT_DIR}")"
+assert_contains "${REAL_REF_REPORT}" $'missingimport\t1\tsrc/core/code_audit/detectors/field_patterns.rs' "report extractor handles refactor.sources collected edits"
+
 BODY_CAPTURE="${TMP_DIR}/source-create.md"
 export BODY_CAPTURE
 export HOMEBOY_PR_MODE="create"
 export AUTOFIX_FILE_COUNT="2"
+export AUTOFIX_TOTAL_FIXES="1"
 export AUTOFIX_CHANGED_FILES=$'docs/architecture/ci-results-contract.md\nhomeboy.json'
 export AUTOFIX_REPORT="${SOURCE_REPORT}"
 
@@ -116,7 +144,9 @@ assert_contains "${SOURCE_BODY}" 'Fixed **1** `broken_doc_reference` finding.' "
 assert_contains "${SOURCE_BODY}" 'Changed **2** files.' "source summary includes changed file count"
 assert_contains "${SOURCE_BODY}" '| `broken_doc_reference` | 1 | `docs/architecture/ci-results-contract.md` |' "source table includes category/count/file"
 assert_contains "${SOURCE_BODY}" '- `homeboy.json` audit baseline metadata was refreshed.' "source report separates baseline churn"
+assert_contains "${SOURCE_BODY}" 'Autofix branch pushed; use the PR branch checks as merge verification.' "verification points to PR branch checks"
 assert_contains "${SOURCE_BODY}" '- Workflow run: https://github.com/Extra-Chill/homeboy-action/actions/runs/12345' "verification includes workflow run"
+assert_not_contains "${SOURCE_BODY}" 'Opened immediately after autofix without rerunning quality gates.' "verification avoids stale no-gates wording"
 assert_not_contains "${SOURCE_BODY}" 'file(s) fixed via' "source report omits generic old summary"
 
 FALLBACK_OUTPUT_DIR="${TMP_DIR}/fallback-output"
@@ -140,6 +170,7 @@ BODY_CAPTURE="${TMP_DIR}/fallback-create.md"
 export BODY_CAPTURE
 export HOMEBOY_PR_MODE="create"
 export AUTOFIX_FILE_COUNT="2"
+export AUTOFIX_TOTAL_FIXES="2"
 export AUTOFIX_CHANGED_FILES=$'src/core/code_audit/duplication.rs\nsrc/core/code_audit/requested_detectors.rs'
 export AUTOFIX_REPORT="${FALLBACK_REPORT}"
 
@@ -152,9 +183,36 @@ assert_contains "${FALLBACK_BODY}" '| `source_change` | 2 | `src/core/code_audit
 assert_not_contains "${FALLBACK_BODY}" 'No source fixes were reported by the autofix output.' "fallback avoids false no-source-fixes summary"
 assert_not_contains "${FALLBACK_BODY}" 'changed outside the reported source-fix set' "fallback does not misclassify source files as other changes"
 
+BODY_CAPTURE="${TMP_DIR}/synthesized-create.md"
+export BODY_CAPTURE
+export AUTOFIX_FILE_COUNT="1"
+export AUTOFIX_TOTAL_FIXES="1"
+export AUTOFIX_CHANGED_FILES="src/core/code_audit/detectors/field_patterns.rs"
+export AUTOFIX_REPORT=""
+
+bash "${ROOT}/scripts/autofix/open-autofix-pr.sh" >/tmp/homeboy-action-test-synthesized.log
+SYNTHESIZED_BODY="$(<"${BODY_CAPTURE}")"
+
+assert_contains "${SYNTHESIZED_BODY}" 'Applied autofix changes to **1** source file.' "synthesized report treats transported-empty fix as source change"
+assert_contains "${SYNTHESIZED_BODY}" '| `source_change` | 1 | `src/core/code_audit/detectors/field_patterns.rs` |' "synthesized report includes changed source file"
+assert_not_contains "${SYNTHESIZED_BODY}" 'changed outside the reported source-fix set' "synthesized report avoids unsafe other-change wording"
+
+BODY_CAPTURE="${TMP_DIR}/unsafe-create.md"
+export BODY_CAPTURE
+export AUTOFIX_FILE_COUNT="1"
+export AUTOFIX_TOTAL_FIXES="0"
+export AUTOFIX_CHANGED_FILES="src/core/code_audit/detectors/field_patterns.rs"
+export AUTOFIX_REPORT=""
+
+UNSAFE_LOG="$(bash "${ROOT}/scripts/autofix/open-autofix-pr.sh")"
+
+assert_contains "${UNSAFE_LOG}" 'Skipping unsafe autofix PR: changed files are not covered by the autofix report' "unsafe unreported source changes skip PR creation"
+assert_contains "$(<"${GITHUB_OUTPUT}")" 'unsafe-unreported-changes=true' "unsafe skip writes output flag"
+
 BODY_CAPTURE="${TMP_DIR}/baseline-create.md"
 export BODY_CAPTURE
 export AUTOFIX_FILE_COUNT="1"
+export AUTOFIX_TOTAL_FIXES="0"
 export AUTOFIX_CHANGED_FILES="homeboy.json"
 export AUTOFIX_REPORT=""
 
@@ -170,6 +228,7 @@ BODY_CAPTURE="${TMP_DIR}/source-edit.md"
 export BODY_CAPTURE
 export HOMEBOY_PR_MODE="find-existing"
 export AUTOFIX_FILE_COUNT="1"
+export AUTOFIX_TOTAL_FIXES="1"
 export AUTOFIX_CHANGED_FILES="docs/architecture/ci-results-contract.md"
 export AUTOFIX_REPORT="${SOURCE_REPORT}"
 

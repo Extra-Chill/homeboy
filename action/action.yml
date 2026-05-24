@@ -607,6 +607,7 @@ runs:
         COMPONENT_NAME: ${{ inputs.component }}
         AUTOFIX_BRANCH: ${{ steps.autofix-prepare-nonpr.outputs.autofix-branch }}
         AUTOFIX_FILE_COUNT: ${{ steps.autofix-prepare-nonpr.outputs.autofix-file-count }}
+        AUTOFIX_TOTAL_FIXES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-total-fixes }}
         AUTOFIX_FIX_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-fix-types }}
         AUTOFIX_FINDING_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-finding-types }}
         AUTOFIX_CHANGED_FILES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-changed-files }}

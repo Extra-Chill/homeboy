@@ -245,7 +245,7 @@ extract_fix_report_from_output() {
       count: length,
       files: ([.[].file] | unique | sort)
     }) |
-    sort_by(-.count, .cat) |
+    sort_by([-.count, .cat]) |
     .[] |
     [.cat, (.count | tostring), (.files | join(", "))] | @tsv
   ' ${json_files} 2>/dev/null || true
@@ -281,6 +281,86 @@ autofix_other_files() {
   changed="$(comm -23 "${tmp_changed}" "${tmp_source}" || true)"
   rm -f "${tmp_changed}" "${tmp_source}"
   printf '%s\n' "${changed}" | sed '/^[[:space:]]*$/d'
+}
+
+autofix_is_metadata_change() {
+  local file="$1"
+  case "${file}" in
+    homeboy.json|*.json|*.yml|*.yaml|*.toml|*.lock)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+autofix_review_files() {
+  local workspace="${1:-$(resolve_workspace)}"
+  local changed drift_files file
+
+  changed="$(autofix_changed_files_list)"
+  [ -n "${changed}" ] || return 0
+  drift_files="$(drift_file_paths "${workspace}" | sort -u)"
+
+  while IFS= read -r file; do
+    [ -n "${file}" ] || continue
+    if printf '%s\n' "${drift_files}" | grep -Fx -- "${file}" >/dev/null 2>&1; then
+      continue
+    fi
+    if autofix_is_metadata_change "${file}"; then
+      continue
+    fi
+    printf '%s\n' "${file}"
+  done <<< "${changed}"
+}
+
+autofix_unreported_review_files() {
+  local workspace="${1:-$(resolve_workspace)}"
+  local other drift_files file
+
+  other="$(autofix_other_files)"
+  [ -n "${other}" ] || return 0
+  drift_files="$(drift_file_paths "${workspace}" | sort -u)"
+
+  while IFS= read -r file; do
+    [ -n "${file}" ] || continue
+    if printf '%s\n' "${drift_files}" | grep -Fx -- "${file}" >/dev/null 2>&1; then
+      continue
+    fi
+    if autofix_is_metadata_change "${file}"; then
+      continue
+    fi
+    printf '%s\n' "${file}"
+  done <<< "${other}"
+}
+
+autofix_synthesize_source_report() {
+  local workspace="${1:-$(resolve_workspace)}"
+  local files count joined
+
+  files="$(autofix_review_files "${workspace}")"
+  [ -n "${files}" ] || return 0
+  count="$(printf '%s\n' "${files}" | sed '/^[[:space:]]*$/d' | wc -l | xargs)"
+  joined="$(printf '%s\n' "${files}" | awk 'NR == 1 { out = $0; next } { out = out ", " $0 } END { print out }')"
+  printf 'source_change\t%s\t%s\n' "${count}" "${joined}"
+}
+
+autofix_prepare_pr_report() {
+  local workspace="${1:-$(resolve_workspace)}"
+  local total_fixes="${AUTOFIX_TOTAL_FIXES:-0}"
+
+  if [ -z "${AUTOFIX_REPORT:-}" ] && [ "${total_fixes}" != "0" ]; then
+    AUTOFIX_REPORT="$(autofix_synthesize_source_report "${workspace}")"
+  fi
+}
+
+autofix_pr_has_unsafe_unreported_changes() {
+  local workspace="${1:-$(resolve_workspace)}"
+  local unreported
+
+  unreported="$(autofix_unreported_review_files "${workspace}")"
+  [ -n "${unreported}" ]
 }
 
 autofix_count_report_rows() {
@@ -468,7 +548,7 @@ build_autofix_pr_body() {
   fi
 
   printf '## Verification\n'
-  printf -- '- Opened immediately after autofix without rerunning quality gates.\n'
+  printf -- '- Autofix branch pushed; use the PR branch checks as merge verification.\n'
   printf -- '- Workflow run: %s\n\n' "${run_url}"
 
   printf '## Context\n'

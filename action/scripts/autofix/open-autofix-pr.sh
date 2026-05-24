@@ -28,6 +28,15 @@ TITLE="chore(ci): autofix ${COMP_ID} from ${BASE_BRANCH}"
 BODY_FILE="$(mktemp)"
 trap 'rm -f "${BODY_FILE}"' EXIT
 
+autofix_prepare_pr_report "${WORKSPACE}"
+if autofix_pr_has_unsafe_unreported_changes "${WORKSPACE}"; then
+  echo "Skipping unsafe autofix PR: changed files are not covered by the autofix report"
+  autofix_unreported_review_files "${WORKSPACE}" | sed 's/^/- /'
+  echo "created=false" >> "${GITHUB_OUTPUT}"
+  echo "unsafe-unreported-changes=true" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
 build_autofix_pr_body "${RUN_URL}" "${AUTOFIX_BRANCH}" "${BASE_BRANCH}" > "${BODY_FILE}"
 
 if [ -n "${PR_OPEN_POLICY:-}" ]; then

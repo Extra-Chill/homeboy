@@ -294,6 +294,7 @@ fi
 echo "committed=true" >> "${GITHUB_OUTPUT}"
 echo "autofix-branch=${AUTOFIX_BRANCH}" >> "${GITHUB_OUTPUT}"
 echo "autofix-file-count=${AUTOFIX_FILE_COUNT}" >> "${GITHUB_OUTPUT}"
+echo "autofix-total-fixes=${AUTOFIX_TOTAL_FIXES:-0}" >> "${GITHUB_OUTPUT}"
 echo "autofix-fix-types=${AUTOFIX_FIX_TYPES:-}" >> "${GITHUB_OUTPUT}"
 echo "autofix-finding-types=${AUTOFIX_FINDING_TYPES:-}" >> "${GITHUB_OUTPUT}"
 write_multiline_output "autofix-changed-files" "${AUTOFIX_CHANGED_FILES:-}"
