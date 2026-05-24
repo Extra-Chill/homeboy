@@ -1,7 +1,7 @@
 use crate::core::component::{self, Component, DependencyStackEdge};
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
 use crate::core::{Error, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
@@ -31,7 +31,7 @@ pub struct DependencyStackPlan {
     pub steps: Vec<DependencyStackPlanStep>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencyStackPlanStep {
     pub sequence: usize,
     pub declaring_component_id: String,
@@ -100,7 +100,7 @@ pub fn stack_apply(upstream: &str, dry_run: bool) -> Result<DependencyStackApply
     let plan = stack_plan(upstream)?;
     let mut steps = Vec::new();
 
-    for step in &plan.steps {
+    for step in plan.planned_steps() {
         let mut command_results = Vec::new();
         command_results.push(run_stack_command(
             "update",
@@ -212,13 +212,22 @@ impl DependencyStackPlan {
             .steps(steps.iter().map(stack_step))
             .summarize()
             .build();
+        let steps = stack_steps_from_plan(&plan);
 
         Self {
+            step_count: plan
+                .summary
+                .as_ref()
+                .map(|summary| summary.total_steps)
+                .unwrap_or_else(|| plan.steps.len()),
             plan,
             upstream,
-            step_count: steps.len(),
             steps,
         }
+    }
+
+    pub fn planned_steps(&self) -> Vec<DependencyStackPlanStep> {
+        stack_steps_from_plan(&self.plan)
     }
 }
 
@@ -242,9 +251,20 @@ fn stack_step(step: &DependencyStackPlanStep) -> PlanStep {
             .string("downstream", step.downstream.clone())
             .string("downstream_path", step.downstream_path.clone())
             .string("package", step.package.clone())
-            .string("update_command", step.update_command.clone()),
+            .string("update_command", step.update_command.clone())
+            .json("post_update", &step.post_update)
+            .json("test", &step.test)
+            .json("stack_step", step),
     )
     .build()
+}
+
+fn stack_steps_from_plan(plan: &HomeboyPlan) -> Vec<DependencyStackPlanStep> {
+    plan.steps
+        .iter()
+        .filter_map(|step| step.inputs.get("stack_step"))
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect()
 }
 
 fn edge_status(component: &Component, edge: &DependencyStackEdge) -> DependencyStackEdgeStatus {

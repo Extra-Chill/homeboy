@@ -184,15 +184,20 @@ impl ReconcilePlan {
             .steps(actions.iter().enumerate().map(action_step))
             .summarize()
             .build();
+        let actions = actions_from_plan(&plan);
 
         Self { plan, actions }
+    }
+
+    pub fn planned_actions(&self) -> Vec<ReconcileAction> {
+        actions_from_plan(&self.plan)
     }
 
     /// Count actions by variant (file_new, update, etc.). Used by the CLI
     /// to render a one-line summary.
     pub fn counts(&self) -> ReconcilePlanCounts {
         let mut c = ReconcilePlanCounts::default();
-        for action in &self.actions {
+        for action in self.planned_actions() {
             match action {
                 ReconcileAction::FileNew { .. } => c.file_new += 1,
                 ReconcileAction::Update { .. } => c.update += 1,
@@ -206,10 +211,18 @@ impl ReconcilePlan {
     }
 
     pub fn is_noop(&self) -> bool {
-        self.actions
-            .iter()
+        self.planned_actions()
+            .into_iter()
             .all(|a| matches!(a, ReconcileAction::Skip { .. }))
     }
+}
+
+fn actions_from_plan(plan: &HomeboyPlan) -> Vec<ReconcileAction> {
+    plan.steps
+        .iter()
+        .filter_map(|step| step.inputs.get("action"))
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect()
 }
 
 fn action_step((index, action): (usize, &ReconcileAction)) -> PlanStep {
@@ -293,4 +306,41 @@ pub struct ReconcilePlanCounts {
     pub close: usize,
     pub close_duplicate: usize,
     pub skip: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{action_kind, ReconcileAction, ReconcilePlan, ReconcileSkipReason};
+
+    #[test]
+    fn planned_actions_are_projected_from_homeboy_plan_steps() {
+        let actions = vec![
+            ReconcileAction::FileNew {
+                command: "audit".to_string(),
+                component_id: "homeboy".to_string(),
+                category: "missing_method".to_string(),
+                title: "audit: missing method".to_string(),
+                body: "body".to_string(),
+                labels: vec!["audit".to_string()],
+                count: 2,
+            },
+            ReconcileAction::Skip {
+                category: "resolved".to_string(),
+                component_id: "homeboy".to_string(),
+                reason: ReconcileSkipReason::NoFindingsNoIssue,
+            },
+        ];
+
+        let plan = ReconcilePlan::new("homeboy", actions.clone());
+
+        assert_eq!(plan.actions.len(), 2);
+        assert_eq!(plan.planned_actions().len(), 2);
+        assert_eq!(
+            action_kind(&plan.planned_actions()[0]),
+            action_kind(&actions[0])
+        );
+        assert_eq!(plan.counts().file_new, 1);
+        assert_eq!(plan.counts().skip, 1);
+        assert!(!plan.is_noop());
+    }
 }
