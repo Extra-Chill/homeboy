@@ -90,6 +90,7 @@ struct ObservationBundle {
 pub struct ObservationBundleImportSummary {
     pub runs: usize,
     pub artifacts: usize,
+    pub artifact_metadata_only: usize,
     pub trace_spans: usize,
     pub findings: usize,
     pub test_failures: usize,
@@ -173,8 +174,16 @@ pub(super) fn import_runs(args: RunsImportArgs) -> CmdResult<RunsOutput> {
     for run in &bundle.runs {
         store.import_run(run)?;
     }
+    let mut artifacts = 0usize;
+    let mut artifact_metadata_only = 0usize;
     for artifact in &bundle.artifacts {
-        store.import_artifact(artifact)?;
+        let artifact = imported_artifact_record(artifact);
+        if artifact.artifact_type == "metadata-only" {
+            artifact_metadata_only += 1;
+        } else {
+            artifacts += 1;
+        }
+        store.import_artifact(&artifact)?;
     }
     for span in &bundle.trace_spans {
         store.import_trace_span(span)?;
@@ -189,7 +198,8 @@ pub(super) fn import_runs(args: RunsImportArgs) -> CmdResult<RunsOutput> {
             input: input.to_string_lossy().to_string(),
             imported: ObservationBundleImportSummary {
                 runs: bundle.runs.len(),
-                artifacts: bundle.artifacts.len(),
+                artifacts,
+                artifact_metadata_only,
                 trace_spans: bundle.trace_spans.len(),
                 findings: bundle.findings.len(),
                 test_failures: bundle.test_failures.len(),
@@ -197,6 +207,23 @@ pub(super) fn import_runs(args: RunsImportArgs) -> CmdResult<RunsOutput> {
         }),
         0,
     ))
+}
+
+fn imported_artifact_record(artifact: &ArtifactRecord) -> ArtifactRecord {
+    if !matches!(artifact.artifact_type.as_str(), "file" | "directory") {
+        return artifact.clone();
+    }
+    let mut imported = artifact.clone();
+    imported.artifact_type = "metadata-only".to_string();
+    imported.path = portable_artifact_label(&artifact.path, &artifact.id);
+    imported
+}
+
+fn portable_artifact_label(path: &str, fallback: &str) -> String {
+    path.rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
 }
 
 fn import_via_gh_actions(args: RunsImportArgs) -> CmdResult<RunsOutput> {

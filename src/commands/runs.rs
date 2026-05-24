@@ -376,6 +376,17 @@ fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
         if remote_artifact::is_remote_artifact(&artifact) {
             return remote_artifact::get(artifact, args.output);
         }
+        if artifact.artifact_type == "metadata-only" {
+            return Err(Error::validation_invalid_argument(
+                "artifact_id",
+                format!(
+                    "artifact {} was imported as metadata only; artifact bytes are not available in this bundle",
+                    artifact.id
+                ),
+                Some(artifact.id),
+                None,
+            ));
+        }
         return Err(Error::validation_invalid_argument(
             "artifact_id",
             format!(
@@ -388,6 +399,18 @@ fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
     }
 
     let source = PathBuf::from(&artifact.path);
+    if !source.is_file() {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "artifact {} file is missing or unreadable at {}; rerun the source command or import a bundle that includes artifact bytes",
+                artifact.id,
+                source.display()
+            ),
+            Some(artifact.id),
+            None,
+        ));
+    }
     let file_name = source
         .file_name()
         .and_then(|name| name.to_str())

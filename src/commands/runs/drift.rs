@@ -126,11 +126,11 @@ pub fn runs_drift(args: RunsDriftArgs) -> CmdResult<RunsOutput> {
         limit: Some(5000),
     };
 
-    let window_rows = load_artifact_rows(&store, filter.clone(), Some(&args.window))?;
+    let window_rows = load_artifact_rows(&store, filter.clone(), Some(&args.window))?.rows;
     let window_snap = distribution_share(&window_rows, &metric_path);
 
     let baseline_snap = if let Some(window) = args.baseline.as_deref() {
-        let rows = load_artifact_rows(&store, filter, Some(window))?;
+        let rows = load_artifact_rows(&store, filter, Some(window))?.rows;
         Some(distribution_share(&rows, &metric_path))
     } else {
         None

@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use homeboy::core::observation::{ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -146,17 +146,31 @@ pub struct ArtifactJsonRow {
     pub json: Value,
 }
 
+pub struct ArtifactJsonLoadResult {
+    pub rows: Vec<ArtifactJsonRow>,
+    pub skipped: Vec<SkippedArtifactRow>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct SkippedArtifactRow {
+    pub run_id: String,
+    pub artifact_id: String,
+    pub artifact_kind: String,
+    pub artifact_type: String,
+    pub path: String,
+    pub reason: String,
+}
+
 /// Load every JSON artifact attached to runs matching the filter.
 ///
-/// Schema-blind: artifacts whose stored file is missing, unreadable, or not
-/// valid JSON are skipped silently (we record artifacts with non-JSON kinds
-/// like images and zips that callers might not want to project over). The
-/// caller decides what to do with a zero-row result.
+/// Schema-blind: artifacts whose stored file is missing, unreadable, not valid
+/// JSON, or metadata-only are skipped with diagnostics. Non-file artifact types
+/// like images, zips, and URLs are ignored because callers project JSON rows.
 pub fn load_artifact_rows(
     store: &ObservationStore,
     filter: RunListFilter,
     since: Option<&str>,
-) -> homeboy::core::Result<Vec<ArtifactJsonRow>> {
+) -> homeboy::core::Result<ArtifactJsonLoadResult> {
     let runs = if let Some(raw) = since {
         let threshold = since_threshold(raw)?;
         store
@@ -169,17 +183,38 @@ pub fn load_artifact_rows(
     };
 
     let mut rows = Vec::new();
+    let mut skipped = Vec::new();
     for run in runs {
         let artifacts = store.list_artifacts(&run.id)?;
         for artifact in artifacts {
             if artifact.artifact_type != "file" {
+                if artifact.artifact_type == "metadata-only" {
+                    skipped.push(skipped_artifact(
+                        &run,
+                        &artifact,
+                        "artifact bytes are not available in this imported metadata-only bundle",
+                    ));
+                }
                 continue;
             }
             let path = Path::new(&artifact.path);
-            let Ok(raw) = fs::read_to_string(path) else {
-                continue;
+            let raw = match fs::read_to_string(path) {
+                Ok(raw) => raw,
+                Err(_) => {
+                    skipped.push(skipped_artifact(
+                        &run,
+                        &artifact,
+                        "artifact file is missing or unreadable",
+                    ));
+                    continue;
+                }
             };
             let Ok(json) = serde_json::from_str::<Value>(&raw) else {
+                skipped.push(skipped_artifact(
+                    &run,
+                    &artifact,
+                    "artifact file is not valid JSON",
+                ));
                 continue;
             };
             rows.push(ArtifactJsonRow {
@@ -190,7 +225,22 @@ pub fn load_artifact_rows(
             });
         }
     }
-    Ok(rows)
+    Ok(ArtifactJsonLoadResult { rows, skipped })
+}
+
+fn skipped_artifact(
+    run: &RunRecord,
+    artifact: &ArtifactRecord,
+    reason: impl Into<String>,
+) -> SkippedArtifactRow {
+    SkippedArtifactRow {
+        run_id: run.id.clone(),
+        artifact_id: artifact.id.clone(),
+        artifact_kind: artifact.kind.clone(),
+        artifact_type: artifact.artifact_type.clone(),
+        path: artifact.path.clone(),
+        reason: reason.into(),
+    }
 }
 
 /// Apply the same filters `list_runs` applies, but client-side. Used to
