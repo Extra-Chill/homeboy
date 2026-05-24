@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.197.6] - 2026-05-24
+
+### Changed
+- reduce duplicate audit blocks
+
+### Fixed
+- hide lab runner flag from unsupported help
+- Fix runner exec failure status
+- project workflow payloads from plans
+- align code audit detector conventions
+- reduce core fingerprint duplicate blocks
+- reduce codebase map duplicate blocks
+
 ## [0.197.5] - 2026-05-24
 
 ### Changed
