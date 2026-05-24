@@ -511,6 +511,11 @@ impl JobHandle {
         self.store
             .append_event(self.job_id, JobEventKind::Progress, None, Some(data))
     }
+
+    pub(crate) fn result(&self, data: Value) -> Result<JobEvent> {
+        self.store
+            .append_event(self.job_id, JobEventKind::Result, None, Some(data))
+    }
 }
 
 fn validate_transition(current: JobStatus, next: JobStatus) -> Result<()> {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::api_jobs::JobStore;
+use crate::core::api_jobs::{JobEventKind, JobStatus, JobStore};
 use crate::core::observation::{NewRunRecord, ObservationStore};
 use crate::test_support::HomeGuard;
 
@@ -335,6 +335,50 @@ fn routes_exec_body_to_daemon_job() {
 }
 
 #[test]
+fn exec_failed_command_marks_job_failed_after_result_event() {
+    let store = JobStore::default();
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "lab-local",
+            "cwd": std::env::current_dir().expect("cwd"),
+            "command": ["sh", "-c", "printf out; printf err >&2; exit 7"]
+        })),
+        &store,
+    );
+
+    assert_eq!(response.status_code, 200);
+    let job_id = response.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id")
+        .to_string();
+    let job = wait_for_job(&store, &job_id);
+    assert_eq!(job.status, JobStatus::Failed);
+
+    let events = store.events(job.id).expect("events");
+    let result = events
+        .iter()
+        .find(|event| event.kind == JobEventKind::Result)
+        .and_then(|event| event.data.as_ref())
+        .expect("result event");
+    assert_eq!(result["exit_code"], 7);
+    assert_eq!(result["stdout"], "out");
+    assert_eq!(result["stderr"], "err");
+
+    let status_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == JobEventKind::Status)
+        .collect();
+    assert!(status_events.iter().all(|event| {
+        event.data.as_ref().and_then(|data| data["status"].as_str()) != Some("succeeded")
+    }));
+    let final_status = status_events.last().expect("final status event");
+    assert_eq!(final_status.data.as_ref().unwrap()["status"], "failed");
+    assert_ne!(final_status.message.as_deref(), Some("job succeeded"));
+}
+
+#[test]
 fn exec_capture_patch_records_remote_delta_artifact() {
     let _home = HomeGuard::new();
     let workspace = tempfile::tempdir().expect("workspace");
@@ -398,9 +442,7 @@ fn wait_for_job(store: &JobStore, job_id: &str) -> crate::core::api_jobs::Job {
         let job = store.get(id).expect("job");
         if matches!(
             job.status,
-            crate::core::api_jobs::JobStatus::Succeeded
-                | crate::core::api_jobs::JobStatus::Failed
-                | crate::core::api_jobs::JobStatus::Cancelled
+            JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
         ) {
             return job;
         }

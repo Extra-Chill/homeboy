@@ -8,7 +8,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use crate::core::api_jobs::JobStore;
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
 use crate::core::paths;
 use crate::core::process::pid_is_running;
@@ -376,7 +376,7 @@ fn enqueue_exec_job(
             } else {
                 None
             };
-            Ok(json!({
+            let result = json!({
                 "runner_id": request.runner_id,
                 "cwd": request.cwd,
                 "command": request.command,
@@ -385,7 +385,23 @@ fn enqueue_exec_job(
                 "stderr": stderr,
                 "source_snapshot": source_snapshot,
                 "patch": patch,
-            }))
+            });
+            if exit_code != 0 {
+                job.result(result.clone())?;
+                return Err(Error::remote_command_failed(RemoteCommandFailedDetails {
+                    command: request.command.join(" "),
+                    exit_code,
+                    stdout,
+                    stderr,
+                    target: TargetDetails {
+                        project_id: None,
+                        server_id: request.runner_id,
+                        host: None,
+                    },
+                }));
+            }
+
+            Ok(result)
         },
     );
     let job = job_store.get(runner.job_id)?;
