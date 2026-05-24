@@ -280,10 +280,6 @@ const BASELINE: &[ViolationKey] = &[
         term: "npm",
     },
     ViolationKey {
-        path: "src/core/context/mod.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
         path: "src/core/defaults.rs",
         term: "Cargo.toml",
     },
@@ -365,18 +361,6 @@ const BASELINE: &[ViolationKey] = &[
     },
     ViolationKey {
         path: "src/core/extension/lifecycle.rs",
-        term: "nodejs",
-    },
-    ViolationKey {
-        path: "src/core/extension/lifecycle.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/extension/lifecycle.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/extension/lifecycle.rs",
         term: "wordpress",
     },
     ViolationKey {
@@ -402,10 +386,6 @@ const BASELINE: &[ViolationKey] = &[
     ViolationKey {
         path: "src/core/extension/manifest.rs",
         term: "phpstan",
-    },
-    ViolationKey {
-        path: "src/core/extension/mod.rs",
-        term: "wordpress",
     },
     ViolationKey {
         path: "src/core/extension/runtime_helper.rs",
@@ -472,44 +452,8 @@ const BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/release/executor.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/release/executor.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/release/pipeline.rs",
-        term: "Cargo.lock",
-    },
-    ViolationKey {
-        path: "src/core/release/pipeline.rs",
-        term: "Cargo.toml",
-    },
-    ViolationKey {
-        path: "src/core/release/pipeline.rs",
-        term: "npm",
-    },
-    ViolationKey {
         path: "src/core/release/planning_quality.rs",
         term: "php",
-    },
-    ViolationKey {
-        path: "src/core/release/pipeline.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/release/version.rs",
-        term: "Cargo.lock",
-    },
-    ViolationKey {
-        path: "src/core/release/version.rs",
-        term: "Cargo.toml",
-    },
-    ViolationKey {
-        path: "src/core/release/version.rs",
-        term: "cargo",
     },
     ViolationKey {
         path: "src/core/release/version/default_pattern_for_file.rs",
@@ -573,6 +517,14 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
         unexpected.is_empty(),
         "core-owned source contains non-baselined ecosystem behavior:\n{}\n\nAdd extension-owned behavior instead, or update the narrow baseline only for known issue #2240 cleanup violations.\n\n{}",
         unexpected.join("\n"),
+        debt_report
+    );
+
+    let stale_baseline = stale_baseline_rows(&found);
+    assert!(
+        stale_baseline.is_empty(),
+        "core-owned source ecosystem baseline contains stale entries. Remove stale BASELINE entries so the #2240 guard only allows current debt:\n{}\n\n{}",
+        stale_baseline.join("\n"),
         debt_report
     );
 
@@ -712,17 +664,21 @@ fn format_baseline_debt_report(found: &BTreeMap<(String, String), Vec<usize>>) -
 }
 
 fn stale_baseline_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
-    let stale_rows = BASELINE
-        .iter()
-        .filter(|entry| !found.contains_key(&(entry.path.to_string(), entry.term.to_string())))
-        .map(|entry| format!("- {}: {}", entry.path, entry.term))
-        .collect::<Vec<_>>();
+    let stale_rows = stale_baseline_rows(found);
 
     if stale_rows.is_empty() {
         return "- none".to_string();
     }
 
     first_rows(stale_rows)
+}
+
+fn stale_baseline_rows(found: &BTreeMap<(String, String), Vec<usize>>) -> Vec<String> {
+    BASELINE
+        .iter()
+        .filter(|entry| !found.contains_key(&(entry.path.to_string(), entry.term.to_string())))
+        .map(|entry| format!("- {}: {}", entry.path, entry.term))
+        .collect::<Vec<_>>()
 }
 
 fn first_rows(rows: Vec<String>) -> String {
