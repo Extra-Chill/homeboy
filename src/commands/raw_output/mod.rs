@@ -83,7 +83,7 @@ fn run_markdown(command: Commands, global: &GlobalArgs) -> RawCommandRun {
     match command {
         Commands::Docs(args) => raw_stdout_only(docs::run_markdown(args)),
         Commands::Changelog(args) => raw_stdout_only(changelog::run_markdown(args)),
-        Commands::Review(args) => review::run_markdown_with_json(args, global),
+        Commands::Review(args) => review::raw_output::run_markdown_with_json(args, global),
         Commands::Trace(args) => trace::run_markdown_with_json_artifact(args, global),
         Commands::Runs(args) => raw_stdout_only(runs::run_markdown(args, global)),
         Commands::Report(args) => raw_stdout_only(report::run_markdown(args)),
