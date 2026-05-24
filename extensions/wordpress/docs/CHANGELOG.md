@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.100.9] - 2026-05-24
+
+### Fixed
+- handle large WordPress lint sidecars
+
 ## [2.100.8] - 2026-05-22
 
 ### Fixed
