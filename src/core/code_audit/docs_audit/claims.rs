@@ -227,6 +227,12 @@ pub fn extract_claims(content: &str, doc_file: &str, ignore_patterns: &[String])
             continue;
         }
 
+        let claim_context = PathClaimContext {
+            doc_file,
+            line_num,
+            line,
+        };
+
         // Skip inline extraction for lines inside code blocks —
         // code blocks are handled separately as CodeExample claims
         if in_code_block {
@@ -241,42 +247,17 @@ pub fn extract_claims(content: &str, doc_file: &str, ignore_patterns: &[String])
             if !claimed_positions.contains(&pos) {
                 let path = cap.get(1).map(|m| m.as_str()).unwrap_or("");
 
-                // Skip if it looks like a URL
-                if path.contains("://") || path.starts_with("http") {
+                if should_skip_file_path(path, ignore_patterns) {
                     continue;
                 }
 
-                // Skip domain-like patterns (mysite.com, example.org)
-                if is_domain_like(path) {
-                    continue;
-                }
-
-                // Skip MIME types (application/*, text/*, etc.)
-                if is_mime_type(path) {
-                    continue;
-                }
-
-                // Skip component-configured ignore patterns
-                if matches_ignore_pattern(path, ignore_patterns) {
-                    continue;
-                }
-
-                // Skip very short paths that might be false positives
-                if path.len() < 5 {
-                    continue;
-                }
-
-                let confidence = classify_path_confidence(path, line, false);
-
-                claimed_positions.push(pos);
-                claims.push(Claim {
-                    claim_type: ClaimType::FilePath,
-                    value: path.to_string(),
-                    doc_file: doc_file.to_string(),
-                    line: line_num,
-                    confidence,
-                    context: Some(line.trim().to_string()),
-                });
+                record_file_claim(
+                    &mut claims,
+                    &mut claimed_positions,
+                    pos,
+                    path,
+                    claim_context,
+                );
             }
         }
 
@@ -324,13 +305,7 @@ pub fn extract_claims(content: &str, doc_file: &str, ignore_patterns: &[String])
             if !claimed_positions.contains(&pos) {
                 let path = cap.get(1).map(|m| m.as_str()).unwrap_or("");
 
-                // Skip common false positives
-                if path == "./" || path == "../" || path.len() < 4 {
-                    continue;
-                }
-
-                // Skip component-configured ignore patterns
-                if matches_ignore_pattern(path, ignore_patterns) {
+                if should_skip_directory_path(path, ignore_patterns) {
                     continue;
                 }
 
@@ -376,6 +351,83 @@ pub fn extract_claims(content: &str, doc_file: &str, ignore_patterns: &[String])
     }
 
     claims
+}
+
+fn should_skip_file_path(path: &str, ignore_patterns: &[String]) -> bool {
+    path.contains("://")
+        || path.starts_with("http")
+        || is_domain_like(path)
+        || is_mime_type(path)
+        || matches_ignore_pattern(path, ignore_patterns)
+        || path.len() < 5
+}
+
+fn should_skip_directory_path(path: &str, ignore_patterns: &[String]) -> bool {
+    path == "./" || path == "../" || path.len() < 4 || matches_ignore_pattern(path, ignore_patterns)
+}
+
+#[derive(Clone, Copy)]
+struct PathClaimContext<'a> {
+    doc_file: &'a str,
+    line_num: usize,
+    line: &'a str,
+}
+
+fn record_file_claim(
+    claims: &mut Vec<Claim>,
+    claimed_positions: &mut Vec<(usize, usize)>,
+    pos: (usize, usize),
+    path: &str,
+    context: PathClaimContext<'_>,
+) {
+    record_path_claim(
+        claims,
+        claimed_positions,
+        pos,
+        ClaimType::FilePath,
+        path,
+        context,
+    );
+}
+
+fn record_path_claim(
+    claims: &mut Vec<Claim>,
+    claimed_positions: &mut Vec<(usize, usize)>,
+    pos: (usize, usize),
+    claim_type: ClaimType,
+    path: &str,
+    context: PathClaimContext<'_>,
+) {
+    let confidence = classify_path_confidence(path, context.line, false);
+    claimed_positions.push(pos);
+    push_claim(
+        claims,
+        claim_type,
+        path,
+        context.doc_file,
+        context.line_num,
+        confidence,
+        context.line,
+    );
+}
+
+fn push_claim(
+    claims: &mut Vec<Claim>,
+    claim_type: ClaimType,
+    value: &str,
+    doc_file: &str,
+    line_num: usize,
+    confidence: ClaimConfidence,
+    line: &str,
+) {
+    claims.push(Claim {
+        claim_type,
+        value: value.to_string(),
+        doc_file: doc_file.to_string(),
+        line: line_num,
+        confidence,
+        context: Some(line.trim().to_string()),
+    });
 }
 
 /// Check if a path looks like a domain name rather than a file path.

@@ -225,10 +225,7 @@ fn extract_literal_shapes(content: &str) -> Vec<Shape> {
 
         // `[` → short array literal candidate.
         if bytes[i] == b'[' && !looks_like_subscript(bytes, i) {
-            if let Some((shape, end)) = parse_array_literal(bytes, i + 1, b']') {
-                if !shape.is_empty() {
-                    results.push(shape);
-                }
+            if let Some(end) = parse_and_push_shape(bytes, i + 1, b']', &mut results) {
                 i = end;
                 continue;
             }
@@ -243,10 +240,7 @@ fn extract_literal_shapes(content: &str) -> Vec<Shape> {
                 j += 1;
             }
             if j < bytes.len() && bytes[j] == b'(' && is_ident_boundary(bytes, i) {
-                if let Some((shape, end)) = parse_array_literal(bytes, j + 1, b')') {
-                    if !shape.is_empty() {
-                        results.push(shape);
-                    }
+                if let Some(end) = parse_and_push_shape(bytes, j + 1, b')', &mut results) {
                     i = end;
                     continue;
                 }
@@ -257,6 +251,23 @@ fn extract_literal_shapes(content: &str) -> Vec<Shape> {
     }
 
     results
+}
+
+fn parse_and_push_shape(
+    bytes: &[u8],
+    start: usize,
+    closer: u8,
+    results: &mut Vec<Shape>,
+) -> Option<usize> {
+    let (shape, end) = parse_array_literal(bytes, start, closer)?;
+    push_shape_if_present(results, shape);
+    Some(end)
+}
+
+fn push_shape_if_present(results: &mut Vec<Shape>, shape: Shape) {
+    if !shape.is_empty() {
+        results.push(shape);
+    }
 }
 
 /// Starting just after the opening delimiter, read until the matching closer
