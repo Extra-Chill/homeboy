@@ -39,6 +39,32 @@ homeboy_detect_package_manager() {
     fi
 }
 
+# Prepare dependencies for clean runner snapshots. Lab offload intentionally
+# excludes node_modules, so package scripts need a deterministic install step.
+homeboy_ensure_node_dependencies() {
+    local _dir="${1:-$PROJECT_PATH}"
+    if [ -d "$_dir/node_modules" ]; then
+        return 0
+    fi
+
+    echo "Installing Node.js dependencies..."
+    case "$PKG_MANAGER" in
+        pnpm)
+            (cd "$_dir" && pnpm install --frozen-lockfile)
+            ;;
+        yarn)
+            (cd "$_dir" && yarn install --frozen-lockfile)
+            ;;
+        npm|*)
+            if [ -f "$_dir/package-lock.json" ]; then
+                (cd "$_dir" && npm ci)
+            else
+                (cd "$_dir" && npm install)
+            fi
+            ;;
+    esac
+}
+
 # Check whether a script name is defined in package.json.
 # Returns 0 if defined, 1 otherwise. Uses node so we don't depend on jq.
 homeboy_has_npm_script() {

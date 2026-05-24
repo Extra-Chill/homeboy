@@ -36,6 +36,7 @@ homeboy_resolve_context
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
 homeboy_detect_package_manager
+homeboy_ensure_node_dependencies
 
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 # shellcheck source=/dev/null

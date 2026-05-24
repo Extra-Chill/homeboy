@@ -41,6 +41,7 @@ homeboy_resolve_context
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
 homeboy_detect_package_manager
+homeboy_ensure_node_dependencies
 
 RUNNER_ARGS=("$@")
 if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
