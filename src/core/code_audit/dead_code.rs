@@ -81,31 +81,28 @@ pub(crate) fn analyze_dead_code_with_config(
         for unused in &fp.unused_parameters {
             let (kind, description, suggestion) = classify_unused_param(unused, &caller_map);
 
-            findings.push(Finding {
-                convention: "dead_code".to_string(),
-                severity: Severity::Warning,
-                file: fp.relative_path.clone(),
+            findings.push(dead_code_finding(
+                fp,
+                Severity::Warning,
                 description,
                 suggestion,
                 kind,
-            });
+            ));
         }
 
         // Check 2: Dead code markers
         for marker in &fp.dead_code_markers {
-            findings.push(Finding {
-                convention: "dead_code".to_string(),
-                severity: Severity::Info,
-                file: fp.relative_path.clone(),
-                description: format!(
+            findings.push(dead_code_finding(
+                fp,
+                Severity::Info,
+                format!(
                     "Dead code marker on '{}' (line {}, type: {})",
                     marker.item, marker.line, marker.marker_type
                 ),
-                suggestion:
-                    "Remove the dead code instead of suppressing the warning, or document why it must stay"
+                "Remove the dead code instead of suppressing the warning, or document why it must stay"
                         .to_string(),
-                kind: AuditFinding::DeadCodeMarker,
-            });
+                AuditFinding::DeadCodeMarker,
+            ));
         }
 
         // Check 3: Unreferenced exports
@@ -181,19 +178,17 @@ pub(crate) fn analyze_dead_code_with_config(
                         continue;
                     }
 
-                    findings.push(Finding {
-                    convention: "dead_code".to_string(),
-                    severity: Severity::Info,
-                    file: fp.relative_path.clone(),
-                    description: format!(
-                        "Public function '{}' is not referenced by any other file",
-                        export
-                    ),
-                    suggestion:
+                    findings.push(dead_code_finding(
+                        fp,
+                        Severity::Info,
+                        format!(
+                            "Public function '{}' is not referenced by any other file",
+                            export
+                        ),
                         "Consider making it private/pub(crate), removing it, or verifying it's used externally"
                             .to_string(),
-                    kind: AuditFinding::UnreferencedExport,
-                });
+                        AuditFinding::UnreferencedExport,
+                    ));
                 }
             }
         } // end if !is_test_path
@@ -248,6 +243,23 @@ pub(crate) fn analyze_dead_code_with_config(
     // Sort by file path for deterministic output
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
+}
+
+fn dead_code_finding(
+    fp: &FileFingerprint,
+    severity: Severity,
+    description: String,
+    suggestion: String,
+    kind: AuditFinding,
+) -> Finding {
+    Finding {
+        convention: "dead_code".to_string(),
+        severity,
+        file: fp.relative_path.clone(),
+        description,
+        suggestion,
+        kind,
+    }
 }
 
 /// Check if a function name is a framework entry point that's expected to be
