@@ -368,6 +368,7 @@ pub mod runner;
 pub mod runs;
 pub mod self_cmd;
 pub mod server;
+pub mod source_command;
 pub mod ssh;
 pub mod stack;
 pub mod status;

@@ -1,7 +1,6 @@
 use clap::Args;
 
-use homeboy::core::ci_profile::{self, CiResolvedJob};
-use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::ci_profile;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::lint::{
     report, run_main_lint_workflow, run_self_check_lint_workflow, LintCommandOutput,
@@ -16,6 +15,9 @@ use homeboy::core::refactor::plan::{
     collect_refactor_sources, lint_refactor_request, LintSourceOptions,
 };
 
+use super::source_command::{
+    finish_observed_workflow, resolve_ci_job_for_command, resolve_source_context,
+};
 use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
 };
@@ -105,14 +107,12 @@ impl LintArgs {
 }
 
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput> {
-    let source_ctx = execution_context::resolve(&ResolveOptions {
-        component_id: args.comp.component.clone(),
-        path_override: args.comp.path.clone(),
-        capability: None,
-        settings_overrides: args.setting_args.setting.clone(),
-        settings_json_overrides: Vec::new(),
-        extension_overrides: args.extension_override.extensions.clone(),
-    })?;
+    let source_ctx = resolve_source_context(
+        &args.comp,
+        &args.setting_args,
+        &args.extension_override,
+        None,
+    )?;
 
     if !args.fix
         && args.ci_job.is_none()
@@ -136,16 +136,14 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         return Ok(report::from_main_workflow(workflow));
     }
 
-    let ctx = execution_context::resolve(&ResolveOptions {
-        component_id: args.comp.component.clone(),
-        path_override: args.comp.path.clone(),
-        capability: Some(ExtensionCapability::Lint),
-        settings_overrides: args.setting_args.setting.clone(),
-        settings_json_overrides: Vec::new(),
-        extension_overrides: args.extension_override.extensions.clone(),
-    })?;
+    let ctx = resolve_source_context(
+        &args.comp,
+        &args.setting_args,
+        &args.extension_override,
+        Some(ExtensionCapability::Lint),
+    )?;
     let effective_id = ctx.component_id.clone();
-    let ci_job = resolve_ci_job(args.ci_job.as_deref(), &ctx.component)?;
+    let ci_job = resolve_ci_job_for_command(args.ci_job.as_deref(), &ctx.component, "lint")?;
 
     let stringified_settings = ctx.resolved_settings().string_lossy_overrides();
 
@@ -204,46 +202,16 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
     ))
 }
 
-fn resolve_ci_job(
-    job_id: Option<&str>,
-    component: &homeboy::core::component::Component,
-) -> homeboy::core::Result<Option<CiResolvedJob>> {
-    let Some(job_id) = job_id else {
-        return Ok(None);
-    };
-    let extension_ids = component
-        .extensions
-        .as_ref()
-        .map(|extensions| {
-            let mut ids: Vec<String> = extensions.keys().cloned().collect();
-            ids.sort();
-            ids
-        })
-        .unwrap_or_default();
-    let extension_id = ci_profile::select_extension_id(&extension_ids)?;
-    let job = ci_profile::resolve_job_for_extension(&extension_id, job_id)?;
-    ci_profile::validate_job_command(&job, "lint")?;
-    Ok(Some(job))
-}
-
 fn finish_lint_workflow(
     observation: Option<LintObservation>,
     workflow: homeboy::core::Result<homeboy::core::extension::lint::LintRunWorkflowResult>,
 ) -> homeboy::core::Result<homeboy::core::extension::lint::LintRunWorkflowResult> {
-    match workflow {
-        Ok(workflow) => {
-            if let Some(observation) = observation {
-                observation.finish_workflow(&workflow);
-            }
-            Ok(workflow)
-        }
-        Err(error) => {
-            if let Some(observation) = observation {
-                observation.finish_error();
-            }
-            Err(error)
-        }
-    }
+    finish_observed_workflow(
+        observation,
+        workflow,
+        |observation, workflow| observation.finish_workflow(workflow),
+        |observation, _error| observation.finish_error(),
+    )
 }
 
 struct LintObservation(ActiveObservation);
