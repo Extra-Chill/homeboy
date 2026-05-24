@@ -18,6 +18,7 @@ use homeboy::core::Error;
 
 use super::common::{
     compile_jsonpath, distribution_share, eval_jsonpath, load_artifact_rows, ArtifactJsonRow,
+    SkippedArtifactRow,
 };
 use super::{CmdResult, RunsOutput};
 
@@ -66,6 +67,9 @@ pub struct RunsQueryOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_by: Option<String>,
     pub matched_artifact_count: usize,
+    pub skipped_artifact_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_artifacts: Vec<SkippedArtifactRow>,
     /// Flat row list (when `--group-by` is absent or `--count` is false and
     /// the caller wants the raw projection). Each entry has one value per
     /// `--select` expression.
@@ -136,7 +140,8 @@ pub fn runs_query(args: RunsQueryArgs) -> CmdResult<RunsOutput> {
         rig_id: None,
         limit: Some(args.limit.clamp(1, 5000)),
     };
-    let rows = load_artifact_rows(&store, filter, args.since.as_deref())?;
+    let loaded = load_artifact_rows(&store, filter, args.since.as_deref())?;
+    let rows = loaded.rows;
 
     let projected: Vec<QueryRow> = rows
         .iter()
@@ -154,6 +159,8 @@ pub fn runs_query(args: RunsQueryArgs) -> CmdResult<RunsOutput> {
         select: args.select.clone(),
         group_by: args.group_by.clone(),
         matched_artifact_count: rows.len(),
+        skipped_artifact_count: loaded.skipped.len(),
+        skipped_artifacts: loaded.skipped,
         rows: Vec::new(),
         groups: Vec::new(),
         table: None,
@@ -370,6 +377,8 @@ mod tests {
             select: vec!["$.theme".into()],
             group_by: None,
             matched_artifact_count: 1,
+            skipped_artifact_count: 0,
+            skipped_artifacts: vec![],
             rows: vec![QueryRow {
                 run_id: "r1".into(),
                 artifact_kind: "design-distribution".into(),
@@ -402,6 +411,8 @@ mod tests {
             select: vec!["$.greeting".into()],
             group_by: None,
             matched_artifact_count: 1,
+            skipped_artifact_count: 0,
+            skipped_artifacts: vec![],
             rows: vec![row],
             groups: vec![],
             table: None,

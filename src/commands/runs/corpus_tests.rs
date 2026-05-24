@@ -10,7 +10,7 @@
 use homeboy::core::observation::{NewRunRecord, ObservationStore, RunRecord, RunStatus};
 use homeboy::test_support::with_isolated_home;
 
-use super::bundle::RunsImportArgs;
+use super::bundle::{RunsExportArgs, RunsImportArgs};
 use super::{bundle::import_runs, drift, query, RunsOutput};
 
 /// Restore `XDG_DATA_HOME` for the test scope so the observation store
@@ -209,6 +209,87 @@ fn import_from_gh_actions_requires_gh_specific_arguments() {
         .err()
         .expect("must fail without required gh-actions args");
         assert_eq!(err.code.as_str(), "validation.missing_argument");
+    });
+}
+
+#[test]
+fn bundle_import_marks_file_artifacts_metadata_only_and_query_reports_skip() {
+    let bundle_dir = tempfile::tempdir().expect("bundle dir");
+    let mut run_id = String::new();
+    let mut source_home_path = String::new();
+
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        source_home_path = home.path().display().to_string();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = install_artifact(
+            &store,
+            home.path(),
+            "observe",
+            "homeboy",
+            serde_json::json!({ "component_id": "homeboy" }),
+            "trace-results",
+        );
+        run_id = run.id.clone();
+
+        super::bundle::export_runs(RunsExportArgs {
+            run: Some(run.id),
+            since: None,
+            output: bundle_dir.path().to_path_buf(),
+        })
+        .expect("export bundle");
+    });
+
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let (output, _) = import_runs(RunsImportArgs {
+            input: Some(bundle_dir.path().to_path_buf()),
+            ..RunsImportArgs::default()
+        })
+        .expect("import bundle");
+        let RunsOutput::Import(output) = output else {
+            panic!("expected import output");
+        };
+        assert_eq!(output.imported.artifacts, 0);
+        assert_eq!(output.imported.artifact_metadata_only, 1);
+
+        let store = ObservationStore::open_initialized().expect("store");
+        let artifacts = store.list_artifacts(&run_id).expect("artifacts");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].artifact_type, "metadata-only");
+        assert!(!artifacts[0].path.contains(&source_home_path));
+        assert!(!std::path::Path::new(&artifacts[0].path).is_absolute());
+
+        let (output, _) = query::runs_query(query::RunsQueryArgs {
+            component_id: Some("homeboy".into()),
+            kind: Some("observe".into()),
+            since: None,
+            select: vec!["$.component_id".into()],
+            group_by: None,
+            count: false,
+            format: query::QueryFormat::Json,
+            limit: 200,
+        })
+        .expect("query");
+        let RunsOutput::Query(output) = output else {
+            panic!("expected query output");
+        };
+        assert_eq!(output.matched_artifact_count, 0);
+        assert_eq!(output.skipped_artifact_count, 1);
+        assert_eq!(output.skipped_artifacts[0].artifact_type, "metadata-only");
+        assert!(output.skipped_artifacts[0]
+            .reason
+            .contains("artifact bytes are not available"));
+
+        let err = super::artifact_get(super::RunsArtifactGetArgs {
+            run_id,
+            artifact_id: artifacts[0].id.clone(),
+            output: None,
+        })
+        .err()
+        .expect("metadata-only artifact get must fail");
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("metadata only"));
     });
 }
 
