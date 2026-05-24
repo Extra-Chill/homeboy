@@ -254,7 +254,7 @@ pub fn stacks() -> Result<PathBuf> {
 }
 
 /// Daemon runtime state directory (~/.config/homeboy/daemon/).
-pub fn daemon_state_dir() -> Result<PathBuf> {
+fn daemon_state_dir() -> Result<PathBuf> {
     Ok(homeboy()?.join("daemon"))
 }
 
@@ -269,7 +269,7 @@ pub fn daemon_jobs_file() -> Result<PathBuf> {
 }
 
 /// Runner connection session state directory (~/.config/homeboy/runner-sessions/).
-pub fn runner_sessions_dir() -> Result<PathBuf> {
+fn runner_sessions_dir() -> Result<PathBuf> {
     Ok(homeboy()?.join("runner-sessions"))
 }
 

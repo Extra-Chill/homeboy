@@ -418,7 +418,7 @@ fn compute_fixability_if_requested(
 }
 
 /// Determine exit code for audit results.
-pub fn default_audit_exit_code(result: &CodeAuditResult, is_scoped: bool) -> i32 {
+fn default_audit_exit_code(result: &CodeAuditResult, is_scoped: bool) -> i32 {
     if is_scoped {
         if result.findings.is_empty() {
             0

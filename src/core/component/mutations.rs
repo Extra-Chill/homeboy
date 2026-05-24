@@ -7,15 +7,6 @@ use crate::core::output::{MergeOutput, MergeResult};
 use serde_json::Value;
 use std::path::Path;
 
-/// Set the changelog target for a component's configuration.
-pub fn set_changelog_target(component_id: &str, file_path: &str) -> Result<()> {
-    mutate_portable(component_id, |component| {
-        component.changelog_target = Some(file_path.to_string());
-        Ok(())
-    })?;
-    Ok(())
-}
-
 pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Result<MergeOutput> {
     let id = id.ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -151,26 +142,6 @@ mod tests {
             .expect("write standalone registration");
 
         repo
-    }
-
-    #[test]
-    fn test_set_changelog_target() {
-        crate::test_support::with_isolated_home(|home| {
-            let repo = write_component_repo(home, "demo-plugin");
-
-            set_changelog_target("demo-plugin", "docs/changelog.md").expect("set changelog target");
-
-            let config: serde_json::Value = serde_json::from_str(
-                &fs::read_to_string(repo.join("homeboy.json")).expect("read homeboy.json"),
-            )
-            .expect("parse homeboy.json");
-            assert_eq!(
-                config
-                    .get("changelog_target")
-                    .and_then(|value| value.as_str()),
-                Some("docs/changelog.md")
-            );
-        });
     }
 
     #[test]

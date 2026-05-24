@@ -19,7 +19,7 @@ pub fn insertion(
     }
 }
 
-pub fn tagged_insertion(
+pub(crate) fn tagged_insertion(
     primitive: RefactorPrimitive,
     kind: InsertionKind,
     finding: AuditFinding,
@@ -179,25 +179,6 @@ pub fn function_removal(
         },
         finding,
         code,
-        description,
-    )
-}
-
-pub fn tagged_function_removal(
-    primitive: RefactorPrimitive,
-    finding: AuditFinding,
-    start_line: usize,
-    end_line: usize,
-    description: String,
-) -> Insertion {
-    tagged_insertion(
-        primitive,
-        InsertionKind::FunctionRemoval {
-            start_line,
-            end_line,
-        },
-        finding,
-        String::new(),
         description,
     )
 }

@@ -827,7 +827,7 @@ fn execute_extension_runtime(
 /// instead of loading the component from storage. This supports `--path` overrides
 /// in commands like `homeboy test --path /alt/path`.
 #[allow(clippy::too_many_arguments)]
-pub fn build_exec_env(
+fn build_exec_env(
     extension_id: &str,
     project_id: Option<&str>,
     component_id: Option<&str>,

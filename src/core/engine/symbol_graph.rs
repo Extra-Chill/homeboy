@@ -180,7 +180,7 @@ pub fn module_path_from_file(file_path: &str) -> String {
 /// Returns structured `ImportRef`s with module paths and imported names.
 /// For Rust, handles both simple (`use crate::mod::Item;`) and grouped
 /// (`use crate::mod::{A, B};`) imports.
-pub fn parse_imports(content: &str, grammar: &Grammar, relative_path: &str) -> Vec<ImportRef> {
+fn parse_imports(content: &str, grammar: &Grammar, relative_path: &str) -> Vec<ImportRef> {
     let symbols = grammar::extract(content, grammar);
     let lines: Vec<&str> = content.lines().collect();
     let import_parser = grammar

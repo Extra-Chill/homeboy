@@ -74,9 +74,6 @@ impl TrackedIssueState {
     pub fn is_open(self) -> bool {
         matches!(self, TrackedIssueState::Open)
     }
-    pub fn is_closed(self) -> bool {
-        !self.is_open()
-    }
 }
 
 /// Configuration that affects reconcile decisions but not finding shape.

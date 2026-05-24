@@ -341,16 +341,6 @@ impl IssueCloseReason {
             IssueCloseReason::NotPlanned => "not planned",
         }
     }
-
-    /// Parse from the GraphQL `state_reason` field on a closed issue.
-    /// Returns `None` when the value is unknown or absent (open issues).
-    pub fn from_graphql(s: &str) -> Option<Self> {
-        match s {
-            "completed" | "COMPLETED" => Some(IssueCloseReason::Completed),
-            "not_planned" | "NOT_PLANNED" => Some(IssueCloseReason::NotPlanned),
-            _ => None,
-        }
-    }
 }
 
 /// Parameters for editing an existing issue.
@@ -1364,7 +1354,7 @@ fn comment_matches_key(body: &str, comment_key: &str) -> bool {
 /// malformed markers are skipped silently (no panic, no error) so the merge
 /// loop can always make forward progress even if a comment body was hand-
 /// edited.
-pub fn parse_comment_sections(body: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_comment_sections(body: &str) -> Vec<(String, String)> {
     // The `regex` crate does not support backreferences, so we capture both
     // start-key and end-key and verify equality post-match.
     let re = regex::Regex::new(
@@ -1425,7 +1415,7 @@ fn extract_footer(body: &str) -> Option<String> {
 
 /// Merge `(section_key, body)` into `sections`. Replaces any existing entry
 /// for `section_key`, preserving the original position; otherwise appends.
-pub fn merge_section(
+pub(crate) fn merge_section(
     mut sections: Vec<(String, String)>,
     section_key: &str,
     body: String,
@@ -1450,7 +1440,7 @@ pub fn merge_section(
 /// - `footer` → optional block written after the last section, wrapped in
 ///   dedicated `<!-- homeboy:footer:start|end -->` markers.
 /// - Output is always newline-normalized with a trailing newline.
-pub fn render_comment(
+pub(crate) fn render_comment(
     comment_key: &str,
     header: Option<&str>,
     sections: &[(String, String)],
@@ -1828,37 +1818,6 @@ mod tests {
     fn issue_close_reason_gh_flag() {
         assert_eq!(IssueCloseReason::Completed.as_gh_flag(), "completed");
         assert_eq!(IssueCloseReason::NotPlanned.as_gh_flag(), "not planned");
-    }
-
-    #[test]
-    fn issue_close_reason_from_graphql_completed() {
-        assert_eq!(
-            IssueCloseReason::from_graphql("completed"),
-            Some(IssueCloseReason::Completed)
-        );
-        assert_eq!(
-            IssueCloseReason::from_graphql("COMPLETED"),
-            Some(IssueCloseReason::Completed)
-        );
-    }
-
-    #[test]
-    fn issue_close_reason_from_graphql_not_planned() {
-        assert_eq!(
-            IssueCloseReason::from_graphql("not_planned"),
-            Some(IssueCloseReason::NotPlanned)
-        );
-        assert_eq!(
-            IssueCloseReason::from_graphql("NOT_PLANNED"),
-            Some(IssueCloseReason::NotPlanned)
-        );
-    }
-
-    #[test]
-    fn issue_close_reason_from_graphql_unknown_returns_none() {
-        assert!(IssueCloseReason::from_graphql("").is_none());
-        assert!(IssueCloseReason::from_graphql("reopened").is_none());
-        assert!(IssueCloseReason::from_graphql("nonsense").is_none());
     }
 
     #[test]
