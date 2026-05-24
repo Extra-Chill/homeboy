@@ -2,7 +2,7 @@ use serde::ser::Error as SerializeError;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 
-use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus};
 use crate::is_zero_u32;
 
 /// Ordered release plan shared by dry-run output and release execution.
@@ -12,11 +12,12 @@ use crate::is_zero_u32;
 #[derive(Debug, Clone)]
 pub struct ReleasePlan {
     pub plan: HomeboyPlan,
-    enabled: bool,
-    semver_recommendation: Option<ReleaseSemverRecommendation>,
 }
 
 impl ReleasePlan {
+    const ENABLED_POLICY_KEY: &'static str = "enabled";
+    const SEMVER_RECOMMENDATION_POLICY_KEY: &'static str = "semver_recommendation";
+
     pub fn new(
         component_id: impl Into<String>,
         enabled: bool,
@@ -30,12 +31,29 @@ impl ReleasePlan {
         plan.steps = steps;
         plan.warnings = warnings;
         plan.hints = hints;
-
-        Self {
-            plan,
-            enabled,
-            semver_recommendation,
+        plan.policy.insert(
+            Self::ENABLED_POLICY_KEY.to_string(),
+            serde_json::Value::Bool(enabled),
+        );
+        if let Some(semver_recommendation) = semver_recommendation {
+            plan.policy.insert(
+                Self::SEMVER_RECOMMENDATION_POLICY_KEY.to_string(),
+                serde_json::to_value(semver_recommendation).unwrap_or(serde_json::Value::Null),
+            );
         }
+
+        Self::from_plan(plan)
+    }
+
+    /// Wrap a generic Homeboy plan in the release compatibility contract.
+    ///
+    /// Release execution consumes `plan.steps` directly. The legacy top-level
+    /// JSON fields (`component_id`, `enabled`, and `semver_recommendation`) are
+    /// projected from the generic plan subject/policy during serialization so
+    /// existing release JSON consumers keep the same shape without creating a
+    /// second authoritative release data store.
+    pub fn from_plan(plan: HomeboyPlan) -> Self {
+        Self { plan }
     }
 
     pub fn component_id(&self) -> Option<&str> {
@@ -43,11 +61,27 @@ impl ReleasePlan {
     }
 
     pub fn enabled(&self) -> bool {
-        self.enabled
+        if let Some(enabled) = self
+            .plan
+            .policy
+            .get(Self::ENABLED_POLICY_KEY)
+            .and_then(|value| value.as_bool())
+        {
+            return enabled;
+        }
+
+        self.plan
+            .steps
+            .iter()
+            .any(|step| matches!(step.status, PlanStepStatus::Ready | PlanStepStatus::Running))
     }
 
-    pub fn semver_recommendation(&self) -> Option<&ReleaseSemverRecommendation> {
-        self.semver_recommendation.as_ref()
+    pub fn semver_recommendation(&self) -> Option<ReleaseSemverRecommendation> {
+        self.plan
+            .policy
+            .get(Self::SEMVER_RECOMMENDATION_POLICY_KEY)
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
     }
 }
 
@@ -67,8 +101,11 @@ impl Serialize for ReleasePlan {
                 serde_json::Value::String(component_id.to_string()),
             );
         }
-        object.insert("enabled".to_string(), serde_json::Value::Bool(self.enabled));
-        if let Some(semver_recommendation) = self.semver_recommendation.as_ref() {
+        object.insert(
+            "enabled".to_string(),
+            serde_json::Value::Bool(self.enabled()),
+        );
+        if let Some(semver_recommendation) = self.semver_recommendation() {
             object.insert(
                 "semver_recommendation".to_string(),
                 serde_json::to_value(semver_recommendation).map_err(S::Error::custom)?,
@@ -384,6 +421,19 @@ mod tests {
     }
 
     #[test]
+    fn enabled_falls_back_to_plan_step_state_when_policy_is_absent() {
+        let mut plan = HomeboyPlan::for_component(PlanKind::Release, "demo");
+        plan.steps = vec![PlanStep::ready("version", "version").build()];
+
+        assert!(ReleasePlan::from_plan(plan).enabled());
+
+        let mut disabled_plan = HomeboyPlan::for_component(PlanKind::Release, "demo");
+        disabled_plan.steps = vec![PlanStep::disabled("release.skip", "release.skip").build()];
+
+        assert!(!ReleasePlan::from_plan(disabled_plan).enabled());
+    }
+
+    #[test]
     fn test_semver_recommendation() {
         let recommendation = ReleaseSemverRecommendation {
             latest_tag: Some("v1.0.0".to_string()),
@@ -405,8 +455,8 @@ mod tests {
 
         assert_eq!(
             plan.semver_recommendation()
-                .and_then(|recommendation| recommendation.recommended_bump.as_deref()),
-            Some("minor")
+                .and_then(|recommendation| recommendation.recommended_bump),
+            Some("minor".to_string())
         );
     }
 
@@ -421,6 +471,7 @@ mod tests {
         assert_eq!(serialized["subject"]["component_id"], "demo");
         assert_eq!(serialized["component_id"], "demo");
         assert_eq!(serialized["enabled"], true);
+        assert_eq!(serialized["policy"]["enabled"], true);
         assert!(serialized.get("semver_recommendation").is_none());
     }
 
