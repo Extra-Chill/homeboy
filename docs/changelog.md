@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.197.13] - 2026-05-24
+
+### Changed
+- extract observation store schema seam
+- reject stale core agnostic baseline entries
+- extract rename safety checks
+
+### Fixed
+- mark imported bundle artifacts metadata-only
+- fail deploy when cleanup before extraction fails
+
 ## [0.197.12] - 2026-05-24
 
 ### Changed
