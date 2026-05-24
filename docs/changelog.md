@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.197.7] - 2026-05-24
+
+### Fixed
+- resolve runner doctor artifact root
+- apply runner env to SSH probes
+
 ## [0.197.6] - 2026-05-24
 
 ### Changed
