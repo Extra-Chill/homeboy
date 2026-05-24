@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use super::expand::expand_vars;
 use super::spec::RigSpec;
 use crate::core::error::{ErrorCode, Result};
+use crate::core::plan::HomeboyPlan;
 use crate::core::stack::{self, StackSpec, SyncOutput};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -36,6 +37,9 @@ pub struct RigStackSyncEntry {
     pub base: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// Stack sync plan reused from the underlying stack sync contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<HomeboyPlan>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub picked_count: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -181,6 +185,7 @@ where
                 branch: None,
                 base: None,
                 target: None,
+                plan: None,
                 picked_count: 0,
                 skipped_count: 0,
                 dropped_count: 0,
@@ -249,17 +254,25 @@ fn comparable_path(path: &str) -> PathBuf {
 }
 
 fn entry_from_output(component_id: &str, output: SyncOutput) -> RigStackSyncEntry {
-    let changed = output.picked_count > 0 || output.preview.dropped_count > 0;
+    let SyncOutput {
+        preview,
+        picked_count,
+        skipped_count,
+        ..
+    } = output;
+    let changed = stack::sync::sync_plan_would_mutate(&preview.plan);
+    let dropped_count = preview.dropped_count;
     RigStackSyncEntry {
         component_id: component_id.to_string(),
-        stack_id: output.preview.stack_id,
+        stack_id: preview.stack_id,
         status: if changed { "changed" } else { "no-op" }.to_string(),
-        branch: Some(output.preview.branch),
-        base: Some(output.preview.base),
-        target: Some(output.preview.target),
-        picked_count: output.picked_count,
-        skipped_count: output.skipped_count,
-        dropped_count: output.preview.dropped_count,
+        branch: Some(preview.branch),
+        base: Some(preview.base),
+        target: Some(preview.target),
+        plan: Some(preview.plan),
+        picked_count,
+        skipped_count,
+        dropped_count,
         error: None,
     }
 }
