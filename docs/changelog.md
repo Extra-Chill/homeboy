@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.197.11] - 2026-05-24
+
+### Changed
+- extract duplication suppression helpers
+- extract refactor autofix commit helper
+
+### Fixed
+- surface broken extension symlinks
+- trim refactor unreferenced exports
+- reduce server connection duplicate block
+
 ## [0.197.10] - 2026-05-24
 
 ### Changed
