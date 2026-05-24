@@ -76,7 +76,7 @@ struct Guard {
     offset: usize,
 }
 
-pub(in crate::core::code_audit) fn detect_with_config(
+fn detect_with_config(
     fingerprints: &[&FileFingerprint],
     root: &Path,
     audit_config: &AuditConfig,
@@ -121,12 +121,12 @@ pub(in crate::core::code_audit) fn detect_with_config(
     findings
 }
 
-#[allow(dead_code)]
 pub(in crate::core::code_audit) fn run(
     fingerprints: &[&FileFingerprint],
     root: &Path,
+    audit_config: &AuditConfig,
 ) -> Vec<Finding> {
-    detect_with_config(fingerprints, root, &AuditConfig::default())
+    detect_with_config(fingerprints, root, audit_config)
 }
 
 fn guard_is_contextual(fp: &FileFingerprint, guard: &Guard, audit_config: &AuditConfig) -> bool {

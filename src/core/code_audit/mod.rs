@@ -1084,7 +1084,7 @@ fn audit_internal(
     // Detects wrapper files missing explicit declarations of what they wrap.
     // Uses configurable call pattern tracing to infer the implementation target.
     let wrapper_findings = if plan.run_wrapper_inference() {
-        wrapper_inference::analyze_wrappers(&all_fingerprints, root)
+        wrapper_inference::run(&all_fingerprints, root)
     } else {
         Vec::new()
     };
@@ -1177,7 +1177,7 @@ fn audit_internal(
     // guards on symbols guaranteed to exist given plugin requirements, composer
     // dependencies, and bootstrap requires.
     let dead_guard_findings = if plan.run_dead_guard() {
-        dead_guard::detect_with_config(&all_fingerprints, root, &audit_config)
+        dead_guard::run(&all_fingerprints, root, &audit_config)
     } else {
         Vec::new()
     };

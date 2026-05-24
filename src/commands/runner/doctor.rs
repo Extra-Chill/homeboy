@@ -204,7 +204,8 @@ mod target {
                     )
                 })?;
                 let server = server::load(server_id)?;
-                let client = SshClient::from_server(&server, server_id)?;
+                let mut client = SshClient::from_server(&server, server_id)?;
+                client.env.extend(runner.env.clone());
                 Ok(RunnerTarget::Ssh {
                     id: runner_id.to_string(),
                     runner,
@@ -1138,5 +1139,42 @@ mod tests {
             ),
         ];
         assert_eq!(checks::overall_status(&checks), RunnerDoctorStatus::Error);
+    }
+
+    #[test]
+    fn ssh_target_uses_runner_env_for_remote_probes() {
+        crate::test_support::with_isolated_home(|_| {
+            server::create(
+                r#"{
+                    "id":"lab",
+                    "host":"localhost",
+                    "user":"tester",
+                    "env":{"PATH":"/server/bin:$PATH"}
+                }"#,
+                false,
+            )
+            .expect("create server");
+            runner::create(
+                r#"{
+                    "id":"lab",
+                    "kind":"ssh",
+                    "server_id":"lab",
+                    "workspace_root":"/tmp",
+                    "env":{"PATH":"/runner/bin:$PATH"}
+                }"#,
+                false,
+            )
+            .expect("create runner");
+
+            let target = target::resolve("lab").expect("resolve runner target");
+            let target::RunnerTarget::Ssh { client, .. } = target else {
+                panic!("expected ssh target");
+            };
+
+            assert_eq!(
+                client.env.get("PATH").map(String::as_str),
+                Some("/runner/bin:$PATH")
+            );
+        });
     }
 }

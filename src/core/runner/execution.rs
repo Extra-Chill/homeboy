@@ -307,7 +307,8 @@ fn exec_ssh(runner: &Runner, cwd: String, command: Vec<String>) -> Result<(Runne
         )
     })?;
     let server = server::load(server_id)?;
-    let client = SshClient::from_server(&server, server_id)?;
+    let mut client = SshClient::from_server(&server, server_id)?;
+    client.env.extend(runner.env.clone());
     let command_line = format!(
         "cd {} && {}",
         shell::quote_arg(&cwd),
