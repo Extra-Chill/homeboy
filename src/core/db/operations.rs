@@ -108,15 +108,7 @@ fn resolve_domain(project: &Project, subtarget: Option<&str>, project_id: &str) 
     }
 
     let Some(sub_id) = subtarget else {
-        let subtarget_list = project
-            .sub_targets
-            .iter()
-            .map(|t| {
-                let slug = project::slugify_id(&t.name).unwrap_or_else(|_| t.name.clone());
-                format!("- {} (use: {})", t.name, slug)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let subtarget_list = format_subtarget_list(project);
         return Err(Error::validation_invalid_argument(
             "subtarget",
             format!(
@@ -135,15 +127,7 @@ fn resolve_domain(project: &Project, subtarget: Option<&str>, project_id: &str) 
         return Ok(target.domain.clone());
     }
 
-    let subtarget_list = project
-        .sub_targets
-        .iter()
-        .map(|t| {
-            let slug = project::slugify_id(&t.name).unwrap_or_else(|_| t.name.clone());
-            format!("- {} (use: {})", t.name, slug)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let subtarget_list = format_subtarget_list(project);
     Err(Error::validation_invalid_argument(
         "subtarget",
         format!(
@@ -153,6 +137,18 @@ fn resolve_domain(project: &Project, subtarget: Option<&str>, project_id: &str) 
         Some(project_id.to_string()),
         None,
     ))
+}
+
+fn format_subtarget_list(project: &Project) -> String {
+    project
+        .sub_targets
+        .iter()
+        .map(|t| {
+            let slug = project::slugify_id(&t.name).unwrap_or_else(|_| t.name.clone());
+            format!("- {} (use: {})", t.name, slug)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn parse_json_tables(json: &str) -> Vec<String> {

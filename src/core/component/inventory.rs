@@ -34,14 +34,17 @@ pub fn inventory() -> Result<Vec<Component>> {
     let projects = project::list().unwrap_or_default();
     let mut components = Vec::new();
     let mut seen = HashSet::new();
+    let mut add_component = |component: Component| {
+        if seen.insert(component.id.clone()) {
+            components.push(component);
+        }
+    };
 
     // 1. Project-attached components (highest priority)
     for project in &projects {
         for attachment in &project.components {
             if let Ok(component) = project::resolve_project_component(project, &attachment.id) {
-                if seen.insert(component.id.clone()) {
-                    components.push(component);
-                }
+                add_component(component);
             }
         }
     }
@@ -52,23 +55,17 @@ pub fn inventory() -> Result<Vec<Component>> {
     //    operations like release, version bump, and changelog.
     if let Ok(standalone) = load_standalone_components() {
         for component in standalone {
-            if seen.insert(component.id.clone()) {
-                components.push(component);
-            }
+            add_component(component);
         }
     }
 
     // 3. CWD portable discovery (lowest priority)
     if let Ok(cwd) = std::env::current_dir() {
         if let Some(component) = discover_from_portable(&cwd) {
-            if seen.insert(component.id.clone()) {
-                components.push(component);
-            }
+            add_component(component);
         } else if let Some(git_root) = crate::core::component::resolution::detect_git_root(&cwd) {
             if let Some(component) = discover_from_portable(&git_root) {
-                if seen.insert(component.id.clone()) {
-                    components.push(component);
-                }
+                add_component(component);
             }
         }
     }

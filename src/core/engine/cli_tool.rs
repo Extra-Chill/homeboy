@@ -306,26 +306,14 @@ fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<
     }
 
     let Some(sub_id) = args.first() else {
-        let subtarget_list = project
-            .sub_targets
-            .iter()
-            .map(|t| {
-                let slug = project::slugify_id(&t.name).unwrap_or_else(|_| t.name.clone());
-                format!("- {} (use: {})", t.name, slug)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let subtarget_list = format_subtarget_list(project);
+        let syntax = format_subtarget_syntax(&project.id);
         return Err(Error::validation_invalid_argument(
             "subtarget",
             format!(
                 "This project has subtargets configured. You must specify which subtarget to use.\n\n\
-                 Available subtargets for project '{}':\n{}\n\n\
-                 Syntax: homeboy <tool> {}:<subtarget> <command>...\n\
-                     OR  homeboy <tool> {} <subtarget> <command>...\n\n\
-                 Commands can be quoted or unquoted:\n  \
-                   homeboy wp {}:events post list\n  \
-                   homeboy wp {}:events \"post list\"",
-                project.id, subtarget_list, project.id, project.id, project.id, project.id
+                 Available subtargets for project '{}':\n{}\n\n{}",
+                project.id, subtarget_list, syntax
             ),
             Some(project.id.clone()),
             None,
@@ -339,7 +327,21 @@ fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<
         return Ok((subtarget.domain.clone(), args[1..].to_vec()));
     }
 
-    let subtarget_list = project
+    let subtarget_list = format_subtarget_list(project);
+    let syntax = format_subtarget_syntax(&project.id);
+    Err(Error::validation_invalid_argument(
+        "subtarget",
+        format!(
+            "Subtarget '{}' not found. Available subtargets for project '{}':\n{}\n\n{}",
+            sub_id, project.id, subtarget_list, syntax
+        ),
+        Some(project.id.clone()),
+        None,
+    ))
+}
+
+fn format_subtarget_list(project: &Project) -> String {
+    project
         .sub_targets
         .iter()
         .map(|t| {
@@ -347,21 +349,17 @@ fn resolve_subtarget(project: &Project, args: &[String]) -> Result<(String, Vec<
             format!("- {} (use: {})", t.name, slug)
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    Err(Error::validation_invalid_argument(
-        "subtarget",
-        format!(
-            "Subtarget '{}' not found. Available subtargets for project '{}':\n{}\n\n\
-             Syntax: homeboy <tool> {}:<subtarget> <command>...\n\
-                 OR  homeboy <tool> {} <subtarget> <command>...\n\n\
-             Commands can be quoted or unquoted:\n  \
-               homeboy wp {}:events post list\n  \
-               homeboy wp {}:events \"post list\"",
-            sub_id, project.id, subtarget_list, project.id, project.id, project.id, project.id
-        ),
-        Some(project.id.clone()),
-        None,
-    ))
+        .join("\n")
+}
+
+fn format_subtarget_syntax(project_id: &str) -> String {
+    format!(
+        "Syntax: homeboy <tool> {project_id}:<subtarget> <command>...\n\
+             OR  homeboy <tool> {project_id} <subtarget> <command>...\n\n\
+         Commands can be quoted or unquoted:\n  \
+           homeboy wp {project_id}:events post list\n  \
+           homeboy wp {project_id}:events \"post list\""
+    )
 }
 
 #[cfg(test)]
