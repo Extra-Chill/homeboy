@@ -18,7 +18,7 @@ mod field_patterns_data_contracts {
     const TYPE_SUFFIXES: &[&str] = &["Args", "Buckets", "CommandInput", "Detail", "Drift", "EditOp", "Entry", "Flags", "Group", "Options", "Output", "Overrides", "Report", "Result", "SeverityCounts", "Snapshot", "Status", "Summary"];
     const LOW_VALUE_FIELDS: &[&str] = &["ahead", "behind", "build_artifact", "changelog_next_section_aliases", "changelog_next_section_label", "confidence", "deploy", "deploy_strategy", "docs_only", "expected_methods", "expected_registrations", "extends", "extract_command", "failure", "implements", "info", "manual_only", "namespace", "needs_release", "picked_count", "primitive", "properties", "ready_detail", "ready_reason", "ready_to_deploy", "remote_owner", "results", "runtime", "skip_checks", "skip_publish", "skipped_count", "summary", "warnings"];
 
-    pub(in crate::core::code_audit) fn is_low_value_group(field_names: &[&str], type_names: &[&str], min_group_size: usize, min_occurrences: usize) -> bool {
+    pub(super) fn is_low_value_group(field_names: &[&str], type_names: &[&str], min_group_size: usize, min_occurrences: usize) -> bool {
         (min_group_size..=4).contains(&field_names.len())
             && type_names.len() >= min_occurrences
             && type_names.iter().all(|name| TYPE_NAMES.contains(name) || TYPE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix)))

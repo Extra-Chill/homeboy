@@ -4,7 +4,7 @@
 
 use std::io::{self, BufRead, IsTerminal, Write};
 
-pub fn is_stdin_tty() -> bool {
+fn is_stdin_tty() -> bool {
     io::stdin().is_terminal()
 }
 

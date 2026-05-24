@@ -18,11 +18,11 @@ pub use commits::{
 };
 pub use github::{
     gh_probe_succeeds, issue_close, issue_comment, issue_create, issue_edit, issue_find,
-    merge_section, parse_comment_sections, pr_comment, pr_create, pr_edit, pr_files, pr_find,
-    pr_merge, pr_view, render_comment, GithubFindItem, GithubFindOutput, GithubIssueOutput,
-    GithubPrOutput, GithubPrView, IssueCloseOptions, IssueCloseReason, IssueCommentOptions,
-    IssueCreateOptions, IssueEditOptions, IssueFindOptions, IssueState, PrCommentMode,
-    PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions, PrState,
+    pr_comment, pr_create, pr_edit, pr_files, pr_find, pr_merge, pr_view, GithubFindItem,
+    GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView, IssueCloseOptions,
+    IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions,
+    IssueState, PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions,
+    PrMergeOptions, PrState,
 };
 pub use operations::{
     build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,

@@ -43,7 +43,7 @@ impl<T: Serialize> CliResponse<T> {
 }
 
 impl CliResponse<()> {
-    pub fn from_error(err: &Error) -> Self {
+    fn from_error(err: &Error) -> Self {
         Self {
             success: false,
             data: None,

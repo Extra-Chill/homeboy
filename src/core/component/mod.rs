@@ -22,10 +22,10 @@ pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,
     reconcile_standalone_registration, write_standalone_registration, ComponentReconcileReport,
 };
-pub use mutations::{delete_safe, merge, rename, set_changelog_target};
+pub use mutations::{delete_safe, merge, rename};
 pub use portable::{
-    discover_from_portable, has_portable_config, infer_portable_component_id, mutate_portable,
-    portable_json, read_portable_config, write_portable_config,
+    discover_from_portable, infer_portable_component_id, mutate_portable, portable_json,
+    write_portable_config,
 };
 pub use relationships::{associated_projects, projects_using, rename_component, shared_components};
 pub use resolution::{resolve, resolve_artifact, resolve_effective, validate_local_path};
