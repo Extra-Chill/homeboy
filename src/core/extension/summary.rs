@@ -3,7 +3,7 @@ use serde::Serialize;
 use super::execution::{extension_ready_status, is_extension_compatible};
 use super::lifecycle::read_source_revision;
 use super::manifest::ActionType;
-use super::registry::{is_extension_linked, load_all_extensions};
+use super::registry::{broken_extension_links, is_extension_linked, load_all_extensions};
 
 /// Summary of an extension for list views.
 #[derive(Debug, Clone, Serialize)]
@@ -21,6 +21,10 @@ pub struct ExtensionSummary {
     pub ready_detail: Option<String>,
     pub linked: bool,
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,7 +55,7 @@ pub struct ActionSummary {
 pub fn list_summaries(project: Option<&crate::core::project::Project>) -> Vec<ExtensionSummary> {
     let extensions = load_all_extensions().unwrap_or_default();
 
-    extensions
+    let mut summaries: Vec<ExtensionSummary> = extensions
         .iter()
         .map(|ext| {
             let ready_status = extension_ready_status(ext);
@@ -106,6 +110,8 @@ pub fn list_summaries(project: Option<&crate::core::project::Project>) -> Vec<Ex
                 ready_detail: ready_status.detail,
                 linked,
                 path: ext.extension_path.clone().unwrap_or_default(),
+                error: None,
+                symlink_target: None,
                 source_revision,
                 cli_tool,
                 cli_display_name,
@@ -114,5 +120,64 @@ pub fn list_summaries(project: Option<&crate::core::project::Project>) -> Vec<Ex
                 has_ready_check,
             }
         })
-        .collect()
+        .collect();
+
+    summaries.extend(broken_extension_links().into_iter().map(|link| {
+        let target = link.target.to_string_lossy().to_string();
+        ExtensionSummary {
+            id: link.id,
+            name: String::new(),
+            version: String::new(),
+            description: String::new(),
+            runtime: String::new(),
+            compatible: false,
+            ready: false,
+            ready_reason: Some("target_missing".to_string()),
+            ready_detail: Some(format!("Linked target does not exist: {}", target)),
+            linked: true,
+            path: link.path.to_string_lossy().to_string(),
+            error: Some("target_missing".to_string()),
+            symlink_target: Some(target),
+            source_revision: None,
+            cli_tool: None,
+            cli_display_name: None,
+            actions: Vec::new(),
+            has_setup: None,
+            has_ready_check: None,
+        }
+    }));
+
+    summaries.sort_by(|a, b| a.id.cmp(&b.id));
+    summaries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::paths;
+
+    #[cfg(unix)]
+    #[test]
+    fn list_summaries_includes_broken_extension_symlinks() {
+        crate::test_support::with_isolated_home(|_| {
+            let extensions_dir = paths::extensions().unwrap();
+            std::fs::create_dir_all(&extensions_dir).unwrap();
+            let link = extensions_dir.join("wordpress");
+            let target = extensions_dir.join("missing-wordpress");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+
+            let summaries = list_summaries(None);
+
+            assert_eq!(summaries.len(), 1);
+            assert_eq!(summaries[0].id, "wordpress");
+            assert!(!summaries[0].ready);
+            assert!(summaries[0].linked);
+            assert_eq!(summaries[0].error.as_deref(), Some("target_missing"));
+            assert_eq!(summaries[0].ready_reason.as_deref(), Some("target_missing"));
+            assert_eq!(
+                summaries[0].symlink_target.as_deref(),
+                Some(target.to_string_lossy().as_ref())
+            );
+        });
+    }
 }
