@@ -1,5 +1,5 @@
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use homeboy::cli_surface::Cli;
 use homeboy::cli_surface::Commands;
@@ -307,7 +307,7 @@ fn run_lab_offload_inner(
         ));
     }
 
-    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+    runner.workspace_root.as_deref().ok_or_else(|| {
         homeboy::core::Error::validation_invalid_argument(
             "workspace_root",
             "Lab offload requires runner.workspace_root so the local checkout can be mapped remotely",
@@ -317,18 +317,29 @@ fn run_lab_offload_inner(
             ]),
         )
     })?;
-    let remote_cwd = remote_cwd_for_current_checkout(workspace_root)?;
+    let source_path = lab_offload_source_path(normalized_args)?;
+    let synced = homeboy::core::runner::sync_workspace(
+        runner_id,
+        homeboy::core::runner::RunnerWorkspaceSyncOptions {
+            path: source_path.display().to_string(),
+            mode: homeboy::core::runner::RunnerWorkspaceSyncMode::Snapshot,
+        },
+    )?
+    .0;
+    let remote_cwd = synced.remote_path;
     let source_snapshot = homeboy::core::source_snapshot::SourceSnapshot::collect_local(
         runner_id,
-        &std::env::current_dir().map_err(|err| {
-            homeboy::core::Error::internal_io(err.to_string(), Some("read cwd".to_string()))
-        })?,
+        Path::new(&synced.local_path),
         Some(&remote_cwd),
         "lab_offload",
     );
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let mut command = vec![homeboy_path.to_string()];
-    command.extend(strip_runner_flag(normalized_args).into_iter().skip(1));
+    command.extend(
+        rewrite_lab_offload_args(normalized_args, &remote_cwd)
+            .into_iter()
+            .skip(1),
+    );
 
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
@@ -359,31 +370,57 @@ fn run_lab_offload_inner(
     Ok(exit_code)
 }
 
-fn remote_cwd_for_current_checkout(workspace_root: &str) -> homeboy::core::Result<String> {
-    let cwd = std::env::current_dir().map_err(|err| {
+fn lab_offload_source_path(args: &[String]) -> homeboy::core::Result<PathBuf> {
+    let mut iter = args.iter().skip(1).peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--path" {
+            let value = iter.next().ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "path",
+                    "--path requires a value before Lab offload can sync the workspace",
+                    None,
+                    None,
+                )
+            })?;
+            return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
+        }
+        if let Some(value) = arg.strip_prefix("--path=") {
+            return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
+        }
+    }
+
+    std::env::current_dir().map_err(|err| {
         homeboy::core::Error::internal_io(err.to_string(), Some("read cwd".to_string()))
-    })?;
-    let basename = cwd
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "cwd",
-                "current checkout path has no basename for Lab workspace mapping",
-                Some(cwd.display().to_string()),
-                None,
-            )
-        })?;
-    Ok(Path::new(workspace_root)
-        .join(basename)
-        .to_string_lossy()
-        .to_string())
+    })
 }
 
-fn strip_runner_flag(args: &[String]) -> Vec<String> {
+fn rewrite_lab_offload_args(args: &[String], remote_path: &str) -> Vec<String> {
     let mut stripped = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
+    let mut passthrough = false;
     while let Some(arg) = iter.next() {
+        if passthrough {
+            stripped.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            stripped.push(arg.clone());
+            continue;
+        }
+        if arg == "--path" {
+            stripped.push(arg.clone());
+            let _ = iter.next();
+            stripped.push(remote_path.to_string());
+            continue;
+        }
+        if arg.starts_with("--path=") {
+            stripped.push(format!("--path={remote_path}"));
+            continue;
+        }
         if arg == "--runner" {
             let _ = iter.next();
             continue;
@@ -491,13 +528,15 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_runner_flag;
+    use super::{lab_offload_source_path, rewrite_lab_offload_args};
 
     #[test]
-    fn strips_runner_flag_forms_before_remote_exec() {
+    fn rewrites_lab_offload_path_and_strips_runner_flag_before_remote_exec() {
         let args = vec![
             "homeboy".to_string(),
             "lint".to_string(),
+            "--path".to_string(),
+            "/Users/chubes/Developer/project".to_string(),
             "--runner".to_string(),
             "lab-a".to_string(),
             "--json-summary".to_string(),
@@ -505,12 +544,74 @@ mod tests {
         ];
 
         assert_eq!(
-            strip_runner_flag(&args),
+            rewrite_lab_offload_args(&args, "/home/chubes/Developer/project"),
             vec![
                 "homeboy".to_string(),
                 "lint".to_string(),
+                "--path".to_string(),
+                "/home/chubes/Developer/project".to_string(),
                 "--json-summary".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn rewrites_equals_path_before_remote_exec() {
+        let args = vec![
+            "homeboy".to_string(),
+            "test".to_string(),
+            "--path=/Users/chubes/Developer/project".to_string(),
+            "--runner=lab".to_string(),
+        ];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&args, "/home/chubes/Developer/project"),
+            vec![
+                "homeboy".to_string(),
+                "test".to_string(),
+                "--path=/home/chubes/Developer/project".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_passthrough_path_args_untouched() {
+        let args = vec![
+            "homeboy".to_string(),
+            "test".to_string(),
+            "--path".to_string(),
+            "/Users/chubes/Developer/project".to_string(),
+            "--".to_string(),
+            "--path".to_string(),
+            "test-fixture".to_string(),
+        ];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&args, "/home/chubes/Developer/project"),
+            vec![
+                "homeboy".to_string(),
+                "test".to_string(),
+                "--path".to_string(),
+                "/home/chubes/Developer/project".to_string(),
+                "--".to_string(),
+                "--path".to_string(),
+                "test-fixture".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn detects_lab_offload_source_path_from_path_flag() {
+        let args = vec![
+            "homeboy".to_string(),
+            "test".to_string(),
+            "--path".to_string(),
+            "/Users/chubes/Developer/project".to_string(),
+        ];
+
+        assert_eq!(
+            lab_offload_source_path(&args).expect("path"),
+            std::path::PathBuf::from("/Users/chubes/Developer/project")
         );
     }
 }

@@ -124,6 +124,7 @@ fn exec_via_daemon(
             "runner_id": runner.id,
             "cwd": cwd,
             "command": command,
+            "env": runner.env,
             "capture_patch": capture_patch,
             "source_snapshot": source_snapshot,
         }))

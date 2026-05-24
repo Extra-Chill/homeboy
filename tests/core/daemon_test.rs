@@ -335,6 +335,40 @@ fn routes_exec_body_to_daemon_job() {
 }
 
 #[test]
+fn exec_applies_request_env_to_daemon_command() {
+    let store = JobStore::default();
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "lab-local",
+            "cwd": std::env::current_dir().expect("cwd"),
+            "command": ["sh", "-c", "printf '%s' \"$HOMEBOY_TEST_DAEMON_ENV\""],
+            "env": {
+                "HOMEBOY_TEST_DAEMON_ENV": "ok"
+            }
+        })),
+        &store,
+    );
+
+    assert_eq!(response.status_code, 200);
+    let job_id = response.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id")
+        .to_string();
+    let job = wait_for_job(&store, &job_id);
+    assert_eq!(job.status, JobStatus::Succeeded);
+
+    let events = store.events(job.id).expect("events");
+    let result = events
+        .iter()
+        .find(|event| event.kind == JobEventKind::Result)
+        .and_then(|event| event.data.as_ref())
+        .expect("result event");
+    assert_eq!(result["stdout"], "ok");
+}
+
+#[test]
 fn exec_failed_command_marks_job_failed_after_result_event() {
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
