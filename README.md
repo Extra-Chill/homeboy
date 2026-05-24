@@ -198,7 +198,7 @@ Useful commands for parallel work:
 homeboy status --all
 homeboy git status
 homeboy review --changed-since origin/main --report pr-comment
-homeboy report review.json
+homeboy report failure-digest --output-dir .homeboy/runs/<run-id> --results @results.json
 homeboy runs list
 ```
 
