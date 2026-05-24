@@ -3,57 +3,22 @@ use homeboy::core::component::Component;
 use homeboy::core::engine::execution_context::{self, ExecutionContext, ResolveOptions};
 use homeboy::core::extension::ExtensionCapability;
 
-#[derive(Clone, Debug)]
-pub(crate) struct SourceContextRequest {
-    component_id: Option<String>,
-    path_override: Option<String>,
-    settings_overrides: Vec<(String, String)>,
-    settings_json_overrides: Vec<(String, serde_json::Value)>,
-    extension_overrides: Vec<String>,
-}
+use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 
-impl SourceContextRequest {
-    pub(crate) fn new(component_id: Option<String>, path_override: Option<String>) -> Self {
-        Self {
-            component_id,
-            path_override,
-            settings_overrides: Vec::new(),
-            settings_json_overrides: Vec::new(),
-            extension_overrides: Vec::new(),
-        }
-    }
-
-    pub(crate) fn with_settings(mut self, settings: Vec<(String, String)>) -> Self {
-        self.settings_overrides = settings;
-        self
-    }
-
-    pub(crate) fn with_json_settings(
-        mut self,
-        settings_json: Vec<(String, serde_json::Value)>,
-    ) -> Self {
-        self.settings_json_overrides = settings_json;
-        self
-    }
-
-    pub(crate) fn with_extension_overrides(mut self, extension_overrides: Vec<String>) -> Self {
-        self.extension_overrides = extension_overrides;
-        self
-    }
-
-    pub(crate) fn resolve(
-        &self,
-        capability: Option<ExtensionCapability>,
-    ) -> homeboy::core::Result<ExecutionContext> {
-        execution_context::resolve(&ResolveOptions {
-            component_id: self.component_id.clone(),
-            path_override: self.path_override.clone(),
-            capability,
-            settings_overrides: self.settings_overrides.clone(),
-            settings_json_overrides: self.settings_json_overrides.clone(),
-            extension_overrides: self.extension_overrides.clone(),
-        })
-    }
+pub(crate) fn resolve_source_context(
+    comp: &PositionalComponentArgs,
+    settings: &SettingArgs,
+    extension_override: &ExtensionOverrideArgs,
+    capability: Option<ExtensionCapability>,
+) -> homeboy::core::Result<ExecutionContext> {
+    execution_context::resolve(&ResolveOptions {
+        component_id: comp.component.clone(),
+        path_override: comp.path.clone(),
+        capability,
+        settings_overrides: settings.setting.clone(),
+        settings_json_overrides: settings.setting_json.clone(),
+        extension_overrides: extension_override.extensions.clone(),
+    })
 }
 
 pub(crate) fn resolve_ci_job_for_command(

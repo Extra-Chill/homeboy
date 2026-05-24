@@ -17,7 +17,7 @@ use homeboy::core::observation::{
 use std::path::Path;
 
 use super::source_command::{
-    finish_observed_workflow, resolve_ci_job_for_command, SourceContextRequest,
+    finish_observed_workflow, resolve_ci_job_for_command, resolve_source_context,
 };
 use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs,
@@ -102,12 +102,12 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 }
 
 pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput> {
-    let source_request =
-        SourceContextRequest::new(args.comp.component.clone(), args.comp.path.clone())
-            .with_settings(args.setting_args.setting.clone())
-            .with_json_settings(args.setting_args.setting_json.clone())
-            .with_extension_overrides(args.extension_override.extensions.clone());
-    let source_ctx = source_request.resolve(None)?;
+    let source_ctx = resolve_source_context(
+        &args.comp,
+        &args.setting_args,
+        &args.extension_override,
+        None,
+    )?;
 
     if !args.drift
         && args.ci_job.is_none()
@@ -132,7 +132,12 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         return Ok(report::from_main_workflow(workflow));
     }
 
-    let ctx = source_request.resolve(Some(ExtensionCapability::Test))?;
+    let ctx = resolve_source_context(
+        &args.comp,
+        &args.setting_args,
+        &args.extension_override,
+        Some(ExtensionCapability::Test),
+    )?;
     let effective_id = ctx.component_id.clone();
     let ci_job = resolve_ci_job_for_command(args.ci_job.as_deref(), &ctx.component, "test")?;
 

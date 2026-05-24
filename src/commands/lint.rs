@@ -16,7 +16,7 @@ use homeboy::core::refactor::plan::{
 };
 
 use super::source_command::{
-    finish_observed_workflow, resolve_ci_job_for_command, SourceContextRequest,
+    finish_observed_workflow, resolve_ci_job_for_command, resolve_source_context,
 };
 use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
@@ -107,11 +107,12 @@ impl LintArgs {
 }
 
 pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput> {
-    let source_request =
-        SourceContextRequest::new(args.comp.component.clone(), args.comp.path.clone())
-            .with_settings(args.setting_args.setting.clone())
-            .with_extension_overrides(args.extension_override.extensions.clone());
-    let source_ctx = source_request.resolve(None)?;
+    let source_ctx = resolve_source_context(
+        &args.comp,
+        &args.setting_args,
+        &args.extension_override,
+        None,
+    )?;
 
     if !args.fix
         && args.ci_job.is_none()
@@ -135,7 +136,12 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         return Ok(report::from_main_workflow(workflow));
     }
 
-    let ctx = source_request.resolve(Some(ExtensionCapability::Lint))?;
+    let ctx = resolve_source_context(
+        &args.comp,
+        &args.setting_args,
+        &args.extension_override,
+        Some(ExtensionCapability::Lint),
+    )?;
     let effective_id = ctx.component_id.clone();
     let ci_job = resolve_ci_job_for_command(args.ci_job.as_deref(), &ctx.component, "lint")?;
 
