@@ -789,11 +789,14 @@ fn extract_implements(symbols: &[Symbol]) -> Vec<String> {
     // From impl_block symbols (Rust: impl Trait for Type)
     for s in symbols.iter().filter(|s| s.concept == "impl_block") {
         if let Some(trait_name) = s.get("trait_name") {
-            if !trait_name.is_empty() && seen.insert(trait_name.to_string()) {
-                // Take last segment for qualified names
-                let short = trait_name.split("::").last().unwrap_or(trait_name);
-                implements.push(short.to_string());
-            }
+            push_unique_implement(
+                &mut implements,
+                &mut seen,
+                trait_name,
+                trait_name,
+                "::",
+                false,
+            );
         }
     }
 
@@ -802,12 +805,7 @@ fn extract_implements(symbols: &[Symbol]) -> Vec<String> {
         if let Some(interfaces) = s.get("interfaces") {
             for iface in interfaces.split(',') {
                 let iface = iface.trim();
-                if !iface.is_empty() {
-                    let short = iface.split('\\').next_back().unwrap_or(iface);
-                    if seen.insert(short.to_string()) {
-                        implements.push(short.to_string());
-                    }
-                }
+                push_unique_implement(&mut implements, &mut seen, iface, iface, "\\", true);
             }
         }
     }
@@ -815,14 +813,33 @@ fn extract_implements(symbols: &[Symbol]) -> Vec<String> {
     // From trait_use pattern (PHP: use SomeTrait;)
     for s in symbols.iter().filter(|s| s.concept == "trait_use") {
         if let Some(name) = s.name() {
-            let short = name.split('\\').next_back().unwrap_or(name);
-            if seen.insert(short.to_string()) {
-                implements.push(short.to_string());
-            }
+            push_unique_implement(&mut implements, &mut seen, name, name, "\\", true);
         }
     }
 
     implements
+}
+
+fn push_unique_implement(
+    implements: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    seen_name: &str,
+    display_name: &str,
+    separator: &str,
+    seen_by_short_name: bool,
+) {
+    if seen_name.is_empty() {
+        return;
+    }
+
+    let short = display_name
+        .rsplit(separator)
+        .next()
+        .unwrap_or(display_name);
+    let seen_key = if seen_by_short_name { short } else { seen_name };
+    if seen.insert(seen_key.to_string()) {
+        implements.push(short.to_string());
+    }
 }
 
 /// Extract namespace from symbols or derive from grammar-owned path metadata.
@@ -953,25 +970,30 @@ fn extract_internal_calls(content: &str, skip_calls: &[&str]) -> Vec<String> {
     static RE: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"\b(\w+)\s*\(").unwrap());
     for caps in RE.captures_iter(content) {
-        let name = &caps[1];
-        if !skip_set.contains(name) {
-            calls.insert(name.to_string());
-        }
+        insert_unskipped_call(&caps, &skip_set, &mut calls);
     }
 
     // Match .method( and ::method( patterns
     static METHOD_RE: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"[.:](\w+)\s*\(").unwrap());
     for caps in METHOD_RE.captures_iter(content) {
-        let name = &caps[1];
-        if !skip_set.contains(name) {
-            calls.insert(name.to_string());
-        }
+        insert_unskipped_call(&caps, &skip_set, &mut calls);
     }
 
     let mut result: Vec<String> = calls.into_iter().collect();
     result.sort();
     result
+}
+
+fn insert_unskipped_call(
+    caps: &regex::Captures<'_>,
+    skip_set: &HashSet<&str>,
+    calls: &mut HashSet<String>,
+) {
+    let name = &caps[1];
+    if !skip_set.contains(name) {
+        calls.insert(name.to_string());
+    }
 }
 
 /// Returns true only for truly public visibility — external API.
@@ -1302,6 +1324,22 @@ fn extract_hooks(symbols: &[Symbol], grammar: &Grammar) -> Vec<HookRef> {
 mod tests {
     use super::*;
 
+    const TEST_GRAMMAR_BLOCKS: &str = r#"
+                escape = "\\"
+                [blocks]
+                open = "{"
+                close = "}"
+"#;
+
+    fn assert_no_unused_parameters(fp: &FileFingerprint, message: &str) {
+        assert!(
+            fp.unused_parameters.is_empty(),
+            "{}: {:?}",
+            message,
+            fp.unused_parameters
+        );
+    }
+
     fn rust_grammar() -> Grammar {
         let grammar_path = std::path::Path::new(
             "/var/lib/datamachine/workspace/homeboy-extensions/rust/grammar.toml",
@@ -1310,8 +1348,7 @@ mod tests {
             grammar::load_grammar(grammar_path).expect("Failed to load Rust grammar")
         } else {
             // Minimal test grammar
-            toml::from_str(
-                r#"
+            let source = r#"
                 [language]
                 id = "rust"
                 extensions = ["rs"]
@@ -1321,10 +1358,7 @@ mod tests {
                 doc = ["///", "//!"]
                 [strings]
                 quotes = ['"']
-                escape = "\\"
-                [blocks]
-                open = "{"
-                close = "}"
+                __TEST_GRAMMAR_BLOCKS__
                 [fingerprint]
                 keywords = ["fn", "let", "if", "for", "return", "true", "false", "pub", "struct", "impl", "trait", "Self", "Result", "String", "bool", "i32", "usize"]
                 skip_calls = ["if", "for", "return", "println", "write", "assert"]
@@ -1369,9 +1403,9 @@ mod tests {
                 [patterns.cfg_test]
                 regex = '#\[cfg\(test\)\]'
                 context = "any"
-                "#,
-            )
-            .expect("Failed to parse minimal grammar")
+                "#
+            .replace("__TEST_GRAMMAR_BLOCKS__", TEST_GRAMMAR_BLOCKS);
+            toml::from_str(&source).expect("Failed to parse minimal grammar")
         }
     }
 
@@ -1632,11 +1666,7 @@ pub fn settings_json(overrides: &[(String, serde_json::Value)]) -> Self {
 
         let fp = fingerprint_from_grammar(content, &grammar, "src/lib.rs").unwrap();
 
-        assert!(
-            fp.unused_parameters.is_empty(),
-            "Nested type paths should not be parsed as parameters. Got: {:?}",
-            fp.unused_parameters
-        );
+        assert_no_unused_parameters(&fp, "Nested type paths should not be parsed as parameters");
     }
 
     #[test]
@@ -1673,15 +1703,15 @@ pub trait FileSystem {
     fn read(&self, path: &Path) -> Result<String>;
     fn write(&self, path: &Path, content: &str) -> Result<()>;
     fn delete(&self, path: &Path) -> Result<()>;
+    // Trait declarations have no body to inspect.
 }
 "#;
 
         let fp = fingerprint_from_grammar(content, &grammar, "src/lib.rs").unwrap();
 
-        assert!(
-            fp.unused_parameters.is_empty(),
-            "Trait method declarations should not produce unused param findings, got: {:?}",
-            fp.unused_parameters
+        assert_no_unused_parameters(
+            &fp,
+            "Trait method declarations should not produce unused param findings",
         );
     }
 
@@ -1789,8 +1819,7 @@ fn helper() {}
     }
 
     fn php_metadata_grammar() -> Grammar {
-        toml::from_str(
-            r##"
+        let source = r##"
             [language]
             id = "php"
             extensions = ["php"]
@@ -1799,10 +1828,7 @@ fn helper() {}
             block = [["/*", "*/"]]
             [strings]
             quotes = ['"', "'"]
-            escape = "\\"
-            [blocks]
-            open = "{"
-            close = "}"
+            __TEST_GRAMMAR_BLOCKS__
             [fingerprint]
             keywords = ["class", "function", "public", "return", "int", "string", "bool", "true", "false"]
             skip_calls = ["if", "return"]
@@ -1838,9 +1864,9 @@ fn helper() {}
             skip_strings = false
             [patterns.transform_value.captures]
             name = 1
-            "##,
-        )
-        .expect("metadata grammar should parse")
+            "##
+        .replace("__TEST_GRAMMAR_BLOCKS__", TEST_GRAMMAR_BLOCKS);
+        toml::from_str(&source).expect("metadata grammar should parse")
     }
 
     #[test]
