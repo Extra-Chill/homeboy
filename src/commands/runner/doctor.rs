@@ -369,7 +369,7 @@ mod remote {
             .workspace_root
             .clone()
             .unwrap_or_else(|| ".".to_string());
-        let artifact_root = "$HOME/.local/share/homeboy/artifacts".to_string();
+        let artifact_root = default_artifact_root(client);
         let mut checks = Vec::new();
         let mut tools = BTreeMap::new();
 
@@ -525,6 +525,31 @@ mod remote {
             resources,
             checks,
         }
+    }
+
+    fn default_artifact_root(client: &SshClient) -> String {
+        remote_home_dir(client)
+            .and_then(|home| default_artifact_root_for_home(&home))
+            .unwrap_or_else(|| "~/.local/share/homeboy/artifacts".to_string())
+    }
+
+    fn remote_home_dir(client: &SshClient) -> Option<String> {
+        common::remote_line(
+            client,
+            "home=${HOME:-}; if [ -z \"$home\" ]; then home=$(getent passwd \"$(id -u)\" 2>/dev/null | cut -d: -f6); fi; if [ -z \"$home\" ]; then home=$(cd ~ 2>/dev/null && pwd -P); fi; [ -n \"$home\" ] && printf '%s\n' \"$home\"",
+        )
+    }
+
+    pub(super) fn default_artifact_root_for_home(home: &str) -> Option<String> {
+        let home = home.trim();
+        if home.is_empty() {
+            return None;
+        }
+        let home = home.trim_end_matches('/');
+        if home.is_empty() {
+            return Some("/.local/share/homeboy/artifacts".to_string());
+        }
+        Some(format!("{home}/.local/share/homeboy/artifacts"))
     }
 }
 
@@ -1176,5 +1201,26 @@ mod tests {
                 Some("/runner/bin:$PATH")
             );
         });
+    }
+
+    #[test]
+    fn remote_default_artifact_root_expands_under_home() {
+        assert_eq!(
+            remote::default_artifact_root_for_home("/home/runner"),
+            Some("/home/runner/.local/share/homeboy/artifacts".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_default_artifact_root_normalizes_trailing_home_slash() {
+        assert_eq!(
+            remote::default_artifact_root_for_home("/Users/chubes/"),
+            Some("/Users/chubes/.local/share/homeboy/artifacts".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_default_artifact_root_rejects_empty_home() {
+        assert_eq!(remote::default_artifact_root_for_home("  "), None);
     }
 }
