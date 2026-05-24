@@ -1,6 +1,7 @@
 mod changes;
 mod commits;
 mod github;
+mod github_comment_sections;
 mod operations;
 mod pr_policy;
 mod primitives;
