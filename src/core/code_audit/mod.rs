@@ -1177,7 +1177,7 @@ fn audit_internal(
     // guards on symbols guaranteed to exist given plugin requirements, composer
     // dependencies, and bootstrap requires.
     let dead_guard_findings = if plan.run_dead_guard() {
-        dead_guard::run_with_config(&all_fingerprints, root, &audit_config)
+        dead_guard::detect_with_config(&all_fingerprints, root, &audit_config)
     } else {
         Vec::new()
     };

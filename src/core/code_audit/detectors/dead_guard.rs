@@ -76,7 +76,7 @@ struct Guard {
     offset: usize,
 }
 
-pub(in crate::core::code_audit) fn run_with_config(
+pub(in crate::core::code_audit) fn detect_with_config(
     fingerprints: &[&FileFingerprint],
     root: &Path,
     audit_config: &AuditConfig,
@@ -119,6 +119,14 @@ pub(in crate::core::code_audit) fn run_with_config(
 
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
+}
+
+#[allow(dead_code)]
+pub(in crate::core::code_audit) fn run(
+    fingerprints: &[&FileFingerprint],
+    root: &Path,
+) -> Vec<Finding> {
+    detect_with_config(fingerprints, root, &AuditConfig::default())
 }
 
 fn guard_is_contextual(fp: &FileFingerprint, guard: &Guard, audit_config: &AuditConfig) -> bool {
@@ -520,8 +528,8 @@ mod tests {
         fs::write(root.join("plugin.php"), content).unwrap();
     }
 
-    fn run(fingerprints: &[&FileFingerprint], root: &Path) -> Vec<Finding> {
-        run_with_config(fingerprints, root, &test_config())
+    fn detect_for_test(fingerprints: &[&FileFingerprint], root: &Path) -> Vec<Finding> {
+        detect_with_config(fingerprints, root, &test_config())
     }
 
     #[test]
@@ -557,7 +565,7 @@ class Register {}
 "#,
         );
 
-        let findings = run(&[&fp], tmp.path());
+        let findings = detect_for_test(&[&fp], tmp.path());
         assert_eq!(findings.len(), 1, "expected one dead-guard finding");
         assert_eq!(findings[0].kind, AuditFinding::DeadGuard);
         assert_eq!(findings[0].severity, Severity::Warning);
@@ -579,7 +587,7 @@ if ( ! function_exists('my_plugin_helper') ) {
 "#,
         );
 
-        let findings = run(&[&fp], tmp.path());
+        let findings = detect_for_test(&[&fp], tmp.path());
         assert!(
             findings.is_empty(),
             "unknown symbol should not be flagged, got: {:?}",
@@ -612,7 +620,7 @@ if ( function_exists('runtime_schedule_once') ) {
 "#,
         );
 
-        let findings = run(&[&fp], tmp.path());
+        let findings = detect_for_test(&[&fp], tmp.path());
         assert_eq!(findings.len(), 1);
         assert!(findings[0].description.contains("runtime_schedule_once"));
     }
@@ -629,7 +637,7 @@ if ( function_exists('runtime_schedule_once') ) {
             ..Default::default()
         };
 
-        let findings = run(&[&fp], tmp.path());
+        let findings = detect_for_test(&[&fp], tmp.path());
         assert!(findings.is_empty());
     }
 
@@ -651,7 +659,7 @@ if ( ! function_exists('runtime_json_encode') ) {
             guard_is_contextual(&fp, &guard, &AuditConfig::default()),
             "stub definition guards are contextual even when the symbol is otherwise available"
         );
-        let findings = run(&[&fp], tmp.path());
+        let findings = detect_for_test(&[&fp], tmp.path());
         assert!(findings.is_empty(), "stub guards are test scaffolding");
     }
 
@@ -678,7 +686,7 @@ if ( function_exists('runtime_unschedule_all') ) {
             guard_is_contextual(&fp, &guard, &config),
             "configured lifecycle globs mark guards as contextual"
         );
-        let findings = run_with_config(&[&fp], tmp.path(), &config);
+        let findings = detect_with_config(&[&fp], tmp.path(), &config);
         assert!(
             findings.is_empty(),
             "uninstall context is not normal runtime"
@@ -715,7 +723,7 @@ if ( function_exists('runtime_unschedule_all') ) {
 "#,
         );
 
-        let findings = run(&[&migration, &uninstall, &smoke], tmp.path());
+        let findings = detect_for_test(&[&migration, &uninstall, &smoke], tmp.path());
         assert!(
             findings.is_empty(),
             "migration, uninstall, and smoke contexts are not normal runtime: {:?}",
@@ -745,7 +753,7 @@ register_deactivation_hook( __FILE__, 'runtime_deactivate_plugin' );
         let content = fs::read_to_string(tmp.path().join("plugin.php")).unwrap();
         let fp = make_fp("plugin.php", &content);
 
-        let findings = run(&[&fp], tmp.path());
+        let findings = detect_for_test(&[&fp], tmp.path());
         assert_eq!(
             findings.len(),
             1,
@@ -770,7 +778,7 @@ function runtime_normal_request() {
 "#,
         );
 
-        let findings = run(&[&fp], tmp.path());
+        let findings = detect_for_test(&[&fp], tmp.path());
         assert_eq!(findings.len(), 1);
         assert!(findings[0].description.contains("runtime_unschedule_all"));
     }
@@ -796,7 +804,7 @@ if ( function_exists('runtime_unschedule_all') ) {
             ..Default::default()
         };
 
-        let findings = run_with_config(&[&fp], tmp.path(), &config);
+        let findings = detect_with_config(&[&fp], tmp.path(), &config);
         assert!(findings.is_empty(), "matched comment context is exempt");
     }
 
@@ -819,7 +827,7 @@ if ( function_exists('runtime_unschedule_all') ) {
             ..Default::default()
         };
 
-        let findings = run_with_config(&[&fp], tmp.path(), &config);
+        let findings = detect_with_config(&[&fp], tmp.path(), &config);
         assert!(findings.is_empty(), "guard-arm comment context is exempt");
     }
 
@@ -837,7 +845,7 @@ if ( function_exists('runtime_unschedule_all') ) {
 "#,
         );
 
-        let findings = run(&[&fp], tmp.path());
+        let findings = detect_for_test(&[&fp], tmp.path());
         assert_eq!(findings.len(), 1, "comments are not magic without config");
     }
 
@@ -860,7 +868,7 @@ if ( function_exists('runtime_unschedule_all') ) {
             ..Default::default()
         };
 
-        let findings = run_with_config(&[&fp], tmp.path(), &config);
+        let findings = detect_with_config(&[&fp], tmp.path(), &config);
         assert_eq!(findings.len(), 1, "only comment context is matched");
     }
 
@@ -873,7 +881,7 @@ if ( function_exists('runtime_unschedule_all') ) {
             r#"<?php if ( class_exists('RuntimeCapability') ) {} "#,
         );
 
-        let findings = run(&[&fp], tmp.path());
+        let findings = detect_for_test(&[&fp], tmp.path());
         assert!(findings.is_empty());
     }
 }
