@@ -219,12 +219,18 @@ pub(super) fn deploy_artifact(
             log_status!("deploy", "Cleaning target directory before extraction");
             let clean_output = ssh_client.execute(&clean_cmd);
             if !clean_output.success {
-                log_status!(
-                    "deploy",
-                    "Warning: failed to clean target directory: {}",
-                    clean_output.stderr
-                );
-                // Non-fatal — proceed with extraction anyway
+                let error_detail = if clean_output.stderr.is_empty() {
+                    clean_output.stdout.clone()
+                } else {
+                    clean_output.stderr.clone()
+                };
+                return Ok(DeployResult::failure(
+                    clean_output.exit_code,
+                    format!(
+                        "Failed to clean target directory before extraction (exit {}): {}",
+                        clean_output.exit_code, error_detail
+                    ),
+                ));
             }
 
             let mut vars = HashMap::new();
@@ -302,6 +308,8 @@ mod tests {
     use crate::core::server::SshClient;
     use std::collections::HashMap;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn local_client() -> SshClient {
         SshClient {
@@ -312,6 +320,13 @@ mod tests {
             auth: None,
             is_local: true,
             env: HashMap::new(),
+        }
+    }
+
+    fn local_client_with_env(env: HashMap<String, String>) -> SshClient {
+        SshClient {
+            env,
+            ..local_client()
         }
     }
 
@@ -370,5 +385,47 @@ mod tests {
                 .to_str()
                 .expect("uploaded artifact path")
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_deploy_artifact_fails_when_pre_extract_cleanup_fails() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("artifact.zip");
+        let target = temp.path().join("target");
+        let fake_bin = temp.path().join("bin");
+        let fake_find = fake_bin.join("find");
+        fs::create_dir_all(&fake_bin).expect("fake bin");
+        fs::write(&artifact, "artifact bytes").expect("artifact");
+        fs::write(&fake_find, "#!/bin/sh\necho cleanup denied >&2\nexit 42\n").expect("fake find");
+        fs::set_permissions(&fake_find, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake find");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                fake_bin.to_str().expect("fake bin path"),
+                std::env::var("PATH").expect("PATH")
+            ),
+        );
+
+        let result = deploy_artifact(
+            &local_client_with_env(env),
+            &artifact,
+            target.to_str().expect("target path"),
+            Some("true"),
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        let error = result.error.expect("cleanup error");
+        assert!(!result.success);
+        assert_eq!(42, result.exit_code);
+        assert!(error.contains("Failed to clean target directory before extraction"));
+        assert!(error.contains("exit 42"));
+        assert!(error.contains("cleanup denied"));
     }
 }
