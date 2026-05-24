@@ -13,6 +13,7 @@ use crate::core::code_audit::{
     AuditAnalysisContext, AuditExecutionPlan, AuditFinding, AuditSummary, CodeAuditResult,
     ConventionReport,
 };
+use crate::core::plan::PlanStepStatus;
 
 fn make_finding(kind: AuditFinding, file: &str) -> Finding {
     Finding {
@@ -99,6 +100,16 @@ fn make_args(include_fixability: bool) -> AuditRunWorkflowArgs {
         json_summary: false,
         include_fixability,
     }
+}
+
+fn detector_step_status<'a>(plan: &'a AuditExecutionPlan, detector: &str) -> &'a PlanStepStatus {
+    &plan
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.id == format!("audit.{detector}"))
+        .unwrap_or_else(|| panic!("missing detector step: {detector}"))
+        .status
 }
 
 fn make_changed_since_args() -> AuditRunWorkflowArgs {
@@ -329,29 +340,68 @@ fn changed_since_comparison_counts_new_findings_as_introduced() {
 fn execution_plan_for_structural_only_skips_unrelated_detector_families() {
     let plan = AuditExecutionPlan::from_filters(&[AuditFinding::GodFile], &[]);
 
-    assert!(plan.run_structural);
-    assert!(!plan.run_conventions);
-    assert!(!plan.run_duplication);
-    assert!(!plan.run_dead_code);
-    assert!(!plan.run_compiler_warnings);
+    assert!(plan.run_structural());
+    assert!(!plan.run_duplication());
+    assert!(!plan.run_dead_code());
+    assert!(!plan.run_compiler_warnings());
+    assert_eq!(
+        detector_step_status(&plan, "conventions"),
+        &PlanStepStatus::Disabled
+    );
+    assert_eq!(
+        detector_step_status(&plan, "structural"),
+        &PlanStepStatus::Ready
+    );
+    assert_eq!(
+        detector_step_status(&plan, "duplication"),
+        &PlanStepStatus::Disabled
+    );
 }
 
 #[test]
 fn execution_plan_for_duplicate_only_skips_structural_detector_family() {
     let plan = AuditExecutionPlan::from_filters(&[AuditFinding::DuplicateFunction], &[]);
 
-    assert!(plan.run_duplication);
-    assert!(!plan.run_structural);
-    assert!(!plan.run_conventions);
+    assert!(plan.run_duplication());
+    assert!(!plan.run_structural());
+    assert_eq!(
+        detector_step_status(&plan, "conventions"),
+        &PlanStepStatus::Disabled
+    );
 }
 
 #[test]
 fn execution_plan_for_unwired_nested_rust_test_runs_wiring_detector() {
     let plan = AuditExecutionPlan::from_filters(&[AuditFinding::UnwiredNestedRustTest], &[]);
 
-    assert!(plan.run_rust_test_wiring);
-    assert!(!plan.run_test_topology);
-    assert!(!plan.run_conventions);
+    assert!(plan.run_rust_test_wiring());
+    assert!(!plan.run_test_topology());
+    assert_eq!(
+        detector_step_status(&plan, "conventions"),
+        &PlanStepStatus::Disabled
+    );
+}
+
+#[test]
+fn execution_plan_for_excluded_structural_detector_disables_plan_step() {
+    let plan = AuditExecutionPlan::from_filters(
+        &[],
+        &[
+            AuditFinding::GodFile,
+            AuditFinding::HighItemCount,
+            AuditFinding::DirectorySprawl,
+        ],
+    );
+
+    assert!(!plan.run_structural());
+    assert_eq!(
+        detector_step_status(&plan, "structural"),
+        &PlanStepStatus::Disabled
+    );
+    assert_eq!(
+        detector_step_status(&plan, "duplication"),
+        &PlanStepStatus::Ready
+    );
 }
 
 #[test]
@@ -360,6 +410,18 @@ fn execution_plan_is_full_without_filters() {
         AuditExecutionPlan::from_filters(&[], &[]),
         AuditExecutionPlan::full()
     );
+}
+
+#[test]
+fn full_execution_plan_marks_all_detector_steps_ready() {
+    let plan = AuditExecutionPlan::full();
+
+    assert!(!plan.plan.steps.is_empty());
+    assert!(plan
+        .plan
+        .steps
+        .iter()
+        .all(|step| step.status == PlanStepStatus::Ready));
 }
 
 #[test]
