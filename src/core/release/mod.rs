@@ -27,7 +27,8 @@ pub use types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseArtifact,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary,
     ReleaseOptions, ReleasePipelineOptions, ReleasePlan, ReleaseProjectDeployResult, ReleaseRun,
-    ReleaseRunResult, ReleaseRunSummary, ReleaseStepResult, ReleaseStepStatus,
+    ReleaseRunResult, ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation,
+    ReleaseStepResult, ReleaseStepStatus,
 };
 pub use utils::{extract_latest_notes, parse_release_artifacts};
 pub use workflow::{run_batch, run_command};

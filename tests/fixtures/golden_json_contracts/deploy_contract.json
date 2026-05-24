@@ -1,0 +1,92 @@
+{
+  "scenarios": [
+    {
+      "payload": {
+        "data": {
+          "all": false,
+          "behind_upstream": false,
+          "check": false,
+          "command": "deploy.run",
+          "dry_run": true,
+          "force": false,
+          "outdated": false,
+          "project_id": "production",
+          "results": [
+            {
+              "artifact_path": "target/dist/homeboy.tar.gz",
+              "build_exit_code": null,
+              "component_status": "needs_update",
+              "deploy_exit_code": null,
+              "deploy_reason": "explicitly_selected",
+              "deployed_ref": "v0.198.0",
+              "error": null,
+              "id": "homeboy",
+              "local_version": "0.198.0",
+              "remote_path": "/srv/homeboy",
+              "remote_version": "0.197.11",
+              "status": "planned"
+            }
+          ],
+          "summary": {
+            "failed": 0,
+            "skipped": 1,
+            "succeeded": 0,
+            "total": 1
+          }
+        },
+        "success": true
+      },
+      "scenario": "deploy dry-run single"
+    },
+    {
+      "payload": {
+        "data": {
+          "check": false,
+          "command": "deploy.multi",
+          "component_ids": [
+            "homeboy"
+          ],
+          "dry_run": true,
+          "force": false,
+          "projects": [
+            {
+              "project_id": "production",
+              "results": [
+                {
+                  "artifact_path": "target/dist/homeboy.tar.gz",
+                  "build_exit_code": null,
+                  "component_status": "needs_update",
+                  "deploy_exit_code": null,
+                  "deploy_reason": "explicitly_selected",
+                  "deployed_ref": "v0.198.0",
+                  "error": null,
+                  "id": "homeboy",
+                  "local_version": "0.198.0",
+                  "remote_path": "/srv/homeboy",
+                  "remote_version": "0.197.11",
+                  "status": "planned"
+                }
+              ],
+              "status": "planned",
+              "summary": {
+                "failed": 0,
+                "skipped": 1,
+                "succeeded": 0,
+                "total": 1
+              }
+            }
+          ],
+          "summary": {
+            "failed": 0,
+            "planned": 1,
+            "skipped": 0,
+            "succeeded": 0,
+            "total_projects": 1
+          }
+        },
+        "success": true
+      },
+      "scenario": "deploy dry-run multi-project"
+    }
+  ]
+}

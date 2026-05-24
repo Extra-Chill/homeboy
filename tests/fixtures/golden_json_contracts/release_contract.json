@@ -1,0 +1,160 @@
+{
+  "scenarios": [
+    {
+      "payload": {
+        "data": {
+          "command": "release",
+          "result": {
+            "bump_type": "minor",
+            "component_id": "homeboy",
+            "dry_run": true,
+            "new_version": "0.198.0",
+            "plan": {
+              "component_id": "homeboy",
+              "enabled": true,
+              "hints": [
+                "review generated plan before releasing"
+              ],
+              "id": "release.homeboy",
+              "kind": "release",
+              "policy": {
+                "enabled": true,
+                "semver_recommendation": {
+                  "commits": [
+                    {
+                      "breaking": false,
+                      "commit_type": "feat",
+                      "sha": "aaaaaaaa",
+                      "subject": "feat: add contract fixtures"
+                    }
+                  ],
+                  "is_underbump": false,
+                  "latest_tag": "v0.197.10",
+                  "range": "v0.197.10..HEAD",
+                  "reasons": [
+                    "feat commit requires a minor release"
+                  ],
+                  "recommended_bump": "minor",
+                  "requested_bump": "minor"
+                }
+              },
+              "semver_recommendation": {
+                "commits": [
+                  {
+                    "breaking": false,
+                    "commit_type": "feat",
+                    "sha": "aaaaaaaa",
+                    "subject": "feat: add contract fixtures"
+                  }
+                ],
+                "is_underbump": false,
+                "latest_tag": "v0.197.10",
+                "range": "v0.197.10..HEAD",
+                "reasons": [
+                  "feat commit requires a minor release"
+                ],
+                "recommended_bump": "minor",
+                "requested_bump": "minor"
+              },
+              "subject": {
+                "component_id": "homeboy"
+              },
+              "warnings": [
+                "dry run only"
+              ]
+            },
+            "releasable_commits": 1,
+            "tag": "v0.198.0"
+          }
+        },
+        "success": true
+      },
+      "scenario": "release dry-run single"
+    },
+    {
+      "payload": {
+        "data": {
+          "command": "release.batch",
+          "result": {
+            "results": [
+              {
+                "component_id": "homeboy",
+                "result": {
+                  "bump_type": "minor",
+                  "component_id": "homeboy",
+                  "dry_run": true,
+                  "new_version": "0.198.0",
+                  "plan": {
+                    "component_id": "homeboy",
+                    "enabled": true,
+                    "hints": [
+                      "review generated plan before releasing"
+                    ],
+                    "id": "release.homeboy",
+                    "kind": "release",
+                    "policy": {
+                      "enabled": true,
+                      "semver_recommendation": {
+                        "commits": [
+                          {
+                            "breaking": false,
+                            "commit_type": "feat",
+                            "sha": "aaaaaaaa",
+                            "subject": "feat: add contract fixtures"
+                          }
+                        ],
+                        "is_underbump": false,
+                        "latest_tag": "v0.197.10",
+                        "range": "v0.197.10..HEAD",
+                        "reasons": [
+                          "feat commit requires a minor release"
+                        ],
+                        "recommended_bump": "minor",
+                        "requested_bump": "minor"
+                      }
+                    },
+                    "semver_recommendation": {
+                      "commits": [
+                        {
+                          "breaking": false,
+                          "commit_type": "feat",
+                          "sha": "aaaaaaaa",
+                          "subject": "feat: add contract fixtures"
+                        }
+                      ],
+                      "is_underbump": false,
+                      "latest_tag": "v0.197.10",
+                      "range": "v0.197.10..HEAD",
+                      "reasons": [
+                        "feat commit requires a minor release"
+                      ],
+                      "recommended_bump": "minor",
+                      "requested_bump": "minor"
+                    },
+                    "subject": {
+                      "component_id": "homeboy"
+                    },
+                    "warnings": [
+                      "dry run only"
+                    ]
+                  },
+                  "releasable_commits": 1,
+                  "tag": "v0.198.0"
+                },
+                "status": "planned"
+              }
+            ],
+            "summary": {
+              "failed": 0,
+              "released": 0,
+              "skipped": 0,
+              "total": 1
+            }
+          }
+        },
+        "success": true
+      },
+      "scenario": "release dry-run batch"
+    }
+  ]
+}

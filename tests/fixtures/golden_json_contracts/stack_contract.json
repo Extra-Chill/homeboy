@@ -1,0 +1,114 @@
+{
+  "scenarios": [
+    {
+      "payload": {
+        "data": {
+          "command": "stack.list",
+          "stacks": [
+            {
+              "base": "origin/main",
+              "component": "homeboy",
+              "component_path": "/work/homeboy",
+              "description": "Combined fixes branch",
+              "id": "combined-fixes",
+              "pr_count": 1,
+              "target": "origin/dev/combined-fixes"
+            }
+          ]
+        },
+        "success": true
+      },
+      "scenario": "stack list"
+    },
+    {
+      "payload": {
+        "data": {
+          "command": "stack.show",
+          "stack": {
+            "base": {
+              "branch": "main",
+              "remote": "origin"
+            },
+            "component": "homeboy",
+            "component_path": "/work/homeboy",
+            "description": "Combined fixes branch",
+            "id": "combined-fixes",
+            "prs": [
+              {
+                "note": "contract coverage",
+                "number": 2753,
+                "repo": "Extra-Chill/homeboy"
+              }
+            ],
+            "target": {
+              "branch": "dev/combined-fixes",
+              "remote": "origin"
+            }
+          }
+        },
+        "success": true
+      },
+      "scenario": "stack show"
+    },
+    {
+      "payload": {
+        "data": {
+          "base": "origin/main",
+          "command": "stack.status",
+          "component_path": "/work/homeboy",
+          "merged_count": 0,
+          "prs": [
+            {
+              "local_state": "applied",
+              "note": "contract coverage",
+              "number": 2753,
+              "repo": "Extra-Chill/homeboy",
+              "review_decision": "REVIEW_REQUIRED",
+              "title": "Add golden JSON contract fixtures",
+              "upstream_state": "OPEN",
+              "url": "https://github.com/Extra-Chill/homeboy/pull/2753"
+            }
+          ],
+          "stack_id": "combined-fixes",
+          "success": true,
+          "target": "dev/combined-fixes",
+          "target_ahead": 2,
+          "target_behind": 0
+        },
+        "success": true
+      },
+      "scenario": "stack status"
+    },
+    {
+      "payload": {
+        "data": {
+          "base": "origin/main",
+          "base_auto_detected": false,
+          "branch": "fix/contract",
+          "command": "stack.inspect",
+          "commits": [
+            {
+              "author": "Homeboy Bot",
+              "date": "2026-05-24T00:00:00Z",
+              "pr": {
+                "number": 2753,
+                "state": "OPEN",
+                "title": "Add golden JSON contract fixtures",
+                "url": "https://github.com/Extra-Chill/homeboy/pull/2753"
+              },
+              "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "short_sha": "aaaaaaaa",
+              "subject": "test: pin command JSON contract"
+            }
+          ],
+          "component_id": "homeboy",
+          "merged_count": 0,
+          "path": "/work/homeboy",
+          "success": true
+        },
+        "success": true
+      },
+      "scenario": "stack inspect"
+    }
+  ]
+}
