@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.197.9] - 2026-05-24
+
+### Fixed
+- reduce local duplicate audit blocks
+
 ## [0.197.8] - 2026-05-24
 
 ### Fixed
