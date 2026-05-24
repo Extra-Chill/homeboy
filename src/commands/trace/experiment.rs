@@ -12,9 +12,31 @@ use super::{TraceArgs, TraceRigContext};
 
 pub(super) struct TraceExperimentRunPlan<'a> {
     plan: HomeboyPlan,
-    name: String,
+    execution: TraceExperimentExecutionContext<'a>,
+}
+
+struct TraceExperimentExecutionContext<'a> {
     spec: &'a rig::TraceExperimentSpec,
     context: &'a TraceRigContext,
+}
+
+impl TraceExperimentRunPlan<'_> {
+    fn experiment_name(&self) -> &str {
+        self.plan
+            .inputs
+            .get("experiment")
+            .and_then(|value| value.as_str())
+            .expect("trace experiment plan missing experiment input")
+    }
+
+    fn phase_steps(&self, phase: &str) -> Vec<&PlanStep> {
+        let kind = format!("trace.experiment.{phase}");
+        self.plan
+            .steps
+            .iter()
+            .filter(|step| step.kind == kind && trace_experiment_step_phase(step) == Some(phase))
+            .collect()
+    }
 }
 
 pub(super) fn trace_experiment_plan_for_args<'a>(
@@ -62,9 +84,10 @@ pub(super) fn trace_experiment_plan_for_args<'a>(
         })?;
     Ok(Some(TraceExperimentRunPlan {
         plan: trace_experiment_plan(&context.rig_spec.id, name, experiment),
-        name: name.to_string(),
-        spec: experiment,
-        context,
+        execution: TraceExperimentExecutionContext {
+            spec: experiment,
+            context,
+        },
     }))
 }
 
@@ -111,6 +134,7 @@ fn trace_experiment_step(phase: &str, name: &str, index: usize, command: &str) -
     .inputs(
         PlanValues::new()
             .string("experiment", name)
+            .number("index", index as u64)
             .string("phase", phase)
             .string("command", command),
     )
@@ -123,7 +147,8 @@ pub(super) fn trace_experiment_settings(
     let Some(plan) = plan else {
         return Ok(Vec::new());
     };
-    plan.spec
+    plan.execution
+        .spec
         .settings
         .iter()
         .map(|(key, value)| {
@@ -131,7 +156,7 @@ pub(super) fn trace_experiment_settings(
                 key.clone(),
                 match value {
                     serde_json::Value::String(value) => serde_json::Value::String(
-                        resolve_trace_experiment_string(plan.context, value),
+                        resolve_trace_experiment_string(plan.execution.context, value),
                     ),
                     other => other.clone(),
                 },
@@ -146,13 +171,14 @@ pub(super) fn trace_experiment_env(
     let Some(plan) = plan else {
         return Ok(Vec::new());
     };
-    plan.spec
+    plan.execution
+        .spec
         .env
         .iter()
         .map(|(key, value)| {
             Ok((
                 key.clone(),
-                resolve_trace_experiment_string(plan.context, value),
+                resolve_trace_experiment_string(plan.execution.context, value),
             ))
         })
         .collect()
@@ -165,13 +191,12 @@ pub(super) fn run_trace_experiment_setup_for_plan(
     let Some(plan) = plan else {
         return Ok(());
     };
-    validate_trace_experiment_plan_phase(&plan.plan, &plan.name, "setup", plan.spec.setup.len())?;
+    validate_trace_experiment_plan_phase(plan, "setup", plan.execution.spec.setup.len())?;
     run_trace_experiment_commands(
-        plan.context,
-        &plan.name,
+        plan,
         "setup",
-        &plan.spec.setup,
-        &plan.spec.env,
+        &plan.execution.spec.setup,
+        &plan.execution.spec.env,
         run_dir,
     )
 }
@@ -183,56 +208,47 @@ pub(super) fn run_trace_experiment_teardown_for_plan(
     let Some(plan) = plan else {
         return Ok(());
     };
-    validate_trace_experiment_plan_phase(
-        &plan.plan,
-        &plan.name,
-        "teardown",
-        plan.spec.teardown.len(),
-    )?;
+    validate_trace_experiment_plan_phase(plan, "teardown", plan.execution.spec.teardown.len())?;
     run_trace_experiment_commands(
-        plan.context,
-        &plan.name,
+        plan,
         "teardown",
-        &plan.spec.teardown,
-        &plan.spec.env,
+        &plan.execution.spec.teardown,
+        &plan.execution.spec.env,
         run_dir,
     )
 }
 
 fn validate_trace_experiment_plan_phase(
-    plan: &HomeboyPlan,
-    experiment_name: &str,
+    plan: &TraceExperimentRunPlan,
     phase: &str,
     command_count: usize,
 ) -> homeboy::core::Result<()> {
-    let planned_count = plan
-        .steps
-        .iter()
-        .filter(|step| {
-            step.kind == format!("trace.experiment.{phase}")
-                && step.inputs.get("phase").and_then(|value| value.as_str()) == Some(phase)
-        })
-        .count();
+    let planned_count = plan.phase_steps(phase).len();
     if planned_count == command_count {
         return Ok(());
     }
 
     Err(homeboy::core::Error::internal_unexpected(format!(
         "trace experiment '{}' {} plan has {} steps for {} commands",
-        experiment_name, phase, planned_count, command_count
+        plan.experiment_name(),
+        phase,
+        planned_count,
+        command_count
     )))
 }
 
 fn run_trace_experiment_commands(
-    context: &TraceRigContext,
-    experiment_name: &str,
+    plan: &TraceExperimentRunPlan,
     phase: &str,
     commands: &[rig::TraceExperimentCommandSpec],
     experiment_env: &BTreeMap<String, String>,
     run_dir: &RunDir,
 ) -> homeboy::core::Result<()> {
-    for command_spec in commands {
-        let command_text = resolve_trace_experiment_string(context, &command_spec.command);
+    let context = plan.execution.context;
+    let experiment_name = plan.experiment_name();
+    for (step, command_spec) in plan.phase_steps(phase).into_iter().zip(commands) {
+        let command_text =
+            resolve_trace_experiment_string(context, trace_experiment_step_command(step));
         let mut command = Command::new(trace_experiment_shell());
         command.arg("-c").arg(&command_text);
         command.env("HOMEBOY_TRACE_EXPERIMENT", experiment_name);
@@ -287,7 +303,24 @@ pub(super) fn collect_trace_experiment_artifacts_for_plan(
     let Some(plan) = plan else {
         return Ok(());
     };
-    collect_trace_experiment_artifacts(plan.context, &plan.name, plan.spec, run_dir, workflow)
+    collect_trace_experiment_artifacts(
+        plan.execution.context,
+        plan.experiment_name(),
+        plan.execution.spec,
+        run_dir,
+        workflow,
+    )
+}
+
+fn trace_experiment_step_phase(step: &PlanStep) -> Option<&str> {
+    step.inputs.get("phase").and_then(|value| value.as_str())
+}
+
+fn trace_experiment_step_command(step: &PlanStep) -> &str {
+    step.inputs
+        .get("command")
+        .and_then(|value| value.as_str())
+        .expect("trace experiment plan step missing command input")
 }
 
 fn collect_trace_experiment_artifacts(
