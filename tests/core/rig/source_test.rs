@@ -187,6 +187,36 @@ fn sources_list_reports_corrupt_metadata_and_missing_configs() {
 }
 
 #[test]
+fn sources_list_skips_non_json_and_collects_invalid_stack_metadata() {
+    let _home = HomeGuard::new();
+    fs::create_dir_all(crate::core::paths::rig_sources().expect("rig sources dir"))
+        .expect("rig sources dir");
+    fs::create_dir_all(crate::core::paths::stack_sources().expect("stack sources dir"))
+        .expect("stack sources dir");
+    fs::write(
+        crate::core::paths::rig_sources()
+            .expect("rig sources dir")
+            .join("ignored.txt"),
+        "not json",
+    )
+    .expect("non-json metadata");
+    fs::write(
+        crate::core::paths::stack_source_metadata("broken-stack").expect("stack metadata"),
+        "not json",
+    )
+    .expect("broken stack metadata");
+
+    let result = list_sources().expect("sources");
+
+    assert!(result.sources.is_empty());
+    assert_eq!(result.invalid.len(), 1);
+    assert_eq!(result.invalid[0].id, "broken-stack");
+    assert!(result.invalid[0]
+        .metadata_path
+        .ends_with("stack-sources/broken-stack.json"));
+}
+
+#[test]
 fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");

@@ -21,6 +21,7 @@ pub mod app;
 pub mod check;
 pub mod expand;
 pub mod install;
+mod json_config;
 pub mod lease;
 pub mod pipeline;
 pub mod runner;
@@ -122,28 +123,17 @@ pub fn declared_id(id: &str) -> Result<Option<String>> {
 /// List all rig specs in `~/.config/homeboy/rigs/`.
 pub fn list() -> Result<Vec<RigSpec>> {
     let dir = paths::rigs()?;
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
     let mut rigs = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .map_err(|e| Error::internal_unexpected(format!("Failed to list rigs: {}", e)))?
-    {
-        let entry = entry
-            .map_err(|e| Error::internal_unexpected(format!("Failed to read rig entry: {}", e)))?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let stem = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        if let Ok(spec) = load(&stem) {
+    for entry in json_config::sorted_json_config_entries(
+        &dir,
+        "list rigs",
+        "read rig entry",
+        |e, context| Error::internal_unexpected(format!("Failed to {}: {}", context, e)),
+    )? {
+        if let Ok(spec) = load(&entry.id) {
             rigs.push(spec);
         }
     }
-    rigs.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(rigs)
 }
 
@@ -151,23 +141,8 @@ pub fn list() -> Result<Vec<RigSpec>> {
 /// e.g. for error suggestions).
 pub fn list_ids() -> Result<Vec<String>> {
     let dir = paths::rigs()?;
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut ids = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .map_err(|e| Error::internal_unexpected(format!("Failed to list rigs: {}", e)))?
-    {
-        let entry = entry
-            .map_err(|e| Error::internal_unexpected(format!("Failed to read rig entry: {}", e)))?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            ids.push(stem.to_string());
-        }
-    }
-    ids.sort();
-    Ok(ids)
+    json_config::sorted_json_config_entries(&dir, "list rigs", "read rig entry", |e, context| {
+        Error::internal_unexpected(format!("Failed to {}: {}", context, e))
+    })
+    .map(|entries| entries.into_iter().map(|entry| entry.id).collect())
 }
