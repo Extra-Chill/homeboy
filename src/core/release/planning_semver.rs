@@ -88,6 +88,45 @@ pub(super) fn validate_release_version_floor(
     None
 }
 
+pub(super) fn validate_current_version_tag_reachable(
+    local_path: &str,
+    monorepo: Option<&git::MonorepoContext>,
+    current_version: &str,
+) -> Result<Option<String>> {
+    let git_root = monorepo
+        .map(|ctx| ctx.git_root.as_str())
+        .unwrap_or(local_path);
+    let tag_name = current_version_tag_name(monorepo, current_version);
+
+    if !git::tag_exists_locally(git_root, &tag_name)? {
+        return Ok(None);
+    }
+
+    let tag_commit = git::get_tag_commit(git_root, &tag_name)?;
+    let output = git::execute_git_for_release(
+        git_root,
+        &["merge-base", "--is-ancestor", &tag_commit, "HEAD"],
+    )
+    .map_err(|err| Error::git_command_failed(format!("git merge-base failed: {}", err)))?;
+    if output.status.success() {
+        return Ok(None);
+    }
+
+    Ok(Some(format!(
+        "Release tag {} exists for current source version {} but is not reachable from HEAD. Refusing to plan the next release until the orphaned tag is recovered or removed.",
+        tag_name, current_version
+    )))
+}
+
+pub(super) fn current_version_tag_name(
+    monorepo: Option<&git::MonorepoContext>,
+    current_version: &str,
+) -> String {
+    monorepo
+        .map(|ctx| ctx.format_tag(current_version))
+        .unwrap_or_else(|| format!("v{}", current_version))
+}
+
 /// Resolve the latest tag and commits since that tag for a component.
 ///
 /// In a monorepo, uses component-prefixed tags and path-scoped commits.
@@ -181,7 +220,8 @@ fn commit_range(latest_tag: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_semver_recommendation, resolve_tag_and_commits, validate_release_version_floor,
+        build_semver_recommendation, resolve_tag_and_commits,
+        validate_current_version_tag_reachable, validate_release_version_floor,
     };
     use crate::core::component::Component;
 
@@ -297,5 +337,44 @@ mod tests {
         assert!(message.contains(
             "Next release version 0.125.0 is not greater than latest release tag v0.125.0"
         ));
+    }
+
+    #[test]
+    fn current_version_tag_reachability_blocks_orphaned_tag() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "v0.1.0"]);
+        commit_file(dir, "fix.txt", "fix", "fix: patch bug");
+        commit_file(dir, "VERSION", "0.1.1", "release: v0.1.1");
+        run_git(dir, &["branch", "-M", "main"]);
+
+        run_git(dir, &["checkout", "--orphan", "orphan-release"]);
+        run_git(dir, &["rm", "-qrf", "."]);
+        commit_file(dir, "VERSION", "0.1.1", "release: v0.1.1");
+        run_git(dir, &["tag", "v0.1.1"]);
+        run_git(dir, &["checkout", "main"]);
+
+        let message = validate_current_version_tag_reachable(&dir.to_string_lossy(), None, "0.1.1")
+            .expect("validation should run")
+            .expect("orphaned current-version tag should block release");
+
+        assert!(message.contains("Release tag v0.1.1 exists"));
+        assert!(message.contains("not reachable from HEAD"));
+        assert!(message.contains("Refusing to plan the next release"));
+    }
+
+    #[test]
+    fn current_version_tag_reachability_allows_reachable_tag() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        commit_file(dir, "VERSION", "0.1.1", "release: v0.1.1");
+        run_git(dir, &["tag", "v0.1.1"]);
+
+        let message = validate_current_version_tag_reachable(&dir.to_string_lossy(), None, "0.1.1")
+            .expect("validation should run");
+
+        assert!(message.is_none());
     }
 }

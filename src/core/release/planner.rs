@@ -9,7 +9,10 @@ use super::context::{load_component, resolve_extensions};
 use super::plan_steps::{build_preflight_steps, build_release_steps};
 use super::planning_changelog::{build_changelog_plan, generate_changelog_entries};
 use super::planning_policy::release_skip_plan;
-use super::planning_semver::{build_semver_recommendation, validate_release_version_floor};
+use super::planning_semver::{
+    build_semver_recommendation, current_version_tag_name, validate_current_version_tag_reachable,
+    validate_release_version_floor,
+};
 use super::planning_worktree::validate_release_worktree;
 use super::types::{ReleaseOptions, ReleasePlan};
 
@@ -25,6 +28,36 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     let mut v = ValidationCollector::new();
 
     let monorepo = git::MonorepoContext::detect(&component.local_path, component_id);
+    let version_info = v.capture(version::read_component_version(&component), "version");
+    if let Some(ref info) = version_info {
+        if let Some(message) = v
+            .capture(
+                validate_current_version_tag_reachable(
+                    &component.local_path,
+                    monorepo.as_ref(),
+                    &info.version,
+                ),
+                "tag",
+            )
+            .flatten()
+        {
+            let tag_name = current_version_tag_name(monorepo.as_ref(), &info.version);
+            v.push(
+                "tag",
+                &message,
+                Some(serde_json::json!({
+                    "version": &info.version,
+                    "tag": &tag_name,
+                    "recovery": [
+                        format!("Inspect the existing tag: git show --no-patch --decorate {}", tag_name),
+                        format!("If the orphaned tag is abandoned, delete it locally and remotely: git tag -d {} && git push origin :refs/tags/{}", tag_name, tag_name),
+                        format!("Then rerun recovery: homeboy release {} --recover", component_id),
+                        format!("If the tag is valid, check out or merge the tagged release commit before releasing {}", component_id),
+                    ]
+                })),
+            );
+        }
+    }
     let semver_recommendation = if options.pipeline.head {
         None
     } else {
@@ -49,7 +82,6 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         .unwrap_or_default()
     };
 
-    let version_info = v.capture(version::read_component_version(&component), "version");
     let new_version = if let Some(ref info) = version_info {
         if options.pipeline.head {
             Some(info.version.clone())
