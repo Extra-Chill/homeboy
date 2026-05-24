@@ -565,6 +565,38 @@ pub fn run_markdown(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<String> 
     Ok((md, exit_code))
 }
 
+pub fn run_markdown_with_json(
+    args: ReviewArgs,
+    global: &GlobalArgs,
+) -> super::raw_output::RawCommandRun {
+    let banners = args.banner.clone();
+    match run(args, global) {
+        Ok((output, exit_code)) => {
+            let md = if banners.is_empty() {
+                render::render_pr_comment(&output)
+            } else {
+                render::render_pr_comment_with_banners(&output, &banners)
+            };
+
+            super::raw_output::RawCommandRun {
+                stdout_result: Ok(md),
+                exit_code,
+                output_file_result: Some(serde_json::to_value(output).map_err(|err| {
+                    homeboy::core::Error::internal_json(
+                        err.to_string(),
+                        Some("serialize response".to_string()),
+                    )
+                })),
+            }
+        }
+        Err(err) => super::raw_output::RawCommandRun {
+            stdout_result: Err(err),
+            exit_code: 1,
+            output_file_result: None,
+        },
+    }
+}
+
 /// Write the stable review artifact to `--output` for automated consumers.
 /// Falls back to the generic JSON envelope if the review command failed before
 /// producing an artifact.

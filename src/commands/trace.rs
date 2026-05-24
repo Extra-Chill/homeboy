@@ -173,57 +173,88 @@ pub fn is_markdown_mode(args: &TraceArgs) -> bool {
 
 pub fn run_markdown(args: TraceArgs, global: &GlobalArgs) -> CmdResult<String> {
     let (output, exit_code) = run(args, global)?;
+    Ok((render_markdown_output(&output), exit_code))
+}
+
+pub fn run_markdown_with_json_artifact(
+    args: TraceArgs,
+    _global: &GlobalArgs,
+) -> super::raw_output::RawCommandRun {
+    let output_to_json = |output: &TraceCommandOutput| {
+        serde_json::to_value(output).map_err(|err| {
+            homeboy::core::Error::internal_json(
+                err.to_string(),
+                Some("serialize response".to_string()),
+            )
+        })
+    };
+
+    match run_outputs(args) {
+        Ok(((stdout_output, artifact_output), exit_code)) => {
+            let markdown = render_markdown_output(&stdout_output);
+            super::raw_output::RawCommandRun {
+                stdout_result: Ok(markdown),
+                exit_code,
+                output_file_result: Some(match artifact_output {
+                    Some(ref output) => output_to_json(output),
+                    None => output_to_json(&stdout_output),
+                }),
+            }
+        }
+        Err(err) => super::raw_output::RawCommandRun {
+            stdout_result: Err(err),
+            exit_code: 1,
+            output_file_result: None,
+        },
+    }
+}
+
+fn render_markdown_output(output: &TraceCommandOutput) -> String {
     match output {
         TraceCommandOutput::Run(run_output) => {
-            let Some(results) = run_output.results else {
-                return Ok(("# Trace\n\nNo trace results were produced.\n".to_string(), exit_code));
+            let Some(results) = run_output.results.as_ref() else {
+                return "# Trace\n\nNo trace results were produced.\n".to_string();
             };
-            Ok((
-                extension_trace::render_markdown(&results, &run_output.overlays),
-                exit_code,
-            ))
+            extension_trace::render_markdown(&results, &run_output.overlays)
         }
-        TraceCommandOutput::Summary(summary) => Ok((
+        TraceCommandOutput::Summary(summary) => {
             format!(
                 "# Trace Summary\n\n- **Component:** `{}`\n- **Status:** `{}`\n- **Exit code:** `{}`\n",
                 summary.component, summary.status, summary.exit_code
-            ),
-            exit_code,
-        )),
-        TraceCommandOutput::Aggregate(aggregate) => {
-            Ok((render_aggregate_markdown(&aggregate), exit_code))
+            )
         }
-        TraceCommandOutput::Compare(compare) => Ok((render_compare_markdown(&compare), exit_code)),
-        TraceCommandOutput::Matrix(matrix) => Ok((render_matrix_markdown(&matrix), exit_code)),
+        TraceCommandOutput::Aggregate(aggregate) => render_aggregate_markdown(&aggregate),
+        TraceCommandOutput::Compare(compare) => render_compare_markdown(&compare),
+        TraceCommandOutput::Matrix(matrix) => render_matrix_markdown(&matrix),
         TraceCommandOutput::List(list) => {
             if !list.profiles.is_empty() || list.command == "trace.list.profiles" {
                 let mut markdown = "# Trace Profiles\n\n".to_string();
-                for profile in list.profiles {
+                for profile in &list.profiles {
                     markdown.push_str(&format!("- `{}`", profile.id));
                     markdown.push_str(&format!(" in rig `{}`", profile.rig_id));
-                    if let Some(scenario) = profile.scenario {
+                    if let Some(scenario) = profile.scenario.as_deref() {
                         markdown.push_str(&format!(": `{}`", scenario));
                     }
                     markdown.push('\n');
                 }
-                return Ok((markdown, exit_code));
+                return markdown;
             }
             let mut markdown = format!("# Trace Scenarios: `{}`\n\n", list.component_id);
-            for scenario in list.scenarios {
+            for scenario in &list.scenarios {
                 markdown.push_str(&format!("- `{}`", scenario.id));
-                if let Some(summary) = scenario.summary {
+                if let Some(summary) = scenario.summary.as_deref() {
                     markdown.push_str(&format!(": {}", summary));
                 }
                 markdown.push('\n');
             }
-            Ok((markdown, exit_code))
+            markdown
         }
         TraceCommandOutput::OverlayLocks(locks) => {
             let mut markdown = format!("# Trace Overlay Locks\n\n- **Count:** `{}`\n- **Active:** `{}`\n- **Stale:** `{}`\n- **Unknown:** `{}`\n\n", locks.count, locks.active_count, locks.stale_count, locks.unknown_count);
-            for lock in locks.locks {
+            for lock in &locks.locks {
                 markdown.push_str(&format!("- `{}`: `{:?}`\n", lock.lock_path, lock.status));
             }
-            Ok((markdown, exit_code))
+            markdown
         }
     }
 }

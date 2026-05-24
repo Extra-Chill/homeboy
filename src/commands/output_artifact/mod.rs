@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::cli_surface::{CommandOutputArtifactPolicy, Commands};
+use crate::cli_surface::{CommandOutputFileMode, Commands};
 
 use super::utils::response as output;
 use super::{review, trace, GlobalArgs};
@@ -11,22 +11,29 @@ pub struct JsonCommandRun {
     pub output_file_result: Option<homeboy::core::Result<Value>>,
 }
 
+impl JsonCommandRun {
+    pub fn from_stdout_result(stdout_result: homeboy::core::Result<Value>, exit_code: i32) -> Self {
+        Self {
+            stdout_result,
+            exit_code,
+            output_file_result: None,
+        }
+    }
+}
+
 pub fn run_and_print(
     command: Commands,
     global: &GlobalArgs,
-    policy: CommandOutputArtifactPolicy,
+    mode: CommandOutputFileMode,
     output_file: Option<&str>,
-    print_json: bool,
 ) -> i32 {
-    let json_run = run_json(command, global, policy);
+    let json_run = run_json(command, global, mode);
 
     if let Some(path) = output_file {
-        write_to_file(&json_run, policy, path);
+        write_to_file(&json_run, mode, path);
     }
 
-    if print_json {
-        output::print_json_result(json_run.stdout_result, json_run.exit_code).ok();
-    }
+    output::print_json_result(json_run.stdout_result, json_run.exit_code).ok();
 
     json_run.exit_code
 }
@@ -34,10 +41,10 @@ pub fn run_and_print(
 pub fn run_json(
     command: Commands,
     global: &GlobalArgs,
-    policy: CommandOutputArtifactPolicy,
+    mode: CommandOutputFileMode,
 ) -> JsonCommandRun {
-    match (policy, command) {
-        (CommandOutputArtifactPolicy::TraceJsonSummaryArtifact, Commands::Trace(args)) => {
+    match (mode, command) {
+        (CommandOutputFileMode::TraceJsonSummaryArtifact, Commands::Trace(args)) => {
             let (stdout_result, exit_code, output_file_result) =
                 trace::run_json_with_output_artifact(args, global);
 
@@ -50,26 +57,23 @@ pub fn run_json(
         (_, command) => {
             let (stdout_result, exit_code) = super::json_output::run(command, global);
 
-            JsonCommandRun {
-                stdout_result,
-                exit_code,
-                output_file_result: None,
-            }
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code)
         }
     }
 }
 
-pub fn write_to_file(run: &JsonCommandRun, policy: CommandOutputArtifactPolicy, path: &str) {
-    match policy {
-        CommandOutputArtifactPolicy::ReviewStableArtifact => {
+pub fn write_to_file(run: &JsonCommandRun, mode: CommandOutputFileMode, path: &str) {
+    match mode {
+        CommandOutputFileMode::None => {}
+        CommandOutputFileMode::ReviewStableArtifact => {
             if !review::write_artifact_to_file(&run.stdout_result, path, run.exit_code) {
                 output::write_json_to_file(&run.stdout_result, path, run.exit_code);
             }
         }
-        CommandOutputArtifactPolicy::TraceJsonSummaryArtifact => {
-            output::write_json_to_file(select_output_file_result(run, policy), path, run.exit_code);
+        CommandOutputFileMode::TraceJsonSummaryArtifact => {
+            output::write_json_to_file(select_output_file_result(run, mode), path, run.exit_code);
         }
-        CommandOutputArtifactPolicy::GenericEnvelope => {
+        CommandOutputFileMode::GenericEnvelope => {
             output::write_json_to_file(&run.stdout_result, path, run.exit_code);
         }
     }
@@ -77,15 +81,16 @@ pub fn write_to_file(run: &JsonCommandRun, policy: CommandOutputArtifactPolicy, 
 
 fn select_output_file_result(
     run: &JsonCommandRun,
-    policy: CommandOutputArtifactPolicy,
+    mode: CommandOutputFileMode,
 ) -> &homeboy::core::Result<Value> {
-    match policy {
-        CommandOutputArtifactPolicy::TraceJsonSummaryArtifact => run
+    match mode {
+        CommandOutputFileMode::TraceJsonSummaryArtifact => run
             .output_file_result
             .as_ref()
             .unwrap_or(&run.stdout_result),
-        CommandOutputArtifactPolicy::ReviewStableArtifact
-        | CommandOutputArtifactPolicy::GenericEnvelope => &run.stdout_result,
+        CommandOutputFileMode::None
+        | CommandOutputFileMode::ReviewStableArtifact
+        | CommandOutputFileMode::GenericEnvelope => &run.stdout_result,
     }
 }
 
@@ -109,7 +114,7 @@ mod tests {
         let run = run_with_output_file_result(Some(Ok(json!({ "kind": "summary" }))));
 
         assert_eq!(
-            select_output_file_result(&run, CommandOutputArtifactPolicy::TraceJsonSummaryArtifact)
+            select_output_file_result(&run, CommandOutputFileMode::TraceJsonSummaryArtifact)
                 .as_ref()
                 .unwrap(),
             &json!({ "kind": "summary" })
@@ -121,7 +126,7 @@ mod tests {
         let run = run_with_output_file_result(None);
 
         assert_eq!(
-            select_output_file_result(&run, CommandOutputArtifactPolicy::TraceJsonSummaryArtifact)
+            select_output_file_result(&run, CommandOutputFileMode::TraceJsonSummaryArtifact)
                 .as_ref()
                 .unwrap(),
             &json!({ "kind": "stdout" })
@@ -133,10 +138,56 @@ mod tests {
         let run = run_with_output_file_result(Some(Ok(json!({ "kind": "summary" }))));
 
         assert_eq!(
-            select_output_file_result(&run, CommandOutputArtifactPolicy::GenericEnvelope)
+            select_output_file_result(&run, CommandOutputFileMode::GenericEnvelope)
                 .as_ref()
                 .unwrap(),
             &json!({ "kind": "stdout" })
         );
+    }
+
+    #[test]
+    fn generic_output_file_writes_cli_envelope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("status.json");
+        let run = run_with_output_file_result(None);
+
+        write_to_file(
+            &run,
+            CommandOutputFileMode::GenericEnvelope,
+            path.to_str().expect("utf8 path"),
+        );
+
+        let written = std::fs::read_to_string(path).expect("artifact written");
+        let json: Value = serde_json::from_str(&written).expect("valid json");
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"], json!({ "kind": "stdout" }));
+    }
+
+    #[test]
+    fn review_output_file_writes_stable_artifact_without_envelope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("review.json");
+        let run = JsonCommandRun::from_stdout_result(
+            Ok(json!({
+                "command": "review",
+                "artifact": {
+                    "schema": "homeboy/review/v1",
+                    "status": "passed",
+                    "commands": []
+                }
+            })),
+            0,
+        );
+
+        write_to_file(
+            &run,
+            CommandOutputFileMode::ReviewStableArtifact,
+            path.to_str().expect("utf8 path"),
+        );
+
+        let written = std::fs::read_to_string(path).expect("artifact written");
+        let json: Value = serde_json::from_str(&written).expect("valid json");
+        assert_eq!(json["schema"], "homeboy/review/v1");
+        assert!(json.get("success").is_none());
     }
 }
