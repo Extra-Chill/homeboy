@@ -365,24 +365,10 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
                     if d.is_behind() {
                         ProjectComponentDashboardStatus::BehindUpstream
                     } else {
-                        // Not behind upstream — check deployed version
-                        match (&local_ver, &remote_ver) {
-                            (Some(local), Some(remote)) if local != remote => {
-                                ProjectComponentDashboardStatus::Outdated
-                            }
-                            (Some(_), None) => ProjectComponentDashboardStatus::Outdated,
-                            _ => ProjectComponentDashboardStatus::Current,
-                        }
+                        deployed_version_dashboard_status(&local_ver, &remote_ver)
                     }
                 } else {
-                    // No upstream data — check deployed version
-                    match (&local_ver, &remote_ver) {
-                        (Some(local), Some(remote)) if local != remote => {
-                            ProjectComponentDashboardStatus::Outdated
-                        }
-                        (Some(_), None) => ProjectComponentDashboardStatus::Outdated,
-                        _ => ProjectComponentDashboardStatus::Current,
-                    }
+                    deployed_version_dashboard_status(&local_ver, &remote_ver)
                 }
             }
             ReleaseStateStatus::Unknown => ProjectComponentDashboardStatus::Unknown,
@@ -442,6 +428,17 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
         }),
         0,
     ))
+}
+
+fn deployed_version_dashboard_status(
+    local_ver: &Option<String>,
+    remote_ver: &Option<String>,
+) -> ProjectComponentDashboardStatus {
+    match (local_ver, remote_ver) {
+        (Some(local), Some(remote)) if local != remote => ProjectComponentDashboardStatus::Outdated,
+        (Some(_), None) => ProjectComponentDashboardStatus::Outdated,
+        _ => ProjectComponentDashboardStatus::Current,
+    }
 }
 
 /// Fetch from origin and compute upstream drift for a component.
@@ -540,59 +537,35 @@ fn log_dashboard_table(rows: &[ProjectStatusRow]) {
     }
 
     // Calculate column widths
-    let id_width = rows
-        .iter()
-        .map(|r| r.component_id.len())
-        .max()
-        .unwrap_or(9)
-        .max(9);
-    let local_width = rows
-        .iter()
-        .map(|r| r.local_version.as_deref().unwrap_or("-").len())
-        .max()
-        .unwrap_or(5)
-        .max(5);
-    let remote_width = rows
-        .iter()
-        .map(|r| r.remote_version.as_deref().unwrap_or("-").len())
-        .max()
-        .unwrap_or(6)
-        .max(6);
-    let origin_width = rows
-        .iter()
-        .map(|r| r.origin_version.as_deref().unwrap_or("-").len())
-        .max()
-        .unwrap_or(6)
-        .max(6);
+    let widths = DashboardColumnWidths {
+        id: rows
+            .iter()
+            .map(|r| r.component_id.len())
+            .max()
+            .unwrap_or(9)
+            .max(9),
+        local: rows
+            .iter()
+            .map(|r| r.local_version.as_deref().unwrap_or("-").len())
+            .max()
+            .unwrap_or(5)
+            .max(5),
+        remote: rows
+            .iter()
+            .map(|r| r.remote_version.as_deref().unwrap_or("-").len())
+            .max()
+            .unwrap_or(6)
+            .max(6),
+        origin: rows
+            .iter()
+            .map(|r| r.origin_version.as_deref().unwrap_or("-").len())
+            .max()
+            .unwrap_or(6)
+            .max(6),
+    };
 
-    // Header
-    eprintln!(
-        "{:<id_w$}  {:<local_w$}  {:<remote_w$}  {:<origin_w$}  {:>10}  {:>8}  Status",
-        "Component",
-        "Local",
-        "Remote",
-        "Origin",
-        "Unreleased",
-        "Upstream",
-        id_w = id_width,
-        local_w = local_width,
-        remote_w = remote_width,
-        origin_w = origin_width,
-    );
-    eprintln!(
-        "{:-<id_w$}  {:-<local_w$}  {:-<remote_w$}  {:-<origin_w$}  {:->10}  {:->8}  {:-<10}",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        id_w = id_width,
-        local_w = local_width,
-        remote_w = remote_width,
-        origin_w = origin_width,
-    );
+    log_dashboard_header(&widths);
+    log_dashboard_separator(&widths);
 
     for row in rows {
         let local = row.local_version.as_deref().unwrap_or("-");
@@ -618,12 +591,52 @@ fn log_dashboard_table(rows: &[ProjectStatusRow]) {
             row.unreleased_commits,
             upstream,
             status_icon,
-            id_w = id_width,
-            local_w = local_width,
-            remote_w = remote_width,
-            origin_w = origin_width,
+            id_w = widths.id,
+            local_w = widths.local,
+            remote_w = widths.remote,
+            origin_w = widths.origin,
         );
     }
+}
+
+struct DashboardColumnWidths {
+    id: usize,
+    local: usize,
+    remote: usize,
+    origin: usize,
+}
+
+fn log_dashboard_header(widths: &DashboardColumnWidths) {
+    eprintln!(
+        "{:<id_w$}  {:<local_w$}  {:<remote_w$}  {:<origin_w$}  {:>10}  {:>8}  Status",
+        "Component",
+        "Local",
+        "Remote",
+        "Origin",
+        "Unreleased",
+        "Upstream",
+        id_w = widths.id,
+        local_w = widths.local,
+        remote_w = widths.remote,
+        origin_w = widths.origin,
+    );
+}
+
+fn log_dashboard_separator(widths: &DashboardColumnWidths) {
+    eprintln!(
+        "{:-<id_w$}  {:-<local_w$}  {:-<remote_w$}  {:-<origin_w$}  {:->10}  {:->8}  {:-<10}",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        id_w = widths.id,
+        local_w = widths.local,
+        remote_w = widths.remote,
+        origin_w = widths.origin,
+    );
 }
 
 /// Format upstream ahead/behind as a compact string like "↓3" or "↑1↓2" or "=".
