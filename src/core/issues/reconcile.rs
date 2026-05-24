@@ -193,15 +193,7 @@ fn reconcile_with_scope(
                 }
                 TrackedIssueState::ClosedCompleted => {
                     // Resolved-then-returned: file a fresh issue.
-                    actions.push(ReconcileAction::FileNew {
-                        command: group.command.clone(),
-                        component_id: group.component_id.clone(),
-                        category: group.category.clone(),
-                        title: render_title(group),
-                        body: body_with_issue_key(group),
-                        labels: vec![group.command.clone()],
-                        count: group.count,
-                    });
+                    push_file_new(&mut actions, group);
                     continue;
                 }
                 TrackedIssueState::Open => unreachable!("partitioned above"),
@@ -209,15 +201,7 @@ fn reconcile_with_scope(
         }
 
         // No issue ever existed (open or closed) for this category.
-        actions.push(ReconcileAction::FileNew {
-            command: group.command.clone(),
-            component_id: group.component_id.clone(),
-            category: group.category.clone(),
-            title: render_title(group),
-            body: body_with_issue_key(group),
-            labels: vec![group.command.clone()],
-            count: group.count,
-        });
+        push_file_new(&mut actions, group);
     }
 
     if let Some((command, component_id)) = scope {
@@ -243,6 +227,18 @@ fn reconcile_with_scope(
         .unwrap_or_else(|| "unknown".to_string());
 
     ReconcilePlan::new(component_id, actions)
+}
+
+fn push_file_new(actions: &mut Vec<ReconcileAction>, group: &IssueGroup) {
+    actions.push(ReconcileAction::FileNew {
+        command: group.command.clone(),
+        component_id: group.component_id.clone(),
+        category: group.category.clone(),
+        title: render_title(group),
+        body: body_with_issue_key(group),
+        labels: vec![group.command.clone()],
+        count: group.count,
+    });
 }
 
 fn close_absent_open_issues(

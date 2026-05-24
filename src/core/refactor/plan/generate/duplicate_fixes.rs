@@ -167,13 +167,11 @@ pub(crate) fn generate_unreferenced_export_fixes(
         };
 
         if symbol_surface.has_external_usage(&finding.file) {
-            skipped.push(SkippedFile {
-                file: finding.file.clone(),
-                reason: format!(
-                    "Module surface shows '{}' still has external callers/importers/re-exports",
-                    fn_name
-                ),
-            });
+            skip_file(
+                skipped,
+                finding.file.clone(),
+                external_usage_reason(&fn_name),
+            );
             continue;
         }
 
@@ -190,13 +188,11 @@ pub(crate) fn generate_unreferenced_export_fixes(
 
         // Hard block: binary crate directly references this function.
         if is_used_by_binary_crate(&fn_name, root) {
-            skipped.push(SkippedFile {
-                file: finding.file.clone(),
-                reason: format!(
-                    "Function '{}' is used by binary crate — cannot narrow visibility",
-                    fn_name
-                ),
-            });
+            skip_file(
+                skipped,
+                finding.file.clone(),
+                binary_crate_usage_reason(&fn_name),
+            );
             continue;
         }
 
@@ -591,13 +587,11 @@ fn generate_simple_duplicate_fixes(
         if crate::core::code_audit::walker::is_test_path(remove_file)
             || crate::core::code_audit::walker::is_test_path(&group.canonical_file)
         {
-            skipped.push(SkippedFile {
-                file: remove_file.clone(),
-                reason: format!(
-                    "Duplicate `{}` spans integration test files — test binaries cannot cross-import",
-                    group.function_name
-                ),
-            });
+            skip_file(
+                skipped,
+                remove_file.clone(),
+                integration_test_duplicate_reason(&group.function_name),
+            );
             continue;
         }
 
@@ -629,13 +623,11 @@ fn generate_simple_duplicate_fixes(
                 .is_some_and(|surface| surface.has_external_usage(&group.canonical_file))
             && remove_surface.owns_public_symbol(&group.function_name)
         {
-            skipped.push(SkippedFile {
-                file: remove_file.clone(),
-                reason: format!(
-                    "Duplicate '{}' is externally surfaced in more than one module; keep ownership stable",
-                    group.function_name
-                ),
-            });
+            skip_file(
+                skipped,
+                remove_file.clone(),
+                externally_surfaced_duplicate_reason(&group.function_name),
+            );
             continue;
         }
 
@@ -648,37 +640,31 @@ fn generate_simple_duplicate_fixes(
         let content = match std::fs::read_to_string(&abs_path) {
             Ok(content) => content,
             Err(_) => {
-                skipped.push(SkippedFile {
-                    file: remove_file.clone(),
-                    reason: format!(
-                        "Cannot read file to remove duplicate `{}`",
-                        group.function_name
-                    ),
-                });
+                skip_file(
+                    skipped,
+                    remove_file.clone(),
+                    cannot_read_duplicate_reason(&group.function_name),
+                );
                 continue;
             }
         };
 
         let items = parse_items_for_dedup(ext, &content, remove_file);
         let Some(items) = items else {
-            skipped.push(SkippedFile {
-                file: remove_file.clone(),
-                reason: format!(
-                    "Cannot locate `{}` boundaries in {} — no grammar or extension available",
-                    group.function_name, remove_file
-                ),
-            });
+            skip_file(
+                skipped,
+                remove_file.clone(),
+                cannot_locate_boundaries_reason(&group.function_name, remove_file),
+            );
             continue;
         };
 
         let Some(item) = find_parsed_item_by_name(&items, &group.function_name) else {
-            skipped.push(SkippedFile {
-                file: remove_file.clone(),
-                reason: format!(
-                    "Function `{}` not found by parser in {}",
-                    group.function_name, remove_file
-                ),
-            });
+            skip_file(
+                skipped,
+                remove_file.clone(),
+                function_not_found_reason(&group.function_name, remove_file),
+            );
             continue;
         };
 
@@ -724,32 +710,12 @@ fn is_used_by_binary_crate(fn_name: &str, root: &Path) -> bool {
 
     let src = root.join("src");
     let main_rs = src.join("main.rs");
-    if main_rs.exists()
-        && std::fs::read_to_string(&main_rs)
-            .ok()
-            .is_some_and(|content| word_re.is_match(&content))
-    {
+    if main_rs.exists() && file_contains_word(&main_rs, &word_re) {
         return true;
     }
 
-    let lib_rs = src.join("lib.rs");
-    let lib_mods = if lib_rs.exists() {
-        std::fs::read_to_string(&lib_rs)
-            .ok()
-            .map(|content| extract_mod_names(&content))
-            .unwrap_or_default()
-    } else {
-        HashSet::new()
-    };
-
-    let main_mods = if main_rs.exists() {
-        std::fs::read_to_string(&main_rs)
-            .ok()
-            .map(|content| extract_mod_names(&content))
-            .unwrap_or_default()
-    } else {
-        HashSet::new()
-    };
+    let lib_mods = read_mod_names(&src.join("lib.rs"));
+    let main_mods = read_mod_names(&main_rs);
 
     for mod_name in main_mods.difference(&lib_mods) {
         let mod_dir = src.join(mod_name);
@@ -758,16 +724,79 @@ fn is_used_by_binary_crate(fn_name: &str, root: &Path) -> bool {
         }
 
         let mod_file = src.join(format!("{}.rs", mod_name));
-        if mod_file.exists()
-            && std::fs::read_to_string(&mod_file)
-                .ok()
-                .is_some_and(|content| word_re.is_match(&content))
-        {
+        if mod_file.exists() && file_contains_word(&mod_file, &word_re) {
             return true;
         }
     }
 
     false
+}
+
+fn skip_file(skipped: &mut Vec<SkippedFile>, file: String, reason: String) {
+    skipped.push(SkippedFile { file, reason });
+}
+
+fn external_usage_reason(fn_name: &str) -> String {
+    format!(
+        "Module surface shows '{}' still has external callers/importers/re-exports",
+        fn_name
+    )
+}
+
+fn binary_crate_usage_reason(fn_name: &str) -> String {
+    format!(
+        "Function '{}' is used by binary crate — cannot narrow visibility",
+        fn_name
+    )
+}
+
+fn integration_test_duplicate_reason(function_name: &str) -> String {
+    format!(
+        "Duplicate `{}` spans integration test files — test binaries cannot cross-import",
+        function_name
+    )
+}
+
+fn externally_surfaced_duplicate_reason(function_name: &str) -> String {
+    format!(
+        "Duplicate '{}' is externally surfaced in more than one module; keep ownership stable",
+        function_name
+    )
+}
+
+fn cannot_read_duplicate_reason(function_name: &str) -> String {
+    format!("Cannot read file to remove duplicate `{}`", function_name)
+}
+
+fn cannot_locate_boundaries_reason(function_name: &str, file: &str) -> String {
+    format!(
+        "Cannot locate `{}` boundaries in {} — no grammar or extension available",
+        function_name, file
+    )
+}
+
+fn function_not_found_reason(function_name: &str, file: &str) -> String {
+    format!(
+        "Function `{}` not found by parser in {}",
+        function_name, file
+    )
+}
+
+fn file_contains_word(path: &Path, word_re: &Regex) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .is_some_and(|content| word_re.is_match(&content))
+}
+
+fn read_mod_names(path: &Path) -> HashSet<String> {
+    if path.exists() {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|content| extract_mod_names(&content))
+            .unwrap_or_default()
+    } else {
+        HashSet::new()
+    }
 }
 
 fn extract_mod_names(content: &str) -> HashSet<String> {
