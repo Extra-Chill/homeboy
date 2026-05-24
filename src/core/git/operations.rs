@@ -210,15 +210,14 @@ pub fn detect_baseline_with_version(
 
                 // No matching release commit - fall back to generic version commit
                 if let Some(hash) = find_version_commit(path)? {
-                    return Ok(BaselineInfo {
-                        latest_tag: Some(tag.clone()),
-                        source: Some(BaselineSource::VersionCommit),
-                        reference: Some(hash),
-                        warning: Some(format!(
+                    return Ok(version_commit_baseline(
+                        Some(tag.clone()),
+                        hash,
+                        format!(
                             "Latest tag '{}' doesn't match version {}. Using most recent version commit.",
                             tag, current
-                        )),
-                    });
+                        ),
+                    ));
                 }
 
                 // No version commits found - use the stale tag but warn
@@ -259,14 +258,11 @@ pub fn detect_baseline_with_version(
 
     // Priority 3: Generic version commit
     if let Some(hash) = find_version_commit(path)? {
-        return Ok(BaselineInfo {
-            latest_tag: None,
-            source: Some(BaselineSource::VersionCommit),
-            reference: Some(hash),
-            warning: Some(
-                "No tags found. Using most recent version commit as baseline.".to_string(),
-            ),
-        });
+        return Ok(version_commit_baseline(
+            None,
+            hash,
+            "No tags found. Using most recent version commit as baseline.".to_string(),
+        ));
     }
 
     // Fallback: No baseline found
@@ -279,6 +275,19 @@ pub fn detect_baseline_with_version(
             DEFAULT_COMMIT_LIMIT
         )),
     })
+}
+
+fn version_commit_baseline(
+    latest_tag: Option<String>,
+    reference: String,
+    warning: String,
+) -> BaselineInfo {
+    BaselineInfo {
+        latest_tag,
+        source: Some(BaselineSource::VersionCommit),
+        reference: Some(reference),
+        warning: Some(warning),
+    }
 }
 
 // Input types for JSON parsing

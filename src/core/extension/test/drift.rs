@@ -428,29 +428,14 @@ fn extract_changes_from_diff(file: &str, diff: &str) -> Vec<ProductionChange> {
     }
 
     // Match removed methods to added methods (renames)
-    let mut matched_removed: Vec<bool> = vec![false; removed_methods.len()];
-    let mut matched_added: Vec<bool> = vec![false; added_methods.len()];
-
-    for (ri, (removed, rline)) in removed_methods.iter().enumerate() {
-        // Look for a close-by addition (same hunk, ≤10 lines apart)
-        for (ai, (added, aline)) in added_methods.iter().enumerate() {
-            if !matched_added[ai] && removed != added {
-                let dist = (*aline as isize - *rline as isize).unsigned_abs();
-                if dist <= 10 {
-                    changes.push(ProductionChange {
-                        change_type: ChangeType::MethodRename,
-                        file: file.to_string(),
-                        old_symbol: removed.clone(),
-                        new_symbol: Some(added.clone()),
-                        line: *rline,
-                    });
-                    matched_removed[ri] = true;
-                    matched_added[ai] = true;
-                    break;
-                }
-            }
-        }
-    }
+    let matched_removed = match_renamed_symbols(
+        &mut changes,
+        file,
+        &removed_methods,
+        &added_methods,
+        ChangeType::MethodRename,
+        10,
+    );
 
     // Unmatched removals are pure removals
     for (ri, (removed, rline)) in removed_methods.iter().enumerate() {
@@ -466,28 +451,14 @@ fn extract_changes_from_diff(file: &str, diff: &str) -> Vec<ProductionChange> {
     }
 
     // Match removed classes to added classes (renames)
-    let mut cls_matched_removed: Vec<bool> = vec![false; removed_classes.len()];
-    let mut cls_matched_added: Vec<bool> = vec![false; added_classes.len()];
-
-    for (ri, (removed, rline)) in removed_classes.iter().enumerate() {
-        for (ai, (added, aline)) in added_classes.iter().enumerate() {
-            if !cls_matched_added[ai] && removed != added {
-                let dist = (*aline as isize - *rline as isize).unsigned_abs();
-                if dist <= 15 {
-                    changes.push(ProductionChange {
-                        change_type: ChangeType::ClassRename,
-                        file: file.to_string(),
-                        old_symbol: removed.clone(),
-                        new_symbol: Some(added.clone()),
-                        line: *rline,
-                    });
-                    cls_matched_removed[ri] = true;
-                    cls_matched_added[ai] = true;
-                    break;
-                }
-            }
-        }
-    }
+    let cls_matched_removed = match_renamed_symbols(
+        &mut changes,
+        file,
+        &removed_classes,
+        &added_classes,
+        ChangeType::ClassRename,
+        15,
+    );
 
     for (ri, (removed, rline)) in removed_classes.iter().enumerate() {
         if !cls_matched_removed[ri] {
@@ -524,6 +495,52 @@ fn extract_changes_from_diff(file: &str, diff: &str) -> Vec<ProductionChange> {
     }
 
     changes
+}
+
+fn match_renamed_symbols(
+    changes: &mut Vec<ProductionChange>,
+    file: &str,
+    removed_symbols: &[(String, usize)],
+    added_symbols: &[(String, usize)],
+    change_type: ChangeType,
+    max_distance: usize,
+) -> Vec<bool> {
+    let mut matched_removed = vec![false; removed_symbols.len()];
+    let mut matched_added = vec![false; added_symbols.len()];
+
+    for (ri, (removed, rline)) in removed_symbols.iter().enumerate() {
+        for (ai, (added, aline)) in added_symbols.iter().enumerate() {
+            if matched_added[ai] || removed == added {
+                continue;
+            }
+            let dist = (*aline as isize - *rline as isize).unsigned_abs();
+            if dist <= max_distance {
+                push_rename_change(changes, change_type.clone(), file, removed, added, *rline);
+                matched_removed[ri] = true;
+                matched_added[ai] = true;
+                break;
+            }
+        }
+    }
+
+    matched_removed
+}
+
+fn push_rename_change(
+    changes: &mut Vec<ProductionChange>,
+    change_type: ChangeType,
+    file: &str,
+    old_symbol: &str,
+    new_symbol: &str,
+    line: usize,
+) {
+    changes.push(ProductionChange {
+        change_type,
+        file: file.to_string(),
+        old_symbol: old_symbol.to_string(),
+        new_symbol: Some(new_symbol.to_string()),
+        line,
+    });
 }
 
 // ============================================================================
