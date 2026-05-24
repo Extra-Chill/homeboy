@@ -34,6 +34,10 @@ use std::collections::HashSet;
 use crate::core::error::{Error, Result};
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 
+const STACK_SYNC_DROP_KIND: &str = "stack.sync.drop";
+const STACK_SYNC_REPLAY_KIND: &str = "stack.sync.replay";
+const STACK_SYNC_UNCERTAIN_KIND: &str = "stack.sync.uncertain";
+
 use super::apply::{
     checkout_force, cherry_pick, ensure_head_remote, fetch_remote_branch, fetch_sha, AppliedPr,
     CherryPickResult, PickOutcome,
@@ -195,32 +199,29 @@ pub(crate) fn plan_sync(spec: &StackSpec) -> Result<SyncPlan> {
     let mut kept_metas = Vec::new();
 
     for pr in &spec.prs {
-        let meta = match fetch_pr_meta(pr) {
-            Ok(meta) => meta,
-            Err(e) => {
-                uncertain.push(uncertain_pr(pr, e.to_string()));
-                continue;
-            }
+        let Some(meta) = record_uncertain(&mut uncertain, pr, fetch_pr_meta(pr)) else {
+            continue;
         };
 
-        let head = match meta.require_head(pr) {
-            Ok(head) => head,
-            Err(e) => {
-                uncertain.push(uncertain_pr(pr, e.to_string()));
-                continue;
-            }
+        let Some(head) = record_uncertain(&mut uncertain, pr, meta.require_head(pr)) else {
+            continue;
         };
 
-        let head_remote = match ensure_head_remote(&path, pr, &head, &mut ensured_remotes) {
-            Ok(remote) => remote,
-            Err(e) => {
-                uncertain.push(uncertain_pr(pr, e.to_string()));
-                continue;
-            }
+        let Some(head_remote) = record_uncertain(
+            &mut uncertain,
+            pr,
+            ensure_head_remote(&path, pr, &head, &mut ensured_remotes),
+        ) else {
+            continue;
         };
 
-        if let Err(e) = fetch_sha(&path, &head_remote, &meta.head_sha) {
-            uncertain.push(uncertain_pr(pr, e.to_string()));
+        if record_uncertain(
+            &mut uncertain,
+            pr,
+            fetch_sha(&path, &head_remote, &meta.head_sha),
+        )
+        .is_none()
+        {
             continue;
         }
 
@@ -248,27 +249,24 @@ pub(crate) fn plan_sync(spec: &StackSpec) -> Result<SyncPlan> {
         }
     }
 
-    let dropped_count = dropped.len();
-    let replayed_count = replayed.len();
-    let uncertain_count = uncertain.len();
-    let blocked = uncertain_count > 0;
-    let would_mutate = sync_would_mutate(
-        target_exists,
-        target_ahead,
-        target_behind,
-        dropped_count,
-        replayed_count,
-    );
-
     let plan = sync_homeboy_plan(
         spec,
         &dropped,
         &replayed,
         &uncertain,
         target_exists,
-        would_mutate,
-        blocked,
+        target_ahead,
+        target_behind,
     );
+    let view = SyncPlanView::new(&plan);
+    let dropped = view.dropped_prs();
+    let replayed = view.replayed_prs();
+    let uncertain = view.uncertain_prs();
+    let dropped_count = view.action_count(STACK_SYNC_DROP_KIND);
+    let replayed_count = view.action_count(STACK_SYNC_REPLAY_KIND);
+    let uncertain_count = view.action_count(STACK_SYNC_UNCERTAIN_KIND);
+    let would_mutate = view.would_mutate();
+    let blocked = view.blocked();
 
     Ok(SyncPlan {
         preview: SyncPreview {
@@ -302,43 +300,108 @@ fn sync_homeboy_plan(
     replayed: &[ReplayedPr],
     uncertain: &[UncertainPr],
     target_exists: bool,
-    would_mutate: bool,
-    blocked: bool,
+    target_ahead: Option<usize>,
+    target_behind: Option<usize>,
 ) -> HomeboyPlan {
     let mut steps = Vec::new();
     for pr in dropped {
+        let mut inputs = PlanValues::new()
+            .string("repo", pr.repo.clone())
+            .number("number", pr.number)
+            .string("reason", pr.reason.clone());
+        if let Some(title) = &pr.title {
+            inputs = inputs.string("title", title.clone());
+        }
+        if let Some(merged_at) = &pr.merged_at {
+            inputs = inputs.string("merged_at", merged_at.clone());
+        }
+
         steps.push(sync_pr_step(
+            STACK_SYNC_DROP_KIND,
             "drop",
             &pr.repo,
             pr.number,
             PlanStepStatus::Skipped,
             &pr.reason,
+            inputs,
         ));
     }
     for pr in replayed {
+        let mut inputs = PlanValues::new()
+            .string("repo", pr.repo.clone())
+            .number("number", pr.number)
+            .string("sha", pr.sha.clone())
+            .string("reason", pr.reason.clone());
+        if let Some(title) = &pr.title {
+            inputs = inputs.string("title", title.clone());
+        }
+        if let Some(url) = &pr.url {
+            inputs = inputs.string("url", url.clone());
+        }
+        if let Some(upstream_state) = &pr.upstream_state {
+            inputs = inputs.string("upstream_state", upstream_state.clone());
+        }
+        if let Some(note) = &pr.note {
+            inputs = inputs.string("note", note.clone());
+        }
+
         steps.push(sync_pr_step(
+            STACK_SYNC_REPLAY_KIND,
             "replay",
             &pr.repo,
             pr.number,
             PlanStepStatus::Ready,
             &pr.reason,
+            inputs,
         ));
     }
     for pr in uncertain {
+        let mut inputs = PlanValues::new()
+            .string("repo", pr.repo.clone())
+            .number("number", pr.number)
+            .string("error", pr.error.clone())
+            .string("reason", pr.error.clone());
+        if let Some(note) = &pr.note {
+            inputs = inputs.string("note", note.clone());
+        }
+
         steps.push(sync_pr_step(
+            STACK_SYNC_UNCERTAIN_KIND,
             "uncertain",
             &pr.repo,
             pr.number,
             PlanStepStatus::Missing,
             &pr.error,
+            inputs,
         ));
     }
+
+    let dropped_count = steps
+        .iter()
+        .filter(|step| step.kind == STACK_SYNC_DROP_KIND)
+        .count();
+    let replayed_count = steps
+        .iter()
+        .filter(|step| step.kind == STACK_SYNC_REPLAY_KIND)
+        .count();
+    let blocked = steps
+        .iter()
+        .any(|step| step.blocking && step.status == PlanStepStatus::Missing);
+    let would_mutate = sync_would_mutate_from_parts(
+        target_exists,
+        target_ahead,
+        target_behind,
+        dropped_count,
+        replayed_count,
+    );
 
     HomeboyPlan::builder_for_description(PlanKind::StackSync, spec.id.clone())
         .inputs(
             PlanValues::new()
                 .string("stack_id", spec.id.clone())
-                .bool("target_exists", target_exists),
+                .bool("target_exists", target_exists)
+                .json("target_ahead", target_ahead)
+                .json("target_behind", target_behind),
         )
         .policy_value("would_mutate", serde_json::Value::Bool(would_mutate))
         .policy_value("blocked", serde_json::Value::Bool(blocked))
@@ -348,27 +411,153 @@ fn sync_homeboy_plan(
 }
 
 fn sync_pr_step(
+    kind: &str,
     action: &str,
     repo: &str,
     number: u64,
     status: PlanStepStatus,
     reason: &str,
+    inputs: PlanValues,
 ) -> PlanStep {
-    PlanStep::builder(
+    let builder = PlanStep::builder(
         format!("stack.sync.{action}.{repo}#{number}"),
-        format!("stack.sync.{action}"),
+        kind.to_string(),
         status.clone(),
     )
     .label(format!("{action} {repo}#{number}"))
     .blocking(status == PlanStepStatus::Missing)
     .scope(vec![format!("{repo}#{number}")])
-    .inputs(
-        PlanValues::new()
-            .string("repo", repo)
-            .number("number", number)
-            .string("reason", reason),
-    )
-    .build()
+    .inputs(inputs);
+
+    if status == PlanStepStatus::Skipped {
+        builder.skip_reason(reason.to_string()).build()
+    } else {
+        builder.build()
+    }
+}
+
+pub(crate) fn sync_plan_would_mutate(plan: &HomeboyPlan) -> bool {
+    SyncPlanView::new(plan).would_mutate()
+}
+
+struct SyncPlanView<'a> {
+    plan: &'a HomeboyPlan,
+}
+
+impl<'a> SyncPlanView<'a> {
+    fn new(plan: &'a HomeboyPlan) -> Self {
+        Self { plan }
+    }
+
+    fn dropped_prs(&self) -> Vec<DroppedPr> {
+        self.steps(STACK_SYNC_DROP_KIND)
+            .map(|step| DroppedPr {
+                repo: self.string_input(step, "repo"),
+                number: self.u64_input(step, "number"),
+                title: self.optional_string_input(step, "title"),
+                merged_at: self.optional_string_input(step, "merged_at"),
+                reason: self.string_input(step, "reason"),
+            })
+            .collect()
+    }
+
+    fn replayed_prs(&self) -> Vec<ReplayedPr> {
+        self.steps(STACK_SYNC_REPLAY_KIND)
+            .map(|step| ReplayedPr {
+                repo: self.string_input(step, "repo"),
+                number: self.u64_input(step, "number"),
+                sha: self.string_input(step, "sha"),
+                title: self.optional_string_input(step, "title"),
+                url: self.optional_string_input(step, "url"),
+                upstream_state: self.optional_string_input(step, "upstream_state"),
+                note: self.optional_string_input(step, "note"),
+                reason: self.string_input(step, "reason"),
+            })
+            .collect()
+    }
+
+    fn uncertain_prs(&self) -> Vec<UncertainPr> {
+        self.steps(STACK_SYNC_UNCERTAIN_KIND)
+            .map(|step| UncertainPr {
+                repo: self.string_input(step, "repo"),
+                number: self.u64_input(step, "number"),
+                note: self.optional_string_input(step, "note"),
+                error: self.string_input(step, "error"),
+            })
+            .collect()
+    }
+
+    fn action_count(&self, kind: &str) -> usize {
+        self.steps(kind).count()
+    }
+
+    fn would_mutate(&self) -> bool {
+        self.bool_policy("would_mutate").unwrap_or_else(|| {
+            sync_would_mutate_from_parts(
+                self.plan
+                    .inputs
+                    .get("target_exists")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true),
+                self.usize_input("target_ahead"),
+                self.usize_input("target_behind"),
+                self.action_count(STACK_SYNC_DROP_KIND),
+                self.action_count(STACK_SYNC_REPLAY_KIND),
+            )
+        })
+    }
+
+    fn blocked(&self) -> bool {
+        self.bool_policy("blocked").unwrap_or_else(|| {
+            self.plan
+                .summary
+                .as_ref()
+                .map(|summary| summary.blocked > 0)
+                .unwrap_or_else(|| {
+                    self.plan
+                        .steps
+                        .iter()
+                        .any(|step| step.blocking && step.status == PlanStepStatus::Missing)
+                })
+        })
+    }
+
+    fn steps(&self, kind: &'a str) -> impl Iterator<Item = &'a PlanStep> {
+        self.plan.steps.iter().filter(move |step| step.kind == kind)
+    }
+
+    fn bool_policy(&self, key: &str) -> Option<bool> {
+        self.plan
+            .policy
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+    }
+
+    fn usize_input(&self, key: &str) -> Option<usize> {
+        self.plan
+            .inputs
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+    }
+
+    fn string_input(&self, step: &PlanStep, key: &str) -> String {
+        self.optional_string_input(step, key).unwrap_or_default()
+    }
+
+    fn optional_string_input(&self, step: &PlanStep, key: &str) -> Option<String> {
+        step.inputs
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }
+
+    fn u64_input(&self, step: &PlanStep, key: &str) -> u64 {
+        step.inputs
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default()
+    }
 }
 
 /// Read-only preview for `homeboy stack diff`.
@@ -489,6 +678,20 @@ fn sync_output(
     }
 }
 
+fn record_uncertain<T>(
+    uncertain: &mut Vec<UncertainPr>,
+    pr: &StackPrEntry,
+    result: Result<T>,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            uncertain.push(uncertain_pr(pr, error.to_string()));
+            None
+        }
+    }
+}
+
 fn uncertain_pr(pr: &StackPrEntry, error: String) -> UncertainPr {
     UncertainPr {
         repo: pr.repo.clone(),
@@ -506,7 +709,7 @@ fn replay_reason(meta: &PrMeta) -> &'static str {
     }
 }
 
-pub(crate) fn sync_would_mutate(
+pub(crate) fn sync_would_mutate_from_parts(
     target_exists: bool,
     target_ahead: Option<usize>,
     target_behind: Option<usize>,

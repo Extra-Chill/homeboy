@@ -43,9 +43,10 @@ fn rig_with_components(components: HashMap<String, ComponentSpec>) -> RigSpec {
 }
 
 fn sync_output(stack_id: &str, picked: usize, skipped: usize, dropped: usize) -> SyncOutput {
+    let would_mutate = picked > 0 || skipped > 0 || dropped > 0;
     SyncOutput {
         preview: SyncPreview {
-            plan: HomeboyPlan::for_description(PlanKind::StackSync, stack_id),
+            plan: stack_sync_plan(stack_id, would_mutate),
             stack_id: stack_id.to_string(),
             component_path: "/tmp/component".to_string(),
             branch: "dev/combined-fixes".to_string(),
@@ -60,7 +61,7 @@ fn sync_output(stack_id: &str, picked: usize, skipped: usize, dropped: usize) ->
             dropped_count: dropped,
             replayed_count: picked + skipped,
             uncertain_count: 0,
-            would_mutate: picked > 0 || dropped > 0,
+            would_mutate,
             blocked: false,
             success: true,
         },
@@ -70,6 +71,17 @@ fn sync_output(stack_id: &str, picked: usize, skipped: usize, dropped: usize) ->
         skipped_count: skipped,
         success: true,
     }
+}
+
+fn stack_sync_plan(stack_id: &str, would_mutate: bool) -> HomeboyPlan {
+    let mut plan = HomeboyPlan::for_description(PlanKind::StackSync, stack_id);
+    plan.policy.insert(
+        "would_mutate".to_string(),
+        serde_json::Value::Bool(would_mutate),
+    );
+    plan.policy
+        .insert("blocked".to_string(), serde_json::Value::Bool(false));
+    plan
 }
 
 fn stack_spec(id: &str, component_path: &str) -> StackSpec {
@@ -196,7 +208,7 @@ fn test_sync_entry_serializes_counts_and_refs() {
     let report = run_sync_with(&rig, false, |_component_id, stack_id, _dry_run| {
         Ok(SyncOutput {
             preview: SyncPreview {
-                plan: HomeboyPlan::for_description(PlanKind::StackSync, stack_id),
+                plan: stack_sync_plan(stack_id, true),
                 stack_id: stack_id.to_string(),
                 component_path: "/tmp/component".to_string(),
                 branch: "dev/combined-fixes".to_string(),
