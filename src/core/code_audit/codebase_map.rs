@@ -635,44 +635,28 @@ fn render_class(out: &mut String, class: &MapClass, children_index: &HashMap<Str
             out.push_str(&format!(
                 "**Getters ({}):** {}\n\n",
                 getters.len(),
-                getters
-                    .iter()
-                    .map(|m| format!("`{}`", m))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                format_code_items(getters.iter().map(|m| m.as_str()))
             ));
         }
         if !setters.is_empty() {
             out.push_str(&format!(
                 "**Setters ({}):** {}\n\n",
                 setters.len(),
-                setters
-                    .iter()
-                    .map(|m| format!("`{}`", m))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                format_code_items(setters.iter().map(|m| m.as_str()))
             ));
         }
         if !booleans.is_empty() {
             out.push_str(&format!(
                 "**Checks ({}):** {}\n\n",
                 booleans.len(),
-                booleans
-                    .iter()
-                    .map(|m| format!("`{}`", m))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                format_code_items(booleans.iter().map(|m| m.as_str()))
             ));
         }
         if !other.is_empty() {
             out.push_str(&format!(
                 "**Other ({}):** {}\n\n",
                 other.len(),
-                other
-                    .iter()
-                    .map(|m| format!("`{}`", m))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                format_code_items(other.iter().map(|m| m.as_str()))
             ));
         }
     }
@@ -681,12 +665,7 @@ fn render_class(out: &mut String, class: &MapClass, children_index: &HashMap<Str
         out.push_str(&format!(
             "### Protected Methods ({})\n\n{}\n\n",
             class.protected_methods.len(),
-            class
-                .protected_methods
-                .iter()
-                .map(|m| format!("`{}`", m))
-                .collect::<Vec<_>>()
-                .join(", ")
+            format_code_items(class.protected_methods.iter().map(String::as_str))
         ));
     }
 
@@ -707,27 +686,30 @@ fn render_class(out: &mut String, class: &MapClass, children_index: &HashMap<Str
             out.push_str(&format!(
                 "**Actions ({}):** {}\n\n",
                 actions.len(),
-                actions
-                    .iter()
-                    .map(|h| format_hook_name(&h.name))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                format_hook_list(actions.iter().map(|h| h.name.as_str()))
             ));
         }
         if !filters.is_empty() {
             out.push_str(&format!(
                 "**Filters ({}):** {}\n\n",
                 filters.len(),
-                filters
-                    .iter()
-                    .map(|h| format_hook_name(&h.name))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                format_hook_list(filters.iter().map(|h| h.name.as_str()))
             ));
         }
     }
 
     out.push_str("---\n\n");
+}
+
+fn format_code_items<'a>(items: impl Iterator<Item = &'a str>) -> String {
+    items
+        .map(|item| format!("`{}`", item))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_hook_list<'a>(hooks: impl Iterator<Item = &'a str>) -> String {
+    hooks.map(format_hook_name).collect::<Vec<_>>().join(", ")
 }
 
 fn format_hook_name(name: &str) -> String {
@@ -857,11 +839,7 @@ fn split_classes_by_prefix(classes: &[MapClass]) -> Vec<(String, Vec<&MapClass>)
 
     let mut groups: HashMap<String, Vec<&MapClass>> = HashMap::new();
     for class in classes {
-        let remainder = if class.name.starts_with(&common) {
-            &class.name[common.len()..]
-        } else {
-            &class.name
-        };
+        let remainder = class_name_remainder(class, &common);
         let key = remainder
             .find('_')
             .map(|i| &remainder[..i])
@@ -879,11 +857,7 @@ fn split_classes_by_prefix(classes: &[MapClass]) -> Vec<(String, Vec<&MapClass>)
     if needs_fallback {
         let mut alpha_groups: HashMap<String, Vec<&MapClass>> = HashMap::new();
         for class in classes {
-            let remainder = if class.name.starts_with(&common) {
-                &class.name[common.len()..]
-            } else {
-                &class.name
-            };
+            let remainder = class_name_remainder(class, &common);
             let first = remainder
                 .chars()
                 .next()
@@ -896,11 +870,7 @@ fn split_classes_by_prefix(classes: &[MapClass]) -> Vec<(String, Vec<&MapClass>)
         if alpha_groups.len() <= 1 {
             alpha_groups.clear();
             for class in classes {
-                let remainder = if class.name.starts_with(&common) {
-                    &class.name[common.len()..]
-                } else {
-                    &class.name
-                };
+                let remainder = class_name_remainder(class, &common);
                 let key: String = remainder.chars().take(3).collect();
                 let key = if key.is_empty() {
                     "Other".to_string()
@@ -919,6 +889,14 @@ fn split_classes_by_prefix(classes: &[MapClass]) -> Vec<(String, Vec<&MapClass>)
     let mut sorted: Vec<_> = groups.into_iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
     sorted
+}
+
+fn class_name_remainder<'a>(class: &'a MapClass, common: &str) -> &'a str {
+    if class.name.starts_with(common) {
+        &class.name[common.len()..]
+    } else {
+        &class.name
+    }
 }
 
 /// Find the most common underscore-delimited prefix among class names.
