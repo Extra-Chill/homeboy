@@ -88,6 +88,11 @@ impl SshClient {
         })
     }
 
+    pub fn with_env_overlay(mut self, env: &HashMap<String, String>) -> Self {
+        self.env.extend(env.clone());
+        self
+    }
+
     fn build_ssh_args(&self, command: Option<&str>, interactive: bool) -> Vec<String> {
         let mut args = Vec::new();
 
@@ -1336,6 +1341,35 @@ mod tests {
             client.auth.as_ref().map(|auth| auth.persist.as_str()),
             Some("5m")
         );
+    }
+
+    #[test]
+    fn env_overlay_replaces_server_path_for_runner_commands() {
+        let server = Server {
+            id: "lab".to_string(),
+            aliases: Vec::new(),
+            host: "localhost".to_string(),
+            user: "tester".to_string(),
+            port: 22,
+            identity_file: None,
+            kind: None,
+            auth: None,
+            env: HashMap::from([("PATH".to_string(), "/server/bin:$PATH".to_string())]),
+            runner: None,
+        };
+        let runner_env = HashMap::from([("PATH".to_string(), "/runner/bin:$PATH".to_string())]);
+
+        let client = SshClient::from_server(&server, "lab")
+            .expect("client")
+            .with_env_overlay(&runner_env);
+
+        assert_eq!(
+            client.env.get("PATH").map(String::as_str),
+            Some("/runner/bin:$PATH")
+        );
+        assert!(client
+            .prepend_env("command -v node")
+            .contains("/runner/bin:$PATH"));
     }
 
     #[test]

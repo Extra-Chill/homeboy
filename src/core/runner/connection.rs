@@ -248,7 +248,7 @@ fn resolve_ssh_runner(runner: &Runner) -> Result<Option<(String, Server, SshClie
         )
     })?;
     let server = server::load(&server_id)?;
-    let client = SshClient::from_server(&server, &server_id)?;
+    let client = SshClient::from_server(&server, &server_id)?.with_env_overlay(&runner.env);
     Ok(Some((server_id, server, client)))
 }
 
