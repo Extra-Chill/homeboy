@@ -24,6 +24,7 @@ use super::utils::{extract_latest_notes, parse_release_artifacts};
 
 pub(crate) mod artifacts;
 pub(crate) mod changelog;
+mod github_release;
 pub(crate) mod prepare;
 
 /// Build a successful step result with optional data and hints.
@@ -476,12 +477,12 @@ pub(crate) fn run_git_tag(
                 crate::core::deploy::release_download::parse_github_url(&remote_url)
             })
             .and_then(|github| {
-                if !gh_is_available() || !gh_is_authenticated() {
+                if !github_release::gh_is_available() || !github_release::gh_is_authenticated() {
                     return None;
                 }
 
                 let repo_flag = format!("{}/{}", github.owner, github.repo);
-                Some(gh_release_exists(tag_name, &repo_flag))
+                Some(github_release::gh_release_exists(tag_name, &repo_flag))
             });
         let github_release_label = match github_release {
             Some(true) => "exists".to_string(),
@@ -963,30 +964,23 @@ pub(crate) fn run_github_release(
             )
         })?;
 
-    if !gh_is_available() {
-        let fallback = fallback_gh_command(&tag);
+    if !github_release::gh_is_available() {
+        let fallback = github_release::fallback_gh_command(&tag);
         log_status!(
             "release",
             "⚠ `gh` CLI not found on PATH — skipping GitHub Release creation"
         );
         log_status!("release", "Manual fallback: {}", fallback);
-        return Ok(step_success(
-            "github.release",
-            "github.release",
-            Some(serde_json::json!({
-                "skipped": true,
-                "reason": "gh-not-available",
-                "tag": tag,
-                "owner": github.owner,
-                "repo": github.repo,
-                "fallback_command": fallback,
-            })),
-            Vec::new(),
+        return Ok(github_release::skipped_result(
+            &tag,
+            &github,
+            "gh-not-available",
+            Some(fallback),
         ));
     }
 
-    if !gh_is_authenticated() {
-        let fallback = fallback_gh_command(&tag);
+    if !github_release::gh_is_authenticated() {
+        let fallback = github_release::fallback_gh_command(&tag);
         log_status!(
             "release",
             "⚠ `gh` is not authenticated — skipping GitHub Release creation"
@@ -996,18 +990,11 @@ pub(crate) fn run_github_release(
             "Authenticate with `gh auth login`, then manual fallback: {}",
             fallback
         );
-        return Ok(step_success(
-            "github.release",
-            "github.release",
-            Some(serde_json::json!({
-                "skipped": true,
-                "reason": "gh-not-authenticated",
-                "tag": tag,
-                "owner": github.owner,
-                "repo": github.repo,
-                "fallback_command": fallback,
-            })),
-            Vec::new(),
+        return Ok(github_release::skipped_result(
+            &tag,
+            &github,
+            "gh-not-authenticated",
+            Some(fallback),
         ));
     }
 
@@ -1026,7 +1013,7 @@ pub(crate) fn run_github_release(
     let has_artifacts = !artifact_paths.is_empty();
 
     let repo_flag = format!("{}/{}", github.owner, github.repo);
-    if gh_release_exists(&tag, &repo_flag) {
+    if github_release::gh_release_exists(&tag, &repo_flag) {
         // Release entry already exists (idempotent retry, or release
         // created out of band). When the release has no artifacts to
         // attach, skip — there is nothing to update. When artifacts are
@@ -1039,17 +1026,11 @@ pub(crate) fn run_github_release(
                 tag,
                 repo_flag
             );
-            return Ok(step_success(
-                "github.release",
-                "github.release",
-                Some(serde_json::json!({
-                    "skipped": true,
-                    "reason": "release-already-exists",
-                    "tag": tag,
-                    "owner": github.owner,
-                    "repo": github.repo,
-                })),
-                Vec::new(),
+            return Ok(github_release::skipped_result(
+                &tag,
+                &github,
+                "release-already-exists",
+                None,
             ));
         }
 
@@ -1081,34 +1062,19 @@ pub(crate) fn run_github_release(
             let stderr = String::from_utf8_lossy(&upload_output.stderr).to_string();
             let stdout = String::from_utf8_lossy(&upload_output.stdout).to_string();
             log_status!("release", "⚠ `gh release upload` failed: {}", stderr.trim());
-            return Ok(step_success(
-                "github.release",
-                "github.release",
-                Some(serde_json::json!({
-                    "skipped": true,
-                    "reason": "gh-upload-failed",
-                    "tag": tag,
-                    "owner": github.owner,
-                    "repo": github.repo,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "artifact_count": artifact_paths.len(),
-                })),
-                Vec::new(),
+            return Ok(github_release::upload_failed_result(
+                &tag,
+                &github,
+                stdout,
+                stderr,
+                artifact_paths.len(),
             ));
         }
 
-        return Ok(step_success(
-            "github.release",
-            "github.release",
-            Some(serde_json::json!({
-                "action": "github.release.upload",
-                "tag": tag,
-                "owner": github.owner,
-                "repo": github.repo,
-                "artifact_count": artifact_paths.len(),
-            })),
-            Vec::new(),
+        return Ok(github_release::upload_success_result(
+            &tag,
+            &github,
+            artifact_paths.len(),
         ));
     }
 
@@ -1119,7 +1085,10 @@ pub(crate) fn run_github_release(
     };
 
     let tmp_dir = crate::core::engine::temp::runtime_temp_dir("github-release")?;
-    let notes_path = tmp_dir.join(format!("notes-{}.md", sanitize_tag_for_filename(&tag)));
+    let notes_path = tmp_dir.join(format!(
+        "notes-{}.md",
+        github_release::sanitize_tag_for_filename(&tag)
+    ));
     std::fs::write(&notes_path, &notes_body).map_err(|e| {
         Error::internal_io(
             format!("Failed to write release notes file: {}", e),
@@ -1170,7 +1139,7 @@ pub(crate) fn run_github_release(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let fallback = fallback_gh_command(&tag);
+        let fallback = github_release::fallback_gh_command(&tag);
         log_status!("release", "⚠ `gh release create` failed: {}", stderr.trim());
         log_status!("release", "Manual fallback: {}", fallback);
         return Ok(step_success(
@@ -1331,47 +1300,9 @@ fn store_artifacts_from_output(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// `gh` CLI probes
-// ---------------------------------------------------------------------------
-
-fn gh_is_available() -> bool {
-    crate::core::git::gh_probe_succeeds(&["--version"])
-}
-
-fn gh_is_authenticated() -> bool {
-    crate::core::git::gh_probe_succeeds(&["auth", "status", "--hostname", "github.com"])
-}
-
-fn gh_release_exists(tag: &str, repo_flag: &str) -> bool {
-    crate::core::git::gh_probe_succeeds(&["release", "view", tag, "-R", repo_flag])
-}
-
-fn fallback_gh_command(tag: &str) -> String {
-    format!(
-        "gh release create {} --title {} --notes-file <path-to-release-notes>",
-        tag, tag
-    )
-}
-
-fn sanitize_tag_for_filename(tag: &str) -> String {
-    tag.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        fallback_gh_command, publish_step_result, run_git_push, sanitize_tag_for_filename,
-        store_artifacts_from_output,
-    };
+    use super::{github_release, publish_step_result, run_git_push, store_artifacts_from_output};
     use crate::core::component::Component;
     use crate::core::release::ReleaseStepStatus;
     use std::process::Command;
@@ -1392,22 +1323,31 @@ mod tests {
 
     #[test]
     fn sanitize_tag_for_filename_preserves_safe_chars() {
-        assert_eq!(sanitize_tag_for_filename("v1.2.3"), "v1.2.3");
         assert_eq!(
-            sanitize_tag_for_filename("data-machine-v0.70.2"),
+            github_release::sanitize_tag_for_filename("v1.2.3"),
+            "v1.2.3"
+        );
+        assert_eq!(
+            github_release::sanitize_tag_for_filename("data-machine-v0.70.2"),
             "data-machine-v0.70.2"
         );
     }
 
     #[test]
     fn sanitize_tag_for_filename_strips_unsafe_chars() {
-        assert_eq!(sanitize_tag_for_filename("v1.2.3 rc1"), "v1.2.3-rc1");
-        assert_eq!(sanitize_tag_for_filename("feat/foo@1"), "feat-foo-1");
+        assert_eq!(
+            github_release::sanitize_tag_for_filename("v1.2.3 rc1"),
+            "v1.2.3-rc1"
+        );
+        assert_eq!(
+            github_release::sanitize_tag_for_filename("feat/foo@1"),
+            "feat-foo-1"
+        );
     }
 
     #[test]
     fn fallback_gh_command_includes_tag_twice() {
-        let cmd = fallback_gh_command("v1.2.3");
+        let cmd = github_release::fallback_gh_command("v1.2.3");
         assert!(cmd.contains("gh release create v1.2.3"));
         assert!(cmd.contains("--title v1.2.3"));
         assert!(cmd.contains("--notes-file"));
