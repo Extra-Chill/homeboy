@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -66,6 +67,8 @@ struct ExecRequest {
     runner_id: Option<String>,
     cwd: String,
     command: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
     #[serde(default)]
     capture_patch: bool,
     #[serde(default)]
@@ -337,6 +340,7 @@ fn enqueue_exec_job(
             let mut command = Command::new(&request.command[0]);
             command
                 .args(&request.command[1..])
+                .envs(request.env.iter())
                 .current_dir(&request.cwd);
             if let Some(snapshot) = &source_snapshot {
                 command.env(
