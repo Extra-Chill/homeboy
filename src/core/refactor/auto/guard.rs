@@ -158,7 +158,7 @@ impl GuardConfig {
     }
 
     /// Whether we're running in a CI context with enough info to check guards.
-    pub fn is_ci(&self) -> bool {
+    pub(crate) fn is_ci(&self) -> bool {
         self.github_repo.is_some()
     }
 }

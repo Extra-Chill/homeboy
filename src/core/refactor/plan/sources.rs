@@ -460,7 +460,7 @@ fn allows_dirty_worktree_write(request: &RefactorSourceRequest) -> bool {
             .is_some_and(|files| !files.is_empty())
 }
 
-pub fn normalize_sources(sources: &[String]) -> crate::core::Result<Vec<String>> {
+pub(crate) fn normalize_sources(sources: &[String]) -> crate::core::Result<Vec<String>> {
     let lowered: Vec<String> = sources.iter().map(|source| source.to_lowercase()).collect();
 
     if lowered.iter().any(|source| source == "all") {
@@ -1413,7 +1413,7 @@ fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) -> Vec<FixA
     entries
 }
 
-pub fn analyze_stage_overlaps(stages: &[SourceStageSummary]) -> Vec<SourceOverlap> {
+fn analyze_stage_overlaps(stages: &[SourceStageSummary]) -> Vec<SourceOverlap> {
     let mut overlaps = Vec::new();
 
     for (later_index, later_stage) in stages.iter().enumerate() {
@@ -1458,7 +1458,7 @@ pub fn analyze_stage_overlaps(stages: &[SourceStageSummary]) -> Vec<SourceOverla
     overlaps
 }
 
-pub fn summarize_source_totals(
+fn summarize_source_totals(
     stages: &[SourceStageSummary],
     total_files_selected: usize,
 ) -> SourceTotals {

@@ -1,4 +1,3 @@
-use crate::core::refactor::decompose;
 use crate::core::refactor::plan::verify::rewrite_callers_after_dedup;
 
 use crate::core::engine::undo::InMemoryRollback;
@@ -6,7 +5,7 @@ use crate::core::extension::AutofixVerifyConfig;
 use crate::core::refactor::auto::verify::{
     applied_files_from_chunks, capture_pre_apply_snapshot, run_verify_gate,
 };
-use crate::core::refactor::auto::{ApplyChunkResult, ChunkStatus, DecomposeFixPlan, Fix, NewFile};
+use crate::core::refactor::auto::{ApplyChunkResult, ChunkStatus, Fix, NewFile};
 use std::path::Path;
 
 // ============================================================================
@@ -278,86 +277,6 @@ fn merge_same_file_insertions(fixes: &mut [Fix]) {
             right[0].insertions.append(&mut left[donor_idx].insertions);
         }
     }
-}
-
-pub fn apply_decompose_plans(plans: &mut [DecomposeFixPlan], root: &Path) -> Vec<ApplyChunkResult> {
-    let mut results = Vec::new();
-    for (index, dfp) in plans.iter_mut().enumerate() {
-        let source_abs = root.join(&dfp.file);
-        let _source_content = match std::fs::read_to_string(&source_abs) {
-            Ok(c) => c,
-            Err(e) => {
-                results.push(ApplyChunkResult {
-                    chunk_id: format!("decompose:{}", index + 1),
-                    files: vec![dfp.file.clone()],
-                    status: ChunkStatus::Reverted,
-                    applied_files: 0,
-                    reverted_files: 0,
-                    verification: None,
-                    error: Some(format!("Failed to read source {}: {}", dfp.file, e)),
-                });
-                continue;
-            }
-        };
-        let mut rollback = InMemoryRollback::new();
-        rollback.capture(&source_abs);
-        let mut all_files = vec![dfp.file.clone()];
-        for group in &dfp.plan.groups {
-            let target_abs = root.join(&group.suggested_target);
-            all_files.push(group.suggested_target.clone());
-            rollback.capture(&target_abs);
-        }
-
-        if let Ok(dry_run_results) = decompose::apply_plan(&dfp.plan, root, false) {
-            for mr in &dry_run_results {
-                for caller_path in &mr.caller_files_modified {
-                    let rel = caller_path
-                        .strip_prefix(root)
-                        .unwrap_or(caller_path)
-                        .to_string_lossy()
-                        .to_string();
-                    all_files.push(rel);
-                    rollback.capture(caller_path);
-                }
-            }
-        }
-
-        match decompose::apply_plan(&dfp.plan, root, true) {
-            Ok(move_results) => {
-                let files_modified = move_results.iter().filter(|r| r.applied).count();
-                let chunk = ApplyChunkResult {
-                    chunk_id: format!("decompose:{}", index + 1),
-                    files: all_files,
-                    status: ChunkStatus::Applied,
-                    applied_files: files_modified,
-                    reverted_files: 0,
-                    verification: Some("decompose_applied".to_string()),
-                    error: None,
-                };
-                dfp.applied = true;
-                log_status!(
-                    "fix",
-                    "Decomposed {} into {} groups",
-                    dfp.file,
-                    dfp.plan.groups.len()
-                );
-                results.push(chunk);
-            }
-            Err(e) => {
-                rollback.restore_all();
-                results.push(ApplyChunkResult {
-                    chunk_id: format!("decompose:{}", index + 1),
-                    files: vec![dfp.file.clone()],
-                    status: ChunkStatus::Reverted,
-                    applied_files: 0,
-                    reverted_files: 0,
-                    verification: None,
-                    error: Some(format!("Decompose failed for {}: {}", dfp.file, e)),
-                });
-            }
-        }
-    }
-    results
 }
 
 #[cfg(test)]

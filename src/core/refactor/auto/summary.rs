@@ -109,7 +109,7 @@ pub fn summarize_audit_fix_result(fix_result: &FixResult) -> FixResultsSummary {
 /// Derive the primitive name from serde's `#[serde(tag = "type", rename_all = "snake_case")]`
 /// attribute on `RefactorPrimitive`. This eliminates manual match arms — adding a new
 /// variant to the enum automatically works for reporting.
-pub fn primitive_name(primitive: &crate::core::refactor::RefactorPrimitive) -> String {
+pub(crate) fn primitive_name(primitive: &crate::core::refactor::RefactorPrimitive) -> String {
     // RefactorPrimitive uses `#[serde(tag = "type", rename_all = "snake_case")]`.
     // Serializing to JSON gives `{"type": "snake_case_name", ...}`.
     // Extract the "type" field value.
