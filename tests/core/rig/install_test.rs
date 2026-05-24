@@ -297,6 +297,27 @@ fn installed_filename_is_runtime_identity_when_declared_id_differs() {
 }
 
 #[test]
+fn rig_list_ids_skip_non_json_files() {
+    let _home = HomeGuard::new();
+    fs::create_dir_all(crate::core::paths::rigs().expect("rigs dir")).expect("rigs dir");
+    fs::write(
+        crate::core::paths::rig_config("alpha").expect("alpha rig path"),
+        minimal_rig("alpha"),
+    )
+    .expect("alpha rig");
+    fs::write(
+        crate::core::paths::rigs()
+            .expect("rigs dir")
+            .join("ignore.txt"),
+        "not json",
+    )
+    .expect("non-json rig sidecar");
+
+    assert_eq!(list_ids().expect("list ids"), vec!["alpha"]);
+    assert_eq!(list().expect("list rigs").len(), 1);
+}
+
+#[test]
 fn git_url_installs_clone_package_and_config_link() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");

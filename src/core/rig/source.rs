@@ -358,53 +358,26 @@ struct StackSourceEntry {
 
 fn read_source_entries() -> Result<SourceEntries> {
     let dir = paths::rig_sources()?;
-    let mut invalid = Vec::new();
-    if !dir.exists() {
-        let valid_stacks = read_stack_source_entries(&mut invalid)?;
-        return Ok(SourceEntries {
-            valid: Vec::new(),
-            valid_stacks,
-            invalid,
-        });
-    }
-
-    let mut valid = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .map_err(|e| Error::internal_io(e.to_string(), Some("read rig sources dir".into())))?
-    {
-        let entry = entry
-            .map_err(|e| Error::internal_io(e.to_string(), Some("read rig source entry".into())))?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let id = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(id) => id.to_string(),
-            None => continue,
-        };
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(err) => {
-                invalid.push(InvalidRigSourceMetadata {
-                    id,
-                    metadata_path: path.to_string_lossy().to_string(),
-                    error: err.to_string(),
-                });
-                continue;
-            }
-        };
-        match serde_json::from_str::<RigSourceMetadata>(&content) {
-            Ok(metadata) => valid.push(RigSourceEntry { id, metadata }),
-            Err(err) => invalid.push(InvalidRigSourceMetadata {
-                id,
-                metadata_path: path.to_string_lossy().to_string(),
-                error: err.to_string(),
-            }),
-        }
-    }
+    let rig_entries = super::json_config::read_json_configs::<RigSourceMetadata>(
+        &dir,
+        "read rig sources dir",
+        "read rig source entry",
+    )?;
+    let mut invalid = rig_entries
+        .invalid
+        .into_iter()
+        .map(invalid_source_metadata)
+        .collect::<Vec<_>>();
+    let valid = rig_entries
+        .valid
+        .into_iter()
+        .map(|entry| RigSourceEntry {
+            id: entry.id,
+            metadata: entry.value,
+        })
+        .collect::<Vec<_>>();
 
     let valid_stacks = read_stack_source_entries(&mut invalid)?;
-    valid.sort_by(|a, b| a.id.cmp(&b.id));
     invalid.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(SourceEntries {
         valid,
@@ -417,47 +390,30 @@ fn read_stack_source_entries(
     invalid: &mut Vec<InvalidRigSourceMetadata>,
 ) -> Result<Vec<StackSourceEntry>> {
     let dir = paths::stack_sources()?;
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
+    let entries = super::json_config::read_json_configs::<StackSourceMetadata>(
+        &dir,
+        "read stack sources dir",
+        "read stack source entry",
+    )?;
+    invalid.extend(entries.invalid.into_iter().map(invalid_source_metadata));
+    Ok(entries
+        .valid
+        .into_iter()
+        .map(|entry| StackSourceEntry {
+            id: entry.id,
+            metadata: entry.value,
+        })
+        .collect())
+}
 
-    let mut valid = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .map_err(|e| Error::internal_io(e.to_string(), Some("read stack sources dir".into())))?
-    {
-        let entry = entry.map_err(|e| {
-            Error::internal_io(e.to_string(), Some("read stack source entry".into()))
-        })?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let id = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(id) => id.to_string(),
-            None => continue,
-        };
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(err) => {
-                invalid.push(InvalidRigSourceMetadata {
-                    id,
-                    metadata_path: path.to_string_lossy().to_string(),
-                    error: err.to_string(),
-                });
-                continue;
-            }
-        };
-        match serde_json::from_str::<StackSourceMetadata>(&content) {
-            Ok(metadata) => valid.push(StackSourceEntry { id, metadata }),
-            Err(err) => invalid.push(InvalidRigSourceMetadata {
-                id,
-                metadata_path: path.to_string_lossy().to_string(),
-                error: err.to_string(),
-            }),
-        }
+fn invalid_source_metadata(
+    entry: super::json_config::InvalidJsonConfig,
+) -> InvalidRigSourceMetadata {
+    InvalidRigSourceMetadata {
+        id: entry.id,
+        metadata_path: entry.path.to_string_lossy().to_string(),
+        error: entry.error,
     }
-    valid.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(valid)
 }
 
 fn group_source_entries(entries: SourceEntries) -> RigSourceListResult {
