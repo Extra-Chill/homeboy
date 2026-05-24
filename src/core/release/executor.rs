@@ -970,18 +970,11 @@ pub(crate) fn run_github_release(
             "⚠ `gh` CLI not found on PATH — skipping GitHub Release creation"
         );
         log_status!("release", "Manual fallback: {}", fallback);
-        return Ok(step_success(
-            "github.release",
-            "github.release",
-            Some(serde_json::json!({
-                "skipped": true,
-                "reason": "gh-not-available",
-                "tag": tag,
-                "owner": github.owner,
-                "repo": github.repo,
-                "fallback_command": fallback,
-            })),
-            Vec::new(),
+        return Ok(github_release_skipped_result(
+            &tag,
+            &github,
+            "gh-not-available",
+            Some(fallback),
         ));
     }
 
@@ -996,18 +989,11 @@ pub(crate) fn run_github_release(
             "Authenticate with `gh auth login`, then manual fallback: {}",
             fallback
         );
-        return Ok(step_success(
-            "github.release",
-            "github.release",
-            Some(serde_json::json!({
-                "skipped": true,
-                "reason": "gh-not-authenticated",
-                "tag": tag,
-                "owner": github.owner,
-                "repo": github.repo,
-                "fallback_command": fallback,
-            })),
-            Vec::new(),
+        return Ok(github_release_skipped_result(
+            &tag,
+            &github,
+            "gh-not-authenticated",
+            Some(fallback),
         ));
     }
 
@@ -1039,17 +1025,11 @@ pub(crate) fn run_github_release(
                 tag,
                 repo_flag
             );
-            return Ok(step_success(
-                "github.release",
-                "github.release",
-                Some(serde_json::json!({
-                    "skipped": true,
-                    "reason": "release-already-exists",
-                    "tag": tag,
-                    "owner": github.owner,
-                    "repo": github.repo,
-                })),
-                Vec::new(),
+            return Ok(github_release_skipped_result(
+                &tag,
+                &github,
+                "release-already-exists",
+                None,
             ));
         }
 
@@ -1081,34 +1061,19 @@ pub(crate) fn run_github_release(
             let stderr = String::from_utf8_lossy(&upload_output.stderr).to_string();
             let stdout = String::from_utf8_lossy(&upload_output.stdout).to_string();
             log_status!("release", "⚠ `gh release upload` failed: {}", stderr.trim());
-            return Ok(step_success(
-                "github.release",
-                "github.release",
-                Some(serde_json::json!({
-                    "skipped": true,
-                    "reason": "gh-upload-failed",
-                    "tag": tag,
-                    "owner": github.owner,
-                    "repo": github.repo,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "artifact_count": artifact_paths.len(),
-                })),
-                Vec::new(),
+            return Ok(github_release_upload_failed_result(
+                &tag,
+                &github,
+                stdout,
+                stderr,
+                artifact_paths.len(),
             ));
         }
 
-        return Ok(step_success(
-            "github.release",
-            "github.release",
-            Some(serde_json::json!({
-                "action": "github.release.upload",
-                "tag": tag,
-                "owner": github.owner,
-                "repo": github.repo,
-                "artifact_count": artifact_paths.len(),
-            })),
-            Vec::new(),
+        return Ok(github_release_upload_success_result(
+            &tag,
+            &github,
+            artifact_paths.len(),
         ));
     }
 
@@ -1334,6 +1299,69 @@ fn store_artifacts_from_output(
 // ---------------------------------------------------------------------------
 // `gh` CLI probes
 // ---------------------------------------------------------------------------
+
+fn github_release_skipped_result(
+    tag: &str,
+    github: &crate::core::deploy::release_download::GitHubRepo,
+    reason: &str,
+    fallback_command: Option<String>,
+) -> ReleaseStepResult {
+    let mut data = serde_json::json!({
+        "skipped": true,
+        "reason": reason,
+        "tag": tag,
+        "owner": github.owner,
+        "repo": github.repo,
+    });
+    if let Some(fallback) = fallback_command {
+        data["fallback_command"] = serde_json::json!(fallback);
+    }
+
+    step_success("github.release", "github.release", Some(data), Vec::new())
+}
+
+fn github_release_upload_failed_result(
+    tag: &str,
+    github: &crate::core::deploy::release_download::GitHubRepo,
+    stdout: String,
+    stderr: String,
+    artifact_count: usize,
+) -> ReleaseStepResult {
+    step_success(
+        "github.release",
+        "github.release",
+        Some(serde_json::json!({
+            "skipped": true,
+            "reason": "gh-upload-failed",
+            "tag": tag,
+            "owner": github.owner,
+            "repo": github.repo,
+            "stdout": stdout,
+            "stderr": stderr,
+            "artifact_count": artifact_count,
+        })),
+        Vec::new(),
+    )
+}
+
+fn github_release_upload_success_result(
+    tag: &str,
+    github: &crate::core::deploy::release_download::GitHubRepo,
+    artifact_count: usize,
+) -> ReleaseStepResult {
+    step_success(
+        "github.release",
+        "github.release",
+        Some(serde_json::json!({
+            "action": "github.release.upload",
+            "tag": tag,
+            "owner": github.owner,
+            "repo": github.repo,
+            "artifact_count": artifact_count,
+        })),
+        Vec::new(),
+    )
+}
 
 fn gh_is_available() -> bool {
     crate::core::git::gh_probe_succeeds(&["--version"])

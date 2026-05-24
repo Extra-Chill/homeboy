@@ -428,30 +428,9 @@ fn group_source_entries(entries: SourceEntries) -> RigSourceListResult {
 
         groups
             .entry(key)
-            .or_insert_with(|| RigSourceGroup {
-                source: entry.metadata.source.clone(),
-                package_id: package_id_from_path(&entry.metadata.package_path),
-                package_path: entry.metadata.package_path.clone(),
-                discovery_path: entry
-                    .metadata
-                    .discovery_path
-                    .clone()
-                    .unwrap_or_else(|| infer_discovery_path(&entry.metadata.rig_path)),
-                linked: entry.metadata.linked,
-                source_revision: entry.metadata.source_revision.clone(),
-                rigs: Vec::new(),
-                stacks: Vec::new(),
-            })
+            .or_insert_with(|| new_rig_source_group(&entry.metadata))
             .rigs
-            .push(RigSourceRig {
-                id: entry.id,
-                rig_path: entry.metadata.rig_path,
-                config_path: config_path
-                    .map(|path| path.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                config_present,
-                config_owned,
-            });
+            .push(source_rig(entry, config_path, config_present, config_owned));
     }
 
     for entry in entries.valid_stacks {
@@ -464,26 +443,14 @@ fn group_source_entries(entries: SourceEntries) -> RigSourceListResult {
 
         groups
             .entry(key)
-            .or_insert_with(|| RigSourceGroup {
-                source: entry.metadata.source.clone(),
-                package_id: package_id_from_path(&entry.metadata.package_path),
-                package_path: entry.metadata.package_path.clone(),
-                discovery_path: entry.metadata.discovery_path.clone(),
-                linked: entry.metadata.linked,
-                source_revision: entry.metadata.source_revision.clone(),
-                rigs: Vec::new(),
-                stacks: Vec::new(),
-            })
+            .or_insert_with(|| new_stack_source_group(&entry.metadata))
             .stacks
-            .push(RigSourceStack {
-                id: entry.id,
-                stack_path: entry.metadata.stack_path,
-                config_path: config_path
-                    .map(|path| path.to_string_lossy().to_string())
-                    .unwrap_or_default(),
+            .push(source_stack(
+                entry,
+                config_path,
                 config_present,
                 config_owned,
-            });
+            ));
     }
 
     let mut sources = groups.into_values().collect::<Vec<_>>();
@@ -514,6 +481,84 @@ fn infer_discovery_path(rig_path: &str) -> String {
             .to_string(),
         _ => path.parent().unwrap_or(path).to_string_lossy().to_string(),
     }
+}
+
+fn new_source_group(
+    source: &str,
+    package_path: &str,
+    discovery_path: String,
+    linked: bool,
+    source_revision: Option<String>,
+) -> RigSourceGroup {
+    RigSourceGroup {
+        source: source.to_string(),
+        package_id: package_id_from_path(package_path),
+        package_path: package_path.to_string(),
+        discovery_path,
+        linked,
+        source_revision,
+        rigs: Vec::new(),
+        stacks: Vec::new(),
+    }
+}
+
+fn new_rig_source_group(metadata: &RigSourceMetadata) -> RigSourceGroup {
+    new_source_group(
+        &metadata.source,
+        &metadata.package_path,
+        metadata
+            .discovery_path
+            .clone()
+            .unwrap_or_else(|| infer_discovery_path(&metadata.rig_path)),
+        metadata.linked,
+        metadata.source_revision.clone(),
+    )
+}
+
+fn new_stack_source_group(metadata: &StackSourceMetadata) -> RigSourceGroup {
+    new_source_group(
+        &metadata.source,
+        &metadata.package_path,
+        metadata.discovery_path.clone(),
+        metadata.linked,
+        metadata.source_revision.clone(),
+    )
+}
+
+fn source_rig(
+    entry: RigSourceEntry,
+    config_path: Option<PathBuf>,
+    config_present: bool,
+    config_owned: bool,
+) -> RigSourceRig {
+    RigSourceRig {
+        id: entry.id,
+        rig_path: entry.metadata.rig_path,
+        config_path: source_config_path(config_path),
+        config_present,
+        config_owned,
+    }
+}
+
+fn source_stack(
+    entry: StackSourceEntry,
+    config_path: Option<PathBuf>,
+    config_present: bool,
+    config_owned: bool,
+) -> RigSourceStack {
+    RigSourceStack {
+        id: entry.id,
+        stack_path: entry.metadata.stack_path,
+        config_path: source_config_path(config_path),
+        config_present,
+        config_owned,
+    }
+}
+
+fn source_config_path(config_path: Option<PathBuf>) -> String {
+    config_path
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 fn source_matches(source: &RigSourceGroup, selector: &str) -> bool {

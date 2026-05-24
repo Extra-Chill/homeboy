@@ -349,10 +349,8 @@ pub(super) fn append_item_to_subsection(
                 if !out.ends_with("\n\n") && !out.is_empty() {
                     out.push('\n');
                 }
-                out.push_str(&target_header);
+                push_subsection_item(&mut out, &target_header, &bullet);
                 out.push('\n');
-                out.push_str(&bullet);
-                out.push_str("\n\n");
             }
             out.push_str(line);
             out.push('\n');
@@ -362,10 +360,7 @@ pub(super) fn append_item_to_subsection(
             if !out.ends_with("\n\n") {
                 out.push('\n');
             }
-            out.push_str(&target_header);
-            out.push('\n');
-            out.push_str(&bullet);
-            out.push('\n');
+            push_subsection_item(&mut out, &target_header, &bullet);
         }
     } else {
         // No subsections exist yet - create the first one after section header
@@ -383,6 +378,13 @@ pub(super) fn append_item_to_subsection(
     }
 
     Ok((out, true))
+}
+
+fn push_subsection_item(out: &mut String, target_header: &str, bullet: &str) {
+    out.push_str(target_header);
+    out.push('\n');
+    out.push_str(bullet);
+    out.push('\n');
 }
 
 #[cfg(test)]
