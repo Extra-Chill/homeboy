@@ -33,6 +33,8 @@ use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
+#[allow(unused_imports)]
+use super::fingerprint::FileFingerprint;
 
 /// Minimum number of structs sharing a field group to report.
 const MIN_OCCURRENCES: usize = 3;

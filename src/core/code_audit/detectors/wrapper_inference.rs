@@ -146,6 +146,14 @@ pub(crate) fn analyze_wrappers(fingerprints: &[&FileFingerprint], root: &Path) -
     findings
 }
 
+#[allow(dead_code)]
+pub(in crate::core::code_audit) fn run(
+    fingerprints: &[&FileFingerprint],
+    root: &Path,
+) -> Vec<Finding> {
+    analyze_wrappers(fingerprints, root)
+}
+
 /// Check if the file content already contains the expected field.
 fn has_field(content: &str, field_name: &str) -> bool {
     // Check for common declaration patterns:
