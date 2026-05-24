@@ -139,14 +139,14 @@ fn run_compare_variant_pair(
     let mut variant = TraceCompareVariantAggregateBuilder::new("variant", &args);
 
     for entry in &plan {
-        let mut run_args = if entry.group == "baseline" {
+        let mut run_args = if entry.group() == "baseline" {
             baseline_args.clone()
         } else {
             args.clone()
         };
         run_args.repeat = 1;
         let single = run_repeat_output(run_args)?;
-        if entry.group == "baseline" {
+        if entry.group() == "baseline" {
             baseline.push(entry, single);
         } else {
             variant.push(entry, single);
@@ -164,9 +164,9 @@ fn trace_run_order_entry_output(
     entry: TraceRunPlanEntry,
 ) -> extension_trace::TraceRunOrderEntryOutput {
     extension_trace::TraceRunOrderEntryOutput {
-        index: entry.index,
-        group: entry.group,
-        iteration: entry.iteration,
+        index: entry.index(),
+        group: entry.group().to_string(),
+        iteration: entry.iteration(),
     }
 }
 
@@ -215,13 +215,13 @@ impl TraceCompareVariantAggregateBuilder {
         self.guardrails.extend(aggregate.guardrails.clone());
         self.run_order
             .push(extension_trace::TraceRunOrderEntryOutput {
-                index: plan.index,
+                index: plan.index(),
                 group: self.group.to_string(),
-                iteration: plan.iteration,
+                iteration: plan.iteration(),
             });
 
         for mut run in aggregate.runs {
-            run.index = plan.index;
+            run.index = plan.index();
             self.runs.push(run);
         }
 
@@ -231,7 +231,7 @@ impl TraceCompareVariantAggregateBuilder {
                 self.span_samples.entry(span.id.clone()).or_default().push(
                     TraceAggregateSpanSample {
                         duration_ms: duration,
-                        run_index: plan.index,
+                        run_index: plan.index(),
                         artifact_path: span.max_artifact_path.clone().unwrap_or_default(),
                     },
                 );

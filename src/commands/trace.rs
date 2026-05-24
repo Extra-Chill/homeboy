@@ -619,7 +619,7 @@ fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     let run_order = plan_trace_run_order(repeat, args.schedule, &["run"]);
 
     for plan_entry in &run_order {
-        let index = plan_entry.index;
+        let index = plan_entry.index();
         let mut run_args = args.clone();
         run_args.repeat = 1;
         match execute_trace_run(run_args) {
@@ -755,9 +755,9 @@ fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
         run_order: run_order
             .into_iter()
             .map(|entry| extension_trace::TraceRunOrderEntryOutput {
-                index: entry.index,
-                group: entry.group,
-                iteration: entry.iteration,
+                index: entry.index(),
+                group: entry.group().to_string(),
+                iteration: entry.iteration(),
             })
             .collect(),
         rig_state,

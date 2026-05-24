@@ -759,7 +759,7 @@ fn trace_run_order_planner_supports_grouped_and_interleaved_variants() {
     assert_eq!(
         grouped
             .iter()
-            .map(|entry| (entry.index, entry.group.as_str(), entry.iteration))
+            .map(|entry| (entry.index(), entry.group(), entry.iteration()))
             .collect::<Vec<_>>(),
         vec![
             (1, "baseline", 1),
@@ -773,7 +773,7 @@ fn trace_run_order_planner_supports_grouped_and_interleaved_variants() {
     assert_eq!(
         interleaved
             .iter()
-            .map(|entry| (entry.index, entry.group.as_str(), entry.iteration))
+            .map(|entry| (entry.index(), entry.group(), entry.iteration()))
             .collect::<Vec<_>>(),
         vec![
             (1, "baseline", 1),
