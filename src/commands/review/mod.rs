@@ -34,6 +34,7 @@ use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponen
 use super::{audit, lint, test, CmdResult, GlobalArgs};
 
 mod observation;
+pub(super) mod raw_output;
 mod render;
 
 #[derive(Args, Debug, Clone)]

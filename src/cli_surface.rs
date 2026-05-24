@@ -155,7 +155,14 @@ pub enum CommandRawOutputMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandOutputArtifactPolicy {
+pub enum CommandStdoutMode {
+    JsonEnvelope,
+    Raw(CommandRawOutputMode),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutputFileMode {
+    None,
     GenericEnvelope,
     ReviewStableArtifact,
     TraceJsonSummaryArtifact,
@@ -163,9 +170,8 @@ pub enum CommandOutputArtifactPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandResponsePlan {
-    pub mode: CommandResponseMode,
-    pub output_artifact_policy: CommandOutputArtifactPolicy,
-    pub print_json: bool,
+    pub stdout: CommandStdoutMode,
+    pub output_file: CommandOutputFileMode,
 }
 
 impl Commands {
@@ -173,9 +179,11 @@ impl Commands {
         let mode = self.response_mode(has_output_file);
 
         CommandResponsePlan {
-            mode,
-            output_artifact_policy: self.output_artifact_policy(has_output_file),
-            print_json: matches!(mode, CommandResponseMode::Json),
+            stdout: match mode {
+                CommandResponseMode::Json => CommandStdoutMode::JsonEnvelope,
+                CommandResponseMode::Raw(raw_mode) => CommandStdoutMode::Raw(raw_mode),
+            },
+            output_file: self.output_file_mode(has_output_file),
         }
     }
 
@@ -237,13 +245,17 @@ impl Commands {
         }
     }
 
-    pub fn output_artifact_policy(&self, has_output_file: bool) -> CommandOutputArtifactPolicy {
+    pub fn output_file_mode(&self, has_output_file: bool) -> CommandOutputFileMode {
+        if !has_output_file {
+            return CommandOutputFileMode::None;
+        }
+
         match self {
-            Commands::Review(_) => CommandOutputArtifactPolicy::ReviewStableArtifact,
-            Commands::Trace(args) if has_output_file && args.json_summary => {
-                CommandOutputArtifactPolicy::TraceJsonSummaryArtifact
+            Commands::Review(_) => CommandOutputFileMode::ReviewStableArtifact,
+            Commands::Trace(args) if args.json_summary => {
+                CommandOutputFileMode::TraceJsonSummaryArtifact
             }
-            _ => CommandOutputArtifactPolicy::GenericEnvelope,
+            _ => CommandOutputFileMode::GenericEnvelope,
         }
     }
 }
@@ -382,18 +394,33 @@ mod tests {
         assert_eq!(
             parsed_command(&["homeboy", "status"]).response_plan(false),
             CommandResponsePlan {
-                mode: CommandResponseMode::Json,
-                output_artifact_policy: CommandOutputArtifactPolicy::GenericEnvelope,
-                print_json: true,
+                stdout: CommandStdoutMode::JsonEnvelope,
+                output_file: CommandOutputFileMode::None,
             }
         );
 
         assert_eq!(
             parsed_command(&["homeboy", "review", "--report", "pr-comment"]).response_plan(false),
             CommandResponsePlan {
-                mode: CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
-                output_artifact_policy: CommandOutputArtifactPolicy::ReviewStableArtifact,
-                print_json: false,
+                stdout: CommandStdoutMode::Raw(CommandRawOutputMode::Markdown),
+                output_file: CommandOutputFileMode::None,
+            }
+        );
+
+        assert_eq!(
+            parsed_command(&["homeboy", "review", "--report", "pr-comment"]).response_plan(true),
+            CommandResponsePlan {
+                stdout: CommandStdoutMode::Raw(CommandRawOutputMode::Markdown),
+                output_file: CommandOutputFileMode::ReviewStableArtifact,
+            }
+        );
+
+        assert_eq!(
+            parsed_command(&["homeboy", "trace", "--report", "markdown", "--json-summary",])
+                .response_plan(true),
+            CommandResponsePlan {
+                stdout: CommandStdoutMode::Raw(CommandRawOutputMode::Markdown),
+                output_file: CommandOutputFileMode::TraceJsonSummaryArtifact,
             }
         );
     }
@@ -440,20 +467,20 @@ mod tests {
     #[test]
     fn test_output_artifact_policy() {
         assert_eq!(
-            parsed_command(&["homeboy", "status"]).output_artifact_policy(true),
-            CommandOutputArtifactPolicy::GenericEnvelope
+            parsed_command(&["homeboy", "status"]).output_file_mode(true),
+            CommandOutputFileMode::GenericEnvelope
         );
         assert_eq!(
-            parsed_command(&["homeboy", "review"]).output_artifact_policy(true),
-            CommandOutputArtifactPolicy::ReviewStableArtifact
+            parsed_command(&["homeboy", "review"]).output_file_mode(true),
+            CommandOutputFileMode::ReviewStableArtifact
         );
         assert_eq!(
-            parsed_command(&["homeboy", "trace", "--json-summary"]).output_artifact_policy(true),
-            CommandOutputArtifactPolicy::TraceJsonSummaryArtifact
+            parsed_command(&["homeboy", "trace", "--json-summary"]).output_file_mode(true),
+            CommandOutputFileMode::TraceJsonSummaryArtifact
         );
         assert_eq!(
-            parsed_command(&["homeboy", "trace", "--json-summary"]).output_artifact_policy(false),
-            CommandOutputArtifactPolicy::GenericEnvelope
+            parsed_command(&["homeboy", "trace", "--json-summary"]).output_file_mode(false),
+            CommandOutputFileMode::None
         );
     }
 }
