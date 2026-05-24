@@ -368,9 +368,9 @@ fn runner_metadata(runner: &Runner) -> Value {
         "kind": runner.kind,
         "server_id": runner.server_id,
         "workspace_root": runner.workspace_root,
-        "homeboy_path": runner.homeboy_path,
-        "daemon": runner.daemon,
-        "artifact_policy": runner.artifact_policy,
+        "homeboy_path": runner.settings.homeboy_path,
+        "daemon": runner.settings.daemon,
+        "artifact_policy": runner.settings.artifact_policy,
     })
 }
 
@@ -490,6 +490,7 @@ fn decode_component(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::runner::RunnerKind;
+    use crate::core::server::RunnerSettings;
     use uuid::Uuid;
 
     fn ssh_runner() -> Runner {
@@ -498,10 +499,10 @@ mod tests {
             kind: RunnerKind::Ssh,
             server_id: Some("srv".to_string()),
             workspace_root: Some("/srv/homeboy".to_string()),
-            homeboy_path: None,
-            daemon: true,
-            concurrency_limit: None,
-            artifact_policy: None,
+            settings: RunnerSettings {
+                daemon: true,
+                ..Default::default()
+            },
             env: Default::default(),
             resources: Default::default(),
         }

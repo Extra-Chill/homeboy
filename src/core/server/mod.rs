@@ -56,9 +56,7 @@ pub struct Server {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ServerRunner {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_root: Option<String>,
+pub struct RunnerSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homeboy_path: Option<String>,
     #[serde(default)]
@@ -67,6 +65,14 @@ pub struct ServerRunner {
     pub concurrency_limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_policy: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerRunner {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    #[serde(flatten)]
+    pub settings: RunnerSettings,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -133,7 +139,7 @@ impl ConfigEntity for Server {
         if self
             .runner
             .as_ref()
-            .and_then(|runner| runner.concurrency_limit)
+            .and_then(|runner| runner.settings.concurrency_limit)
             == Some(0)
         {
             return Err(Error::validation_invalid_argument(

@@ -237,7 +237,7 @@ mod local {
         let homeboy = HomeboyProbe {
             version: env!("CARGO_PKG_VERSION").to_string(),
             path: runner
-                .and_then(|runner| runner.homeboy_path.clone())
+                .and_then(|runner| runner.settings.homeboy_path.clone())
                 .or_else(|| env::current_exe().ok().map(common::display_path)),
         };
         checks.push(checks::ok(
@@ -386,7 +386,7 @@ mod remote {
             ),
         });
 
-        let homeboy_command = runner.homeboy_path.as_deref().unwrap_or("homeboy");
+        let homeboy_command = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
         let homeboy = HomeboyProbe {
             version: common::remote_line(
                 client,
@@ -397,6 +397,7 @@ mod remote {
             )
             .unwrap_or_else(|| "unknown".to_string()),
             path: runner
+                .settings
                 .homeboy_path
                 .clone()
                 .or_else(|| common::remote_line(client, "command -v homeboy")),

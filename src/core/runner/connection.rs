@@ -86,7 +86,7 @@ struct CliEnvelope {
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
-    let homeboy = runner.homeboy_path.as_deref().unwrap_or("homeboy");
+    let homeboy = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
 
     let Some((server_id, server, client)) = resolve_ssh_runner(&runner)? else {
         return Ok(failed_connect(

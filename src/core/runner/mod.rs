@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::core::config::{self, ConfigEntity};
 use crate::core::error::{Error, Result};
 use crate::core::output::{BatchResult, CreateOutput, CreateResult, MergeOutput, MergeResult};
-use crate::core::server::{self, ServerRunner};
+use crate::core::server::{self, RunnerSettings, ServerRunner};
 
 mod apply;
 mod connection;
@@ -47,14 +47,8 @@ pub struct Runner {
     pub server_id: Option<String>,
     #[serde(default)]
     pub workspace_root: Option<String>,
-    #[serde(default)]
-    pub homeboy_path: Option<String>,
-    #[serde(default)]
-    pub daemon: bool,
-    #[serde(default)]
-    pub concurrency_limit: Option<usize>,
-    #[serde(default)]
-    pub artifact_policy: Option<String>,
+    #[serde(flatten)]
+    pub settings: RunnerSettings,
     #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
@@ -90,7 +84,7 @@ impl ConfigEntity for Runner {
             server::load(server_id)?;
         }
 
-        if self.concurrency_limit == Some(0) {
+        if self.settings.concurrency_limit == Some(0) {
             return Err(Error::validation_invalid_argument(
                 "concurrency_limit",
                 "concurrency_limit must be greater than zero",
@@ -283,10 +277,7 @@ fn runner_from_server(server_id: &str, runner: ServerRunner) -> Runner {
         kind: RunnerKind::Ssh,
         server_id: Some(server_id.to_string()),
         workspace_root: runner.workspace_root,
-        homeboy_path: runner.homeboy_path,
-        daemon: runner.daemon,
-        concurrency_limit: runner.concurrency_limit,
-        artifact_policy: runner.artifact_policy,
+        settings: runner.settings,
         env: runner.env,
         resources: runner.resources,
     }
@@ -324,7 +315,7 @@ fn strip_runner_identity_fields(mut value: Value) -> Value {
 }
 
 fn validate_server_runner(server_id: &str, runner: &ServerRunner) -> Result<()> {
-    if runner.concurrency_limit == Some(0) {
+    if runner.settings.concurrency_limit == Some(0) {
         return Err(Error::validation_invalid_argument(
             "concurrency_limit",
             "concurrency_limit must be greater than zero",
@@ -365,7 +356,7 @@ mod tests {
                 runner.workspace_root.as_deref(),
                 Some("/Users/chubes/Developer")
             );
-            assert_eq!(runner.concurrency_limit, Some(2));
+            assert_eq!(runner.settings.concurrency_limit, Some(2));
             assert_eq!(runner.env.get("RUST_LOG").map(String::as_str), Some("info"));
             assert_eq!(runner.resources.get("cpu"), Some(&Value::from(8)));
         });
@@ -416,7 +407,7 @@ mod tests {
                 runner.workspace_root.as_deref(),
                 Some("/home/chubes/Developer")
             );
-            assert_eq!(runner.concurrency_limit, Some(4));
+            assert_eq!(runner.settings.concurrency_limit, Some(4));
 
             let stored_server = server::load("homeboy-lab").expect("load server");
             assert!(stored_server.runner.is_some());
@@ -479,7 +470,7 @@ mod tests {
 
             let runner = load("lab-local").expect("load runner");
             assert_eq!(runner.workspace_root.as_deref(), Some("/tmp/b"));
-            assert_eq!(runner.concurrency_limit, Some(3));
+            assert_eq!(runner.settings.concurrency_limit, Some(3));
         });
     }
 }

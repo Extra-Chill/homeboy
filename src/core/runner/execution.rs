@@ -454,6 +454,7 @@ fn string_field(value: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::server::RunnerSettings;
 
     fn ssh_runner() -> Runner {
         Runner {
@@ -461,10 +462,10 @@ mod tests {
             kind: RunnerKind::Ssh,
             server_id: Some("srv".to_string()),
             workspace_root: Some("/srv/homeboy".to_string()),
-            homeboy_path: None,
-            daemon: true,
-            concurrency_limit: None,
-            artifact_policy: None,
+            settings: RunnerSettings {
+                daemon: true,
+                ..Default::default()
+            },
             env: Default::default(),
             resources: Default::default(),
         }

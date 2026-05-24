@@ -9,6 +9,7 @@ use homeboy::core::runner::{
     RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOutput,
 };
+use homeboy::core::server::RunnerSettings;
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
 use super::{CmdResult, DynamicSetArgs};
@@ -31,12 +32,6 @@ pub enum RunnerConnectionOutput {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
-pub enum RunnerExecutionOutput {
-    Exec(RunnerExecOutput),
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
 pub enum RunnerWorkspaceOutput {
     Sync(RunnerWorkspaceSyncOutput),
     Apply(RunnerWorkspaceApplyOutput),
@@ -49,7 +44,7 @@ pub type RunnerOutput = EntityCrudOutput<Runner, RunnerExtra>;
 pub enum RunnerCommandOutput {
     Registry(RunnerOutput),
     Doctor(doctor::RunnerDoctorOutput),
-    Execution(RunnerExecutionOutput),
+    Execution(RunnerExecOutput),
     Workspace(RunnerWorkspaceOutput),
 }
 
@@ -276,10 +271,12 @@ pub fn run(
             kind,
             server,
             workspace_root,
-            homeboy_path,
-            daemon,
-            concurrency_limit,
-            artifact_policy,
+            settings: RunnerSettings {
+                homeboy_path,
+                daemon,
+                concurrency_limit,
+                artifact_policy,
+            },
         })),
         RunnerCommand::Enable {
             server_id,
@@ -290,8 +287,8 @@ pub fn run(
             artifact_policy,
         } => map_registry(enable(
             &server_id,
-            RunnerEnableInput {
-                workspace_root,
+            workspace_root,
+            RunnerSettings {
                 homeboy_path,
                 daemon,
                 concurrency_limit,
@@ -335,12 +332,7 @@ fn map_doctor(result: CmdResult<doctor::RunnerDoctorOutput>) -> CmdResult<Runner
 }
 
 fn map_execution(result: CmdResult<RunnerExecOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| {
-        (
-            RunnerCommandOutput::Execution(RunnerExecutionOutput::Exec(output)),
-            exit_code,
-        )
-    })
+    result.map(|(output, exit_code)| (RunnerCommandOutput::Execution(output), exit_code))
 }
 
 fn map_workspace(result: CmdResult<RunnerWorkspaceSyncOutput>) -> CmdResult<RunnerCommandOutput> {
@@ -370,18 +362,7 @@ struct RunnerAddInput {
     kind: Option<RunnerKindArg>,
     server: Option<String>,
     workspace_root: Option<String>,
-    homeboy_path: Option<String>,
-    daemon: bool,
-    concurrency_limit: Option<usize>,
-    artifact_policy: Option<String>,
-}
-
-struct RunnerEnableInput {
-    workspace_root: Option<String>,
-    homeboy_path: Option<String>,
-    daemon: bool,
-    concurrency_limit: Option<usize>,
-    artifact_policy: Option<String>,
+    settings: RunnerSettings,
 }
 
 fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
@@ -408,10 +389,7 @@ fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
             kind,
             server_id: input.server,
             workspace_root: input.workspace_root,
-            homeboy_path: input.homeboy_path,
-            daemon: input.daemon,
-            concurrency_limit: input.concurrency_limit,
-            artifact_policy: input.artifact_policy,
+            settings: input.settings,
             env: HashMap::new(),
             resources: HashMap::<String, Value>::new(),
         };
@@ -455,21 +433,25 @@ fn list() -> CmdResult<RunnerOutput> {
     ))
 }
 
-fn enable(server_id: &str, input: RunnerEnableInput) -> CmdResult<RunnerOutput> {
+fn enable(
+    server_id: &str,
+    workspace_root: Option<String>,
+    settings: RunnerSettings,
+) -> CmdResult<RunnerOutput> {
     let mut spec = serde_json::Map::new();
-    if let Some(workspace_root) = input.workspace_root {
+    if let Some(workspace_root) = workspace_root {
         spec.insert("workspace_root".to_string(), workspace_root.into());
     }
-    if let Some(homeboy_path) = input.homeboy_path {
+    if let Some(homeboy_path) = settings.homeboy_path {
         spec.insert("homeboy_path".to_string(), homeboy_path.into());
     }
-    if input.daemon {
+    if settings.daemon {
         spec.insert("daemon".to_string(), true.into());
     }
-    if let Some(concurrency_limit) = input.concurrency_limit {
+    if let Some(concurrency_limit) = settings.concurrency_limit {
         spec.insert("concurrency_limit".to_string(), concurrency_limit.into());
     }
-    if let Some(artifact_policy) = input.artifact_policy {
+    if let Some(artifact_policy) = settings.artifact_policy {
         spec.insert("artifact_policy".to_string(), artifact_policy.into());
     }
     let runner = runner::enable_server_runner(server_id, Value::Object(spec))?;
