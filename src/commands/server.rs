@@ -194,6 +194,7 @@ pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
                     kind: None,
                     auth: None,
                     env: std::collections::HashMap::new(),
+                    runner: None,
                 };
 
                 homeboy::core::config::to_json_string(&new_server)?

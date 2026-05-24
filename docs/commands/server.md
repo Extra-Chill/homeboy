@@ -8,6 +8,18 @@ homeboy server <COMMAND>
 
 ## Subcommands
 
+## Homeboy Lab Onboarding
+
+For a normal Lab machine, use one ID for the machine and its runner capability:
+
+```sh
+homeboy server create homeboy-lab --host 192.168.86.63 --user chubes --port 22
+homeboy runner enable homeboy-lab --workspace-root /home/chubes/Developer --concurrency-limit 4 --artifact-policy copy
+homeboy runner connect homeboy-lab
+```
+
+This records `homeboy-lab` as the SSH server and enables runner settings on the same server record.
+
 ### `create`
 
 ```sh
@@ -35,7 +47,7 @@ homeboy server set <server_id> auth.mode=key_plus_password_controlmaster
 homeboy server set --json <JSON>   # server_id may be provided in JSON body
 ```
 
-Updates a server by merging a JSON object into `servers/<id>.json`.
+Updates a server by merging a JSON object into `servers/<id>.json`. Runner-capable servers store their runner settings under the nested `runner` object; `homeboy runner enable <server_id>` is the preferred CLI for adding that capability.
 
 `key=value` arguments support dotted paths, so `auth.mode=value` is equivalent to `{"auth":{"mode":"value"}}`.
 

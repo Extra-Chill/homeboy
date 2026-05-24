@@ -18,6 +18,15 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
     "control_path": "string",
     "persist": "string"
   },
+  "runner": {
+    "workspace_root": "string",
+    "homeboy_path": "string",
+    "daemon": boolean,
+    "concurrency_limit": number,
+    "artifact_policy": "string",
+    "env": {},
+    "resources": {}
+  },
   "forward_agent": boolean
 }
 ```
@@ -37,6 +46,7 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
 - **`identity_file`** (string): Path to SSH private key file for authentication
 - **`kind`** (string): Optional server classification for extensions and project-specific behavior
 - **`auth`** (object): Optional SSH authentication/session policy
+- **`runner`** (object): Optional runner capability for Homeboy Lab execution on this server
 - **`forward_agent`** (boolean): Enable SSH agent forwarding (default: false)
 
 ## Example
@@ -55,9 +65,22 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
     "control_path": "~/.ssh/controlmasters/%h-%p-%r",
     "persist": "4h"
   },
+  "runner": {
+    "workspace_root": "/home/deploy/Developer",
+    "homeboy_path": "/usr/local/bin/homeboy",
+    "daemon": false,
+    "concurrency_limit": 4,
+    "artifact_policy": "copy",
+    "env": {},
+    "resources": {}
+  },
   "forward_agent": true
 }
 ```
+
+## Runner Capability
+
+Use `homeboy runner enable <server_id>` to make an SSH server runner-capable. The server ID is also the runner ID, matching the common Homeboy Lab model: one machine, one server, one runner-capable server.
 
 ## Managed SSH Sessions
 

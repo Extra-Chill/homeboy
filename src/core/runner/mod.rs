@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::core::config::{self, ConfigEntity};
 use crate::core::error::{Error, Result};
-use crate::core::output::{CreateOutput, MergeOutput, RemoveResult};
-use crate::core::server;
+use crate::core::output::{BatchResult, CreateOutput, CreateResult, MergeOutput, MergeResult};
+use crate::core::server::{self, RunnerSettings, ServerRunner};
 
 mod apply;
 mod connection;
@@ -47,14 +47,8 @@ pub struct Runner {
     pub server_id: Option<String>,
     #[serde(default)]
     pub workspace_root: Option<String>,
-    #[serde(default)]
-    pub homeboy_path: Option<String>,
-    #[serde(default)]
-    pub daemon: bool,
-    #[serde(default)]
-    pub concurrency_limit: Option<usize>,
-    #[serde(default)]
-    pub artifact_policy: Option<String>,
+    #[serde(flatten)]
+    pub settings: RunnerSettings,
     #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
@@ -90,7 +84,7 @@ impl ConfigEntity for Runner {
             server::load(server_id)?;
         }
 
-        if self.concurrency_limit == Some(0) {
+        if self.settings.concurrency_limit == Some(0) {
             return Err(Error::validation_invalid_argument(
                 "concurrency_limit",
                 "concurrency_limit must be greater than zero",
@@ -107,7 +101,230 @@ impl ConfigEntity for Runner {
     }
 }
 
-entity_crud!(Runner; merge);
+pub fn load(id: &str) -> Result<Runner> {
+    if config::exists::<Runner>(id) {
+        return config::load::<Runner>(id);
+    }
+
+    load_server_runner(id)
+}
+
+pub fn list() -> Result<Vec<Runner>> {
+    let mut runners = config::list::<Runner>()?;
+    runners.extend(
+        server::list()?
+            .into_iter()
+            .filter(|server| server.runner.is_some())
+            .map(|server| runner_from_server(&server.id, server.runner.expect("checked above"))),
+    );
+    runners.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(runners)
+}
+
+pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runner>> {
+    let raw = config::read_json_spec_to_string(json_spec)?;
+    let value: Value = config::from_str(&raw)?;
+
+    if let Some(items) = value.as_array() {
+        let mut summary = BatchResult::new();
+        for item in items {
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            if skip_existing && load(&id).is_ok() {
+                summary.record_skipped(id);
+                continue;
+            }
+
+            match create_single_value(item.clone()) {
+                Ok(result) => summary.record_created(result.id),
+                Err(err) => summary.record_error(id, err.message),
+            }
+        }
+        return Ok(CreateOutput::Bulk(summary));
+    }
+
+    Ok(CreateOutput::Single(create_single_value(value)?))
+}
+
+pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Result<MergeOutput> {
+    let raw = config::read_json_spec_to_string(json_spec)?;
+    let parsed: Value = config::from_str(&raw)?;
+
+    if parsed.is_array() {
+        return Ok(MergeOutput::Bulk(config::merge_batch_from_json::<Runner>(
+            &raw,
+        )?));
+    }
+
+    let effective_id = id
+        .map(String::from)
+        .or_else(|| parsed.get("id").and_then(Value::as_str).map(String::from))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "id",
+                "Provide runner ID as argument or in JSON body",
+                None,
+                None,
+            )
+        })?;
+
+    if config::exists::<Runner>(&effective_id) {
+        return Ok(MergeOutput::Single(config::merge_from_json::<Runner>(
+            Some(&effective_id),
+            &raw,
+            replace_fields,
+        )?));
+    }
+
+    Ok(MergeOutput::Single(merge_server_runner(
+        &effective_id,
+        parsed,
+        replace_fields,
+    )?))
+}
+
+pub fn delete_safe(id: &str) -> Result<()> {
+    if config::exists::<Runner>(id) {
+        return config::delete_safe::<Runner>(id);
+    }
+
+    let mut server = server::load(id)?;
+    if server.runner.is_none() {
+        return Err(Error::runner_not_found(id.to_string(), vec![]));
+    }
+    server.runner = None;
+    server::save(&server)
+}
+
+pub fn exists(id: &str) -> bool {
+    config::exists::<Runner>(id) || load_server_runner(id).is_ok()
+}
+
+pub fn enable_server_runner(server_id: &str, patch: Value) -> Result<Runner> {
+    let mut server = server::load(server_id)?;
+    let mut runner = server.runner.unwrap_or_default();
+    let patch = strip_runner_identity_fields(patch);
+    if !matches!(patch.as_object(), Some(obj) if obj.is_empty()) {
+        config::merge_config(&mut runner, patch, &[])?;
+    }
+    validate_server_runner(server_id, &runner)?;
+    server.runner = Some(runner.clone());
+    server::save(&server)?;
+    Ok(runner_from_server(server_id, runner))
+}
+
+fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument("id", "Missing required field: id", None, None)
+        })?
+        .to_string();
+    let mut runner: Runner = serde_json::from_value(value.clone())
+        .map_err(|err| Error::validation_invalid_argument("json", err.to_string(), None, None))?;
+    runner.set_id(id.clone());
+
+    match runner.kind {
+        RunnerKind::Local => {
+            if config::exists::<Runner>(&id) {
+                return Err(Error::validation_invalid_argument(
+                    "runner.id",
+                    format!("runner '{}' already exists", id),
+                    Some(id),
+                    None,
+                ));
+            }
+            runner.validate()?;
+            config::save(&runner)?;
+            Ok(CreateResult {
+                id: runner.id.clone(),
+                entity: runner,
+            })
+        }
+        RunnerKind::Ssh => {
+            let server_id = runner.server_id.as_deref().unwrap_or(&id);
+            if server_id != id {
+                return Err(Error::validation_invalid_argument(
+                    "server_id",
+                    "SSH runner IDs are server IDs; use the server ID as the runner ID",
+                    Some(server_id.to_string()),
+                    Some(vec![format!(
+                        "Run `homeboy runner enable {server_id}` to make server '{server_id}' runner-capable."
+                    )]),
+                ));
+            }
+            let entity = enable_server_runner(&id, value)?;
+            Ok(CreateResult { id, entity })
+        }
+    }
+}
+
+fn load_server_runner(id: &str) -> Result<Runner> {
+    let server = server::load(id)?;
+    let runner = server
+        .runner
+        .ok_or_else(|| Error::runner_not_found(id.to_string(), vec![]))?;
+    Ok(runner_from_server(id, runner))
+}
+
+fn runner_from_server(server_id: &str, runner: ServerRunner) -> Runner {
+    Runner {
+        id: server_id.to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: Some(server_id.to_string()),
+        workspace_root: runner.workspace_root,
+        settings: runner.settings,
+        env: runner.env,
+        resources: runner.resources,
+    }
+}
+
+fn merge_server_runner(
+    id: &str,
+    mut patch: Value,
+    replace_fields: &[String],
+) -> Result<MergeResult> {
+    let mut server = server::load(id)?;
+    let mut runner = server.runner.unwrap_or_default();
+    if let Some(obj) = patch.as_object_mut() {
+        obj.remove("id");
+        obj.remove("kind");
+        obj.remove("server_id");
+    }
+    let result = config::merge_config(&mut runner, patch, replace_fields)?;
+    validate_server_runner(id, &runner)?;
+    server.runner = Some(runner);
+    server::save(&server)?;
+    Ok(MergeResult {
+        id: id.to_string(),
+        updated_fields: result.updated_fields,
+    })
+}
+
+fn strip_runner_identity_fields(mut value: Value) -> Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("id");
+        obj.remove("kind");
+        obj.remove("server_id");
+    }
+    value
+}
+
+fn validate_server_runner(server_id: &str, runner: &ServerRunner) -> Result<()> {
+    if runner.settings.concurrency_limit == Some(0) {
+        return Err(Error::validation_invalid_argument(
+            "concurrency_limit",
+            "concurrency_limit must be greater than zero",
+            Some(server_id.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -139,7 +356,7 @@ mod tests {
                 runner.workspace_root.as_deref(),
                 Some("/Users/chubes/Developer")
             );
-            assert_eq!(runner.concurrency_limit, Some(2));
+            assert_eq!(runner.settings.concurrency_limit, Some(2));
             assert_eq!(runner.env.get("RUST_LOG").map(String::as_str), Some("info"));
             assert_eq!(runner.resources.get("cpu"), Some(&Value::from(8)));
         });
@@ -151,12 +368,74 @@ mod tests {
             let spec = r#"{
                 "id": "remote-lab",
                 "kind": "ssh",
-                "server_id": "missing",
+                "server_id": "remote-lab",
                 "workspace_root": "/srv/homeboy"
             }"#;
 
             let err = create(spec, false).expect_err("missing server rejects ssh runner");
             assert_eq!(err.code.as_str(), "server.not_found");
+        });
+    }
+
+    #[test]
+    fn ssh_runner_is_server_capability() {
+        test_support::with_isolated_home(|_| {
+            server::create(
+                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"chubes"}"#,
+                false,
+            )
+            .expect("create server");
+
+            create(
+                r#"{
+                    "id":"homeboy-lab",
+                    "kind":"ssh",
+                    "server_id":"homeboy-lab",
+                    "workspace_root":"/home/chubes/Developer",
+                    "concurrency_limit":4,
+                    "artifact_policy":"copy"
+                }"#,
+                false,
+            )
+            .expect("enable runner capability");
+
+            let runner = load("homeboy-lab").expect("load server runner");
+            assert_eq!(runner.id, "homeboy-lab");
+            assert_eq!(runner.kind, RunnerKind::Ssh);
+            assert_eq!(runner.server_id.as_deref(), Some("homeboy-lab"));
+            assert_eq!(
+                runner.workspace_root.as_deref(),
+                Some("/home/chubes/Developer")
+            );
+            assert_eq!(runner.settings.concurrency_limit, Some(4));
+
+            let stored_server = server::load("homeboy-lab").expect("load server");
+            assert!(stored_server.runner.is_some());
+        });
+    }
+
+    #[test]
+    fn ssh_runner_id_must_match_server_id() {
+        test_support::with_isolated_home(|_| {
+            server::create(
+                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"chubes"}"#,
+                false,
+            )
+            .expect("create server");
+
+            let err = create(
+                r#"{
+                    "id":"lab",
+                    "kind":"ssh",
+                    "server_id":"homeboy-lab",
+                    "workspace_root":"/home/chubes/Developer"
+                }"#,
+                false,
+            )
+            .expect_err("ssh runner cannot use a second ID");
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("SSH runner IDs are server IDs"));
         });
     }
 
@@ -191,7 +470,7 @@ mod tests {
 
             let runner = load("lab-local").expect("load runner");
             assert_eq!(runner.workspace_root.as_deref(), Some("/tmp/b"));
-            assert_eq!(runner.concurrency_limit, Some(3));
+            assert_eq!(runner.settings.concurrency_limit, Some(3));
         });
     }
 }

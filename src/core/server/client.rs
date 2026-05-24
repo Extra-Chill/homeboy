@@ -462,12 +462,9 @@ pub fn execute_local_command(command: &str) -> CommandOutput {
 
 /// Run a local command, capturing stdout/stderr.
 ///
-/// All locally-spawned commands run in their own process group with
-/// guaranteed teardown of every descendant on exit, panic, or signal.
-/// There is no "leak the children" mode — verbs that genuinely want a
-/// process to outlive the command (e.g. `homeboy daemon`) build their
-/// own background spawn directly with `std::process::Command` and
-/// manage the pid themselves.
+/// All locally-spawned commands run in their own process group with guaranteed
+/// descendant teardown on exit, panic, or signal. Verbs that genuinely need a
+/// background process use `std::process::Command` directly and manage the pid.
 pub fn execute_local_command_in_dir(
     command: &str,
     current_dir: Option<&str>,
@@ -1266,6 +1263,7 @@ mod tests {
                 },
             }),
             env: HashMap::new(),
+            runner: None,
         };
 
         let client = SshClient::from_server(&server, "bastion").expect("client");
@@ -1326,6 +1324,7 @@ mod tests {
                 },
             }),
             env: HashMap::new(),
+            runner: None,
         };
 
         let client = SshClient::from_server(&server, "local").expect("client");

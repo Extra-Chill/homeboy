@@ -326,7 +326,7 @@ fn run_lab_offload_inner(
         Some(&remote_cwd),
         "lab_offload",
     );
-    let homeboy_path = runner.homeboy_path.as_deref().unwrap_or("homeboy");
+    let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let mut command = vec![homeboy_path.to_string()];
     command.extend(strip_runner_flag(normalized_args).into_iter().skip(1));
 

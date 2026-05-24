@@ -86,7 +86,7 @@ struct CliEnvelope {
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
-    let homeboy = runner.homeboy_path.as_deref().unwrap_or("homeboy");
+    let homeboy = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
 
     let Some((server_id, server, client)) = resolve_ssh_runner(&runner)? else {
         return Ok(failed_connect(
@@ -630,6 +630,7 @@ mod tests {
             kind: None,
             auth: None,
             env: HashMap::new(),
+            runner: None,
         };
 
         let tunnel = open_loopback_tunnel(&server, 49100, "127.0.0.1", 49200);

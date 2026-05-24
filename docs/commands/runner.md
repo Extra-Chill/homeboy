@@ -6,7 +6,7 @@
 homeboy runner <COMMAND>
 ```
 
-`runner` manages durable execution backends. It records where Homeboy workflows can run and can execute explicit commands through a connected runner daemon or an opt-in SSH diagnostic path.
+`runner` manages durable execution backends. SSH runners are a capability on a `homeboy server` record, so the common Lab flow uses one ID for the machine and its runner. Local runners remain standalone because they describe this machine rather than an SSH server.
 
 ## Subcommands
 
@@ -14,19 +14,36 @@ homeboy runner <COMMAND>
 
 ```sh
 homeboy runner add <id> --workspace-root <path>
-homeboy runner add <id> --server <server-id> --workspace-root <path>
+homeboy runner add <server-id> --server <server-id> --workspace-root <path>
 homeboy runner add --json <spec>
 ```
 
 Options:
 
 - `--kind local|ssh`: explicit runner kind. Defaults to `ssh` when `--server` is set, otherwise `local`.
-- `--server <server-id>`: existing `homeboy server` record for SSH runners.
+- `--server <server-id>`: existing `homeboy server` record for SSH runners. For SSH runners, `<id>` must match `<server-id>`.
 - `--workspace-root <path>`: workspace root on the runner machine.
 - `--homeboy-path <path>`: Homeboy binary path on the runner machine.
 - `--daemon`: marks the runner as daemon-preferred for future commands.
 - `--concurrency-limit <n>`: maximum concurrent workflows this runner should accept.
 - `--artifact-policy <label>`: artifact policy label reserved for future execution commands.
+
+### `enable`
+
+```sh
+homeboy runner enable <server-id> --workspace-root <path>
+homeboy runner enable <server-id> --workspace-root <path> --concurrency-limit 4 --artifact-policy copy
+```
+
+Enables runner capability on an existing SSH server. This is the recommended Homeboy Lab onboarding path:
+
+```sh
+homeboy server create homeboy-lab --host 192.168.86.63 --user chubes --port 22
+homeboy runner enable homeboy-lab --workspace-root /home/chubes/Developer --concurrency-limit 4 --artifact-policy copy
+homeboy runner connect homeboy-lab
+```
+
+After this, `homeboy-lab` is both the server ID and the runner ID.
 
 ### `list`
 
@@ -48,7 +65,7 @@ homeboy runner set <id> workspace_root=/srv/homeboy
 homeboy runner set <id> -- --concurrency_limit 4
 ```
 
-Updates a runner by merging a JSON object into `runners/<id>.json`.
+Updates a runner by merging a JSON object into the runner config. SSH runner settings live under `servers/<id>.json` as the server's `runner` capability; local runners live under `runners/<id>.json`.
 
 ### `remove`
 
@@ -151,7 +168,27 @@ Delta form is also accepted for explicit file replacement/deletion:
 
 ## Runner Shape
 
-Runner records are stored as JSON config entities under `~/.config/homeboy/runners/`.
+SSH runner records are stored on their server as `runner` capability config under `~/.config/homeboy/servers/<id>.json`.
+
+```json
+{
+  "id": "homeboy-lab",
+  "host": "192.168.86.63",
+  "user": "chubes",
+  "port": 22,
+  "runner": {
+    "workspace_root": "/home/chubes/Developer",
+    "homeboy_path": "/usr/local/bin/homeboy",
+    "daemon": false,
+    "concurrency_limit": 4,
+    "artifact_policy": "copy",
+    "env": {},
+    "resources": {}
+  }
+}
+```
+
+Standalone local runner records are still stored under `~/.config/homeboy/runners/`.
 
 ```json
 {
@@ -171,7 +208,7 @@ Runner records are stored as JSON config entities under `~/.config/homeboy/runne
 Rules:
 
 - `kind` is `local` or `ssh`.
-- `ssh` runners require `server_id` to reference an existing `homeboy server` record.
+- `ssh` runner IDs are server IDs; a single SSH machine does not need a separate runner ID.
 - `concurrency_limit`, when set, must be greater than zero.
 - `env` and `resources` are metadata maps for future `connect`, `doctor`, `exec`, and Desktop workflows.
 
