@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.1] - 2026-05-24
+
+### Fixed
+- guard unsafe autofix PR reports
+
 ## [2.7.0] - 2026-05-21
 
 ### Added
