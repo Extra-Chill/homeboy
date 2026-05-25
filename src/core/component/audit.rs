@@ -74,16 +74,35 @@ pub struct AuditConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct CommandStatusContractConfig {
+    /// Visible command paths that must have at least one golden output fixture.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_commands: Vec<String>,
+    /// Visible command paths that must declare a validation-error scenario using
+    /// `--output`, proving error responses still write the structured file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_output_error_commands: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scenarios: Vec<CommandStatusContractScenario>,
 }
 
 impl CommandStatusContractConfig {
     pub fn is_empty(&self) -> bool {
-        self.scenarios.is_empty()
+        self.required_commands.is_empty()
+            && self.required_output_error_commands.is_empty()
+            && self.scenarios.is_empty()
     }
 
     fn merge(&mut self, other: &CommandStatusContractConfig) {
+        for command in &other.required_commands {
+            if !self.required_commands.contains(command) {
+                self.required_commands.push(command.clone());
+            }
+        }
+        for command in &other.required_output_error_commands {
+            if !self.required_output_error_commands.contains(command) {
+                self.required_output_error_commands.push(command.clone());
+            }
+        }
         for scenario in &other.scenarios {
             if !self
                 .scenarios
@@ -100,8 +119,18 @@ impl CommandStatusContractConfig {
 pub struct CommandStatusContractScenario {
     /// Stable scenario id shown in findings.
     pub id: String,
+    /// Visible command path this fixture covers, e.g. `audit` or `runs list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     /// JSON fixture path relative to the component root.
     pub file: String,
+    /// Scenario outcome class. `validation_error` requires a failed envelope
+    /// with an error object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// Whether this scenario is expected to cover the global `--output` file path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub output_file: bool,
     /// Expected JSON Pointer fields and values, e.g. `/success: true`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub expected_fields: BTreeMap<String, serde_json::Value>,
@@ -755,9 +784,14 @@ mod tests {
     fn command_status_contracts_mark_audit_config_non_empty() {
         let config = AuditConfig {
             command_status_contracts: CommandStatusContractConfig {
+                required_commands: Vec::new(),
+                required_output_error_commands: Vec::new(),
                 scenarios: vec![CommandStatusContractScenario {
                     id: "refactor-transform-no-match".to_string(),
+                    command: Some("refactor transform".to_string()),
                     file: "tests/fixtures/refactor-transform-no-match.json".to_string(),
+                    outcome: None,
+                    output_file: false,
                     expected_fields: BTreeMap::from([(
                         "/success".to_string(),
                         serde_json::json!(true),
