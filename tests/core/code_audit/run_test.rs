@@ -359,6 +359,22 @@ fn execution_plan_for_structural_only_skips_unrelated_detector_families() {
 }
 
 #[test]
+fn output_capture_detector_is_explicit_first_slice() {
+    let default_plan = AuditExecutionPlan::full();
+    assert_eq!(
+        detector_step_status(&default_plan, "output_capture"),
+        &PlanStepStatus::Disabled
+    );
+
+    let filtered_plan =
+        AuditExecutionPlan::from_filters(&[AuditFinding::UnboundedOutputCapture], &[]);
+    assert_eq!(
+        detector_step_status(&filtered_plan, "output_capture"),
+        &PlanStepStatus::Ready
+    );
+}
+
+#[test]
 fn execution_plan_for_duplicate_only_skips_structural_detector_family() {
     let plan = AuditExecutionPlan::from_filters(&[AuditFinding::DuplicateFunction], &[]);
 
@@ -421,7 +437,7 @@ fn full_execution_plan_marks_all_detector_steps_ready() {
         .plan
         .steps
         .iter()
-        .all(|step| step.status == PlanStepStatus::Ready));
+        .all(|step| { step.id == "audit.output_capture" || step.status == PlanStepStatus::Ready }));
 }
 
 #[test]

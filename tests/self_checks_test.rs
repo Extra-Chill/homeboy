@@ -78,6 +78,12 @@ fn test_args(root: &Path) -> TestArgs {
     }
 }
 
+fn json_test_args(root: &Path) -> TestArgs {
+    let mut args = test_args(root);
+    args.json_summary = true;
+    args
+}
+
 #[test]
 fn lint_runs_declared_self_check_without_extensions() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -127,6 +133,33 @@ fn non_zero_self_check_fails_command_and_surfaces_output() {
         .expect("failure should include raw output");
     assert!(raw.stdout_tail.contains("visible failure stdout"));
     assert!(raw.stderr_tail.contains("visible failure stderr"));
+}
+
+#[test]
+fn json_self_check_failure_reports_bounded_large_output_metadata() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write_component(dir.path(), r#"{ "test": ["sh scripts/large-fail.sh"] }"#);
+    write_script(
+        dir.path(),
+        "large-fail.sh",
+        "perl -e 'print \"stdout-line\\n\" x 20000'\nperl -e 'print STDERR \"stderr-line\\n\" x 20000'\nexit 7\n",
+    );
+
+    let (output, exit_code) = run_test(json_test_args(dir.path()), &GlobalArgs {})
+        .expect("test self-check failure should return structured output");
+
+    assert_eq!(exit_code, 7);
+    assert!(!output.passed);
+    let raw = output
+        .raw_output
+        .expect("failure should include bounded raw output metadata");
+    assert!(raw.truncated);
+    assert!(raw.stdout_truncated);
+    assert!(raw.stderr_truncated);
+    assert!(raw.stdout_seen_bytes > raw.stdout_limit_bytes);
+    assert!(raw.stderr_seen_bytes > raw.stderr_limit_bytes);
+    assert!(raw.stdout_tail.contains("stdout-line"));
+    assert!(raw.stderr_tail.contains("stderr-line"));
 }
 
 #[test]

@@ -1,10 +1,13 @@
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
 use crate::core::extension::ExtensionCapability;
-use crate::core::server::{
-    execute_local_command_in_dir, execute_local_command_passthrough, CommandOutput,
-};
+use serde::Serialize;
+use std::io::{Read, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::thread;
+
+const SELF_CHECK_CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct SelfCheckOutput {
@@ -12,6 +15,21 @@ pub struct SelfCheckOutput {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    pub capture: SelfCheckCaptureMetadata,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SelfCheckCaptureMetadata {
+    pub stdout: SelfCheckStreamCaptureMetadata,
+    pub stderr: SelfCheckStreamCaptureMetadata,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SelfCheckStreamCaptureMetadata {
+    pub limit_bytes: usize,
+    pub seen_bytes: usize,
+    pub retained_bytes: usize,
+    pub truncated: bool,
 }
 
 pub fn run_self_checks(
@@ -43,8 +61,8 @@ pub(crate) fn run_self_checks_with_passthrough(
     }
 
     let working_dir = source_path.to_string_lossy();
-    let mut stdout = String::new();
-    let mut stderr = String::new();
+    let mut stdout = BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES);
+    let mut stderr = BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES);
 
     for command in commands {
         if passthrough {
@@ -57,15 +75,19 @@ pub(crate) fn run_self_checks_with_passthrough(
             );
         }
         let output = execute_self_check_command(command, &working_dir, passthrough);
-        stdout.push_str(&output.stdout);
-        stderr.push_str(&output.stderr);
+        stdout.push_capture(output.stdout);
+        stderr.push_capture(output.stderr);
 
         if !output.success {
             return Ok(SelfCheckOutput {
                 exit_code: output.exit_code,
                 success: false,
-                stdout,
-                stderr,
+                stdout: stdout.to_string_lossy(),
+                stderr: stderr.to_string_lossy(),
+                capture: SelfCheckCaptureMetadata {
+                    stdout: stdout.metadata(),
+                    stderr: stderr.metadata(),
+                },
             });
         }
     }
@@ -73,8 +95,12 @@ pub(crate) fn run_self_checks_with_passthrough(
     Ok(SelfCheckOutput {
         exit_code: 0,
         success: true,
-        stdout,
-        stderr,
+        stdout: stdout.to_string_lossy(),
+        stderr: stderr.to_string_lossy(),
+        capture: SelfCheckCaptureMetadata {
+            stdout: stdout.metadata(),
+            stderr: stderr.metadata(),
+        },
     })
 }
 
@@ -82,12 +108,168 @@ fn execute_self_check_command(
     command: &str,
     working_dir: &str,
     passthrough: bool,
-) -> CommandOutput {
-    if passthrough {
-        execute_local_command_passthrough(command, Some(working_dir), None)
-    } else {
-        execute_local_command_in_dir(command, Some(working_dir), None)
+) -> SelfCheckCommandOutput {
+    execute_local_self_check_command(command, working_dir, passthrough)
+}
+
+#[derive(Debug, Clone)]
+struct SelfCheckCommandOutput {
+    stdout: BoundedCapture,
+    stderr: BoundedCapture,
+    success: bool,
+    exit_code: i32,
+}
+
+#[derive(Debug, Clone)]
+struct BoundedCapture {
+    limit: usize,
+    seen: usize,
+    retained: Vec<u8>,
+}
+
+impl BoundedCapture {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            seen: 0,
+            retained: Vec::new(),
+        }
     }
+
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        self.seen = self.seen.saturating_add(bytes.len());
+        self.retained.extend_from_slice(bytes);
+        if self.retained.len() > self.limit {
+            let drop_len = self.retained.len() - self.limit;
+            self.retained.drain(..drop_len);
+        }
+    }
+
+    fn push_capture(&mut self, capture: BoundedCapture) {
+        self.seen = self.seen.saturating_add(capture.seen);
+        self.retained.extend_from_slice(&capture.retained);
+        if self.retained.len() > self.limit {
+            let drop_len = self.retained.len() - self.limit;
+            self.retained.drain(..drop_len);
+        }
+    }
+
+    fn to_string_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.retained).to_string()
+    }
+
+    fn metadata(&self) -> SelfCheckStreamCaptureMetadata {
+        SelfCheckStreamCaptureMetadata {
+            limit_bytes: self.limit,
+            seen_bytes: self.seen,
+            retained_bytes: self.retained.len(),
+            truncated: self.seen > self.retained.len(),
+        }
+    }
+}
+
+fn execute_local_self_check_command(
+    command: &str,
+    working_dir: &str,
+    passthrough: bool,
+) -> SelfCheckCommandOutput {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    };
+
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    };
+
+    cmd.current_dir(working_dir);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            return SelfCheckCommandOutput {
+                stdout: BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES),
+                stderr: {
+                    let mut capture = BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES);
+                    capture.push_bytes(format!("Command error: {}", err).as_bytes());
+                    capture
+                },
+                success: false,
+                exit_code: -1,
+            };
+        }
+    };
+
+    let stdout_handle = child
+        .stdout
+        .take()
+        .map(|pipe| thread::spawn(move || capture_stream(pipe, passthrough, false)));
+    let stderr_handle = child
+        .stderr
+        .take()
+        .map(|pipe| thread::spawn(move || capture_stream(pipe, passthrough, true)));
+
+    let status = child.wait();
+    let stdout = stdout_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_else(|| BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES));
+    let stderr = stderr_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_else(|| BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES));
+
+    match status {
+        Ok(status) => SelfCheckCommandOutput {
+            stdout,
+            stderr,
+            success: status.success(),
+            exit_code: status.code().unwrap_or(-1),
+        },
+        Err(err) => {
+            let mut stderr = stderr;
+            stderr.push_bytes(format!("\nCommand error: {}", err).as_bytes());
+            SelfCheckCommandOutput {
+                stdout,
+                stderr,
+                success: false,
+                exit_code: -1,
+            }
+        }
+    }
+}
+
+fn capture_stream<R: Read>(mut src: R, passthrough: bool, stderr: bool) -> BoundedCapture {
+    let mut captured = BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES);
+    let mut buf = [0u8; 4096];
+
+    loop {
+        match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if passthrough {
+                    if stderr {
+                        let mut sink = std::io::stderr();
+                        let _ = sink.write_all(&buf[..n]);
+                        let _ = sink.flush();
+                    } else {
+                        let mut sink = std::io::stdout();
+                        let _ = sink.write_all(&buf[..n]);
+                        let _ = sink.flush();
+                    }
+                }
+                captured.push_bytes(&buf[..n]);
+            }
+            Err(_) => break,
+        }
+    }
+
+    captured
 }
 
 #[cfg(test)]
@@ -170,5 +352,45 @@ mod tests {
         assert!(output.success);
         assert_eq!(output.stdout, "self-check-stdout");
         assert_eq!(output.stderr, "self-check-stderr");
+    }
+
+    #[test]
+    fn test_run_self_checks_bounds_large_output_capture() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("large.sh"),
+            "perl -e 'print \"stdout-line\\n\" x 20000'\nperl -e 'print STDERR \"stderr-line\\n\" x 20000'\nexit 7\n",
+        )
+        .expect("script should be written");
+
+        let mut component = Component::new(
+            "fixture".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "".to_string(),
+            None,
+        );
+        component.self_checks = Some(SelfCheckConfig {
+            lint: vec!["sh large.sh".to_string()],
+            test: Vec::new(),
+        });
+
+        let output = run_self_checks_with_passthrough(
+            &component,
+            ExtensionCapability::Lint,
+            dir.path(),
+            false,
+        )
+        .expect("self-check should return bounded failure output");
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, 7);
+        assert!(output.capture.stdout.truncated);
+        assert!(output.capture.stderr.truncated);
+        assert!(output.capture.stdout.seen_bytes > output.capture.stdout.limit_bytes);
+        assert!(output.capture.stderr.seen_bytes > output.capture.stderr.limit_bytes);
+        assert!(output.stdout.len() <= output.capture.stdout.limit_bytes);
+        assert!(output.stderr.len() <= output.capture.stderr.limit_bytes);
+        assert!(output.stdout.contains("stdout-line"));
+        assert!(output.stderr.contains("stderr-line"));
     }
 }

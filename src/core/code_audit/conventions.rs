@@ -278,6 +278,9 @@ pub enum AuditFinding {
     /// Persisted artifact evidence points at a runtime-local temp path instead
     /// of a durable artifact-store path or portable artifact token.
     NonPortableArtifactPath,
+    /// Command output capture retains stdout/stderr or repeated details without
+    /// an explicit size bound and truncation metadata.
+    UnboundedOutputCapture,
 }
 
 impl AuditFinding {
@@ -349,6 +352,7 @@ impl AuditFinding {
             "public_registry_exposure",
             "redirect_validation",
             "non_portable_artifact_path",
+            "unbounded_output_capture",
         ]
     }
 }

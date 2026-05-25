@@ -512,8 +512,8 @@ fn respond_bad_gateway(mut stream: TcpStream, message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{ActiveTraceProbes, TraceProbeConfig};
+    use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;

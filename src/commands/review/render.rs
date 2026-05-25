@@ -563,6 +563,7 @@ mod tests {
             baseline_comparison: None,
             lint_findings: Some(findings),
             summary: None,
+            self_check_capture: None,
             ci_context: None,
         }
     }
