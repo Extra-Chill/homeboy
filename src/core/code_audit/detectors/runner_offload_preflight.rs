@@ -30,6 +30,14 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
                 "Attach source_snapshot or an equivalent mirror verification contract before reporting remote artifacts as run evidence.",
             ));
         }
+
+        if dispatches_extension_without_parity_preflight(&fp.content) {
+            findings.push(finding(
+                fp,
+                "Remote runner dispatch accepts an extension selector without validating runner extension parity before execution.",
+                "Add a pre-dispatch extension parity check so missing runner-side extension support fails before command execution.",
+            ));
+        }
     }
 
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
@@ -69,6 +77,21 @@ fn forwards_args_without_path_preflight(content: &str) -> bool {
 
 fn captures_artifacts_without_snapshot(content: &str) -> bool {
     content.contains("capture_patch: true") && !content.contains("source_snapshot")
+}
+
+fn dispatches_extension_without_parity_preflight(content: &str) -> bool {
+    let accepts_extension = contains_any(content, &["--extension", "extension_id", "extension"]);
+    let has_parity_preflight = contains_any(
+        content,
+        &[
+            "extension_parity",
+            "required_extensions",
+            "runner_extension",
+            "validate_runner_extension",
+        ],
+    );
+
+    accepts_extension && !has_parity_preflight
 }
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
@@ -157,5 +180,22 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert!(findings[0].description.contains("artifact capture"));
+    }
+
+    #[test]
+    fn flags_extension_dispatch_without_parity_preflight() {
+        let fp = fingerprint(
+            "src/main.rs",
+            r#"
+            fn run(command: Vec<String>, extension_id: &str) {
+                runner::exec("lab", RunnerExecOptions { command, capture_patch: false });
+            }
+            "#,
+        );
+
+        let findings = run(&[&fp]);
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("extension selector"));
     }
 }
