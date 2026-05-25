@@ -32,12 +32,22 @@ use bundle::{
 pub use common::RunSummary;
 use compare::{compare_runs, RunsCompareArgs, RunsCompareOutput};
 pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
-use drift::{runs_drift, RunsDriftArgs, RunsDriftOutput};
+use drift::{runs_drift, RunsDriftArgs};
 use findings::{RunsFindingOutput, RunsFindingsOutput};
 use gh_actions::GhActionsImportOutput;
 use latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
 use query::{runs_query, RunsQueryArgs, RunsQueryOutput};
 use reconcile::{reconcile_runs, RunsReconcileArgs, RunsReconcileOutput};
+
+#[cfg(test)]
+pub(crate) use common::SkippedArtifactRow;
+pub(crate) use drift::RunsDriftOutput;
+#[cfg(test)]
+pub(crate) use drift::{DriftValue, RunsDriftFilters};
+#[cfg(test)]
+pub(crate) use query::{
+    QueryGroup, QueryRow, RunsQueryFilters, RunsQueryOutput as TestRunsQueryOutput,
+};
 
 const DEFAULT_LIMIT: i64 = 20;
 

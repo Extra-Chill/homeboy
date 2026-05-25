@@ -1,0 +1,170 @@
+{
+  "scenarios": [
+    {
+      "payload": {
+        "data": {
+          "command": "runs.list",
+          "runs": [
+            {
+              "command": "homeboy bench --format=json",
+              "component_id": "homeboy",
+              "cwd": "/work/homeboy",
+              "finished_at": "2026-05-24T00:01:00Z",
+              "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "id": "run-contract-1",
+              "kind": "bench",
+              "rig_id": "contract-rig",
+              "started_at": "2026-05-24T00:00:00Z",
+              "status": "passed",
+              "status_note": "fixture"
+            }
+          ]
+        },
+        "success": true
+      },
+      "scenario": "runs list"
+    },
+    {
+      "payload": {
+        "data": {
+          "command": "runs.show",
+          "run": {
+            "artifacts": [
+              {
+                "created_at": "2026-05-24T00:01:00Z",
+                "id": "artifact-summary",
+                "kind": "summary",
+                "mime": "application/json",
+                "path": "artifacts/summary.json",
+                "run_id": "run-contract-1",
+                "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "size_bytes": 1234,
+                "type": "file",
+                "url": "https://example.test/artifacts/summary.json"
+              }
+            ],
+            "command": "homeboy bench --format=json",
+            "component_id": "homeboy",
+            "cwd": "/work/homeboy",
+            "finished_at": "2026-05-24T00:01:00Z",
+            "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "homeboy_version": "0.197.11",
+            "id": "run-contract-1",
+            "kind": "bench",
+            "metadata": {
+              "scenario": "contract",
+              "score": 0.98
+            },
+            "rig_id": "contract-rig",
+            "started_at": "2026-05-24T00:00:00Z",
+            "status": "passed",
+            "status_note": "fixture"
+          }
+        },
+        "success": true
+      },
+      "scenario": "runs show"
+    },
+    {
+      "payload": {
+        "data": {
+          "artifacts": [
+            {
+              "created_at": "2026-05-24T00:01:00Z",
+              "id": "artifact-summary",
+              "kind": "summary",
+              "mime": "application/json",
+              "path": "artifacts/summary.json",
+              "run_id": "run-contract-1",
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "size_bytes": 1234,
+              "type": "file",
+              "url": "https://example.test/artifacts/summary.json"
+            }
+          ],
+          "command": "runs.artifacts",
+          "run_id": "run-contract-1"
+        },
+        "success": true
+      },
+      "scenario": "runs artifacts"
+    },
+    {
+      "payload": {
+        "data": {
+          "command": "runs.query",
+          "filters": {
+            "component_id": "homeboy",
+            "kind": "bench",
+            "limit": 200,
+            "since": "7d"
+          },
+          "group_by": "$.variant",
+          "groups": [
+            {
+              "count": 1,
+              "group": "candidate"
+            }
+          ],
+          "matched_artifact_count": 1,
+          "rows": [
+            {
+              "artifact_kind": "summary",
+              "run_id": "run-contract-1",
+              "values": [
+                123.4
+              ]
+            }
+          ],
+          "select": [
+            "$.metrics.ready_ms"
+          ],
+          "skipped_artifact_count": 1,
+          "skipped_artifacts": [
+            {
+              "artifact_id": "artifact-log",
+              "artifact_kind": "log",
+              "artifact_type": "file",
+              "path": "artifacts/output.log",
+              "reason": "not JSON",
+              "run_id": "run-contract-1"
+            }
+          ]
+        },
+        "success": true
+      },
+      "scenario": "runs query json"
+    },
+    {
+      "payload": {
+        "data": {
+          "baseline_missing_rows": 2,
+          "baseline_observations": 40,
+          "command": "runs.drift",
+          "filters": {
+            "baseline": "30d",
+            "component_id": "homeboy",
+            "kind": "bench",
+            "window": "7d"
+          },
+          "metric": "$.variant",
+          "threshold": 0.5,
+          "values": [
+            {
+              "baseline_share": 0.25,
+              "dominant": true,
+              "share_delta": 0.45,
+              "value": "candidate",
+              "window_count": 7,
+              "window_share": 0.7
+            }
+          ],
+          "window_missing_rows": 0,
+          "window_observations": 10
+        },
+        "success": true
+      },
+      "scenario": "runs drift json"
+    }
+  ]
+}
