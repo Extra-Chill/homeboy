@@ -14,7 +14,12 @@
           "id": "refactor-transform-no-match-dry-run"
         }
       ]
-    }
+    },
+    "convention_exception_globs": [
+      "src/core/code_audit/detectors/test_coverage.rs",
+      "src/core/code_audit/detectors/test_vacuity.rs",
+      "src/core/code_audit/detectors/upstream_workaround.rs"
+    ]
   },
   "autofix_verify": {
     "args": [
