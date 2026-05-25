@@ -153,6 +153,17 @@ The `next_steps` array contains context-aware actionable guidance based on the c
 
 On success, `data` is the command-specific output struct (varies by command).
 
+## Golden Output Fixtures
+
+Automation-facing JSON surfaces should have golden output fixtures that serialize
+typed command payloads through the same `CliResponse` envelope used by stdout and
+`--output`.
+
+Quality command fixtures live under `tests/fixtures/output_contracts/quality/`
+and are enforced by `tests/output_contracts_test.rs`. The first required quality
+set covers `audit`, `lint`, `test`, and `review`; adding or changing stable fields
+in those payloads should update the matching fixture deliberately.
+
 ## Observation-backed payloads
 
 `--output` remains the per-invocation command-result artifact. It must continue
