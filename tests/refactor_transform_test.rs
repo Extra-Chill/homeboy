@@ -27,7 +27,15 @@ fn transform_output_samples_match_details_at_scale() {
     }
 
     let set = refactor::ad_hoc_transform("OLD", "NEW", "src/**/*.txt", "line");
-    let result = refactor::apply_transforms(&root, "ad-hoc", &set, false, None).unwrap();
+    let result = refactor::apply_transforms(
+        &root,
+        "ad-hoc",
+        &set,
+        false,
+        None,
+        Some(refactor::DEFAULT_MATCH_DETAIL_LIMIT),
+    )
+    .unwrap();
     let rule = &result.rules[0];
 
     assert_eq!(result.total_replacements, 20_000);
@@ -57,17 +65,7 @@ fn transform_output_can_include_full_match_details() {
     fs::write(src.join("file.txt"), "OLD one\nOLD two\nOLD three\n").unwrap();
 
     let set = refactor::ad_hoc_transform("OLD", "NEW", "src/**/*.txt", "line");
-    let result = refactor::apply_transforms_with_options(
-        &root,
-        "ad-hoc",
-        &set,
-        false,
-        None,
-        refactor::TransformOptions {
-            match_detail_limit: None,
-        },
-    )
-    .unwrap();
+    let result = refactor::apply_transforms(&root, "ad-hoc", &set, false, None, None).unwrap();
     let rule = &result.rules[0];
 
     assert_eq!(rule.replacement_count, 3);

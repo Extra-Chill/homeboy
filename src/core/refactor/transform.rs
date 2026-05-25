@@ -73,21 +73,6 @@ fn default_context() -> String {
 /// Default number of per-rule match details included in transform output.
 pub const DEFAULT_MATCH_DETAIL_LIMIT: usize = 100;
 
-/// Controls how many match detail records are retained in transform results.
-#[derive(Debug, Clone, Copy)]
-pub struct TransformOptions {
-    /// Maximum match details retained per rule. `None` retains every match.
-    pub match_detail_limit: Option<usize>,
-}
-
-impl Default for TransformOptions {
-    fn default() -> Self {
-        Self {
-            match_detail_limit: Some(DEFAULT_MATCH_DETAIL_LIMIT),
-        }
-    }
-}
-
 /// Result of applying a transform set.
 #[derive(Debug, Clone, Serialize)]
 pub struct TransformResult {
@@ -224,25 +209,7 @@ pub fn apply_transforms(
     set: &TransformSet,
     write: bool,
     rule_filter: Option<&str>,
-) -> Result<TransformResult> {
-    apply_transforms_with_options(
-        root,
-        name,
-        set,
-        write,
-        rule_filter,
-        TransformOptions::default(),
-    )
-}
-
-/// Apply a transform set with explicit output detail options.
-pub fn apply_transforms_with_options(
-    root: &Path,
-    name: &str,
-    set: &TransformSet,
-    write: bool,
-    rule_filter: Option<&str>,
-    options: TransformOptions,
+    match_detail_limit: Option<usize>,
 ) -> Result<TransformResult> {
     // Compile all regexes up front
     let compiled_rules: Vec<(&TransformRule, Regex)> = set
@@ -324,9 +291,8 @@ pub fn apply_transforms_with_options(
                 .to_string_lossy()
                 .to_string();
 
-            let remaining_detail = options
-                .match_detail_limit
-                .map(|limit| limit.saturating_sub(matches.len()));
+            let remaining_detail =
+                match_detail_limit.map(|limit| limit.saturating_sub(matches.len()));
 
             let (new_content, file_matches, file_replacement_count) = if rule.context == "file" {
                 apply_file_context(
@@ -370,7 +336,7 @@ pub fn apply_transforms_with_options(
             replacement_count,
             matches_truncated: omitted_match_count > 0,
             omitted_match_count,
-            match_detail_limit: options.match_detail_limit,
+            match_detail_limit,
         });
     }
 
@@ -628,15 +594,15 @@ fn apply_line_context(
                 regex.replace_all(line, replace).to_string()
             };
             if replaced != line {
-                replacement_count += 1;
-                if detail_limit.is_none_or(|limit| matches.len() < limit) {
-                    matches.push(TransformMatch {
-                        file: relative_path.to_string(),
-                        line: i + 1,
-                        before: line.to_string(),
-                        after: replaced.clone(),
-                    });
-                }
+                record_match(
+                    &mut replacement_count,
+                    &mut matches,
+                    detail_limit,
+                    relative_path,
+                    i + 1,
+                    line,
+                    &replaced,
+                );
                 new_lines.push(replaced);
                 continue;
             }
@@ -678,15 +644,15 @@ fn apply_file_context(
         };
 
         if matched != replaced {
-            replacement_count += 1;
-            if detail_limit.is_none_or(|limit| matches.len() < limit) {
-                matches.push(TransformMatch {
-                    file: relative_path.to_string(),
-                    line: line_num,
-                    before: matched,
-                    after: replaced,
-                });
-            }
+            record_match(
+                &mut replacement_count,
+                &mut matches,
+                detail_limit,
+                relative_path,
+                line_num,
+                &matched,
+                &replaced,
+            );
         }
     }
 
@@ -792,15 +758,15 @@ fn apply_hoist_static_context(
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            replacement_count += 1;
-            if detail_limit.is_none_or(|limit| matches.len() < limit) {
-                matches.push(TransformMatch {
-                    file: relative_path.to_string(),
-                    line: i + 1,
-                    before: line.to_string(),
-                    after: replaced.clone(),
-                });
-            }
+            record_match(
+                &mut replacement_count,
+                &mut matches,
+                detail_limit,
+                relative_path,
+                i + 1,
+                line,
+                &replaced,
+            );
 
             new_lines[i] = replaced;
             match_sites.push((i, var, screaming, line.to_string()));
@@ -836,15 +802,15 @@ fn apply_hoist_static_context(
             if var_re.is_match(&new_lines[i]) {
                 let renamed = var_re.replace_all(&new_lines[i], new_var.as_str());
                 if renamed != new_lines[i] {
-                    replacement_count += 1;
-                    if detail_limit.is_none_or(|limit| matches.len() < limit) {
-                        matches.push(TransformMatch {
-                            file: relative_path.to_string(),
-                            line: i + 1,
-                            before: new_lines[i].clone(),
-                            after: renamed.to_string(),
-                        });
-                    }
+                    record_match(
+                        &mut replacement_count,
+                        &mut matches,
+                        detail_limit,
+                        relative_path,
+                        i + 1,
+                        &new_lines[i],
+                        renamed.as_ref(),
+                    );
                     new_lines[i] = renamed.to_string();
                 }
             }
@@ -857,6 +823,29 @@ fn apply_hoist_static_context(
     }
 
     (result, matches, replacement_count)
+}
+
+fn record_match(
+    replacement_count: &mut usize,
+    matches: &mut Vec<TransformMatch>,
+    detail_limit: Option<usize>,
+    relative_path: &str,
+    line: usize,
+    before: &str,
+    after: &str,
+) {
+    *replacement_count += 1;
+
+    if detail_limit.is_some_and(|limit| matches.len() >= limit) {
+        return;
+    }
+
+    matches.push(TransformMatch {
+        file: relative_path.to_string(),
+        line,
+        before: before.to_string(),
+        after: after.to_string(),
+    });
 }
 
 /// Find the line index of the enclosing `fn` declaration.

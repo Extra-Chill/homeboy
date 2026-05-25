@@ -89,6 +89,6 @@ pub use rename::{
     RenameResult, RenameScope, RenameSpec, RenameTargeting, RenameWarning,
 };
 pub use transform::{
-    ad_hoc_transform, apply_transforms, apply_transforms_with_options, RuleResult, TransformMatch,
-    TransformOptions, TransformResult, TransformRule, TransformSet, DEFAULT_MATCH_DETAIL_LIMIT,
+    ad_hoc_transform, apply_transforms, RuleResult, TransformMatch, TransformResult, TransformRule,
+    TransformSet, DEFAULT_MATCH_DETAIL_LIMIT,
 };
