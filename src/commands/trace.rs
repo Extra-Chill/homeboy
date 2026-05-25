@@ -215,7 +215,7 @@ fn render_markdown_output(output: &TraceCommandOutput) -> String {
             let Some(results) = run_output.results.as_ref() else {
                 return "# Trace\n\nNo trace results were produced.\n".to_string();
             };
-            extension_trace::render_markdown(&results, &run_output.overlays)
+            extension_trace::render_markdown(results, &run_output.overlays)
         }
         TraceCommandOutput::Summary(summary) => {
             format!(
@@ -223,9 +223,9 @@ fn render_markdown_output(output: &TraceCommandOutput) -> String {
                 summary.component, summary.status, summary.exit_code
             )
         }
-        TraceCommandOutput::Aggregate(aggregate) => render_aggregate_markdown(&aggregate),
-        TraceCommandOutput::Compare(compare) => render_compare_markdown(&compare),
-        TraceCommandOutput::Matrix(matrix) => render_matrix_markdown(&matrix),
+        TraceCommandOutput::Aggregate(aggregate) => render_aggregate_markdown(aggregate),
+        TraceCommandOutput::Compare(compare) => render_compare_markdown(compare),
+        TraceCommandOutput::Matrix(matrix) => render_matrix_markdown(matrix),
         TraceCommandOutput::List(list) => {
             if !list.profiles.is_empty() || list.command == "trace.list.profiles" {
                 let mut markdown = "# Trace Profiles\n\n".to_string();

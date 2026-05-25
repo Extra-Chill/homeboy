@@ -136,8 +136,8 @@ fn config_roundtrip_findings(
             convention: rule.convention.clone(),
             severity: severity_from_config(&rule.severity),
             file: site.file.clone(),
-            description: render_template(description, None, &render_value),
-            suggestion: render_template(suggestion, None, &render_value),
+            description: render_template(description, None, render_value),
+            suggestion: render_template(suggestion, None, render_value),
             kind: AuditFinding::from_str(&rule.kind).unwrap_or(AuditFinding::LegacyComment),
         });
     }

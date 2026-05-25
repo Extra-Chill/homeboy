@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_run() {
-        let files = vec![
+        let files = [
             fp("src/builder.rs", "set_config('enabled_items', values);"),
             fp(
                 "src/config.rs",
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_run_rule() {
-        let files = vec![fp("src/builder.rs", "set_config('enabled_items', values);")];
+        let files = [fp("src/builder.rs", "set_config('enabled_items', values);")];
         let refs = files.iter().collect::<Vec<_>>();
 
         let findings = run_rule(&refs, &rule());
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_collect_accessor_symbol_reads() {
-        let files = vec![
+        let files = [
             fp(
                 "src/config.rs",
                 "fn enabled_items() { get_config('enabled_items') }",
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn production_read_satisfies_written_key() {
-        let files = vec![
+        let files = [
             fp("src/builder.rs", "set_config('enabled_items', values);"),
             fp(
                 "src/runtime.rs",
@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn production_accessor_symbol_call_satisfies_key() {
-        let files = vec![
+        let files = [
             fp(
                 "src/config.rs",
                 "fn enabled_items() { get_config('enabled_items') }",
@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn accessor_symbol_comments_do_not_satisfy_key() {
-        let files = vec![
+        let files = [
             fp(
                 "src/config.rs",
                 "fn enabled_items() { get_config('enabled_items') }",
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn accessor_symbol_partial_identifier_does_not_satisfy_key() {
-        let files = vec![
+        let files = [
             fp(
                 "src/config.rs",
                 "fn enabled_items() { get_config('enabled_items') }",
@@ -534,7 +534,7 @@ mod tests {
 
     #[test]
     fn configured_accessor_symbol_read_pattern_satisfies_key() {
-        let files = vec![
+        let files = [
             fp(
                 "src/config.rs",
                 "fn enabled_items() { get_config('enabled_items') }",
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn fixture_only_writes_are_excluded() {
-        let files = vec![fp(
+        let files = [fp(
             "fixtures/builder.rs",
             "set_config('enabled_items', values);",
         )];
