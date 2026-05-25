@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use homeboy::cli_surface::current_command_surface;
 use homeboy::commands::review::{
     ReviewArtifact, ReviewArtifactCommand, ReviewCommandOutput, ReviewStage, ReviewSummary,
 };
@@ -30,18 +31,23 @@ struct OutputContractScenario {
 }
 
 #[test]
-fn quality_commands_have_declared_golden_json_contract_fixtures() {
+fn visible_quality_commands_have_declared_golden_json_contract_fixtures() {
+    let surface = current_command_surface();
     let covered: BTreeSet<_> = quality_output_contract_scenarios()
         .iter()
         .map(|scenario| scenario.command)
         .collect();
-    let required: BTreeSet<_> = REQUIRED_QUALITY_COMMAND_FIXTURES.iter().copied().collect();
 
-    let missing: Vec<_> = required.difference(&covered).copied().collect();
-    assert!(
-        missing.is_empty(),
-        "missing golden JSON output contract fixture(s) for quality command(s): {missing:?}"
-    );
+    for command in REQUIRED_QUALITY_COMMAND_FIXTURES {
+        assert!(
+            surface.contains_path(&[*command]),
+            "required quality output contract command is not visible in the CLI surface: {command}"
+        );
+        assert!(
+            covered.contains(command),
+            "missing golden JSON output contract fixture for visible quality command: {command}"
+        );
+    }
 }
 
 #[test]
