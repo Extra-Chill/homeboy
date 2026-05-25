@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.197.14] - 2026-05-25
+
+### Changed
+- cover http egress audit paths
+- extract config JSON pointer helpers
+- extract bench side-by-side report
+- extract git operation output seam
+
+### Fixed
+- align docs with command help
+- skip dry-run deploy plan for skipped releases
+- include errored commands in failure digest
+
 ## [0.197.13] - 2026-05-24
 
 ### Changed
