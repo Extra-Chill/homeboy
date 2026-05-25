@@ -223,7 +223,10 @@ mod tests {
             changed_test_file_for_path("tests/fixtures/refactor_transform_no_match.json"),
             Some("tests/refactor_transform_test.rs".to_string())
         );
-        assert_eq!(changed_test_file_for_path("tests/fixtures/other.json"), None);
+        assert_eq!(
+            changed_test_file_for_path("tests/fixtures/other.json"),
+            None
+        );
     }
 
     #[test]
