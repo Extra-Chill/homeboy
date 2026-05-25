@@ -169,17 +169,21 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
     };
 
     write_trace_results(&trace_path, &results)?;
-    let _ = store.record_artifact(&run.id, "trace-results", &trace_path);
+    let artifact = store.record_artifact(&run.id, "trace-results", &trace_path)?;
+    let artifact_id = artifact.id.clone();
+    let artifact_path = artifact.path.clone();
     let finished = store.finish_run(
         &run.id,
         status,
         Some(serde_json::json!({
             "duration_ms": duration_millis(args.duration),
             "event_count": results.timeline.len(),
-            "trace_results_path": trace_path,
+            "trace_results_artifact_id": artifact_id,
+            "trace_results_path": artifact_path.clone(),
             "failure": failure,
         })),
     )?;
+    run_dir.cleanup();
 
     Ok((
         ObserveOutput {
@@ -189,7 +193,7 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
             status: finished.status,
             duration_ms: duration_millis(args.duration),
             event_count: results.timeline.len(),
-            artifact_path: trace_path.to_string_lossy().to_string(),
+            artifact_path,
             hints: vec![
                 format!("View this run: homeboy runs show {}", finished.id),
                 "List observe runs: homeboy runs list --kind observe".to_string(),
@@ -602,6 +606,7 @@ fn invalid_regex(field: &str, pattern: &str, error: regex::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::test_support::with_isolated_home;
 
     #[test]
     fn parse_duration_accepts_supported_units() {
@@ -849,6 +854,42 @@ mod tests {
         let parsed = <ObserveArgs as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
         assert_eq!(parsed.comp.component.as_deref(), Some("demo"));
         assert!(parsed.comp.path.is_none());
+    }
+
+    #[test]
+    fn observe_reports_persisted_artifact_and_cleans_run_dir() {
+        with_isolated_home(|home| {
+            let runtime = tempfile::tempdir().expect("runtime tmpdir");
+            std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", runtime.path());
+            let target = home.path().join("target");
+            std::fs::create_dir_all(&target).expect("target dir");
+
+            let args = ObserveArgs {
+                comp: PositionalComponentArgs {
+                    component: None,
+                    path: Some(target.to_string_lossy().to_string()),
+                },
+                duration: Duration::from_millis(1),
+                tail_logs: Vec::new(),
+                grep: None,
+                watch_processes: vec!["unlikely-homeboy-observe-test-process".to_string()],
+                watch_process_interval: Duration::from_millis(1),
+                probes: Vec::new(),
+            };
+
+            let (output, exit_code) = run(args, &GlobalArgs {}).expect("observe run");
+
+            assert_eq!(exit_code, 0);
+            assert!(std::path::Path::new(&output.artifact_path).is_file());
+            assert!(!std::path::Path::new(&output.artifact_path).starts_with(runtime.path()));
+            assert!(
+                std::fs::read_dir(runtime.path())
+                    .expect("runtime entries")
+                    .next()
+                    .is_none(),
+                "observe should clean completed run dirs"
+            );
+        });
     }
 
     /// Issue #2366: `--path` pointed at an unregistered directory resolves to
