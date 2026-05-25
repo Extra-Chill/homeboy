@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::core::component::audit::CommandStatusContractConfig;
+use crate::core::component::CommandStatusContractConfig;
 
 use super::super::{AuditFinding, Finding, Severity};
 
@@ -88,7 +88,7 @@ fn json_value_label(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::component::audit::CommandStatusContractScenario;
+    use crate::core::component::CommandStatusContractScenario;
     use std::collections::BTreeMap;
 
     #[test]

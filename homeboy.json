@@ -1,5 +1,21 @@
 {
   "auto_cleanup": false,
+  "audit": {
+    "command_status_contracts": {
+      "scenarios": [
+        {
+          "expected_fields": {
+            "/data/command": "refactor.transform",
+            "/data/total_replacements": 0,
+            "/data/written": false,
+            "/success": true
+          },
+          "file": "tests/fixtures/refactor_transform_no_match.json",
+          "id": "refactor-transform-no-match-dry-run"
+        }
+      ]
+    }
+  },
   "autofix_verify": {
     "args": [
       "check",

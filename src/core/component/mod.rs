@@ -12,11 +12,11 @@ pub mod scope;
 pub mod versioning;
 
 pub use audit::{
-    AuditConfig, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
-    ConventionTagGlob, CoreBoundaryLeakConfig, DuplicationDetectorConfig, KnownSymbolEntry,
-    KnownSymbolHeaderVersionProvider, KnownSymbolKind, KnownSymbolVersionedEntry,
-    MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
-    RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope,
+    AuditConfig, CommandStatusContractConfig, CommandStatusContractScenario, ConfigKeyUsageConfig,
+    ConfigKeyUsagePattern, ConfigKeyUsageRule, ConventionTagGlob, CoreBoundaryLeakConfig,
+    DuplicationDetectorConfig, KnownSymbolEntry, KnownSymbolHeaderVersionProvider, KnownSymbolKind,
+    KnownSymbolVersionedEntry, MutatingResourceAccessConfig, PublicRegistryExposureConfig,
+    RedirectValidationConfig, RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope,
 };
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,
