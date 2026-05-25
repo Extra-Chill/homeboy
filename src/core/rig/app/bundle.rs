@@ -1,14 +1,21 @@
-//! macOS script-backed launcher bundle generation.
+//! Script-backed desktop launcher generation.
 
 use std::fs;
 use std::path::Path;
 
 use super::ResolvedLauncher;
 use crate::core::error::{Error, Result};
-use crate::core::rig::spec::AppLauncherPreflight;
+use crate::core::rig::spec::{AppLauncherPlatform, AppLauncherPreflight};
 use crate::core::rig::RigSpec;
 
-pub(super) fn write_macos_bundle(rig: &RigSpec, launcher: &ResolvedLauncher) -> Result<()> {
+pub(super) fn write_launcher(rig: &RigSpec, launcher: &ResolvedLauncher) -> Result<()> {
+    match launcher.platform {
+        AppLauncherPlatform::Macos => write_macos_bundle(rig, launcher),
+        AppLauncherPlatform::Linux => write_linux_desktop(rig, launcher),
+    }
+}
+
+fn write_macos_bundle(rig: &RigSpec, launcher: &ResolvedLauncher) -> Result<()> {
     let contents = launcher.launcher_path.join("Contents");
     let macos = contents.join("MacOS");
     fs::create_dir_all(&macos).map_err(|e| {
@@ -41,19 +48,44 @@ pub(super) fn write_macos_bundle(rig: &RigSpec, launcher: &ResolvedLauncher) -> 
 }
 
 pub(super) fn planned_files(launcher: &ResolvedLauncher) -> Vec<String> {
-    vec![
-        launcher.launcher_path.display().to_string(),
-        launcher
-            .launcher_path
-            .join("Contents/Info.plist")
-            .display()
-            .to_string(),
-        launcher
-            .launcher_path
-            .join("Contents/MacOS/launch")
-            .display()
-            .to_string(),
-    ]
+    match launcher.platform {
+        AppLauncherPlatform::Macos => vec![
+            launcher.launcher_path.display().to_string(),
+            launcher
+                .launcher_path
+                .join("Contents/Info.plist")
+                .display()
+                .to_string(),
+            launcher
+                .launcher_path
+                .join("Contents/MacOS/launch")
+                .display()
+                .to_string(),
+        ],
+        AppLauncherPlatform::Linux => vec![launcher.launcher_path.display().to_string()],
+    }
+}
+
+fn write_linux_desktop(rig: &RigSpec, launcher: &ResolvedLauncher) -> Result<()> {
+    if let Some(parent) = launcher.launcher_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            Error::internal_unexpected(format!(
+                "Failed to create launcher directory {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
+
+    fs::write(&launcher.launcher_path, render_desktop_entry(rig, launcher)).map_err(|e| {
+        Error::internal_unexpected(format!(
+            "Failed to write launcher desktop file {}: {}",
+            launcher.launcher_path.display(),
+            e
+        ))
+    })?;
+    make_executable(&launcher.launcher_path)?;
+    Ok(())
 }
 
 pub(super) fn render_info_plist(launcher: &ResolvedLauncher) -> String {
@@ -117,6 +149,43 @@ exec "$TARGET_APP" "$@"
     )
 }
 
+pub(super) fn render_desktop_entry(rig: &RigSpec, launcher: &ResolvedLauncher) -> String {
+    format!(
+        r#"[Desktop Entry]
+Type=Application
+Name={}
+Exec=/bin/sh -lc {} homeboy-launcher %U
+Terminal=false
+Categories=Development;
+"#,
+        desktop_escape(&launcher.display_name),
+        sh_single_quote(&render_linux_exec_command(rig, launcher))
+    )
+}
+
+fn render_linux_exec_command(rig: &RigSpec, launcher: &ResolvedLauncher) -> String {
+    let mut commands = vec!["HOMEBOY_BIN=\"${HOMEBOY_BIN:-homeboy}\"".to_string()];
+    for step in &launcher.preflight {
+        match step {
+            AppLauncherPreflight::RigCheck => {
+                commands.push(format!(
+                    "\"$HOMEBOY_BIN\" rig check {}",
+                    sh_single_quote(&rig.id)
+                ));
+            }
+        }
+    }
+    commands.push(format!(
+        "\"$HOMEBOY_BIN\" rig up {}",
+        sh_single_quote(&rig.id)
+    ));
+    commands.push(format!(
+        "exec {} \"$@\"",
+        sh_single_quote(&launcher.target_path)
+    ));
+    commands.join(" && ")
+}
+
 fn push_rig_check_preflight(rig: &RigSpec, preflight: &mut String) {
     let rig_id = sh_single_quote(&rig.id);
     let terminal_command =
@@ -166,6 +235,13 @@ fn xml_escape(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+fn desktop_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "")
 }
 
 fn applescript_string_literal(value: &str) -> String {

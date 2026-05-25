@@ -389,11 +389,11 @@ Workload paths support `~`, `${env.NAME}`, `${components.<id>.path}`, and `${pac
 
 | Field | Type | Description |
 |---|---|---|
-| `platform` | enum | Currently `macos`. |
-| `wrapper_display_name` | string | Display name for the generated `.app` bundle. |
-| `wrapper_bundle_id` | string | Bundle identifier written to `Info.plist`. |
+| `platform` | enum | `macos` or `linux`. |
+| `wrapper_display_name` | string | Display name for the generated launcher. |
+| `wrapper_bundle_id` | string | Bundle identifier written to `Info.plist` on macOS. |
 | `target_app` | string | App or executable opened after rig prep succeeds. |
-| `install_dir` | string | Optional install directory; defaults to `/Applications`. |
+| `install_dir` | string | Optional install directory; defaults to `/Applications` on macOS and `$HOME/.local/share/applications` on Linux. |
 | `preflight` | array | Preflight actions; defaults to `rig:check`. |
 | `on_preflight_fail` | string | Optional failure behavior for generated launcher scripts. |
 
@@ -408,6 +408,8 @@ Workload paths support `~`, `${env.NAME}`, `${components.<id>.path}`, and `${pac
   }
 }
 ```
+
+Linux launchers use the same block with `"platform": "linux"` and write a `.desktop` file that invokes the target executable after preflight and `rig up` succeed.
 
 ## Variable Expansion
 

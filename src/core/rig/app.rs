@@ -1,8 +1,8 @@
 //! Desktop launcher wrappers for rigs.
 //!
-//! v1 intentionally ships the smallest useful surface: a macOS `.app` bundle
-//! whose executable is a shell script. Native Swift/Platypus launchers and
-//! cross-platform `.desktop` / `.lnk` generators can layer on this contract.
+//! The first launcher surfaces are a macOS `.app` bundle whose executable is a
+//! shell script and a Linux `.desktop` file. Native Swift/Platypus launchers and
+//! Windows `.lnk` generators can layer on this contract.
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,6 +16,7 @@ use crate::core::error::{Error, Result};
 mod bundle;
 
 const DEFAULT_MACOS_INSTALL_DIR: &str = "/Applications";
+const DEFAULT_LINUX_INSTALL_DIR_SUFFIX: &str = ".local/share/applications";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -77,7 +78,12 @@ fn uninstall_inner(
     let files = bundle::planned_files(&launcher);
 
     if !options.dry_run && launcher.launcher_path.exists() {
-        fs::remove_dir_all(&launcher.launcher_path).map_err(|e| {
+        let remove_result = if launcher.launcher_path.is_dir() {
+            fs::remove_dir_all(&launcher.launcher_path)
+        } else {
+            fs::remove_file(&launcher.launcher_path)
+        };
+        remove_result.map_err(|e| {
             Error::internal_unexpected(format!(
                 "Failed to remove launcher {}: {}",
                 launcher.launcher_path.display(),
@@ -107,7 +113,7 @@ fn install_inner(
     let files = bundle::planned_files(&launcher);
 
     if !options.dry_run {
-        bundle::write_macos_bundle(rig, &launcher)?;
+        bundle::write_launcher(rig, &launcher)?;
     }
 
     Ok(report(
@@ -153,10 +159,10 @@ fn resolve_launcher(rig: &RigSpec) -> Result<ResolvedLauncher> {
         .install_dir
         .as_deref()
         .map(|p| expand_vars(rig, p))
-        .unwrap_or_else(|| DEFAULT_MACOS_INSTALL_DIR.to_string());
+        .unwrap_or_else(|| default_install_dir(spec.platform));
     let install_dir = PathBuf::from(install_dir);
     let display_name = spec.wrapper_display_name.trim().to_string();
-    let launcher_path = install_dir.join(format!("{}.app", display_name));
+    let launcher_path = install_dir.join(launcher_file_name(spec.platform, &display_name));
 
     Ok(ResolvedLauncher {
         platform: spec.platform,
@@ -175,14 +181,41 @@ fn resolve_launcher(rig: &RigSpec) -> Result<ResolvedLauncher> {
 fn validate_platform(platform: AppLauncherPlatform) -> Result<()> {
     match platform {
         AppLauncherPlatform::Macos if cfg!(target_os = "macos") => Ok(()),
+        AppLauncherPlatform::Linux if cfg!(target_os = "linux") => Ok(()),
         AppLauncherPlatform::Macos => Err(Error::validation_invalid_argument(
             "app_launcher.platform",
             "macOS app launchers can only be installed on macOS; use --dry-run to preview generated paths",
             None,
             Some(vec![
-                "Linux .desktop and Windows .lnk launchers are deferred from v1".to_string(),
+                "Set app_launcher.platform to linux for Linux .desktop launchers".to_string(),
+                "Windows .lnk launchers are deferred".to_string(),
             ]),
         )),
+        AppLauncherPlatform::Linux => Err(Error::validation_invalid_argument(
+            "app_launcher.platform",
+            "Linux .desktop launchers can only be installed on Linux; use --dry-run to preview generated paths",
+            None,
+            Some(vec![
+                "Set app_launcher.platform to macos for macOS .app launchers".to_string(),
+                "Windows .lnk launchers are deferred".to_string(),
+            ]),
+        )),
+    }
+}
+
+fn default_install_dir(platform: AppLauncherPlatform) -> String {
+    match platform {
+        AppLauncherPlatform::Macos => DEFAULT_MACOS_INSTALL_DIR.to_string(),
+        AppLauncherPlatform::Linux => std::env::var("HOME")
+            .map(|home| format!("{home}/{DEFAULT_LINUX_INSTALL_DIR_SUFFIX}"))
+            .unwrap_or_else(|_| format!("~/{DEFAULT_LINUX_INSTALL_DIR_SUFFIX}")),
+    }
+}
+
+fn launcher_file_name(platform: AppLauncherPlatform, display_name: &str) -> String {
+    match platform {
+        AppLauncherPlatform::Macos => format!("{display_name}.app"),
+        AppLauncherPlatform::Linux => format!("{display_name}.desktop"),
     }
 }
 
