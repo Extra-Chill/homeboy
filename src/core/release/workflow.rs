@@ -159,10 +159,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         let tag = new_version
             .as_ref()
             .map(|v| format_tag(v, monorepo.as_ref()));
-        let deployment = input
-            .pipeline
-            .deploy
-            .then(|| super::deployment::plan_deployment(&input.component_id));
+        let deployment = dry_run_deployment_plan(&input.component_id, input.pipeline.deploy, &plan);
 
         return Ok((
             ReleaseCommandResult {
@@ -243,6 +240,18 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         },
         exit_code,
     ))
+}
+
+fn dry_run_deployment_plan(
+    component_id: &str,
+    deploy_requested: bool,
+    plan: &ReleasePlan,
+) -> Option<super::types::ReleaseDeploymentResult> {
+    if deploy_requested && plan.enabled() {
+        Some(super::deployment::plan_deployment(component_id))
+    } else {
+        None
+    }
 }
 
 fn current_component_version(
@@ -760,6 +769,25 @@ mod tests {
             extract_new_version_from_plan(&plan).as_deref(),
             Some("1.2.3")
         );
+    }
+
+    #[test]
+    fn dry_run_deployment_plan_is_omitted_when_release_plan_is_disabled() {
+        let plan = ReleasePlan::new(
+            "demo",
+            false,
+            vec![PlanStep::disabled_with_reason(
+                "release.skip",
+                "release.skip",
+                "no-releasable-commits",
+            )
+            .build()],
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(dry_run_deployment_plan("demo", true, &plan).is_none());
     }
 
     #[test]
