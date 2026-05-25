@@ -18,6 +18,7 @@ use super::records::{
 use crate::core::{paths, Error, Result};
 
 pub const CURRENT_SCHEMA_VERSION: i64 = 5;
+pub const LAB_OFFLOAD_METADATA_ENV: &str = "HOMEBOY_LAB_OFFLOAD_JSON";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ObservationDbStatus {
@@ -802,23 +803,34 @@ fn with_run_owner_metadata(mut metadata: serde_json::Value) -> serde_json::Value
     let source_snapshot = std::env::var("HOMEBOY_SOURCE_SNAPSHOT_JSON")
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let lab_offload = std::env::var(LAB_OFFLOAD_METADATA_ENV)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
 
-    if let Some(object) = metadata.as_object_mut() {
-        object.insert("homeboy_run_owner".to_string(), owner);
-        if let Some(source_snapshot) = source_snapshot {
-            object.insert("source_snapshot".to_string(), source_snapshot);
+    let mut additions = vec![("homeboy_run_owner".to_string(), owner)];
+    if let Some(source_snapshot) = source_snapshot {
+        additions.push(("source_snapshot".to_string(), source_snapshot));
+    }
+    if let Some(lab_offload) = lab_offload {
+        additions.push(("lab_offload".to_string(), lab_offload));
+    }
+
+    let target = if metadata.is_object() {
+        &mut metadata
+    } else {
+        metadata = serde_json::json!({
+            "homeboy_original_metadata": metadata,
+        });
+        &mut metadata
+    };
+
+    if let Some(object) = target.as_object_mut() {
+        for (key, value) in additions {
+            object.insert(key, value);
         }
-        return metadata;
     }
 
-    let mut wrapped = serde_json::json!({
-        "homeboy_run_owner": owner,
-        "homeboy_original_metadata": metadata,
-    });
-    if let (Some(object), Some(source_snapshot)) = (wrapped.as_object_mut(), source_snapshot) {
-        object.insert("source_snapshot".to_string(), source_snapshot);
-    }
-    wrapped
+    metadata
 }
 
 fn parse_metadata(raw: String) -> rusqlite::Result<serde_json::Value> {
@@ -1119,6 +1131,27 @@ mod api_coverage_tests {
             std::env::remove_var("HOMEBOY_SOURCE_SNAPSHOT_JSON");
 
             assert_eq!(run.metadata_json["source_snapshot"], snapshot);
+        });
+    }
+
+    #[test]
+    fn test_start_run_records_lab_offload_metadata_from_environment() {
+        with_isolated_home(|_| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let lab = serde_json::json!({
+                "source": "automatic",
+                "status": "fallback",
+                "runner_id": "lab",
+                "remote_workspace": null,
+                "fallback_reason": "runner connect timed out after 3s"
+            });
+
+            std::env::set_var(LAB_OFFLOAD_METADATA_ENV, lab.to_string());
+            let run = store.start_run(new_run("test")).expect("start");
+            std::env::remove_var(LAB_OFFLOAD_METADATA_ENV);
+
+            assert_eq!(run.metadata_json["lab_offload"], lab);
         });
     }
 

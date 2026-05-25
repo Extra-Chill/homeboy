@@ -629,6 +629,7 @@ fn exec(
             cwd,
             allow_ssh,
             command,
+            env: Default::default(),
             capture_patch,
             source_snapshot: None,
         },

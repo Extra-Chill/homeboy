@@ -13,6 +13,7 @@ mod apply;
 mod connection;
 mod evidence;
 mod execution;
+mod offload_metadata;
 mod workspace;
 
 pub use apply::{
@@ -28,6 +29,7 @@ pub use evidence::{
 };
 pub(crate) use execution::daemon_api_get;
 pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
+pub use offload_metadata::{capture_lab_offload_metadata, lab_offload_metadata};
 pub use workspace::{
     sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
