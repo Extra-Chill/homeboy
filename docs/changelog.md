@@ -4,6 +4,33 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.198.0] - 2026-05-25
+
+### Added
+- auto-select default lab runner
+- add Linux rig app launchers
+
+### Changed
+- Treat empty refactor transforms as success
+- Cap refactor transform match details
+- Add golden JSON contract fixtures for quality outputs
+- remove unreferenced internal exports
+- extract refactor source planning helpers
+- add golden JSON command contracts
+- extract triage watch helper
+
+### Fixed
+- auto-connect Lab runner before offload
+- migrate legacy ssh runner configs
+- align test coverage detector entry point
+- gate Lab offload by runner capabilities
+- bound self-check output capture
+- Fix lab offload output path handling
+- preflight lab runner test extensions
+- persist observe artifacts cleanly
+- report mirrored capture-patch artifacts
+- write runner validation errors to output file
+
 ## [0.197.14] - 2026-05-25
 
 ### Changed
