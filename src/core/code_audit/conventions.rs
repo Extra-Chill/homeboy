@@ -237,6 +237,9 @@ pub enum AuditFinding {
     /// Command-family files independently assemble the same generic execution
     /// contract phases and contract-call shape.
     ParallelRunnerSetup,
+    /// Remote runner dispatch lacks an explicit preflight for path/artifact
+    /// translation before handing arguments to the runner.
+    RunnerOffloadPreflight,
     /// Repeated exhaustive match blocks over the same enum duplicate a
     /// label/getter/policy contract that should likely live on the enum.
     RepeatedEnumDispatchContract,
