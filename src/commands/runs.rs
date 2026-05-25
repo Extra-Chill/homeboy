@@ -39,6 +39,8 @@ use latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
 use query::{runs_query, RunsQueryArgs, RunsQueryOutput};
 use reconcile::{reconcile_runs, RunsReconcileArgs, RunsReconcileOutput};
 
+#[cfg(test)]
+pub(crate) use common::SkippedArtifactRow;
 pub(crate) use drift::RunsDriftOutput;
 #[cfg(test)]
 pub(crate) use drift::{DriftValue, RunsDriftFilters};

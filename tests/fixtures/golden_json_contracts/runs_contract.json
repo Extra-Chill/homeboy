@@ -118,6 +118,17 @@
           ],
           "select": [
             "$.metrics.ready_ms"
+          ],
+          "skipped_artifact_count": 1,
+          "skipped_artifacts": [
+            {
+              "artifact_id": "artifact-log",
+              "artifact_kind": "log",
+              "artifact_type": "file",
+              "path": "artifacts/output.log",
+              "reason": "not JSON",
+              "run_id": "run-contract-1"
+            }
           ]
         },
         "success": true

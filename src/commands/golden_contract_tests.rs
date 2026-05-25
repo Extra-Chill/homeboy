@@ -12,7 +12,7 @@ use super::deploy::{DeployCommandOutput, DeployOutput, MultiProjectDeployOutput}
 use super::release::{BatchReleaseOutput, ReleaseCommandOutput, ReleaseOutput};
 use super::runs::{
     DriftValue, QueryGroup, QueryRow, RunsDriftFilters, RunsDriftOutput, RunsQueryFilters,
-    TestRunsQueryOutput as RunsQueryOutput,
+    SkippedArtifactRow, TestRunsQueryOutput as RunsQueryOutput,
 };
 use super::runs::{RunDetail, RunSummary, RunsArtifactsOutput, RunsListOutput, RunsShowOutput};
 use super::stack::{
@@ -68,6 +68,15 @@ fn runs_command_json_contract_matches_golden_fixture() {
                     select: vec!["$.metrics.ready_ms".to_string()],
                     group_by: Some("$.variant".to_string()),
                     matched_artifact_count: 1,
+                    skipped_artifact_count: 1,
+                    skipped_artifacts: vec![SkippedArtifactRow {
+                        run_id: "run-contract-1".to_string(),
+                        artifact_id: "artifact-log".to_string(),
+                        artifact_kind: "log".to_string(),
+                        artifact_type: "file".to_string(),
+                        path: "artifacts/output.log".to_string(),
+                        reason: "not JSON".to_string(),
+                    }],
                     rows: vec![QueryRow {
                         run_id: "run-contract-1".to_string(),
                         artifact_kind: "summary".to_string(),
