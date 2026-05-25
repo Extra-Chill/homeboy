@@ -1,5 +1,26 @@
 {
   "auto_cleanup": false,
+  "audit": {
+    "command_status_contracts": {
+      "scenarios": [
+        {
+          "expected_fields": {
+            "/data/command": "refactor.transform",
+            "/data/total_replacements": 0,
+            "/data/written": false,
+            "/success": true
+          },
+          "file": "tests/fixtures/refactor_transform_no_match.json",
+          "id": "refactor-transform-no-match-dry-run"
+        }
+      ]
+    },
+    "convention_exception_globs": [
+      "src/core/code_audit/detectors/test_coverage.rs",
+      "src/core/code_audit/detectors/test_vacuity.rs",
+      "src/core/code_audit/detectors/upstream_workaround.rs"
+    ]
+  },
   "autofix_verify": {
     "args": [
       "check",

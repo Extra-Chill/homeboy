@@ -48,11 +48,12 @@ use std::path::Path;
 
 use self::detectors::layer_ownership::run as run_layer_ownership;
 use self::detectors::{
-    aggregate_construction, artifact_portability, config_key_usage, core_boundary_leak, dead_guard,
-    deprecation_age, enum_dispatch_contracts, facade_passthrough, field_patterns, global_env_guard,
-    mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
-    repeated_literal_shape, requested_detectors, runner_offload_preflight, rust_test_wiring,
-    shared_scaffolding, test_coverage, test_topology, unbounded_output_capture, wrapper_inference,
+    aggregate_construction, artifact_portability, command_status_contracts, config_key_usage,
+    core_boundary_leak, dead_guard, deprecation_age, enum_dispatch_contracts, facade_passthrough,
+    field_patterns, global_env_guard, mutating_resource_access, parallel_runner_setup,
+    public_registry_exposure, redirect_validation, repeated_literal_shape, requested_detectors,
+    runner_offload_preflight, rust_test_wiring, shared_scaffolding, test_coverage, test_topology,
+    unbounded_output_capture, wrapper_inference,
 };
 
 pub use checks::{CheckResult, CheckStatus};
@@ -338,6 +339,11 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
         findings: &[AuditFinding::UnboundedOutputCapture],
         requires_discovery: true,
     },
+    DetectorFamily {
+        id: "command_status_contracts",
+        findings: &[AuditFinding::CommandStatusContractViolation],
+        requires_discovery: false,
+    },
 ];
 
 impl AuditExecutionPlan {
@@ -503,6 +509,10 @@ impl AuditExecutionPlan {
 
     pub(crate) fn run_output_capture(&self) -> bool {
         self.detector_enabled("output_capture")
+    }
+
+    pub(crate) fn run_command_status_contracts(&self) -> bool {
+        self.detector_enabled("command_status_contracts")
     }
 
     fn requires_discovery(&self) -> bool {
@@ -1427,6 +1437,21 @@ fn audit_internal(
             artifact_portability_findings.len()
         );
         all_findings.extend(artifact_portability_findings);
+    }
+
+    // Phase 4z: Declared command status scenario fixtures.
+    let command_status_findings = if plan.run_command_status_contracts() {
+        command_status_contracts::run(root, &audit_config.command_status_contracts)
+    } else {
+        Vec::new()
+    };
+    if !command_status_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Command status contracts: {} finding(s) (inconsistent no-op/dry-run status fields)",
+            command_status_findings.len()
+        );
+        all_findings.extend(command_status_findings);
     }
 
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,

@@ -281,6 +281,8 @@ pub enum AuditFinding {
     /// Command output capture retains stdout/stderr or repeated details without
     /// an explicit size bound and truncation metadata.
     UnboundedOutputCapture,
+    /// Declared command scenario output differs from its expected status contract.
+    CommandStatusContractViolation,
 }
 
 impl AuditFinding {
@@ -353,6 +355,7 @@ impl AuditFinding {
             "redirect_validation",
             "non_portable_artifact_path",
             "unbounded_output_capture",
+            "command_status_contract_violation",
         ]
     }
 }

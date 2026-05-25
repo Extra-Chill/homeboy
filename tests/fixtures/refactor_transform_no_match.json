@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "data": {
+    "command": "refactor.transform",
+    "name": "ad-hoc",
+    "rules": [
+      {
+        "description": "",
+        "id": "ad-hoc",
+        "matches": [],
+        "replacement_count": 0
+      }
+    ],
+    "total_files": 0,
+    "total_replacements": 0,
+    "written": false
+  }
+}
