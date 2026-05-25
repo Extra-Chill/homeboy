@@ -1010,11 +1010,8 @@ fn audit_internal(
                 for ext_id in extensions.keys() {
                     if let Ok(ext_manifest) = crate::core::extension::load_extension(ext_id) {
                         if let Some(test_mapping) = ext_manifest.test_mapping() {
-                            let coverage_findings = test_coverage::analyze_test_coverage(
-                                root,
-                                &all_fingerprints,
-                                test_mapping,
-                            );
+                            let coverage_findings =
+                                test_coverage::run(root, &all_fingerprints, test_mapping);
                             if !coverage_findings.is_empty() {
                                 log_status!(
                                     "audit",
