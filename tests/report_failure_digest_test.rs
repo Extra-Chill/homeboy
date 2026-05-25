@@ -237,6 +237,39 @@ fn missing_json_renders_explicit_structured_details_unavailable() {
 }
 
 #[test]
+fn error_statuses_render_command_sections_and_classify_as_failures() {
+    let dir = tmp_dir("error-statuses");
+    fs::create_dir_all(&dir).expect("temp dir should exist");
+
+    let markdown = render(
+        &dir,
+        r#"{"lint":"error","test":"error","audit":"error"}"#,
+        false,
+        false,
+    );
+
+    assert!(markdown.contains("### Lint Failure Digest"));
+    assert!(markdown.contains("### Test Failure Digest"));
+    assert!(markdown.contains("### Audit Failure Digest"));
+    assert!(markdown.contains("- No structured lint details available."));
+    assert!(markdown.contains("- No structured test failure details available."));
+    assert!(markdown.contains("- No structured audit findings available."));
+    assert!(markdown.contains("- Overall: **human_needed**"));
+    assert!(markdown.contains("- Human-needed failed commands:"));
+    assert!(markdown.contains("  - `audit`"));
+    assert!(markdown.contains("  - `lint`"));
+    assert!(markdown.contains("  - `test`"));
+    assert!(markdown
+        .contains("- Full lint log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
+    assert!(markdown
+        .contains("- Full test log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
+    assert!(markdown
+        .contains("- Full audit log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn renders_tooling_metadata_from_json_file() {
     let dir = tmp_dir("tooling");
     fs::create_dir_all(&dir).expect("temp dir should exist");
