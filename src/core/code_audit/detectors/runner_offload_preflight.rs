@@ -31,11 +31,27 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
             ));
         }
 
+        if dispatches_without_capability_preflight(&fp.content) {
+            findings.push(finding(
+                fp,
+                "Remote runner dispatch starts execution without validating runner capability parity first.",
+                "Check runner capabilities before dispatch so missing tools, components, or environment requirements fail before remote execution starts.",
+            ));
+        }
+
         if dispatches_extension_without_parity_preflight(&fp.content) {
             findings.push(finding(
                 fp,
                 "Remote runner dispatch accepts an extension selector without validating runner extension parity before execution.",
                 "Add a pre-dispatch extension parity check so missing runner-side extension support fails before command execution.",
+            ));
+        }
+
+        if reports_remote_artifact_without_access_check(&fp.content) {
+            findings.push(finding(
+                fp,
+                "Remote runner artifact reporting does not prove the reported artifact path is locally accessible or retrievable.",
+                "Verify mirrored artifact paths with local metadata or a retrievable runner-artifact token before exposing them as run evidence.",
             ));
         }
     }
@@ -49,6 +65,8 @@ fn is_remote_dispatch_file(content: &str) -> bool {
     content.contains("RunnerExecOptions")
         || content.contains("runner::exec")
         || content.contains("core::runner::exec")
+        || content.contains("patch_artifact_path")
+        || content.contains("runner-artifact://")
 }
 
 fn forwards_args_without_path_preflight(content: &str) -> bool {
@@ -79,6 +97,25 @@ fn captures_artifacts_without_snapshot(content: &str) -> bool {
     content.contains("capture_patch: true") && !content.contains("source_snapshot")
 }
 
+fn dispatches_without_capability_preflight(content: &str) -> bool {
+    let dispatches_remote_work = contains_any(
+        content,
+        &["runner::exec", "core::runner::exec", "sync_workspace"],
+    );
+    let has_capability_preflight = contains_any(
+        content,
+        &[
+            "evaluate_lab_runner_capabilities",
+            "lab_runner_capability_plan",
+            "RunnerDoctorOutput",
+            "runner doctor",
+            "capability_plan",
+        ],
+    );
+
+    dispatches_remote_work && !has_capability_preflight
+}
+
 fn dispatches_extension_without_parity_preflight(content: &str) -> bool {
     let accepts_extension = contains_any(content, &["--extension", "extension_id", "extension"]);
     let has_parity_preflight = contains_any(
@@ -92,6 +129,30 @@ fn dispatches_extension_without_parity_preflight(content: &str) -> bool {
     );
 
     accepts_extension && !has_parity_preflight
+}
+
+fn reports_remote_artifact_without_access_check(content: &str) -> bool {
+    let reports_remote_artifact = contains_any(
+        content,
+        &[
+            "patch_artifact_path",
+            "patch_artifact_id",
+            "runner-artifact://",
+            "artifact.path",
+        ],
+    );
+    let verifies_access = contains_any(
+        content,
+        &[
+            "is_remote_runner_artifact_path",
+            "download_remote_artifact",
+            "fs::metadata",
+            ".is_file()",
+            "get_artifact",
+        ],
+    );
+
+    reports_remote_artifact && !verifies_access
 }
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
@@ -138,11 +199,12 @@ mod tests {
 
         let findings = run(&[&fp]);
 
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, AuditFinding::RunnerOffloadPreflight);
-        assert!(findings[0]
-            .suggestion
-            .contains("strips local-only wrapper flags"));
+        assert!(findings.iter().any(|finding| {
+            finding.kind == AuditFinding::RunnerOffloadPreflight
+                && finding
+                    .suggestion
+                    .contains("strips local-only wrapper flags")
+        }));
     }
 
     #[test]
@@ -151,6 +213,8 @@ mod tests {
             "src/main.rs",
             r#"
             fn run(normalized_args: &[String], remote_path: &str) {
+                let plan = lab_runner_capability_plan(command, source_path).unwrap();
+                evaluate_lab_runner_capabilities(runner_id, &plan, &capabilities, mode);
                 let mut command = vec!["homeboy".to_string()];
                 command.extend(rewrite_lab_offload_args(normalized_args, remote_path));
                 runner::exec("lab", RunnerExecOptions {
@@ -166,6 +230,52 @@ mod tests {
     }
 
     #[test]
+    fn flags_runner_dispatch_without_capability_preflight() {
+        let fp = fingerprint(
+            "src/main.rs",
+            r#"
+            fn run(command: Vec<String>) {
+                runner::exec("lab", RunnerExecOptions {
+                    command,
+                    capture_patch: false,
+                    source_snapshot: None,
+                });
+            }
+            "#,
+        );
+
+        let findings = run(&[&fp]);
+
+        assert!(findings
+            .iter()
+            .any(|finding| finding.description.contains("capability parity")));
+    }
+
+    #[test]
+    fn accepts_runner_dispatch_with_capability_preflight() {
+        let fp = fingerprint(
+            "src/main.rs",
+            r#"
+            fn run(command: Vec<String>) {
+                let plan = lab_runner_capability_plan(command_kind, source_path).unwrap();
+                evaluate_lab_runner_capabilities(runner_id, &plan, &capabilities, mode);
+                runner::exec("lab", RunnerExecOptions {
+                    command,
+                    capture_patch: false,
+                    source_snapshot: None,
+                });
+            }
+            "#,
+        );
+
+        let findings = run(&[&fp]);
+
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.description.contains("capability parity")));
+    }
+
+    #[test]
     fn flags_artifact_capture_without_snapshot_contract() {
         let fp = fingerprint(
             "src/core/runner.rs",
@@ -178,8 +288,9 @@ mod tests {
 
         let findings = run(&[&fp]);
 
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].description.contains("artifact capture"));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.description.contains("artifact capture")));
     }
 
     #[test]
@@ -195,7 +306,48 @@ mod tests {
 
         let findings = run(&[&fp]);
 
+        assert!(findings
+            .iter()
+            .any(|finding| finding.description.contains("extension selector")));
+    }
+
+    #[test]
+    fn flags_remote_artifact_reporting_without_access_check() {
+        let fp = fingerprint(
+            "src/core/runner/evidence.rs",
+            r#"
+            fn mirrored_patch_result(patch: Value, artifact: ArtifactRecord) -> Value {
+                let mut patched = patch.clone();
+                patched["patch_artifact_path"] = Value::String(artifact.path);
+                patched
+            }
+            "#,
+        );
+
+        let findings = run(&[&fp]);
+
         assert_eq!(findings.len(), 1);
-        assert!(findings[0].description.contains("extension selector"));
+        assert!(findings[0].description.contains("locally accessible"));
+    }
+
+    #[test]
+    fn accepts_remote_artifact_reporting_with_access_check() {
+        let fp = fingerprint(
+            "src/core/runner/evidence.rs",
+            r#"
+            fn mirrored_patch_result(patch: Value, artifact: ArtifactRecord) -> Value {
+                let accessible = is_remote_runner_artifact_path(&artifact.path)
+                    || fs::metadata(&artifact.path).map(|metadata| metadata.is_file()).unwrap_or(false);
+                if accessible {
+                    let mut patched = patch.clone();
+                    patched["patch_artifact_path"] = Value::String(artifact.path);
+                    return patched;
+                }
+                patch
+            }
+            "#,
+        );
+
+        assert!(run(&[&fp]).is_empty());
     }
 }
