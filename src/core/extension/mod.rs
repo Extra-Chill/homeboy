@@ -7,6 +7,7 @@ mod execution;
 mod fingerprint;
 pub mod grammar;
 pub mod grammar_items;
+mod grammar_strings;
 mod lifecycle;
 pub mod lint;
 mod maintenance;
