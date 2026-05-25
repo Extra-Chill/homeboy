@@ -1426,7 +1426,11 @@ fn audit_internal(
     }
 
     let artifact_portability_findings = if plan.run_artifact_portability() {
-        artifact_portability::run(component_id)
+        if audit_config.artifact_portability.is_empty() {
+            artifact_portability::run(component_id)
+        } else {
+            artifact_portability::run_with_config(component_id, &audit_config.artifact_portability)
+        }
     } else {
         Vec::new()
     };
@@ -1604,6 +1608,7 @@ fn audit_root_only(
     root: &Path,
     plan: &AuditExecutionPlan,
 ) -> CodeAuditResult {
+    let audit_config = audit_config_for(component_id, root);
     let mut findings = Vec::new();
 
     if plan.run_structural() {
@@ -1691,7 +1696,11 @@ fn audit_root_only(
     }
 
     if plan.run_artifact_portability() {
-        let artifact_portability_findings = artifact_portability::run(component_id);
+        let artifact_portability_findings = if audit_config.artifact_portability.is_empty() {
+            artifact_portability::run(component_id)
+        } else {
+            artifact_portability::run_with_config(component_id, &audit_config.artifact_portability)
+        };
         if !artifact_portability_findings.is_empty() {
             log_status!(
                 "audit",
