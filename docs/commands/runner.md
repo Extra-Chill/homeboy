@@ -45,6 +45,23 @@ homeboy runner connect homeboy-lab
 
 After this, `homeboy-lab` is both the server ID and the runner ID.
 
+### `migrate`
+
+```sh
+homeboy runner migrate <legacy-runner-id>
+homeboy runner migrate <legacy-runner-id> --remove-legacy
+```
+
+Migrates a pre-capability standalone SSH runner onto the server referenced by its `server_id`. Use this for old Lab configs such as runner `lab` pointing at server `homeboy-lab`:
+
+```sh
+homeboy runner migrate lab
+homeboy runner show homeboy-lab
+homeboy runner migrate lab --remove-legacy
+```
+
+The migration copies `workspace_root`, `homeboy_path`, `daemon`, `concurrency_limit`, `artifact_policy`, `env`, and `resources` into the server's embedded `runner` capability. Without `--remove-legacy`, the old `~/.config/homeboy/runners/<legacy-runner-id>.json` file is preserved so the result can be inspected first. With `--remove-legacy`, Homeboy deletes the legacy standalone runner after the server capability has been saved.
+
 ### `doctor`
 
 ```sh
@@ -281,7 +298,7 @@ Rules:
 
 All command output is wrapped in the global JSON envelope described in the [JSON output contract](../architecture/output-system.md). The `data` payload uses the generic entity CRUD shape:
 
-- `command`: action identifier such as `runner.add`, `runner.list`, `runner.show`, `runner.set`, `runner.remove`, `runner.doctor`, `runner.connect`, `runner.status`, `runner.disconnect`, `runner.exec`, `runner.workspace.sync`, or `runner.workspace.apply`
+- `command`: action identifier such as `runner.add`, `runner.enable`, `runner.migrate`, `runner.list`, `runner.show`, `runner.set`, `runner.remove`, `runner.doctor`, `runner.connect`, `runner.status`, `runner.disconnect`, `runner.exec`, `runner.workspace.sync`, or `runner.workspace.apply`
 - `id`: present for single-runner actions
 - `entity`: runner configuration for single-runner read/write actions
 - `entities`: list for `list`
