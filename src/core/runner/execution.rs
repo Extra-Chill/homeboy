@@ -176,7 +176,6 @@ fn exec_via_daemon(
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
     let stdout = string_field(&result, "stdout");
     let stderr = string_field(&result, "stderr");
-    let patch = result.get("patch").cloned();
     let exit_code = result
         .get("exit_code")
         .and_then(Value::as_i64)
@@ -190,6 +189,7 @@ fn exec_via_daemon(
         });
 
     let mirror = mirror_daemon_evidence(runner, &cwd, &command, &job, &events, &result)?;
+    let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
 
     Ok((
         RunnerExecOutput {
@@ -205,7 +205,7 @@ fn exec_via_daemon(
             job_id: Some(job.id.to_string()),
             job: Some(job),
             job_events: Some(events),
-            mirror_run_id: mirror.map(|run| run.id),
+            mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
         },
         exit_code,

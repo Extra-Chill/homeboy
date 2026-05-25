@@ -91,6 +91,12 @@ pub struct RemoteArtifactDownload {
     pub sha256: Option<String>,
 }
 
+#[derive(Debug)]
+pub struct MirroredDaemonEvidence {
+    pub run: RunRecord,
+    pub patch: Option<Value>,
+}
+
 #[derive(Debug, Clone)]
 struct RemoteArtifactToken {
     runner_id: String,
@@ -139,11 +145,62 @@ pub fn mirror_daemon_evidence(
     job: &Job,
     events: &[JobEvent],
     result: &Value,
-) -> Result<Option<RunRecord>> {
+) -> Result<Option<MirroredDaemonEvidence>> {
     let store = ObservationStore::open_initialized()?;
     let local_job_run = mirror_job_run(&store, runner, cwd, command, job, events, result)?;
     mirror_remote_observation_runs(&store, runner, job)?;
-    Ok(Some(local_job_run))
+    let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
+    Ok(Some(MirroredDaemonEvidence {
+        run: local_job_run,
+        patch,
+    }))
+}
+
+fn mirrored_patch_result(
+    store: &ObservationStore,
+    runner: &Runner,
+    job: &Job,
+    patch: Option<&Value>,
+) -> Result<Option<Value>> {
+    let Some(patch) = patch.filter(|patch| !patch.is_null()) else {
+        return Ok(None);
+    };
+    let Some(artifact_id) = patch.get("patch_artifact_id").and_then(Value::as_str) else {
+        return Ok(Some(patch.clone()));
+    };
+    if artifact_id.is_empty() {
+        return Ok(Some(patch.clone()));
+    }
+
+    let expected_run_id = format!("runner-exec-{}", job.id);
+    let artifact = store
+        .get_artifact(artifact_id)?
+        .filter(|artifact| artifact.run_id == expected_run_id)
+        .ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "runner capture-patch artifact {artifact_id} was reported by remote run {expected_run_id}, but no mirrored artifact record is available"
+            ))
+        })?;
+
+    let accessible = is_remote_runner_artifact_path(&artifact.path)
+        || fs::metadata(&artifact.path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false);
+    if !accessible {
+        return Err(Error::internal_unexpected(format!(
+            "runner capture-patch artifact {artifact_id} was mirrored for runner {}, but its mirrored path is not accessible: {}",
+            runner.id, artifact.path
+        )));
+    }
+
+    let mut patched = patch.clone();
+    if let Some(object) = patched.as_object_mut() {
+        object.insert(
+            "patch_artifact_path".to_string(),
+            Value::String(artifact.path),
+        );
+    }
+    Ok(Some(patched))
 }
 
 fn mirror_job_run(
@@ -562,6 +619,104 @@ mod tests {
                 run.metadata_json["lab"]["remote_job"]["id"].as_str(),
                 Some(job_id.to_string().as_str())
             );
+        });
+    }
+
+    #[test]
+    fn test_mirrored_patch_result_reports_accessible_artifact_token() {
+        crate::test_support::with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let runner = ssh_runner();
+            let job_id = Uuid::new_v4();
+            let job = Job {
+                id: job_id,
+                operation: "exec".to_string(),
+                status: JobStatus::Succeeded,
+                created_at_ms: 1_700_000_000_000,
+                updated_at_ms: 1_700_000_001_000,
+                started_at_ms: Some(1_700_000_000_000),
+                finished_at_ms: Some(1_700_000_001_000),
+                event_count: 0,
+                source_snapshot: None,
+                stale_reason: None,
+            };
+            let run_id = format!("runner-exec-{job_id}");
+            let artifact_id = format!("runner-fix-patch-{job_id}");
+            store
+                .import_run(&RunRecord {
+                    id: run_id.clone(),
+                    kind: "runner-exec".to_string(),
+                    component_id: None,
+                    started_at: "2026-05-16T00:00:00Z".to_string(),
+                    finished_at: Some("2026-05-16T00:00:01Z".to_string()),
+                    status: "pass".to_string(),
+                    command: Some("homeboy runner exec".to_string()),
+                    cwd: Some("/srv/project".to_string()),
+                    homeboy_version: None,
+                    git_sha: None,
+                    rig_id: None,
+                    metadata_json: json!({}),
+                })
+                .expect("import run");
+            let token = runner_artifact_token(&runner.id, &run_id, &artifact_id);
+            store
+                .import_artifact(&ArtifactRecord {
+                    id: artifact_id.clone(),
+                    run_id: run_id.clone(),
+                    kind: "lab_fix_patch".to_string(),
+                    artifact_type: "remote_file".to_string(),
+                    path: token.clone(),
+                    url: None,
+                    sha256: Some("abc".to_string()),
+                    size_bytes: Some(12),
+                    mime: Some("text/x-diff".to_string()),
+                    created_at: "2026-05-16T00:00:01Z".to_string(),
+                })
+                .expect("import artifact");
+
+            let patch = json!({
+                "patch_artifact_id": artifact_id,
+                "patch_artifact_path": "/srv/homeboy/.homeboy/artifacts/remote.diff",
+            });
+
+            let mirrored = mirrored_patch_result(&store, &runner, &job, Some(&patch))
+                .expect("mirror patch")
+                .expect("patch");
+
+            assert_eq!(mirrored["patch_artifact_path"], token);
+        });
+    }
+
+    #[test]
+    fn test_mirrored_patch_result_fails_when_patch_artifact_was_not_mirrored() {
+        crate::test_support::with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let runner = ssh_runner();
+            let job_id = Uuid::new_v4();
+            let job = Job {
+                id: job_id,
+                operation: "exec".to_string(),
+                status: JobStatus::Succeeded,
+                created_at_ms: 1_700_000_000_000,
+                updated_at_ms: 1_700_000_001_000,
+                started_at_ms: Some(1_700_000_000_000),
+                finished_at_ms: Some(1_700_000_001_000),
+                event_count: 0,
+                source_snapshot: None,
+                stale_reason: None,
+            };
+            let artifact_id = format!("runner-fix-patch-{job_id}");
+            let patch = json!({
+                "patch_artifact_id": artifact_id,
+                "patch_artifact_path": "/srv/homeboy/.homeboy/artifacts/remote.diff",
+            });
+
+            let err = mirrored_patch_result(&store, &runner, &job, Some(&patch))
+                .expect_err("missing mirror should fail");
+
+            assert!(err
+                .message
+                .contains("no mirrored artifact record is available"));
         });
     }
 
