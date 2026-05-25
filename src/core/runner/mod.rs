@@ -216,6 +216,51 @@ pub fn enable_server_runner(server_id: &str, patch: Value) -> Result<Runner> {
     Ok(runner_from_server(server_id, runner))
 }
 
+pub fn migrate_standalone_ssh_runner(id: &str, remove_legacy: bool) -> Result<Runner> {
+    let runner = config::load::<Runner>(id)?;
+    if !matches!(runner.kind, RunnerKind::Ssh) {
+        return Err(Error::validation_invalid_argument(
+            "runner_id",
+            "Only standalone SSH runners can be migrated to server capabilities",
+            Some(id.to_string()),
+            None,
+        ));
+    }
+
+    let server_id = runner.server_id.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "server_id",
+            "SSH runners require server_id before migration",
+            Some(id.to_string()),
+            None,
+        )
+    })?;
+    if server_id == id {
+        return Err(Error::validation_invalid_argument(
+            "runner_id",
+            "Runner already uses its server ID; no migration is needed",
+            Some(id.to_string()),
+            None,
+        ));
+    }
+
+    let mut server = server::load(server_id)?;
+    let mut server_runner = server.runner.unwrap_or_default();
+    server_runner.workspace_root = runner.workspace_root.clone();
+    server_runner.settings = runner.settings.clone();
+    server_runner.env.extend(runner.env.clone());
+    server_runner.resources.extend(runner.resources.clone());
+    validate_server_runner(server_id, &server_runner)?;
+    server.runner = Some(server_runner.clone());
+    server::save(&server)?;
+
+    if remove_legacy {
+        config::delete_safe::<Runner>(id)?;
+    }
+
+    Ok(runner_from_server(server_id, server_runner))
+}
+
 fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
     let id = value
         .get("id")
@@ -471,6 +516,85 @@ mod tests {
             let runner = load("lab-local").expect("load runner");
             assert_eq!(runner.workspace_root.as_deref(), Some("/tmp/b"));
             assert_eq!(runner.settings.concurrency_limit, Some(3));
+        });
+    }
+
+    #[test]
+    fn migrates_standalone_ssh_runner_to_server_capability() {
+        test_support::with_isolated_home(|_| {
+            server::create(
+                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"chubes"}"#,
+                false,
+            )
+            .expect("create server");
+
+            let legacy = Runner {
+                id: "lab".to_string(),
+                kind: RunnerKind::Ssh,
+                server_id: Some("homeboy-lab".to_string()),
+                workspace_root: Some("/home/chubes/Developer".to_string()),
+                settings: RunnerSettings {
+                    homeboy_path: Some("/usr/local/bin/homeboy".to_string()),
+                    daemon: true,
+                    concurrency_limit: Some(4),
+                    artifact_policy: Some("copy".to_string()),
+                },
+                env: HashMap::from([("RUST_LOG".to_string(), "info".to_string())]),
+                resources: HashMap::from([("cpu".to_string(), Value::from(16))]),
+            };
+            config::save(&legacy).expect("save legacy runner");
+
+            let migrated = migrate_standalone_ssh_runner("lab", false).expect("migrate runner");
+
+            assert_eq!(migrated.id, "homeboy-lab");
+            assert_eq!(migrated.server_id.as_deref(), Some("homeboy-lab"));
+            assert_eq!(
+                migrated.workspace_root.as_deref(),
+                Some("/home/chubes/Developer")
+            );
+            assert_eq!(
+                migrated.settings.homeboy_path.as_deref(),
+                Some("/usr/local/bin/homeboy")
+            );
+            assert!(migrated.settings.daemon);
+            assert_eq!(migrated.settings.concurrency_limit, Some(4));
+            assert_eq!(migrated.settings.artifact_policy.as_deref(), Some("copy"));
+            assert_eq!(
+                migrated.env.get("RUST_LOG").map(String::as_str),
+                Some("info")
+            );
+            assert_eq!(migrated.resources.get("cpu"), Some(&Value::from(16)));
+            assert!(config::exists::<Runner>("lab"));
+
+            let stored_server = server::load("homeboy-lab").expect("load server");
+            assert!(stored_server.runner.is_some());
+        });
+    }
+
+    #[test]
+    fn migrate_can_remove_legacy_runner_when_requested() {
+        test_support::with_isolated_home(|_| {
+            server::create(
+                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"chubes"}"#,
+                false,
+            )
+            .expect("create server");
+
+            let legacy = Runner {
+                id: "lab".to_string(),
+                kind: RunnerKind::Ssh,
+                server_id: Some("homeboy-lab".to_string()),
+                workspace_root: Some("/home/chubes/Developer".to_string()),
+                settings: RunnerSettings::default(),
+                env: HashMap::new(),
+                resources: HashMap::new(),
+            };
+            config::save(&legacy).expect("save legacy runner");
+
+            migrate_standalone_ssh_runner("lab", true).expect("migrate runner");
+
+            assert!(!config::exists::<Runner>("lab"));
+            assert!(load("homeboy-lab").is_ok());
         });
     }
 }

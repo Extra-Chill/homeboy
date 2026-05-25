@@ -122,6 +122,15 @@ enum RunnerCommand {
         #[arg(long)]
         artifact_policy: Option<String>,
     },
+    /// Migrate a legacy standalone SSH runner onto its referenced server
+    Migrate {
+        /// Legacy standalone SSH runner ID, for example `lab`
+        runner_id: String,
+
+        /// Delete the old standalone runner after copying it to the server
+        #[arg(long)]
+        remove_legacy: bool,
+    },
     /// List all configured runners
     List,
     /// Display runner configuration
@@ -295,6 +304,38 @@ pub fn run(
                 artifact_policy,
             },
         )),
+        RunnerCommand::Migrate {
+            runner_id,
+            remove_legacy,
+        } => map_registry({
+            let runner = runner::migrate_standalone_ssh_runner(&runner_id, remove_legacy)?;
+            let mut deleted = Vec::new();
+            let hint = if remove_legacy {
+                deleted.push(runner_id.to_string());
+                Some(format!(
+                    "Legacy runner '{runner_id}' was removed. Use runner ID '{}' for this Lab server.",
+                    runner.id
+                ))
+            } else {
+                Some(format!(
+                    "Legacy runner '{runner_id}' was preserved. Re-run with --remove-legacy after verifying runner '{}' works.",
+                    runner.id
+                ))
+            };
+
+            Ok((
+                RunnerOutput {
+                    command: "runner.migrate".to_string(),
+                    id: Some(runner.id.clone()),
+                    entity: Some(runner),
+                    updated_fields: vec!["server.runner".to_string()],
+                    deleted,
+                    hint,
+                    ..Default::default()
+                },
+                0,
+            ))
+        }),
         RunnerCommand::List => map_registry(list()),
         RunnerCommand::Show { id } => map_registry(show(&id)),
         RunnerCommand::Set { args } => map_registry(set(args)),
