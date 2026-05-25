@@ -916,10 +916,10 @@ mod tests {
             resource_policy::reset_captured_context_for_test();
 
             let synthetic = synthetic_resources(ResourceRecommendation::Hot);
-            let warning = resource_policy::evaluate(HotCommand { label: "bench" }, &synthetic)
+            let warning = resource_policy::evaluate(HotCommand::lab_supported("bench"), &synthetic)
                 .expect("synthetic warning");
             resource_policy::capture_context(ResourcePolicyContext::from_evaluation(
-                HotCommand { label: "bench" },
+                HotCommand::lab_supported("bench"),
                 &synthetic,
                 Some(&warning),
                 false,
@@ -983,10 +983,10 @@ mod tests {
             resource_policy::reset_captured_context_for_test();
 
             let synthetic = synthetic_resources(ResourceRecommendation::Hot);
-            let warning = resource_policy::evaluate(HotCommand { label: "bench" }, &synthetic)
+            let warning = resource_policy::evaluate(HotCommand::lab_supported("bench"), &synthetic)
                 .expect("synthetic warning");
             resource_policy::capture_context(ResourcePolicyContext::from_evaluation(
-                HotCommand { label: "bench" },
+                HotCommand::lab_supported("bench"),
                 &synthetic,
                 Some(&warning),
                 true,

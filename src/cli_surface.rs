@@ -198,6 +198,18 @@ impl Commands {
         }
     }
 
+    pub fn lab_runner_unsupported_reason(&self) -> Option<&'static str> {
+        match self {
+            Commands::Rig(args) if args.is_hot_resource_command() => Some(
+                "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.",
+            ),
+            Commands::Fleet(args) if args.is_hot_resource_command() => Some(
+                "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.",
+            ),
+            _ => None,
+        }
+    }
+
     pub fn lab_offload_mutation_flag(&self) -> Option<&'static str> {
         match self {
             Commands::Bench(args) if args.lab_offload_writes_local_state() => {
@@ -523,12 +535,34 @@ mod tests {
         assert!(parsed_command(&["homeboy", "audit"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "bench"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "trace"]).supports_lab_runner());
+        assert!(!parsed_command(&["homeboy", "rig", "up", "studio"]).supports_lab_runner());
+        assert!(
+            !parsed_command(&["homeboy", "fleet", "exec", "prod", "wp", "plugin", "list"])
+                .supports_lab_runner()
+        );
         assert!(!parsed_command(&["homeboy", "status"]).supports_lab_runner());
         assert!(!parsed_command(&["homeboy", "bench", "list"]).supports_lab_runner());
 
         let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
         assert_eq!(cli.runner.as_deref(), Some("lab-a"));
         assert!(cli.command.supports_lab_runner());
+    }
+
+    #[test]
+    fn test_lab_runner_unsupported_hot_command_reasons() {
+        assert!(parsed_command(&["homeboy", "rig", "up", "studio"])
+            .lab_runner_unsupported_reason()
+            .expect("rig up reason")
+            .contains("single-workspace Lab snapshot"));
+        assert!(
+            parsed_command(&["homeboy", "fleet", "exec", "prod", "wp", "plugin", "list"])
+                .lab_runner_unsupported_reason()
+                .expect("fleet exec reason")
+                .contains("config parity")
+        );
+        assert!(parsed_command(&["homeboy", "status"])
+            .lab_runner_unsupported_reason()
+            .is_none());
     }
 
     #[test]

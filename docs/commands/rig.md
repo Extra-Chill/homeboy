@@ -76,6 +76,9 @@ Runs the `up` pipeline. Mutating rig commands acquire a resource lease first whe
 `rig up` also participates in resource-policy warnings. If the machine is
 already warm or hot, Homeboy warns on stderr before adding more load. The warning
 is advisory only; use global `--force-hot` when the extra pressure is expected.
+`rig up` intentionally stays local for Lab offload: the pipeline can manage local
+services, leases, ports, and declared filesystem paths that are not portable
+through the current single-workspace runner snapshot.
 
 The pipeline can start services, run typed `git` / `build` / `extension` / `stack` steps, apply idempotent local patches, create symlinks/shared paths, and run checks.
 

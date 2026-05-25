@@ -74,6 +74,20 @@ Hot commands that support Lab offload (`audit`, full `lint`, `test`, `bench run`
 
 Observation metadata records the routing decision under `metadata.lab_offload` when an observed run is created. `source` is `automatic` or `explicit`; `status` is `offloaded`, `skipped`, or `fallback`; and successful offloads include `runner_id` plus `remote_workspace`. Local fallback records the runner and `fallback_reason`, while skipped local execution records why no automatic offload was used, such as `force_hot` or `no_default_runner`.
 
+Lab offload support is intentionally command-specific:
+
+| Command | Auto offload | Explicit `--runner` | Decision |
+|---|---:|---:|---|
+| `audit` full workspace | Yes | Yes | Safe single-workspace replay after snapshot sync. |
+| `bench run` / default bench run | Yes | Yes | Safe single-workspace replay; local baseline/ratchet writes are treated as mutation flags. |
+| `lint` full workspace | Yes | Yes | Safe single-workspace replay; `--fix` is treated as a mutation flag. |
+| `test` full workspace | Yes | Yes | Safe single-workspace replay with runner extension parity preflight. |
+| `trace` | Yes | Yes | Safe single-workspace replay with Playwright/browser capability gate. |
+| `rig up` | No | No | Stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace snapshot cannot safely mirror. |
+| `fleet exec` | No | No | Stays local because fleet execution depends on local fleet/project/server config before opening SSH sessions to each project; runner-side config parity is not guaranteed. |
+
+Unsupported hot commands still get resource-policy warnings, but those warnings explain why Lab offload is unavailable instead of suggesting `--runner`.
+
 Configure a preferred Lab runner with:
 
 ```sh

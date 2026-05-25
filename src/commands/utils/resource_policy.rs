@@ -11,6 +11,26 @@ use crate::commands::runner::doctor::RunnerDoctorOutput;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HotCommand {
     pub label: &'static str,
+    pub lab_offload_supported: bool,
+    pub lab_offload_unsupported_reason: Option<&'static str>,
+}
+
+impl HotCommand {
+    pub fn lab_supported(label: &'static str) -> Self {
+        Self {
+            label,
+            lab_offload_supported: true,
+            lab_offload_unsupported_reason: None,
+        }
+    }
+
+    fn local_only(label: &'static str, reason: Option<&'static str>) -> Self {
+        Self {
+            label,
+            lab_offload_supported: false,
+            lab_offload_unsupported_reason: reason,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,20 +271,23 @@ pub fn reset_captured_context_for_test() {
 }
 
 pub fn hot_command(command: &Commands) -> Option<HotCommand> {
-    match command {
-        Commands::Bench(args) if args.is_run_command() => Some(HotCommand { label: "bench" }),
-        Commands::Rig(args) if args.is_hot_resource_command() => {
-            Some(HotCommand { label: "rig up" })
-        }
-        Commands::Fleet(args) if args.is_hot_resource_command() => Some(HotCommand {
-            label: "fleet exec",
-        }),
-        Commands::Audit(args) if args.changed_since.is_none() && !args.conventions => {
-            Some(HotCommand { label: "audit" })
-        }
-        Commands::Lint(args) if args.is_full_workspace_run() => Some(HotCommand { label: "lint" }),
-        Commands::Test(args) if args.changed_since.is_none() => Some(HotCommand { label: "test" }),
-        _ => None,
+    let label = match command {
+        Commands::Bench(args) if args.is_run_command() => "bench",
+        Commands::Rig(args) if args.is_hot_resource_command() => "rig up",
+        Commands::Fleet(args) if args.is_hot_resource_command() => "fleet exec",
+        Commands::Audit(args) if args.changed_since.is_none() && !args.conventions => "audit",
+        Commands::Lint(args) if args.is_full_workspace_run() => "lint",
+        Commands::Test(args) if args.changed_since.is_none() => "test",
+        _ => return None,
+    };
+
+    if command.supports_lab_runner() {
+        Some(HotCommand::lab_supported(label))
+    } else {
+        Some(HotCommand::local_only(
+            label,
+            command.lab_runner_unsupported_reason(),
+        ))
     }
 }
 
@@ -416,20 +439,31 @@ pub fn evaluate(command: HotCommand, resources: &DoctorOutput) -> Option<Resourc
         recommendation => Some(ResourcePolicyWarning {
             command: command.label,
             recommendation,
-            message: warning_message(command.label, recommendation, resources),
+            message: warning_message(command, recommendation, resources),
         }),
     }
 }
 
 fn warning_message(
-    command: &'static str,
+    command: HotCommand,
     recommendation: ResourceRecommendation,
     resources: &DoctorOutput,
 ) -> String {
     let severity = severity_str(recommendation);
     let reason = primary_reason(resources);
+    if command.lab_offload_supported {
+        return format!(
+            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Connect a default Homeboy Lab runner or use --runner <id> to offload this hot command, or use --force-hot to run locally without this warning.",
+            command.label
+        );
+    }
+
+    let local_only_reason = command
+        .lab_offload_unsupported_reason
+        .unwrap_or("This hot command does not have a portable Lab offload contract yet.");
     format!(
-        "Resource policy warning: machine is {severity}; starting `{command}` may skew results or add pressure. {reason} Connect a default Homeboy Lab runner or use --runner <id> to offload this hot command, or use --force-hot to run locally without this warning."
+        "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} {local_only_reason} Use --force-hot to run locally without this warning.",
+        command.label
     )
 }
 
@@ -542,10 +576,26 @@ mod tests {
         }
     }
 
+    fn lab_supported_hot(label: &'static str) -> HotCommand {
+        HotCommand {
+            label,
+            lab_offload_supported: true,
+            lab_offload_unsupported_reason: None,
+        }
+    }
+
+    fn local_only_hot(label: &'static str, reason: &'static str) -> HotCommand {
+        HotCommand {
+            label,
+            lab_offload_supported: false,
+            lab_offload_unsupported_reason: Some(reason),
+        }
+    }
+
     #[test]
     fn warns_when_hot_command_runs_on_warm_or_hot_machine() {
         let warning = evaluate(
-            HotCommand { label: "bench" },
+            lab_supported_hot("bench"),
             &resources(ResourceRecommendation::Hot),
         )
         .expect("hot machines warn");
@@ -556,16 +606,29 @@ mod tests {
         assert!(warning.message.contains("Load average is 9.0"));
 
         assert!(evaluate(
-            HotCommand { label: "bench" },
+            lab_supported_hot("bench"),
             &resources(ResourceRecommendation::Warm)
         )
         .is_some());
     }
 
     #[test]
+    fn warning_for_local_only_hot_command_explains_runner_unavailability() {
+        let warning = evaluate(
+            local_only_hot("rig up", "`rig up` stays local for test reasons."),
+            &resources(ResourceRecommendation::Hot),
+        )
+        .expect("hot machines warn");
+
+        assert!(warning.message.contains("`rig up` stays local"));
+        assert!(warning.message.contains("--force-hot"));
+        assert!(!warning.message.contains("--runner <id>"));
+    }
+
+    #[test]
     fn does_not_warn_when_machine_is_ok() {
         assert!(evaluate(
-            HotCommand { label: "bench" },
+            lab_supported_hot("bench"),
             &resources(ResourceRecommendation::Ok)
         )
         .is_none());
@@ -574,9 +637,9 @@ mod tests {
     #[test]
     fn context_records_severity_warning_and_host_snapshot_when_hot() {
         let resources = resources(ResourceRecommendation::Hot);
-        let warning = evaluate(HotCommand { label: "bench" }, &resources).expect("warning");
+        let warning = evaluate(lab_supported_hot("bench"), &resources).expect("warning");
         let context = ResourcePolicyContext::from_evaluation(
-            HotCommand { label: "bench" },
+            lab_supported_hot("bench"),
             &resources,
             Some(&warning),
             false,
@@ -604,9 +667,9 @@ mod tests {
     #[test]
     fn context_records_force_hot_bypass_for_hot_machine() {
         let resources = resources(ResourceRecommendation::Hot);
-        let warning = evaluate(HotCommand { label: "bench" }, &resources).expect("warning");
+        let warning = evaluate(lab_supported_hot("bench"), &resources).expect("warning");
         let context = ResourcePolicyContext::from_evaluation(
-            HotCommand { label: "bench" },
+            lab_supported_hot("bench"),
             &resources,
             Some(&warning),
             true,
@@ -621,9 +684,9 @@ mod tests {
     #[test]
     fn context_records_ok_machine_with_no_warning() {
         let resources = resources(ResourceRecommendation::Ok);
-        assert!(evaluate(HotCommand { label: "bench" }, &resources).is_none());
+        assert!(evaluate(lab_supported_hot("bench"), &resources).is_none());
         let context = ResourcePolicyContext::from_evaluation(
-            HotCommand { label: "bench" },
+            lab_supported_hot("bench"),
             &resources,
             None,
             false,
@@ -645,7 +708,7 @@ mod tests {
             recommendation: ResourceRecommendation::Warm,
         });
         let context = ResourcePolicyContext::from_evaluation(
-            HotCommand { label: "bench" },
+            lab_supported_hot("bench"),
             &resources,
             None,
             false,
@@ -659,9 +722,9 @@ mod tests {
     #[test]
     fn context_serializes_to_json_with_expected_keys() {
         let resources = resources(ResourceRecommendation::Hot);
-        let warning = evaluate(HotCommand { label: "bench" }, &resources).expect("warning");
+        let warning = evaluate(lab_supported_hot("bench"), &resources).expect("warning");
         let context = ResourcePolicyContext::from_evaluation(
-            HotCommand { label: "bench" },
+            lab_supported_hot("bench"),
             &resources,
             Some(&warning),
             false,

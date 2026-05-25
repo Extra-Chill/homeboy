@@ -517,11 +517,16 @@ fn resolve_lab_runner_selection_from_default(
 ) -> homeboy::core::Result<Option<LabRunnerSelection>> {
     if let Some(runner_id) = explicit_runner {
         if !command.supports_lab_runner() {
+            let reason = command.lab_runner_unsupported_reason();
+            let message = reason.map_or_else(
+                || "--runner is only supported for hot Lab-offload commands: lint, test, audit, bench, and trace".to_string(),
+                |reason| format!("--runner is unavailable for this hot command. {reason}"),
+            );
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "runner",
-                "--runner is only supported for hot Lab-offload commands: lint, test, audit, bench, and trace",
+                message,
                 Some(runner_id.to_string()),
-                None,
+                Some(vec!["Current Lab offload support: audit, bench run, full lint, full test, and trace.".to_string()]),
             ));
         }
 
@@ -1015,6 +1020,7 @@ mod tests {
         rewrite_lab_offload_args, runner_extension_preflight_tail, LabRunnerPreparation,
         LabRunnerSelection, LabRunnerSelectionSource,
     };
+    use clap::Parser;
     use homeboy::cli_surface::Commands;
     use homeboy::commands::test::TestArgs;
     use homeboy::commands::utils::args::{
@@ -1310,6 +1316,22 @@ mod tests {
         .expect_err("unsupported command rejects explicit runner");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    }
+
+    #[test]
+    fn lab_runner_selection_explains_hot_commands_that_stay_local() {
+        let err = resolve_lab_runner_selection_from_default(
+            &homeboy::cli_surface::Cli::try_parse_from(["homeboy", "rig", "up", "studio"])
+                .expect("parse")
+                .command,
+            Some("lab-explicit"),
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect_err("rig up rejects explicit runner");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("single-workspace Lab snapshot"));
     }
 
     #[test]

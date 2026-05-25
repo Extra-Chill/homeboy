@@ -131,6 +131,14 @@ Returns per-project status with:
 
 Summary includes counts for quick overview.
 
+### `exec`
+
+```sh
+homeboy fleet exec <id> -- <command>
+```
+
+Runs a command across projects in the fleet via each project's configured SSH connection. `fleet exec` participates in resource-policy warnings because it can create heavy remote work, but it intentionally stays local for Lab offload: the command depends on local fleet, project, and server configuration before opening those SSH sessions, and runner-side config parity is not guaranteed.
+
 ### `sync` (deprecated)
 
 > **Deprecated.** Use `homeboy deploy` to sync files across servers instead. Register shared configs as components and deploy them like any other component. See [#101](https://github.com/Extra-Chill/homeboy/issues/101).
