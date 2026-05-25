@@ -1,5 +1,8 @@
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use homeboy::cli_surface::Cli;
 use homeboy::cli_surface::Commands;
@@ -174,14 +177,26 @@ fn main() -> std::process::ExitCode {
                 );
             }
 
-            let capture_patch = cli.command.lab_offload_mutation_flag().is_some();
-            return run_lab_offload(
-                &selection.runner_id,
-                &cli.command,
-                &normalized,
-                output_file.as_deref(),
-                capture_patch,
-            );
+            match prepare_lab_runner_for_offload(&selection) {
+                Ok(LabRunnerPreparation::Ready) => {
+                    let capture_patch = cli.command.lab_offload_mutation_flag().is_some();
+                    return run_lab_offload(
+                        &selection.runner_id,
+                        &cli.command,
+                        &normalized,
+                        output_file.as_deref(),
+                        capture_patch,
+                    );
+                }
+                Ok(LabRunnerPreparation::FallBackLocal { reason }) => {
+                    eprintln!("Lab offload: {reason}; running locally.");
+                    // Continue into the normal local command path below.
+                }
+                Err(err) => {
+                    emit_json_result(Err(err), output_file.as_deref(), 2);
+                    return std::process::ExitCode::from(exit_code_to_u8(2));
+                }
+            }
         }
         Ok(None) => {}
         Err(err) => {
@@ -263,6 +278,191 @@ enum LabRunnerSelectionSource {
 struct LabRunnerSelection {
     runner_id: String,
     source: LabRunnerSelectionSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LabRunnerPreparation {
+    Ready,
+    FallBackLocal { reason: String },
+}
+
+const AUTO_LAB_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const EXPLICIT_LAB_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn prepare_lab_runner_for_offload(
+    selection: &LabRunnerSelection,
+) -> homeboy::core::Result<LabRunnerPreparation> {
+    let runner = homeboy::core::runner::load(&selection.runner_id)?;
+    if runner.kind != homeboy::core::runner::RunnerKind::Ssh {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "runner",
+            "Lab offload requires a remote SSH runner; local runners would execute on this machine",
+            Some(runner.id),
+            Some(vec![
+                "Register an SSH runner before using Lab offload.".to_string()
+            ]),
+        ));
+    }
+
+    prepare_lab_runner_for_offload_with(selection, homeboy::core::runner::status, |runner_id| {
+        connect_runner_for_offload(runner_id, selection.source)
+    })
+}
+
+fn connect_runner_for_offload(
+    runner_id: &str,
+    source: LabRunnerSelectionSource,
+) -> homeboy::core::Result<(homeboy::core::runner::RunnerConnectReport, i32)> {
+    let timeout = match source {
+        LabRunnerSelectionSource::Explicit => EXPLICIT_LAB_CONNECT_TIMEOUT,
+        LabRunnerSelectionSource::Default => AUTO_LAB_CONNECT_TIMEOUT,
+    };
+    let (stdout, stderr, exit_code, timed_out) = run_runner_connect_command(runner_id, timeout)?;
+    let status = homeboy::core::runner::status(runner_id)?;
+
+    if status.connected {
+        if let Some(session) = status.session {
+            return Ok((
+                homeboy::core::runner::RunnerConnectReport {
+                    runner_id: runner_id.to_string(),
+                    connected: true,
+                    local_url: Some(session.local_url),
+                    remote_daemon_address: Some(session.remote_daemon_address),
+                    tunnel_pid: session.tunnel_pid,
+                    remote_daemon_pid: session.remote_daemon_pid,
+                    homeboy_version: Some(session.homeboy_version),
+                    session_path: Some(status.session_path),
+                    failure_kind: None,
+                    failure_message: None,
+                },
+                0,
+            ));
+        }
+    }
+
+    let reason = if timed_out {
+        format!("runner connect timed out after {}s", timeout.as_secs())
+    } else {
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        if detail.is_empty() {
+            format!("runner connect exited with code {exit_code}")
+        } else {
+            format!("runner connect exited with code {exit_code}: {detail}")
+        }
+    };
+
+    Ok((
+        homeboy::core::runner::RunnerConnectReport {
+            runner_id: runner_id.to_string(),
+            connected: false,
+            local_url: None,
+            remote_daemon_address: None,
+            tunnel_pid: None,
+            remote_daemon_pid: None,
+            homeboy_version: None,
+            session_path: Some(status.session_path),
+            failure_kind: Some(homeboy::core::runner::RunnerFailureKind::SshFailure),
+            failure_message: Some(reason),
+        },
+        exit_code,
+    ))
+}
+
+fn run_runner_connect_command(
+    runner_id: &str,
+    timeout: Duration,
+) -> homeboy::core::Result<(String, String, i32, bool)> {
+    let exe = std::env::current_exe().map_err(|err| {
+        homeboy::core::Error::internal_io(
+            err.to_string(),
+            Some("resolve homeboy executable".into()),
+        )
+    })?;
+    let mut child = std::process::Command::new(exe)
+        .args(["runner", "connect", runner_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            homeboy::core::Error::internal_io(err.to_string(), Some("start runner connect".into()))
+        })?;
+    let deadline = std::time::Instant::now() + timeout;
+
+    loop {
+        if let Some(status) = child.try_wait().map_err(|err| {
+            homeboy::core::Error::internal_io(err.to_string(), Some("wait runner connect".into()))
+        })? {
+            let mut stdout = String::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                let _ = pipe.read_to_string(&mut stdout);
+            }
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            return Ok((stdout, stderr, status.code().unwrap_or(-1), false));
+        }
+
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok((String::new(), String::new(), 124, true));
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn prepare_lab_runner_for_offload_with(
+    selection: &LabRunnerSelection,
+    status_fn: impl Fn(&str) -> homeboy::core::Result<homeboy::core::runner::RunnerStatusReport>,
+    connect_fn: impl Fn(
+        &str,
+    ) -> homeboy::core::Result<(homeboy::core::runner::RunnerConnectReport, i32)>,
+) -> homeboy::core::Result<LabRunnerPreparation> {
+    let status = status_fn(&selection.runner_id)?;
+    if status.connected {
+        return Ok(LabRunnerPreparation::Ready);
+    }
+
+    eprintln!(
+        "Lab offload: runner `{}` is not connected; attempting connection.",
+        selection.runner_id
+    );
+    let (report, _) = connect_fn(&selection.runner_id)?;
+    if report.connected {
+        return Ok(LabRunnerPreparation::Ready);
+    }
+
+    let reason = report
+        .failure_message
+        .unwrap_or_else(|| "runner connection did not become ready".to_string());
+
+    match selection.source {
+        LabRunnerSelectionSource::Default => Ok(LabRunnerPreparation::FallBackLocal { reason }),
+        LabRunnerSelectionSource::Explicit => {
+            Err(homeboy::core::Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "Lab offload could not connect runner `{}` before execution: {reason}",
+                    selection.runner_id
+                ),
+                Some(selection.runner_id.clone()),
+                Some(vec![
+                    format!(
+                        "Run `homeboy runner connect {}` for full diagnostics.",
+                        selection.runner_id
+                    ),
+                    "Use --force-hot to run the command locally instead of offloading.".to_string(),
+                ]),
+            ))
+        }
+    }
 }
 
 fn resolve_lab_runner_selection(
@@ -762,8 +962,9 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
 mod tests {
     use super::{
         lab_offload_source_path, lab_offload_test_extension_ids,
-        resolve_lab_runner_selection_from_default, rewrite_lab_offload_args,
-        runner_extension_preflight_tail, LabRunnerSelectionSource,
+        prepare_lab_runner_for_offload_with, resolve_lab_runner_selection_from_default,
+        rewrite_lab_offload_args, runner_extension_preflight_tail, LabRunnerPreparation,
+        LabRunnerSelection, LabRunnerSelectionSource,
     };
     use homeboy::cli_surface::Commands;
     use homeboy::commands::test::TestArgs;
@@ -1060,5 +1261,154 @@ mod tests {
         .expect_err("unsupported command rejects explicit runner");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    }
+
+    #[test]
+    fn lab_runner_preparation_uses_already_connected_runner() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+        };
+
+        let prepared = prepare_lab_runner_for_offload_with(
+            &selection,
+            |runner_id| {
+                Ok(homeboy::core::runner::RunnerStatusReport {
+                    runner_id: runner_id.to_string(),
+                    connected: true,
+                    session: None,
+                    session_path: "/tmp/lab.json".to_string(),
+                })
+            },
+            |_| panic!("connected runner should not reconnect"),
+        )
+        .expect("prepared");
+
+        assert_eq!(prepared, LabRunnerPreparation::Ready);
+    }
+
+    #[test]
+    fn lab_runner_preparation_connects_disconnected_runner() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+        };
+
+        let prepared = prepare_lab_runner_for_offload_with(
+            &selection,
+            |runner_id| {
+                Ok(homeboy::core::runner::RunnerStatusReport {
+                    runner_id: runner_id.to_string(),
+                    connected: false,
+                    session: None,
+                    session_path: "/tmp/lab.json".to_string(),
+                })
+            },
+            |runner_id| {
+                Ok((
+                    homeboy::core::runner::RunnerConnectReport {
+                        runner_id: runner_id.to_string(),
+                        connected: true,
+                        local_url: Some("http://127.0.0.1:1234".to_string()),
+                        remote_daemon_address: Some("127.0.0.1:5678".to_string()),
+                        tunnel_pid: None,
+                        remote_daemon_pid: Some(42),
+                        homeboy_version: Some("homeboy 0.0.0".to_string()),
+                        session_path: Some("/tmp/lab.json".to_string()),
+                        failure_kind: None,
+                        failure_message: None,
+                    },
+                    0,
+                ))
+            },
+        )
+        .expect("prepared");
+
+        assert_eq!(prepared, LabRunnerPreparation::Ready);
+    }
+
+    #[test]
+    fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+        };
+
+        let prepared = prepare_lab_runner_for_offload_with(
+            &selection,
+            |runner_id| {
+                Ok(homeboy::core::runner::RunnerStatusReport {
+                    runner_id: runner_id.to_string(),
+                    connected: false,
+                    session: None,
+                    session_path: "/tmp/lab.json".to_string(),
+                })
+            },
+            |runner_id| {
+                Ok((
+                    homeboy::core::runner::RunnerConnectReport {
+                        runner_id: runner_id.to_string(),
+                        connected: false,
+                        local_url: None,
+                        remote_daemon_address: None,
+                        tunnel_pid: None,
+                        remote_daemon_pid: None,
+                        homeboy_version: None,
+                        session_path: Some("/tmp/lab.json".to_string()),
+                        failure_kind: Some(homeboy::core::runner::RunnerFailureKind::SshFailure),
+                        failure_message: Some("SSH connectivity check failed".to_string()),
+                    },
+                    20,
+                ))
+            },
+        )
+        .expect("prepared");
+
+        assert_eq!(
+            prepared,
+            LabRunnerPreparation::FallBackLocal {
+                reason: "SSH connectivity check failed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+        };
+
+        let err = prepare_lab_runner_for_offload_with(
+            &selection,
+            |runner_id| {
+                Ok(homeboy::core::runner::RunnerStatusReport {
+                    runner_id: runner_id.to_string(),
+                    connected: false,
+                    session: None,
+                    session_path: "/tmp/lab.json".to_string(),
+                })
+            },
+            |runner_id| {
+                Ok((
+                    homeboy::core::runner::RunnerConnectReport {
+                        runner_id: runner_id.to_string(),
+                        connected: false,
+                        local_url: None,
+                        remote_daemon_address: None,
+                        tunnel_pid: None,
+                        remote_daemon_pid: None,
+                        homeboy_version: None,
+                        session_path: Some("/tmp/lab.json".to_string()),
+                        failure_kind: Some(homeboy::core::runner::RunnerFailureKind::SshFailure),
+                        failure_message: Some("SSH connectivity check failed".to_string()),
+                    },
+                    20,
+                ))
+            },
+        )
+        .expect_err("explicit runner should error");
+
+        assert!(err.message.contains("could not connect runner"));
     }
 }
