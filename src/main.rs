@@ -428,6 +428,13 @@ fn rewrite_lab_offload_args(args: &[String], remote_path: &str) -> Vec<String> {
         if arg.starts_with("--runner=") {
             continue;
         }
+        if arg == "--output" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--output=") {
+            continue;
+        }
         stripped.push(arg.clone());
     }
     stripped
@@ -572,6 +579,39 @@ mod tests {
                 "--path=/home/chubes/Developer/project".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn strips_local_output_path_before_remote_exec() {
+        let args = vec![
+            "homeboy".to_string(),
+            "audit".to_string(),
+            "--path".to_string(),
+            "/Users/chubes/Developer/project".to_string(),
+            "--runner".to_string(),
+            "lab".to_string(),
+            "--json-summary".to_string(),
+            "--output".to_string(),
+            "/var/folders/local/homeboy-audit.json".to_string(),
+            "--output=/tmp/other-local-output.json".to_string(),
+        ];
+
+        let rewritten = rewrite_lab_offload_args(&args, "/home/chubes/Developer/project");
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy".to_string(),
+                "audit".to_string(),
+                "--path".to_string(),
+                "/home/chubes/Developer/project".to_string(),
+                "--json-summary".to_string(),
+            ]
+        );
+        assert!(!rewritten.iter().any(|arg| arg.contains("/var/folders")));
+        assert!(!rewritten
+            .iter()
+            .any(|arg| arg.contains("/tmp/other-local-output.json")));
     }
 
     #[test]

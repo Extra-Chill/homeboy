@@ -51,8 +51,8 @@ use self::detectors::{
     aggregate_construction, config_key_usage, core_boundary_leak, dead_guard, deprecation_age,
     enum_dispatch_contracts, facade_passthrough, field_patterns, global_env_guard,
     mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
-    repeated_literal_shape, requested_detectors, rust_test_wiring, shared_scaffolding,
-    test_coverage, test_topology, wrapper_inference,
+    repeated_literal_shape, requested_detectors, runner_offload_preflight, rust_test_wiring,
+    shared_scaffolding, test_coverage, test_topology, wrapper_inference,
 };
 
 pub use checks::{CheckResult, CheckStatus};
@@ -304,6 +304,11 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
         requires_discovery: true,
     },
     DetectorFamily {
+        id: "runner_offload_preflight",
+        findings: &[AuditFinding::RunnerOffloadPreflight],
+        requires_discovery: true,
+    },
+    DetectorFamily {
         id: "enum_dispatch_contracts",
         findings: &[AuditFinding::RepeatedEnumDispatchContract],
         requires_discovery: true,
@@ -458,6 +463,10 @@ impl AuditExecutionPlan {
 
     pub(crate) fn run_parallel_runner_setup(&self) -> bool {
         self.detector_enabled("parallel_runner_setup")
+    }
+
+    pub(crate) fn run_runner_offload_preflight(&self) -> bool {
+        self.detector_enabled("runner_offload_preflight")
     }
 
     pub(crate) fn run_enum_dispatch_contracts(&self) -> bool {
@@ -1310,6 +1319,22 @@ fn audit_internal(
             parallel_runner_findings.len()
         );
         all_findings.extend(parallel_runner_findings);
+    }
+
+    // Phase 4w1: Runner/offload preflight detection — remote dispatch sites
+    // that do not prove path/artifact parity before runner execution.
+    let runner_offload_findings = if plan.run_runner_offload_preflight() {
+        runner_offload_preflight::run(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
+    if !runner_offload_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Runner offload preflight: {} finding(s) (remote path/artifact parity gaps)",
+            runner_offload_findings.len()
+        );
+        all_findings.extend(runner_offload_findings);
     }
 
     // Phase 4w: Repeated enum-dispatch contract detection.

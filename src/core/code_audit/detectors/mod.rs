@@ -14,6 +14,7 @@ pub(super) mod public_registry_exposure;
 pub(super) mod redirect_validation;
 pub(super) mod repeated_literal_shape;
 pub(super) mod requested_detectors;
+pub(super) mod runner_offload_preflight;
 pub(super) mod rust_test_wiring;
 pub(super) mod shared_scaffolding;
 pub(super) mod test_coverage;
