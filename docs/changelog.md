@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.198.5] - 2026-05-25
+
+### Changed
+- Add output contract audit coverage
+- Strengthen runner offload parity audit
+
 ## [0.198.4] - 2026-05-25
 
 ### Changed
