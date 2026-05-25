@@ -271,19 +271,6 @@ fn no_parallel_for_generic_names() {
 }
 
 #[test]
-fn extract_calls_skips_keywords() {
-    let body = "if something() {\n    let x = process();\n    for item in list() {\n        handle(item);\n    }\n}";
-    let calls = extract_calls_from_body(body, &std::collections::HashSet::new());
-    assert!(calls.contains(&"something".to_string()));
-    assert!(calls.contains(&"process".to_string()));
-    assert!(calls.contains(&"list".to_string()));
-    assert!(calls.contains(&"handle".to_string()));
-    assert!(!calls.contains(&"if".to_string()));
-    assert!(!calls.contains(&"for".to_string()));
-    assert!(!calls.contains(&"let".to_string()));
-}
-
-#[test]
 fn jaccard_identical_sets() {
     let a = vec!["foo".to_string(), "bar".to_string()];
     assert!((jaccard_similarity(&a, &a) - 1.0).abs() < f64::EPSILON);
@@ -626,9 +613,9 @@ fn extension_plumbing_calls_filter_out_of_signal() {
 #[test]
 fn extension_call_lists_fix_env_path_helper_fp_2333() {
     // Direct regression for issue #2333: `cache_fallback_root` ↔ `homeboy_data`
-    // both call `var`, `cfg`, `not`, `internal_unexpected` (Rust env-derived
+    // both call `var`, `cfg`, `not`, `internal_unexpected` (environment-derived
     // path plumbing). Without extension hints the detector flags them; with
-    // the rust manifest declaring those calls as trivial/plumbing, no FP.
+    // extension config declaring those calls as trivial/plumbing, no FP.
     let cache = make_fingerprint_with_content(
             "src/core/cache.rs",
             &["cache_fallback_root"],
@@ -645,7 +632,7 @@ fn extension_call_lists_fix_env_path_helper_fp_2333() {
     // gate that may also suppress this. We only require that the extension
     // hook genuinely silences it.
 
-    // With extension config matching the rust manifest:
+    // With extension config matching the component manifest:
     let cfg = DuplicationDetectorConfig {
         trivial_calls: vec!["var".to_string(), "cfg".to_string(), "not".to_string()],
         plumbing_calls: vec!["internal_unexpected".to_string()],
@@ -654,7 +641,7 @@ fn extension_call_lists_fix_env_path_helper_fp_2333() {
         detect_parallel_implementations(&[&cache, &data], &std::collections::HashSet::new(), &cfg);
     assert!(
             findings.is_empty(),
-            "Issue #2333: env-derived path helpers should NOT flag once rust extension supplies trivial/plumbing lists, got: {:?}",
+            "Issue #2333: env-derived path helpers should NOT flag once extension config supplies trivial/plumbing lists, got: {:?}",
             findings.iter().map(|f| &f.description).collect::<Vec<_>>()
         );
 }
