@@ -1,4 +1,4 @@
-//! Runner/offload preflight detector.
+//! Remote execution preflight detector.
 //!
 //! Flags remote runner dispatch sites that can hand local paths or artifacts to
 //! a runner without an explicit translation/mirror contract.
@@ -6,16 +6,23 @@
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use crate::core::component::audit::RemoteExecutionSafetyConfig;
 
-pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(
+    fingerprints: &[&FileFingerprint],
+    config: &RemoteExecutionSafetyConfig,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
+    let policy = RemoteExecutionSafetyPolicy::new(config);
 
     for fp in fingerprints {
-        if super::walker::is_test_path(&fp.relative_path) || !is_remote_dispatch_file(&fp.content) {
+        if super::walker::is_test_path(&fp.relative_path)
+            || !is_remote_dispatch_file(&fp.content, &policy)
+        {
             continue;
         }
 
-        if forwards_args_without_path_preflight(&fp.content) {
+        if forwards_args_without_path_preflight(&fp.content, &policy) {
             findings.push(finding(
                 fp,
                 "Remote runner dispatch builds command argv from caller args without an explicit path-translation preflight.",
@@ -23,15 +30,15 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
             ));
         }
 
-        if captures_artifacts_without_snapshot(&fp.content) {
+        if captures_artifacts_without_snapshot(&fp.content, &policy) {
             findings.push(finding(
                 fp,
                 "Remote runner dispatch can request artifact capture without a source snapshot or mirror contract.",
-                "Attach source_snapshot or an equivalent mirror verification contract before reporting remote artifacts as run evidence.",
+                "Attach a source snapshot or equivalent mirror verification contract before reporting remote artifacts as run evidence.",
             ));
         }
 
-        if dispatches_without_capability_preflight(&fp.content) {
+        if dispatches_without_capability_preflight(&fp.content, &policy) {
             findings.push(finding(
                 fp,
                 "Remote runner dispatch starts execution without validating runner capability parity first.",
@@ -39,7 +46,7 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
             ));
         }
 
-        if dispatches_extension_without_parity_preflight(&fp.content) {
+        if dispatches_extension_without_parity_preflight(&fp.content, &policy) {
             findings.push(finding(
                 fp,
                 "Remote runner dispatch accepts an extension selector without validating runner extension parity before execution.",
@@ -47,7 +54,7 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
             ));
         }
 
-        if reports_remote_artifact_without_access_check(&fp.content) {
+        if reports_remote_artifact_without_access_check(&fp.content, &policy) {
             findings.push(finding(
                 fp,
                 "Remote runner artifact reporting does not prove the reported artifact path is locally accessible or retrievable.",
@@ -61,15 +68,80 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
     findings
 }
 
-fn is_remote_dispatch_file(content: &str) -> bool {
-    content.contains("RunnerExecOptions")
-        || content.contains("runner::exec")
-        || content.contains("core::runner::exec")
-        || content.contains("patch_artifact_path")
-        || content.contains("runner-artifact://")
+struct RemoteExecutionSafetyPolicy<'a> {
+    dispatch_markers: Vec<&'a str>,
+    path_translation_markers: Vec<&'a str>,
+    capability_preflight_markers: Vec<&'a str>,
+    artifact_capture_markers: Vec<&'a str>,
+    artifact_snapshot_markers: Vec<&'a str>,
+    extension_parity_markers: Vec<&'a str>,
+    artifact_report_markers: Vec<&'a str>,
+    artifact_access_markers: Vec<&'a str>,
 }
 
-fn forwards_args_without_path_preflight(content: &str) -> bool {
+impl<'a> RemoteExecutionSafetyPolicy<'a> {
+    fn new(config: &'a RemoteExecutionSafetyConfig) -> Self {
+        Self {
+            dispatch_markers: with_defaults(
+                &["RunnerExecOptions", "runner::exec", "core::runner::exec"],
+                &config.dispatch_markers,
+            ),
+            path_translation_markers: with_defaults(
+                &[
+                    "translate_remote_path",
+                    "remote_path",
+                    "sync_workspace",
+                    "strip_local_output",
+                ],
+                &config.path_translation_markers,
+            ),
+            capability_preflight_markers: with_defaults(
+                &["RunnerDoctorOutput", "runner doctor", "capability_plan"],
+                &config.capability_preflight_markers,
+            ),
+            artifact_capture_markers: with_defaults(&[], &config.artifact_capture_markers),
+            artifact_snapshot_markers: with_defaults(&[], &config.artifact_snapshot_markers),
+            extension_parity_markers: with_defaults(
+                &[
+                    "extension_parity",
+                    "required_extensions",
+                    "runner_extension",
+                    "validate_runner_extension",
+                ],
+                &config.extension_parity_markers,
+            ),
+            artifact_report_markers: with_defaults(
+                &["runner-artifact://", "artifact.path"],
+                &config.artifact_report_markers,
+            ),
+            artifact_access_markers: with_defaults(
+                &[
+                    "download_remote_artifact",
+                    "fs::metadata",
+                    ".is_file()",
+                    "get_artifact",
+                ],
+                &config.artifact_access_markers,
+            ),
+        }
+    }
+}
+
+fn with_defaults<'a>(defaults: &[&'a str], configured: &'a [String]) -> Vec<&'a str> {
+    let mut markers = defaults.to_vec();
+    markers.extend(configured.iter().map(String::as_str));
+    markers
+}
+
+fn is_remote_dispatch_file(content: &str, policy: &RemoteExecutionSafetyPolicy) -> bool {
+    contains_any(content, &policy.dispatch_markers)
+        || contains_any(content, &policy.artifact_report_markers)
+}
+
+fn forwards_args_without_path_preflight(
+    content: &str,
+    policy: &RemoteExecutionSafetyPolicy,
+) -> bool {
     let forwards_caller_args = contains_any(
         content,
         &[
@@ -79,78 +151,46 @@ fn forwards_args_without_path_preflight(content: &str) -> bool {
             "command.extend(args",
         ],
     );
-    let has_path_preflight = contains_any(
-        content,
-        &[
-            "rewrite_lab_offload_args",
-            "translate_remote_path",
-            "remote_path",
-            "sync_workspace",
-            "strip_local_output",
-        ],
-    );
+    let has_path_preflight = contains_any(content, &policy.path_translation_markers);
 
     forwards_caller_args && !has_path_preflight
 }
 
-fn captures_artifacts_without_snapshot(content: &str) -> bool {
-    content.contains("capture_patch: true") && !content.contains("source_snapshot")
+fn captures_artifacts_without_snapshot(
+    content: &str,
+    policy: &RemoteExecutionSafetyPolicy,
+) -> bool {
+    contains_any(content, &policy.artifact_capture_markers)
+        && !contains_any(content, &policy.artifact_snapshot_markers)
 }
 
-fn dispatches_without_capability_preflight(content: &str) -> bool {
-    let dispatches_remote_work = contains_any(
-        content,
-        &["runner::exec", "core::runner::exec", "sync_workspace"],
-    );
-    let has_capability_preflight = contains_any(
-        content,
-        &[
-            "evaluate_lab_runner_capabilities",
-            "lab_runner_capability_plan",
-            "RunnerDoctorOutput",
-            "runner doctor",
-            "capability_plan",
-        ],
-    );
+fn dispatches_without_capability_preflight(
+    content: &str,
+    policy: &RemoteExecutionSafetyPolicy,
+) -> bool {
+    let dispatches_remote_work =
+        contains_any(content, &policy.dispatch_markers) || content.contains("sync_workspace");
+    let has_capability_preflight = contains_any(content, &policy.capability_preflight_markers);
 
     dispatches_remote_work && !has_capability_preflight
 }
 
-fn dispatches_extension_without_parity_preflight(content: &str) -> bool {
+fn dispatches_extension_without_parity_preflight(
+    content: &str,
+    policy: &RemoteExecutionSafetyPolicy,
+) -> bool {
     let accepts_extension = contains_any(content, &["--extension", "extension_id", "extension"]);
-    let has_parity_preflight = contains_any(
-        content,
-        &[
-            "extension_parity",
-            "required_extensions",
-            "runner_extension",
-            "validate_runner_extension",
-        ],
-    );
+    let has_parity_preflight = contains_any(content, &policy.extension_parity_markers);
 
     accepts_extension && !has_parity_preflight
 }
 
-fn reports_remote_artifact_without_access_check(content: &str) -> bool {
-    let reports_remote_artifact = contains_any(
-        content,
-        &[
-            "patch_artifact_path",
-            "patch_artifact_id",
-            "runner-artifact://",
-            "artifact.path",
-        ],
-    );
-    let verifies_access = contains_any(
-        content,
-        &[
-            "is_remote_runner_artifact_path",
-            "download_remote_artifact",
-            "fs::metadata",
-            ".is_file()",
-            "get_artifact",
-        ],
-    );
+fn reports_remote_artifact_without_access_check(
+    content: &str,
+    policy: &RemoteExecutionSafetyPolicy,
+) -> bool {
+    let reports_remote_artifact = contains_any(content, &policy.artifact_report_markers);
+    let verifies_access = contains_any(content, &policy.artifact_access_markers);
 
     reports_remote_artifact && !verifies_access
 }
@@ -184,20 +224,35 @@ mod tests {
         }
     }
 
+    fn policy_config() -> RemoteExecutionSafetyConfig {
+        RemoteExecutionSafetyConfig {
+            path_translation_markers: vec!["rewrite_component_remote_args".to_string()],
+            capability_preflight_markers: vec![
+                "component_runner_capability_plan".to_string(),
+                "evaluate_component_runner_capabilities".to_string(),
+            ],
+            artifact_capture_markers: vec!["capture_change: true".to_string()],
+            artifact_snapshot_markers: vec!["source_snapshot".to_string()],
+            artifact_report_markers: vec!["change_artifact_path".to_string()],
+            artifact_access_markers: vec!["is_retrievable_runner_artifact".to_string()],
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn flags_arg_forwarding_without_path_preflight() {
         let fp = fingerprint(
             "src/main.rs",
             r#"
             fn run(args: &[String]) {
-                let mut command = vec!["homeboy".to_string()];
+                let mut command = vec!["tool".to_string()];
                 command.extend(args.iter().cloned());
-                runner::exec("lab", RunnerExecOptions { command, capture_patch: false });
+                runner::exec("remote", RunnerExecOptions { command, capture_change: false });
             }
             "#,
         );
 
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &policy_config());
 
         assert!(findings.iter().any(|finding| {
             finding.kind == AuditFinding::RunnerOffloadPreflight
@@ -208,25 +263,25 @@ mod tests {
     }
 
     #[test]
-    fn accepts_explicit_path_rewrite_and_artifact_snapshot() {
+    fn accepts_configured_path_rewrite_and_artifact_snapshot() {
         let fp = fingerprint(
             "src/main.rs",
             r#"
             fn run(normalized_args: &[String], remote_path: &str) {
-                let plan = lab_runner_capability_plan(command, source_path).unwrap();
-                evaluate_lab_runner_capabilities(runner_id, &plan, &capabilities, mode);
-                let mut command = vec!["homeboy".to_string()];
-                command.extend(rewrite_lab_offload_args(normalized_args, remote_path));
-                runner::exec("lab", RunnerExecOptions {
+                let plan = component_runner_capability_plan(command, source_path).unwrap();
+                evaluate_component_runner_capabilities(runner_id, &plan, &capabilities, mode);
+                let mut command = vec!["tool".to_string()];
+                command.extend(rewrite_component_remote_args(normalized_args, remote_path));
+                runner::exec("remote", RunnerExecOptions {
                     command,
-                    capture_patch: true,
+                    capture_change: true,
                     source_snapshot: Some(source_snapshot),
                 });
             }
             "#,
         );
 
-        assert!(run(&[&fp]).is_empty());
+        assert!(run(&[&fp], &policy_config()).is_empty());
     }
 
     #[test]
@@ -235,16 +290,16 @@ mod tests {
             "src/main.rs",
             r#"
             fn run(command: Vec<String>) {
-                runner::exec("lab", RunnerExecOptions {
+                runner::exec("remote", RunnerExecOptions {
                     command,
-                    capture_patch: false,
+                    capture_change: false,
                     source_snapshot: None,
                 });
             }
             "#,
         );
 
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &policy_config());
 
         assert!(findings
             .iter()
@@ -257,18 +312,18 @@ mod tests {
             "src/main.rs",
             r#"
             fn run(command: Vec<String>) {
-                let plan = lab_runner_capability_plan(command_kind, source_path).unwrap();
-                evaluate_lab_runner_capabilities(runner_id, &plan, &capabilities, mode);
-                runner::exec("lab", RunnerExecOptions {
+                let plan = component_runner_capability_plan(command_kind, source_path).unwrap();
+                evaluate_component_runner_capabilities(runner_id, &plan, &capabilities, mode);
+                runner::exec("remote", RunnerExecOptions {
                     command,
-                    capture_patch: false,
+                    capture_change: false,
                     source_snapshot: None,
                 });
             }
             "#,
         );
 
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &policy_config());
 
         assert!(!findings
             .iter()
@@ -281,12 +336,12 @@ mod tests {
             "src/core/runner.rs",
             r#"
             fn run(command: Vec<String>) {
-                runner::exec("lab", RunnerExecOptions { command, capture_patch: true });
+                runner::exec("remote", RunnerExecOptions { command, capture_change: true });
             }
             "#,
         );
 
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &policy_config());
 
         assert!(findings
             .iter()
@@ -299,12 +354,12 @@ mod tests {
             "src/main.rs",
             r#"
             fn run(command: Vec<String>, extension_id: &str) {
-                runner::exec("lab", RunnerExecOptions { command, capture_patch: false });
+                runner::exec("remote", RunnerExecOptions { command, capture_change: false });
             }
             "#,
         );
 
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &policy_config());
 
         assert!(findings
             .iter()
@@ -318,13 +373,13 @@ mod tests {
             r#"
             fn mirrored_patch_result(patch: Value, artifact: ArtifactRecord) -> Value {
                 let mut patched = patch.clone();
-                patched["patch_artifact_path"] = Value::String(artifact.path);
+                patched["change_artifact_path"] = Value::String(artifact.path);
                 patched
             }
             "#,
         );
 
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &policy_config());
 
         assert_eq!(findings.len(), 1);
         assert!(findings[0].description.contains("locally accessible"));
@@ -336,11 +391,10 @@ mod tests {
             "src/core/runner/evidence.rs",
             r#"
             fn mirrored_patch_result(patch: Value, artifact: ArtifactRecord) -> Value {
-                let accessible = is_remote_runner_artifact_path(&artifact.path)
-                    || fs::metadata(&artifact.path).map(|metadata| metadata.is_file()).unwrap_or(false);
+                let accessible = is_retrievable_runner_artifact(&artifact.path);
                 if accessible {
                     let mut patched = patch.clone();
-                    patched["patch_artifact_path"] = Value::String(artifact.path);
+                    patched["change_artifact_path"] = Value::String(artifact.path);
                     return patched;
                 }
                 patch
@@ -348,6 +402,6 @@ mod tests {
             "#,
         );
 
-        assert!(run(&[&fp]).is_empty());
+        assert!(run(&[&fp], &policy_config()).is_empty());
     }
 }

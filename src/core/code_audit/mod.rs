@@ -1366,7 +1366,7 @@ fn audit_internal(
     // Phase 4w1: Runner/offload preflight detection — remote dispatch sites
     // that do not prove path/artifact parity before runner execution.
     let runner_offload_findings = if plan.run_runner_offload_preflight() {
-        runner_offload_preflight::run(&all_fingerprints)
+        runner_offload_preflight::run(&all_fingerprints, &audit_config.remote_execution_safety)
     } else {
         Vec::new()
     };

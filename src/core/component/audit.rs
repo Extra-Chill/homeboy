@@ -70,6 +70,83 @@ pub struct AuditConfig {
     /// Component-owned command scenario fixtures with expected status fields.
     #[serde(default, skip_serializing_if = "CommandStatusContractConfig::is_empty")]
     pub command_status_contracts: CommandStatusContractConfig,
+    /// Component-owned markers that prove remote execution dispatch sites satisfy
+    /// generic safety invariants before work leaves the local machine.
+    #[serde(default, skip_serializing_if = "RemoteExecutionSafetyConfig::is_empty")]
+    pub remote_execution_safety: RemoteExecutionSafetyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RemoteExecutionSafetyConfig {
+    /// Markers that identify remote execution dispatch sites.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dispatch_markers: Vec<String>,
+    /// Markers that prove local arguments/paths are translated or rejected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_translation_markers: Vec<String>,
+    /// Markers that prove required remote capabilities were declared/checked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_preflight_markers: Vec<String>,
+    /// Markers that identify component-specific artifact capture requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_capture_markers: Vec<String>,
+    /// Markers that prove captured artifacts carry a source snapshot/mirror contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_snapshot_markers: Vec<String>,
+    /// Markers that prove selected extensions/tools are available remotely.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_parity_markers: Vec<String>,
+    /// Markers that identify remotely reported artifact references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_report_markers: Vec<String>,
+    /// Markers that prove reported artifacts are locally accessible or retrievable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_access_markers: Vec<String>,
+}
+
+impl RemoteExecutionSafetyConfig {
+    pub fn is_empty(&self) -> bool {
+        self.dispatch_markers.is_empty()
+            && self.path_translation_markers.is_empty()
+            && self.capability_preflight_markers.is_empty()
+            && self.artifact_capture_markers.is_empty()
+            && self.artifact_snapshot_markers.is_empty()
+            && self.extension_parity_markers.is_empty()
+            && self.artifact_report_markers.is_empty()
+            && self.artifact_access_markers.is_empty()
+    }
+
+    fn merge(&mut self, other: &RemoteExecutionSafetyConfig) {
+        extend_unique(&mut self.dispatch_markers, &other.dispatch_markers);
+        extend_unique(
+            &mut self.path_translation_markers,
+            &other.path_translation_markers,
+        );
+        extend_unique(
+            &mut self.capability_preflight_markers,
+            &other.capability_preflight_markers,
+        );
+        extend_unique(
+            &mut self.artifact_capture_markers,
+            &other.artifact_capture_markers,
+        );
+        extend_unique(
+            &mut self.artifact_snapshot_markers,
+            &other.artifact_snapshot_markers,
+        );
+        extend_unique(
+            &mut self.extension_parity_markers,
+            &other.extension_parity_markers,
+        );
+        extend_unique(
+            &mut self.artifact_report_markers,
+            &other.artifact_report_markers,
+        );
+        extend_unique(
+            &mut self.artifact_access_markers,
+            &other.artifact_access_markers,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -699,6 +776,7 @@ impl AuditConfig {
             && self.public_registry_exposure.is_empty()
             && self.config_key_usage.is_empty()
             && self.command_status_contracts.is_empty()
+            && self.remote_execution_safety.is_empty()
     }
 
     pub fn merge(&mut self, other: &AuditConfig) {
@@ -732,6 +810,8 @@ impl AuditConfig {
         self.config_key_usage.merge(&other.config_key_usage);
         self.command_status_contracts
             .merge(&other.command_status_contracts);
+        self.remote_execution_safety
+            .merge(&other.remote_execution_safety);
         for rule in &other.requested_detectors {
             if !self
                 .requested_detectors
@@ -805,6 +885,19 @@ mod tests {
     }
 
     #[test]
+    fn remote_execution_safety_config_marks_audit_config_non_empty() {
+        let config = AuditConfig {
+            remote_execution_safety: RemoteExecutionSafetyConfig {
+                path_translation_markers: vec!["rewrite_remote_args".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(!config.is_empty());
+    }
+
+    #[test]
     fn merge_dedupes_core_boundary_leak_config() {
         let mut config = AuditConfig {
             core_boundary_leaks: CoreBoundaryLeakConfig {
@@ -841,6 +934,33 @@ mod tests {
         assert_eq!(
             config.core_boundary_leaks.allow_line_contains,
             vec!["allow-core-boundary-example"]
+        );
+    }
+
+    #[test]
+    fn merge_dedupes_remote_execution_safety_config() {
+        let mut config = AuditConfig {
+            remote_execution_safety: RemoteExecutionSafetyConfig {
+                capability_preflight_markers: vec!["capability_plan".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.merge(&AuditConfig {
+            remote_execution_safety: RemoteExecutionSafetyConfig {
+                capability_preflight_markers: vec![
+                    "capability_plan".to_string(),
+                    "evaluate_remote_capabilities".to_string(),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        assert_eq!(
+            config.remote_execution_safety.capability_preflight_markers,
+            vec!["capability_plan", "evaluate_remote_capabilities"]
         );
     }
 }
