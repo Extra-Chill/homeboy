@@ -32,14 +32,6 @@ pub struct SelfCheckStreamCaptureMetadata {
     pub truncated: bool,
 }
 
-pub fn run_self_checks(
-    component: &Component,
-    capability: ExtensionCapability,
-    source_path: &Path,
-) -> Result<SelfCheckOutput> {
-    run_self_checks_with_passthrough(component, capability, source_path, true)
-}
-
 pub(crate) fn run_self_checks_with_passthrough(
     component: &Component,
     capability: ExtensionCapability,
@@ -79,29 +71,29 @@ pub(crate) fn run_self_checks_with_passthrough(
         stderr.push_capture(output.stderr);
 
         if !output.success {
-            return Ok(SelfCheckOutput {
-                exit_code: output.exit_code,
-                success: false,
-                stdout: stdout.to_string_lossy(),
-                stderr: stderr.to_string_lossy(),
-                capture: SelfCheckCaptureMetadata {
-                    stdout: stdout.metadata(),
-                    stderr: stderr.metadata(),
-                },
-            });
+            return Ok(self_check_output(output.exit_code, false, &stdout, &stderr));
         }
     }
 
-    Ok(SelfCheckOutput {
-        exit_code: 0,
-        success: true,
+    Ok(self_check_output(0, true, &stdout, &stderr))
+}
+
+fn self_check_output(
+    exit_code: i32,
+    success: bool,
+    stdout: &BoundedCapture,
+    stderr: &BoundedCapture,
+) -> SelfCheckOutput {
+    SelfCheckOutput {
+        exit_code,
+        success,
         stdout: stdout.to_string_lossy(),
         stderr: stderr.to_string_lossy(),
         capture: SelfCheckCaptureMetadata {
             stdout: stdout.metadata(),
             stderr: stderr.metadata(),
         },
-    })
+    }
 }
 
 fn execute_self_check_command(
@@ -286,8 +278,13 @@ mod tests {
             None,
         );
 
-        let err = run_self_checks(&component, ExtensionCapability::Test, Path::new("/tmp"))
-            .expect_err("missing self-checks should fail");
+        let err = run_self_checks_with_passthrough(
+            &component,
+            ExtensionCapability::Test,
+            Path::new("/tmp"),
+            false,
+        )
+        .expect_err("missing self-checks should fail");
 
         assert!(err.to_string().contains("no test self-check commands"));
     }
@@ -311,8 +308,13 @@ mod tests {
             test: Vec::new(),
         });
 
-        let output = run_self_checks(&component, ExtensionCapability::Lint, dir.path())
-            .expect("self-checks should run");
+        let output = run_self_checks_with_passthrough(
+            &component,
+            ExtensionCapability::Lint,
+            dir.path(),
+            false,
+        )
+        .expect("self-checks should run");
 
         assert!(output.success);
         assert_eq!(
