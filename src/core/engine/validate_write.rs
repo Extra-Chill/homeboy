@@ -1,9 +1,7 @@
 //! Post-write compilation validation gate for code-modifying commands.
 //!
-//! Any command that writes source code (`refactor decompose`, `refactor move`,
-//! `refactor transform`, `refactor --from audit --write`) should call `validate_write()`
-//! after writing files and before reporting success. If validation fails,
-//! the changed files are rolled back to their pre-write state.
+//! Code-writing commands can call `validate_only()` after writing files and before
+//! reporting success. Callers that need rollback should manage their own snapshots.
 //!
 //! The validation command is determined by the project's extension. Language
 //! extensions can provide a `scripts.validate` command for their own checker.
@@ -16,7 +14,6 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::undo::InMemoryRollback;
 use crate::core::error::{Error, Result};
 use crate::core::extension;
 
@@ -67,102 +64,6 @@ impl ValidationResult {
             files_checked,
         }
     }
-}
-
-/// Validate that written code compiles/parses correctly, with automatic rollback on failure.
-///
-/// # Arguments
-/// * `root` - Project root directory (git root or component source path)
-/// * `changed_files` - Files that were modified/created (absolute paths)
-/// * `rollback` - Pre-captured file states for rollback on validation failure
-///
-/// # Behavior
-/// 1. Finds an extension that handles the changed files' language
-/// 2. Runs the extension's `scripts.validate` command
-/// 3. If validation fails → rolls back all changed files, returns error details
-/// 4. If validation passes → returns success
-/// 5. If no validate script exists → returns success (no-op)
-pub fn validate_write(
-    root: &Path,
-    changed_files: &[PathBuf],
-    rollback: &InMemoryRollback,
-) -> Result<ValidationResult> {
-    if changed_files.is_empty() {
-        return Ok(ValidationResult::skipped(0));
-    }
-
-    // Determine which extension provides validation for these files
-    let validate_command = match resolve_validate_command(root, changed_files) {
-        Some(cmd) => cmd,
-        None => {
-            // No extension provides validation — skip (success)
-            return Ok(ValidationResult::skipped(changed_files.len()));
-        }
-    };
-
-    crate::log_status!(
-        "validate",
-        "Running post-write validation: {}",
-        validate_command
-    );
-
-    // Run the validation command in the project root
-    let output = std::process::Command::new("sh")
-        .args(["-c", &validate_command])
-        .current_dir(root)
-        .output()
-        .map_err(|e| {
-            Error::internal_io(
-                format!("Failed to run validation command: {}", e),
-                Some("validate_write".to_string()),
-            )
-        })?;
-
-    if output.status.success() {
-        crate::log_status!("validate", "Validation passed");
-        return Ok(ValidationResult::passed(
-            validate_command,
-            changed_files.len(),
-        ));
-    }
-
-    // Validation failed — collect output and rollback
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let error_output = if stderr.trim().is_empty() {
-        stdout.trim().to_string()
-    } else {
-        stderr.trim().to_string()
-    };
-
-    // Truncate to last 30 lines for readability
-    let truncated: String = error_output
-        .lines()
-        .rev()
-        .take(30)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    crate::log_status!(
-        "validate",
-        "Validation FAILED — rolling back {} file(s)",
-        rollback.len()
-    );
-
-    // Rollback all changed files
-    rollback.restore_all();
-
-    crate::log_status!("validate", "Rollback complete");
-
-    Ok(ValidationResult::failed(
-        validate_command,
-        truncated,
-        true,
-        changed_files.len(),
-    ))
 }
 
 /// Validate without rollback — for dry-run preview or when caller manages rollback.
@@ -269,7 +170,6 @@ fn find_extension_with_validate(file_ext: &str) -> Option<extension::ExtensionMa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_isolated_home;
     use std::fs;
     use tempfile::TempDir;
 
@@ -288,15 +188,6 @@ mod tests {
         assert!(result.success);
         assert!(!result.rolled_back);
         assert!(result.command.is_none());
-    }
-
-    #[test]
-    fn validate_write_with_no_files_is_success() {
-        let dir = TempDir::new().expect("temp dir");
-        let rollback = InMemoryRollback::new();
-        let result = validate_write(dir.path(), &[], &rollback).expect("should succeed");
-        assert!(result.success);
-        assert_eq!(result.files_checked, 0);
     }
 
     /// Regression test for #1276.
@@ -352,34 +243,5 @@ mod tests {
             stdout.contains("count=2"),
             "expected bash process substitution to succeed, got: {stdout:?}"
         );
-    }
-
-    #[test]
-    fn validate_write_without_extension_validator_is_success() {
-        with_isolated_home(|_| {
-            let dir = TempDir::new().expect("temp dir");
-            let root = dir.path();
-            fs::create_dir_all(root.join("src")).unwrap();
-            fs::write(root.join("src/lib.rs"), "pub fn broken( {}\n").unwrap();
-
-            let mut rollback = InMemoryRollback::new();
-            let lib_path = root.join("src/lib.rs");
-            rollback.capture(&lib_path);
-
-            let changed = vec![lib_path.clone()];
-            let result = validate_write(root, &changed, &rollback).expect("should not error");
-
-            assert!(
-                result.success,
-                "validation should skip without extension contract"
-            );
-            assert!(
-                !result.rolled_back,
-                "skipped validation should not roll back"
-            );
-            assert!(result.command.is_none());
-            let content = fs::read_to_string(&lib_path).unwrap();
-            assert_eq!(content, "pub fn broken( {}\n");
-        });
     }
 }

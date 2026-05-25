@@ -17,18 +17,6 @@ pub enum VerificationPhase {
     Test,
 }
 
-impl VerificationPhase {
-    pub fn canonical_order() -> [Self; 5] {
-        [
-            Self::Syntax,
-            Self::Lint,
-            Self::Typecheck,
-            Self::Audit,
-            Self::Test,
-        ]
-    }
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PhaseStatus {
@@ -200,20 +188,6 @@ mod tests {
         let env = filter.to_env_pairs();
         assert!(env.iter().any(|(k, v)| k == "HOMEBOY_STEP" && v == "a"));
         assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "b"));
-    }
-
-    #[test]
-    fn verification_phase_order_is_canonical() {
-        assert_eq!(
-            VerificationPhase::canonical_order(),
-            [
-                VerificationPhase::Syntax,
-                VerificationPhase::Lint,
-                VerificationPhase::Typecheck,
-                VerificationPhase::Audit,
-                VerificationPhase::Test,
-            ]
-        );
     }
 
     #[test]
