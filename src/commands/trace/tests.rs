@@ -6,24 +6,13 @@ use crate::test_support::with_isolated_home;
 use homeboy::core::component::ScopedExtensionConfig;
 use homeboy::core::rig::ComponentSpec;
 
+use super::aggregate_test_support::aggregate_samples;
 use super::test_fixture::{
     init_overlay_component, write_trace_extension, write_trace_rig,
     write_trace_rig_with_phase_preset, write_trace_rig_with_span_metadata,
     write_trace_rig_with_variant,
 };
 use super::*;
-
-fn aggregate_samples(durations: &[u64]) -> Vec<TraceAggregateSpanSample> {
-    durations
-        .iter()
-        .enumerate()
-        .map(|(index, duration_ms)| TraceAggregateSpanSample {
-            duration_ms: *duration_ms,
-            run_index: index + 1,
-            artifact_path: format!("/tmp/trace-run-{}.json", index + 1),
-        })
-        .collect()
-}
 
 fn trace_args_for_profile(profile: &str) -> TraceArgs {
     TraceArgs {

@@ -1685,6 +1685,8 @@ fn trace_run_finish_metadata(
 }
 
 #[cfg(test)]
+mod aggregate_test_support;
+#[cfg(test)]
 mod compare_tests;
 #[cfg(test)]
 mod compare_variant_tests;
