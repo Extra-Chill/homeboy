@@ -52,7 +52,7 @@ use self::detectors::{
     deprecation_age, enum_dispatch_contracts, facade_passthrough, field_patterns, global_env_guard,
     mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
     repeated_literal_shape, requested_detectors, runner_offload_preflight, rust_test_wiring,
-    shared_scaffolding, test_coverage, test_topology, wrapper_inference,
+    shared_scaffolding, test_coverage, test_topology, unbounded_output_capture, wrapper_inference,
 };
 
 pub use checks::{CheckResult, CheckStatus};
@@ -333,11 +333,18 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
         findings: &[AuditFinding::NonPortableArtifactPath],
         requires_discovery: false,
     },
+    DetectorFamily {
+        id: "output_capture",
+        findings: &[AuditFinding::UnboundedOutputCapture],
+        requires_discovery: true,
+    },
 ];
 
 impl AuditExecutionPlan {
     pub(crate) fn full() -> Self {
-        Self::from_enabled_families("full", |family| family_enabled(&[], &[], family.findings))
+        Self::from_enabled_families("full", |family| {
+            family.id != "output_capture" && family_enabled(&[], &[], family.findings)
+        })
     }
 
     pub(crate) fn from_filters(only: &[AuditFinding], exclude: &[AuditFinding]) -> Self {
@@ -492,6 +499,10 @@ impl AuditExecutionPlan {
 
     pub(crate) fn run_artifact_portability(&self) -> bool {
         self.detector_enabled("artifact_portability")
+    }
+
+    pub(crate) fn run_output_capture(&self) -> bool {
+        self.detector_enabled("output_capture")
     }
 
     fn requires_discovery(&self) -> bool {
@@ -1236,6 +1247,21 @@ fn audit_internal(
             config_key_findings.len()
         );
         all_findings.extend(config_key_findings);
+    }
+
+    // Phase 4t1b: Generic command-output capture hygiene.
+    let output_capture_findings = if plan.run_output_capture() {
+        unbounded_output_capture::run(&all_fingerprints)
+    } else {
+        Vec::new()
+    };
+    if !output_capture_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Output capture: {} finding(s) (unbounded stdout/stderr capture)",
+            output_capture_findings.len()
+        );
+        all_findings.extend(output_capture_findings);
     }
 
     // Phase 4t2: Configured core-boundary ecosystem leak detection.

@@ -5,6 +5,7 @@
 
 use crate::core::ci_profile::CiContext;
 use crate::core::extension::lint::baseline::{BaselineComparison, LintFinding};
+use crate::core::extension::self_check::SelfCheckCaptureMetadata;
 use crate::core::extension::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, VerificationPhase,
@@ -38,6 +39,8 @@ pub struct LintCommandOutput {
     pub lint_findings: Option<Vec<LintFinding>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<LintSummaryOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_check_capture: Option<SelfCheckCaptureMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_context: Option<CiContext>,
 }
@@ -89,6 +92,7 @@ pub fn from_main_workflow_with_ci_context(
                 result.lint_findings
             },
             summary: result.summary,
+            self_check_capture: result.self_check_capture,
             ci_context,
         },
         exit_code,
@@ -172,6 +176,7 @@ pub fn from_lint_fix(component_label: String, run: RefactorSourceRun) -> (LintCo
             baseline_comparison: None,
             lint_findings: None,
             summary: None,
+            self_check_capture: None,
             ci_context: None,
         },
         exit_code,

@@ -68,6 +68,24 @@ pub struct RawTestOutput {
     pub stderr_tail: String,
     /// Whether either tail was truncated from the original output.
     pub truncated: bool,
+    /// Whether stdout capture itself was bounded before the line tail was built.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub stdout_truncated: bool,
+    /// Whether stderr capture itself was bounded before the line tail was built.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub stderr_truncated: bool,
+    /// Total stdout bytes observed before bounded capture retained its tail.
+    #[serde(skip_serializing_if = "crate::is_zero", default)]
+    pub stdout_seen_bytes: usize,
+    /// Total stderr bytes observed before bounded capture retained its tail.
+    #[serde(skip_serializing_if = "crate::is_zero", default)]
+    pub stderr_seen_bytes: usize,
+    /// Maximum stdout bytes retained by the self-check capture buffer.
+    #[serde(skip_serializing_if = "crate::is_zero", default)]
+    pub stdout_limit_bytes: usize,
+    /// Maximum stderr bytes retained by the self-check capture buffer.
+    #[serde(skip_serializing_if = "crate::is_zero", default)]
+    pub stderr_limit_bytes: usize,
 }
 
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
@@ -434,6 +452,12 @@ pub fn run_main_test_workflow(
                 stdout_tail,
                 stderr_tail,
                 truncated: stdout_truncated || stderr_truncated,
+                stdout_truncated,
+                stderr_truncated,
+                stdout_seen_bytes: output.stdout.len(),
+                stderr_seen_bytes: output.stderr.len(),
+                stdout_limit_bytes: 0,
+                stderr_limit_bytes: 0,
             })
         }
     } else {
@@ -483,8 +507,12 @@ pub fn run_self_check_test_workflow(
     component_label: String,
     json_summary: bool,
 ) -> crate::core::Result<TestRunWorkflowResult> {
-    let output =
-        extension::self_check::run_self_checks(component, ExtensionCapability::Test, source_path)?;
+    let output = extension::self_check::run_self_checks_with_passthrough(
+        component,
+        ExtensionCapability::Test,
+        source_path,
+        !json_summary,
+    )?;
     let status = if output.success { "passed" } else { "failed" }.to_string();
     let raw_output = (!output.success).then(|| {
         let (stdout_tail, stdout_truncated) = tail_lines(&output.stdout, RAW_OUTPUT_TAIL_LINES);
@@ -492,7 +520,16 @@ pub fn run_self_check_test_workflow(
         RawTestOutput {
             stdout_tail,
             stderr_tail,
-            truncated: stdout_truncated || stderr_truncated,
+            truncated: stdout_truncated
+                || stderr_truncated
+                || output.capture.stdout.truncated
+                || output.capture.stderr.truncated,
+            stdout_truncated: output.capture.stdout.truncated || stdout_truncated,
+            stderr_truncated: output.capture.stderr.truncated || stderr_truncated,
+            stdout_seen_bytes: output.capture.stdout.seen_bytes,
+            stderr_seen_bytes: output.capture.stderr.seen_bytes,
+            stdout_limit_bytes: output.capture.stdout.limit_bytes,
+            stderr_limit_bytes: output.capture.stderr.limit_bytes,
         }
     });
 

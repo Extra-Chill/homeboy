@@ -10,6 +10,7 @@ use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::engine::shell;
 use crate::core::extension::lint::baseline::{self as lint_baseline, LintFinding};
 use crate::core::extension::lint::build_lint_runner;
+use crate::core::extension::self_check::SelfCheckCaptureMetadata;
 use crate::core::extension::{self, ExtensionCapability, LintChangedFileRoute};
 use crate::core::git;
 use crate::core::refactor::AppliedRefactor;
@@ -49,6 +50,8 @@ pub struct LintRunWorkflowResult {
     pub baseline_comparison: Option<lint_baseline::BaselineComparison>,
     pub lint_findings: Option<Vec<LintFinding>>,
     pub summary: Option<LintSummaryOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_check_capture: Option<SelfCheckCaptureMetadata>,
 }
 
 /// Compact lint summary for automation consumers.
@@ -96,6 +99,7 @@ pub fn run_main_lint_workflow(
                 } else {
                     None
                 },
+                self_check_capture: None,
             });
         }
     }
@@ -202,6 +206,7 @@ pub fn run_main_lint_workflow(
             None
         },
         lint_findings: Some(lint_findings),
+        self_check_capture: None,
     })
 }
 
@@ -461,6 +466,7 @@ pub fn run_self_check_lint_workflow(
         } else {
             None
         },
+        self_check_capture: Some(output.capture),
     })
 }
 
