@@ -90,5 +90,5 @@ pub use rename::{
 };
 pub use transform::{
     ad_hoc_transform, apply_transforms, RuleResult, TransformMatch, TransformResult, TransformRule,
-    TransformSet,
+    TransformSet, DEFAULT_MATCH_DETAIL_LIMIT,
 };

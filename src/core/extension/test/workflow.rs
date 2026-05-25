@@ -224,8 +224,14 @@ pub fn auto_fix_test_drift(
             rules,
         };
 
-        let result =
-            refactor::apply_transforms(&source_path, "test_auto_fix_drift", &set, write, None)?;
+        let result = refactor::apply_transforms(
+            &source_path,
+            "test_auto_fix_drift",
+            &set,
+            write,
+            None,
+            Some(refactor::DEFAULT_MATCH_DETAIL_LIMIT),
+        )?;
 
         crate::log_status!(
             "test",
