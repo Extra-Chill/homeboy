@@ -337,6 +337,7 @@ fn run_lab_offload_inner(
         )
     })?;
     let source_path = lab_offload_source_path(normalized_args)?;
+    preflight_lab_runner_capabilities(runner_id, command_kind, &source_path)?;
     let synced = homeboy::core::runner::sync_workspace(
         runner_id,
         homeboy::core::runner::RunnerWorkspaceSyncOptions {
@@ -389,6 +390,35 @@ fn run_lab_offload_inner(
     }
     print!("{}", exec_output.stdout);
     Ok(exit_code)
+}
+
+fn preflight_lab_runner_capabilities(
+    runner_id: &str,
+    command: &Commands,
+    source_path: &Path,
+) -> homeboy::core::Result<()> {
+    let Some(plan) = resource_policy::lab_runner_capability_plan(command, source_path) else {
+        return Ok(());
+    };
+    let (doctor, _) = homeboy::commands::runner::doctor::run(runner_id)?;
+    match resource_policy::evaluate_lab_runner_capabilities(
+        runner_id,
+        &plan,
+        &resource_policy::LabRunnerCapabilities::from_doctor(&doctor),
+        resource_policy::LabRunnerGateMode::Explicit,
+    ) {
+        resource_policy::LabRunnerGateDecision::Eligible => Ok(()),
+        resource_policy::LabRunnerGateDecision::Missing {
+            reason,
+            remediation,
+            ..
+        } => Err(homeboy::core::Error::validation_invalid_argument(
+            "runner_capabilities",
+            reason,
+            Some(runner_id.to_string()),
+            Some(remediation),
+        )),
+    }
 }
 
 fn preflight_lab_offload_test_extensions(

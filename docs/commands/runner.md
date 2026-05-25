@@ -60,6 +60,21 @@ The JSON payload uses `command: "runner.doctor"` and includes `runner_id`,
 Use `doctor` before `connect` when you need to know whether Homeboy, Git, SSH,
 and the configured workspace root are usable on the target machine.
 
+Hot-command Lab offload uses the same capability vocabulary before running on
+an explicit `--runner`. Homeboy currently gates `lint`, `test`, `audit`,
+`bench`, and `trace` against the source worktree's lightweight tool signals:
+
+- `package.json` requires `node` and `npm`.
+- `pnpm-lock.yaml` requires `node` and `pnpm`.
+- `composer.json` requires `php` and `composer`.
+- Docker/Compose files require `docker`.
+- `trace` requires Playwright plus browser binaries.
+
+When an explicit runner is missing required tools, the command fails before
+workspace sync with a `runner_capabilities` validation error and remediation.
+The same central policy returns a local fallback reason for future automatic
+Lab offload selection.
+
 ### `connect`
 
 ```sh

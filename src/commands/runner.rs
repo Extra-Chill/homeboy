@@ -14,7 +14,7 @@ use homeboy::core::{EntityCrudOutput, MergeOutput};
 
 use super::{CmdResult, DynamicSetArgs};
 
-mod doctor;
+pub mod doctor;
 
 #[derive(Debug, Default, Serialize)]
 pub struct RunnerExtra {

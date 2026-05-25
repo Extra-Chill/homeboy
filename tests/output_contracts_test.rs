@@ -196,6 +196,7 @@ fn lint_findings_output() -> LintCommandOutput {
             extra: BTreeMap::new(),
         }]),
         summary: None,
+        self_check_capture: None,
         ci_context: None,
     }
 }
@@ -245,6 +246,12 @@ fn test_summary_output() -> TestCommandOutput {
             stdout_tail: "running 3 tests\nfixture::fails_contract FAILED".to_string(),
             stderr_tail: "assertion failed: stable envelope".to_string(),
             truncated: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_seen_bytes: 0,
+            stderr_seen_bytes: 0,
+            stdout_limit_bytes: 0,
+            stderr_limit_bytes: 0,
         }),
         ci_context: None,
     }
