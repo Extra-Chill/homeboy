@@ -26,6 +26,14 @@ use super::test_mapping::{
 use super::test_vacuity::{find_vacuous_test_methods, rust_crate_name};
 use crate::core::extension::TestMappingConfig;
 
+pub(in crate::core::code_audit) fn run(
+    root: &Path,
+    fingerprints: &[&FileFingerprint],
+    config: &TestMappingConfig,
+) -> Vec<Finding> {
+    analyze_test_coverage(root, fingerprints, config)
+}
+
 /// Analyze test coverage gaps given source fingerprints and a test mapping config.
 ///
 /// `root` is the component root directory (for resolving test file existence).
