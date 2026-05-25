@@ -1,4 +1,3 @@
-use crate::core::code_audit::CodeAuditResult;
 use crate::core::component::Component;
 use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::engine::undo::UndoSnapshot;
@@ -10,11 +9,20 @@ use crate::core::refactor::auto::{self, FixApplied, FixResultsSummary};
 use crate::core::Error;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
+mod cache;
+mod lint_scope;
 mod planning;
 
+use cache::{
+    try_load_cached_audit, try_load_cached_lint, try_load_cached_test, CachedLintResult,
+    CachedTestResult, OUTPUT_DIR_ENV,
+};
+use lint_scope::{
+    capture_release_owned_files, constrain_lint_fix_changes, lint_finding_scope_files,
+    lint_scope_glob, restore_release_owned_files,
+};
 use planning::{
     analyze_stage_overlaps, collect_collected_edits, collect_stage_changed_files,
     summarize_source_totals, FixAccumulator, PlannedStage,
@@ -24,13 +32,6 @@ pub use planning::{CollectedEdit, SourceOverlap, SourceStageSummary, SourceTotal
 use super::verify::AuditConvergenceScoring;
 
 pub const KNOWN_REFACTOR_SOURCES: &[&str] = &["audit", "lint", "test"];
-
-/// Name of the env var pointing to previous command output files.
-///
-/// When set, `--from audit` reads the cached audit result instead of
-/// re-running the audit. The action sets this during `run-homeboy-commands.sh`
-/// and it persists across steps via `GITHUB_ENV`.
-const OUTPUT_DIR_ENV: &str = "HOMEBOY_OUTPUT_DIR";
 
 #[derive(Debug, Clone)]
 pub struct RefactorSourceRequest {
@@ -132,17 +133,6 @@ pub struct RefactorSourceRun {
     /// short-circuited without modifying any files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guard_block: Option<crate::core::refactor::auto::guard::GuardBlock>,
-}
-
-struct ReleaseOwnedFileSnapshot {
-    relative: String,
-    existed: bool,
-    bytes: Vec<u8>,
-}
-
-struct LintFixScopeOutcome {
-    changed_files: Vec<String>,
-    warnings: Vec<String>,
 }
 
 pub fn collect_refactor_sources(
@@ -464,135 +454,6 @@ fn format_changed_files(root: &Path, changed_files: &[String], warnings: &mut Ve
     }
 }
 
-/// Try to load a cached audit result from a previous `homeboy audit` run.
-///
-/// Checks `HOMEBOY_OUTPUT_DIR/audit.json` for a `CliResponse<CodeAuditResult>`
-/// envelope. If found and parseable, returns the `CodeAuditResult` without
-/// re-running the audit. This avoids redundant full-codebase scans when the
-/// refactor step runs after an audit gate that already produced the results.
-///
-/// Returns `None` if:
-/// - `HOMEBOY_OUTPUT_DIR` is not set
-/// - The file doesn't exist
-/// - The file can't be parsed (e.g. the audit failed and wrote an error envelope)
-fn try_load_cached_audit() -> Option<CodeAuditResult> {
-    let output_dir = std::env::var(OUTPUT_DIR_ENV).ok()?;
-    let audit_file = PathBuf::from(&output_dir).join("audit.json");
-
-    let content = std::fs::read_to_string(&audit_file).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    // Only use cached results from successful runs
-    if !json.get("success")?.as_bool()? {
-        return None;
-    }
-
-    // The `--output` envelope wraps the audit in a `data` field
-    let data = json.get("data")?;
-    let result: CodeAuditResult = serde_json::from_value(data.clone()).ok()?;
-
-    crate::log_status!(
-        "refactor",
-        "Using cached audit result ({} findings from {})",
-        result.findings.len(),
-        audit_file.display()
-    );
-
-    Some(result)
-}
-
-/// Try to load cached lint findings from a previous `homeboy lint` run.
-///
-/// Checks `HOMEBOY_OUTPUT_DIR/lint.json` for a `CliResponse<LintCommandOutput>`
-/// envelope. If found and the run passed (zero findings), returns `Clean`
-/// — the fix stage can be skipped entirely.
-///
-/// If findings exist, returns `HasFindings(count)` so the fix stage knows
-/// to invoke fix-only mode without re-running the diagnostic pass.
-fn try_load_cached_lint() -> Option<CachedLintResult> {
-    let output_dir = std::env::var(OUTPUT_DIR_ENV).ok()?;
-    let lint_file = PathBuf::from(&output_dir).join("lint.json");
-
-    let content = std::fs::read_to_string(&lint_file).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    let success = json.get("success")?.as_bool()?;
-    let data = json.get("data")?;
-    let passed = data.get("passed")?.as_bool()?;
-    let finding_count = data
-        .get("lint_findings")
-        .and_then(|f| f.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-
-    if !success {
-        return None;
-    }
-
-    if passed && finding_count == 0 {
-        crate::log_status!(
-            "refactor",
-            "Cached lint result is clean (0 findings from {}) — skipping lint fix stage",
-            lint_file.display()
-        );
-        return Some(CachedLintResult::Clean);
-    }
-
-    if finding_count > 0 {
-        crate::log_status!(
-            "refactor",
-            "Cached lint result has {} findings — fix stage will invoke fix-only mode",
-            finding_count
-        );
-        return Some(CachedLintResult::HasFindings(finding_count));
-    }
-
-    None
-}
-
-/// Try to load cached test results from a previous `homeboy test` run.
-///
-/// Same pattern as lint: if the test run passed, skip the test fix stage.
-/// If tests failed, return None so the fix stage runs to attempt auto-fixes.
-fn try_load_cached_test() -> Option<CachedTestResult> {
-    let output_dir = std::env::var(OUTPUT_DIR_ENV).ok()?;
-    let test_file = PathBuf::from(&output_dir).join("test.json");
-
-    let content = std::fs::read_to_string(&test_file).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    let success = json.get("success")?.as_bool()?;
-    let data = json.get("data")?;
-    let passed = data.get("passed")?.as_bool()?;
-
-    if success && passed {
-        crate::log_status!(
-            "refactor",
-            "Cached test result is clean (passed from {}) — skipping test fix stage",
-            test_file.display()
-        );
-        return Some(CachedTestResult::Clean);
-    }
-
-    crate::log_status!(
-        "refactor",
-        "Cached test result has failures — fix stage will re-run tests with auto-fix"
-    );
-    None
-}
-
-enum CachedLintResult {
-    /// Lint passed with zero findings — nothing to fix.
-    Clean,
-    /// Lint had findings — the fix stage should invoke fix-only mode.
-    HasFindings(usize),
-}
-
-enum CachedTestResult {
-    /// Tests passed — nothing to fix.
-    Clean,
-}
-
 fn plan_audit_stage(
     component_id: &str,
     root: &Path,
@@ -605,7 +466,7 @@ fn plan_audit_stage(
         cached
     } else if let Some(changed) = changed_files {
         if changed.is_empty() {
-            CodeAuditResult {
+            crate::core::code_audit::CodeAuditResult {
                 component_id: component_id.to_string(),
                 source_path: root.to_string_lossy().to_string(),
                 summary: crate::core::code_audit::AuditSummary {
@@ -730,191 +591,6 @@ fn plan_audit_stage(
         },
         fix_results,
     })
-}
-
-fn capture_release_owned_files(
-    component: &Component,
-    root: &Path,
-) -> crate::core::Result<Vec<ReleaseOwnedFileSnapshot>> {
-    release_owned_file_paths(component)
-        .into_iter()
-        .map(|relative| {
-            let path = root.join(&relative);
-            let existed = path.exists();
-            let bytes = if existed {
-                fs::read(&path).map_err(|error| {
-                    Error::internal_io(
-                        error.to_string(),
-                        Some(format!(
-                            "Failed to snapshot release-owned file {}",
-                            path.display()
-                        )),
-                    )
-                })?
-            } else {
-                Vec::new()
-            };
-
-            Ok(ReleaseOwnedFileSnapshot {
-                relative,
-                existed,
-                bytes,
-            })
-        })
-        .collect()
-}
-
-fn restore_release_owned_files(
-    root: &Path,
-    snapshots: &[ReleaseOwnedFileSnapshot],
-) -> crate::core::Result<()> {
-    for snapshot in snapshots {
-        let path = root.join(&snapshot.relative);
-        if snapshot.existed {
-            fs::write(&path, &snapshot.bytes).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!(
-                        "Failed to restore release-owned file {}",
-                        path.display()
-                    )),
-                )
-            })?;
-        } else if path.exists() {
-            fs::remove_file(&path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!(
-                        "Failed to remove generated release-owned file {}",
-                        path.display()
-                    )),
-                )
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
-fn constrain_lint_fix_changes(
-    root: &Path,
-    selected_files: Option<&[String]>,
-    before_dirty: &[String],
-    after_dirty: Vec<String>,
-    release_owned: &[ReleaseOwnedFileSnapshot],
-) -> crate::core::Result<LintFixScopeOutcome> {
-    let before_set: HashSet<&str> = before_dirty.iter().map(|file| file.as_str()).collect();
-    let release_owned_set: HashSet<&str> = release_owned
-        .iter()
-        .map(|snapshot| snapshot.relative.as_str())
-        .collect();
-    let newly_changed: Vec<String> = after_dirty
-        .into_iter()
-        .filter(|file| {
-            !before_set.contains(file.as_str()) && !release_owned_set.contains(file.as_str())
-        })
-        .collect();
-
-    let Some(selected_files) = selected_files else {
-        return Ok(LintFixScopeOutcome {
-            changed_files: newly_changed,
-            warnings: Vec::new(),
-        });
-    };
-
-    let selected_set: HashSet<&str> = selected_files.iter().map(|file| file.as_str()).collect();
-    let mut allowed = Vec::new();
-    let mut out_of_scope = Vec::new();
-
-    for file in newly_changed {
-        if selected_set.contains(file.as_str()) {
-            allowed.push(file);
-        } else {
-            out_of_scope.push(file);
-        }
-    }
-
-    let mut warnings = Vec::new();
-    if !out_of_scope.is_empty() {
-        git::discard_worktree_changes(&root.to_string_lossy(), &out_of_scope)?;
-        warnings.push(format!(
-            "Discarded {} lint autofix change(s) outside selected scope: {}",
-            out_of_scope.len(),
-            out_of_scope.join(", ")
-        ));
-    }
-
-    Ok(LintFixScopeOutcome {
-        changed_files: allowed,
-        warnings,
-    })
-}
-
-fn lint_finding_scope_files(findings: &[crate::core::extension::lint::LintFinding]) -> Vec<String> {
-    let mut files = BTreeSet::new();
-    for finding in findings {
-        let Some(file) = finding.file.as_deref() else {
-            continue;
-        };
-        if let Some(normalized) = normalize_relative_release_path(file) {
-            files.insert(normalized);
-        }
-    }
-    files.into_iter().collect()
-}
-
-fn lint_scope_glob(root_str: &str, files: &[String]) -> Option<String> {
-    if files.is_empty() {
-        return None;
-    }
-
-    let abs_files: Vec<String> = files
-        .iter()
-        .map(|file| format!("{}/{}", root_str, file))
-        .collect();
-    if abs_files.len() == 1 {
-        Some(abs_files[0].clone())
-    } else {
-        Some(format!("{{{}}}", abs_files.join(",")))
-    }
-}
-
-fn release_owned_file_paths(component: &Component) -> BTreeSet<String> {
-    let mut paths = BTreeSet::new();
-
-    if let Some(changelog) = component.changelog_target.as_deref() {
-        if let Some(path) = normalize_relative_release_path(changelog) {
-            paths.insert(path);
-        }
-    }
-
-    if let Some(targets) = component.version_targets.as_deref() {
-        for target in targets {
-            if let Some(path) = normalize_relative_release_path(&target.file) {
-                paths.insert(path);
-            }
-        }
-    }
-
-    paths
-}
-
-fn normalize_relative_release_path(path: &str) -> Option<String> {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        return None;
-    }
-
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
-            std::path::Component::CurDir => {}
-            _ => return None,
-        }
-    }
-
-    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 fn run_lint_stage(
@@ -1300,16 +976,9 @@ fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) -> Vec<FixA
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::component::{Component, VersionTarget};
+    use crate::core::component::Component;
     use std::fs;
-    use std::process::Command;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn tmp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -1326,20 +995,6 @@ mod tests {
             remote_path: String::new(),
             ..Default::default()
         }
-    }
-
-    fn run_git(root: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git command should run");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 
     #[test]
@@ -1386,130 +1041,6 @@ mod tests {
         );
 
         assert!(!allows_dirty_worktree_write(&request));
-    }
-
-    #[test]
-    fn release_owned_file_paths_include_changelog_and_version_targets() {
-        let root = PathBuf::from("/tmp/homeboy-release-owned-files");
-        let mut component = test_component(&root);
-        component.changelog_target = Some("./CHANGELOG.md".to_string());
-        component.version_targets = Some(vec![
-            VersionTarget {
-                file: "Cargo.toml".to_string(),
-                pattern: None,
-            },
-            VersionTarget {
-                file: "nested/package.json".to_string(),
-                pattern: None,
-            },
-        ]);
-
-        let paths = release_owned_file_paths(&component);
-
-        assert_eq!(
-            paths.into_iter().collect::<Vec<_>>(),
-            vec!["CHANGELOG.md", "Cargo.toml", "nested/package.json"]
-        );
-    }
-
-    #[test]
-    fn release_owned_snapshots_restore_existing_and_remove_generated_files() {
-        let root = tmp_dir("release-owned-snapshot");
-        fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("CHANGELOG.md"), "before\n").unwrap();
-
-        let mut component = test_component(&root);
-        component.changelog_target = Some("CHANGELOG.md".to_string());
-        component.version_targets = Some(vec![VersionTarget {
-            file: "Cargo.toml".to_string(),
-            pattern: None,
-        }]);
-
-        let snapshots = capture_release_owned_files(&component, &root).unwrap();
-        fs::write(root.join("CHANGELOG.md"), "after\n").unwrap();
-        fs::write(root.join("Cargo.toml"), "[package]\nversion = \"1.0.0\"\n").unwrap();
-
-        restore_release_owned_files(&root, &snapshots).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(root.join("CHANGELOG.md")).unwrap(),
-            "before\n"
-        );
-        assert!(!root.join("Cargo.toml").exists());
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn lint_fix_scope_discards_changes_outside_selected_files() {
-        let root = tmp_dir("lint-fix-scope");
-        fs::create_dir_all(root.join("src")).unwrap();
-        run_git(&root, &["init", "-q"]);
-        run_git(&root, &["config", "user.email", "test@example.com"]);
-        run_git(&root, &["config", "user.name", "test"]);
-
-        fs::write(root.join("src/scoped.rs"), "before scoped\n").unwrap();
-        fs::write(root.join("src/unrelated.rs"), "before unrelated\n").unwrap();
-        run_git(&root, &["add", "."]);
-        run_git(&root, &["commit", "-q", "-m", "init"]);
-
-        fs::write(root.join("src/scoped.rs"), "after scoped\n").unwrap();
-        fs::write(root.join("src/unrelated.rs"), "after unrelated\n").unwrap();
-        fs::write(root.join("src/generated.rs"), "generated\n").unwrap();
-
-        let after_dirty = git::get_dirty_files(&root.to_string_lossy()).unwrap();
-        let selected_files = vec!["src/scoped.rs".to_string()];
-        let outcome =
-            constrain_lint_fix_changes(&root, Some(&selected_files), &[], after_dirty, &[])
-                .unwrap();
-
-        assert_eq!(outcome.changed_files, vec!["src/scoped.rs"]);
-        assert_eq!(
-            fs::read_to_string(root.join("src/scoped.rs")).unwrap(),
-            "after scoped\n"
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("src/unrelated.rs")).unwrap(),
-            "before unrelated\n"
-        );
-        assert!(!root.join("src/generated.rs").exists());
-        assert!(outcome
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("outside selected scope")));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn lint_finding_scope_files_normalizes_reported_files() {
-        let findings = vec![
-            crate::core::extension::lint::LintFinding {
-                file: Some("src/b.php".to_string()),
-                ..Default::default()
-            },
-            crate::core::extension::lint::LintFinding {
-                file: Some("./src/a.php".to_string()),
-                ..Default::default()
-            },
-            crate::core::extension::lint::LintFinding {
-                file: Some("src/b.php".to_string()),
-                ..Default::default()
-            },
-            crate::core::extension::lint::LintFinding {
-                file: Some("../outside.php".to_string()),
-                ..Default::default()
-            },
-            crate::core::extension::lint::LintFinding {
-                file: None,
-                ..Default::default()
-            },
-        ];
-
-        assert_eq!(
-            lint_finding_scope_files(&findings),
-            vec!["src/a.php".to_string(), "src/b.php".to_string()]
-        );
     }
 
     #[test]
@@ -1609,88 +1140,6 @@ mod tests {
     fn test_collect_refactor_sources() {
         let _collect: fn(RefactorSourceRequest) -> crate::core::Result<RefactorSourceRun> =
             collect_refactor_sources;
-    }
-
-    #[test]
-    fn try_load_cached_audit_reads_output_dir() {
-        let _guard = env_lock().lock().unwrap();
-        std::env::remove_var(OUTPUT_DIR_ENV);
-        let dir = tmp_dir("cached-audit");
-        fs::create_dir_all(&dir).unwrap();
-        let audit_result = CodeAuditResult {
-            component_id: "test".to_string(),
-            source_path: "/tmp/test".to_string(),
-            summary: crate::core::code_audit::AuditSummary {
-                files_scanned: 10,
-                conventions_detected: 2,
-                outliers_found: 1,
-                alignment_score: None,
-                files_skipped: 0,
-                warnings: vec![],
-            },
-            conventions: vec![],
-            directory_conventions: vec![],
-            findings: vec![],
-            duplicate_groups: vec![],
-        };
-
-        // Write a CliResponse envelope
-        let envelope = serde_json::json!({
-            "success": true,
-            "data": audit_result,
-        });
-        fs::write(
-            dir.join("audit.json"),
-            serde_json::to_string_pretty(&envelope).unwrap(),
-        )
-        .unwrap();
-
-        // Set the env var and load
-        std::env::set_var(OUTPUT_DIR_ENV, dir.to_string_lossy().as_ref());
-        let loaded = try_load_cached_audit();
-        std::env::remove_var(OUTPUT_DIR_ENV);
-
-        let loaded = loaded.expect("should load cached audit");
-        assert_eq!(loaded.component_id, "test");
-        assert_eq!(loaded.summary.files_scanned, 10);
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn try_load_cached_audit_skips_failed_envelope() {
-        let _guard = env_lock().lock().unwrap();
-        std::env::remove_var(OUTPUT_DIR_ENV);
-        let dir = tmp_dir("cached-audit-fail");
-        fs::create_dir_all(&dir).unwrap();
-        let envelope = serde_json::json!({
-            "success": false,
-            "error": {
-                "code": "internal.io_error",
-                "message": "something broke",
-                "details": {},
-            },
-        });
-        fs::write(
-            dir.join("audit.json"),
-            serde_json::to_string_pretty(&envelope).unwrap(),
-        )
-        .unwrap();
-
-        std::env::set_var(OUTPUT_DIR_ENV, dir.to_string_lossy().as_ref());
-        let loaded = try_load_cached_audit();
-        std::env::remove_var(OUTPUT_DIR_ENV);
-
-        assert!(loaded.is_none(), "should not use failed audit result");
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn try_load_cached_audit_returns_none_when_unset() {
-        let _guard = env_lock().lock().unwrap();
-        std::env::remove_var(OUTPUT_DIR_ENV);
-        assert!(try_load_cached_audit().is_none());
     }
 
     #[test]
