@@ -2,6 +2,7 @@ mod changes;
 mod commits;
 mod github;
 mod github_comment_sections;
+mod github_pr_comments;
 mod operation_output;
 mod operations;
 mod pr_policy;
@@ -22,13 +23,13 @@ pub use commits::{
     CommitInfo, MonorepoContext, SemverBump,
 };
 pub use github::{
-    gh_probe_succeeds, issue_close, issue_comment, issue_create, issue_edit, issue_find,
-    pr_comment, pr_create, pr_edit, pr_files, pr_find, pr_merge, pr_view, GithubFindItem,
-    GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView, IssueCloseOptions,
-    IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions,
-    IssueState, PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions,
-    PrMergeOptions, PrState,
+    gh_probe_succeeds, issue_close, issue_comment, issue_create, issue_edit, issue_find, pr_create,
+    pr_edit, pr_files, pr_find, pr_merge, pr_view, GithubFindItem, GithubFindOutput,
+    GithubIssueOutput, GithubPrOutput, GithubPrView, IssueCloseOptions, IssueCloseReason,
+    IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions, IssueState,
+    PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions, PrState,
 };
+pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
 pub use operation_output::GitOutput;
 pub use operations::{
     build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,
