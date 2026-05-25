@@ -62,13 +62,15 @@ homeboy runner migrate lab --remove-legacy
 
 The migration copies `workspace_root`, `homeboy_path`, `daemon`, `concurrency_limit`, `artifact_policy`, `env`, and `resources` into the server's embedded `runner` capability. Without `--remove-legacy`, the old `~/.config/homeboy/runners/<legacy-runner-id>.json` file is preserved so the result can be inspected first. With `--remove-legacy`, Homeboy deletes the legacy standalone runner after the server capability has been saved.
 
-Hot commands that support Lab offload (`audit`, full `lint`, `test`, `bench run`, and `trace`) auto-select a connected default Lab runner when `--runner` is omitted. Selection is conservative:
+Hot commands that support Lab offload (`audit`, full `lint`, `test`, `bench run`, and `trace`) auto-select a default Lab runner when `--runner` is omitted. Selection is conservative:
 
 - `--runner <id>` always wins.
 - `--force-hot` keeps the command local.
-- `lab.preferred_runner` is used when it names a connected SSH runner.
-- Without `lab.preferred_runner`, Homeboy auto-selects only when exactly one SSH runner is connected.
-- Local runners and disconnected SSH runners are not auto-selected.
+- `lab.preferred_runner` is used when it names an SSH runner, even if that runner is not connected yet.
+- Without `lab.preferred_runner`, Homeboy auto-selects only when exactly one SSH runner is configured or exactly one SSH runner is already connected.
+- Local runners are never auto-selected.
+- If the auto-selected runner is disconnected, Homeboy attempts a short bounded `runner connect` before execution. Connection failure prints the reason and falls back to local execution.
+- Explicit `--runner <id>` also attempts to connect a disconnected runner, but connection failure remains a command error instead of falling back silently.
 
 Configure a preferred Lab runner with:
 

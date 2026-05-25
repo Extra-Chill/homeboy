@@ -150,17 +150,23 @@ fn resolve_default_lab_runner_from_candidates(
     preferred: Option<&str>,
     candidates: impl IntoIterator<Item = DefaultLabRunnerCandidate>,
 ) -> Option<String> {
-    let connected: Vec<DefaultLabRunnerCandidate> = candidates
-        .into_iter()
-        .filter(|candidate| candidate.connected)
-        .collect();
+    let candidates: Vec<DefaultLabRunnerCandidate> = candidates.into_iter().collect();
 
     if let Some(preferred) = preferred {
-        return connected
+        return candidates
             .into_iter()
             .find(|candidate| candidate.id == preferred)
             .map(|candidate| candidate.id);
     }
+
+    if candidates.len() == 1 {
+        return candidates.into_iter().next().map(|candidate| candidate.id);
+    }
+
+    let connected: Vec<DefaultLabRunnerCandidate> = candidates
+        .into_iter()
+        .filter(|candidate| candidate.connected)
+        .collect();
 
     if connected.len() == 1 {
         connected.into_iter().next().map(|candidate| candidate.id)
@@ -666,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn default_lab_runner_selects_single_connected_runner_when_unconfigured() {
+    fn default_lab_runner_selects_single_runner_when_unconfigured() {
         let selected = resolve_default_lab_runner_from_candidates(
             None,
             vec![
@@ -682,16 +688,32 @@ mod tests {
         );
 
         assert_eq!(selected.as_deref(), Some("lab-b"));
-    }
 
-    #[test]
-    fn default_lab_runner_is_conservative_without_unique_connected_runner() {
-        let none_connected = resolve_default_lab_runner_from_candidates(
+        let disconnected = resolve_default_lab_runner_from_candidates(
             None,
             vec![DefaultLabRunnerCandidate {
                 id: "lab-a".to_string(),
                 connected: false,
             }],
+        );
+
+        assert_eq!(disconnected.as_deref(), Some("lab-a"));
+    }
+
+    #[test]
+    fn default_lab_runner_is_conservative_without_unique_connected_runner() {
+        let none_connected_with_multiple_candidates = resolve_default_lab_runner_from_candidates(
+            None,
+            vec![
+                DefaultLabRunnerCandidate {
+                    id: "lab-a".to_string(),
+                    connected: false,
+                },
+                DefaultLabRunnerCandidate {
+                    id: "lab-b".to_string(),
+                    connected: false,
+                },
+            ],
         );
         let multiple_connected = resolve_default_lab_runner_from_candidates(
             None,
@@ -707,12 +729,12 @@ mod tests {
             ],
         );
 
-        assert!(none_connected.is_none());
+        assert!(none_connected_with_multiple_candidates.is_none());
         assert!(multiple_connected.is_none());
     }
 
     #[test]
-    fn default_lab_runner_skips_disconnected_preferred_runner() {
+    fn default_lab_runner_uses_disconnected_preferred_runner() {
         let selected = resolve_default_lab_runner_from_candidates(
             Some("lab-a"),
             vec![DefaultLabRunnerCandidate {
@@ -721,6 +743,6 @@ mod tests {
             }],
         );
 
-        assert!(selected.is_none());
+        assert_eq!(selected.as_deref(), Some("lab-a"));
     }
 }
