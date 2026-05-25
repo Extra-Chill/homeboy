@@ -248,17 +248,13 @@ pub struct CiProfileSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum CiJobFidelity {
     LocalEquivalent,
     LocalPartial,
     RemoteOnly,
+    #[default]
     Unknown,
-}
-
-impl Default for CiJobFidelity {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

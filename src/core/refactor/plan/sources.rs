@@ -1011,7 +1011,7 @@ fn run_lint_stage(
     } else {
         Vec::new()
     };
-    let fix_scope_files = requested_scope_files.or_else(|| {
+    let fix_scope_files = requested_scope_files.or({
         if finding_scope_files.is_empty() {
             None
         } else {
