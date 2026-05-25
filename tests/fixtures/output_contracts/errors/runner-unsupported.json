@@ -1,0 +1,11 @@
+{
+  "success": false,
+  "error": {
+    "code": "validation.invalid_argument",
+    "message": "Unsupported runner for command 'status'",
+    "details": {
+      "argument": "--runner",
+      "value": "lab"
+    }
+  }
+}

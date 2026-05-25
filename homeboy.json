@@ -2,8 +2,104 @@
   "auto_cleanup": false,
   "audit": {
     "command_status_contracts": {
+      "required_commands": [
+        "audit",
+        "deploy",
+        "lint",
+        "release",
+        "review",
+        "runs",
+        "stack",
+        "test"
+      ],
+      "required_output_error_commands": [
+        "status"
+      ],
       "scenarios": [
         {
+          "command": "audit",
+          "expected_fields": {
+            "/data/command": "audit.summary",
+            "/success": false
+          },
+          "file": "tests/fixtures/output_contracts/quality/audit-summary.json",
+          "id": "audit-summary-golden"
+        },
+        {
+          "command": "deploy",
+          "expected_fields": {
+            "/scenarios/0/payload/data/command": "deploy.run",
+            "/scenarios/0/payload/success": true
+          },
+          "file": "tests/fixtures/golden_json_contracts/deploy_contract.json",
+          "id": "deploy-golden-contract"
+        },
+        {
+          "command": "lint",
+          "expected_fields": {
+            "/data/phase/phase": "lint",
+            "/success": false
+          },
+          "file": "tests/fixtures/output_contracts/quality/lint-findings.json",
+          "id": "lint-findings-golden"
+        },
+        {
+          "command": "release",
+          "expected_fields": {
+            "/scenarios/0/payload/success": true
+          },
+          "file": "tests/fixtures/golden_json_contracts/release_contract.json",
+          "id": "release-golden-contract"
+        },
+        {
+          "command": "review",
+          "expected_fields": {
+            "/data/command": "review",
+            "/success": false
+          },
+          "file": "tests/fixtures/output_contracts/quality/review-artifact.json",
+          "id": "review-artifact-golden"
+        },
+        {
+          "command": "runs",
+          "expected_fields": {
+            "/scenarios/0/payload/data/command": "runs.list",
+            "/scenarios/0/payload/success": true
+          },
+          "file": "tests/fixtures/golden_json_contracts/runs_contract.json",
+          "id": "runs-golden-contract"
+        },
+        {
+          "command": "stack",
+          "expected_fields": {
+            "/scenarios/0/payload/data/command": "stack.list",
+            "/scenarios/0/payload/success": true
+          },
+          "file": "tests/fixtures/golden_json_contracts/stack_contract.json",
+          "id": "stack-golden-contract"
+        },
+        {
+          "command": "status",
+          "expected_fields": {
+            "/error/code": "validation.invalid_argument",
+            "/success": false
+          },
+          "file": "tests/fixtures/output_contracts/errors/runner-unsupported.json",
+          "id": "status-runner-validation-error-output",
+          "outcome": "validation_error",
+          "output_file": true
+        },
+        {
+          "command": "test",
+          "expected_fields": {
+            "/data/phase/phase": "test",
+            "/success": false
+          },
+          "file": "tests/fixtures/output_contracts/quality/test-summary.json",
+          "id": "test-summary-golden"
+        },
+        {
+          "command": "refactor transform",
           "expected_fields": {
             "/data/command": "refactor.transform",
             "/data/total_replacements": 0,
