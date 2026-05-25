@@ -307,7 +307,35 @@ pub fn run(
         RunnerCommand::Migrate {
             runner_id,
             remove_legacy,
-        } => map_registry(migrate(&runner_id, remove_legacy)),
+        } => map_registry({
+            let runner = runner::migrate_standalone_ssh_runner(&runner_id, remove_legacy)?;
+            let mut deleted = Vec::new();
+            let hint = if remove_legacy {
+                deleted.push(runner_id.to_string());
+                Some(format!(
+                    "Legacy runner '{runner_id}' was removed. Use runner ID '{}' for this Lab server.",
+                    runner.id
+                ))
+            } else {
+                Some(format!(
+                    "Legacy runner '{runner_id}' was preserved. Re-run with --remove-legacy after verifying runner '{}' works.",
+                    runner.id
+                ))
+            };
+
+            Ok((
+                RunnerOutput {
+                    command: "runner.migrate".to_string(),
+                    id: Some(runner.id.clone()),
+                    entity: Some(runner),
+                    updated_fields: vec!["server.runner".to_string()],
+                    deleted,
+                    hint,
+                    ..Default::default()
+                },
+                0,
+            ))
+        }),
         RunnerCommand::List => map_registry(list()),
         RunnerCommand::Show { id } => map_registry(show(&id)),
         RunnerCommand::Set { args } => map_registry(set(args)),
@@ -474,36 +502,6 @@ fn enable(
             id: Some(runner.id.clone()),
             entity: Some(runner),
             updated_fields: vec!["runner".to_string()],
-            ..Default::default()
-        },
-        0,
-    ))
-}
-
-fn migrate(runner_id: &str, remove_legacy: bool) -> CmdResult<RunnerOutput> {
-    let runner = runner::migrate_standalone_ssh_runner(runner_id, remove_legacy)?;
-    let mut deleted = Vec::new();
-    let hint = if remove_legacy {
-        deleted.push(runner_id.to_string());
-        Some(format!(
-            "Legacy runner '{runner_id}' was removed. Use runner ID '{}' for this Lab server.",
-            runner.id
-        ))
-    } else {
-        Some(format!(
-            "Legacy runner '{runner_id}' was preserved. Re-run with --remove-legacy after verifying runner '{}' works.",
-            runner.id
-        ))
-    };
-
-    Ok((
-        RunnerOutput {
-            command: "runner.migrate".to_string(),
-            id: Some(runner.id.clone()),
-            entity: Some(runner),
-            updated_fields: vec!["server.runner".to_string()],
-            deleted,
-            hint,
             ..Default::default()
         },
         0,
