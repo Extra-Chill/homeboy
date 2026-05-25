@@ -180,7 +180,11 @@ fn command_failed(results: &Map<String, Value>, command: &str) -> bool {
     results
         .get(command)
         .and_then(Value::as_str)
-        .is_some_and(|status| status == "fail")
+        .is_some_and(is_failure_status)
+}
+
+fn is_failure_status(status: &str) -> bool {
+    matches!(status, "fail" | "error")
 }
 
 fn command_reported(results: &Map<String, Value>, command: &str) -> bool {
@@ -202,7 +206,7 @@ fn failed_commands(results: &Map<String, Value>) -> Vec<String> {
         .filter_map(|(name, status)| {
             status
                 .as_str()
-                .filter(|value| *value == "fail")
+                .filter(|value| is_failure_status(value))
                 .map(|_| name.clone())
         })
         .collect::<Vec<_>>();
