@@ -1,0 +1,33 @@
+{
+  "success": false,
+  "data": {
+    "passed": false,
+    "status": "failed",
+    "component": "fixture",
+    "exit_code": 1,
+    "phase": {
+      "phase": "lint",
+      "status": "failed",
+      "exit_code": 1,
+      "summary": "lint phase reported 1 finding(s)"
+    },
+    "failure": {
+      "phase": "lint",
+      "category": "findings",
+      "summary": "1 lint finding(s) detected"
+    },
+    "hints": [
+      "Run `homeboy lint fixture --fix` to apply safe fixes."
+    ],
+    "lint_findings": [
+      {
+        "id": "lint:src/lib.rs:12:trailing-whitespace",
+        "message": "Trailing whitespace",
+        "category": "whitespace",
+        "tool": "fixture-linter",
+        "file": "src/lib.rs",
+        "severity": "warning"
+      }
+    ]
+  }
+}
