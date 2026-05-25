@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[cfg(test)]
 #[path = "../../../tests/core/component/audit_test.rs"]
@@ -66,6 +67,44 @@ pub struct AuditConfig {
     /// reads. Core only matches configured captures; components own semantics.
     #[serde(default, skip_serializing_if = "ConfigKeyUsageConfig::is_empty")]
     pub config_key_usage: ConfigKeyUsageConfig,
+    /// Component-owned command scenario fixtures with expected status fields.
+    #[serde(default, skip_serializing_if = "CommandStatusContractConfig::is_empty")]
+    pub command_status_contracts: CommandStatusContractConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct CommandStatusContractConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenarios: Vec<CommandStatusContractScenario>,
+}
+
+impl CommandStatusContractConfig {
+    pub fn is_empty(&self) -> bool {
+        self.scenarios.is_empty()
+    }
+
+    fn merge(&mut self, other: &CommandStatusContractConfig) {
+        for scenario in &other.scenarios {
+            if !self
+                .scenarios
+                .iter()
+                .any(|existing| existing.id == scenario.id)
+            {
+                self.scenarios.push(scenario.clone());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CommandStatusContractScenario {
+    /// Stable scenario id shown in findings.
+    pub id: String,
+    /// JSON fixture path relative to the component root.
+    pub file: String,
+    /// Expected JSON Pointer fields and values, e.g. `/success: true`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expected_fields: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -630,6 +669,7 @@ impl AuditConfig {
             && self.duplication_detector.is_empty()
             && self.public_registry_exposure.is_empty()
             && self.config_key_usage.is_empty()
+            && self.command_status_contracts.is_empty()
     }
 
     pub fn merge(&mut self, other: &AuditConfig) {
@@ -661,6 +701,8 @@ impl AuditConfig {
         self.public_registry_exposure
             .merge(&other.public_registry_exposure);
         self.config_key_usage.merge(&other.config_key_usage);
+        self.command_status_contracts
+            .merge(&other.command_status_contracts);
         for rule in &other.requested_detectors {
             if !self
                 .requested_detectors
@@ -703,6 +745,25 @@ mod tests {
     fn dead_guard_comment_patterns_mark_audit_config_non_empty() {
         let config = AuditConfig {
             dead_guard_context_comment_patterns: vec!["dual context".to_string()],
+            ..Default::default()
+        };
+
+        assert!(!config.is_empty());
+    }
+
+    #[test]
+    fn command_status_contracts_mark_audit_config_non_empty() {
+        let config = AuditConfig {
+            command_status_contracts: CommandStatusContractConfig {
+                scenarios: vec![CommandStatusContractScenario {
+                    id: "refactor-transform-no-match".to_string(),
+                    file: "tests/fixtures/refactor-transform-no-match.json".to_string(),
+                    expected_fields: BTreeMap::from([(
+                        "/success".to_string(),
+                        serde_json::json!(true),
+                    )]),
+                }],
+            },
             ..Default::default()
         };
 

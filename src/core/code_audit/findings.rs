@@ -79,7 +79,8 @@ impl AuditFinding {
             | AuditFinding::BrokenDocReference
             | AuditFinding::StaleDocReference
             | AuditFinding::UnwiredNestedRustTest
-            | AuditFinding::NonPortableArtifactPath => FindingConfidence::Structural,
+            | AuditFinding::NonPortableArtifactPath
+            | AuditFinding::CommandStatusContractViolation => FindingConfidence::Structural,
 
             // Depends on cross-file reference resolution or declared ownership maps.
             AuditFinding::UnusedParameter

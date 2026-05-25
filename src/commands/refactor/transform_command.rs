@@ -89,7 +89,7 @@ fn run_transform_single(
     log_transform_rules(&result);
     log_transform_summary(&result, write);
 
-    let exit_code = if result.total_replacements == 0 { 1 } else { 0 };
+    let exit_code = 0;
     Ok((RefactorOutput::Transform { result }, exit_code))
 }
 
@@ -160,5 +160,41 @@ fn plural_suffix(count: usize) -> &'static str {
         ""
     } else {
         "s"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn transform_no_match_dry_run_is_successful_empty_result() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("src dir");
+        fs::write(src.join("sample.txt"), "hello world\n").expect("fixture file");
+
+        let (output, exit_code) = run_transform_single(
+            "NO_MATCH_TOKEN",
+            "NEW",
+            "src/**/*.txt",
+            "line",
+            false,
+            None,
+            Some(dir.path().to_str().expect("utf8 path")),
+            false,
+        )
+        .expect("transform should return structured output");
+
+        assert_eq!(exit_code, 0);
+        let RefactorOutput::Transform { result } = output else {
+            panic!("expected transform output");
+        };
+        assert_eq!(result.total_replacements, 0);
+        assert_eq!(result.total_files, 0);
+        assert!(!result.written);
+        assert_eq!(result.rules.len(), 1);
+        assert!(result.rules[0].matches.is_empty());
     }
 }
