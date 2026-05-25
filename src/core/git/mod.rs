@@ -2,9 +2,13 @@ mod changes;
 mod commits;
 mod github;
 mod github_comment_sections;
+mod operation_output;
 mod operations;
 mod pr_policy;
 mod primitives;
+
+#[cfg(test)]
+mod operation_tests;
 
 pub use changes::{
     discard_worktree_changes, get_diff, get_dirty_files, get_files_changed_since, get_range_diff,
@@ -25,6 +29,7 @@ pub use github::{
     IssueState, PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions,
     PrMergeOptions, PrState,
 };
+pub use operation_output::GitOutput;
 pub use operations::{
     build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,
     changes_project_filtered, cherry_pick, cherry_pick_at, commit, commit_at, commit_from_json,
@@ -33,7 +38,7 @@ pub use operations::{
     pull_bulk, push, push_at, push_bulk, rebase, rebase_at, remote_tag_commit,
     short_head_revision_at, status, status_at, status_bulk, tag, tag_at, tag_exists_locally,
     tag_exists_on_remote, BaselineInfo, BaselineSource, ChangelogInfo, ChangesOutput,
-    CherryPickOptions, CommitJsonOutput, CommitOptions, GitOutput, PushOptions, RebaseOptions,
+    CherryPickOptions, CommitJsonOutput, CommitOptions, PushOptions, RebaseOptions,
     RepoBaselineSnapshot, RepoSnapshot,
 };
 pub use pr_policy::{
