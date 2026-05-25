@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::config::{self, ConfigEntity};
+use crate::core::defaults;
 use crate::core::error::{Error, Result};
 use crate::core::output::{BatchResult, CreateOutput, CreateResult, MergeOutput, MergeResult};
 use crate::core::server::{self, RunnerSettings, ServerRunner};
@@ -119,6 +120,53 @@ pub fn list() -> Result<Vec<Runner>> {
     );
     runners.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(runners)
+}
+
+pub fn resolve_default_lab_runner() -> Result<Option<String>> {
+    let preferred = defaults::load_config().lab.preferred_runner;
+    let runners = list()?;
+    Ok(resolve_default_lab_runner_from_candidates(
+        preferred.as_deref(),
+        runners.into_iter().filter_map(|runner| {
+            if runner.kind != RunnerKind::Ssh {
+                return None;
+            }
+            let connected = status(&runner.id).ok()?.connected;
+            Some(DefaultLabRunnerCandidate {
+                id: runner.id,
+                connected,
+            })
+        }),
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DefaultLabRunnerCandidate {
+    id: String,
+    connected: bool,
+}
+
+fn resolve_default_lab_runner_from_candidates(
+    preferred: Option<&str>,
+    candidates: impl IntoIterator<Item = DefaultLabRunnerCandidate>,
+) -> Option<String> {
+    let connected: Vec<DefaultLabRunnerCandidate> = candidates
+        .into_iter()
+        .filter(|candidate| candidate.connected)
+        .collect();
+
+    if let Some(preferred) = preferred {
+        return connected
+            .into_iter()
+            .find(|candidate| candidate.id == preferred)
+            .map(|candidate| candidate.id);
+    }
+
+    if connected.len() == 1 {
+        connected.into_iter().next().map(|candidate| candidate.id)
+    } else {
+        None
+    }
 }
 
 pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runner>> {
@@ -596,5 +644,83 @@ mod tests {
             assert!(!config::exists::<Runner>("lab"));
             assert!(load("homeboy-lab").is_ok());
         });
+    }
+
+    #[test]
+    fn default_lab_runner_prefers_configured_connected_runner() {
+        let selected = resolve_default_lab_runner_from_candidates(
+            Some("lab-b"),
+            vec![
+                DefaultLabRunnerCandidate {
+                    id: "lab-a".to_string(),
+                    connected: true,
+                },
+                DefaultLabRunnerCandidate {
+                    id: "lab-b".to_string(),
+                    connected: true,
+                },
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("lab-b"));
+    }
+
+    #[test]
+    fn default_lab_runner_selects_single_connected_runner_when_unconfigured() {
+        let selected = resolve_default_lab_runner_from_candidates(
+            None,
+            vec![
+                DefaultLabRunnerCandidate {
+                    id: "lab-a".to_string(),
+                    connected: false,
+                },
+                DefaultLabRunnerCandidate {
+                    id: "lab-b".to_string(),
+                    connected: true,
+                },
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("lab-b"));
+    }
+
+    #[test]
+    fn default_lab_runner_is_conservative_without_unique_connected_runner() {
+        let none_connected = resolve_default_lab_runner_from_candidates(
+            None,
+            vec![DefaultLabRunnerCandidate {
+                id: "lab-a".to_string(),
+                connected: false,
+            }],
+        );
+        let multiple_connected = resolve_default_lab_runner_from_candidates(
+            None,
+            vec![
+                DefaultLabRunnerCandidate {
+                    id: "lab-a".to_string(),
+                    connected: true,
+                },
+                DefaultLabRunnerCandidate {
+                    id: "lab-b".to_string(),
+                    connected: true,
+                },
+            ],
+        );
+
+        assert!(none_connected.is_none());
+        assert!(multiple_connected.is_none());
+    }
+
+    #[test]
+    fn default_lab_runner_skips_disconnected_preferred_runner() {
+        let selected = resolve_default_lab_runner_from_candidates(
+            Some("lab-a"),
+            vec![DefaultLabRunnerCandidate {
+                id: "lab-a".to_string(),
+                connected: false,
+            }],
+        );
+
+        assert!(selected.is_none());
     }
 }

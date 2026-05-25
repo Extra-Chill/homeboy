@@ -62,6 +62,20 @@ homeboy runner migrate lab --remove-legacy
 
 The migration copies `workspace_root`, `homeboy_path`, `daemon`, `concurrency_limit`, `artifact_policy`, `env`, and `resources` into the server's embedded `runner` capability. Without `--remove-legacy`, the old `~/.config/homeboy/runners/<legacy-runner-id>.json` file is preserved so the result can be inspected first. With `--remove-legacy`, Homeboy deletes the legacy standalone runner after the server capability has been saved.
 
+Hot commands that support Lab offload (`audit`, full `lint`, `test`, `bench run`, and `trace`) auto-select a connected default Lab runner when `--runner` is omitted. Selection is conservative:
+
+- `--runner <id>` always wins.
+- `--force-hot` keeps the command local.
+- `lab.preferred_runner` is used when it names a connected SSH runner.
+- Without `lab.preferred_runner`, Homeboy auto-selects only when exactly one SSH runner is connected.
+- Local runners and disconnected SSH runners are not auto-selected.
+
+Configure a preferred Lab runner with:
+
+```sh
+homeboy config set /lab/preferred_runner '"homeboy-lab"'
+```
+
 ### `doctor`
 
 ```sh
