@@ -156,10 +156,7 @@ fn main() -> std::process::ExitCode {
         let result = cli::run(cli_args, &global);
 
         let (json_result, exit_code) = output::map_cmd_result_to_json(result);
-        if let Some(ref path) = output_file {
-            output::write_json_to_file(&json_result, path, exit_code);
-        }
-        output::print_json_result(json_result, exit_code).ok();
+        emit_json_result(json_result, output_file.as_deref(), exit_code);
         return std::process::ExitCode::from(exit_code_to_u8(exit_code));
     }
 
@@ -176,7 +173,7 @@ fn main() -> std::process::ExitCode {
                 Some(runner_id.to_string()),
                 None,
             );
-            output::print_result::<serde_json::Value>(Err(err)).ok();
+            emit_json_result(Err(err), output_file.as_deref(), 2);
             return std::process::ExitCode::from(exit_code_to_u8(2));
         }
         let capture_patch = cli.command.lab_offload_mutation_flag().is_some();
@@ -261,6 +258,17 @@ fn exit_code_to_u8(code: i32) -> u8 {
     }
 }
 
+fn emit_json_result(
+    result: homeboy::core::Result<serde_json::Value>,
+    output_file: Option<&str>,
+    exit_code: i32,
+) {
+    if let Some(path) = output_file {
+        output::write_json_to_file(&result, path, exit_code);
+    }
+    output::print_json_result(result, exit_code).ok();
+}
+
 fn run_lab_offload(
     runner_id: &str,
     normalized_args: &[String],
@@ -270,8 +278,10 @@ fn run_lab_offload(
     match run_lab_offload_inner(runner_id, normalized_args, output_file, capture_patch) {
         Ok(exit_code) => std::process::ExitCode::from(exit_code_to_u8(exit_code)),
         Err(err) => {
-            output::print_result::<serde_json::Value>(Err(err)).ok();
-            std::process::ExitCode::from(exit_code_to_u8(1))
+            let (json_result, exit_code) =
+                output::map_cmd_result_to_json::<serde_json::Value>(Err(err));
+            emit_json_result(json_result, output_file, exit_code);
+            std::process::ExitCode::from(exit_code_to_u8(exit_code))
         }
     }
 }
