@@ -272,6 +272,9 @@ pub enum AuditFinding {
     /// Request-derived redirect destination reaches a configured redirect sink
     /// before configured URL validation dominates the sink path.
     RedirectValidation,
+    /// Persisted artifact evidence points at a runtime-local temp path instead
+    /// of a durable artifact-store path or portable artifact token.
+    NonPortableArtifactPath,
 }
 
 impl AuditFinding {
@@ -342,6 +345,7 @@ impl AuditFinding {
             "internal_proxy_scope_missing",
             "public_registry_exposure",
             "redirect_validation",
+            "non_portable_artifact_path",
         ]
     }
 }

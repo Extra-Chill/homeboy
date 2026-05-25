@@ -48,8 +48,8 @@ use std::path::Path;
 
 use self::detectors::layer_ownership::run as run_layer_ownership;
 use self::detectors::{
-    aggregate_construction, config_key_usage, core_boundary_leak, dead_guard, deprecation_age,
-    enum_dispatch_contracts, facade_passthrough, field_patterns, global_env_guard,
+    aggregate_construction, artifact_portability, config_key_usage, core_boundary_leak, dead_guard,
+    deprecation_age, enum_dispatch_contracts, facade_passthrough, field_patterns, global_env_guard,
     mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
     repeated_literal_shape, requested_detectors, rust_test_wiring, shared_scaffolding,
     test_coverage, test_topology, wrapper_inference,
@@ -323,6 +323,11 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
         findings: &[AuditFinding::WriteOnlyConfigKey],
         requires_discovery: true,
     },
+    DetectorFamily {
+        id: "artifact_portability",
+        findings: &[AuditFinding::NonPortableArtifactPath],
+        requires_discovery: false,
+    },
 ];
 
 impl AuditExecutionPlan {
@@ -474,6 +479,10 @@ impl AuditExecutionPlan {
 
     pub(crate) fn run_config_key_usage(&self) -> bool {
         self.detector_enabled("config_key_usage")
+    }
+
+    pub(crate) fn run_artifact_portability(&self) -> bool {
+        self.detector_enabled("artifact_portability")
     }
 
     fn requires_discovery(&self) -> bool {
@@ -1358,6 +1367,20 @@ fn audit_internal(
         all_findings.extend(public_registry_findings);
     }
 
+    let artifact_portability_findings = if plan.run_artifact_portability() {
+        artifact_portability::run(component_id)
+    } else {
+        Vec::new()
+    };
+    if !artifact_portability_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Artifact portability: {} finding(s) (non-portable artifact evidence paths)",
+            artifact_portability_findings.len()
+        );
+        all_findings.extend(artifact_portability_findings);
+    }
+
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,
     // expand scope to include call sites affected by symbol changes, then
     // filter findings to that expanded scope.
@@ -1591,6 +1614,18 @@ fn audit_root_only(
                 field_pattern_findings.len()
             );
             findings.extend(field_pattern_findings);
+        }
+    }
+
+    if plan.run_artifact_portability() {
+        let artifact_portability_findings = artifact_portability::run(component_id);
+        if !artifact_portability_findings.is_empty() {
+            log_status!(
+                "audit",
+                "Artifact portability: {} finding(s) (non-portable artifact evidence paths)",
+                artifact_portability_findings.len()
+            );
+            findings.extend(artifact_portability_findings);
         }
     }
 
