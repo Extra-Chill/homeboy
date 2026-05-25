@@ -22,7 +22,9 @@ pub use records::{
     NewTriageItemRecord, RunListFilter, RunRecord, RunStatus, TraceRunRecord, TraceSpanRecord,
     TriageItemRecord, TriagePullRequestSignals,
 };
-pub use store::{ObservationDbStatus, ObservationStore, CURRENT_SCHEMA_VERSION};
+pub use store::{
+    ObservationDbStatus, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,
+};
 pub use timeline::{
     ObservationEvent, ObservationPhaseMilestone, ObservationSpanDefinition, ObservationSpanResult,
     ObservationSpanStatus,

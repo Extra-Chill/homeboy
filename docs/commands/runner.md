@@ -72,6 +72,8 @@ Hot commands that support Lab offload (`audit`, full `lint`, `test`, `bench run`
 - If the auto-selected runner is disconnected, Homeboy attempts a short bounded `runner connect` before execution. Connection failure prints the reason and falls back to local execution.
 - Explicit `--runner <id>` also attempts to connect a disconnected runner, but connection failure remains a command error instead of falling back silently.
 
+Observation metadata records the routing decision under `metadata.lab_offload` when an observed run is created. `source` is `automatic` or `explicit`; `status` is `offloaded`, `skipped`, or `fallback`; and successful offloads include `runner_id` plus `remote_workspace`. Local fallback records the runner and `fallback_reason`, while skipped local execution records why no automatic offload was used, such as `force_hot` or `no_default_runner`.
+
 Configure a preferred Lab runner with:
 
 ```sh

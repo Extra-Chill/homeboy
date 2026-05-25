@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -18,6 +19,7 @@ pub struct RunnerExecOptions {
     pub cwd: Option<String>,
     pub allow_ssh: bool,
     pub command: Vec<String>,
+    pub env: HashMap<String, String>,
     pub capture_patch: bool,
     pub source_snapshot: Option<SourceSnapshot>,
 }
@@ -82,6 +84,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 &session.local_url,
                 cwd,
                 options.command,
+                options.env,
                 options.capture_patch,
                 options.source_snapshot,
             );
@@ -89,8 +92,8 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     }
 
     match runner.kind {
-        RunnerKind::Local => exec_local(&runner, cwd, options.command),
-        RunnerKind::Ssh if options.allow_ssh => exec_ssh(&runner, cwd, options.command),
+        RunnerKind::Local => exec_local(&runner, cwd, options.command, options.env),
+        RunnerKind::Ssh if options.allow_ssh => exec_ssh(&runner, cwd, options.command, options.env),
         RunnerKind::Ssh => Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` or pass `--ssh` for explicit SSH diagnostics",
@@ -108,6 +111,7 @@ fn exec_via_daemon(
     local_url: &str,
     cwd: String,
     command: Vec<String>,
+    env: HashMap<String, String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
 ) -> Result<(RunnerExecOutput, i32)> {
@@ -118,13 +122,15 @@ fn exec_via_daemon(
     let source_snapshot = source_snapshot_override.unwrap_or_else(|| {
         SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
     });
+    let mut request_env = runner.env.clone();
+    request_env.extend(env);
     let response = client
         .post(format!("{}/exec", local_url.trim_end_matches('/')))
         .json(&json!({
             "runner_id": runner.id,
             "cwd": cwd,
             "command": command,
-            "env": runner.env,
+            "env": request_env,
             "capture_patch": capture_patch,
             "source_snapshot": source_snapshot,
         }))
@@ -276,11 +282,13 @@ fn exec_local(
     runner: &Runner,
     cwd: String,
     command: Vec<String>,
+    env: HashMap<String, String>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let output = command_output(
         std::process::Command::new(&command[0])
             .args(&command[1..])
-            .current_dir(&cwd),
+            .current_dir(&cwd)
+            .envs(env),
     )?;
     let source_snapshot = SourceSnapshot::collect_local(
         &runner.id,
@@ -298,7 +306,12 @@ fn exec_local(
     ))
 }
 
-fn exec_ssh(runner: &Runner, cwd: String, command: Vec<String>) -> Result<(RunnerExecOutput, i32)> {
+fn exec_ssh(
+    runner: &Runner,
+    cwd: String,
+    command: Vec<String>,
+    env: HashMap<String, String>,
+) -> Result<(RunnerExecOutput, i32)> {
     let server_id = runner.server_id.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "server_id",
@@ -310,6 +323,7 @@ fn exec_ssh(runner: &Runner, cwd: String, command: Vec<String>) -> Result<(Runne
     let server = server::load(server_id)?;
     let mut client = SshClient::from_server(&server, server_id)?;
     client.env.extend(runner.env.clone());
+    client.env.extend(env);
     let command_line = format!(
         "cd {} && {}",
         shell::quote_arg(&cwd),
@@ -498,6 +512,7 @@ mod tests {
                     cwd: None,
                     allow_ssh: false,
                     command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
+                    env: Default::default(),
                     capture_patch: false,
                     source_snapshot: None,
                 },

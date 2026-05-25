@@ -182,6 +182,7 @@ fn main() -> std::process::ExitCode {
                     let capture_patch = cli.command.lab_offload_mutation_flag().is_some();
                     return run_lab_offload(
                         &selection.runner_id,
+                        selection.source,
                         &cli.command,
                         &normalized,
                         output_file.as_deref(),
@@ -189,6 +190,18 @@ fn main() -> std::process::ExitCode {
                     );
                 }
                 Ok(LabRunnerPreparation::FallBackLocal { reason }) => {
+                    homeboy::core::runner::capture_lab_offload_metadata(
+                        homeboy::core::runner::lab_offload_metadata(
+                            match selection.source {
+                                LabRunnerSelectionSource::Explicit => "explicit",
+                                LabRunnerSelectionSource::Default => "automatic",
+                            },
+                            Some(&selection.runner_id),
+                            "fallback",
+                            None,
+                            Some(&reason),
+                        ),
+                    );
                     eprintln!("Lab offload: {reason}; running locally.");
                     // Continue into the normal local command path below.
                 }
@@ -198,7 +211,23 @@ fn main() -> std::process::ExitCode {
                 }
             }
         }
-        Ok(None) => {}
+        Ok(None) => {
+            if cli.command.supports_lab_runner() {
+                homeboy::core::runner::capture_lab_offload_metadata(
+                    homeboy::core::runner::lab_offload_metadata(
+                        "automatic",
+                        None,
+                        "skipped",
+                        None,
+                        Some(if cli.force_hot {
+                            "force_hot"
+                        } else {
+                            "no_default_runner"
+                        }),
+                    ),
+                );
+            }
+        }
         Err(err) => {
             emit_json_result(Err(err), output_file.as_deref(), 2);
             return std::process::ExitCode::from(exit_code_to_u8(2));
@@ -535,6 +564,7 @@ fn emit_json_result(
 
 fn run_lab_offload(
     runner_id: &str,
+    source: LabRunnerSelectionSource,
     command: &Commands,
     normalized_args: &[String],
     output_file: Option<&str>,
@@ -542,6 +572,7 @@ fn run_lab_offload(
 ) -> std::process::ExitCode {
     match run_lab_offload_inner(
         runner_id,
+        source,
         command,
         normalized_args,
         output_file,
@@ -559,6 +590,7 @@ fn run_lab_offload(
 
 fn run_lab_offload_inner(
     runner_id: &str,
+    source: LabRunnerSelectionSource,
     command_kind: &Commands,
     normalized_args: &[String],
     output_file: Option<&str>,
@@ -632,12 +664,28 @@ fn run_lab_offload_inner(
         runner_id,
         remote_cwd
     );
+    let lab_metadata = homeboy::core::runner::lab_offload_metadata(
+        match source {
+            LabRunnerSelectionSource::Explicit => "explicit",
+            LabRunnerSelectionSource::Default => "automatic",
+        },
+        Some(runner_id),
+        "offloaded",
+        Some(&remote_cwd),
+        None,
+    );
+    let mut env = std::collections::HashMap::new();
+    env.insert(
+        homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV.to_string(),
+        serde_json::to_string(&lab_metadata).unwrap_or_default(),
+    );
     let (exec_output, exit_code) = homeboy::core::runner::exec(
         runner_id,
         homeboy::core::runner::RunnerExecOptions {
             cwd: Some(remote_cwd),
             allow_ssh: false,
             command,
+            env,
             capture_patch,
             source_snapshot: Some(source_snapshot),
         },
@@ -703,6 +751,7 @@ fn preflight_lab_offload_test_extensions(
                     "show".to_string(),
                     extension_id.clone(),
                 ],
+                env: Default::default(),
                 capture_patch: false,
                 source_snapshot: None,
             },
