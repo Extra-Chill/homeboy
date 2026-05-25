@@ -84,30 +84,6 @@ pub fn build_test_refactor_request(
     }
 }
 
-pub fn run_lint_refactor(
-    component: Component,
-    root: PathBuf,
-    settings: Vec<(String, String)>,
-    options: LintSourceOptions,
-    write: bool,
-) -> crate::core::Result<RefactorSourceRun> {
-    collect_refactor_sources(lint_refactor_request(
-        component, root, settings, options, write,
-    ))
-}
-
-pub fn run_test_refactor(
-    component: Component,
-    root: PathBuf,
-    settings: Vec<(String, String)>,
-    options: TestSourceOptions,
-    write: bool,
-) -> crate::core::Result<RefactorSourceRun> {
-    collect_refactor_sources(build_test_refactor_request(
-        component, root, settings, options, write,
-    ))
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct LintSourceOptions {
     pub selected_files: Option<Vec<String>>,
@@ -1929,28 +1905,6 @@ mod tests {
     fn test_collect_refactor_sources() {
         let _collect: fn(RefactorSourceRequest) -> crate::core::Result<RefactorSourceRun> =
             collect_refactor_sources;
-    }
-
-    #[test]
-    fn test_run_lint_refactor() {
-        let _run: fn(
-            Component,
-            PathBuf,
-            Vec<(String, String)>,
-            LintSourceOptions,
-            bool,
-        ) -> crate::core::Result<RefactorSourceRun> = run_lint_refactor;
-    }
-
-    #[test]
-    fn test_run_test_refactor() {
-        let _run: fn(
-            Component,
-            PathBuf,
-            Vec<(String, String)>,
-            TestSourceOptions,
-            bool,
-        ) -> crate::core::Result<RefactorSourceRun> = run_test_refactor;
     }
 
     #[test]
