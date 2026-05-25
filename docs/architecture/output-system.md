@@ -6,8 +6,19 @@ Exceptions:
 
 - `homeboy docs` prints raw markdown (or newline-delimited topic names for `homeboy docs list`).
 - `homeboy changelog` (default show) prints raw markdown by default; in JSON mode it returns JSON with a `content` field containing the markdown.
+- `homeboy review --report pr-comment` prints a raw markdown PR-comment report.
+- `homeboy trace --report markdown` prints a raw markdown trace report.
+- `homeboy runs compare` prints raw markdown unless `--output` is provided.
+- `homeboy report failure-digest` prints raw markdown because markdown is currently the only report format.
 - `homeboy list` prints clap help text (raw; not JSON-wrapped).
 - `homeboy ssh` connect mode and `homeboy logs show --follow` use interactive passthrough output.
+
+For raw markdown commands, `--output <path>` still writes a JSON file when the
+command supports output artifacts. The generic output-file shape is the normal
+success envelope with `data` set to the rendered markdown string. Commands with
+special output artifacts keep their documented artifact contract: `review`
+writes the stable review artifact, and `trace --json-summary` writes the trace
+summary artifact.
 
 ## Top-level envelope
 

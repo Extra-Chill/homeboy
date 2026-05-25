@@ -36,6 +36,7 @@ rig package / local spec
 | `up <id>` | Run the rig's `up` pipeline and materialize the environment. |
 | `check <id>` | Run the rig's `check` pipeline and report all failures. |
 | `down <id>` | Run the rig's `down` pipeline and stop managed services. |
+| `repair <id>` | Repair safe declared drift without running the full `up` pipeline. |
 | `sync <id>` | Sync every stack declared by the rig's components. |
 | `status <id>` | Show running services and last `up` / `check` state. |
 | `runs <id>` | List persisted observation runs for the rig. |
@@ -93,6 +94,21 @@ homeboy rig down studio
 ```
 
 Runs the `down` pipeline, cleans rig-owned shared paths, and stops declared services. `external` services are adopted rather than spawned, so `down` can recycle stale daemons that were started by another tool.
+
+### `repair`
+
+```sh
+homeboy rig repair studio
+```
+
+Repairs safe declared drift without running the full `up` pipeline. Use it after
+`rig check` reports fixable local drift and you do not want to start services,
+run builds, or execute the full materialization sequence.
+
+`repair` is narrower than `up`: it applies only repairs the rig engine classifies
+as safe and declared by the rig spec, and it refuses broader environment
+materialization. `check` remains read-only; `repair` is the middle path for safe
+state correction; `up` is the full mutating setup pipeline.
 
 ### `status`
 

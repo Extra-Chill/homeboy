@@ -45,6 +45,56 @@ homeboy runner connect homeboy-lab
 
 After this, `homeboy-lab` is both the server ID and the runner ID.
 
+### `doctor`
+
+```sh
+homeboy runner doctor local
+homeboy runner doctor <runner-id>
+```
+
+Diagnoses a local or configured SSH runner without mutating it. Use `local`,
+`localhost`, or `self` to inspect this machine without creating a runner record.
+The JSON payload uses `command: "runner.doctor"` and includes `runner_id`,
+`status`, `capabilities`, and warning/error details when a capability probe fails.
+
+Use `doctor` before `connect` when you need to know whether Homeboy, Git, SSH,
+and the configured workspace root are usable on the target machine.
+
+### `connect`
+
+```sh
+homeboy runner connect <runner-id>
+```
+
+Starts a loopback-only Homeboy daemon on the runner and opens an SSH tunnel to
+it. This is the preferred Lab execution path because later `runner exec` calls
+can use the daemon session instead of ad-hoc SSH command execution. The JSON
+payload uses `command: "runner.connect"` and reports connection state such as
+the runner ID, tunnel endpoint, daemon endpoint, and persisted session metadata.
+
+### `status`
+
+```sh
+homeboy runner status <runner-id>
+```
+
+Shows the persisted tunnel/session state for a runner. Use this to determine
+whether `runner exec` will use a connected daemon or needs an explicit fallback.
+The JSON payload uses `command: "runner.status"` and reports whether a saved
+session exists, whether the tunnel still appears live, and the recorded endpoint
+details.
+
+### `disconnect`
+
+```sh
+homeboy runner disconnect <runner-id>
+```
+
+Closes a persisted runner tunnel session and removes its local session state.
+The JSON payload uses `command: "runner.disconnect"` and reports which session
+state was removed. This is safe to run when no live session exists; it is the
+explicit cleanup counterpart to `runner connect`.
+
 ### `list`
 
 ```sh
@@ -88,7 +138,7 @@ Path rules:
 - SSH runners require `workspace_root` so local paths are not silently reused remotely.
 - SSH `--cwd` must be an absolute path under the configured `workspace_root`.
 - Omitting `--cwd` on an SSH runner uses the runner `workspace_root`.
-- `--ssh` is an MVP/diagnostic fallback; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
+- `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
 
 ### `workspace sync`
 
@@ -216,7 +266,7 @@ Rules:
 
 All command output is wrapped in the global JSON envelope described in the [JSON output contract](../architecture/output-system.md). The `data` payload uses the generic entity CRUD shape:
 
-- `command`: action identifier such as `runner.add`, `runner.list`, `runner.show`, `runner.set`, `runner.remove`, `runner.exec`, `runner.workspace.sync`, or `runner.workspace.apply`
+- `command`: action identifier such as `runner.add`, `runner.list`, `runner.show`, `runner.set`, `runner.remove`, `runner.doctor`, `runner.connect`, `runner.status`, `runner.disconnect`, `runner.exec`, `runner.workspace.sync`, or `runner.workspace.apply`
 - `id`: present for single-runner actions
 - `entity`: runner configuration for single-runner read/write actions
 - `entities`: list for `list`
