@@ -181,7 +181,7 @@ homeboy rig app update studio --dry-run
 homeboy rig app uninstall studio
 ```
 
-`rig app` manages an optional desktop launcher declared in `app_launcher`. The current implementation generates a macOS `.app` wrapper that runs rig preflight, runs `rig up`, and opens the target app when the rig is ready. Use `--dry-run` to preview generated paths without writing or deleting files.
+`rig app` manages an optional desktop launcher declared in `app_launcher`. It can generate a macOS `.app` wrapper or a Linux `.desktop` file that runs rig preflight, runs `rig up`, and opens the target app when the rig is ready. Use `--dry-run` to preview generated paths without writing or deleting files.
 
 ## Minimal Example
 

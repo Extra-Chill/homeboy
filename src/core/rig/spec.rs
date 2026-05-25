@@ -109,8 +109,8 @@ pub struct RigSpec {
 
     /// Optional desktop launcher wrapper for this rig.
     ///
-    /// v1 is macOS-only and generates a script-backed `.app` bundle that runs
-    /// `homeboy rig check` and `homeboy rig up` before opening the target app.
+    /// Generates a desktop launcher that runs `homeboy rig check` and
+    /// `homeboy rig up` before opening the target app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_launcher: Option<AppLauncherSpec>,
 }
@@ -147,13 +147,13 @@ impl RigResourcesSpec {
 /// Desktop launcher settings for a rig.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppLauncherSpec {
-    /// Launcher platform. v1 supports `macos` only.
+    /// Launcher platform. Supports `macos` and `linux`.
     pub platform: AppLauncherPlatform,
 
-    /// Display name for the generated launcher bundle.
+    /// Display name for the generated launcher.
     pub wrapper_display_name: String,
 
-    /// Bundle identifier written to Info.plist.
+    /// Bundle identifier written to Info.plist on macOS.
     pub wrapper_bundle_id: String,
 
     /// Target app or executable to launch after rig prep succeeds.
@@ -161,8 +161,8 @@ pub struct AppLauncherSpec {
     pub target_app: String,
 
     /// Directory that receives the generated wrapper. Defaults to
-    /// `/Applications`; tests and non-global installs can point this at a
-    /// writable directory.
+    /// `/Applications` on macOS and `$HOME/.local/share/applications` on Linux;
+    /// tests and non-global installs can point this at a writable directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_dir: Option<String>,
 
@@ -173,8 +173,9 @@ pub struct AppLauncherSpec {
     )]
     pub preflight: Vec<AppLauncherPreflight>,
 
-    /// Failure behaviour for preflight. v1 implements the dialog + terminal
-    /// script path on macOS.
+    /// Failure behaviour for preflight. macOS implements the dialog + terminal
+    /// script path; Linux exits the generated `.desktop` command with the
+    /// failing preflight status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_preflight_fail: Option<String>,
 }
@@ -184,6 +185,7 @@ pub struct AppLauncherSpec {
 #[serde(rename_all = "kebab-case")]
 pub enum AppLauncherPlatform {
     Macos,
+    Linux,
 }
 
 /// Preflight command run by a generated launcher before `rig up`.
