@@ -1,146 +1,165 @@
+use std::collections::BTreeMap;
+
 use super::super::{collect_artifacts, from_main_workflow, from_main_workflow_with_rig};
-use super::*;
-use crate::core::extension::bench::artifact::BenchArtifact;
-use crate::core::extension::bench::diagnostic::BenchDiagnosticSource;
-use crate::core::extension::bench::parsing::{
-    BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, BenchMetrics, BenchRunSnapshot,
-    BenchScenario,
+use super::{
+    aggregate_comparison, aggregate_comparison_with_axes, BenchComparisonDiff, BenchPhaseGroups,
+    RigBenchEntry,
 };
-use crate::core::extension::bench::run::BenchRunWorkflowResult;
+use crate::core::extension::bench::artifact::BenchArtifact;
+use crate::core::extension::bench::diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
+use crate::core::extension::bench::distribution::BenchRunDistribution;
+use crate::core::extension::bench::parsing::{
+    BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, BenchMetrics, BenchResults,
+    BenchRunSnapshot, BenchScenario,
+};
+use crate::core::extension::bench::run::{BenchRunFailure, BenchRunWorkflowResult};
 use crate::core::extension::bench::side_by_side::BenchSideBySideMetric;
 
-fn scenario(id: &str, metrics: &[(&str, f64)]) -> BenchScenario {
-    let mut values = BTreeMap::new();
-    for (k, v) in metrics {
-        values.insert((*k).to_string(), *v);
+mod fixtures {
+    use super::*;
+
+    pub(super) fn scenario(id: &str, metrics: &[(&str, f64)]) -> BenchScenario {
+        let mut values = BTreeMap::new();
+        for (k, v) in metrics {
+            values.insert((*k).to_string(), *v);
+        }
+        BenchScenario {
+            id: id.to_string(),
+            file: None,
+            source: None,
+            default_iterations: None,
+            tags: Vec::new(),
+            iterations: 10,
+            metrics: BenchMetrics {
+                values,
+                distributions: BTreeMap::new(),
+            },
+            metric_groups: BTreeMap::new(),
+            timeline: Vec::new(),
+            span_definitions: Vec::new(),
+            span_results: Vec::new(),
+            gates: Vec::new(),
+            gate_results: Vec::new(),
+            metadata: BTreeMap::new(),
+            passed: true,
+            memory: None,
+            artifacts: BTreeMap::new(),
+            diagnostics: Vec::new(),
+            runs: None,
+            runs_summary: None,
+        }
     }
-    BenchScenario {
-        id: id.to_string(),
-        file: None,
-        source: None,
-        default_iterations: None,
-        tags: Vec::new(),
-        iterations: 10,
-        metrics: BenchMetrics {
-            values,
-            distributions: BTreeMap::new(),
-        },
-        metric_groups: BTreeMap::new(),
-        timeline: Vec::new(),
-        span_definitions: Vec::new(),
-        span_results: Vec::new(),
-        gates: Vec::new(),
-        gate_results: Vec::new(),
-        metadata: BTreeMap::new(),
-        passed: true,
-        memory: None,
-        artifacts: BTreeMap::new(),
-        diagnostics: Vec::new(),
-        runs: None,
-        runs_summary: None,
+
+    pub(super) fn scenario_with_metric_groups(
+        id: &str,
+        metrics: &[(&str, f64)],
+        metric_groups: &[(&str, &[(&str, f64)])],
+    ) -> BenchScenario {
+        let mut scenario = scenario(id, metrics);
+        scenario.metric_groups = metric_groups
+            .iter()
+            .map(|(group, values)| {
+                (
+                    (*group).to_string(),
+                    values
+                        .iter()
+                        .map(|(name, value)| ((*name).to_string(), *value))
+                        .collect(),
+                )
+            })
+            .collect();
+        scenario
     }
-}
 
-fn scenario_with_metric_groups(
-    id: &str,
-    metrics: &[(&str, f64)],
-    metric_groups: &[(&str, &[(&str, f64)])],
-) -> BenchScenario {
-    let mut scenario = scenario(id, metrics);
-    scenario.metric_groups = metric_groups
-        .iter()
-        .map(|(group, values)| {
-            (
-                (*group).to_string(),
-                values
-                    .iter()
-                    .map(|(name, value)| ((*name).to_string(), *value))
-                    .collect(),
-            )
-        })
-        .collect();
-    scenario
-}
-
-fn scenario_with_runs_summary(
-    id: &str,
-    metrics: &[(&str, f64)],
-    summary_metric: &str,
-    distribution: BenchRunDistribution,
-) -> BenchScenario {
-    let mut scenario = scenario(id, metrics);
-    let mut runs_summary = BTreeMap::new();
-    runs_summary.insert(summary_metric.to_string(), distribution);
-    scenario.runs_summary = Some(runs_summary);
-    scenario
-}
-
-fn run_distribution(n: u64, p50: f64, p95: f64, mean: f64, cv_pct: f64) -> BenchRunDistribution {
-    BenchRunDistribution {
-        n,
-        min: p50,
-        max: p95,
-        mean,
-        stdev: mean * cv_pct / 100.0,
-        cv_pct,
-        p50,
-        p95,
+    pub(super) fn scenario_with_runs_summary(
+        id: &str,
+        metrics: &[(&str, f64)],
+        summary_metric: &str,
+        distribution: BenchRunDistribution,
+    ) -> BenchScenario {
+        let mut scenario = scenario(id, metrics);
+        let mut runs_summary = BTreeMap::new();
+        runs_summary.insert(summary_metric.to_string(), distribution);
+        scenario.runs_summary = Some(runs_summary);
+        scenario
     }
-}
 
-fn results(scenarios: Vec<BenchScenario>) -> BenchResults {
-    BenchResults {
-        component_id: "studio".to_string(),
-        iterations: 10,
-        run_metadata: None,
-        diagnostics: Vec::new(),
-        budget_findings: Vec::new(),
-        scenarios,
-        metric_policies: BTreeMap::new(),
+    pub(super) fn run_distribution(
+        n: u64,
+        p50: f64,
+        p95: f64,
+        mean: f64,
+        cv_pct: f64,
+    ) -> BenchRunDistribution {
+        BenchRunDistribution {
+            n,
+            min: p50,
+            max: p95,
+            mean,
+            stdev: mean * cv_pct / 100.0,
+            cv_pct,
+            p50,
+            p95,
+        }
     }
-}
 
-fn artifact(path: &str, kind: Option<&str>, label: Option<&str>) -> BenchArtifact {
-    BenchArtifact {
-        path: Some(path.to_string()),
-        url: None,
-        artifact_type: None,
-        kind: kind.map(str::to_string),
-        label: label.map(str::to_string),
+    pub(super) fn results(scenarios: Vec<BenchScenario>) -> BenchResults {
+        BenchResults {
+            component_id: "studio".to_string(),
+            iterations: 10,
+            run_metadata: None,
+            diagnostics: Vec::new(),
+            budget_findings: Vec::new(),
+            scenarios,
+            metric_policies: BTreeMap::new(),
+        }
     }
-}
 
-fn artifact_with_url(
-    path: &str,
-    url: &str,
-    kind: Option<&str>,
-    label: Option<&str>,
-) -> BenchArtifact {
-    BenchArtifact {
-        path: Some(path.to_string()),
-        url: Some(url.to_string()),
-        artifact_type: None,
-        kind: kind.map(str::to_string),
-        label: label.map(str::to_string),
+    pub(super) fn artifact(path: &str, kind: Option<&str>, label: Option<&str>) -> BenchArtifact {
+        BenchArtifact {
+            path: Some(path.to_string()),
+            url: None,
+            artifact_type: None,
+            kind: kind.map(str::to_string),
+            label: label.map(str::to_string),
+        }
     }
-}
 
-fn entry(rig_id: &str, passed: bool, results: Option<BenchResults>) -> RigBenchEntry {
-    RigBenchEntry {
-        rig_id: rig_id.to_string(),
-        passed,
-        status: if passed { "passed" } else { "failed" }.to_string(),
-        exit_code: if passed { 0 } else { 1 },
-        artifacts: results.as_ref().map(collect_artifacts).unwrap_or_default(),
-        results,
-        rig_state: None,
-        failure: None,
-        diagnostics: Vec::new(),
+    pub(super) fn artifact_with_url(
+        path: &str,
+        url: &str,
+        kind: Option<&str>,
+        label: Option<&str>,
+    ) -> BenchArtifact {
+        BenchArtifact {
+            path: Some(path.to_string()),
+            url: Some(url.to_string()),
+            artifact_type: None,
+            kind: kind.map(str::to_string),
+            label: label.map(str::to_string),
+        }
     }
-}
 
-fn failed_entry_with_stderr(rig_id: &str) -> RigBenchEntry {
-    RigBenchEntry {
+    pub(super) fn entry(
+        rig_id: &str,
+        passed: bool,
+        results: Option<BenchResults>,
+    ) -> RigBenchEntry {
+        RigBenchEntry {
+            rig_id: rig_id.to_string(),
+            passed,
+            status: if passed { "passed" } else { "failed" }.to_string(),
+            exit_code: if passed { 0 } else { 1 },
+            artifacts: results.as_ref().map(collect_artifacts).unwrap_or_default(),
+            results,
+            rig_state: None,
+            failure: None,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub(super) fn failed_entry_with_stderr(rig_id: &str) -> RigBenchEntry {
+        RigBenchEntry {
             rig_id: rig_id.to_string(),
             passed: false,
             status: "failed".to_string(),
@@ -158,16 +177,19 @@ fn failed_entry_with_stderr(rig_id: &str) -> RigBenchEntry {
             }),
             diagnostics: Vec::new(),
         }
-}
+    }
 
-fn diagnostic(class: &str) -> BenchDiagnostic {
-    BenchDiagnostic {
-        class: class.to_string(),
-        message: Some("database setup failed".to_string()),
-        source: Some(BenchDiagnosticSource::Run),
-        metadata: BTreeMap::new(),
+    pub(super) fn diagnostic(class: &str) -> BenchDiagnostic {
+        BenchDiagnostic {
+            class: class.to_string(),
+            message: Some("database setup failed".to_string()),
+            source: Some(BenchDiagnosticSource::Run),
+            metadata: BTreeMap::new(),
+        }
     }
 }
+
+use fixtures::*;
 
 #[test]
 fn test_from_main_workflow() {
