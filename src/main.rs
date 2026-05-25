@@ -165,25 +165,29 @@ fn main() -> std::process::ExitCode {
         Err(e) => e.exit(),
     };
 
-    if let Some(runner_id) = cli.runner.as_deref() {
-        if !cli.command.supports_lab_runner() {
-            let err = homeboy::core::Error::validation_invalid_argument(
-                "runner",
-                "--runner is only supported for hot Lab-offload commands: lint, test, audit, bench, and trace",
-                Some(runner_id.to_string()),
-                None,
+    match resolve_lab_runner_selection(&cli.command, cli.runner.as_deref(), cli.force_hot) {
+        Ok(Some(selection)) => {
+            if matches!(selection.source, LabRunnerSelectionSource::Default) {
+                eprintln!(
+                    "Lab offload: auto-selected default runner `{}`.",
+                    selection.runner_id
+                );
+            }
+
+            let capture_patch = cli.command.lab_offload_mutation_flag().is_some();
+            return run_lab_offload(
+                &selection.runner_id,
+                &cli.command,
+                &normalized,
+                output_file.as_deref(),
+                capture_patch,
             );
+        }
+        Ok(None) => {}
+        Err(err) => {
             emit_json_result(Err(err), output_file.as_deref(), 2);
             return std::process::ExitCode::from(exit_code_to_u8(2));
         }
-        let capture_patch = cli.command.lab_offload_mutation_flag().is_some();
-        return run_lab_offload(
-            runner_id,
-            &cli.command,
-            &normalized,
-            output_file.as_deref(),
-            capture_patch,
-        );
     }
 
     homeboy::core::set_artifact_root_override(cli.artifact_root.clone().or(artifact_root_override));
@@ -247,6 +251,65 @@ fn main() -> std::process::ExitCode {
     let exit_code = commands::response::run(cli.command, &global, output_file.as_deref());
 
     std::process::ExitCode::from(exit_code_to_u8(exit_code))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabRunnerSelectionSource {
+    Explicit,
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LabRunnerSelection {
+    runner_id: String,
+    source: LabRunnerSelectionSource,
+}
+
+fn resolve_lab_runner_selection(
+    command: &Commands,
+    explicit_runner: Option<&str>,
+    force_hot: bool,
+) -> homeboy::core::Result<Option<LabRunnerSelection>> {
+    let default_runner = if explicit_runner.is_none() && !force_hot && command.supports_lab_runner()
+    {
+        homeboy::core::runner::resolve_default_lab_runner()?
+    } else {
+        None
+    };
+
+    resolve_lab_runner_selection_from_default(command, explicit_runner, force_hot, default_runner)
+}
+
+fn resolve_lab_runner_selection_from_default(
+    command: &Commands,
+    explicit_runner: Option<&str>,
+    force_hot: bool,
+    default_runner: Option<String>,
+) -> homeboy::core::Result<Option<LabRunnerSelection>> {
+    if let Some(runner_id) = explicit_runner {
+        if !command.supports_lab_runner() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "runner",
+                "--runner is only supported for hot Lab-offload commands: lint, test, audit, bench, and trace",
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+
+        return Ok(Some(LabRunnerSelection {
+            runner_id: runner_id.to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+        }));
+    }
+
+    if force_hot || !command.supports_lab_runner() {
+        return Ok(None);
+    }
+
+    Ok(default_runner.map(|runner_id| LabRunnerSelection {
+        runner_id,
+        source: LabRunnerSelectionSource::Default,
+    }))
 }
 
 fn exit_code_to_u8(code: i32) -> u8 {
@@ -698,8 +761,9 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        lab_offload_source_path, lab_offload_test_extension_ids, rewrite_lab_offload_args,
-        runner_extension_preflight_tail,
+        lab_offload_source_path, lab_offload_test_extension_ids,
+        resolve_lab_runner_selection_from_default, rewrite_lab_offload_args,
+        runner_extension_preflight_tail, LabRunnerSelectionSource,
     };
     use homeboy::cli_surface::Commands;
     use homeboy::commands::test::TestArgs;
@@ -926,5 +990,75 @@ mod tests {
 
         assert!(tail.contains("two\nthree\nfour"));
         assert!(!tail.contains("one"));
+    }
+
+    #[test]
+    fn lab_runner_selection_keeps_explicit_runner_precedence() {
+        let command = Commands::Test(test_args_for_path(std::path::Path::new("/tmp/project")));
+        let selection = resolve_lab_runner_selection_from_default(
+            &command,
+            Some("lab-explicit"),
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect("selection")
+        .expect("explicit runner selected");
+
+        assert_eq!(selection.runner_id, "lab-explicit");
+        assert_eq!(selection.source, LabRunnerSelectionSource::Explicit);
+    }
+
+    #[test]
+    fn lab_runner_selection_uses_default_for_supported_commands() {
+        let command = Commands::Test(test_args_for_path(std::path::Path::new("/tmp/project")));
+        let selection = resolve_lab_runner_selection_from_default(
+            &command,
+            None,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect("selection")
+        .expect("default runner selected");
+
+        assert_eq!(selection.runner_id, "lab-default");
+        assert_eq!(selection.source, LabRunnerSelectionSource::Default);
+    }
+
+    #[test]
+    fn lab_runner_selection_runs_locally_without_default_runner() {
+        let command = Commands::Test(test_args_for_path(std::path::Path::new("/tmp/project")));
+
+        assert!(
+            resolve_lab_runner_selection_from_default(&command, None, false, None)
+                .expect("selection")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lab_runner_selection_force_hot_is_local_escape_hatch() {
+        let command = Commands::Test(test_args_for_path(std::path::Path::new("/tmp/project")));
+
+        assert!(resolve_lab_runner_selection_from_default(
+            &command,
+            None,
+            true,
+            Some("lab-default".to_string())
+        )
+        .expect("selection")
+        .is_none());
+    }
+
+    #[test]
+    fn lab_runner_selection_rejects_explicit_runner_on_unsupported_command() {
+        let err = resolve_lab_runner_selection_from_default(
+            &Commands::List,
+            Some("lab-explicit"),
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect_err("unsupported command rejects explicit runner");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
     }
 }

@@ -11,6 +11,9 @@ pub struct HomeboyConfig {
     pub defaults: Defaults,
 
     #[serde(default)]
+    pub lab: LabConfig,
+
+    #[serde(default)]
     pub triage: TriageConfig,
 
     /// Directory where persisted run artifacts are copied.
@@ -32,6 +35,7 @@ impl Default for HomeboyConfig {
     fn default() -> Self {
         Self {
             defaults: Defaults::default(),
+            lab: LabConfig::default(),
             triage: TriageConfig::default(),
             artifact_root: None,
             update_check: true,
@@ -41,6 +45,12 @@ impl Default for HomeboyConfig {
 
 pub fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LabConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_runner: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -452,9 +462,30 @@ mod tests {
     }
 
     #[test]
+    fn homeboy_config_parses_lab_preferred_runner() {
+        let config: HomeboyConfig = serde_json::from_str(
+            r#"{
+                "lab": {
+                    "preferred_runner": "homeboy-lab"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.lab.preferred_runner.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
     fn homeboy_config_leaves_triage_priority_labels_unset_by_default() {
         let config = HomeboyConfig::default();
 
         assert!(config.triage.priority_labels.is_none());
+    }
+
+    #[test]
+    fn homeboy_config_leaves_lab_preferred_runner_unset_by_default() {
+        let config = HomeboyConfig::default();
+
+        assert!(config.lab.preferred_runner.is_none());
     }
 }

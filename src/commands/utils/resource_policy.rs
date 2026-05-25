@@ -429,7 +429,7 @@ fn warning_message(
     let severity = severity_str(recommendation);
     let reason = primary_reason(resources);
     format!(
-        "Resource policy warning: machine is {severity}; starting `{command}` may skew results or add pressure. {reason} Use --runner <id> to offload this hot command to a connected Homeboy Lab runner, or use --force-hot to run locally without this warning."
+        "Resource policy warning: machine is {severity}; starting `{command}` may skew results or add pressure. {reason} Connect a default Homeboy Lab runner or use --runner <id> to offload this hot command, or use --force-hot to run locally without this warning."
     )
 }
 
