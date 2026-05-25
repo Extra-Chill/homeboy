@@ -70,6 +70,24 @@ fn default_context() -> String {
 // Output model
 // ============================================================================
 
+/// Default number of per-rule match details included in transform output.
+pub const DEFAULT_MATCH_DETAIL_LIMIT: usize = 100;
+
+/// Controls how many match detail records are retained in transform results.
+#[derive(Debug, Clone, Copy)]
+pub struct TransformOptions {
+    /// Maximum match details retained per rule. `None` retains every match.
+    pub match_detail_limit: Option<usize>,
+}
+
+impl Default for TransformOptions {
+    fn default() -> Self {
+        Self {
+            match_detail_limit: Some(DEFAULT_MATCH_DETAIL_LIMIT),
+        }
+    }
+}
+
 /// Result of applying a transform set.
 #[derive(Debug, Clone, Serialize)]
 pub struct TransformResult {
@@ -81,6 +99,9 @@ pub struct TransformResult {
     pub total_replacements: usize,
     /// Total files modified.
     pub total_files: usize,
+    /// Files modified by the transform. Internal so JSON output remains detail-bounded.
+    #[serde(skip)]
+    pub modified_files: Vec<String>,
     /// Whether changes were written to disk.
     pub written: bool,
 }
@@ -96,6 +117,12 @@ pub struct RuleResult {
     pub matches: Vec<TransformMatch>,
     /// Number of replacements.
     pub replacement_count: usize,
+    /// Whether the match detail list was truncated.
+    pub matches_truncated: bool,
+    /// Number of replacement details omitted from `matches`.
+    pub omitted_match_count: usize,
+    /// Match detail cap used for this rule. `None` means full detail output.
+    pub match_detail_limit: Option<usize>,
 }
 
 /// A single match/replacement within a file.
@@ -198,6 +225,25 @@ pub fn apply_transforms(
     write: bool,
     rule_filter: Option<&str>,
 ) -> Result<TransformResult> {
+    apply_transforms_with_options(
+        root,
+        name,
+        set,
+        write,
+        rule_filter,
+        TransformOptions::default(),
+    )
+}
+
+/// Apply a transform set with explicit output detail options.
+pub fn apply_transforms_with_options(
+    root: &Path,
+    name: &str,
+    set: &TransformSet,
+    write: bool,
+    rule_filter: Option<&str>,
+    options: TransformOptions,
+) -> Result<TransformResult> {
     // Compile all regexes up front
     let compiled_rules: Vec<(&TransformRule, Regex)> = set
         .rules
@@ -254,6 +300,7 @@ pub fn apply_transforms(
             .collect();
 
         let mut matches = Vec::new();
+        let mut replacement_count = 0usize;
 
         // Collapse C-style backslash escapes in the replacement template once
         // per rule so `\\` in JSON → one literal backslash on disk, matching
@@ -277,32 +324,69 @@ pub fn apply_transforms(
                 .to_string_lossy()
                 .to_string();
 
-            let (new_content, file_matches) = if rule.context == "file" {
-                apply_file_context(regex, &replace_unescaped, &content, &relative)
+            let remaining_detail = options
+                .match_detail_limit
+                .map(|limit| limit.saturating_sub(matches.len()));
+
+            let (new_content, file_matches, file_replacement_count) = if rule.context == "file" {
+                apply_file_context(
+                    regex,
+                    &replace_unescaped,
+                    &content,
+                    &relative,
+                    remaining_detail,
+                )
             } else if rule.context == "hoist_static" {
-                apply_hoist_static_context(regex, &replace_unescaped, &content, &relative)
+                apply_hoist_static_context(
+                    regex,
+                    &replace_unescaped,
+                    &content,
+                    &relative,
+                    remaining_detail,
+                )
             } else {
-                apply_line_context(regex, &replace_unescaped, &content, &relative)
+                apply_line_context(
+                    regex,
+                    &replace_unescaped,
+                    &content,
+                    &relative,
+                    remaining_detail,
+                )
             };
 
-            if !file_matches.is_empty() {
+            if file_replacement_count > 0 {
                 matches.extend(file_matches);
                 file_edits.insert(file_path.clone(), new_content);
             }
+
+            replacement_count += file_replacement_count;
         }
 
-        let replacement_count = matches.len();
+        let omitted_match_count = replacement_count.saturating_sub(matches.len());
         rule_results.push(RuleResult {
             id: rule.id.clone(),
             description: rule.description.clone(),
             matches,
             replacement_count,
+            matches_truncated: omitted_match_count > 0,
+            omitted_match_count,
+            match_detail_limit: options.match_detail_limit,
         });
     }
 
     // Calculate totals
     let total_replacements: usize = rule_results.iter().map(|r| r.replacement_count).sum();
     let total_files = file_edits.len();
+    let mut modified_files: Vec<String> = file_edits
+        .keys()
+        .map(|path| {
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    modified_files.sort();
 
     // Write if requested
     if write && !file_edits.is_empty() {
@@ -316,6 +400,7 @@ pub fn apply_transforms(
         rules: rule_results,
         total_replacements,
         total_files,
+        modified_files,
         written: write,
     })
 }
@@ -528,8 +613,10 @@ fn apply_line_context(
     replace: &str,
     content: &str,
     relative_path: &str,
-) -> (String, Vec<TransformMatch>) {
+    detail_limit: Option<usize>,
+) -> (String, Vec<TransformMatch>, usize) {
     let mut matches = Vec::new();
+    let mut replacement_count = 0usize;
     let mut new_lines = Vec::new();
     let use_case_transforms = has_case_transforms(replace);
 
@@ -541,12 +628,15 @@ fn apply_line_context(
                 regex.replace_all(line, replace).to_string()
             };
             if replaced != line {
-                matches.push(TransformMatch {
-                    file: relative_path.to_string(),
-                    line: i + 1,
-                    before: line.to_string(),
-                    after: replaced.clone(),
-                });
+                replacement_count += 1;
+                if detail_limit.is_none_or(|limit| matches.len() < limit) {
+                    matches.push(TransformMatch {
+                        file: relative_path.to_string(),
+                        line: i + 1,
+                        before: line.to_string(),
+                        after: replaced.clone(),
+                    });
+                }
                 new_lines.push(replaced);
                 continue;
             }
@@ -560,7 +650,7 @@ fn apply_line_context(
         result.push('\n');
     }
 
-    (result, matches)
+    (result, matches, replacement_count)
 }
 
 /// Apply regex to entire file content. Returns (new_content, matches).
@@ -569,8 +659,10 @@ fn apply_file_context(
     replace: &str,
     content: &str,
     relative_path: &str,
-) -> (String, Vec<TransformMatch>) {
+    detail_limit: Option<usize>,
+) -> (String, Vec<TransformMatch>, usize) {
     let mut matches = Vec::new();
+    let mut replacement_count = 0usize;
     let use_case_transforms = has_case_transforms(replace);
 
     // Find all matches before replacing (for reporting)
@@ -586,12 +678,15 @@ fn apply_file_context(
         };
 
         if matched != replaced {
-            matches.push(TransformMatch {
-                file: relative_path.to_string(),
-                line: line_num,
-                before: matched,
-                after: replaced,
-            });
+            replacement_count += 1;
+            if detail_limit.is_none_or(|limit| matches.len() < limit) {
+                matches.push(TransformMatch {
+                    file: relative_path.to_string(),
+                    line: line_num,
+                    before: matched,
+                    after: replaced,
+                });
+            }
         }
     }
 
@@ -600,7 +695,7 @@ fn apply_file_context(
     } else {
         regex.replace_all(content, replace).to_string()
     };
-    (new_content, matches)
+    (new_content, matches, replacement_count)
 }
 
 /// Hoist local `let` bindings to `static` declarations using `LazyLock`.
@@ -627,10 +722,12 @@ fn apply_hoist_static_context(
     replace: &str,
     content: &str,
     relative_path: &str,
-) -> (String, Vec<TransformMatch>) {
+    detail_limit: Option<usize>,
+) -> (String, Vec<TransformMatch>, usize) {
     let lines: Vec<&str> = content.lines().collect();
     let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     let mut matches = Vec::new();
+    let mut replacement_count = 0usize;
 
     // Collect all match sites first (line index, captures)
     let mut match_sites: Vec<(usize, String, String, String)> = Vec::new(); // (line_idx, old_var, new_var, old_line)
@@ -695,12 +792,15 @@ fn apply_hoist_static_context(
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            matches.push(TransformMatch {
-                file: relative_path.to_string(),
-                line: i + 1,
-                before: line.to_string(),
-                after: replaced.clone(),
-            });
+            replacement_count += 1;
+            if detail_limit.is_none_or(|limit| matches.len() < limit) {
+                matches.push(TransformMatch {
+                    file: relative_path.to_string(),
+                    line: i + 1,
+                    before: line.to_string(),
+                    after: replaced.clone(),
+                });
+            }
 
             new_lines[i] = replaced;
             match_sites.push((i, var, screaming, line.to_string()));
@@ -736,12 +836,15 @@ fn apply_hoist_static_context(
             if var_re.is_match(&new_lines[i]) {
                 let renamed = var_re.replace_all(&new_lines[i], new_var.as_str());
                 if renamed != new_lines[i] {
-                    matches.push(TransformMatch {
-                        file: relative_path.to_string(),
-                        line: i + 1,
-                        before: new_lines[i].clone(),
-                        after: renamed.to_string(),
-                    });
+                    replacement_count += 1;
+                    if detail_limit.is_none_or(|limit| matches.len() < limit) {
+                        matches.push(TransformMatch {
+                            file: relative_path.to_string(),
+                            line: i + 1,
+                            before: new_lines[i].clone(),
+                            after: renamed.to_string(),
+                        });
+                    }
                     new_lines[i] = renamed.to_string();
                 }
             }
@@ -753,7 +856,7 @@ fn apply_hoist_static_context(
         result.push('\n');
     }
 
-    (result, matches)
+    (result, matches, replacement_count)
 }
 
 /// Find the line index of the enclosing `fn` declaration.
@@ -877,7 +980,7 @@ mod tests {
 
         let regex = Regex::new(find).unwrap();
         let unescaped = unescape_replacement_template(replace_in_memory);
-        let (out, matches) = apply_line_context(&regex, &unescaped, content, "t.php");
+        let (out, matches, _) = apply_line_context(&regex, &unescaped, content, "t.php", None);
 
         assert_eq!(matches.len(), 1);
         // One literal backslash before WP_ — the PHP FQN the user intended.
@@ -927,8 +1030,13 @@ mod tests {
     fn line_context_simple_replace() {
         let regex = Regex::new("rest_forbidden").unwrap();
         let content = "if ($code === 'rest_forbidden') {\n    return false;\n}\n";
-        let (new, matches) =
-            apply_line_context(&regex, "ability_invalid_permissions", content, "test.php");
+        let (new, matches, _) = apply_line_context(
+            &regex,
+            "ability_invalid_permissions",
+            content,
+            "test.php",
+            None,
+        );
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].line, 1);
         assert_eq!(matches[0].before, "if ($code === 'rest_forbidden') {");
@@ -944,11 +1052,12 @@ mod tests {
     fn line_context_with_capture_groups() {
         let regex = Regex::new(r"\$this->assertIsArray\((.+?)\)").unwrap();
         let content = "$this->assertIsArray($result);\n$this->assertIsArray($other);\n";
-        let (new, matches) = apply_line_context(
+        let (new, matches, _) = apply_line_context(
             &regex,
             "$$this->assertInstanceOf(WP_Error::class, $1)",
             content,
             "test.php",
+            None,
         );
         assert_eq!(matches.len(), 2);
         assert!(new.contains("assertInstanceOf(WP_Error::class, $result)"));
@@ -959,7 +1068,7 @@ mod tests {
     fn line_context_no_match_unchanged() {
         let regex = Regex::new("xyz_not_found").unwrap();
         let content = "some normal code\nmore code\n";
-        let (new, matches) = apply_line_context(&regex, "replaced", content, "test.php");
+        let (new, matches, _) = apply_line_context(&regex, "replaced", content, "test.php", None);
         assert!(matches.is_empty());
         assert_eq!(new, content);
     }
@@ -968,7 +1077,7 @@ mod tests {
     fn line_context_preserves_trailing_newline() {
         let regex = Regex::new("old").unwrap();
         let content = "old\n";
-        let (new, _) = apply_line_context(&regex, "new", content, "f.txt");
+        let (new, _, _) = apply_line_context(&regex, "new", content, "f.txt", None);
         assert!(new.ends_with('\n'));
         assert_eq!(new, "new\n");
     }
@@ -977,7 +1086,7 @@ mod tests {
     fn line_context_no_trailing_newline() {
         let regex = Regex::new("old").unwrap();
         let content = "old";
-        let (new, _) = apply_line_context(&regex, "new", content, "f.txt");
+        let (new, _, _) = apply_line_context(&regex, "new", content, "f.txt", None);
         assert!(!new.ends_with('\n'));
         assert_eq!(new, "new");
     }
@@ -988,11 +1097,12 @@ mod tests {
     fn file_context_multiline_match() {
         let regex = Regex::new(r"(?s)function\s+old_name\(\).*?\}").unwrap();
         let content = "function old_name() {\n    return 1;\n}\n";
-        let (new, matches) = apply_file_context(
+        let (new, matches, _) = apply_file_context(
             &regex,
             "function new_name() {\n    return 2;\n}",
             content,
             "test.php",
+            None,
         );
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].line, 1);
@@ -1043,11 +1153,12 @@ mod tests {
     fn line_context_with_case_transform() {
         let regex = Regex::new(r"new (\w+)Ability\(\)").unwrap();
         let content = "let x = new BlueskyDeleteAbility();\nlet y = new FacebookPostAbility();\n";
-        let (new, matches) = apply_line_context(
+        let (new, matches, _) = apply_line_context(
             &regex,
             "wp_get_ability('datamachine/$1:kebab')",
             content,
             "test.rs",
+            None,
         );
         assert_eq!(matches.len(), 2);
         assert!(
@@ -1066,11 +1177,12 @@ mod tests {
     fn case_transform_with_literal_dollar() {
         let regex = Regex::new(r"new (\w+)Ability\(\)").unwrap();
         let content = "$ability = new BlueskyDeleteAbility();\n";
-        let (new, _) = apply_line_context(
+        let (new, _, _) = apply_line_context(
             &regex,
             "$$ability = wp_get_ability('datamachine/$1:kebab')",
             content,
             "test.php",
+            None,
         );
         assert!(
             new.contains("$ability = wp_get_ability('datamachine/bluesky-delete')"),
@@ -1083,11 +1195,12 @@ mod tests {
     fn case_transform_mixed_with_plain_refs() {
         let regex = Regex::new(r"(\w+)::(\w+)").unwrap();
         let content = "BlueskyApi::PostMessage\n";
-        let (new, _) = apply_line_context(
+        let (new, _, _) = apply_line_context(
             &regex,
             "$1:snake::$2:kebab (was $1::$2)",
             content,
             "test.rs",
+            None,
         );
         assert!(
             new.contains("bluesky_api::post-message (was BlueskyApi::PostMessage)"),

@@ -220,6 +220,10 @@ enum RefactorCommand {
         #[arg(long, value_name = "CONTEXT", default_value = "line")]
         context: String,
 
+        /// Include every match detail in JSON output instead of the default bounded sample.
+        #[arg(long)]
+        full_match_details: bool,
+
         #[command(flatten)]
         target: RefactorTargetArgs,
         #[command(flatten)]
@@ -372,9 +376,18 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             replace,
             files,
             context,
+            full_match_details,
             target,
             write_mode,
-        }) => run_transform(&find, &replace, &files, &context, &target, write_mode.write),
+        }) => run_transform(
+            &find,
+            &replace,
+            &files,
+            &context,
+            full_match_details,
+            &target,
+            write_mode.write,
+        ),
 
         Some(RefactorCommand::Decompose {
             file,
@@ -1366,12 +1379,22 @@ fn run_transform(
     replace: &str,
     files: &str,
     context: &str,
+    full_match_details: bool,
     target: &RefactorTargetArgs,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
     let targets = target.resolve_targets()?;
     run_across_targets("transform", targets, |component_id, path| {
-        run_transform_single(find, replace, files, context, component_id, path, write)
+        run_transform_single(
+            find,
+            replace,
+            files,
+            context,
+            full_match_details,
+            component_id,
+            path,
+            write,
+        )
     })
 }
 
@@ -1380,6 +1403,7 @@ fn run_transform_single(
     replace: &str,
     files: &str,
     context: &str,
+    full_match_details: bool,
     component_id: Option<&str>,
     path: Option<&str>,
     write: bool,
@@ -1403,12 +1427,16 @@ fn run_transform_single(
 
     if write {
         // Dry-run to discover affected files for the undo snapshot
-        if let Ok(preview) = refactor::apply_transforms(&root, set_name, &set, false, None) {
-            let affected_files: std::collections::HashSet<String> = preview
-                .rules
-                .iter()
-                .flat_map(|r| r.matches.iter().map(|m| m.file.clone()))
-                .collect();
+        if let Ok(preview) = refactor::apply_transforms_with_options(
+            &root,
+            set_name,
+            &set,
+            false,
+            None,
+            refactor::TransformOptions::default(),
+        ) {
+            let affected_files: std::collections::HashSet<String> =
+                preview.modified_files.iter().cloned().collect();
             homeboy::core::engine::undo::UndoSnapshot::capture_and_save(
                 &root,
                 "refactor transform",
@@ -1418,7 +1446,20 @@ fn run_transform_single(
     }
 
     // Apply transforms
-    let result = refactor::apply_transforms(&root, set_name, &set, write, None)?;
+    let result = refactor::apply_transforms_with_options(
+        &root,
+        set_name,
+        &set,
+        write,
+        None,
+        refactor::TransformOptions {
+            match_detail_limit: if full_match_details {
+                None
+            } else {
+                Some(refactor::DEFAULT_MATCH_DETAIL_LIMIT)
+            },
+        },
+    )?;
 
     // Report results to stderr
     for rule_result in &result.rules {
@@ -1445,6 +1486,19 @@ fn run_transform_single(
                 homeboy::log_status!("  -", "{}", m.before.trim());
                 homeboy::log_status!("  +", "{}", m.after.trim());
             }
+        }
+
+        if rule_result.matches_truncated {
+            homeboy::log_status!(
+                "  omitted",
+                "{} additional match detail{} omitted (use --full-match-details to include all)",
+                rule_result.omitted_match_count,
+                if rule_result.omitted_match_count == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            );
         }
     }
 
