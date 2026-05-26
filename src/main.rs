@@ -638,6 +638,10 @@ fn run_lab_offload_inner(
     })?;
     let source_path = lab_offload_source_path(normalized_args)?;
     preflight_lab_runner_capabilities(runner_id, command_kind, &source_path)?;
+    homeboy::core::runner::preflight_lab_offload_changed_since(
+        normalized_args,
+        homeboy::core::runner::RunnerWorkspaceSyncMode::Snapshot,
+    )?;
     let synced = homeboy::core::runner::sync_workspace(
         runner_id,
         homeboy::core::runner::RunnerWorkspaceSyncOptions {
