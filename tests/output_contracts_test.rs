@@ -30,6 +30,11 @@ struct OutputContractScenario {
     payload: fn() -> Value,
 }
 
+struct VariantContract {
+    name: &'static str,
+    value: Value,
+}
+
 #[test]
 fn visible_quality_commands_have_declared_golden_json_contract_fixtures() {
     let surface = current_command_surface();
@@ -59,6 +64,206 @@ fn quality_command_golden_json_contract_fixtures_match_typed_payloads() {
 
         assert_eq!(actual, expected, "{} golden JSON drifted", scenario.command);
     }
+}
+
+#[test]
+fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
+    assert_unique_variant_signatures(
+        "runs",
+        vec![
+            variant_contract("list", json!({ "command": "runs.list", "runs": [] })),
+            variant_contract(
+                "distribution",
+                json!({ "command": "runs.distribution", "filters": {}, "fields": [] }),
+            ),
+            variant_contract(
+                "latest_run",
+                json!({ "command": "runs.latest-run", "run": {} }),
+            ),
+            variant_contract("compare", json!({ "command": "runs.compare", "rows": [] })),
+            variant_contract("show", json!({ "command": "runs.show", "run": {} })),
+            variant_contract(
+                "artifacts",
+                json!({ "command": "runs.artifacts", "run_id": "run-1", "artifacts": [] }),
+            ),
+            variant_contract(
+                "artifact_get",
+                json!({
+                    "command": "runs.artifact.get",
+                    "run_id": "run-1",
+                    "artifact_id": "summary",
+                    "output_path": "summary.json"
+                }),
+            ),
+            variant_contract(
+                "artifact_cleanup_downloads",
+                json!({
+                    "command": "runs.artifact.cleanup-downloads",
+                    "dry_run": true,
+                    "root": "/tmp/homeboy",
+                    "removed": false,
+                    "file_count": 0,
+                    "directory_count": 0,
+                    "size_bytes": 0,
+                    "paths": []
+                }),
+            ),
+            variant_contract(
+                "findings",
+                json!({ "command": "runs.findings", "findings": [] }),
+            ),
+            variant_contract(
+                "finding",
+                json!({ "command": "runs.finding", "finding": {} }),
+            ),
+            variant_contract(
+                "latest_finding",
+                json!({ "command": "runs.latest-finding", "run": {}, "finding": {} }),
+            ),
+            variant_contract(
+                "bench_history",
+                json!({ "command": "bench.history", "component_id": "homeboy", "runs": [] }),
+            ),
+            variant_contract(
+                "bench_compare",
+                json!({
+                    "command": "bench.compare",
+                    "from_run": {},
+                    "to_run": {},
+                    "comparisons": [],
+                    "missing": []
+                }),
+            ),
+            variant_contract(
+                "reconcile",
+                json!({ "command": "runs.reconcile", "stale_runs": [] }),
+            ),
+            variant_contract(
+                "export",
+                json!({ "command": "runs.export", "output": "bundle", "manifest": {} }),
+            ),
+            variant_contract(
+                "import",
+                json!({ "command": "runs.import", "input": "bundle", "imported": {} }),
+            ),
+            variant_contract(
+                "import_from_gh_actions",
+                json!({ "command": "runs.import-gh-actions", "imported": {} }),
+            ),
+            variant_contract(
+                "query",
+                json!({
+                    "command": "runs.query",
+                    "filters": {},
+                    "select": [],
+                    "matched_artifact_count": 0,
+                    "skipped_artifact_count": 0
+                }),
+            ),
+            variant_contract(
+                "drift",
+                json!({
+                    "command": "runs.drift",
+                    "filters": {},
+                    "metric": "$.status",
+                    "threshold": 0.5,
+                    "window_observations": 0,
+                    "window_missing_rows": 0,
+                    "values": []
+                }),
+            ),
+        ],
+    );
+
+    assert_unique_variant_signatures(
+        "rig",
+        vec![
+            variant_contract("list", json!({ "command": "rig.list", "rigs": [] })),
+            variant_contract("show", json!({ "command": "rig.show", "rig": {} })),
+            variant_contract("up", json!({ "command": "rig.up", "steps": [] })),
+            variant_contract("check", json!({ "command": "rig.check", "checks": [] })),
+            variant_contract("down", json!({ "command": "rig.down", "steps": [] })),
+            variant_contract("repair", json!({ "command": "rig.repair", "steps": [] })),
+            variant_contract("sync", json!({ "command": "rig.sync", "stacks": [] })),
+            variant_contract("status", json!({ "command": "rig.status", "rigs": [] })),
+            variant_contract(
+                "install",
+                json!({
+                    "command": "rig.install",
+                    "source": "fixtures",
+                    "package_path": ".",
+                    "linked": false,
+                    "installed": [],
+                    "installed_stacks": []
+                }),
+            ),
+            variant_contract("update", json!({ "command": "rig.update", "updated": [] })),
+            variant_contract(
+                "sources_list",
+                json!({ "command": "rig.sources.list", "sources": [] }),
+            ),
+            variant_contract(
+                "sources_remove",
+                json!({ "command": "rig.sources.remove", "removed": true }),
+            ),
+            variant_contract(
+                "app_install",
+                json!({ "command": "rig.app.install", "apps": [] }),
+            ),
+            variant_contract("runs", json!({ "command": "runs.list", "runs": [] })),
+        ],
+    );
+
+    assert_unique_variant_signatures(
+        "bench",
+        vec![
+            variant_contract(
+                "single_legacy",
+                json!({
+                    "passed": true,
+                    "status": "passed",
+                    "component": "homeboy",
+                    "exit_code": 0,
+                    "iterations": 10
+                }),
+            ),
+            variant_contract(
+                "comparison",
+                json!({
+                    "comparison": "cross_rig",
+                    "passed": true,
+                    "component": "homeboy",
+                    "exit_code": 0,
+                    "iterations": 10,
+                    "rigs": [],
+                    "diff": {},
+                    "reports": {}
+                }),
+            ),
+            variant_contract(
+                "comparison_summary",
+                json!({
+                    "comparison": "cross_rig",
+                    "summary_only": true,
+                    "passed": true,
+                    "component": "homeboy",
+                    "exit_code": 0,
+                    "iterations": 10,
+                    "rigs": []
+                }),
+            ),
+            variant_contract(
+                "list_legacy",
+                json!({
+                    "component": "homeboy",
+                    "component_id": "homeboy",
+                    "scenarios": [],
+                    "count": 0
+                }),
+            ),
+            variant_contract("observation", json!({ "command": "runs.list", "runs": [] })),
+        ],
+    );
 }
 
 fn quality_output_contract_scenarios() -> Vec<OutputContractScenario> {
@@ -98,6 +303,52 @@ fn enveloped_json(payload: Value, exit_code: i32) -> Value {
 
 fn typed_output_value<T: Serialize>(output: T) -> Value {
     serde_json::to_value(output).expect("command output should serialize")
+}
+
+fn variant_contract(name: &'static str, value: Value) -> VariantContract {
+    VariantContract { name, value }
+}
+
+fn assert_unique_variant_signatures(group: &str, contracts: Vec<VariantContract>) {
+    let mut signatures = BTreeMap::<String, &'static str>::new();
+
+    for contract in contracts {
+        let signature = variant_signature(&contract.value);
+        if let Some(existing) = signatures.insert(signature.clone(), contract.name) {
+            panic!(
+                "{group} output variants `{existing}` and `{}` share ambiguous signature `{signature}`",
+                contract.name
+            );
+        }
+    }
+}
+
+fn variant_signature(value: &Value) -> String {
+    if let Some(command) = value.get("command").and_then(Value::as_str) {
+        return format!("command={command}");
+    }
+
+    if let Some(comparison) = value.get("comparison").and_then(Value::as_str) {
+        return if value
+            .get("summary_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            format!("comparison={comparison};summary_only=true")
+        } else {
+            format!("comparison={comparison};summary_only=false")
+        };
+    }
+
+    let keys = value
+        .as_object()
+        .expect("variant contract payload should be a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!("shape={keys}")
 }
 
 fn audit_summary_payload() -> Value {
