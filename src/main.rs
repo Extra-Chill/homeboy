@@ -13,6 +13,8 @@ use homeboy::commands::cli;
 use homeboy::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use homeboy::core::extension::load_all_extensions;
 
+mod lab_offload_extension_parity;
+
 struct ExtensionCliCommand {
     tool: String,
     project_id: String,
@@ -638,6 +640,7 @@ fn run_lab_offload_inner(
     })?;
     let source_path = lab_offload_source_path(normalized_args)?;
     preflight_lab_runner_capabilities(runner_id, command_kind, &source_path)?;
+    let capability_plan_preflight = lab_offload_extension_parity::after_capability_plan();
     homeboy::core::runner::preflight_lab_offload_changed_since(
         normalized_args,
         homeboy::core::runner::RunnerWorkspaceSyncMode::Snapshot,
@@ -658,7 +661,13 @@ fn run_lab_offload_inner(
         "lab_offload",
     );
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
-    preflight_lab_offload_test_extensions(command_kind, runner_id, homeboy_path, &remote_cwd)?;
+    lab_offload_extension_parity::preflight(
+        command_kind,
+        runner_id,
+        homeboy_path,
+        &remote_cwd,
+        capability_plan_preflight,
+    )?;
 
     let mut command = vec![homeboy_path.to_string()];
     command.extend(
@@ -738,118 +747,6 @@ fn preflight_lab_runner_capabilities(
             Some(runner_id.to_string()),
             Some(remediation),
         )),
-    }
-}
-
-fn preflight_lab_offload_test_extensions(
-    command: &Commands,
-    runner_id: &str,
-    homeboy_path: &str,
-    remote_cwd: &str,
-) -> homeboy::core::Result<()> {
-    let extension_ids = lab_offload_test_extension_ids(command)?;
-    for extension_id in extension_ids {
-        let (output, exit_code) = homeboy::core::runner::exec(
-            runner_id,
-            homeboy::core::runner::RunnerExecOptions {
-                cwd: Some(remote_cwd.to_string()),
-                allow_ssh: false,
-                command: vec![
-                    homeboy_path.to_string(),
-                    "extension".to_string(),
-                    "show".to_string(),
-                    extension_id.clone(),
-                ],
-                env: Default::default(),
-                capture_patch: false,
-                source_snapshot: None,
-            },
-        )?;
-
-        if exit_code != 0 {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "runner_extension",
-                format!(
-                    "Lab offload runner '{runner_id}' is missing required test extension '{extension_id}' before test execution"
-                ),
-                Some(extension_id.clone()),
-                Some(vec![
-                    format!(
-                        "Install the extension on the runner before offloading tests: {homeboy_path} extension install <source> --id {extension_id}"
-                    ),
-                    format!(
-                        "Remote preflight command failed: {homeboy_path} extension show {extension_id}"
-                    ),
-                    runner_extension_preflight_tail(&output.stderr, &output.stdout),
-                ]),
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn lab_offload_test_extension_ids(command: &Commands) -> homeboy::core::Result<Vec<String>> {
-    let Commands::Test(args) = command else {
-        return Ok(Vec::new());
-    };
-
-    let source_context = homeboy::core::engine::execution_context::resolve(
-        &homeboy::core::engine::execution_context::ResolveOptions {
-            component_id: args.comp.component.clone(),
-            path_override: args.comp.path.clone(),
-            capability: None,
-            settings_overrides: args.setting_args.setting.clone(),
-            settings_json_overrides: args.setting_args.setting_json.clone(),
-            extension_overrides: args.extension_override.extensions.clone(),
-        },
-    )?;
-
-    if !args.drift
-        && args.ci_job.is_none()
-        && source_context
-            .component
-            .has_script(homeboy::core::extension::ExtensionCapability::Test)
-    {
-        return Ok(Vec::new());
-    }
-
-    let context = homeboy::core::engine::execution_context::resolve(
-        &homeboy::core::engine::execution_context::ResolveOptions {
-            component_id: args.comp.component.clone(),
-            path_override: args.comp.path.clone(),
-            capability: Some(homeboy::core::extension::ExtensionCapability::Test),
-            settings_overrides: args.setting_args.setting.clone(),
-            settings_json_overrides: args.setting_args.setting_json.clone(),
-            extension_overrides: args.extension_override.extensions.clone(),
-        },
-    )?;
-
-    Ok(context.extension_id.into_iter().collect())
-}
-
-fn runner_extension_preflight_tail(stderr: &str, stdout: &str) -> String {
-    let output = if stderr.trim().is_empty() {
-        stdout
-    } else {
-        stderr
-    };
-    let tail = output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .rev()
-        .take(3)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if tail.is_empty() {
-        "Runner extension preflight produced no diagnostic output.".to_string()
-    } else {
-        format!("Runner extension preflight output:\n{tail}")
     }
 }
 
@@ -1019,9 +916,8 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        lab_offload_source_path, lab_offload_test_extension_ids,
-        prepare_lab_runner_for_offload_with, resolve_lab_runner_selection_from_default,
-        rewrite_lab_offload_args, runner_extension_preflight_tail, LabRunnerPreparation,
+        lab_offload_source_path, prepare_lab_runner_for_offload_with,
+        resolve_lab_runner_selection_from_default, rewrite_lab_offload_args, LabRunnerPreparation,
         LabRunnerSelection, LabRunnerSelectionSource,
     };
     use clap::Parser;
@@ -1030,13 +926,6 @@ mod tests {
     use homeboy::commands::utils::args::{
         BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
     };
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     fn test_args_for_path(path: &std::path::Path) -> TestArgs {
         TestArgs {
             comp: PositionalComponentArgs {
@@ -1059,20 +948,6 @@ mod tests {
             _json: HiddenJsonArgs::default(),
             json_summary: false,
         }
-    }
-
-    fn with_temp_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _guard = env_lock().lock().expect("env lock");
-        let previous_home = std::env::var("HOME").ok();
-        let home = tempfile::tempdir().expect("temp home");
-        std::env::set_var("HOME", home.path());
-        let result = f(home.path());
-        if let Some(previous_home) = previous_home {
-            std::env::set_var("HOME", previous_home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        result
     }
 
     #[test]
@@ -1191,65 +1066,6 @@ mod tests {
             lab_offload_source_path(&args).expect("path"),
             std::path::PathBuf::from("/Users/chubes/Developer/project")
         );
-    }
-
-    #[test]
-    fn lab_offload_test_preflight_skips_component_script_components() {
-        with_temp_home(|_| {
-            let dir = tempfile::tempdir().expect("component dir");
-            std::fs::write(
-                dir.path().join("homeboy.json"),
-                r#"{"id":"fixture","scripts":{"test":["printf ok\n"]},"extensions":{"missing-runner-extension":{}}}"#,
-            )
-            .expect("write component config");
-
-            let ids =
-                lab_offload_test_extension_ids(&Commands::Test(test_args_for_path(dir.path())))
-                    .expect("component script should not require extension parity preflight");
-
-            assert!(ids.is_empty());
-        });
-    }
-
-    #[test]
-    fn lab_offload_test_preflight_resolves_selected_test_extension() {
-        with_temp_home(|home| {
-            let extension_dir = home
-                .join(".config")
-                .join("homeboy")
-                .join("extensions")
-                .join("fixture-extension");
-            std::fs::create_dir_all(&extension_dir).expect("extension dir");
-            std::fs::write(
-                extension_dir.join("fixture-extension.json"),
-                r#"{"name":"Fixture","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
-            )
-            .expect("write extension manifest");
-
-            let dir = tempfile::tempdir().expect("component dir");
-            std::fs::write(
-                dir.path().join("homeboy.json"),
-                r#"{"id":"fixture","extensions":{"fixture-extension":{}}}"#,
-            )
-            .expect("write component config");
-
-            let ids =
-                lab_offload_test_extension_ids(&Commands::Test(test_args_for_path(dir.path())))
-                    .expect("test extension should resolve locally before runner parity check");
-
-            assert_eq!(ids, vec!["fixture-extension".to_string()]);
-        });
-    }
-
-    #[test]
-    fn runner_extension_preflight_tail_prefers_recent_diagnostics() {
-        let tail = runner_extension_preflight_tail(
-            "one\ntwo\nthree\nfour",
-            "stdout should be ignored when stderr has enough lines",
-        );
-
-        assert!(tail.contains("two\nthree\nfour"));
-        assert!(!tail.contains("one"));
     }
 
     #[test]

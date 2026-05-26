@@ -41,6 +41,10 @@ impl BenchArgs {
     pub fn lab_offload_writes_local_state(&self) -> bool {
         self.run.baseline_args.baseline || self.run.baseline_args.ratchet
     }
+
+    pub fn extension_override_ids(&self) -> &[String] {
+        &self.run.extension_override.extensions
+    }
 }
 
 #[derive(Subcommand)]
