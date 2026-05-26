@@ -70,6 +70,49 @@ pub struct AuditConfig {
     /// Component-owned command scenario fixtures with expected status fields.
     #[serde(default, skip_serializing_if = "CommandStatusContractConfig::is_empty")]
     pub command_status_contracts: CommandStatusContractConfig,
+    /// Component-owned path policy for durable artifact portability checks.
+    #[serde(default, skip_serializing_if = "ArtifactPortabilityConfig::is_empty")]
+    pub artifact_portability: ArtifactPortabilityConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ArtifactPortabilityConfig {
+    /// Path prefixes that identify local/runtime-only locations in stored artifacts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub non_portable_path_prefixes: Vec<String>,
+    /// Path substrings that identify project-specific local/runtime-only artifact locations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub non_portable_path_contains: Vec<String>,
+}
+
+impl ArtifactPortabilityConfig {
+    pub fn is_empty(&self) -> bool {
+        self.non_portable_path_prefixes.is_empty() && self.non_portable_path_contains.is_empty()
+    }
+
+    pub fn with_generic_defaults(&self) -> Self {
+        let mut config = self.clone();
+        extend_unique(
+            &mut config.non_portable_path_prefixes,
+            &[
+                "/tmp/".to_string(),
+                "/private/tmp/".to_string(),
+                "/var/folders/".to_string(),
+            ],
+        );
+        config
+    }
+
+    fn merge(&mut self, other: &ArtifactPortabilityConfig) {
+        extend_unique(
+            &mut self.non_portable_path_prefixes,
+            &other.non_portable_path_prefixes,
+        );
+        extend_unique(
+            &mut self.non_portable_path_contains,
+            &other.non_portable_path_contains,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -699,6 +742,7 @@ impl AuditConfig {
             && self.public_registry_exposure.is_empty()
             && self.config_key_usage.is_empty()
             && self.command_status_contracts.is_empty()
+            && self.artifact_portability.is_empty()
     }
 
     pub fn merge(&mut self, other: &AuditConfig) {
@@ -732,6 +776,7 @@ impl AuditConfig {
         self.config_key_usage.merge(&other.config_key_usage);
         self.command_status_contracts
             .merge(&other.command_status_contracts);
+        self.artifact_portability.merge(&other.artifact_portability);
         for rule in &other.requested_detectors {
             if !self
                 .requested_detectors
