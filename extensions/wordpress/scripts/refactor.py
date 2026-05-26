@@ -677,6 +677,8 @@ def refactor_source(data):
     if data.get('source') != 'audit':
         return {'handled': False}
 
+    source_result = data.get('source_result') or data.get('audit_result') or {}
+
     settings = data.get('settings') or {}
     output_dir = settings.get('wp_codebox_output_dir') or tempfile.mkdtemp(prefix='homeboy-wp-codebox-audit-')
     os.makedirs(output_dir, exist_ok=True)
@@ -685,7 +687,7 @@ def refactor_source(data):
     plan_path = os.path.join(output_dir, 'fanout-plan.json')
     runs_path = os.path.join(output_dir, 'fanout-run.json')
     with open(audit_report_path, 'w') as f:
-        json.dump(data.get('audit_result') or {}, f, indent=2)
+        json.dump(source_result, f, indent=2)
         f.write('\n')
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -725,7 +727,7 @@ def refactor_source(data):
     if result.returncode != 0:
         return {
             'handled': True,
-            'detected_findings': len((data.get('audit_result') or {}).get('findings') or []),
+            'detected_findings': len(source_result.get('findings') or []),
             'changed_files': [],
             'fix_results': [],
             'warnings': [

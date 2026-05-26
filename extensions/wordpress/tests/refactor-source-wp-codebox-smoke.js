@@ -19,7 +19,7 @@ try {
     source: 'audit',
     component_id: 'fixture-plugin',
     root: '/repo/fixture-plugin',
-    audit_result: auditResult,
+    source_result: auditResult,
     write: false,
     settings: {
       wp_codebox_output_dir: outputDir,
