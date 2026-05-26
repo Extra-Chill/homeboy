@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.1] - 2026-05-26
+
+### Fixed
+- route wp-codebox audit fanout through task runner
+
 ## [2.102.0] - 2026-05-26
 
 ### Added
