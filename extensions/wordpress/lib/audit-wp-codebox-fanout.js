@@ -137,11 +137,9 @@ function safeBranchSlug(value) {
   const slug = String(value || '')
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9._/-]+/g, '-')
+    .replace(/[^a-z0-9]+/g, '-')
     .replace(/-{2,}/g, '-')
-    .replace(/\/{2,}/g, '/')
-    .replace(/[-/.]+$/g, '')
-    .replace(/^[-/.]+/g, '');
+    .replace(/^-+|-+$/g, '');
 
   return slug || 'audit-batch';
 }

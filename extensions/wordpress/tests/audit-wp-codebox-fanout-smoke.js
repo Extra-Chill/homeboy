@@ -111,7 +111,11 @@ try {
   assert.equal(initialPlan.audit.group_count, 2);
   assert.equal(initialPlan.task_requests.length, 2);
 
-  assert.equal(safeBranchSlug('PHPCS Formatting/Auto Fix!'), 'phpcs-formatting/auto-fix');
+  assert.equal(safeBranchSlug('PHPCS Formatting/Auto Fix!'), 'phpcs-formatting-auto-fix');
+  assert.equal(safeBranchSlug('foo..bar'), 'foo-bar');
+  assert.equal(safeBranchSlug('foo/.bar'), 'foo-bar');
+  assert.equal(safeBranchSlug('foo/bar.lock'), 'foo-bar-lock');
+  assert.equal(safeBranchSlug('../.@{'), 'audit-batch');
 
   const phpcsRequest = initialPlan.task_requests.find((request) => request.group_key === 'PHPCS Formatting/Auto Fix!');
   const docsRequest = initialPlan.task_requests.find((request) => request.group_key === 'docs-reference');
@@ -166,9 +170,9 @@ try {
   assert.equal(phpcsApplyBack.artifact.patch_sha256, phpcsBundle.patchSha256);
   assert.deepEqual(phpcsApplyBack.review.approved_files, [phpcsBundle.changedPath]);
   assert.equal(phpcsApplyBack.adapter_payload.bundlePath, fs.realpathSync(phpcsBundle.bundle));
-  assert.equal(phpcsApplyBack.adapter_payload.branch, 'fix/homeboy-audit/phpcs-formatting/auto-fix');
+  assert.equal(phpcsApplyBack.adapter_payload.branch, 'fix/homeboy-audit/phpcs-formatting-auto-fix');
   assert.equal(phpcsApplyBack.pull_request.base, 'main');
-  assert.equal(phpcsApplyBack.pull_request.head, 'fix/homeboy-audit/phpcs-formatting/auto-fix');
+  assert.equal(phpcsApplyBack.pull_request.head, 'fix/homeboy-audit/phpcs-formatting-auto-fix');
   assert.match(phpcsApplyBack.pull_request.body, /Extra-Chill\/homeboy-extensions\/issues\/769/);
 
   const missingApprovalMap = {
