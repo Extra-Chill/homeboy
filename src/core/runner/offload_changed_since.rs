@@ -1,18 +1,33 @@
+use std::path::Path;
+use std::process::Command;
+
 use crate::core::error::{Error, Result};
 
 use super::RunnerWorkspaceSyncMode;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabOffloadChangedSincePreflight {
+    pub args: Vec<String>,
+    pub resolved_base: Option<String>,
+}
+
 pub fn preflight_lab_offload_changed_since(
     args: &[String],
     sync_mode: RunnerWorkspaceSyncMode,
-) -> Result<()> {
-    if sync_mode != RunnerWorkspaceSyncMode::Snapshot {
-        return Ok(());
-    }
-
+) -> Result<LabOffloadChangedSincePreflight> {
     let Some(git_ref) = lab_offload_changed_since_ref(args) else {
-        return Ok(());
+        return Ok(LabOffloadChangedSincePreflight {
+            args: args.to_vec(),
+            resolved_base: None,
+        });
     };
+
+    if sync_mode != RunnerWorkspaceSyncMode::Snapshot {
+        return Ok(LabOffloadChangedSincePreflight {
+            args: args.to_vec(),
+            resolved_base: Some(git_ref),
+        });
+    }
 
     Err(Error::validation_invalid_argument(
         "changed_since",
@@ -27,7 +42,27 @@ pub fn preflight_lab_offload_changed_since(
     ))
 }
 
-fn lab_offload_changed_since_ref(args: &[String]) -> Option<String> {
+pub fn prepare_git_lab_offload_changed_since(
+    args: &[String],
+    source_path: &Path,
+) -> Result<LabOffloadChangedSincePreflight> {
+    let Some(git_ref) = lab_offload_changed_since_ref(args) else {
+        return Ok(LabOffloadChangedSincePreflight {
+            args: args.to_vec(),
+            resolved_base: None,
+        });
+    };
+
+    let resolved_base = resolve_changed_since_base(source_path, &git_ref)?;
+    ensure_local_merge_base(source_path, &git_ref)?;
+
+    Ok(LabOffloadChangedSincePreflight {
+        args: rewrite_changed_since_ref(args, &resolved_base),
+        resolved_base: Some(resolved_base),
+    })
+}
+
+pub fn lab_offload_changed_since_ref(args: &[String]) -> Option<String> {
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         if arg == "--" {
@@ -41,6 +76,90 @@ fn lab_offload_changed_since_ref(args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+fn rewrite_changed_since_ref(args: &[String], resolved_base: &str) -> Vec<String> {
+    let mut rewritten = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            rewritten.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            rewritten.push(arg.clone());
+            continue;
+        }
+        if arg == "--changed-since" {
+            rewritten.push(arg.clone());
+            if iter.peek().is_some() {
+                let _ = iter.next();
+                rewritten.push(resolved_base.to_string());
+            }
+            continue;
+        }
+        if arg.starts_with("--changed-since=") {
+            rewritten.push(format!("--changed-since={resolved_base}"));
+            continue;
+        }
+        rewritten.push(arg.clone());
+    }
+
+    rewritten
+}
+
+fn resolve_changed_since_base(path: &Path, git_ref: &str) -> Result<String> {
+    git_output(
+        path,
+        &["rev-parse", "--verify", &format!("{git_ref}^{{commit}}")],
+    )
+}
+
+fn ensure_local_merge_base(path: &Path, git_ref: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["merge-base", git_ref, "HEAD"])
+        .current_dir(path)
+        .output()
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some("run git merge-base".to_string()))
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "changed_since",
+        "Lab offload cannot resolve the requested --changed-since base before dispatch",
+        Some(git_ref.to_string()),
+        Some(vec![
+            format!("Fetch or correct the base ref locally: git fetch origin {git_ref}"),
+            "Run with --force-hot to execute the changed-since command locally.".to_string(),
+        ]),
+    ))
+}
+
+fn git_output(path: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .map_err(|err| Error::internal_io(err.to_string(), Some("run git".to_string())))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "changed_since",
+        "Lab offload cannot resolve the requested --changed-since base before dispatch",
+        Some(args.last().copied().unwrap_or_default().to_string()),
+        Some(vec![
+            "Fetch the base ref locally before using Lab offload.".to_string(),
+            "Run with --force-hot to execute the changed-since command locally.".to_string(),
+        ]),
+    ))
 }
 
 #[cfg(test)]
@@ -113,5 +232,65 @@ mod tests {
 
         preflight_lab_offload_changed_since(&args, RunnerWorkspaceSyncMode::Git)
             .expect("git Lab offload can preserve changed-since semantics");
+    }
+
+    #[test]
+    fn rewrites_changed_since_to_resolved_commit_for_git_lab_offload() {
+        let dir = tempfile::tempdir().expect("repo");
+        git(dir.path(), &["init"]);
+        git(dir.path(), &["config", "user.email", "test@example.com"]);
+        git(dir.path(), &["config", "user.name", "Test User"]);
+        std::fs::write(dir.path().join("file.txt"), "base\n").expect("write base");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-m", "base"]);
+        git(dir.path(), &["branch", "base"]);
+        std::fs::write(dir.path().join("file.txt"), "head\n").expect("write head");
+        git(dir.path(), &["commit", "-am", "head"]);
+        let base_sha = git_stdout(dir.path(), &["rev-parse", "base"]);
+
+        let args = vec![
+            "homeboy".to_string(),
+            "audit".to_string(),
+            "--changed-since".to_string(),
+            "base".to_string(),
+        ];
+
+        let preflight = prepare_git_lab_offload_changed_since(&args, dir.path())
+            .expect("changed-since preflight");
+
+        assert_eq!(preflight.resolved_base.as_deref(), Some(base_sha.as_str()));
+        assert_eq!(
+            preflight.args,
+            vec![
+                "homeboy".to_string(),
+                "audit".to_string(),
+                "--changed-since".to_string(),
+                base_sha,
+            ]
+        );
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 }

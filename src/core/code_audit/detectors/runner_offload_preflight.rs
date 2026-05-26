@@ -117,6 +117,9 @@ impl<'a> RemoteExecutionSafetyPolicy<'a> {
             artifact_access_markers: with_defaults(
                 &[
                     "download_remote_artifact",
+                    "is_reportable_artifact_evidence_path",
+                    "is_retrievable_runner_artifact",
+                    "reportable_artifact_evidence_path",
                     "fs::metadata",
                     ".is_file()",
                     "get_artifact",

@@ -480,6 +480,44 @@ fn test_collect_url_artifacts() {
 }
 
 #[test]
+fn test_collect_artifacts_drops_unproven_remote_absolute_paths() {
+    let mut scenario = scenario("agent-runtime", &[("p95_ms", 100.0)]);
+    scenario.artifacts.insert(
+        "remote_trace".to_string(),
+        artifact(
+            "/srv/remote-run/trace.zip",
+            Some("zip"),
+            Some("Remote trace"),
+        ),
+    );
+    scenario.artifacts.insert(
+        "token_trace".to_string(),
+        artifact(
+            "runner-artifact://lab/run-1/trace.zip",
+            Some("zip"),
+            Some("Mirrored trace"),
+        ),
+    );
+
+    let indexed = collect_artifacts(&results(vec![scenario]));
+
+    assert_eq!(indexed.len(), 2);
+    let remote = indexed
+        .iter()
+        .find(|artifact| artifact.name == "remote_trace")
+        .expect("remote trace");
+    assert_eq!(remote.path, None);
+    let token = indexed
+        .iter()
+        .find(|artifact| artifact.name == "token_trace")
+        .expect("token trace");
+    assert_eq!(
+        token.path.as_deref(),
+        Some("runner-artifact://lab/run-1/trace.zip")
+    );
+}
+
+#[test]
 fn cross_rig_output_serializes_artifact_index() {
     let mut ref_scenario = scenario("agent-runtime", &[("p95_ms", 100.0)]);
     ref_scenario.runs = Some(vec![BenchRunSnapshot {

@@ -10,6 +10,7 @@ use super::run::{BenchRunFailure, BenchRunWorkflowResult};
 use crate::core::budget::BudgetFinding;
 use crate::core::ci_profile::CiContext;
 use crate::core::rig::RigStateSnapshot;
+use crate::core::runner::reportable_artifact_evidence_path;
 
 pub use super::side_by_side::{
     BenchSideBySideArtifact, BenchSideBySideMetric, BenchSideBySideReport, BenchSideBySideRigReport,
@@ -162,7 +163,7 @@ fn artifact_ref(
         scenario_id: scenario_id.to_string(),
         run_index,
         name: name.to_string(),
-        path: artifact.path.clone(),
+        path: reportable_artifact_evidence_path(artifact.path.as_ref()),
         url: artifact.url.clone(),
         artifact_type: artifact.artifact_type.clone(),
         kind: artifact.kind.clone(),

@@ -26,11 +26,15 @@ pub use connection::{
     RunnerSession, RunnerStatusReport,
 };
 pub use evidence::{
-    download_remote_artifact, is_remote_runner_artifact_path, RemoteArtifactDownload,
+    download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
+    is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,
 };
 pub(crate) use execution::daemon_api_get;
 pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
-pub use offload_changed_since::preflight_lab_offload_changed_since;
+pub use offload_changed_since::{
+    lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
+    prepare_git_lab_offload_changed_since,
+};
 pub use offload_metadata::{capture_lab_offload_metadata, lab_offload_metadata};
 pub use workspace::{
     sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
