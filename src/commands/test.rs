@@ -18,6 +18,7 @@ use std::path::Path;
 
 use super::source_command::{
     finish_observed_workflow, resolve_ci_job_for_command, resolve_source_context,
+    ObservedWorkflowRunner,
 };
 use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs,
@@ -161,18 +162,14 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
     }
 
     // Main test workflow — delegate to core
-    let run_dir = RunDir::create()?;
+    let runner = ObservedWorkflowRunner::create(format!("test {}", effective_id))?;
     let observation = start_test_observation(
         &ctx.component_id,
         &ctx.source_path,
         &args,
         "test",
-        Some(&run_dir),
+        Some(runner.run_dir()),
     );
-    let resource_run = homeboy::core::engine::resource::ResourceSummaryRun::start(Some(format!(
-        "test {}",
-        effective_id
-    )));
     let mut passthrough_args = ci_job_passthrough_args(ci_job.as_ref());
     passthrough_args.extend(filter_homeboy_flags(&args.args));
     let workflow = extension_test::run_main_test_workflow(
@@ -197,10 +194,14 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             ci_env: ci_profile::ci_job_env(ci_job.as_ref()),
             passthrough_args: passthrough_args.clone(),
         },
-        &run_dir,
+        runner.run_dir(),
     );
-    resource_run.write_to_run_dir(&run_dir)?;
-    let workflow = finish_test_workflow_observation(observation, workflow)?;
+    let workflow = runner.finish(
+        observation,
+        workflow,
+        |observation, workflow| finish_test_observation(Some(observation), workflow),
+        |observation, error| finish_test_observation_error(Some(observation), error),
+    )?;
 
     Ok(report::from_main_workflow_with_ci_context(
         workflow,

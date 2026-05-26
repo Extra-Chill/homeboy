@@ -1,7 +1,6 @@
 use clap::Args;
 
 use homeboy::core::ci_profile;
-use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::lint::{
     report, run_main_lint_workflow, run_self_check_lint_workflow, LintCommandOutput,
     LintRunWorkflowArgs,
@@ -17,6 +16,7 @@ use homeboy::core::refactor::plan::{
 
 use super::source_command::{
     finish_observed_workflow, resolve_ci_job_for_command, resolve_source_context,
+    ObservedWorkflowRunner,
 };
 use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
@@ -155,11 +155,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         return run_fix(args, &ctx, effective_id, stringified_settings);
     }
 
-    let run_dir = RunDir::create()?;
-    let resource_run = homeboy::core::engine::resource::ResourceSummaryRun::start(Some(format!(
-        "lint {}",
-        effective_id
-    )));
+    let runner = ObservedWorkflowRunner::create(format!("lint {}", effective_id))?;
     let observation = LintObservation::start(
         ctx.component_id.clone(),
         &ctx.source_path,
@@ -191,10 +187,14 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             },
             json_summary: args.json_summary,
         },
-        &run_dir,
+        runner.run_dir(),
     );
-    resource_run.write_to_run_dir(&run_dir)?;
-    let workflow = finish_lint_workflow(observation, workflow)?;
+    let workflow = runner.finish(
+        observation,
+        workflow,
+        |observation, workflow| observation.finish_workflow(workflow),
+        |observation, _error| observation.finish_error(),
+    )?;
 
     Ok(report::from_main_workflow_with_ci_context(
         workflow,
