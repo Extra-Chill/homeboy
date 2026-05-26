@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.2] - 2026-05-26
+
+### Fixed
+- mount wp-codebox audit repo as workspace
+
 ## [2.102.1] - 2026-05-26
 
 ### Fixed
