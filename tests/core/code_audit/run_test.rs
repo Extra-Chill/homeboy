@@ -118,6 +118,22 @@ fn make_changed_since_args() -> AuditRunWorkflowArgs {
     args
 }
 
+fn make_baseline(
+    known_fingerprints: Vec<&str>,
+) -> crate::core::code_audit::baseline::AuditBaseline {
+    crate::core::code_audit::baseline::AuditBaseline {
+        created_at: "2026-04-28T00:00:00Z".to_string(),
+        context_id: "test".to_string(),
+        item_count: known_fingerprints.len(),
+        known_fingerprints: known_fingerprints.into_iter().map(str::to_string).collect(),
+        metadata: crate::core::code_audit::baseline::AuditBaselineMetadata {
+            outliers_count: 0,
+            alignment_score: None,
+            known_outliers: vec![],
+        },
+    }
+}
+
 #[test]
 fn filter_noop_when_both_lists_empty() {
     // The common case: no flags → no-op, untouched findings AND untouched summary.
@@ -333,6 +349,83 @@ fn changed_since_comparison_counts_new_findings_as_introduced() {
             );
         }
         _ => panic!("expected compared output"),
+    }
+}
+
+#[test]
+fn json_summary_names_baseline_known_findings_separately_from_blocking_findings() {
+    let mut known_finding = make_finding(AuditFinding::GodFile, "src/large.rs");
+    known_finding.convention = "structural".to_string();
+    let result = make_result(vec![known_finding]);
+    let baseline = make_baseline(vec![
+        "structural::src/large.rs::GodFile",
+        "structural::src/resolved.rs::GodFile",
+    ]);
+    let mut args = make_args(false);
+    args.json_summary = true;
+
+    let workflow = build_comparison_output(result, &make_analysis(), baseline, &args)
+        .expect("comparison output builds");
+
+    assert_eq!(workflow.exit_code, 0);
+    match workflow.output {
+        crate::core::code_audit::report::AuditCommandOutput::Summary(summary) => {
+            assert_eq!(summary.total_findings, 1);
+            assert_eq!(summary.finding_groups.len(), 1);
+
+            let filtering = summary
+                .baseline_filtering
+                .expect("baseline summary should describe filtering scope");
+            assert_eq!(filtering.current_findings, 1);
+            assert_eq!(filtering.unbaselined_findings, 0);
+            assert_eq!(filtering.baseline_known_findings, 1);
+            assert_eq!(filtering.baseline_filtered_findings, 1);
+            assert_eq!(filtering.baseline_total_findings, 2);
+            assert_eq!(filtering.resolved_findings, 1);
+            assert_eq!(filtering.drift_delta, -1);
+            assert!(!filtering.drift_increased);
+        }
+        _ => panic!("expected summary output"),
+    }
+}
+
+#[test]
+fn json_summary_for_targeted_detector_counts_current_and_unbaselined_findings() {
+    let mut first = make_finding(AuditFinding::GodFile, "src/large.rs");
+    first.convention = "structural".to_string();
+    let mut second = make_finding(AuditFinding::GodFile, "src/also-large.rs");
+    second.convention = "structural".to_string();
+    let result = make_result(vec![first, second]);
+    let baseline = make_baseline(vec![]);
+    let mut args = make_args(false);
+    args.json_summary = true;
+    args.only_kinds = vec![AuditFinding::GodFile];
+    args.only_labels = vec!["god_file".to_string()];
+
+    let workflow = build_comparison_output(result, &make_analysis(), baseline, &args)
+        .expect("comparison output builds");
+
+    assert_eq!(workflow.exit_code, 1);
+    match workflow.output {
+        crate::core::code_audit::report::AuditCommandOutput::Summary(summary) => {
+            assert_eq!(summary.total_findings, 2);
+            assert_eq!(summary.finding_groups.len(), 1);
+            assert_eq!(summary.finding_groups[0].kind, "god_file");
+            assert_eq!(summary.finding_groups[0].count, 2);
+
+            let filtering = summary
+                .baseline_filtering
+                .expect("baseline summary should describe filtering scope");
+            assert_eq!(filtering.current_findings, 2);
+            assert_eq!(filtering.unbaselined_findings, 2);
+            assert_eq!(filtering.baseline_known_findings, 0);
+            assert_eq!(filtering.baseline_filtered_findings, 0);
+            assert_eq!(filtering.baseline_total_findings, 0);
+            assert_eq!(filtering.resolved_findings, 0);
+            assert_eq!(filtering.drift_delta, 2);
+            assert!(filtering.drift_increased);
+        }
+        _ => panic!("expected summary output"),
     }
 }
 
