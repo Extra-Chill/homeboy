@@ -1,0 +1,38 @@
+{
+  "id": "fixture-homeboy-audit-001",
+  "run_id": "homeboy-audit-fixture-run",
+  "data": {
+    "findings": [
+      {
+        "id": "finding-phpcs-001",
+        "kind": "wordpress.phpcs.fixable",
+        "fix_batch_key": "PHPCS Formatting/Auto Fix!",
+        "file": "src/Example/class-alpha.php",
+        "line": 12,
+        "message": "Spacing around assignment can be fixed automatically.",
+        "severity": "warning",
+        "fingerprint": "fixture-phpcs-001"
+      },
+      {
+        "id": "finding-phpcs-002",
+        "kind": "wordpress.phpcs.fixable",
+        "fix_batch_key": "PHPCS Formatting/Auto Fix!",
+        "file": "src/Example/class-beta.php",
+        "line": 24,
+        "message": "Array alignment can be fixed automatically.",
+        "severity": "warning",
+        "fingerprint": "fixture-phpcs-002"
+      },
+      {
+        "id": "finding-doc-001",
+        "kind": "wordpress.docs.broken_reference",
+        "fix_batch_key": "docs-reference",
+        "file": "docs/setup.md",
+        "line": 7,
+        "message": "Document references a removed setup script.",
+        "severity": "error",
+        "fingerprint": "fixture-doc-001"
+      }
+    ]
+  }
+}
