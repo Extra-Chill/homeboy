@@ -57,7 +57,15 @@ pub fn install(rig: &RigSpec, options: AppLauncherOptions) -> Result<AppLauncher
 }
 
 pub fn update(rig: &RigSpec, options: AppLauncherOptions) -> Result<AppLauncherReport> {
-    let mut report = install_inner(rig, options, true)?;
+    update_inner(rig, options, true)
+}
+
+fn update_inner(
+    rig: &RigSpec,
+    options: AppLauncherOptions,
+    enforce_platform: bool,
+) -> Result<AppLauncherReport> {
+    let mut report = install_inner(rig, options, enforce_platform)?;
     report.action = AppLauncherAction::Update;
     Ok(report)
 }

@@ -217,6 +217,25 @@ fn test_linux_install_writes_desktop_file_to_temp_dir() {
 }
 
 #[test]
+fn test_linux_update_regenerates_desktop_file_in_place() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let rig = rig_with_linux_launcher(&tmp.path().to_string_lossy());
+    install_inner(&rig, AppLauncherOptions { dry_run: false }, false).expect("install");
+    let desktop = tmp.path().join("Studio (Dev).desktop");
+    fs::write(&desktop, "stale desktop entry").expect("write stale desktop");
+
+    let report =
+        super::update_inner(&rig, AppLauncherOptions { dry_run: false }, false).expect("update");
+    let content = fs::read_to_string(&desktop).expect("read desktop");
+
+    assert_eq!(report.action, AppLauncherAction::Update);
+    assert_eq!(report.files, vec![desktop.display().to_string()]);
+    assert!(content.starts_with("[Desktop Entry]"));
+    assert!(content.contains("Exec=/bin/sh -lc"));
+    assert!(!content.contains("stale desktop entry"));
+}
+
+#[test]
 fn test_uninstall_removes_generated_bundle_from_temp_dir() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let rig = rig_with_launcher(&tmp.path().to_string_lossy());
