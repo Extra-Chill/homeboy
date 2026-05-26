@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.2] - 2026-05-26
+
+### Fixed
+- avoid artifact action bootstrap in quality jobs
+
 ## [2.7.1] - 2026-05-24
 
 ### Fixed
