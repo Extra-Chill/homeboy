@@ -149,6 +149,16 @@ struct ExtensionRefactorSourceResponse {
     warnings: Vec<String>,
 }
 
+struct AuditStageRequest<'a> {
+    component: &'a Component,
+    root: &'a Path,
+    changed_files: Option<&'a [String]>,
+    only: &'a [crate::core::code_audit::AuditFinding],
+    exclude: &'a [crate::core::code_audit::AuditFinding],
+    write: bool,
+    settings: &'a [(String, String)],
+}
+
 pub fn collect_refactor_sources(
     request: RefactorSourceRequest,
 ) -> crate::core::Result<RefactorSourceRun> {
@@ -258,16 +268,15 @@ pub fn collect_refactor_sources(
 
     for source in &sources {
         let stage = match source.as_str() {
-            "audit" => plan_audit_stage(
-                &request.component,
-                &request.component.id,
-                &request.root,
-                scoped_changed_files.as_deref(),
-                &request.only,
-                &request.exclude,
-                request.write,
-                &request.settings,
-            )?,
+            "audit" => plan_audit_stage(AuditStageRequest {
+                component: &request.component,
+                root: &request.root,
+                changed_files: scoped_changed_files.as_deref(),
+                only: &request.only,
+                exclude: &request.exclude,
+                write: request.write,
+                settings: &request.settings,
+            })?,
             "lint" => run_lint_stage(
                 &request.component,
                 &request.root,
@@ -394,7 +403,7 @@ fn try_extension_audit_refactor_stage(
 ) -> crate::core::Result<Option<PlannedStage>> {
     let source = "audit";
     let setting_key = "refactor.audit.extension";
-    let Some(extension_id) = setting_value(settings, &setting_key) else {
+    let Some(extension_id) = setting_value(settings, setting_key) else {
         return Ok(None);
     };
     let manifest = extension::load_extension(extension_id)?;
@@ -570,19 +579,12 @@ fn format_changed_files(root: &Path, changed_files: &[String], warnings: &mut Ve
     }
 }
 
-fn plan_audit_stage(
-    component: &Component,
-    component_id: &str,
-    root: &Path,
-    changed_files: Option<&[String]>,
-    only: &[crate::core::code_audit::AuditFinding],
-    exclude: &[crate::core::code_audit::AuditFinding],
-    write: bool,
-    settings: &[(String, String)],
-) -> crate::core::Result<PlannedStage> {
+fn plan_audit_stage(request: AuditStageRequest<'_>) -> crate::core::Result<PlannedStage> {
+    let component_id = &request.component.id;
+    let root = request.root;
     let result = if let Some(cached) = try_load_cached_audit() {
         cached
-    } else if let Some(changed) = changed_files {
+    } else if let Some(changed) = request.changed_files {
         if changed.is_empty() {
             crate::core::code_audit::CodeAuditResult {
                 component_id: component_id.to_string(),
@@ -613,11 +615,17 @@ fn plan_audit_stage(
     };
 
     let policy = fixer::FixPolicy {
-        only: (!only.is_empty()).then_some(only.to_vec()),
-        exclude: exclude.to_vec(),
+        only: (!request.only.is_empty()).then_some(request.only.to_vec()),
+        exclude: request.exclude.to_vec(),
     };
     if let Some(stage) = try_extension_audit_refactor_stage(
-        component, root, &result, only, exclude, write, settings,
+        request.component,
+        root,
+        &result,
+        request.only,
+        request.exclude,
+        request.write,
+        request.settings,
     )? {
         return Ok(stage);
     }
@@ -627,7 +635,7 @@ fn plan_audit_stage(
         fixer::PolicySummary,
         Vec<String>,
         Vec<String>,
-    ) = if write {
+    ) = if request.write {
         // Single pass: generate fixes from the provided findings, apply, validate.
         // The audit already ran and provided findings in `result` — the refactor
         // command does not re-run the audit internally. The convergence loop
@@ -635,8 +643,8 @@ fn plan_audit_stage(
         // pipeline, not inside a single refactor invocation.
         let outcome = super::verify::run_audit_refactor(
             result.clone(),
-            only,
-            exclude,
+            request.only,
+            request.exclude,
             AuditConvergenceScoring::default(),
             true,
         )?;
@@ -694,12 +702,12 @@ fn plan_audit_stage(
         summary: SourceStageSummary {
             stage: "audit".to_string(),
             collected: true,
-            applied: write && !changed_files.is_empty(),
+            applied: request.write && !changed_files.is_empty(),
             edit_count,
             files_modified: changed_files.len(),
             detected_findings: Some(result.findings.len()),
             changed_files,
-            fix_summary: if write {
+            fix_summary: if request.write {
                 if fix_result.files_modified > 0 {
                     Some(auto::summarize_audit_fix_result(&fix_result))
                 } else {
