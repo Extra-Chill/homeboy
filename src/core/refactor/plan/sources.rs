@@ -7,7 +7,7 @@ use crate::core::git;
 use crate::core::refactor::auto as fixer;
 use crate::core::refactor::auto::{self, FixApplied, FixResultsSummary};
 use crate::core::Error;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -135,6 +135,20 @@ pub struct RefactorSourceRun {
     pub guard_block: Option<crate::core::refactor::auto::guard::GuardBlock>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ExtensionRefactorSourceResponse {
+    #[serde(default)]
+    handled: bool,
+    #[serde(default)]
+    detected_findings: Option<usize>,
+    #[serde(default)]
+    changed_files: Vec<String>,
+    #[serde(default)]
+    fix_results: Vec<FixApplied>,
+    #[serde(default)]
+    warnings: Vec<String>,
+}
+
 pub fn collect_refactor_sources(
     request: RefactorSourceRequest,
 ) -> crate::core::Result<RefactorSourceRun> {
@@ -245,12 +259,14 @@ pub fn collect_refactor_sources(
     for source in &sources {
         let stage = match source.as_str() {
             "audit" => plan_audit_stage(
+                &request.component,
                 &request.component.id,
                 &request.root,
                 scoped_changed_files.as_deref(),
                 &request.only,
                 &request.exclude,
                 request.write,
+                &request.settings,
             )?,
             "lint" => run_lint_stage(
                 &request.component,
@@ -358,6 +374,106 @@ pub fn collect_refactor_sources(
     })
 }
 
+fn setting_value<'a>(settings: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    settings
+        .iter()
+        .rev()
+        .find(|(setting_key, _)| setting_key == key)
+        .map(|(_, value)| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn try_extension_audit_refactor_stage(
+    component: &Component,
+    root: &Path,
+    audit_result: &crate::core::code_audit::CodeAuditResult,
+    only: &[crate::core::code_audit::AuditFinding],
+    exclude: &[crate::core::code_audit::AuditFinding],
+    write: bool,
+    settings: &[(String, String)],
+) -> crate::core::Result<Option<PlannedStage>> {
+    let source = "audit";
+    let setting_key = "refactor.audit.extension";
+    let Some(extension_id) = setting_value(settings, &setting_key) else {
+        return Ok(None);
+    };
+    let manifest = extension::load_extension(extension_id)?;
+    let command = serde_json::json!({
+        "command": "refactor_source",
+        "source": source,
+        "component_id": component.id,
+        "root": root.to_string_lossy(),
+        "audit_result": audit_result,
+        "only": only,
+        "exclude": exclude,
+        "write": write,
+        "settings": settings.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
+    });
+    let Some(value) = extension::run_refactor_script(&manifest, &command) else {
+        return Err(Error::validation_invalid_argument(
+            setting_key.to_string(),
+            format!(
+                "Extension '{}' did not handle refactor source '{}'",
+                extension_id, source
+            ),
+            None,
+            Some(vec![
+                "Remove the setting to use Homeboy's built-in refactor source".to_string(),
+                "Or update the extension refactor script to support command=refactor_source"
+                    .to_string(),
+            ]),
+        ));
+    };
+    let response: ExtensionRefactorSourceResponse =
+        serde_json::from_value(value).map_err(|err| {
+            Error::validation_invalid_argument(
+                setting_key,
+                format!(
+                    "Extension '{}' returned an invalid refactor source response: {}",
+                    extension_id, err
+                ),
+                None,
+                None,
+            )
+        })?;
+
+    if !response.handled {
+        return Err(Error::validation_invalid_argument(
+            setting_key.to_string(),
+            format!(
+                "Extension '{}' declined refactor source '{}'",
+                extension_id, source
+            ),
+            None,
+            Some(vec![
+                "Remove the setting to use Homeboy's built-in refactor source".to_string(),
+            ]),
+        ));
+    }
+
+    let fix_summary = if response.fix_results.is_empty() {
+        None
+    } else {
+        Some(auto::summarize_fix_results(&response.fix_results))
+    };
+
+    Ok(Some(PlannedStage {
+        source: source.to_string(),
+        summary: SourceStageSummary {
+            stage: source.to_string(),
+            collected: true,
+            applied: write && !response.changed_files.is_empty(),
+            edit_count: response.fix_results.len(),
+            files_modified: response.changed_files.len(),
+            detected_findings: response.detected_findings,
+            changed_files: response.changed_files,
+            fix_summary,
+            warnings: response.warnings,
+        },
+        fix_results: response.fix_results,
+    }))
+}
+
 fn allows_dirty_worktree_write(request: &RefactorSourceRequest) -> bool {
     request.write
         && request.sources == ["lint"]
@@ -455,12 +571,14 @@ fn format_changed_files(root: &Path, changed_files: &[String], warnings: &mut Ve
 }
 
 fn plan_audit_stage(
+    component: &Component,
     component_id: &str,
     root: &Path,
     changed_files: Option<&[String]>,
     only: &[crate::core::code_audit::AuditFinding],
     exclude: &[crate::core::code_audit::AuditFinding],
     write: bool,
+    settings: &[(String, String)],
 ) -> crate::core::Result<PlannedStage> {
     let result = if let Some(cached) = try_load_cached_audit() {
         cached
@@ -498,6 +616,11 @@ fn plan_audit_stage(
         only: (!only.is_empty()).then_some(only.to_vec()),
         exclude: exclude.to_vec(),
     };
+    if let Some(stage) = try_extension_audit_refactor_stage(
+        component, root, &result, only, exclude, write, settings,
+    )? {
+        return Ok(stage);
+    }
     let mut fix_result = super::generate::generate_audit_fixes(&result, root, &policy);
     let (fix_result, policy_summary, changed_files, stage_warnings): (
         fixer::FixResult,
