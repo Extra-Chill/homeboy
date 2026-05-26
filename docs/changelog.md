@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.199.1] - 2026-05-26
+
+### Changed
+- dedupe command descriptor shapes
+- move observed workflow helper to utils
+- anchor output contracts to public enums
+- centralize command descriptor behavior
+- Unify target resolution
+- consolidate batch bulk output totals
+- share observed quality workflow runner
+- guard output variant contracts
+
+### Fixed
+- remove unused git root detector
+
 ## [0.199.0] - 2026-05-26
 
 ### Added
