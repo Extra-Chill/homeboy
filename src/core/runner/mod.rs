@@ -30,7 +30,10 @@ pub use evidence::{
     is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,
 };
 pub(crate) use execution::daemon_api_get;
-pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
+pub use execution::{
+    exec, RunnerCapabilityPreflight, RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
+    RunnerRequiredTool,
+};
 pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since,
