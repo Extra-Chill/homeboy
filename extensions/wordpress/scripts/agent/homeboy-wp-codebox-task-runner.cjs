@@ -94,13 +94,20 @@ function mountEntries() {
 function recipeForRequest(request, options) {
   const provider = argValue('--provider') || request.provider || '';
   const model = argValue('--model') || request.model || '';
+  const workspaceSlug = path.basename(options.agentsApi).split('@')[0].replace(/[^a-zA-Z0-9_-]/g, '-');
   const task = JSON.stringify({
     schema: 'homeboy/wp-codebox-audit-task/v1',
     sandbox_session_id: request.sandbox_session_id,
     group_key: request.group_key,
     orchestrator: request.orchestrator,
     audit_findings: request.audit_findings,
-    task: request.task,
+    task: {
+      ...(request.task || {}),
+      prompt: [
+        request.task?.prompt || '',
+        `Use Data Machine Code workspace repo \`${workspaceSlug}\` for all workspace_* tool calls.`,
+      ].filter(Boolean).join('\n\n'),
+    },
   });
 
   const providerSlugs = providerPluginEntries(request).map((plugin) => plugin.slug).join(',');
@@ -120,6 +127,18 @@ function recipeForRequest(request, options) {
       blueprint: { steps: [] },
     },
     inputs: {
+      workspaces: [
+        {
+          seed: {
+            type: 'directory',
+            source: options.agentsApi,
+            slug: workspaceSlug,
+          },
+          target: `/workspace/${workspaceSlug}`,
+          mode: 'readwrite',
+          sourceMode: 'repo-backed',
+        },
+      ],
       mounts: mountEntries(),
       extraPlugins: [
         pluginEntry(options.agentsApi, 'agents-api', false),
