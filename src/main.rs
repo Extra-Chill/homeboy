@@ -638,15 +638,25 @@ fn run_lab_offload_inner(
     })?;
     let source_path = lab_offload_source_path(normalized_args)?;
     let capability_preflight = lab_runner_capability_preflight(command_kind, &source_path);
-    homeboy::core::runner::preflight_lab_offload_changed_since(
-        normalized_args,
-        homeboy::core::runner::RunnerWorkspaceSyncMode::Snapshot,
-    )?;
+    let sync_mode =
+        if homeboy::core::runner::lab_offload_changed_since_ref(normalized_args).is_some() {
+            homeboy::core::runner::RunnerWorkspaceSyncMode::Git
+        } else {
+            homeboy::core::runner::RunnerWorkspaceSyncMode::Snapshot
+        };
+    let changed_since_preflight = if sync_mode
+        == homeboy::core::runner::RunnerWorkspaceSyncMode::Git
+    {
+        homeboy::core::runner::prepare_git_lab_offload_changed_since(normalized_args, &source_path)?
+    } else {
+        homeboy::core::runner::preflight_lab_offload_changed_since(normalized_args, sync_mode)?
+    };
     let synced = homeboy::core::runner::sync_workspace(
         runner_id,
         homeboy::core::runner::RunnerWorkspaceSyncOptions {
             path: source_path.display().to_string(),
-            mode: homeboy::core::runner::RunnerWorkspaceSyncMode::Snapshot,
+            mode: sync_mode,
+            changed_since_base: changed_since_preflight.resolved_base.clone(),
         },
     )?
     .0;
@@ -662,7 +672,7 @@ fn run_lab_offload_inner(
 
     let mut command = vec![homeboy_path.to_string()];
     command.extend(
-        rewrite_lab_offload_args(normalized_args, &remote_cwd)
+        rewrite_lab_offload_args(&changed_since_preflight.args, &remote_cwd)
             .into_iter()
             .skip(1),
     );

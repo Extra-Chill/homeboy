@@ -56,6 +56,7 @@ pub enum RunnerWorkspaceSyncMode {
 pub struct RunnerWorkspaceSyncOptions {
     pub path: String,
     pub mode: RunnerWorkspaceSyncMode,
+    pub changed_since_base: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,9 +117,15 @@ pub fn sync_workspace(
             ))
         }
         RunnerWorkspaceSyncMode::Git => {
-            let git = git_snapshot(&local_path)?;
+            let git = git_snapshot(&local_path, options.changed_since_base.as_deref())?;
             let remote_path = deterministic_remote_path(workspace_root, &local_path, &git.head);
-            materialize_git(&runner, &remote_path, &git.remote_url, &git.head)?;
+            materialize_git(
+                &runner,
+                &remote_path,
+                &git.remote_url,
+                &git.head,
+                git.changed_since_base.as_deref(),
+            )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
                     command: "runner.workspace.sync",
@@ -145,6 +152,7 @@ struct SnapshotStats {
 struct GitSnapshot {
     remote_url: String,
     head: String,
+    changed_since_base: Option<String>,
 }
 
 fn canonical_workspace_path(path: &str) -> Result<PathBuf> {
@@ -210,7 +218,7 @@ fn snapshot_identity(local_path: &Path) -> Result<String> {
     Ok(format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)))
 }
 
-fn git_snapshot(local_path: &Path) -> Result<GitSnapshot> {
+fn git_snapshot(local_path: &Path, changed_since_base: Option<&str>) -> Result<GitSnapshot> {
     let status = git_output(local_path, &["status", "--porcelain=v1"])?;
     if !status.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -230,7 +238,11 @@ fn git_snapshot(local_path: &Path) -> Result<GitSnapshot> {
             None,
         ));
     }
-    Ok(GitSnapshot { remote_url, head })
+    Ok(GitSnapshot {
+        remote_url,
+        head,
+        changed_since_base: changed_since_base.map(str::to_string),
+    })
 }
 
 fn git_output(local_path: &Path, args: &[&str]) -> Result<String> {
@@ -402,14 +414,14 @@ fn materialize_snapshot_ssh(
     run_shell_command(&command, "materialize SSH workspace snapshot")
 }
 
-fn materialize_git(runner: &Runner, remote_path: &str, remote_url: &str, head: &str) -> Result<()> {
-    let command = format!(
-        "mkdir -p {parent} && if [ -d {dest}/.git ]; then git -C {dest} fetch --prune origin; else rm -rf {dest} && git clone {url} {dest}; fi && git -C {dest} checkout --detach {head} && git -C {dest} clean -ffdqx",
-        parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
-        dest = shell::quote_arg(remote_path),
-        url = shell::quote_arg(remote_url),
-        head = shell::quote_arg(head),
-    );
+fn materialize_git(
+    runner: &Runner,
+    remote_path: &str,
+    remote_url: &str,
+    head: &str,
+    changed_since_base: Option<&str>,
+) -> Result<()> {
+    let command = materialize_git_command(remote_path, remote_url, head, changed_since_base);
     match runner.kind {
         RunnerKind::Local => run_shell_command(&command, "materialize local git workspace"),
         RunnerKind::Ssh => {
@@ -418,13 +430,47 @@ fn materialize_git(runner: &Runner, remote_path: &str, remote_url: &str, head: &
             if output.success {
                 Ok(())
             } else {
-                Err(Error::internal_unexpected(format!(
-                    "materialize git workspace failed: {}",
-                    output.stderr
-                )))
+                Err(Error::validation_invalid_argument(
+                    "changed_since",
+                    "Lab offload could not make the requested --changed-since base reachable in the runner workspace before dispatch",
+                    changed_since_base.map(str::to_string),
+                    Some(vec![
+                        "Verify the branch and base commit are pushed to origin.".to_string(),
+                        "Run with --force-hot to execute the changed-since command locally."
+                            .to_string(),
+                        format!("Remote git error: {}", output.stderr.trim()),
+                    ]),
+                ))
             }
         }
     }
+}
+
+fn materialize_git_command(
+    remote_path: &str,
+    remote_url: &str,
+    head: &str,
+    changed_since_base: Option<&str>,
+) -> String {
+    let dest = shell::quote_arg(remote_path);
+    let fetch_changed_since = changed_since_base
+        .map(|base| {
+            format!(
+                " && (git -C {dest} rev-parse --verify -q {} >/dev/null || git -C {dest} fetch origin {})",
+                shell::quote_arg(&format!("{base}^{{commit}}")),
+                shell::quote_arg(base)
+            )
+        })
+        .unwrap_or_default();
+
+    format!(
+        "mkdir -p {parent} && if [ -d {dest}/.git ]; then git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf {dest} && git clone {url} {dest} && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since} && git -C {dest} checkout --detach {head} && git -C {dest} clean -ffdqx",
+        parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
+        dest = dest,
+        url = shell::quote_arg(remote_url),
+        head = shell::quote_arg(head),
+        fetch_changed_since = fetch_changed_since,
+    )
 }
 
 fn ssh_client_for_runner(runner: &Runner) -> Result<(Server, SshClient)> {
@@ -602,6 +648,7 @@ mod tests {
                 RunnerWorkspaceSyncOptions {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
+                    changed_since_base: None,
                 },
             )
             .expect("sync workspace");
@@ -619,5 +666,20 @@ mod tests {
                 .join("target/debug/homeboy")
                 .exists());
         });
+    }
+
+    #[test]
+    fn git_materialization_fetches_changed_since_base_before_checkout() {
+        let command = materialize_git_command(
+            "/srv/homeboy/_lab_workspaces/homeboy-abc",
+            "https://github.com/Extra-Chill/homeboy.git",
+            "abc123",
+            Some("def456"),
+        );
+
+        assert!(command.contains("fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'"));
+        assert!(command.contains("rev-parse --verify -q 'def456^{commit}'"));
+        assert!(command.contains("fetch origin def456"));
+        assert!(command.contains("checkout --detach abc123"));
     }
 }

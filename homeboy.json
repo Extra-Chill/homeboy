@@ -156,24 +156,20 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-26T02:11:55Z",
-      "item_count": 32,
+      "created_at": "2026-05-26T22:37:03Z",
+      "item_count": 26,
       "known_fingerprints": [
+        "artifact_portability::observation:554f67ae-74b0-4a98-b896-0d49a2807076::NonPortableArtifactPath",
         "runner_offload_preflight::src/commands/bench/observation.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/commands/observe.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/commands/runs/bundle.rs::RunnerOffloadPreflight",
-        "runner_offload_preflight::src/commands/runs/bundle.rs::RunnerOffloadPreflight",
-        "runner_offload_preflight::src/commands/runs/common.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/commands/trace/observations.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/core/code_audit/detectors/artifact_portability.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/core/code_audit/detectors/test_topology.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/core/extension/bench/report.rs::RunnerOffloadPreflight",
-        "runner_offload_preflight::src/core/extension/bench/report.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/core/extension/bench/side_by_side.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/core/extension/trace/report.rs::RunnerOffloadPreflight",
-        "runner_offload_preflight::src/core/extension/trace/report.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/core/observation/store.rs::RunnerOffloadPreflight",
-        "runner_offload_preflight::src/core/release/executor.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/core/release/executor.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/core/runner/execution.rs::RunnerOffloadPreflight",
         "structural::src/commands/bench/tests.rs::HighItemCount",
@@ -183,8 +179,6 @@
         "structural::src/core/code_audit/core_fingerprint.rs::GodFile",
         "structural::src/core/code_audit/detectors/test_coverage.rs::GodFile",
         "structural::src/core/code_audit/mod.rs::GodFile",
-        "structural::src/core/extension/bench/run.rs::HighItemCount",
-        "structural::src/core/extension/execution.rs::HighItemCount",
         "structural::src/core/extension/grammar.rs::GodFile",
         "structural::src/core/extension/lifecycle.rs::GodFile",
         "structural::src/core/project/mod.rs::HighItemCount",
@@ -193,7 +187,7 @@
         "structural::src/core/rig/pipeline.rs::HighItemCount"
       ],
       "metadata": {
-        "alignment_score": 0.9259259104728699,
+        "alignment_score": 0.9154929518699646,
         "known_outliers": [
           "src/core/observation/records/triage_items.rs",
           "src/core/observation/records/run_status.rs",

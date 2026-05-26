@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
 
 use super::{event, push_event, TraceEvent};
 
@@ -23,6 +27,7 @@ pub(super) struct HttpEgressConfig {
     pub max_body_bytes: usize,
     pub redact_headers: Vec<String>,
     pub listen_port: Option<u16>,
+    pub artifact_dir: Option<PathBuf>,
 }
 
 pub(super) fn default_redact_headers() -> Vec<String> {
@@ -457,7 +462,11 @@ fn add_capture_data(
         );
     }
     if config.capture == "body" {
-        let body = truncate_body(&message.body, config.max_body_bytes);
+        let captured = capture_body(
+            &message.body,
+            config.max_body_bytes,
+            config.artifact_dir.as_deref(),
+        );
         data.insert(
             if request {
                 "request_body"
@@ -465,13 +474,72 @@ fn add_capture_data(
                 "response_body"
             }
             .to_string(),
-            serde_json::json!(body),
+            serde_json::json!(captured.preview),
         );
         data.insert(
             "body_truncated".to_string(),
-            serde_json::json!(message.body.len() > config.max_body_bytes),
+            serde_json::json!(captured.truncated),
         );
+        data.insert(
+            "body_omitted".to_string(),
+            serde_json::json!(captured.omitted),
+        );
+        data.insert(
+            "body_preview_bytes".to_string(),
+            serde_json::json!(captured.preview_bytes),
+        );
+        data.insert(
+            "body_sha256".to_string(),
+            serde_json::json!(captured.sha256),
+        );
+        if let Some(artifact_ref) = captured.artifact_ref {
+            data.insert(
+                "body_artifact_ref".to_string(),
+                serde_json::json!(artifact_ref),
+            );
+        }
     }
+}
+
+struct CapturedBody {
+    preview: String,
+    preview_bytes: usize,
+    truncated: bool,
+    omitted: usize,
+    sha256: String,
+    artifact_ref: Option<String>,
+}
+
+fn capture_body(body: &[u8], max: usize, artifact_dir: Option<&Path>) -> CapturedBody {
+    let preview_bytes = body.len().min(max);
+    let truncated = body.len() > max;
+    let sha256 = format!("{:x}", Sha256::digest(body));
+    let artifact_ref = if truncated {
+        artifact_dir.and_then(|dir| write_body_artifact(dir, &sha256, body).ok())
+    } else {
+        None
+    };
+
+    CapturedBody {
+        preview: truncate_body(body, max),
+        preview_bytes,
+        truncated,
+        omitted: body.len().saturating_sub(preview_bytes),
+        sha256,
+        artifact_ref,
+    }
+}
+
+fn write_body_artifact(dir: &Path, sha256: &str, body: &[u8]) -> std::io::Result<String> {
+    let relative = format!("artifacts/http-egress/{sha256}.body");
+    let artifact_path = dir.join("http-egress").join(format!("{sha256}.body"));
+    if let Some(parent) = artifact_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if !artifact_path.exists() {
+        fs::write(&artifact_path, body)?;
+    }
+    Ok(relative)
 }
 
 fn truncate_body(body: &[u8], max: usize) -> String {
@@ -518,6 +586,7 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use std::time::Duration;
+    use tempfile::TempDir;
 
     #[test]
     fn test_default_redact_headers() {
@@ -598,5 +667,106 @@ mod tests {
                 .and_then(|headers| headers.get("Authorization"))
                 .and_then(|value| value.as_str())
                 == Some("<redacted>")));
+    }
+
+    #[test]
+    fn test_request_body_spills_to_artifact_when_over_limit() {
+        let temp = TempDir::new().expect("temp dir");
+        let message = http_message_with_body("POST", "/v1/messages", b"hello=world");
+        let config = http_egress_config(temp.path().join("artifacts"), 5);
+
+        let data = request_event_data(&message, &config);
+
+        assert_eq!(
+            data.get("request_body").and_then(|value| value.as_str()),
+            Some("hello")
+        );
+        assert_eq!(
+            data.get("body_truncated").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            data.get("body_omitted").and_then(|value| value.as_u64()),
+            Some(6)
+        );
+        assert_eq!(
+            data.get("body_preview_bytes")
+                .and_then(|value| value.as_u64()),
+            Some(5)
+        );
+        let sha = data
+            .get("body_sha256")
+            .and_then(|value| value.as_str())
+            .expect("sha256");
+        let artifact_ref = data
+            .get("body_artifact_ref")
+            .and_then(|value| value.as_str())
+            .expect("artifact ref");
+        assert_eq!(artifact_ref, format!("artifacts/http-egress/{sha}.body"));
+        assert_eq!(
+            fs::read(temp.path().join(artifact_ref)).expect("artifact body"),
+            b"hello=world"
+        );
+    }
+
+    #[test]
+    fn test_response_body_spills_to_artifact_when_over_limit() {
+        let temp = TempDir::new().expect("temp dir");
+        let message = http_message_with_body("HTTP/1.1", "200", b"hello back from upstream");
+        let config = http_egress_config(temp.path().join("artifacts"), 10);
+
+        let data = response_event_data(&message, &config);
+
+        assert_eq!(
+            data.get("response_body").and_then(|value| value.as_str()),
+            Some("hello back")
+        );
+        assert_eq!(
+            data.get("body_truncated").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            data.get("body_omitted").and_then(|value| value.as_u64()),
+            Some(14)
+        );
+        let sha = data
+            .get("body_sha256")
+            .and_then(|value| value.as_str())
+            .expect("sha256");
+        let artifact_ref = data
+            .get("body_artifact_ref")
+            .and_then(|value| value.as_str())
+            .expect("artifact ref");
+        assert_eq!(artifact_ref, format!("artifacts/http-egress/{sha}.body"));
+        assert_eq!(
+            fs::read(temp.path().join(artifact_ref)).expect("artifact body"),
+            b"hello back from upstream"
+        );
+    }
+
+    fn http_egress_config(artifact_dir: PathBuf, max_body_bytes: usize) -> HttpEgressConfig {
+        HttpEgressConfig {
+            host: "127.0.0.1".to_string(),
+            path: None,
+            capture: "body".to_string(),
+            max_body_bytes,
+            redact_headers: default_redact_headers(),
+            listen_port: None,
+            artifact_dir: Some(artifact_dir),
+        }
+    }
+
+    fn http_message_with_body(method: &str, target: &str, body: &[u8]) -> HttpMessage {
+        HttpMessage {
+            method: method.to_string(),
+            target: target.to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: body.to_vec(),
+            raw: body.to_vec(),
+            host: "127.0.0.1".to_string(),
+            port: Some(80),
+            path: "/v1/messages".to_string(),
+        }
     }
 }

@@ -665,6 +665,7 @@ fn workspace_sync(
         runner::RunnerWorkspaceSyncOptions {
             path,
             mode: RunnerWorkspaceSyncMode::from(mode),
+            changed_since_base: None,
         },
     )
 }
