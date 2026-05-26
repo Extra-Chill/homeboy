@@ -33,6 +33,7 @@ pub fn preflight(
                 env: Default::default(),
                 capture_patch: false,
                 source_snapshot: None,
+                capability_preflight: None,
             },
         )?;
 
