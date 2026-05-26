@@ -26,6 +26,17 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
                 kind: AuditFinding::UnboundedOutputCapture,
             });
         }
+
+        if has_unbounded_detail_output_shape(&fp.content) {
+            findings.push(Finding {
+                convention: "output_capture".to_string(),
+                severity: Severity::Warning,
+                file: fp.relative_path.clone(),
+                description: "Reporter output appears to emit per-match or per-file details without an explicit item cap or omitted-count metadata.".to_string(),
+                suggestion: "Cap detail rows with take/truncate and report how many items were omitted from the detailed output.".to_string(),
+                kind: AuditFinding::UnboundedOutputCapture,
+            });
+        }
     }
 
     findings.sort_by(|a, b| a.file.cmp(&b.file));
@@ -53,6 +64,46 @@ fn has_unbounded_capture_shape(content: &str) -> bool {
         || content.contains("MAX_OUTPUT")
         || content.contains("OUTPUT_LIMIT")
         || content.contains("take(");
+
+    !has_bound
+}
+
+fn has_unbounded_detail_output_shape(content: &str) -> bool {
+    let emits_text = content.contains("println!")
+        || content.contains("eprintln!")
+        || content.contains("writeln!")
+        || content.contains("push_str(&format!")
+        || content.contains("push_str(format!");
+    if !emits_text {
+        return false;
+    }
+
+    let has_detail_loop = content.lines().any(|line| {
+        let line = line.trim();
+        if !line.starts_with("for ") || !line.contains(" in ") {
+            return false;
+        }
+
+        let lower = line.to_ascii_lowercase();
+        [
+            "matches", "findings", "files", "details", "entries", "items",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    });
+    if !has_detail_loop {
+        return false;
+    }
+
+    let has_bound = content.contains(".take(")
+        || content.contains(".truncate(")
+        || content.contains("omitted")
+        || content.contains("remaining")
+        || content.contains("detail_limit")
+        || content.contains("DETAIL_LIMIT")
+        || content.contains("MAX_DETAIL")
+        || content.contains("max_detail")
+        || content.contains("summary");
 
     !has_bound
 }
@@ -103,6 +154,47 @@ mod tests {
                 let stdout = "";
                 let stderr = "";
                 let _ = (&mut captured, stdout, stderr);
+            }
+            "#,
+        );
+
+        assert!(run(&[&file]).is_empty());
+    }
+
+    #[test]
+    fn flags_detail_reporter_without_item_cap() {
+        let file = fp(
+            "src/report.rs",
+            r#"
+            fn render(matches: Vec<String>, out: &mut String) {
+                for item in matches {
+                    out.push_str(&format!("- {item}\n"));
+                }
+            }
+            "#,
+        );
+
+        let findings = run(&[&file]);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::UnboundedOutputCapture);
+        assert!(findings[0].description.contains("per-match"));
+    }
+
+    #[test]
+    fn accepts_detail_reporter_with_cap_and_omitted_count() {
+        let file = fp(
+            "src/report.rs",
+            r#"
+            const DETAIL_LIMIT: usize = 20;
+            fn render(matches: Vec<String>, out: &mut String) {
+                for item in matches.iter().take(DETAIL_LIMIT) {
+                    out.push_str(&format!("- {item}\n"));
+                }
+                let omitted = matches.len().saturating_sub(DETAIL_LIMIT);
+                if omitted > 0 {
+                    out.push_str(&format!("... {omitted} omitted\n"));
+                }
             }
             "#,
         );
