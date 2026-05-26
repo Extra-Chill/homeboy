@@ -10,6 +10,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::runner::is_reportable_artifact_evidence_path;
 use homeboy::core::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -195,6 +196,14 @@ pub fn load_artifact_rows(
                         "artifact bytes are not available in this imported metadata-only bundle",
                     ));
                 }
+                continue;
+            }
+            if !is_reportable_artifact_evidence_path(&artifact.path) {
+                skipped.push(skipped_artifact(
+                    &run,
+                    &artifact,
+                    "artifact path is not locally accessible or retrievable",
+                ));
                 continue;
             }
             let path = Path::new(&artifact.path);
