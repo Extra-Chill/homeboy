@@ -3,6 +3,7 @@ mod commits;
 mod github;
 mod github_comment_sections;
 mod github_pr_comments;
+mod github_types;
 mod operation_output;
 mod operations;
 mod pr_policy;
