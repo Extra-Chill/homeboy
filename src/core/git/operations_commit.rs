@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::config::read_json_spec_to_string;
 use crate::core::error::{Error, Result};
-use crate::core::output::{BulkResult, BulkSummary, ItemOutcome};
+use crate::core::output::{BulkResult, BulkResultBuilder};
 
 use super::operation_output::GitOutput;
 use super::{execute_git, resolve_target};
@@ -169,20 +169,13 @@ fn commit_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
         )
     })?;
 
-    let mut results = Vec::new();
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
+    let mut builder = BulkResultBuilder::with_capacity("commit", input.components.len());
 
     for spec in &input.components {
         let id = match &spec.id {
             Some(id) => id.clone(),
             None => {
-                failed += 1;
-                results.push(ItemOutcome {
-                    id: "unknown".to_string(),
-                    result: None,
-                    error: Some("Missing 'id' field in bulk commit spec".to_string()),
-                });
+                builder.record_error("unknown", "Missing 'id' field in bulk commit spec");
                 continue;
             }
         };
@@ -195,36 +188,18 @@ fn commit_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
         match commit(Some(&id), Some(&spec.message), options) {
             Ok(output) => {
                 if output.success {
-                    succeeded += 1;
+                    builder.record_success(id, output);
                 } else {
-                    failed += 1;
+                    builder.record_failed_result(id, output);
                 }
-                results.push(ItemOutcome {
-                    id,
-                    result: Some(output),
-                    error: None,
-                });
             }
             Err(e) => {
-                failed += 1;
-                results.push(ItemOutcome {
-                    id,
-                    result: None,
-                    error: Some(e.to_string()),
-                });
+                builder.record_error(id, e.to_string());
             }
         }
     }
 
-    Ok(BulkResult {
-        action: "commit".to_string(),
-        results,
-        summary: BulkSummary {
-            total: succeeded + failed,
-            succeeded,
-            failed,
-        },
-    })
+    Ok(builder.finish())
 }
 
 /// Output from commit_from_json - either single or bulk result.

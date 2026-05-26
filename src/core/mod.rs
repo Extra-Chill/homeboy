@@ -63,9 +63,9 @@ pub use server::auth;
 // Re-export common types for convenience
 pub use error::{Error, ErrorCode, Result};
 pub use output::{
-    BatchResult, BatchResultItem, BulkResult, BulkSummary, CreateOutput, CreateResult,
-    EntityCrudOutput, ItemOutcome, MergeOutput, MergeResult, NoExtra, ObservationOutputDetails,
-    ObservationOutputMetadata, RemoveResult,
+    BatchResult, BatchResultItem, BulkResult, BulkResultBuilder, BulkSummary, CreateOutput,
+    CreateResult, EntityCrudOutput, ItemOutcome, MergeOutput, MergeResult, NoExtra,
+    ObservationOutputDetails, ObservationOutputMetadata, OutcomeTotals, RemoveResult,
 };
 
 /// Set a process-local artifact root override for the current CLI invocation.
