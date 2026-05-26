@@ -7,18 +7,22 @@ use crate::core::git;
 use crate::core::refactor::auto as fixer;
 use crate::core::refactor::auto::{self, FixApplied, FixResultsSummary};
 use crate::core::Error;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+mod audit_source;
 mod cache;
+mod extension_source;
 mod lint_scope;
 mod planning;
 
+use audit_source::filtered_audit_source_result;
 use cache::{
     try_load_cached_audit, try_load_cached_lint, try_load_cached_test, CachedLintResult,
     CachedTestResult, OUTPUT_DIR_ENV,
 };
+use extension_source::{read_optional_json, try_extension_refactor_source_stage};
 use lint_scope::{
     capture_release_owned_files, constrain_lint_fix_changes, lint_finding_scope_files,
     lint_scope_glob, restore_release_owned_files,
@@ -133,20 +137,6 @@ pub struct RefactorSourceRun {
     /// short-circuited without modifying any files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guard_block: Option<crate::core::refactor::auto::guard::GuardBlock>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ExtensionRefactorSourceResponse {
-    #[serde(default)]
-    handled: bool,
-    #[serde(default)]
-    detected_findings: Option<usize>,
-    #[serde(default)]
-    changed_files: Vec<String>,
-    #[serde(default)]
-    fix_results: Vec<FixApplied>,
-    #[serde(default)]
-    warnings: Vec<String>,
 }
 
 struct AuditStageRequest<'a> {
@@ -383,106 +373,6 @@ pub fn collect_refactor_sources(
     })
 }
 
-fn setting_value<'a>(settings: &'a [(String, String)], key: &str) -> Option<&'a str> {
-    settings
-        .iter()
-        .rev()
-        .find(|(setting_key, _)| setting_key == key)
-        .map(|(_, value)| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn try_extension_audit_refactor_stage(
-    component: &Component,
-    root: &Path,
-    audit_result: &crate::core::code_audit::CodeAuditResult,
-    only: &[crate::core::code_audit::AuditFinding],
-    exclude: &[crate::core::code_audit::AuditFinding],
-    write: bool,
-    settings: &[(String, String)],
-) -> crate::core::Result<Option<PlannedStage>> {
-    let source = "audit";
-    let setting_key = "refactor.audit.extension";
-    let Some(extension_id) = setting_value(settings, setting_key) else {
-        return Ok(None);
-    };
-    let manifest = extension::load_extension(extension_id)?;
-    let command = serde_json::json!({
-        "command": "refactor_source",
-        "source": source,
-        "component_id": component.id,
-        "root": root.to_string_lossy(),
-        "audit_result": audit_result,
-        "only": only,
-        "exclude": exclude,
-        "write": write,
-        "settings": settings.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
-    });
-    let Some(value) = extension::run_refactor_script(&manifest, &command) else {
-        return Err(Error::validation_invalid_argument(
-            setting_key.to_string(),
-            format!(
-                "Extension '{}' did not handle refactor source '{}'",
-                extension_id, source
-            ),
-            None,
-            Some(vec![
-                "Remove the setting to use Homeboy's built-in refactor source".to_string(),
-                "Or update the extension refactor script to support command=refactor_source"
-                    .to_string(),
-            ]),
-        ));
-    };
-    let response: ExtensionRefactorSourceResponse =
-        serde_json::from_value(value).map_err(|err| {
-            Error::validation_invalid_argument(
-                setting_key,
-                format!(
-                    "Extension '{}' returned an invalid refactor source response: {}",
-                    extension_id, err
-                ),
-                None,
-                None,
-            )
-        })?;
-
-    if !response.handled {
-        return Err(Error::validation_invalid_argument(
-            setting_key.to_string(),
-            format!(
-                "Extension '{}' declined refactor source '{}'",
-                extension_id, source
-            ),
-            None,
-            Some(vec![
-                "Remove the setting to use Homeboy's built-in refactor source".to_string(),
-            ]),
-        ));
-    }
-
-    let fix_summary = if response.fix_results.is_empty() {
-        None
-    } else {
-        Some(auto::summarize_fix_results(&response.fix_results))
-    };
-
-    Ok(Some(PlannedStage {
-        source: source.to_string(),
-        summary: SourceStageSummary {
-            stage: source.to_string(),
-            collected: true,
-            applied: write && !response.changed_files.is_empty(),
-            edit_count: response.fix_results.len(),
-            files_modified: response.changed_files.len(),
-            detected_findings: response.detected_findings,
-            changed_files: response.changed_files,
-            fix_summary,
-            warnings: response.warnings,
-        },
-        fix_results: response.fix_results,
-    }))
-}
-
 fn allows_dirty_worktree_write(request: &RefactorSourceRequest) -> bool {
     request.write
         && request.sources == ["lint"]
@@ -618,12 +508,12 @@ fn plan_audit_stage(request: AuditStageRequest<'_>) -> crate::core::Result<Plann
         only: (!request.only.is_empty()).then_some(request.only.to_vec()),
         exclude: request.exclude.to_vec(),
     };
-    if let Some(stage) = try_extension_audit_refactor_stage(
+    let extension_result = filtered_audit_source_result(&result, &policy);
+    if let Some(stage) = try_extension_refactor_source_stage(
+        "audit",
         request.component,
         root,
-        &result,
-        request.only,
-        request.exclude,
+        &extension_result,
         request.write,
         request.settings,
     )? {
@@ -809,6 +699,20 @@ fn run_lint_stage(
             .unwrap_or_default()
     };
 
+    let lint_source_result = serde_json::json!({
+        "lint_findings": &lint_findings,
+    });
+    if let Some(stage) = try_extension_refactor_source_stage(
+        "lint",
+        component,
+        root,
+        &lint_source_result,
+        write,
+        settings,
+    )? {
+        return Ok(stage);
+    }
+
     // ── Phase 2: Apply fixes (only when --write) ───────────────────────
     // The engine controls fix application. The extension's fix-mode
     // invocation runs ONLY the fixers, not the diagnostic pass. The engine
@@ -969,6 +873,21 @@ fn run_test_stage(
     }
 
     runner.run()?;
+
+    let test_source_result = serde_json::json!({
+        "test_results": read_optional_json(&run_dir.step_file(run_dir::files::TEST_RESULTS)),
+        "test_failures": read_optional_json(&run_dir.step_file(run_dir::files::TEST_FAILURES)),
+    });
+    if let Some(stage) = try_extension_refactor_source_stage(
+        "test",
+        component,
+        root,
+        &test_source_result,
+        write,
+        settings,
+    )? {
+        return Ok(stage);
+    }
 
     // ── Phase 2: Apply fixes (only when --write) ───────────────────────
     // The engine controls fix application. The extension's fix-mode

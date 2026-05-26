@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.199.0] - 2026-05-26
+
+### Added
+- generalize refactor source extension dispatch
+
+### Changed
+- Allow extension refactor source handlers
+
+### Fixed
+- split audit source filter helper
+- scope extension refactor source dispatch
+
 ## [0.198.9] - 2026-05-26
 
 ### Changed
