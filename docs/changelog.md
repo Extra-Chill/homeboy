@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.198.7] - 2026-05-26
+
+### Changed
+- extract code audit execution plan
+- Make artifact portability path policy configurable
+
 ## [0.198.6] - 2026-05-25
 
 ### Changed
