@@ -3,8 +3,12 @@ mod commits;
 mod github;
 mod github_comment_sections;
 mod github_pr_comments;
+mod github_types;
 mod operation_output;
 mod operations;
+mod operations_changes;
+mod operations_commit;
+mod operations_push;
 mod pr_policy;
 mod primitives;
 
@@ -32,16 +36,19 @@ pub use github::{
 pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
 pub use operation_output::GitOutput;
 pub use operations::{
-    build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,
-    changes_project_filtered, cherry_pick, cherry_pick_at, commit, commit_at, commit_from_json,
-    detect_baseline_with_version, execute_git_for_release, fetch_and_fast_forward,
+    cherry_pick, cherry_pick_at, execute_git_for_release, fetch_and_fast_forward,
     fetch_and_get_behind_count, get_head_commit, get_repo_snapshot, get_tag_commit, pull, pull_at,
-    pull_bulk, push, push_at, push_bulk, rebase, rebase_at, remote_tag_commit,
-    short_head_revision_at, status, status_at, status_bulk, tag, tag_at, tag_exists_locally,
-    tag_exists_on_remote, BaselineInfo, BaselineSource, ChangelogInfo, ChangesOutput,
-    CherryPickOptions, CommitJsonOutput, CommitOptions, PushOptions, RebaseOptions,
-    RepoBaselineSnapshot, RepoSnapshot,
+    pull_bulk, rebase, rebase_at, remote_tag_commit, short_head_revision_at, status, status_at,
+    status_bulk, tag, tag_at, tag_exists_locally, tag_exists_on_remote, CherryPickOptions,
+    RebaseOptions, RepoSnapshot,
 };
+pub use operations_changes::{
+    build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,
+    changes_project_filtered, detect_baseline_with_version, BaselineInfo, BaselineSource,
+    ChangelogInfo, ChangesOutput, RepoBaselineSnapshot,
+};
+pub use operations_commit::{commit, commit_at, commit_from_json, CommitJsonOutput, CommitOptions};
+pub use operations_push::{push, push_at, push_bulk, PushOptions};
 pub use pr_policy::{
     evaluate_merge_policy, evaluate_open_policy, PrPolicyContext, PrPolicyDecision, PrPolicyFile,
     PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules,
