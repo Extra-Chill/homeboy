@@ -1,6 +1,62 @@
 use crate::core::component::{discover_from_portable, inventory, load, Component};
 use crate::core::error::{Error, Result};
+use crate::core::extension::{self, ExtensionCapability};
 use std::path::{Path, PathBuf};
+
+/// Shared target-resolution input for component/path-oriented commands.
+///
+/// This is the single contract for commands that need to turn user input into
+/// an effective component and source path. Callers can keep command-specific
+/// validation before this point, then rely on the same resolution order for
+/// registered components, `--path`, bare directories, CWD discovery, project
+/// scope, synthetic targets, and optional capability checks.
+#[derive(Debug, Clone, Default)]
+pub struct TargetSpec<'a> {
+    /// Positional or flagged component ID. May also be a bare directory when
+    /// `accept_bare_directory` is enabled.
+    pub component_id: Option<&'a str>,
+
+    /// Explicit `--path` override.
+    pub path_override: Option<&'a str>,
+
+    /// Optional project scope for project-attached component lookup.
+    pub project: Option<&'a crate::core::project::Project>,
+
+    /// Optional extension capability required by the caller.
+    pub capability: Option<ExtensionCapability>,
+
+    /// Whether an explicit path without registration/portable config may
+    /// produce a synthetic component.
+    pub allow_synthetic: bool,
+
+    /// Whether a positional component value that is a directory is accepted as
+    /// an ad-hoc target.
+    pub accept_bare_directory: bool,
+}
+
+impl<'a> TargetSpec<'a> {
+    pub fn new(component_id: Option<&'a str>, path_override: Option<&'a str>) -> Self {
+        Self {
+            component_id,
+            path_override,
+            project: None,
+            capability: None,
+            allow_synthetic: true,
+            accept_bare_directory: true,
+        }
+    }
+}
+
+/// Resolved target shared by git, audit, refactor, and execution context setup.
+#[derive(Debug, Clone)]
+pub struct ResolvedTarget {
+    pub component: Component,
+    pub component_id: String,
+    pub source_path: PathBuf,
+    pub git_root: Option<PathBuf>,
+    pub extension_id: Option<String>,
+    pub synthetic: bool,
+}
 
 pub fn resolve_artifact(component: &Component) -> Option<String> {
     if let Some(ref artifact) = component.build_artifact {
@@ -140,7 +196,102 @@ fn resolve_path_override(path: &str) -> Component {
         return discovered;
     }
 
+    let dir = Path::new(path);
+    if let Some(git_root) = detect_git_root(dir) {
+        if git_root != dir {
+            if let Some(mut discovered) = discover_from_portable(&git_root) {
+                discovered.local_path = path.to_string();
+                discovered.resolve_remote_path();
+                return discovered;
+            }
+        }
+    }
+
     synthetic_component_for_path(path)
+}
+
+fn path_has_portable_config(path: &Path) -> bool {
+    if discover_from_portable(path).is_some() {
+        return true;
+    }
+
+    if let Some(git_root) = detect_git_root(path) {
+        if git_root != path {
+            return discover_from_portable(&git_root).is_some();
+        }
+    }
+
+    false
+}
+
+/// Resolve a target from the shared command-facing contract.
+///
+/// Resolution order:
+/// 1. project-scoped component ID, when a project is supplied
+/// 2. explicit `--path`, optionally preserving an explicit component ID
+/// 3. positional bare directory, when enabled
+/// 4. CWD checkout matching the requested component ID
+/// 5. registered component lookup
+/// 6. CWD registry/portable discovery
+pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
+    let component_id_is_bare_dir = spec
+        .component_id
+        .map(|id| Path::new(id).is_dir())
+        .unwrap_or(false);
+
+    if component_id_is_bare_dir && !spec.accept_bare_directory && spec.path_override.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "component",
+            "Bare directory targets are not accepted by this command",
+            spec.component_id.map(ToOwned::to_owned),
+            Some(vec![
+                "Use --path when this command supports ad-hoc paths".to_string()
+            ]),
+        ));
+    }
+
+    let mut component = resolve_effective_inner(
+        spec.component_id,
+        spec.path_override,
+        spec.project,
+        spec.accept_bare_directory,
+    )?;
+
+    let explicit_path = spec
+        .path_override
+        .or_else(|| component_id_is_bare_dir.then_some(component.local_path.as_str()));
+    let synthetic = explicit_path
+        .map(|path| !path_has_portable_config(Path::new(path)))
+        .unwrap_or(false);
+    if synthetic && !spec.allow_synthetic {
+        return Err(Error::validation_invalid_argument(
+            "target",
+            "Target is not registered and has no homeboy.json",
+            Some(component.local_path.clone()),
+            Some(vec![
+                "Register the component or add a repo-owned homeboy.json".to_string(),
+            ]),
+        ));
+    }
+
+    let source_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
+    let git_root = detect_git_root(&source_path);
+    let extension_id = if let Some(capability) = spec.capability {
+        Some(extension::resolve_execution_context(&component, capability)?.extension_id)
+    } else {
+        None
+    };
+
+    component.resolve_remote_path();
+
+    Ok(ResolvedTarget {
+        component_id: component.id.clone(),
+        component,
+        source_path,
+        git_root,
+        extension_id,
+        synthetic,
+    })
 }
 
 /// Find the git root directory for a given path.
@@ -210,6 +361,15 @@ pub fn resolve_effective(
     path_override: Option<&str>,
     project: Option<&crate::core::project::Project>,
 ) -> Result<Component> {
+    resolve_effective_inner(id, path_override, project, true)
+}
+
+fn resolve_effective_inner(
+    id: Option<&str>,
+    path_override: Option<&str>,
+    project: Option<&crate::core::project::Project>,
+    accept_bare_directory: bool,
+) -> Result<Component> {
     if let (Some(project), Some(id)) = (project, id) {
         let mut component = crate::core::project::resolve_project_component(project, id)?;
         if let Some(path) = path_override {
@@ -237,7 +397,7 @@ pub fn resolve_effective(
             }
         } else {
             let id_path = Path::new(id);
-            if id_path.is_dir() {
+            if accept_bare_directory && id_path.is_dir() {
                 if let Some(mut discovered) = discover_from_portable(id_path) {
                     discovered.local_path = id.to_string();
                     discovered.resolve_remote_path();
@@ -295,6 +455,20 @@ mod tests {
         let result = f();
         std::env::set_current_dir(previous).expect("restore cwd");
         result
+    }
+
+    fn write_standalone_registration(home: &Path, id: &str, local_path: &Path) {
+        let components = home.join(".config").join("homeboy").join("components");
+        std::fs::create_dir_all(&components).expect("components dir");
+        std::fs::write(
+            components.join(format!("{id}.json")),
+            serde_json::json!({
+                "local_path": local_path,
+                "remote_path": format!("wp-content/plugins/{id}")
+            })
+            .to_string(),
+        )
+        .expect("standalone registration");
     }
 
     #[test]
@@ -432,5 +606,98 @@ mod tests {
             .as_ref()
             .expect("extensions")
             .contains_key("nodejs"));
+    }
+
+    #[test]
+    fn target_spec_resolves_registered_component() {
+        crate::test_support::with_isolated_home(|home| {
+            let repo = home.path().join("registered-repo");
+            std::fs::create_dir_all(&repo).expect("repo dir");
+            write_standalone_registration(home.path(), "registered", &repo);
+
+            let target = resolve_target(TargetSpec::new(Some("registered"), None))
+                .expect("registered target");
+
+            assert_eq!(target.component_id, "registered");
+            assert_eq!(target.source_path, repo);
+            assert!(!target.synthetic);
+        });
+    }
+
+    #[test]
+    fn target_spec_resolves_from_cwd_portable_config() {
+        crate::test_support::with_isolated_home(|_home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let repo = dir.path().join("cwd-repo");
+            std::fs::create_dir_all(&repo).expect("repo dir");
+            std::fs::write(repo.join("homeboy.json"), r#"{"id":"cwd-id"}"#)
+                .expect("portable config");
+
+            with_cwd(&repo, || {
+                let target = resolve_target(TargetSpec::new(None, None)).expect("cwd target");
+
+                assert_eq!(target.component_id, "cwd-id");
+                assert_eq!(target.source_path, repo.canonicalize().unwrap());
+                assert!(!target.synthetic);
+            });
+        });
+    }
+
+    #[test]
+    fn target_spec_resolves_path_override() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path().join("path-repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        std::fs::write(repo.join("homeboy.json"), r#"{"id":"path-id"}"#).expect("portable config");
+
+        let target = resolve_target(TargetSpec::new(None, repo.to_str())).expect("path target");
+
+        assert_eq!(target.component_id, "path-id");
+        assert_eq!(target.source_path, repo);
+        assert!(!target.synthetic);
+    }
+
+    #[test]
+    fn target_spec_accepts_bare_directory_positional_target() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path().join("bare-repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+
+        let target = resolve_target(TargetSpec::new(repo.to_str(), None)).expect("bare target");
+
+        assert_eq!(target.component_id, "bare-repo");
+        assert_eq!(target.source_path, repo);
+        assert!(target.synthetic);
+    }
+
+    #[test]
+    fn target_spec_allows_synthetic_path_target() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path().join("synthetic-repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+
+        let target =
+            resolve_target(TargetSpec::new(None, repo.to_str())).expect("synthetic target");
+
+        assert_eq!(target.component_id, "synthetic-repo");
+        assert_eq!(target.source_path, repo);
+        assert!(target.synthetic);
+    }
+
+    #[test]
+    fn target_spec_can_reject_synthetic_target() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path().join("synthetic-repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+
+        let err = resolve_target(TargetSpec {
+            component_id: None,
+            path_override: repo.to_str(),
+            allow_synthetic: false,
+            ..TargetSpec::default()
+        })
+        .expect_err("synthetic target should be rejected");
+
+        assert!(err.to_string().contains("not registered"));
     }
 }

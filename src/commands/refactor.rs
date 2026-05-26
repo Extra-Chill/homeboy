@@ -1,5 +1,6 @@
 use clap::{Args, Subcommand};
 use homeboy::core::code_audit::AuditFinding;
+use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::refactor::{
     self, auto, AddResult, MoveResult, RenameContext, RenameScope, RenameSpec, RenameTargeting,
@@ -546,11 +547,7 @@ impl RefactorTargetArgs {
         }
 
         if let Some(path) = &self.path {
-            return Ok(vec![RefactorTarget {
-                component_id: None,
-                path: Some(path.clone()),
-                label: path.clone(),
-            }]);
+            return resolve_refactor_target(None, Some(path));
         }
 
         if component_ids.is_empty() {
@@ -568,6 +565,20 @@ impl RefactorTargetArgs {
             })
             .collect())
     }
+}
+
+fn resolve_refactor_target(
+    component_id: Option<&str>,
+    path: Option<&str>,
+) -> homeboy::core::Result<Vec<RefactorTarget>> {
+    let target = component::resolve_target(TargetSpec::new(component_id, path))?;
+    let path = target.source_path.to_string_lossy().to_string();
+
+    Ok(vec![RefactorTarget {
+        label: target.component_id.clone(),
+        component_id: Some(target.component_id),
+        path: Some(path),
+    }])
 }
 
 fn resolve_top_level_targets(
@@ -588,23 +599,13 @@ fn resolve_top_level_targets(
                 ));
             }
 
-            return Ok(vec![RefactorTarget {
-                component_id: Some(component_id.clone()),
-                path: comp.path.clone(),
-                label: component_id.clone(),
-            }]);
+            return resolve_refactor_target(Some(component_id), comp.path.as_deref());
         }
         // Component omitted — fall through to flagged_ids or CWD auto-discovery
     }
 
     if flagged_ids.is_empty() {
-        // No component specified anywhere — try CWD auto-discovery
-        let component = homeboy::core::component::resolution::resolve(None)?;
-        return Ok(vec![RefactorTarget {
-            label: component.id.clone(),
-            component_id: Some(component.id),
-            path: None,
-        }]);
+        return resolve_refactor_target(None, None);
     }
 
     Ok(flagged_ids

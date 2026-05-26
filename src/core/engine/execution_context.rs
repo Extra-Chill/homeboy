@@ -227,26 +227,25 @@ pub fn resolve_with_component(
         }
         component
     } else {
-        component::resolve_effective(
+        component::resolve_target(component::TargetSpec::new(
             options.component_id.as_deref(),
             options.path_override.as_deref(),
-            None,
-        )?
+        ))?
+        .component
     };
 
     let declared_extension_ids = declared_extension_ids(&component);
     apply_extension_overrides(&mut component, &options.extension_overrides);
 
     // 2. Resolve source path
-    let source_path = if let Some(ref path) = options.path_override {
-        PathBuf::from(path)
-    } else {
-        let expanded = shellexpand::tilde(&component.local_path);
-        PathBuf::from(expanded.as_ref())
-    };
+    let target = component::resolve_target(component::TargetSpec::new(
+        Some(&component.id),
+        Some(&component.local_path),
+    ))?;
+    let source_path = target.source_path;
 
     // 3. Detect git root
-    let git_root = detect_git_root(&source_path);
+    let git_root = target.git_root;
 
     // 4. Optionally resolve extension context
     let (extension_id, extension_path, settings) = if let Some(capability) = options.capability {
@@ -407,34 +406,6 @@ impl<'a> ResolvedSettings<'a> {
     }
 }
 
-/// Detect the git repository root for a given directory.
-///
-/// Returns `None` if the path is not inside a git repository.
-fn detect_git_root(dir: &std::path::Path) -> Option<PathBuf> {
-    let effective_dir = if dir.is_file() {
-        dir.parent()?
-    } else if dir.exists() {
-        dir
-    } else {
-        // Directory doesn't exist yet — try parent
-        dir.parent()?
-    };
-
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(effective_dir)
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,33 +434,6 @@ mod tests {
             ),
         )
         .expect("write extension manifest");
-    }
-
-    #[test]
-    fn detect_git_root_finds_repo() {
-        let dir = TempDir::new().expect("temp dir");
-        let root = dir.path();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .expect("git init");
-
-        let result = detect_git_root(root);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), root.canonicalize().unwrap());
-    }
-
-    #[test]
-    fn detect_git_root_returns_none_outside_repo() {
-        let dir = TempDir::new().expect("temp dir");
-        let non_git = dir.path().join("not-a-repo");
-        fs::create_dir_all(&non_git).expect("create dir");
-
-        let result = detect_git_root(&non_git);
-        // May still find a parent repo, so we just test it doesn't panic
-        assert!(result.is_none() || result.is_some());
     }
 
     #[test]

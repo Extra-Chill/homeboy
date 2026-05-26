@@ -29,7 +29,10 @@ pub use portable::{
     write_portable_config,
 };
 pub use relationships::{associated_projects, projects_using, rename_component, shared_components};
-pub use resolution::{resolve, resolve_artifact, resolve_effective, validate_local_path};
+pub use resolution::{
+    resolve, resolve_artifact, resolve_effective, resolve_target, validate_local_path,
+    ResolvedTarget, TargetSpec,
+};
 pub use scope::{resolve_component_scope, EffectiveScope, ScopeCommand};
 pub use versioning::{
     normalize_version_pattern, parse_version_targets, validate_version_pattern,
