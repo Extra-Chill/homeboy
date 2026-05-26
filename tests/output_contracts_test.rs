@@ -160,6 +160,7 @@ fn audit_summary_output() -> AuditCommandOutput {
             introduced_findings: 1,
             contextual_findings: 1,
         }),
+        baseline_filtering: None,
         exit_code: 1,
     })
 }
