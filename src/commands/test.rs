@@ -16,14 +16,12 @@ use homeboy::core::observation::{
 };
 use std::path::Path;
 
-use super::source_command::{
-    finish_observed_workflow, resolve_ci_job_for_command, resolve_source_context,
-    ObservedWorkflowRunner,
-};
+use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs,
     PassthroughCommand, PositionalComponentArgs, SettingArgs,
 };
+use super::utils::observed_workflow::{finish_observed_workflow, ObservedWorkflowRunner};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
