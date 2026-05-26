@@ -30,6 +30,10 @@ homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id
 homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id nodejs
 ```
 
+Remote runners need the same extension IDs installed on the runner host before
+Homeboy can offload matching jobs to them. For the standard runner bootstrap
+path, see [`docs/remote-runner-bootstrap.md`](docs/remote-runner-bootstrap.md).
+
 ### Verify installation
 
 ```bash
