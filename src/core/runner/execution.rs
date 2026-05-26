@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -22,6 +22,27 @@ pub struct RunnerExecOptions {
     pub env: HashMap<String, String>,
     pub capture_patch: bool,
     pub source_snapshot: Option<SourceSnapshot>,
+    pub capability_preflight: Option<RunnerCapabilityPreflight>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunnerCapabilityPreflight {
+    pub command: String,
+    pub required_tools: Vec<RunnerRequiredTool>,
+    pub required_components: Vec<String>,
+    pub required_env: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RunnerRequiredTool {
+    Git,
+    Node,
+    Npm,
+    Pnpm,
+    Php,
+    Composer,
+    Docker,
+    Playwright,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -76,15 +97,22 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     let runner = load(runner_id)?;
     let cwd = resolve_cwd(&runner, options.cwd.as_deref())?;
     let connected = status(runner_id)?;
+    let mut request_env = runner.env.clone();
+    request_env.extend(options.env.clone());
 
     if connected.connected {
         if let Some(session) = connected.session {
+            preflight_remote_runner_capabilities(
+                &runner,
+                options.capability_preflight.as_ref(),
+                &request_env,
+            )?;
             return exec_via_daemon(
                 &runner,
                 &session.local_url,
                 cwd,
                 options.command,
-                options.env,
+                request_env,
                 options.capture_patch,
                 options.source_snapshot,
             );
@@ -93,7 +121,14 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     match runner.kind {
         RunnerKind::Local => exec_local(&runner, cwd, options.command, options.env),
-        RunnerKind::Ssh if options.allow_ssh => exec_ssh(&runner, cwd, options.command, options.env),
+        RunnerKind::Ssh if options.allow_ssh => {
+            preflight_remote_runner_capabilities(
+                &runner,
+                options.capability_preflight.as_ref(),
+                &request_env,
+            )?;
+            exec_ssh(&runner, cwd, options.command, request_env)
+        }
         RunnerKind::Ssh => Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` or pass `--ssh` for explicit SSH diagnostics",
@@ -122,15 +157,13 @@ fn exec_via_daemon(
     let source_snapshot = source_snapshot_override.unwrap_or_else(|| {
         SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
     });
-    let mut request_env = runner.env.clone();
-    request_env.extend(env);
     let response = client
         .post(format!("{}/exec", local_url.trim_end_matches('/')))
         .json(&json!({
             "runner_id": runner.id,
             "cwd": cwd,
             "command": command,
-            "env": request_env,
+            "env": env,
             "capture_patch": capture_patch,
             "source_snapshot": source_snapshot,
         }))
@@ -216,6 +249,228 @@ fn exec_via_daemon(
         },
         exit_code,
     ))
+}
+
+fn preflight_remote_runner_capabilities(
+    runner: &Runner,
+    preflight: Option<&RunnerCapabilityPreflight>,
+    request_env: &HashMap<String, String>,
+) -> Result<()> {
+    let Some(preflight) = preflight else {
+        return Ok(());
+    };
+    if preflight.is_empty() || runner.kind != RunnerKind::Ssh {
+        return Ok(());
+    }
+
+    let (report, _) = crate::commands::runner::doctor::run(&runner.id)?;
+    let capabilities = RunnerCapabilitySnapshot::from_doctor(&report, runner);
+    validate_runner_capability_preflight(&runner.id, preflight, &capabilities, request_env)
+}
+
+#[derive(Debug, Clone, Default)]
+struct RunnerCapabilitySnapshot {
+    tools: BTreeSet<RunnerRequiredTool>,
+    components: BTreeSet<String>,
+}
+
+impl RunnerCapabilitySnapshot {
+    fn from_doctor(
+        report: &crate::commands::runner::doctor::RunnerDoctorOutput,
+        runner: &Runner,
+    ) -> Self {
+        let mut tools = BTreeSet::new();
+        if report.capabilities.git {
+            tools.insert(RunnerRequiredTool::Git);
+        }
+        if report.capabilities.node {
+            tools.insert(RunnerRequiredTool::Node);
+        }
+        if report.capabilities.npm {
+            tools.insert(RunnerRequiredTool::Npm);
+        }
+        if report.capabilities.pnpm {
+            tools.insert(RunnerRequiredTool::Pnpm);
+        }
+        if report.capabilities.php {
+            tools.insert(RunnerRequiredTool::Php);
+        }
+        if report.capabilities.composer {
+            tools.insert(RunnerRequiredTool::Composer);
+        }
+        if report.capabilities.docker {
+            tools.insert(RunnerRequiredTool::Docker);
+        }
+        if report.capabilities.playwright && report.capabilities.browser_ready {
+            tools.insert(RunnerRequiredTool::Playwright);
+        }
+
+        Self {
+            tools,
+            components: configured_runner_components(runner),
+        }
+    }
+
+    fn has_tool(&self, tool: RunnerRequiredTool) -> bool {
+        self.tools.contains(&tool)
+    }
+}
+
+fn validate_runner_capability_preflight(
+    runner_id: &str,
+    preflight: &RunnerCapabilityPreflight,
+    capabilities: &RunnerCapabilitySnapshot,
+    request_env: &HashMap<String, String>,
+) -> Result<()> {
+    let missing_tools = preflight
+        .required_tools
+        .iter()
+        .copied()
+        .filter(|tool| !capabilities.has_tool(*tool))
+        .collect::<Vec<_>>();
+    let missing_components = preflight
+        .required_components
+        .iter()
+        .filter(|component| !capabilities.components.contains(component.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing_env = preflight
+        .required_env
+        .iter()
+        .filter(|name| {
+            request_env
+                .get(name.as_str())
+                .is_none_or(|value| value.is_empty())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if missing_tools.is_empty() && missing_components.is_empty() && missing_env.is_empty() {
+        return Ok(());
+    }
+
+    let mut missing = Vec::new();
+    if !missing_tools.is_empty() {
+        missing.push(format!(
+            "tools: {}",
+            missing_tools
+                .iter()
+                .map(|tool| tool.id())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !missing_components.is_empty() {
+        missing.push(format!("components: {}", missing_components.join(", ")));
+    }
+    if !missing_env.is_empty() {
+        missing.push(format!("environment: {}", missing_env.join(", ")));
+    }
+
+    let command = if preflight.command.is_empty() {
+        "runner command"
+    } else {
+        preflight.command.as_str()
+    };
+    let mut remediation = missing_tools
+        .iter()
+        .map(|tool| tool.remediation().to_string())
+        .collect::<Vec<_>>();
+    remediation.extend(missing_components.iter().map(|component| {
+        format!("Register component '{component}' on the runner capability profile or choose a runner with that component.")
+    }));
+    remediation.extend(missing_env.iter().map(|name| {
+        format!("Set required environment variable '{name}' on the runner or pass it with the runner exec request.")
+    }));
+    remediation.push(
+        "Remote execution was not started; fix the runner capability parity issue and retry."
+            .to_string(),
+    );
+
+    Err(Error::validation_invalid_argument(
+        "runner_capabilities",
+        format!(
+            "Runner '{runner_id}' is missing required capability parity for `{command}`: {}.",
+            missing.join("; ")
+        ),
+        Some(runner_id.to_string()),
+        Some(remediation),
+    ))
+}
+
+fn configured_runner_components(runner: &Runner) -> BTreeSet<String> {
+    let Some(value) = runner.resources.get("components") else {
+        return BTreeSet::new();
+    };
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_string))
+            })
+            .collect(),
+        Value::Object(map) => map.keys().cloned().collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
+impl RunnerCapabilityPreflight {
+    fn is_empty(&self) -> bool {
+        self.required_tools.is_empty()
+            && self.required_components.is_empty()
+            && self.required_env.is_empty()
+    }
+}
+
+impl RunnerRequiredTool {
+    pub fn id(self) -> &'static str {
+        match self {
+            RunnerRequiredTool::Git => "git",
+            RunnerRequiredTool::Node => "node",
+            RunnerRequiredTool::Npm => "npm",
+            RunnerRequiredTool::Pnpm => "pnpm",
+            RunnerRequiredTool::Php => "php",
+            RunnerRequiredTool::Composer => "composer",
+            RunnerRequiredTool::Docker => "docker",
+            RunnerRequiredTool::Playwright => "playwright+browsers",
+        }
+    }
+
+    fn remediation(self) -> &'static str {
+        match self {
+            RunnerRequiredTool::Git => "Install git and ensure it is on the runner PATH.",
+            RunnerRequiredTool::Node => "Install Node.js and ensure node is on the runner PATH.",
+            RunnerRequiredTool::Npm => {
+                "Install npm with Node.js and ensure npm is on the runner PATH."
+            }
+            RunnerRequiredTool::Pnpm => "Install pnpm for repositories with pnpm-lock.yaml.",
+            RunnerRequiredTool::Php => "Install PHP for repositories with composer.json.",
+            RunnerRequiredTool::Composer => "Install Composer for repositories with composer.json.",
+            RunnerRequiredTool::Docker => {
+                "Install and start Docker for container-backed repositories."
+            }
+            RunnerRequiredTool::Playwright => {
+                "Install Playwright CLI and browser binaries on the runner."
+            }
+        }
+    }
+}
+
+impl From<crate::commands::utils::resource_policy::LabRunnerTool> for RunnerRequiredTool {
+    fn from(tool: crate::commands::utils::resource_policy::LabRunnerTool) -> Self {
+        match tool {
+            crate::commands::utils::resource_policy::LabRunnerTool::Git => Self::Git,
+            crate::commands::utils::resource_policy::LabRunnerTool::Node => Self::Node,
+            crate::commands::utils::resource_policy::LabRunnerTool::Npm => Self::Npm,
+            crate::commands::utils::resource_policy::LabRunnerTool::Pnpm => Self::Pnpm,
+            crate::commands::utils::resource_policy::LabRunnerTool::Php => Self::Php,
+            crate::commands::utils::resource_policy::LabRunnerTool::Composer => Self::Composer,
+            crate::commands::utils::resource_policy::LabRunnerTool::Docker => Self::Docker,
+            crate::commands::utils::resource_policy::LabRunnerTool::Playwright => Self::Playwright,
+        }
+    }
 }
 
 fn fetch_daemon_job(client: &Client, local_url: &str, job_id: &str) -> Result<Job> {
@@ -515,6 +770,7 @@ mod tests {
                     env: Default::default(),
                     capture_patch: false,
                     source_snapshot: None,
+                    capability_preflight: None,
                 },
             )
             .expect("exec local runner");
@@ -529,6 +785,84 @@ mod tests {
             assert!(source_snapshot.snapshot_hash.starts_with("sha256:"));
             assert!(output.job_id.is_none());
         });
+    }
+
+    #[test]
+    fn test_runner_capability_preflight_reports_missing_tools_components_and_env() {
+        let preflight = RunnerCapabilityPreflight {
+            command: "test".to_string(),
+            required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Pnpm],
+            required_components: vec!["nodejs".to_string(), "wordpress".to_string()],
+            required_env: vec!["HOMEBOY_TOKEN".to_string()],
+        };
+        let capabilities = RunnerCapabilitySnapshot {
+            tools: [RunnerRequiredTool::Git].into_iter().collect(),
+            components: ["nodejs".to_string()].into_iter().collect(),
+        };
+
+        let err =
+            validate_runner_capability_preflight("lab", &preflight, &capabilities, &HashMap::new())
+                .expect_err("missing capability parity");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("tools: pnpm"));
+        assert!(err.message.contains("components: wordpress"));
+        assert!(err.message.contains("environment: HOMEBOY_TOKEN"));
+        let tried = err
+            .details
+            .get("tried")
+            .and_then(Value::as_array)
+            .expect("remediation details");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("Remote execution was not started"))));
+    }
+
+    #[test]
+    fn test_runner_capability_preflight_accepts_matching_requirements() {
+        let preflight = RunnerCapabilityPreflight {
+            command: "lint".to_string(),
+            required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Node],
+            required_components: vec!["nodejs".to_string()],
+            required_env: vec!["HOMEBOY_TOKEN".to_string()],
+        };
+        let capabilities = RunnerCapabilitySnapshot {
+            tools: [RunnerRequiredTool::Git, RunnerRequiredTool::Node]
+                .into_iter()
+                .collect(),
+            components: ["nodejs".to_string()].into_iter().collect(),
+        };
+        let mut env = HashMap::new();
+        env.insert("HOMEBOY_TOKEN".to_string(), "present".to_string());
+
+        validate_runner_capability_preflight("lab", &preflight, &capabilities, &env)
+            .expect("capability parity passes");
+    }
+
+    #[test]
+    fn test_configured_runner_components_accept_arrays_and_maps() {
+        let mut runner = ssh_runner();
+        runner.resources.insert(
+            "components".to_string(),
+            serde_json::json!(["nodejs", { "id": "wordpress" }]),
+        );
+        assert_eq!(
+            configured_runner_components(&runner),
+            ["nodejs".to_string(), "wordpress".to_string()]
+                .into_iter()
+                .collect()
+        );
+
+        runner.resources.insert(
+            "components".to_string(),
+            serde_json::json!({ "rust": true, "php": true }),
+        );
+        assert_eq!(
+            configured_runner_components(&runner),
+            ["php".to_string(), "rust".to_string()]
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]

@@ -637,7 +637,7 @@ fn run_lab_offload_inner(
         )
     })?;
     let source_path = lab_offload_source_path(normalized_args)?;
-    preflight_lab_runner_capabilities(runner_id, command_kind, &source_path)?;
+    let capability_preflight = lab_runner_capability_preflight(command_kind, &source_path);
     homeboy::core::runner::preflight_lab_offload_changed_since(
         normalized_args,
         homeboy::core::runner::RunnerWorkspaceSyncMode::Snapshot,
@@ -697,6 +697,7 @@ fn run_lab_offload_inner(
             env,
             capture_patch,
             source_snapshot: Some(source_snapshot),
+            capability_preflight,
         },
     )?;
 
@@ -712,33 +713,21 @@ fn run_lab_offload_inner(
     Ok(exit_code)
 }
 
-fn preflight_lab_runner_capabilities(
-    runner_id: &str,
+fn lab_runner_capability_preflight(
     command: &Commands,
     source_path: &Path,
-) -> homeboy::core::Result<()> {
-    let Some(plan) = resource_policy::lab_runner_capability_plan(command, source_path) else {
-        return Ok(());
-    };
-    let (doctor, _) = homeboy::commands::runner::doctor::run(runner_id)?;
-    match resource_policy::evaluate_lab_runner_capabilities(
-        runner_id,
-        &plan,
-        &resource_policy::LabRunnerCapabilities::from_doctor(&doctor),
-        resource_policy::LabRunnerGateMode::Explicit,
-    ) {
-        resource_policy::LabRunnerGateDecision::Eligible => Ok(()),
-        resource_policy::LabRunnerGateDecision::Missing {
-            reason,
-            remediation,
-            ..
-        } => Err(homeboy::core::Error::validation_invalid_argument(
-            "runner_capabilities",
-            reason,
-            Some(runner_id.to_string()),
-            Some(remediation),
-        )),
-    }
+) -> Option<homeboy::core::runner::RunnerCapabilityPreflight> {
+    let plan = resource_policy::lab_runner_capability_plan(command, source_path)?;
+    Some(homeboy::core::runner::RunnerCapabilityPreflight {
+        command: plan.command.to_string(),
+        required_tools: plan
+            .required_tools
+            .into_iter()
+            .map(homeboy::core::runner::RunnerRequiredTool::from)
+            .collect(),
+        required_components: Vec::new(),
+        required_env: Vec::new(),
+    })
 }
 
 fn preflight_lab_offload_test_extensions(
@@ -763,6 +752,7 @@ fn preflight_lab_offload_test_extensions(
                 env: Default::default(),
                 capture_patch: false,
                 source_snapshot: None,
+                capability_preflight: None,
             },
         )?;
 

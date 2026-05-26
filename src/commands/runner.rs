@@ -650,6 +650,7 @@ fn exec(
             env: Default::default(),
             capture_patch,
             source_snapshot: None,
+            capability_preflight: None,
         },
     )
 }
