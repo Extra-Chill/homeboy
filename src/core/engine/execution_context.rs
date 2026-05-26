@@ -406,34 +406,6 @@ impl<'a> ResolvedSettings<'a> {
     }
 }
 
-/// Detect the git repository root for a given directory.
-///
-/// Returns `None` if the path is not inside a git repository.
-fn detect_git_root(dir: &std::path::Path) -> Option<PathBuf> {
-    let effective_dir = if dir.is_file() {
-        dir.parent()?
-    } else if dir.exists() {
-        dir
-    } else {
-        // Directory doesn't exist yet — try parent
-        dir.parent()?
-    };
-
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(effective_dir)
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,33 +434,6 @@ mod tests {
             ),
         )
         .expect("write extension manifest");
-    }
-
-    #[test]
-    fn detect_git_root_finds_repo() {
-        let dir = TempDir::new().expect("temp dir");
-        let root = dir.path();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .expect("git init");
-
-        let result = detect_git_root(root);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), root.canonicalize().unwrap());
-    }
-
-    #[test]
-    fn detect_git_root_returns_none_outside_repo() {
-        let dir = TempDir::new().expect("temp dir");
-        let non_git = dir.path().join("not-a-repo");
-        fs::create_dir_all(&non_git).expect("create dir");
-
-        let result = detect_git_root(&non_git);
-        // May still find a parent repo, so we just test it doesn't panic
-        assert!(result.is_none() || result.is_some());
     }
 
     #[test]
