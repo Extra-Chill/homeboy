@@ -9,6 +9,7 @@ const { spawnSync } = require('node:child_process');
 const {
   createAuditWpCodeboxFanoutPlan,
   createAuditWpCodeboxFanoutPlanFromFiles,
+  safeBranchSlug,
 } = require('../lib/audit-wp-codebox-fanout');
 const { artifactContentDigest } = require('../lib/wp-codebox-apply-adapter');
 
@@ -110,7 +111,9 @@ try {
   assert.equal(initialPlan.audit.group_count, 2);
   assert.equal(initialPlan.task_requests.length, 2);
 
-  const phpcsRequest = initialPlan.task_requests.find((request) => request.group_key === 'phpcs-formatting');
+  assert.equal(safeBranchSlug('PHPCS Formatting/Auto Fix!'), 'phpcs-formatting/auto-fix');
+
+  const phpcsRequest = initialPlan.task_requests.find((request) => request.group_key === 'PHPCS Formatting/Auto Fix!');
   const docsRequest = initialPlan.task_requests.find((request) => request.group_key === 'docs-reference');
   assert.equal(phpcsRequest.audit_findings.length, 2);
   assert.equal(docsRequest.audit_findings.length, 1);
@@ -131,18 +134,18 @@ try {
     'docs/setup.md'
   );
   const artifactMap = {
-    'phpcs-formatting': {
+    'PHPCS Formatting/Auto Fix!': {
       bundle_path: phpcsBundle.bundle,
+      approved_files: [phpcsBundle.changedPath],
       reviewed_at: '2026-05-25T00:00:00.000Z',
       reviewer: 'homeboy-review-fixture',
-      branch: 'fix/homeboy-audit/phpcs-formatting',
       base: 'main',
     },
     'docs-reference': {
       bundle_path: docsBundle.bundle,
+      approved_files: [docsBundle.changedPath],
       reviewed_at: '2026-05-25T00:00:00.000Z',
       reviewer: 'homeboy-review-fixture',
-      branch: 'fix/homeboy-audit/docs-reference',
       base: 'main',
     },
   };
@@ -154,7 +157,7 @@ try {
   });
   assert.equal(plan.apply_back.length, 2);
 
-  const phpcsApplyBack = plan.apply_back.find((entry) => entry.group_key === 'phpcs-formatting');
+  const phpcsApplyBack = plan.apply_back.find((entry) => entry.group_key === 'PHPCS Formatting/Auto Fix!');
   assert.equal(phpcsApplyBack.adapter_id, 'homeboy/wp-codebox-apply-adapter/v1');
   assert.equal(phpcsApplyBack.sandbox_session_id, phpcsRequest.sandbox_session_id);
   assert.deepEqual(phpcsApplyBack.finding_ids, ['finding-phpcs-001', 'finding-phpcs-002']);
@@ -163,10 +166,37 @@ try {
   assert.equal(phpcsApplyBack.artifact.patch_sha256, phpcsBundle.patchSha256);
   assert.deepEqual(phpcsApplyBack.review.approved_files, [phpcsBundle.changedPath]);
   assert.equal(phpcsApplyBack.adapter_payload.bundlePath, fs.realpathSync(phpcsBundle.bundle));
-  assert.equal(phpcsApplyBack.adapter_payload.branch, 'fix/homeboy-audit/phpcs-formatting');
+  assert.equal(phpcsApplyBack.adapter_payload.branch, 'fix/homeboy-audit/phpcs-formatting/auto-fix');
   assert.equal(phpcsApplyBack.pull_request.base, 'main');
-  assert.equal(phpcsApplyBack.pull_request.head, 'fix/homeboy-audit/phpcs-formatting');
+  assert.equal(phpcsApplyBack.pull_request.head, 'fix/homeboy-audit/phpcs-formatting/auto-fix');
   assert.match(phpcsApplyBack.pull_request.body, /Extra-Chill\/homeboy-extensions\/issues\/769/);
+
+  const missingApprovalMap = {
+    'PHPCS Formatting/Auto Fix!': {
+      bundle_path: phpcsBundle.bundle,
+    },
+  };
+  assert.throws(
+    () => createAuditWpCodeboxFanoutPlan({
+      report,
+      artifact_map: missingApprovalMap,
+    }),
+    /non-empty explicit approved_files/
+  );
+
+  const rejectedPlan = createAuditWpCodeboxFanoutPlan({
+    report,
+    artifact_map: {
+      ...artifactMap,
+      'docs-reference': {
+        bundle_path: docsBundle.bundle,
+        approved_files: [docsBundle.changedPath],
+        approved: false,
+      },
+    },
+  });
+  assert.equal(rejectedPlan.apply_back.length, 1);
+  assert.equal(rejectedPlan.apply_back[0].group_key, 'PHPCS Formatting/Auto Fix!');
 
   const artifactMapPath = path.join(root, 'artifact-map.json');
   const outputPath = path.join(root, 'fanout-plan.json');

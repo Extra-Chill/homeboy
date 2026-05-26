@@ -133,18 +133,30 @@ function createTaskRequest(group, orchestrator) {
   };
 }
 
-function approvedFilesForBundle(bundle, explicitApprovedFiles = []) {
-  if (explicitApprovedFiles.length > 0) {
-    return explicitApprovedFiles;
+function safeBranchSlug(value) {
+  const slug = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/\/{2,}/g, '/')
+    .replace(/[-/.]+$/g, '')
+    .replace(/^[-/.]+/g, '');
+
+  return slug || 'audit-batch';
+}
+
+function explicitApprovedFiles(artifactEntry) {
+  if (!Array.isArray(artifactEntry.approved_files) || artifactEntry.approved_files.length === 0) {
+    throw new Error('apply-back artifact entries require non-empty explicit approved_files');
   }
-  return (bundle.changed_files.files || [])
-    .map((file) => file && file.path)
-    .filter((filePath) => typeof filePath === 'string' && filePath.length > 0);
+
+  return artifactEntry.approved_files;
 }
 
 function createApplyBackMetadata(taskRequest, artifactEntry, options) {
   const bundle = loadWpCodeboxArtifactBundle(artifactEntry.bundle_path);
-  const approvedFiles = approvedFilesForBundle(bundle, artifactEntry.approved_files || []);
+  const approvedFiles = explicitApprovedFiles(artifactEntry);
   const verified = verifyWpCodeboxPayload({
     artifact_id: bundle.id,
     artifact: bundle,
@@ -153,7 +165,7 @@ function createApplyBackMetadata(taskRequest, artifactEntry, options) {
     patch_sha256: artifactEntry.patch_sha256,
     artifact_content_digest: artifactEntry.artifact_content_digest,
   });
-  const branch = artifactEntry.branch || `${options.branch_prefix || 'fix/homeboy-audit'}/${taskRequest.group_key}`;
+  const branch = artifactEntry.branch || `${options.branch_prefix || 'fix/homeboy-audit'}/${safeBranchSlug(taskRequest.group_key)}`;
   const title = artifactEntry.pr_title || `Fix Homeboy audit batch ${taskRequest.group_key}`;
   const issueUrl = options.issue_url || taskRequest.orchestrator.issue_url || '';
 
@@ -221,6 +233,9 @@ function createAuditWpCodeboxFanoutPlan(input) {
   const apply_back = task_requests
     .map((taskRequest) => {
       const artifactEntry = artifactMap[taskRequest.sandbox_session_id] || artifactMap[taskRequest.group_key];
+      if (artifactEntry?.approved === false) {
+        return null;
+      }
       return artifactEntry ? createApplyBackMetadata(taskRequest, artifactEntry, options) : null;
     })
     .filter(Boolean);
@@ -264,5 +279,6 @@ module.exports = {
   createAuditWpCodeboxFanoutPlan,
   createAuditWpCodeboxFanoutPlanFromFiles,
   groupFindings,
+  safeBranchSlug,
   sandboxSessionId,
 };
