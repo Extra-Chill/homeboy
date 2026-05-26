@@ -12,6 +12,8 @@ mod lifecycle;
 pub mod lint;
 mod maintenance;
 mod manifest;
+mod manifest_action_config;
+mod manifest_config;
 mod refactor_protocol;
 mod registry;
 mod repair;

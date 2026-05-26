@@ -383,6 +383,11 @@ fn build_comparison_output(
         let mut summary = report::build_audit_summary(&result, exit_code);
         summary.fixability = compute_fixability_if_requested(&result, analysis, args);
         summary.changed_since = changed_since_summary;
+        summary.baseline_filtering = Some(report::build_baseline_filtering_summary(
+            &result,
+            &comparison,
+            &existing_baseline,
+        ));
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Summary(summary),
             exit_code,

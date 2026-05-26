@@ -31,6 +31,8 @@ pub struct AuditSummaryOutput {
     pub fixability: Option<AuditFixability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_since: Option<AuditChangedSinceSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_filtering: Option<AuditBaselineFilteringSummary>,
     pub exit_code: i32,
 }
 
@@ -69,6 +71,23 @@ struct AuditSummaryGroupAccumulator {
 pub struct AuditChangedSinceSummary {
     pub introduced_findings: usize,
     pub contextual_findings: usize,
+}
+
+/// Baseline filtering counters for compact audit summaries.
+///
+/// `total_findings` on [`AuditSummaryOutput`] is the current findings count.
+/// These counters make the baseline-filtered blocking scope explicit: known
+/// findings may be present while only unbaselined findings affect the exit code.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct AuditBaselineFilteringSummary {
+    pub current_findings: usize,
+    pub unbaselined_findings: usize,
+    pub baseline_known_findings: usize,
+    pub baseline_filtered_findings: usize,
+    pub baseline_total_findings: usize,
+    pub resolved_findings: usize,
+    pub drift_delta: i64,
+    pub drift_increased: bool,
 }
 
 /// Individual finding in the summary.
@@ -206,7 +225,29 @@ pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSum
         top_findings,
         fixability: None,
         changed_since: None,
+        baseline_filtering: None,
         exit_code,
+    }
+}
+
+pub fn build_baseline_filtering_summary(
+    result: &CodeAuditResult,
+    comparison: &baseline::BaselineComparison,
+    baseline: &baseline::AuditBaseline,
+) -> AuditBaselineFilteringSummary {
+    let current_findings = result.findings.len();
+    let unbaselined_findings = comparison.new_items.len();
+    let baseline_known_findings = current_findings.saturating_sub(unbaselined_findings);
+
+    AuditBaselineFilteringSummary {
+        current_findings,
+        unbaselined_findings,
+        baseline_known_findings,
+        baseline_filtered_findings: baseline_known_findings,
+        baseline_total_findings: baseline.item_count,
+        resolved_findings: comparison.resolved_fingerprints.len(),
+        drift_delta: comparison.delta,
+        drift_increased: comparison.drift_increased,
     }
 }
 

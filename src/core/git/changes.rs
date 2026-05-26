@@ -7,6 +7,19 @@ use crate::core::error::{Error, Result};
 
 use super::execute_git;
 
+const VERBOSE_UNTRACKED_THRESHOLD: usize = 200;
+
+const NOISY_UNTRACKED_DIRS: [&str; 8] = [
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+    ".next",
+    "vendor",
+    "target",
+    ".cache",
+];
+
 #[derive(Debug, Clone, Serialize)]
 
 pub struct UncommittedChanges {
@@ -73,7 +86,7 @@ pub fn get_uncommitted_changes(path: &str) -> Result<UncommittedChanges> {
     }
 
     let has_changes = !staged.is_empty() || !unstaged.is_empty() || !untracked.is_empty();
-    let hint = super::operations::build_untracked_hint(path, untracked.len());
+    let hint = build_untracked_hint(path, untracked.len());
 
     Ok(UncommittedChanges {
         has_changes,
@@ -82,6 +95,50 @@ pub fn get_uncommitted_changes(path: &str) -> Result<UncommittedChanges> {
         untracked,
         hint,
     })
+}
+
+fn build_untracked_hint(path: &str, untracked_count: usize) -> Option<String> {
+    if untracked_count < VERBOSE_UNTRACKED_THRESHOLD {
+        return None;
+    }
+
+    let ignored_output = execute_git(path, &["status", "--ignored", "--porcelain=v1"]).ok()?;
+    if !ignored_output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&ignored_output.stdout);
+    let ignored_lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("!!"))
+        .collect();
+    if ignored_lines.is_empty() {
+        return None;
+    }
+
+    let mut noisy_ignored = Vec::new();
+    for line in ignored_lines {
+        let path = line[3..].trim();
+        for dir in NOISY_UNTRACKED_DIRS {
+            if path == dir || path.starts_with(&format!("{}/", dir)) {
+                noisy_ignored.push(dir.to_string());
+                break;
+            }
+        }
+    }
+
+    noisy_ignored.sort();
+    noisy_ignored.dedup();
+
+    if noisy_ignored.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "Large untracked list detected ({}). Common noisy directories ignored by git: {}. If output feels too big, add them to .gitignore.",
+        untracked_count,
+        noisy_ignored.join(", ")
+    ))
 }
 
 /// Get file paths changed between a ref and HEAD.
