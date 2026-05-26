@@ -558,8 +558,15 @@ mod tests {
             listen_port: Some(proxy_addr.port()),
         }])
         .expect("start egress proxy");
-        thread::sleep(Duration::from_millis(100));
-        let mut client = std::net::TcpStream::connect(proxy_addr).expect("connect proxy");
+        let mut client = (0..20)
+            .find_map(|_| match std::net::TcpStream::connect(proxy_addr) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(25));
+                    None
+                }
+            })
+            .expect("connect proxy");
         write!(
             client,
             "POST http://{}/v1/messages HTTP/1.1\r\nHost: {}\r\nAuthorization: secret\r\nContent-Length: 11\r\n\r\nhello=world",

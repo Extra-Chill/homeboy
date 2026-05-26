@@ -418,6 +418,7 @@ mod remote {
         });
 
         let homeboy_command = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+        let local_homeboy_version = env!("CARGO_PKG_VERSION");
         let homeboy = HomeboyProbe {
             version: common::remote_line(
                 client,
@@ -433,6 +434,14 @@ mod remote {
                 .clone()
                 .or_else(|| common::remote_line(client, "command -v homeboy")),
         };
+        if let Some(check) = checks::homeboy_version_skew_check(
+            local_homeboy_version,
+            &homeboy.version,
+            runner_id,
+            &server.id,
+        ) {
+            checks.push(check);
+        }
         checks.push(if homeboy.path.is_some() {
             checks::ok(
                 "homeboy",
@@ -1034,6 +1043,37 @@ mod checks {
         }
     }
 
+    pub fn homeboy_version_skew_check(
+        local_version: &str,
+        remote_version: &str,
+        runner_id: &str,
+        server_id: &str,
+    ) -> Option<RunnerCheck> {
+        let local_version = local_version.trim();
+        let remote_version = remote_version.trim();
+        if local_version.is_empty()
+            || remote_version.is_empty()
+            || remote_version == "unknown"
+            || local_version == remote_version
+        {
+            return None;
+        }
+
+        let mut details = BTreeMap::new();
+        details.insert("local_version".to_string(), local_version.to_string());
+        details.insert("remote_version".to_string(), remote_version.to_string());
+        Some(warning_with_details(
+            "homeboy.version_skew",
+            format!(
+                "Local Homeboy {local_version} differs from remote runner Homeboy {remote_version}"
+            ),
+            Some(format!(
+                "Upgrade Homeboy on runner `{runner_id}` to match the local client; for example: `homeboy ssh {server_id} -- homeboy upgrade --no-restart`, or rerun the runner setup/upgrade workflow"
+            )),
+            details,
+        ))
+    }
+
     pub fn ok(id: impl Into<String>, message: String, remediation: Option<String>) -> RunnerCheck {
         RunnerCheck {
             id: id.into(),
@@ -1055,6 +1095,21 @@ mod checks {
             message,
             remediation,
             details: BTreeMap::new(),
+        }
+    }
+
+    fn warning_with_details(
+        id: impl Into<String>,
+        message: String,
+        remediation: Option<String>,
+        details: BTreeMap<String, String>,
+    ) -> RunnerCheck {
+        RunnerCheck {
+            id: id.into(),
+            status: RunnerDoctorStatus::Warning,
+            message,
+            remediation,
+            details,
         }
     }
 
@@ -1301,6 +1356,34 @@ mod tests {
             ]),
             vec!["nodejs".to_string(), "rust".to_string()]
         );
+    }
+
+    #[test]
+    fn homeboy_version_skew_check_is_absent_for_equal_versions() {
+        assert!(checks::homeboy_version_skew_check("0.198.7", "0.198.7", "lab", "lab").is_none());
+    }
+
+    #[test]
+    fn homeboy_version_skew_check_warns_for_different_versions() {
+        let check = checks::homeboy_version_skew_check("0.198.7", "0.197.7", "lab", "lab")
+            .expect("version skew warning");
+
+        assert_eq!(check.id, "homeboy.version_skew");
+        assert_eq!(check.status, RunnerDoctorStatus::Warning);
+        assert!(check.message.contains("0.198.7"));
+        assert!(check.message.contains("0.197.7"));
+        assert_eq!(
+            check.details.get("local_version").map(String::as_str),
+            Some("0.198.7")
+        );
+        assert_eq!(
+            check.details.get("remote_version").map(String::as_str),
+            Some("0.197.7")
+        );
+        assert!(check
+            .remediation
+            .as_deref()
+            .is_some_and(|value| value.contains("homeboy ssh lab -- homeboy upgrade")));
     }
 
     #[test]
