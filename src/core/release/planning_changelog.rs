@@ -380,7 +380,7 @@ mod tests {
 
         ensure_changelog_initialized(&component).expect("no-op without target");
 
-        for entry in std::fs::read_dir(temp.path()).unwrap() {
+        if let Some(entry) = std::fs::read_dir(temp.path()).unwrap().next() {
             let path = entry.unwrap().path();
             panic!("should have created nothing, but found: {}", path.display());
         }
