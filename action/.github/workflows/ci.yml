@@ -311,10 +311,10 @@ jobs:
 
       - name: Download built Homeboy binary
         if: inputs.build-command != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: homeboy-binary
-          path: .homeboy-bin
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${GITHUB_RUN_ID}" --name homeboy-binary --dir .homeboy-bin
 
       - name: Resolve Homeboy binary path
         id: binary-path
