@@ -36,32 +36,6 @@ pub(crate) fn resolve_ci_job_for_command(
     Ok(Some(job))
 }
 
-pub(crate) fn finish_observed_workflow<O, T, F, E>(
-    observation: Option<O>,
-    workflow: homeboy::core::Result<T>,
-    finish_success: F,
-    finish_error: E,
-) -> homeboy::core::Result<T>
-where
-    F: FnOnce(O, &T),
-    E: FnOnce(O, &homeboy::core::Error),
-{
-    match workflow {
-        Ok(workflow) => {
-            if let Some(observation) = observation {
-                finish_success(observation, &workflow);
-            }
-            Ok(workflow)
-        }
-        Err(error) => {
-            if let Some(observation) = observation {
-                finish_error(observation, &error);
-            }
-            Err(error)
-        }
-    }
-}
-
 fn component_extension_ids(component: &Component) -> Vec<String> {
     let mut ids: Vec<String> = component
         .extensions
