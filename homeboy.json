@@ -104,6 +104,7 @@
         },
         {
           "command": "refactor transform",
+          "empty_success": true,
           "expected_fields": {
             "/data/command": "refactor.transform",
             "/data/total_replacements": 0,
