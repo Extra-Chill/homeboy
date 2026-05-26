@@ -638,7 +638,7 @@ fn run_lab_offload_inner(
     })?;
     let source_path = lab_offload_source_path(normalized_args)?;
     preflight_lab_runner_capabilities(runner_id, command_kind, &source_path)?;
-    preflight_lab_offload_changed_since(
+    homeboy::core::runner::preflight_lab_offload_changed_since(
         normalized_args,
         homeboy::core::runner::RunnerWorkspaceSyncMode::Snapshot,
     )?;
@@ -826,47 +826,6 @@ fn lab_offload_test_extension_ids(command: &Commands) -> homeboy::core::Result<V
     )?;
 
     Ok(context.extension_id.into_iter().collect())
-}
-
-fn preflight_lab_offload_changed_since(
-    args: &[String],
-    sync_mode: homeboy::core::runner::RunnerWorkspaceSyncMode,
-) -> homeboy::core::Result<()> {
-    if sync_mode != homeboy::core::runner::RunnerWorkspaceSyncMode::Snapshot {
-        return Ok(());
-    }
-
-    let Some(git_ref) = lab_offload_changed_since_ref(args) else {
-        return Ok(());
-    };
-
-    Err(homeboy::core::Error::validation_invalid_argument(
-        "changed_since",
-        "Lab offload cannot honor --changed-since in snapshot workspaces because snapshot sync excludes .git metadata",
-        Some(git_ref),
-        Some(vec![
-            "Use a git-backed Lab workspace sync mode before offloading changed-since commands."
-                .to_string(),
-            "Run the changed-since command locally when the Lab workspace is snapshot-only."
-                .to_string(),
-        ]),
-    ))
-}
-
-fn lab_offload_changed_since_ref(args: &[String]) -> Option<String> {
-    let mut iter = args.iter().skip(1);
-    while let Some(arg) = iter.next() {
-        if arg == "--" {
-            break;
-        }
-        if arg == "--changed-since" {
-            return iter.next().cloned();
-        }
-        if let Some(value) = arg.strip_prefix("--changed-since=") {
-            return Some(value.to_string());
-        }
-    }
-    None
 }
 
 fn runner_extension_preflight_tail(stderr: &str, stdout: &str) -> String {
@@ -1060,11 +1019,10 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        lab_offload_changed_since_ref, lab_offload_source_path, lab_offload_test_extension_ids,
-        preflight_lab_offload_changed_since, prepare_lab_runner_for_offload_with,
-        resolve_lab_runner_selection_from_default, rewrite_lab_offload_args,
-        runner_extension_preflight_tail, LabRunnerPreparation, LabRunnerSelection,
-        LabRunnerSelectionSource,
+        lab_offload_source_path, lab_offload_test_extension_ids,
+        prepare_lab_runner_for_offload_with, resolve_lab_runner_selection_from_default,
+        rewrite_lab_offload_args, runner_extension_preflight_tail, LabRunnerPreparation,
+        LabRunnerSelection, LabRunnerSelectionSource,
     };
     use clap::Parser;
     use homeboy::cli_surface::Commands;
@@ -1218,80 +1176,6 @@ mod tests {
                 "test-fixture".to_string()
             ]
         );
-    }
-
-    #[test]
-    fn detects_changed_since_before_passthrough_args() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            "/Users/chubes/Developer/project".to_string(),
-            "--changed-since=origin/main".to_string(),
-            "--".to_string(),
-            "--changed-since".to_string(),
-            "fixture".to_string(),
-        ];
-
-        assert_eq!(
-            lab_offload_changed_since_ref(&args),
-            Some("origin/main".to_string())
-        );
-    }
-
-    #[test]
-    fn ignores_passthrough_changed_since_args() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            "/Users/chubes/Developer/project".to_string(),
-            "--".to_string(),
-            "--changed-since".to_string(),
-            "fixture".to_string(),
-        ];
-
-        assert_eq!(lab_offload_changed_since_ref(&args), None);
-    }
-
-    #[test]
-    fn rejects_changed_since_for_snapshot_lab_offload() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            "/Users/chubes/Developer/project".to_string(),
-            "--changed-since".to_string(),
-            "origin/main".to_string(),
-        ];
-
-        let err = preflight_lab_offload_changed_since(
-            &args,
-            homeboy::core::runner::RunnerWorkspaceSyncMode::Snapshot,
-        )
-        .expect_err("snapshot Lab offload must reject changed-since");
-
-        assert!(err.message.contains("cannot honor --changed-since"));
-        assert!(err.message.contains("snapshot workspaces"));
-        assert_eq!(err.details["id"], "origin/main");
-    }
-
-    #[test]
-    fn allows_changed_since_for_git_lab_offload() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            "/Users/chubes/Developer/project".to_string(),
-            "--changed-since".to_string(),
-            "origin/main".to_string(),
-        ];
-
-        preflight_lab_offload_changed_since(
-            &args,
-            homeboy::core::runner::RunnerWorkspaceSyncMode::Git,
-        )
-        .expect("git Lab offload can preserve changed-since semantics");
     }
 
     #[test]
