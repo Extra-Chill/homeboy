@@ -156,10 +156,11 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-26T22:37:03Z",
+      "created_at": "2026-05-26T23:58:53Z",
       "item_count": 26,
       "known_fingerprints": [
-        "artifact_portability::observation:554f67ae-74b0-4a98-b896-0d49a2807076::NonPortableArtifactPath",
+        "artifact_portability::observation:020d11a6-6dd7-4fbd-b8ac-7c1cc1fd9b2d::NonPortableArtifactPath",
+        "dead_code::src/commands/utils/resource_policy.rs::UnreferencedExport",
         "runner_offload_preflight::src/commands/bench/observation.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/commands/observe.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/commands/runs/bundle.rs::RunnerOffloadPreflight",
@@ -171,7 +172,6 @@
         "runner_offload_preflight::src/core/extension/trace/report.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/core/observation/store.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/core/release/executor.rs::RunnerOffloadPreflight",
-        "runner_offload_preflight::src/core/runner/execution.rs::RunnerOffloadPreflight",
         "structural::src/commands/bench/tests.rs::HighItemCount",
         "structural::src/commands/trace.rs::GodFile",
         "structural::src/commands/trace/tests.rs::GodFile",
@@ -189,8 +189,8 @@
       "metadata": {
         "alignment_score": 0.9154929518699646,
         "known_outliers": [
-          "src/core/observation/records/triage_items.rs",
           "src/core/observation/records/run_status.rs",
+          "src/core/observation/records/triage_items.rs",
           "src/core/observation/records/run_builder.rs",
           "src/core/engine/undo/rollback.rs",
           "src/core/engine/undo/entry.rs",
