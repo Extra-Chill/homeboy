@@ -54,6 +54,64 @@ try {
   assert.deepEqual(plan.task_requests[0].provider_plugin_paths, ['/plugins/ai-provider-for-opencode']);
   assert.deepEqual(plan.task_requests[0].secret_env, ['OPENCODE_API_KEY']);
 
+  const fixtureWpCodebox = path.join(root, 'fixture-wp-codebox.cjs');
+  fs.writeFileSync(fixtureWpCodebox, `#!/usr/bin/env node
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const recipeIndex = process.argv.indexOf('--recipe');
+if (process.argv[2] !== 'recipe-run' || recipeIndex < 0) {
+  process.exit(2);
+}
+const recipe = JSON.parse(fs.readFileSync(process.argv[recipeIndex + 1], 'utf8'));
+const stepArgs = recipe.workflow.steps[0].args;
+const task = JSON.parse(stepArgs.find((arg) => arg.startsWith('task=')).slice('task='.length));
+const sessionId = task.sandbox_session_id;
+const artifactDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'fixture-wp-codebox-artifact-'));
+process.stdout.write(JSON.stringify({
+  session: { id: sessionId },
+  artifacts: {
+    id: 'artifact-' + sessionId,
+    directory: artifactDirectory
+  }
+}));
+`);
+  fs.chmodSync(fixtureWpCodebox, 0o755);
+
+  const writeOutputDir = path.join(root, 'fanout-write');
+  const writeCommand = {
+    ...command,
+    root: path.join(root, 'agents-api'),
+    write: true,
+    settings: {
+      ...command.settings,
+      wp_codebox_output_dir: writeOutputDir,
+      wp_codebox_bin: fixtureWpCodebox,
+      wp_codebox_agents_api_path: path.join(root, 'agents-api'),
+      wp_codebox_data_machine_path: path.join(root, 'data-machine'),
+      wp_codebox_data_machine_code_path: path.join(root, 'data-machine-code'),
+    },
+  };
+  fs.mkdirSync(writeCommand.settings.wp_codebox_agents_api_path, { recursive: true });
+  fs.mkdirSync(writeCommand.settings.wp_codebox_data_machine_path, { recursive: true });
+  fs.mkdirSync(writeCommand.settings.wp_codebox_data_machine_code_path, { recursive: true });
+
+  const writeResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
+    encoding: 'utf8',
+    input: JSON.stringify(writeCommand),
+  });
+
+  assert.equal(writeResult.status, 0, writeResult.stderr || writeResult.stdout);
+  const writeResponse = JSON.parse(writeResult.stdout);
+  assert.equal(writeResponse.handled, true);
+  assert.match(writeResponse.warnings[1], /fanout-run\.json/);
+  const run = JSON.parse(fs.readFileSync(path.join(writeOutputDir, 'fanout-run.json'), 'utf8'));
+  assert.equal(run.status, 'completed');
+  assert.equal(run.records[0].command.bin, 'node');
+  assert.match(run.records[0].command.args[0], /homeboy-wp-codebox-task-runner\.cjs$/);
+  assert.equal(run.records[0].command.args.includes('--wp-codebox-bin'), true);
+  assert.equal(run.records[0].artifact.id.startsWith('artifact-homeboy-audit-'), true);
+
   console.log('WordPress refactor source WP Codebox smoke passed');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

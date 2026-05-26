@@ -672,6 +672,33 @@ def split_setting(value):
     return parts
 
 
+def default_sibling_path(component_root, sibling_name):
+    if not component_root:
+        return ''
+    return os.path.join(os.path.dirname(os.path.abspath(component_root)), sibling_name)
+
+
+def wp_codebox_task_runner_args(data, settings, script_dir):
+    component_root = data.get('root') or data.get('component_path') or os.getcwd()
+    agents_api_path = settings.get('wp_codebox_agents_api_path') or os.environ.get('HOMEBOY_WP_CODEBOX_AGENTS_API_PATH') or component_root
+    data_machine_path = settings.get('wp_codebox_data_machine_path') or os.environ.get('HOMEBOY_WP_CODEBOX_DATA_MACHINE_PATH') or default_sibling_path(component_root, 'data-machine')
+    data_machine_code_path = settings.get('wp_codebox_data_machine_code_path') or os.environ.get('HOMEBOY_WP_CODEBOX_DATA_MACHINE_CODE_PATH') or default_sibling_path(component_root, 'data-machine-code')
+
+    args = [
+        os.path.join(script_dir, 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+        '--agents-api', agents_api_path,
+        '--data-machine', data_machine_path,
+        '--data-machine-code', data_machine_code_path,
+    ]
+    if settings.get('wp_codebox_bin'):
+        args.extend(['--wp-codebox-bin', settings['wp_codebox_bin']])
+    if settings.get('wp_codebox_artifacts'):
+        args.extend(['--artifacts', settings['wp_codebox_artifacts']])
+    for mount in split_setting(settings.get('wp_codebox_mounts')):
+        args.extend(['--mount', mount])
+    return args
+
+
 def refactor_source(data):
     """Handle Homeboy's generic extension refactor source command."""
     if data.get('source') != 'audit':
@@ -720,7 +747,11 @@ def refactor_source(data):
         args.extend(['--runs-output', runs_path])
         if settings.get('wp_codebox_command'):
             args.extend(['--wp-codebox-command', settings['wp_codebox_command']])
-        for arg in shlex.split(settings.get('wp_codebox_args') or ''):
+            task_runner_args = shlex.split(settings.get('wp_codebox_args') or '')
+        else:
+            args.extend(['--wp-codebox-command', settings.get('node_bin') or 'node'])
+            task_runner_args = wp_codebox_task_runner_args(data, settings, script_dir)
+        for arg in task_runner_args:
             args.extend(['--wp-codebox-arg', arg])
 
     result = subprocess.run(args, text=True, capture_output=True, check=False)
