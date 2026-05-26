@@ -147,42 +147,15 @@ pub(crate) fn resolve_target(
     component_id: Option<&str>,
     path_override: Option<&str>,
 ) -> crate::core::error::Result<(String, String)> {
-    // Case 1 & 2: explicit path given.
-    if let Some(path) = path_override {
-        if let Some(id) = component_id {
-            return Ok((id.to_string(), path.to_string()));
-        }
-        // Discover ID from path or its git root via portable homeboy.json.
-        let dir = std::path::Path::new(path);
-        if let Some(comp) = crate::core::component::discover_from_portable(dir) {
-            return Ok((comp.id, path.to_string()));
-        }
-        if let Some(git_root) = crate::core::component::resolution::detect_git_root(dir) {
-            if git_root != dir {
-                if let Some(comp) = crate::core::component::discover_from_portable(&git_root) {
-                    return Ok((comp.id, path.to_string()));
-                }
-            }
-        }
-        // No portable config — synthesize an ID from the path basename so
-        // downstream output still has a meaningful identifier.
-        let basename = dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("(unknown)")
-            .to_string();
-        return Ok((basename, path.to_string()));
-    }
+    let target = crate::core::component::resolve_target(crate::core::component::TargetSpec::new(
+        component_id,
+        path_override,
+    ))?;
 
-    // Case 3: ID without path — look it up in the registry.
-    if let Some(id) = component_id {
-        let comp = crate::core::component::resolve_effective(Some(id), None, None)?;
-        return Ok((id.to_string(), comp.local_path));
-    }
-
-    // Case 4: neither — CWD detection.
-    let comp = crate::core::component::resolve(None)?;
-    Ok((comp.id, comp.local_path))
+    Ok((
+        target.component_id,
+        target.source_path.to_string_lossy().to_string(),
+    ))
 }
 
 #[cfg(test)]

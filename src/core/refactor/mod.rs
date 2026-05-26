@@ -21,21 +21,20 @@ pub fn resolve_root(
     component_id: Option<&str>,
     path: Option<&str>,
 ) -> crate::core::Result<PathBuf> {
-    if let Some(p) = path {
-        let pb = PathBuf::from(p);
-        if !pb.is_dir() {
-            return Err(crate::core::Error::validation_invalid_argument(
-                "path",
-                format!("Not a directory: {}", p),
-                None,
-                None,
-            ));
-        }
-        Ok(pb)
-    } else {
-        let comp = crate::core::component::resolve(component_id)?;
-        crate::core::component::validate_local_path(&comp)
+    let target = crate::core::component::resolve_target(crate::core::component::TargetSpec::new(
+        component_id,
+        path,
+    ))?;
+    if !target.source_path.is_dir() {
+        return Err(crate::core::Error::validation_invalid_argument(
+            "path",
+            format!("Not a directory: {}", target.source_path.display()),
+            None,
+            None,
+        ));
     }
+
+    Ok(target.source_path)
 }
 
 /// Shared output for refactors/fixes.

@@ -4,7 +4,7 @@ use std::path::Path;
 use homeboy::core::code_audit::{
     self, report, run_main_audit_workflow, AuditCommandOutput, AuditRunWorkflowArgs,
 };
-use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
     finding_records_from_audit, NewRunRecord, ObservationStore, RunRecord, RunStatus,
@@ -76,34 +76,12 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         run_audit_reference_setup(component_id);
     }
 
-    // Resolve component ID and source path.
-    // When component is omitted, auto-discover from CWD via homeboy.json.
-    let (resolved_id, resolved_path) = if let Some(ref comp_arg) = args.comp.component {
-        if Path::new(comp_arg).is_dir() {
-            // Bare directory path — no registered component
-            let effective = args.comp.path.as_deref().unwrap_or(comp_arg).to_string();
-            let name = Path::new(&effective)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            (name, effective)
-        } else {
-            // Registered component — use unified resolver
-            let ctx = execution_context::resolve(&ResolveOptions::source_only(
-                comp_arg,
-                args.comp.path.clone(),
-            ))?;
-            (
-                ctx.component_id,
-                ctx.source_path.to_string_lossy().to_string(),
-            )
-        }
-    } else {
-        // No component specified — auto-discover from CWD
-        let component = args.comp.load()?;
-        let source_path = component.local_path.clone();
-        (component.id, source_path)
-    };
+    let target = component::resolve_target(TargetSpec::new(
+        args.comp.component.as_deref(),
+        args.comp.path.as_deref(),
+    ))?;
+    let resolved_id = target.component_id;
+    let resolved_path = target.source_path.to_string_lossy().to_string();
 
     let observation = start_audit_observation(&resolved_id, &resolved_path, &args);
     let workflow = run_main_audit_workflow(AuditRunWorkflowArgs {

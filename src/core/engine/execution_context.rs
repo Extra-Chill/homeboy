@@ -227,26 +227,25 @@ pub fn resolve_with_component(
         }
         component
     } else {
-        component::resolve_effective(
+        component::resolve_target(component::TargetSpec::new(
             options.component_id.as_deref(),
             options.path_override.as_deref(),
-            None,
-        )?
+        ))?
+        .component
     };
 
     let declared_extension_ids = declared_extension_ids(&component);
     apply_extension_overrides(&mut component, &options.extension_overrides);
 
     // 2. Resolve source path
-    let source_path = if let Some(ref path) = options.path_override {
-        PathBuf::from(path)
-    } else {
-        let expanded = shellexpand::tilde(&component.local_path);
-        PathBuf::from(expanded.as_ref())
-    };
+    let target = component::resolve_target(component::TargetSpec::new(
+        Some(&component.id),
+        Some(&component.local_path),
+    ))?;
+    let source_path = target.source_path;
 
     // 3. Detect git root
-    let git_root = detect_git_root(&source_path);
+    let git_root = target.git_root;
 
     // 4. Optionally resolve extension context
     let (extension_id, extension_path, settings) = if let Some(capability) = options.capability {
