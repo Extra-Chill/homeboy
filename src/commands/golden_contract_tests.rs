@@ -8,6 +8,7 @@ const FIXTURE_ROOT: &str = concat!(
     "/tests/fixtures/golden_json_contracts"
 );
 
+use super::bench::BenchOutput;
 use super::deploy::{DeployCommandOutput, DeployOutput, MultiProjectDeployOutput};
 use super::release::{BatchReleaseOutput, ReleaseCommandOutput, ReleaseOutput};
 use super::runs::{
@@ -23,6 +24,7 @@ use crate::core::deploy::{
     ComponentDeployResult, ComponentStatus, DeployReason, DeploySummary, MultiDeploySummary,
     ProjectDeployResult,
 };
+use crate::core::extension::bench::{BenchCommandOutput, BenchListWorkflowResult};
 use crate::core::observation::ArtifactRecord;
 use crate::core::release::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseCommandResult,
@@ -32,6 +34,40 @@ use crate::core::stack::{
     GitRef, InspectCommit, InspectCommitDetails, InspectOutput, InspectPr, LocalState,
     StackPrEntry, StackSpec, StatusOutput, StatusPr,
 };
+
+#[test]
+fn bench_command_json_contract_matches_golden_fixture() {
+    assert_fixture(
+        "bench_contract.json",
+        json!({
+            "scenarios": [
+                scenario("bench single legacy", BenchOutput::Single(BenchCommandOutput {
+                    passed: true,
+                    status: "passed".to_string(),
+                    component: "homeboy".to_string(),
+                    exit_code: 0,
+                    iterations: 3,
+                    artifacts: Vec::new(),
+                    results: None,
+                    budget_findings: Vec::new(),
+                    gate_failures: Vec::new(),
+                    baseline_comparison: None,
+                    hints: None,
+                    rig_state: None,
+                    failure: None,
+                    diagnostics: Vec::new(),
+                    ci_context: None,
+                })),
+                scenario("bench list legacy", BenchOutput::List(BenchListWorkflowResult {
+                    component: "homeboy".to_string(),
+                    component_id: "homeboy".to_string(),
+                    scenarios: Vec::new(),
+                    count: 0,
+                })),
+            ]
+        }),
+    );
+}
 
 #[test]
 fn runs_command_json_contract_matches_golden_fixture() {
