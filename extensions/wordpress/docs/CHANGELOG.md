@@ -2,6 +2,15 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.101.0] - 2026-05-26
+
+### Added
+- add WP Codebox audit fanout planner
+
+### Fixed
+- tighten audit fanout branch slugs
+- harden WP Codebox audit apply-back metadata
+
 ## [2.100.9] - 2026-05-24
 
 ### Fixed
