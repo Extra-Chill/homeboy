@@ -53,6 +53,7 @@ impl ObservationOutputMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_for_run() {
@@ -125,6 +126,76 @@ mod tests {
         assert_eq!(result.items[0].id, "alpha");
         assert_eq!(result.items[0].status, "error");
         assert_eq!(result.items[0].error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn batch_outcome_totals_cover_success_partial_failure_skipped_and_empty() {
+        let empty = BatchResult::new();
+        assert_eq!(empty.outcome_totals(), OutcomeTotals::default());
+
+        let mut result = BatchResult::new();
+        result.record_created("created".to_string());
+        result.record_updated("updated".to_string());
+        result.record_skipped("skipped".to_string());
+        result.record_error("failed".to_string(), "boom".to_string());
+
+        assert_eq!(
+            result.outcome_totals(),
+            OutcomeTotals {
+                total: 4,
+                succeeded: 2,
+                failed: 1,
+                skipped: 1,
+            }
+        );
+        assert_eq!(result.exit_code(), 1);
+    }
+
+    #[test]
+    fn bulk_result_builds_summary_without_changing_json_shape() {
+        let output = BulkResult::new(
+            "fixture",
+            vec![
+                ItemOutcome::success("alpha", json!({ "value": 1 })),
+                ItemOutcome::error("beta", "boom"),
+            ],
+        );
+
+        let serialized = serde_json::to_value(output).expect("serialize bulk result");
+        assert_eq!(serialized["action"], "fixture");
+        assert_eq!(serialized["summary"]["total"], 2);
+        assert_eq!(serialized["summary"]["succeeded"], 1);
+        assert_eq!(serialized["summary"]["failed"], 1);
+        assert!(serialized["summary"].get("skipped").is_none());
+        assert_eq!(serialized["results"][0]["id"], "alpha");
+        assert_eq!(serialized["results"][0]["value"], 1);
+        assert_eq!(serialized["results"][1]["id"], "beta");
+        assert_eq!(serialized["results"][1]["error"], "boom");
+    }
+
+    #[test]
+    fn bulk_builder_counts_failed_results_without_changing_item_shape() {
+        let mut builder = BulkResultBuilder::new("fixture");
+        builder.record_success("alpha", json!({ "success": true }));
+        builder.record_failed_result("beta", json!({ "success": false }));
+
+        let serialized = serde_json::to_value(builder.finish()).expect("serialize bulk result");
+        assert_eq!(serialized["summary"]["total"], 2);
+        assert_eq!(serialized["summary"]["succeeded"], 1);
+        assert_eq!(serialized["summary"]["failed"], 1);
+        assert_eq!(serialized["results"][1]["id"], "beta");
+        assert_eq!(serialized["results"][1]["success"], false);
+        assert!(serialized["results"][1].get("error").is_none());
+    }
+
+    #[test]
+    fn bulk_result_handles_empty_results() {
+        let output = BulkResult::<serde_json::Value>::new("fixture", Vec::new());
+
+        assert_eq!(output.summary.total, 0);
+        assert_eq!(output.summary.succeeded, 0);
+        assert_eq!(output.summary.failed, 0);
+        assert!(output.results.is_empty());
     }
 }
 
@@ -199,6 +270,15 @@ pub struct BatchResultItem {
     pub error: Option<String>,
 }
 
+/// Shared outcome counters used by batch and bulk result adapters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutcomeTotals {
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub skipped: usize,
+}
+
 impl BatchResult {
     pub fn new() -> Self {
         Self::default()
@@ -248,6 +328,15 @@ impl BatchResult {
             error: Some(error),
         });
     }
+
+    pub fn outcome_totals(&self) -> OutcomeTotals {
+        OutcomeTotals {
+            total: self.items.len(),
+            succeeded: (self.created + self.updated) as usize,
+            failed: self.errors as usize,
+            skipped: self.skipped as usize,
+        }
+    }
 }
 
 // ============================================================================
@@ -263,6 +352,73 @@ pub struct BulkResult<T: Serialize> {
     pub summary: BulkSummary,
 }
 
+impl<T: Serialize> BulkResult<T> {
+    pub fn new(action: impl Into<String>, results: Vec<ItemOutcome<T>>) -> Self {
+        let summary = BulkSummary::from_outcome_totals(OutcomeTotals {
+            total: results.len(),
+            succeeded: results.iter().filter(|result| result.succeeded()).count(),
+            failed: results.iter().filter(|result| result.failed()).count(),
+            skipped: 0,
+        });
+
+        Self {
+            action: action.into(),
+            results,
+            summary,
+        }
+    }
+}
+
+pub struct BulkResultBuilder<T: Serialize> {
+    action: String,
+    results: Vec<ItemOutcome<T>>,
+    totals: OutcomeTotals,
+}
+
+impl<T: Serialize> BulkResultBuilder<T> {
+    pub fn new(action: impl Into<String>) -> Self {
+        Self {
+            action: action.into(),
+            results: Vec::new(),
+            totals: OutcomeTotals::default(),
+        }
+    }
+
+    pub fn with_capacity(action: impl Into<String>, capacity: usize) -> Self {
+        Self {
+            action: action.into(),
+            results: Vec::with_capacity(capacity),
+            totals: OutcomeTotals::default(),
+        }
+    }
+
+    pub fn record_success(&mut self, id: impl Into<String>, result: T) {
+        self.totals.total += 1;
+        self.totals.succeeded += 1;
+        self.results.push(ItemOutcome::success(id, result));
+    }
+
+    pub fn record_failed_result(&mut self, id: impl Into<String>, result: T) {
+        self.totals.total += 1;
+        self.totals.failed += 1;
+        self.results.push(ItemOutcome::success(id, result));
+    }
+
+    pub fn record_error(&mut self, id: impl Into<String>, error: impl Into<String>) {
+        self.totals.total += 1;
+        self.totals.failed += 1;
+        self.results.push(ItemOutcome::error(id, error));
+    }
+
+    pub fn finish(self) -> BulkResult<T> {
+        BulkResult {
+            action: self.action,
+            results: self.results,
+            summary: BulkSummary::from_outcome_totals(self.totals),
+        }
+    }
+}
+
 /// Outcome for a single item in a bulk operation.
 #[derive(Debug, Serialize)]
 
@@ -275,6 +431,32 @@ pub struct ItemOutcome<T: Serialize> {
     pub error: Option<String>,
 }
 
+impl<T: Serialize> ItemOutcome<T> {
+    pub fn success(id: impl Into<String>, result: T) -> Self {
+        Self {
+            id: id.into(),
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    pub fn error(id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            result: None,
+            error: Some(error.into()),
+        }
+    }
+
+    fn succeeded(&self) -> bool {
+        self.result.is_some() && self.error.is_none()
+    }
+
+    fn failed(&self) -> bool {
+        !self.succeeded()
+    }
+}
+
 /// Summary of bulk operation results.
 #[derive(Debug, Clone, Serialize)]
 
@@ -282,6 +464,16 @@ pub struct BulkSummary {
     pub total: usize,
     pub succeeded: usize,
     pub failed: usize,
+}
+
+impl BulkSummary {
+    pub fn from_outcome_totals(totals: OutcomeTotals) -> Self {
+        Self {
+            total: totals.total,
+            succeeded: totals.succeeded,
+            failed: totals.failed,
+        }
+    }
 }
 
 // ============================================================================

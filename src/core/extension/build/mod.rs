@@ -8,7 +8,7 @@ use crate::core::engine::command::CapturedOutput;
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::extension::{self, exec_context, ExtensionCapability, ExtensionExecutionContext};
-use crate::core::output::{BulkResult, BulkSummary, ItemOutcome};
+use crate::core::output::{BulkResult, BulkResultBuilder};
 use crate::core::paths;
 use crate::core::server::execute_local_command_in_dir;
 
@@ -268,49 +268,27 @@ pub fn run_with_path(component_id: &str, path: &str) -> Result<(BuildResult, i32
 fn run_bulk(json_spec: &str) -> Result<(BuildResult, i32)> {
     let input = parse_bulk_ids(json_spec)?;
 
-    let mut results = Vec::with_capacity(input.component_ids.len());
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
+    let mut builder = BulkResultBuilder::with_capacity("build", input.component_ids.len());
 
     for id in &input.component_ids {
         match execute_build(id, None) {
             Ok((output, _)) => {
                 if output.success {
-                    succeeded += 1;
+                    builder.record_success(id.clone(), output);
                 } else {
-                    failed += 1;
+                    builder.record_failed_result(id.clone(), output);
                 }
-                results.push(ItemOutcome {
-                    id: id.clone(),
-                    result: Some(output),
-                    error: None,
-                });
             }
             Err(e) => {
-                failed += 1;
-                results.push(ItemOutcome {
-                    id: id.clone(),
-                    result: None,
-                    error: Some(e.to_string()),
-                });
+                builder.record_error(id.clone(), e.to_string());
             }
         }
     }
 
-    let exit_code = if failed > 0 { 1 } else { 0 };
+    let output = builder.finish();
+    let exit_code = if output.summary.failed > 0 { 1 } else { 0 };
 
-    Ok((
-        BuildResult::Bulk(BulkResult {
-            action: "build".to_string(),
-            results,
-            summary: BulkSummary {
-                total: succeeded + failed,
-                succeeded,
-                failed,
-            },
-        }),
-        exit_code,
-    ))
+    Ok((BuildResult::Bulk(output), exit_code))
 }
 
 /// Build a pre-resolved component (supports both registered and discovered components).
@@ -321,49 +299,27 @@ pub fn run_component(component: &Component) -> Result<(BuildResult, i32)> {
 
 /// Build multiple pre-resolved components.
 pub fn run_components(components: &[Component]) -> Result<(BuildResult, i32)> {
-    let mut results = Vec::with_capacity(components.len());
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
+    let mut builder = BulkResultBuilder::with_capacity("build", components.len());
 
     for component in components {
         match execute_build_component(component) {
             Ok((output, _)) => {
                 if output.success {
-                    succeeded += 1;
+                    builder.record_success(component.id.clone(), output);
                 } else {
-                    failed += 1;
+                    builder.record_failed_result(component.id.clone(), output);
                 }
-                results.push(ItemOutcome {
-                    id: component.id.clone(),
-                    result: Some(output),
-                    error: None,
-                });
             }
             Err(error) => {
-                failed += 1;
-                results.push(ItemOutcome {
-                    id: component.id.clone(),
-                    result: None,
-                    error: Some(error.to_string()),
-                });
+                builder.record_error(component.id.clone(), error.to_string());
             }
         }
     }
 
-    let exit_code = if failed > 0 { 1 } else { 0 };
+    let output = builder.finish();
+    let exit_code = if output.summary.failed > 0 { 1 } else { 0 };
 
-    Ok((
-        BuildResult::Bulk(BulkResult {
-            action: "build".to_string(),
-            results,
-            summary: BulkSummary {
-                total: succeeded + failed,
-                succeeded,
-                failed,
-            },
-        }),
-        exit_code,
-    ))
+    Ok((BuildResult::Bulk(output), exit_code))
 }
 
 fn execute_build(component_id: &str, path_override: Option<&str>) -> Result<(BuildOutput, i32)> {

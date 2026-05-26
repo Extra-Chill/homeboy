@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::core::config::read_json_spec_to_string;
 use crate::core::error::{Error, Result};
-use crate::core::output::{BulkResult, BulkSummary, ItemOutcome};
+use crate::core::output::{BulkResult, BulkResultBuilder};
 use crate::core::project;
 use crate::core::release::changelog;
 
@@ -326,44 +326,24 @@ fn build_bulk_changes_output(
     component_ids: &[String],
     include_diff: bool,
 ) -> BulkResult<ChangesOutput> {
-    let mut results = Vec::new();
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
+    let mut builder = BulkResultBuilder::with_capacity("changes", component_ids.len());
 
     for id in component_ids {
         match changes(Some(id), None, include_diff) {
             Ok(output) => {
                 if output.success {
-                    succeeded += 1;
+                    builder.record_success(id.clone(), output);
                 } else {
-                    failed += 1;
+                    builder.record_failed_result(id.clone(), output);
                 }
-                results.push(ItemOutcome {
-                    id: id.clone(),
-                    result: Some(output),
-                    error: None,
-                });
             }
             Err(e) => {
-                failed += 1;
-                results.push(ItemOutcome {
-                    id: id.clone(),
-                    result: None,
-                    error: Some(e.to_string()),
-                });
+                builder.record_error(id.clone(), e.to_string());
             }
         }
     }
 
-    BulkResult {
-        action: "changes".to_string(),
-        results,
-        summary: BulkSummary {
-            total: succeeded + failed,
-            succeeded,
-            failed,
-        },
-    }
+    builder.finish()
 }
 
 /// Get changes for multiple components from JSON spec.

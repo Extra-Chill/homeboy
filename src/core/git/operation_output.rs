@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::core::error::Result;
-use crate::core::output::{BulkResult, BulkSummary, ItemOutcome};
+use crate::core::output::{BulkResult, BulkResultBuilder};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GitOutput {
@@ -59,44 +59,24 @@ pub(crate) fn run_bulk_ids<F>(ids: &[String], action: &str, op: F) -> BulkResult
 where
     F: Fn(&str) -> Result<GitOutput>,
 {
-    let mut results = Vec::new();
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
+    let mut builder = BulkResultBuilder::with_capacity(action, ids.len());
 
     for id in ids {
         match op(id) {
             Ok(output) => {
                 if output.success {
-                    succeeded += 1;
+                    builder.record_success(id.clone(), output);
                 } else {
-                    failed += 1;
+                    builder.record_failed_result(id.clone(), output);
                 }
-                results.push(ItemOutcome {
-                    id: id.clone(),
-                    result: Some(output),
-                    error: None,
-                });
             }
             Err(e) => {
-                failed += 1;
-                results.push(ItemOutcome {
-                    id: id.clone(),
-                    result: None,
-                    error: Some(e.to_string()),
-                });
+                builder.record_error(id.clone(), e.to_string());
             }
         }
     }
 
-    BulkResult {
-        action: action.to_string(),
-        results,
-        summary: BulkSummary {
-            total: succeeded + failed,
-            succeeded,
-            failed,
-        },
-    }
+    builder.finish()
 }
 
 #[cfg(test)]
