@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::cli_surface::current_command_surface;
+use homeboy::commands::bench::BenchOutput;
 use homeboy::commands::review::{
     ReviewArtifact, ReviewArtifactCommand, ReviewCommandOutput, ReviewStage, ReviewSummary,
 };
+use homeboy::commands::rig::RigCommandOutput;
+use homeboy::commands::runs::RunsOutput;
 use homeboy::commands::utils::response::cli_response_for_json_result;
 use homeboy::core::code_audit::report::{
     AuditChangedSinceSummary, AuditCommandOutput, AuditFixability, AuditSummaryFinding,
@@ -68,6 +71,17 @@ fn quality_command_golden_json_contract_fixtures_match_typed_payloads() {
 
 #[test]
 fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
+    assert!(
+        [
+            std::any::type_name::<RunsOutput>(),
+            std::any::type_name::<RigCommandOutput>(),
+            std::any::type_name::<BenchOutput>(),
+        ]
+        .iter()
+        .all(|output_type| output_type.starts_with("homeboy::commands::")),
+        "contract test should stay anchored to public command output enums"
+    );
+
     assert_unique_variant_signatures(
         "runs",
         vec![
