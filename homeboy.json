@@ -1,5 +1,10 @@
 {
   "audit": {
+    "artifact_portability": {
+      "non_portable_path_contains": [
+        "/homeboy-run-"
+      ]
+    },
     "command_status_contracts": {
       "required_commands": [
         "audit",

@@ -28,6 +28,7 @@ mod matrix;
 mod metadata;
 mod observations;
 mod output;
+mod overlay_locks;
 mod probes;
 mod schedule;
 #[cfg(test)]
@@ -42,6 +43,7 @@ use experiment::{
 use guardrails::run_trace_guardrails_for_args;
 use metadata::trace_span_metadata_for_args;
 use observations::record_trace_artifacts;
+use overlay_locks::run_overlay_locks;
 
 use output::{
     aggregate_span, attach_span_metadata, classification_summaries, render_aggregate_markdown,
@@ -370,63 +372,6 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
 
 pub(super) fn apply_command_target_component(args: &mut TraceArgs) {
     args.comp.component = args.component_arg.clone();
-}
-
-fn run_overlay_locks(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
-    match args.scenario.as_deref() {
-        Some("list") => {
-            let locks = extension_trace::list_trace_overlay_locks()?;
-            let output = overlay_locks_output(locks);
-            Ok((TraceCommandOutput::OverlayLocks(output), 0))
-        }
-        Some("cleanup") => {
-            if !args.stale {
-                return Err(homeboy::core::Error::validation_invalid_argument(
-                    "--stale",
-                    "trace overlay lock cleanup requires --stale",
-                    None,
-                    None,
-                ));
-            }
-            let result = extension_trace::cleanup_stale_trace_overlay_locks(args.force)?;
-            let output = overlay_locks_output(result.removed);
-            Ok((TraceCommandOutput::OverlayLocks(output), 0))
-        }
-        Some(other) => Err(homeboy::core::Error::validation_invalid_argument(
-            "overlay-locks",
-            format!("unsupported trace overlay-locks command `{other}`"),
-            None,
-            Some(vec!["list".to_string(), "cleanup --stale".to_string()]),
-        )),
-        None => Err(homeboy::core::Error::validation_missing_argument(vec![
-            "overlay-locks command".to_string(),
-        ])),
-    }
-}
-
-fn overlay_locks_output(
-    locks: Vec<extension_trace::TraceOverlayLockRecord>,
-) -> extension_trace::TraceOverlayLocksOutput {
-    let active_count = locks
-        .iter()
-        .filter(|lock| lock.status == extension_trace::TraceOverlayLockStatus::Active)
-        .count();
-    let stale_count = locks
-        .iter()
-        .filter(|lock| lock.status == extension_trace::TraceOverlayLockStatus::Stale)
-        .count();
-    let unknown_count = locks
-        .iter()
-        .filter(|lock| lock.status == extension_trace::TraceOverlayLockStatus::Unknown)
-        .count();
-    extension_trace::TraceOverlayLocksOutput {
-        command: "trace.overlay-locks",
-        count: locks.len(),
-        active_count,
-        stale_count,
-        unknown_count,
-        locks,
-    }
 }
 
 pub(super) fn required_trace_scenario(args: &TraceArgs) -> homeboy::core::Result<String> {
@@ -1684,6 +1629,8 @@ fn trace_run_finish_metadata(
     })
 }
 
+#[cfg(test)]
+mod aggregate_test_support;
 #[cfg(test)]
 mod compare_tests;
 #[cfg(test)]

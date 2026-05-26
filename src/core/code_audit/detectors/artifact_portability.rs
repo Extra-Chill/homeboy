@@ -2,9 +2,17 @@ use std::path::Path;
 
 use crate::core::code_audit::conventions::AuditFinding;
 use crate::core::code_audit::findings::{Finding, Severity};
+use crate::core::component::ArtifactPortabilityConfig;
 use crate::core::observation::{ObservationStore, RunListFilter};
 
 pub(crate) fn run(component_id: &str) -> Vec<Finding> {
+    run_with_config(component_id, &ArtifactPortabilityConfig::default())
+}
+
+pub(crate) fn run_with_config(
+    component_id: &str,
+    config: &ArtifactPortabilityConfig,
+) -> Vec<Finding> {
     let Ok(store) = ObservationStore::open_initialized() else {
         return Vec::new();
     };
@@ -18,6 +26,7 @@ pub(crate) fn run(component_id: &str) -> Vec<Finding> {
         return Vec::new();
     };
     let artifact_root = crate::core::artifact_root().ok();
+    let path_policy = config.with_generic_defaults();
     let mut findings = Vec::new();
 
     for run in runs {
@@ -28,7 +37,7 @@ pub(crate) fn run(component_id: &str) -> Vec<Finding> {
             if artifact.artifact_type != "file" && artifact.artifact_type != "directory" {
                 continue;
             }
-            if artifact_path_is_portable(&artifact.path, artifact_root.as_deref()) {
+            if artifact_path_is_portable(&artifact.path, artifact_root.as_deref(), &path_policy) {
                 continue;
             }
             findings.push(Finding {
@@ -49,7 +58,11 @@ pub(crate) fn run(component_id: &str) -> Vec<Finding> {
     findings
 }
 
-fn artifact_path_is_portable(path: &str, artifact_root: Option<&Path>) -> bool {
+fn artifact_path_is_portable(
+    path: &str,
+    artifact_root: Option<&Path>,
+    config: &ArtifactPortabilityConfig,
+) -> bool {
     if path.starts_with("runner-artifact://") || path.starts_with("metadata-only:") {
         return true;
     }
@@ -59,14 +72,18 @@ fn artifact_path_is_portable(path: &str, artifact_root: Option<&Path>) -> bool {
             return true;
         }
     }
-    !looks_like_runtime_temp_path(path)
+    !looks_like_runtime_temp_path(path, config)
 }
 
-fn looks_like_runtime_temp_path(path: &str) -> bool {
-    path.contains("/homeboy-run-")
-        || path.starts_with("/tmp/")
-        || path.starts_with("/private/tmp/")
-        || path.starts_with("/var/folders/")
+fn looks_like_runtime_temp_path(path: &str, config: &ArtifactPortabilityConfig) -> bool {
+    config
+        .non_portable_path_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+        || config
+            .non_portable_path_contains
+            .iter()
+            .any(|marker| path.contains(marker))
 }
 
 #[cfg(test)]
@@ -122,8 +139,42 @@ mod tests {
 
             assert!(artifact_path_is_portable(
                 &artifact_root.join("run/artifact.json").to_string_lossy(),
-                Some(&artifact_root)
+                Some(&artifact_root),
+                &ArtifactPortabilityConfig::default().with_generic_defaults()
             ));
         });
+    }
+
+    #[test]
+    fn accepts_project_specific_path_markers_from_config() {
+        let config = ArtifactPortabilityConfig {
+            non_portable_path_contains: vec!["/project-run-".to_string()],
+            ..Default::default()
+        }
+        .with_generic_defaults();
+
+        assert!(!artifact_path_is_portable(
+            "/workspace/project-run-abc/trace.json",
+            None,
+            &config
+        ));
+        assert!(artifact_path_is_portable(
+            "/workspace/other-run-abc/trace.json",
+            None,
+            &config
+        ));
+    }
+
+    #[test]
+    fn homeboy_config_declares_homeboy_run_marker() {
+        let raw = std::fs::read_to_string("homeboy.json").expect("homeboy config");
+        let component: crate::core::component::Component =
+            serde_json::from_str(&raw).expect("component config");
+        let audit = component.audit.expect("audit config");
+
+        assert!(audit
+            .artifact_portability
+            .non_portable_path_contains
+            .contains(&"/homeboy-run-".to_string()));
     }
 }

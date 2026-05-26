@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.198.6] - 2026-05-25
+
+### Changed
+- extract extension source metadata lifecycle
+- extract release version target checks
+- Refactor core fingerprint relationships
+- extract grammar string scanner
+- Refactor convention membership helpers
+- extract test coverage symbol helpers
+- Extract edit op import helpers
+- extract runs bench helpers
+- extract trace overlay lock command
+- Extract trace aggregate test support
+
 ## [0.198.5] - 2026-05-25
 
 ### Changed
