@@ -9,6 +9,8 @@ const { spawnSync } = require('node:child_process');
 const {
   createAuditWpCodeboxFanoutPlan,
   createAuditWpCodeboxFanoutPlanFromFiles,
+  executeAuditWpCodeboxFanout,
+  executeAuditWpCodeboxFanoutFromFiles,
   safeBranchSlug,
 } = require('../lib/audit-wp-codebox-fanout');
 const { artifactContentDigest } = require('../lib/wp-codebox-apply-adapter');
@@ -97,6 +99,37 @@ function createBundle(root, name, changedPath, relativePath) {
   return { artifactId, bundle, changedPath, contentDigest, patchSha256: sha256(patch) };
 }
 
+function createWpCodeboxFixtureCommand(root) {
+  const scriptPath = path.join(root, 'fixture-wp-codebox.cjs');
+  fs.writeFileSync(scriptPath, `#!/usr/bin/env node
+'use strict';
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  const request = JSON.parse(input);
+  if (request.group_key === 'docs-reference') {
+    process.stderr.write('fixture docs-reference failure\\n');
+    process.exit(3);
+  }
+  process.stdout.write(JSON.stringify({
+    success: true,
+    session: {
+      schema: 'wp-codebox/sandbox-session/v1',
+      id: request.sandbox_session_id,
+      orchestrator: request.orchestrator,
+    },
+    artifacts: {
+      id: 'artifact-' + request.sandbox_session_id,
+      directory: '/tmp/' + request.sandbox_session_id,
+      preview: { url: 'https://preview.example.test/' + request.sandbox_session_id },
+    },
+  }));
+});
+`);
+  return scriptPath;
+}
+
 const auditReportPath = path.join(__dirname, 'fixtures', 'homeboy-audit-wp-codebox-fanout', 'audit-report.json');
 const report = readJson(auditReportPath);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-audit-wp-codebox-fanout-'));
@@ -105,6 +138,10 @@ try {
   const initialPlan = createAuditWpCodeboxFanoutPlan({
     report,
     issue_url: 'https://github.com/Extra-Chill/homeboy-extensions/issues/769',
+    provider: 'codex',
+    model: 'gpt-5.5',
+    provider_plugin_paths: ['/opt/ai-provider-for-openai'],
+    secret_env: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
   });
   assert.equal(initialPlan.schema, 'homeboy/audit-wp-codebox-fanout/v1');
   assert.equal(initialPlan.audit.finding_count, 3);
@@ -123,6 +160,10 @@ try {
   assert.equal(docsRequest.audit_findings.length, 1);
   assert.match(phpcsRequest.sandbox_session_id, /^homeboy-audit-[a-f0-9]{16}$/);
   assert.equal(phpcsRequest.orchestrator.issue_url, 'https://github.com/Extra-Chill/homeboy-extensions/issues/769');
+  assert.equal(phpcsRequest.provider, 'codex');
+  assert.equal(phpcsRequest.model, 'gpt-5.5');
+  assert.deepEqual(phpcsRequest.provider_plugin_paths, ['/opt/ai-provider-for-openai']);
+  assert.deepEqual(phpcsRequest.secret_env, ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN']);
   assert.match(phpcsRequest.task.prompt, /finding-phpcs-001/);
 
   const phpcsBundle = createBundle(
@@ -210,6 +251,10 @@ try {
     artifactMapPath,
     outputPath,
     issueUrl: 'https://github.com/Extra-Chill/homeboy-extensions/issues/769',
+    provider: 'codex',
+    model: 'gpt-5.5',
+    providerPluginPaths: ['/opt/ai-provider-for-openai'],
+    secretEnv: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
   });
   assert.equal(filePlan.apply_back.length, 2);
   assert.equal(readJson(outputPath).apply_back.length, 2);
@@ -222,10 +267,69 @@ try {
     artifactMapPath,
     '--issue-url',
     'https://github.com/Extra-Chill/homeboy-extensions/issues/769',
+    '--provider',
+    'codex',
+    '--model',
+    'gpt-5.5',
+    '--provider-plugin-path',
+    '/opt/ai-provider-for-openai',
+    '--secret-env',
+    'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
   ]);
   const cliPlan = JSON.parse(cliOutput);
   assert.equal(cliPlan.task_requests.length, 2);
   assert.equal(cliPlan.apply_back.length, 2);
+  assert.equal(cliPlan.task_requests[0].provider, 'codex');
+
+  const fixtureCommand = createWpCodeboxFixtureCommand(root);
+  const execution = executeAuditWpCodeboxFanout({
+    report,
+    issue_url: 'https://github.com/Extra-Chill/homeboy-extensions/issues/773',
+    provider: 'codex',
+    model: 'gpt-5.5',
+    wp_codebox_command: process.execPath,
+    wp_codebox_args: [fixtureCommand],
+  });
+  assert.equal(execution.schema, 'homeboy/audit-wp-codebox-execution/v1');
+  assert.equal(execution.records.length, 2);
+  assert.equal(execution.status, 'failed');
+  const completedRecord = execution.records.find((record) => record.group_key === 'PHPCS Formatting/Auto Fix!');
+  const failedRecord = execution.records.find((record) => record.group_key === 'docs-reference');
+  assert.equal(completedRecord.status, 'completed');
+  assert.equal(completedRecord.command.bin, process.execPath);
+  assert.equal(completedRecord.result.session.id, completedRecord.sandbox_session_id);
+  assert.equal(completedRecord.result.session.orchestrator.issue_url, 'https://github.com/Extra-Chill/homeboy-extensions/issues/773');
+  assert.match(completedRecord.artifact.id, /^artifact-homeboy-audit-/);
+  assert.equal(failedRecord.status, 'failed');
+  assert.equal(failedRecord.command.exit_code, 3);
+  assert.match(failedRecord.stderr, /fixture docs-reference failure/);
+
+  const runsOutputPath = path.join(root, 'fanout-run.json');
+  const fileExecution = executeAuditWpCodeboxFanoutFromFiles({
+    auditReportPath,
+    issueUrl: 'https://github.com/Extra-Chill/homeboy-extensions/issues/773',
+    wpCodeboxCommand: process.execPath,
+    wpCodeboxArgs: [fixtureCommand],
+    runsOutputPath,
+  });
+  assert.equal(fileExecution.records.length, 2);
+  assert.equal(readJson(runsOutputPath).records.length, 2);
+
+  const cliExecutionOutput = run(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-audit-wp-codebox-fanout.cjs'),
+    '--audit-report',
+    auditReportPath,
+    '--issue-url',
+    'https://github.com/Extra-Chill/homeboy-extensions/issues/773',
+    '--execute',
+    '--wp-codebox-command',
+    process.execPath,
+    '--wp-codebox-arg',
+    fixtureCommand,
+  ]);
+  const cliExecution = JSON.parse(cliExecutionOutput);
+  assert.equal(cliExecution.records.length, 2);
+  assert.equal(cliExecution.records[0].schema, 'homeboy/audit-wp-codebox-run/v1');
 
   console.log('Homeboy audit WP Codebox fanout smoke passed');
 } finally {

@@ -8,6 +8,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 /**
  * Internal dependencies
@@ -20,6 +21,7 @@ const {
 
 const PLAN_SCHEMA = 'homeboy/audit-wp-codebox-fanout/v1';
 const TASK_SCHEMA = 'homeboy/wp-codebox-task-request/v1';
+const RUN_SCHEMA = 'homeboy/audit-wp-codebox-run/v1';
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -32,6 +34,18 @@ function readJson(filePath) {
 function writeJson(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function tryParseJson(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
 }
 
 function auditFindings(report) {
@@ -105,7 +119,7 @@ function taskPrompt(group) {
 
 function createTaskRequest(group, orchestrator) {
   const sandbox_session_id = sandboxSessionId(orchestrator, group);
-  return {
+  const request = {
     schema: TASK_SCHEMA,
     sandbox_session_id,
     group_key: group.key,
@@ -131,6 +145,21 @@ function createTaskRequest(group, orchestrator) {
       prompt: taskPrompt(group),
     },
   };
+
+  if (orchestrator.provider) {
+    request.provider = orchestrator.provider;
+  }
+  if (orchestrator.model) {
+    request.model = orchestrator.model;
+  }
+  if (orchestrator.provider_plugin_paths.length > 0) {
+    request.provider_plugin_paths = orchestrator.provider_plugin_paths;
+  }
+  if (orchestrator.secret_env.length > 0) {
+    request.secret_env = orchestrator.secret_env;
+  }
+
+  return request;
 }
 
 function safeBranchSlug(value) {
@@ -217,6 +246,10 @@ function createAuditWpCodeboxFanoutPlan(input) {
     run_id: input.run_id || report.run_id || report.id || 'fixture-run',
     report_id: input.report_id || report.id || report.run_id || 'fixture-report',
     issue_url: input.issue_url || '',
+    provider: input.provider || '',
+    model: input.model || '',
+    provider_plugin_paths: Array.isArray(input.provider_plugin_paths) ? input.provider_plugin_paths : [],
+    secret_env: Array.isArray(input.secret_env) ? input.secret_env : [],
   };
   const groups = groupFindings(auditFindings(report));
   const artifactMap = input.artifact_map || {};
@@ -260,6 +293,10 @@ function createAuditWpCodeboxFanoutPlanFromFiles(options) {
     run_id: options.runId,
     report_id: options.reportId,
     issue_url: options.issueUrl,
+    provider: options.provider,
+    model: options.model,
+    provider_plugin_paths: options.providerPluginPaths || [],
+    secret_env: options.secretEnv || [],
     base: options.base,
     branch_prefix: options.branchPrefix,
     reviewed_at: options.reviewedAt,
@@ -270,12 +307,98 @@ function createAuditWpCodeboxFanoutPlanFromFiles(options) {
   return plan;
 }
 
+function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
+  const command = options.wp_codebox_command || 'wp-codebox';
+  const args = options.wp_codebox_args || [];
+  const requestJson = `${JSON.stringify(taskRequest, null, 2)}\n`;
+  const startedAt = new Date().toISOString();
+  const result = spawnSync(command, args, {
+    cwd: options.cwd || process.cwd(),
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ...(options.env || {}),
+      HOMEBOY_WP_CODEBOX_TASK_REQUEST: requestJson,
+      HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID: taskRequest.sandbox_session_id,
+      HOMEBOY_WP_CODEBOX_GROUP_KEY: taskRequest.group_key,
+    },
+    input: requestJson,
+    maxBuffer: options.max_buffer || 1024 * 1024 * 10,
+  });
+  const finishedAt = new Date().toISOString();
+  const stdout = result.stdout || '';
+  const stderr = result.stderr || '';
+  const parsed = tryParseJson(stdout);
+  const artifact = parsed && typeof parsed === 'object' && parsed.artifacts ? parsed.artifacts : null;
+  const success = result.status === 0 && result.error === undefined;
+
+  return {
+    schema: RUN_SCHEMA,
+    sandbox_session_id: taskRequest.sandbox_session_id,
+    group_key: taskRequest.group_key,
+    finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
+    command: {
+      bin: command,
+      args,
+      exit_code: result.status,
+      signal: result.signal || null,
+      error: result.error ? result.error.message : '',
+    },
+    status: success ? 'completed' : 'failed',
+    started_at: startedAt,
+    finished_at: finishedAt,
+    stdout,
+    stderr,
+    result: parsed,
+    artifact: artifact ? {
+      id: artifact.id || '',
+      directory: artifact.directory || artifact.path || '',
+      preview_url: artifact.preview?.url || artifact.preview_url || '',
+    } : null,
+  };
+}
+
+function executeAuditWpCodeboxFanout(input) {
+  const plan = input.plan || createAuditWpCodeboxFanoutPlan(input);
+  const records = plan.task_requests.map((taskRequest) => executeWpCodeboxTaskRequest(taskRequest, input));
+  const run = {
+    schema: 'homeboy/audit-wp-codebox-execution/v1',
+    plan_schema: plan.schema,
+    orchestrator: plan.orchestrator,
+    audit: plan.audit,
+    records,
+    status: records.every((record) => record.status === 'completed') ? 'completed' : 'failed',
+  };
+
+  if (input.runsOutputPath) {
+    writeJson(input.runsOutputPath, run);
+  }
+
+  return run;
+}
+
+function executeAuditWpCodeboxFanoutFromFiles(options) {
+  const plan = createAuditWpCodeboxFanoutPlanFromFiles(options);
+  return executeAuditWpCodeboxFanout({
+    plan,
+    wp_codebox_command: options.wpCodeboxCommand,
+    wp_codebox_args: options.wpCodeboxArgs || [],
+    cwd: options.cwd,
+    env: options.env,
+    runsOutputPath: options.runsOutputPath,
+  });
+}
+
 module.exports = {
   PLAN_SCHEMA,
+  RUN_SCHEMA,
   TASK_SCHEMA,
   auditFindings,
   createAuditWpCodeboxFanoutPlan,
   createAuditWpCodeboxFanoutPlanFromFiles,
+  executeAuditWpCodeboxFanout,
+  executeAuditWpCodeboxFanoutFromFiles,
+  executeWpCodeboxTaskRequest,
   groupFindings,
   safeBranchSlug,
   sandboxSessionId,

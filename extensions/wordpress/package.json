@@ -23,7 +23,8 @@
     "test:request-profiler": "node tests/request-profiler-smoke.js",
     "test:timing-correlator": "node tests/timing-correlator-smoke.js",
     "test:wp-codebox-apply-adapter": "node tests/wp-codebox-apply-adapter-smoke.js",
-    "test:audit-wp-codebox-fanout": "node tests/audit-wp-codebox-fanout-smoke.js"
+    "test:audit-wp-codebox-fanout": "node tests/audit-wp-codebox-fanout-smoke.js",
+    "test:audit-wp-codebox-execute": "node tests/audit-wp-codebox-fanout-smoke.js"
   },
   "devDependencies": {
     "@wp-playground/cli": "^3.1.29",
