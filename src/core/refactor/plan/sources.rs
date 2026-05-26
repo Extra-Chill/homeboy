@@ -11,11 +11,13 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+mod audit_source;
 mod cache;
 mod extension_source;
 mod lint_scope;
 mod planning;
 
+use audit_source::filtered_audit_source_result;
 use cache::{
     try_load_cached_audit, try_load_cached_lint, try_load_cached_test, CachedLintResult,
     CachedTestResult, OUTPUT_DIR_ENV,
@@ -963,23 +965,6 @@ fn count_manual_only_fixes(fix_result: &fixer::FixResult) -> usize {
     manual_only_fixes + manual_only_new_files
 }
 
-fn filtered_audit_source_result(
-    result: &crate::core::code_audit::CodeAuditResult,
-    policy: &fixer::FixPolicy,
-) -> crate::core::code_audit::CodeAuditResult {
-    let mut filtered = result.clone();
-    filtered.findings.retain(|finding| {
-        let allowed = policy
-            .only
-            .as_ref()
-            .is_none_or(|only| only.contains(&finding.kind));
-        let denied = policy.exclude.contains(&finding.kind);
-        allowed && !denied
-    });
-    filtered.summary.outliers_found = filtered.findings.len();
-    filtered
-}
-
 /// Count only files that `--write` mode would actually modify.
 ///
 /// `apply_fix_policy` keeps all policy-selected edits visible in dry-run, but
@@ -1297,55 +1282,6 @@ mod tests {
             total_insertions,
             files_modified: 0,
         }
-    }
-
-    fn audit_result_with(kinds: Vec<AuditFinding>) -> crate::core::code_audit::CodeAuditResult {
-        crate::core::code_audit::CodeAuditResult {
-            component_id: "component".to_string(),
-            source_path: "/tmp/component".to_string(),
-            summary: crate::core::code_audit::AuditSummary {
-                files_scanned: 1,
-                conventions_detected: 1,
-                outliers_found: kinds.len(),
-                alignment_score: None,
-                files_skipped: 0,
-                warnings: Vec::new(),
-            },
-            conventions: Vec::new(),
-            directory_conventions: Vec::new(),
-            findings: kinds
-                .into_iter()
-                .map(|kind| crate::core::code_audit::Finding {
-                    convention: "fixture".to_string(),
-                    severity: crate::core::code_audit::Severity::Warning,
-                    file: "src/lib.rs".to_string(),
-                    description: "fixture finding".to_string(),
-                    suggestion: "fix it".to_string(),
-                    kind,
-                })
-                .collect(),
-            duplicate_groups: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn filtered_audit_source_result_applies_only_and_exclude() {
-        let result = audit_result_with(vec![
-            AuditFinding::DuplicateFunction,
-            AuditFinding::MissingMethod,
-            AuditFinding::GodFile,
-        ]);
-        let policy = fixer::FixPolicy {
-            only: Some(vec![AuditFinding::DuplicateFunction, AuditFinding::GodFile]),
-            exclude: vec![AuditFinding::GodFile],
-        };
-
-        let filtered = filtered_audit_source_result(&result, &policy);
-
-        assert_eq!(filtered.findings.len(), 1);
-        assert_eq!(filtered.findings[0].kind, AuditFinding::DuplicateFunction);
-        assert_eq!(filtered.summary.outliers_found, 1);
-        assert_eq!(result.findings.len(), 3);
     }
 
     #[test]
