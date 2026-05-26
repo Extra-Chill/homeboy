@@ -154,6 +154,14 @@ enum RunnerCommand {
         /// Runner ID. Use `local`, `localhost`, or `self` for this machine;
         /// other values resolve through `homeboy runner` configuration.
         runner_id: String,
+
+        /// Component/workspace path to use as the extension parity probe cwd.
+        #[arg(long)]
+        path: Option<String>,
+
+        /// Required extension ID to resolve on the runner. Repeat for multiple extensions.
+        #[arg(long = "extension")]
+        extensions: Vec<String>,
     },
     /// Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
     Connect {
@@ -340,7 +348,14 @@ pub fn run(
         RunnerCommand::Show { id } => map_registry(show(&id)),
         RunnerCommand::Set { args } => map_registry(set(args)),
         RunnerCommand::Remove { id } => map_registry(remove(&id)),
-        RunnerCommand::Doctor { runner_id } => map_doctor(doctor::run(&runner_id)),
+        RunnerCommand::Doctor {
+            runner_id,
+            path,
+            extensions,
+        } => map_doctor(doctor::run_with_options(
+            &runner_id,
+            doctor::RunnerDoctorOptions { path, extensions },
+        )),
         RunnerCommand::Connect { id } => map_registry(connect(&id)),
         RunnerCommand::Status { id } => map_registry(status(&id)),
         RunnerCommand::Disconnect { id } => map_registry(disconnect(&id)),

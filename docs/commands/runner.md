@@ -99,6 +99,7 @@ homeboy config set /lab/preferred_runner '"homeboy-lab"'
 ```sh
 homeboy runner doctor local
 homeboy runner doctor <runner-id>
+homeboy runner doctor <runner-id> --path <component-path> --extension rust
 ```
 
 Diagnoses a local or configured SSH runner without mutating it. Use `local`,
@@ -108,6 +109,13 @@ The JSON payload uses `command: "runner.doctor"` and includes `runner_id`,
 
 Use `doctor` before `connect` when you need to know whether Homeboy, Git, SSH,
 and the configured workspace root are usable on the target machine.
+
+Pass one or more `--extension <id>` values to validate extension parity before
+Lab offload. Doctor runs the same `homeboy extension show <id>` contract on the
+target runner that test offload uses at execution time. `--path` sets the probe
+working directory when the extension should resolve from a specific component
+checkout. Missing extensions are reported as `extension.parity` errors with an
+install command such as `homeboy extension install <source> --id rust`.
 
 Hot-command Lab offload uses the same capability vocabulary before running on
 an explicit `--runner`. Homeboy currently gates `lint`, `test`, `audit`,

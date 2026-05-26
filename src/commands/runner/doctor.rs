@@ -12,16 +12,29 @@ use crate::commands::CmdResult;
 
 pub use types::RunnerDoctorOutput;
 
+#[derive(Debug, Default)]
+pub struct RunnerDoctorOptions {
+    pub path: Option<String>,
+    pub extensions: Vec<String>,
+}
+
 pub fn run(runner_id: &str) -> CmdResult<RunnerDoctorOutput> {
+    run_with_options(runner_id, RunnerDoctorOptions::default())
+}
+
+pub fn run_with_options(
+    runner_id: &str,
+    options: RunnerDoctorOptions,
+) -> CmdResult<RunnerDoctorOutput> {
     let target = target::resolve(runner_id)?;
     let report = match &target {
-        target::RunnerTarget::Local { id, runner } => local::report(id, runner.as_ref()),
+        target::RunnerTarget::Local { id, runner } => local::report(id, runner.as_ref(), &options),
         target::RunnerTarget::Ssh {
             id,
             runner,
             server,
             client,
-        } => remote::report(id, runner, server, client),
+        } => remote::report(id, runner, server, client, &options),
     };
     Ok((report, 0))
 }
@@ -151,7 +164,7 @@ mod types {
 
     #[derive(Debug, Serialize)]
     pub struct RunnerCheck {
-        pub id: &'static str,
+        pub id: String,
         pub status: RunnerDoctorStatus,
         pub message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -225,7 +238,11 @@ mod local {
     use super::*;
     use types::*;
 
-    pub fn report(runner_id: &str, runner: Option<&Runner>) -> RunnerDoctorOutput {
+    pub fn report(
+        runner_id: &str,
+        runner: Option<&Runner>,
+        options: &RunnerDoctorOptions,
+    ) -> RunnerDoctorOutput {
         let workspace_root = runner
             .and_then(|runner| runner.workspace_root.as_ref())
             .map(PathBuf::from)
@@ -323,6 +340,15 @@ mod local {
             "Create the artifact root or configure HOMEBOY_ARTIFACT_ROOT to a writable directory",
         ));
 
+        let homeboy_command = homeboy.path.as_deref().unwrap_or("homeboy");
+        for extension_id in normalized_extension_ids(&options.extensions) {
+            checks.push(extension_parity::local_check(
+                homeboy_command,
+                options.path.as_deref(),
+                &extension_id,
+            ));
+        }
+
         let capabilities = probes::capabilities_from(
             &tools,
             true,
@@ -364,6 +390,7 @@ mod remote {
         runner: &Runner,
         server: &Server,
         client: &SshClient,
+        options: &RunnerDoctorOptions,
     ) -> RunnerDoctorOutput {
         let workspace_root = runner
             .workspace_root
@@ -495,6 +522,15 @@ mod remote {
             Path::new(&artifact_root),
             "Create the artifact root or configure HOMEBOY_ARTIFACT_ROOT to a writable directory",
         ));
+
+        for extension_id in normalized_extension_ids(&options.extensions) {
+            checks.push(extension_parity::remote_check(
+                client,
+                homeboy_command,
+                options.path.as_deref(),
+                &extension_id,
+            ));
+        }
 
         let capabilities = probes::capabilities_from(
             &tools,
@@ -995,9 +1031,9 @@ mod checks {
         }
     }
 
-    pub fn ok(id: &'static str, message: String, remediation: Option<String>) -> RunnerCheck {
+    pub fn ok(id: impl Into<String>, message: String, remediation: Option<String>) -> RunnerCheck {
         RunnerCheck {
-            id,
+            id: id.into(),
             status: RunnerDoctorStatus::Ok,
             message,
             remediation,
@@ -1005,9 +1041,13 @@ mod checks {
         }
     }
 
-    pub fn warning(id: &'static str, message: String, remediation: Option<String>) -> RunnerCheck {
+    pub fn warning(
+        id: impl Into<String>,
+        message: String,
+        remediation: Option<String>,
+    ) -> RunnerCheck {
         RunnerCheck {
-            id,
+            id: id.into(),
             status: RunnerDoctorStatus::Warning,
             message,
             remediation,
@@ -1016,13 +1056,13 @@ mod checks {
     }
 
     pub fn error(
-        id: &'static str,
+        id: impl Into<String>,
         message: String,
         remediation: Option<String>,
         details: BTreeMap<String, String>,
     ) -> RunnerCheck {
         RunnerCheck {
-            id,
+            id: id.into(),
             status: RunnerDoctorStatus::Error,
             message,
             remediation,
@@ -1046,18 +1086,161 @@ mod checks {
         }
     }
 
-    fn ok_with_details(
-        id: &'static str,
+    pub(super) fn ok_with_details(
+        id: impl Into<String>,
         message: String,
         details: BTreeMap<String, String>,
     ) -> RunnerCheck {
         RunnerCheck {
-            id,
+            id: id.into(),
             status: RunnerDoctorStatus::Ok,
             message,
             remediation: None,
             details,
         }
+    }
+}
+
+mod extension_parity {
+    use super::*;
+    use types::RunnerCheck;
+
+    pub fn local_check(
+        homeboy_command: &str,
+        cwd: Option<&str>,
+        extension_id: &str,
+    ) -> RunnerCheck {
+        let mut command = Command::new(homeboy_command);
+        command.args(["extension", "show", extension_id]);
+        if let Some(cwd) = cwd.filter(|path| !path.trim().is_empty()) {
+            command.current_dir(cwd);
+        }
+
+        match command.output() {
+            Ok(output) => check_from_probe(
+                "local",
+                homeboy_command,
+                cwd,
+                extension_id,
+                output.status.success(),
+                &String::from_utf8_lossy(&output.stderr),
+                &String::from_utf8_lossy(&output.stdout),
+            ),
+            Err(err) => check_from_probe(
+                "local",
+                homeboy_command,
+                cwd,
+                extension_id,
+                false,
+                &err.to_string(),
+                "",
+            ),
+        }
+    }
+
+    pub fn remote_check(
+        client: &SshClient,
+        homeboy_command: &str,
+        cwd: Option<&str>,
+        extension_id: &str,
+    ) -> RunnerCheck {
+        let show_command = format!(
+            "{} extension show {}",
+            common::shell_word(homeboy_command),
+            common::shell_word(extension_id)
+        );
+        let command = if let Some(cwd) = cwd.filter(|path| !path.trim().is_empty()) {
+            format!("cd {} && {show_command}", common::shell_word(cwd))
+        } else {
+            show_command
+        };
+        let output = client.execute(&command);
+
+        check_from_probe(
+            "remote",
+            homeboy_command,
+            cwd,
+            extension_id,
+            output.success,
+            &output.stderr,
+            &output.stdout,
+        )
+    }
+
+    pub fn check_from_probe(
+        target: &str,
+        homeboy_command: &str,
+        cwd: Option<&str>,
+        extension_id: &str,
+        success: bool,
+        stderr: &str,
+        stdout: &str,
+    ) -> RunnerCheck {
+        let mut details = BTreeMap::new();
+        details.insert("extension_id".to_string(), extension_id.to_string());
+        details.insert(
+            "command".to_string(),
+            format!("{homeboy_command} extension show {extension_id}"),
+        );
+        if let Some(cwd) = cwd.filter(|path| !path.trim().is_empty()) {
+            details.insert("cwd".to_string(), cwd.to_string());
+        }
+
+        if success {
+            return checks::ok_with_details(
+                "extension.parity",
+                format!("Extension '{extension_id}' resolves on the {target} runner"),
+                details,
+            );
+        }
+
+        let diagnostics = diagnostic_tail(stderr, stdout);
+        if !diagnostics.is_empty() {
+            details.insert("diagnostics".to_string(), diagnostics);
+        }
+
+        checks::error(
+            "extension.parity",
+            format!("Extension '{extension_id}' does not resolve on the {target} runner"),
+            Some(format!(
+                "Install the extension on the runner before offloading: {homeboy_command} extension install <source> --id {extension_id}"
+            )),
+            details,
+        )
+    }
+
+    fn diagnostic_tail(stderr: &str, stdout: &str) -> String {
+        let output = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
+        if let Some(message) = json_error_message(output) {
+            return message;
+        }
+        output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn json_error_message(output: &str) -> Option<String> {
+        let value: serde_json::Value = serde_json::from_str(output.trim()).ok()?;
+        value
+            .pointer("/error/message")
+            .or_else(|| value.pointer("/data/error/message"))
+            .or_else(|| value.get("message"))
+            .and_then(|message| message.as_str())
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(str::to_string)
     }
 }
 
@@ -1131,6 +1314,18 @@ fn runner_summary(
     }
 }
 
+fn normalized_extension_ids(extension_ids: &[String]) -> Vec<String> {
+    let mut ids = extension_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1164,6 +1359,88 @@ mod tests {
             ),
         ];
         assert_eq!(checks::overall_status(&checks), RunnerDoctorStatus::Error);
+    }
+
+    #[test]
+    fn extension_parity_check_reports_missing_extension_with_remediation() {
+        let check = extension_parity::check_from_probe(
+            "remote",
+            "/home/chubes/.local/bin/homeboy",
+            Some("/home/chubes/Developer/component"),
+            "rust",
+            false,
+            "first\nsecond\nthird\nfourth",
+            "",
+        );
+
+        assert_eq!(check.id, "extension.parity");
+        assert_eq!(check.status, RunnerDoctorStatus::Error);
+        assert!(check.message.contains("rust"));
+        assert!(check
+            .remediation
+            .as_deref()
+            .expect("remediation")
+            .contains("extension install <source> --id rust"));
+        assert_eq!(
+            check.details.get("cwd").map(String::as_str),
+            Some("/home/chubes/Developer/component")
+        );
+        assert_eq!(
+            check.details.get("diagnostics").map(String::as_str),
+            Some("second\nthird\nfourth")
+        );
+    }
+
+    #[test]
+    fn extension_parity_check_extracts_nested_json_error_message() {
+        let check = extension_parity::check_from_probe(
+            "remote",
+            "homeboy",
+            None,
+            "rust",
+            false,
+            "",
+            r#"{"success":false,"error":{"message":"Extension 'rust' not found"}}"#,
+        );
+
+        assert_eq!(
+            check.details.get("diagnostics").map(String::as_str),
+            Some("Extension 'rust' not found")
+        );
+    }
+
+    #[test]
+    fn extension_parity_check_reports_resolved_extension() {
+        let check = extension_parity::check_from_probe(
+            "remote",
+            "homeboy",
+            None,
+            "rust",
+            true,
+            "",
+            "extension details",
+        );
+
+        assert_eq!(check.id, "extension.parity");
+        assert_eq!(check.status, RunnerDoctorStatus::Ok);
+        assert!(check.remediation.is_none());
+        assert_eq!(
+            check.details.get("extension_id").map(String::as_str),
+            Some("rust")
+        );
+    }
+
+    #[test]
+    fn normalizes_requested_extensions_before_parity_checks() {
+        assert_eq!(
+            normalized_extension_ids(&[
+                " rust ".to_string(),
+                "".to_string(),
+                "nodejs".to_string(),
+                "rust".to_string(),
+            ]),
+            vec!["nodejs".to_string(), "rust".to_string()]
+        );
     }
 
     #[test]
