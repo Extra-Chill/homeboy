@@ -4,6 +4,27 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.198.9] - 2026-05-26
+
+### Changed
+- extract bench run metadata helpers
+- Reject changed-since Lab offload for snapshot workspaces
+- extract extension execution helpers
+- extract git operation helper modules
+- extract config JSON helpers
+- extract GitHub data contracts
+- extract project file edit helpers
+- extract defaults builtins
+- split report failure digest helpers
+- extract rig path helpers
+- extract manifest config modules
+
+### Fixed
+- Fix runner doctor extension parity
+- warn on runner doctor version skew
+- clarify audit baseline summary counts
+- make observation run imports idempotent
+
 ## [0.198.8] - 2026-05-26
 
 ### Changed
