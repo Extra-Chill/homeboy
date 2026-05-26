@@ -1180,6 +1180,45 @@ mod tests {
     }
 
     #[test]
+    fn export_rewrites_unproven_remote_artifact_paths_as_metadata_only() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+                .expect("run");
+            store
+                .import_artifact(&ArtifactRecord {
+                    id: "remote-trace".to_string(),
+                    run_id: run.id.clone(),
+                    kind: "trace".to_string(),
+                    artifact_type: "file".to_string(),
+                    path: "/srv/remote-only/trace.zip".to_string(),
+                    url: None,
+                    sha256: None,
+                    size_bytes: None,
+                    mime: None,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                })
+                .expect("artifact");
+            let output = home.path().join("remote-artifact-bundle");
+
+            export_runs(RunsExportArgs {
+                run: Some(run.id),
+                since: None,
+                output: output.clone(),
+            })
+            .expect("export");
+
+            let artifacts: Vec<ArtifactRecord> =
+                read_bundle_test_json(&output.join("artifacts.json"));
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].artifact_type, "metadata-only");
+            assert_eq!(artifacts[0].path, "metadata-only:trace.zip");
+        });
+    }
+
+    #[test]
     fn export_trace_spans_when_present() {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();

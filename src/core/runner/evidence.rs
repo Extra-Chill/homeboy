@@ -16,6 +16,24 @@ pub fn is_remote_runner_artifact_path(path: &str) -> bool {
     path.starts_with("runner-artifact://")
 }
 
+pub fn is_retrievable_runner_artifact(path: &str) -> bool {
+    RemoteArtifactToken::parse(path).is_ok()
+}
+
+pub fn is_reportable_artifact_evidence_path(path: &str) -> bool {
+    is_retrievable_runner_artifact(path)
+        || path.starts_with("metadata-only:")
+        || !std::path::Path::new(path).is_absolute()
+        || fs::metadata(path)
+            .map(|metadata| metadata.is_file() || metadata.is_dir())
+            .unwrap_or(false)
+}
+
+pub fn reportable_artifact_evidence_path(path: Option<&String>) -> Option<String> {
+    path.filter(|path| is_reportable_artifact_evidence_path(path))
+        .cloned()
+}
+
 pub fn download_remote_artifact(
     path: &str,
     output: Option<PathBuf>,
@@ -182,7 +200,7 @@ fn mirrored_patch_result(
             ))
         })?;
 
-    let accessible = is_remote_runner_artifact_path(&artifact.path)
+    let accessible = is_retrievable_runner_artifact(&artifact.path)
         || fs::metadata(&artifact.path)
             .map(|metadata| metadata.is_file())
             .unwrap_or(false);
@@ -579,6 +597,33 @@ mod tests {
         assert_eq!(parsed.runner_id, "runner/a");
         assert_eq!(parsed.run_id, "run b");
         assert_eq!(parsed.artifact_id, "artifact:c");
+    }
+
+    #[test]
+    fn test_reportable_artifact_evidence_requires_local_or_retrievable_path() {
+        crate::test_support::with_isolated_home(|home| {
+            let local = home.path().join("artifact.json");
+            fs::write(&local, b"{}").expect("artifact");
+
+            assert!(is_reportable_artifact_evidence_path(
+                &local.to_string_lossy()
+            ));
+            assert!(is_reportable_artifact_evidence_path(
+                "runner-artifact://lab/run-1/artifact-1"
+            ));
+            assert!(is_reportable_artifact_evidence_path(
+                "metadata-only:trace.zip"
+            ));
+            assert!(is_reportable_artifact_evidence_path(
+                "artifacts/relative-trace.zip"
+            ));
+            assert!(!is_reportable_artifact_evidence_path(
+                "/srv/remote-only/trace.zip"
+            ));
+            assert!(!is_retrievable_runner_artifact(
+                "runner-artifact://missing-segments"
+            ));
+        });
     }
 
     #[test]

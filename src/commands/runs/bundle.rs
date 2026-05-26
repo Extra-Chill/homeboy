@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use homeboy::core::observation::{
     ArtifactRecord, FindingRecord, ObservationStore, RunRecord, TraceSpanRecord,
 };
+use homeboy::core::runner::is_reportable_artifact_evidence_path;
 use homeboy::core::Error;
 
 use super::common::since_threshold;
@@ -257,7 +258,12 @@ fn build_bundle(
     let mut trace_spans = Vec::new();
     let mut findings = Vec::new();
     for run in &runs {
-        artifacts.extend(store.list_artifacts(&run.id)?);
+        artifacts.extend(
+            store
+                .list_artifacts(&run.id)?
+                .into_iter()
+                .map(portable_bundle_artifact_record),
+        );
         trace_spans.extend(store.list_trace_spans(&run.id)?);
         findings.extend(store.list_findings_for_run(&run.id)?);
     }
@@ -285,6 +291,22 @@ fn build_bundle(
         findings,
         test_failures,
     })
+}
+
+fn portable_bundle_artifact_record(artifact: ArtifactRecord) -> ArtifactRecord {
+    if !matches!(artifact.artifact_type.as_str(), "file" | "directory")
+        || is_reportable_artifact_evidence_path(&artifact.path)
+    {
+        return artifact;
+    }
+
+    let mut portable = artifact;
+    portable.artifact_type = "metadata-only".to_string();
+    portable.path = format!(
+        "metadata-only:{}",
+        portable_artifact_label(&portable.path, &portable.id)
+    );
+    portable
 }
 
 fn write_bundle_dir(path: &Path, bundle: &ObservationBundle) -> homeboy::core::Result<()> {

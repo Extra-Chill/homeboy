@@ -10,6 +10,7 @@ use super::parsing::{
 };
 use super::run::{TraceOverlay, TraceRunWorkflowResult};
 use crate::core::rig::RigStateSnapshot;
+use crate::core::runner::is_reportable_artifact_evidence_path;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -420,7 +421,7 @@ fn from_run_workflow_result(
     let artifacts = result
         .results
         .as_ref()
-        .map(|r| r.artifacts.clone())
+        .map(|r| reportable_trace_artifacts(&r.artifacts))
         .unwrap_or_default();
     TraceCommandOutput::Run(Box::new(TraceRunOutput {
         passed: result.exit_code == 0 && result.status == "pass",
@@ -493,9 +494,10 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
         }
     }
 
-    if !results.artifacts.is_empty() {
+    let artifacts = reportable_trace_artifacts(&results.artifacts);
+    if !artifacts.is_empty() {
         out.push_str("\n## Artifacts\n\n");
-        for artifact in &results.artifacts {
+        for artifact in &artifacts {
             out.push_str(&format!("- **{}:** `{}`\n", artifact.label, artifact.path));
         }
     }
@@ -511,6 +513,14 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
     }
 
     out
+}
+
+fn reportable_trace_artifacts(artifacts: &[TraceArtifact]) -> Vec<TraceArtifact> {
+    artifacts
+        .iter()
+        .filter(|artifact| is_reportable_artifact_evidence_path(&artifact.path))
+        .cloned()
+        .collect()
 }
 
 pub fn push_overlay_markdown(out: &mut String, overlays: &[TraceOverlay]) {
@@ -778,5 +788,37 @@ mod tests {
         assert!(markdown.contains("- Applied relative to: `/tmp/studio`"));
         assert!(markdown.contains("- `apps/studio/out/app.js`"));
         assert!(markdown.contains("| `submit_to_cli` | `ui.submit` | `cli.start` | 42ms | ok |"));
+    }
+
+    #[test]
+    fn test_render_markdown_omits_unproven_remote_artifact_paths() {
+        let results = TraceResults {
+            component_id: "studio".to_string(),
+            scenario_id: "create-site".to_string(),
+            status: TraceStatus::Pass,
+            summary: None,
+            failure: None,
+            rig: None,
+            timeline: Vec::new(),
+            span_definitions: Vec::new(),
+            span_results: Vec::new(),
+            assertions: Vec::new(),
+            temporal_assertions: Vec::new(),
+            artifacts: vec![
+                TraceArtifact {
+                    label: "remote trace".to_string(),
+                    path: "/srv/remote-only/trace.zip".to_string(),
+                },
+                TraceArtifact {
+                    label: "mirrored trace".to_string(),
+                    path: "runner-artifact://lab/run-1/trace.zip".to_string(),
+                },
+            ],
+        };
+
+        let markdown = render_markdown(&results, &[]);
+
+        assert!(!markdown.contains("/srv/remote-only/trace.zip"));
+        assert!(markdown.contains("runner-artifact://lab/run-1/trace.zip"));
     }
 }

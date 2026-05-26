@@ -855,6 +855,11 @@ pub(crate) fn run_github_release(
     let artifact_paths: Vec<String> = state
         .artifacts
         .iter()
+        .filter(|artifact| {
+            std::fs::metadata(&artifact.path)
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false)
+        })
         .map(|artifact| artifact.path.clone())
         .collect();
     let has_artifacts = !artifact_paths.is_empty();

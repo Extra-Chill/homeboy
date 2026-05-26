@@ -26,7 +26,8 @@ pub use connection::{
     RunnerSession, RunnerStatusReport,
 };
 pub use evidence::{
-    download_remote_artifact, is_remote_runner_artifact_path, RemoteArtifactDownload,
+    download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
+    is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,
 };
 pub(crate) use execution::daemon_api_get;
 pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
