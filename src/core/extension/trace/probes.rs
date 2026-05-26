@@ -146,6 +146,13 @@ enum RunningTraceProbeConfig {
 
 impl ActiveTraceProbes {
     pub fn start(configs: &[TraceProbeConfig]) -> Result<Self> {
+        Self::start_with_artifact_dir(configs, None)
+    }
+
+    pub fn start_with_artifact_dir(
+        configs: &[TraceProbeConfig],
+        artifact_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         let started_at = Instant::now();
         let events = Arc::new(Mutex::new(Vec::new()));
         let mut stops = Vec::new();
@@ -155,7 +162,7 @@ impl ActiveTraceProbes {
             validate_probe(config)?;
             let (stop_tx, stop_rx) = mpsc::channel();
             let events_for_thread = Arc::clone(&events);
-            let config = running_probe_config(config);
+            let config = running_probe_config(config, artifact_dir.clone());
             let handle =
                 thread::spawn(move || run_probe(config, started_at, events_for_thread, stop_rx));
             stops.push(stop_tx);
@@ -186,7 +193,10 @@ impl ActiveTraceProbes {
     }
 }
 
-fn running_probe_config(config: &TraceProbeConfig) -> RunningTraceProbeConfig {
+fn running_probe_config(
+    config: &TraceProbeConfig,
+    artifact_dir: Option<PathBuf>,
+) -> RunningTraceProbeConfig {
     match config {
         TraceProbeConfig::LogTail {
             path,
@@ -245,6 +255,7 @@ fn running_probe_config(config: &TraceProbeConfig) -> RunningTraceProbeConfig {
                 .clone()
                 .unwrap_or_else(default_redact_headers),
             listen_port: *listen_port,
+            artifact_dir,
         }),
         TraceProbeConfig::CmdRun { command, args } => RunningTraceProbeConfig::CmdRun {
             command: command.clone(),

@@ -251,11 +251,23 @@ fn run_trace_workflow_with_context(
         Some(acquire_trace_overlay_locks(&args.overlays, run_dir)?)
     };
     let applied_overlays = apply_trace_overlays(&args.overlays, args.keep_overlay)?;
+    let artifact_dir = run_dir.path().join("artifacts");
+    std::fs::create_dir_all(&artifact_dir).map_err(|e| {
+        Error::internal_io(
+            format!(
+                "Failed to create trace artifact dir {}: {}",
+                artifact_dir.display(),
+                e
+            ),
+            Some("trace.artifacts.create".to_string()),
+        )
+    })?;
     let probe_configs = trace_probes_with_fswatch_attachments(
         &args.runner_inputs.probes,
         &args.runner_inputs.attachments,
     );
-    let active_probes = ActiveTraceProbes::start(&probe_configs)?;
+    let active_probes =
+        ActiveTraceProbes::start_with_artifact_dir(&probe_configs, Some(artifact_dir))?;
     let started_at = Instant::now();
     let mut attach_observations =
         observe_trace_attachments(&args.runner_inputs.attachments, "before", started_at);
