@@ -5,7 +5,7 @@
 
 use crate::core::observation::store::{self, ObservationStore, CURRENT_SCHEMA_VERSION};
 use crate::core::observation::{
-    FindingListFilter, NewFindingRecord, NewRunRecord, RunListFilter, RunStatus,
+    FindingListFilter, NewFindingRecord, NewRunRecord, RunListFilter, RunRecord, RunStatus,
 };
 use crate::test_support::with_isolated_home;
 
@@ -212,6 +212,28 @@ fn sample_run(kind: &str, component_id: &str) -> NewRunRecord {
         .build()
 }
 
+fn sample_import_run(id: &str) -> RunRecord {
+    RunRecord {
+        id: id.to_string(),
+        kind: "runner-exec".to_string(),
+        component_id: Some("homeboy".to_string()),
+        started_at: "2026-05-25T00:00:00+00:00".to_string(),
+        finished_at: Some("2026-05-25T00:01:00+00:00".to_string()),
+        status: "pass".to_string(),
+        command: Some("homeboy audit homeboy".to_string()),
+        cwd: Some("/home/chubes/Developer/homeboy".to_string()),
+        homeboy_version: Some("test-version".to_string()),
+        git_sha: Some("abc123".to_string()),
+        rig_id: None,
+        metadata_json: serde_json::json!({
+            "lab": {
+                "runner": { "id": "lab" },
+                "remote_job_id": "job-123"
+            }
+        }),
+    }
+}
+
 #[test]
 fn test_start_run() {
     with_isolated_home(|_home| {
@@ -234,6 +256,40 @@ fn test_start_run() {
             .expect("run exists");
 
         assert_eq!(fetched, started);
+    });
+}
+
+#[test]
+fn import_run_is_idempotent_for_existing_mirrored_run_id() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let first = ObservationStore::open_initialized().expect("first store");
+        let second = ObservationStore::open_initialized().expect("second store");
+        let run = sample_import_run("runner-run-123");
+
+        first.import_run(&run).expect("first import");
+        second.import_run(&run).expect("duplicate import");
+
+        assert_eq!(second.get_run(&run.id).expect("get run"), Some(run));
+    });
+}
+
+#[test]
+fn import_run_rejects_conflicting_existing_record() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = sample_import_run("runner-run-456");
+        let mut conflicting = run.clone();
+        conflicting.status = "fail".to_string();
+
+        store.import_run(&run).expect("first import");
+        let err = store
+            .import_run(&conflicting)
+            .expect_err("conflicting duplicate should fail");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("existing run record conflicts"));
     });
 }
 

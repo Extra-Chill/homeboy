@@ -232,14 +232,12 @@ impl ObservationStore {
 
     pub fn import_run(&self, run: &RunRecord) -> Result<()> {
         validate_required("run.id", &run.id)?;
-        if let Some(existing) = self.get_run(&run.id)? {
-            return ensure_identical("run", &run.id, &existing, run);
-        }
         let metadata_json = serialize_metadata(&run.metadata_json)?;
-        self.connection
+        let inserted = self
+            .connection
             .execute(
                 r#"
-                INSERT INTO runs(
+                INSERT OR IGNORE INTO runs(
                     id,
                     kind,
                     component_id,
@@ -270,6 +268,15 @@ impl ObservationStore {
                 ],
             )
             .map_err(sqlite_error("import run record"))?;
+        if inserted == 0 {
+            let existing = self.get_run(&run.id)?.ok_or_else(|| {
+                Error::internal_unexpected(format!(
+                    "run import for {} was ignored but no existing record was found",
+                    run.id
+                ))
+            })?;
+            ensure_identical("run", &run.id, &existing, run)?;
+        }
         Ok(())
     }
 
