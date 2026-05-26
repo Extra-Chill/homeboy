@@ -254,6 +254,26 @@ pub struct CommandStatusContractScenario {
     /// Expected JSON Pointer fields and values, e.g. `/success: true`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub expected_fields: BTreeMap<String, serde_json::Value>,
+    /// Expected status label for declared status fields, e.g. `planned`,
+    /// `skipped`, `empty`, `failed`, or `completed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_status: Option<String>,
+    /// JSON Pointer fields that must equal `expected_status`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub status_fields: Vec<String>,
+    /// Expected dry-run value for declared dry-run fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_dry_run: Option<bool>,
+    /// JSON Pointer fields that must equal `expected_dry_run`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dry_run_fields: Vec<String>,
+    /// Expected top-level Homeboy envelope success value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_success: Option<bool>,
+    /// This scenario intentionally represents empty/no-op work that should
+    /// succeed rather than report an error.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub empty_success: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -921,6 +941,12 @@ mod tests {
                         "/success".to_string(),
                         serde_json::json!(true),
                     )]),
+                    expected_status: None,
+                    status_fields: Vec::new(),
+                    expected_dry_run: None,
+                    dry_run_fields: Vec::new(),
+                    expected_success: None,
+                    empty_success: false,
                 }],
             },
             ..Default::default()

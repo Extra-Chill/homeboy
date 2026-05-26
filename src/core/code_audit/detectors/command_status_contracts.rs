@@ -66,6 +66,7 @@ pub(in crate::core::code_audit) fn run(
         };
 
         findings.extend(validate_json_envelope(scenario, &json));
+        findings.extend(validate_declared_semantics(scenario, &json));
 
         for (pointer, expected) in &scenario.expected_fields {
             match json.pointer(pointer) {
@@ -98,6 +99,147 @@ pub(in crate::core::code_audit) fn run(
 
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
+}
+
+fn validate_declared_semantics(
+    scenario: &CommandStatusContractScenario,
+    json: &serde_json::Value,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    if let Some(expected_success) = scenario.expected_success {
+        validate_bool_pointer(
+            &mut findings,
+            scenario,
+            json,
+            "/success",
+            expected_success,
+            "success",
+        );
+    }
+
+    if scenario.empty_success {
+        validate_bool_pointer(&mut findings, scenario, json, "/success", true, "success");
+    }
+
+    if let Some(expected_status) = &scenario.expected_status {
+        for pointer in &scenario.status_fields {
+            match json.pointer(pointer) {
+                Some(serde_json::Value::String(actual)) if actual == expected_status => {}
+                Some(serde_json::Value::String(actual)) => findings.push(finding(
+                    &scenario.file,
+                    &scenario.id,
+                    format!(
+                        "expected status {pointer} to be {expected_status:?}, found {actual:?}"
+                    ),
+                    status_suggestion(scenario, expected_status, actual),
+                )),
+                Some(actual) => findings.push(finding(
+                    &scenario.file,
+                    &scenario.id,
+                    format!(
+                        "expected status {pointer} to be string {expected_status:?}, found {}",
+                        json_value_label(actual)
+                    ),
+                    "Expose machine-readable string status fields for declared command scenarios."
+                        .to_string(),
+                )),
+                None => findings.push(finding(
+                    &scenario.file,
+                    &scenario.id,
+                    format!("expected status field {pointer} is missing"),
+                    format!(
+                        "Expose {pointer} in scenario '{}' or remove the stale status contract.",
+                        scenario.id
+                    ),
+                )),
+            }
+        }
+    }
+
+    if let Some(expected_dry_run) = scenario.expected_dry_run {
+        for pointer in &scenario.dry_run_fields {
+            validate_bool_pointer(
+                &mut findings,
+                scenario,
+                json,
+                pointer,
+                expected_dry_run,
+                "dry_run",
+            );
+        }
+    }
+
+    findings
+}
+
+fn validate_bool_pointer(
+    findings: &mut Vec<Finding>,
+    scenario: &CommandStatusContractScenario,
+    json: &serde_json::Value,
+    pointer: &str,
+    expected: bool,
+    label: &str,
+) {
+    match json.pointer(pointer) {
+        Some(serde_json::Value::Bool(actual)) if *actual == expected => {}
+        Some(serde_json::Value::Bool(actual)) => findings.push(finding(
+            &scenario.file,
+            &scenario.id,
+            format!("expected {label} {pointer} to be {expected}, found {actual}"),
+            bool_suggestion(scenario, label, expected),
+        )),
+        Some(actual) => findings.push(finding(
+            &scenario.file,
+            &scenario.id,
+            format!(
+                "expected {label} {pointer} to be boolean {expected}, found {}",
+                json_value_label(actual)
+            ),
+            format!(
+                "Expose machine-readable boolean {label} fields for declared command scenarios."
+            ),
+        )),
+        None => findings.push(finding(
+            &scenario.file,
+            &scenario.id,
+            format!("expected {label} field {pointer} is missing"),
+            format!(
+                "Expose {pointer} in scenario '{}' or remove the stale {label} contract.",
+                scenario.id
+            ),
+        )),
+    }
+}
+
+fn status_suggestion(
+    scenario: &CommandStatusContractScenario,
+    expected_status: &str,
+    actual_status: &str,
+) -> String {
+    if expected_status == "skipped" && matches!(actual_status, "planned" | "completed") {
+        return "Skipped work must report status=skipped, not planned/completed; keep dry-run planning separate from skipped/no-op actions.".to_string();
+    }
+
+    format!(
+        "Update the command implementation or fixture so scenario '{}' reports status={expected_status}.",
+        scenario.id
+    )
+}
+
+fn bool_suggestion(
+    scenario: &CommandStatusContractScenario,
+    label: &str,
+    expected: bool,
+) -> String {
+    if scenario.empty_success && label == "success" && expected {
+        return "Empty/no-op dry-run scenarios declared as successful empty results must return success=true instead of an error envelope.".to_string();
+    }
+
+    format!(
+        "Update the command implementation or fixture so scenario '{}' reports {label}={expected}.",
+        scenario.id
+    )
 }
 
 fn is_validation_error_scenario(scenario: &CommandStatusContractScenario) -> bool {
@@ -359,6 +501,72 @@ mod tests {
         assert!(findings[0].description.contains("/error/code"));
     }
 
+    #[test]
+    fn skipped_dry_run_reported_as_planned_is_flagged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("skipped.json"),
+            r#"{"success":true,"data":{"dry_run":true,"results":[{"status":"planned"}]}}"#,
+        )
+        .expect("fixture");
+        let config = CommandStatusContractConfig {
+            required_commands: Vec::new(),
+            required_output_error_commands: Vec::new(),
+            scenarios: vec![CommandStatusContractScenario {
+                expected_status: Some("skipped".to_string()),
+                status_fields: vec!["/data/results/0/status".to_string()],
+                expected_dry_run: Some(true),
+                dry_run_fields: vec!["/data/dry_run".to_string()],
+                ..scenario(
+                    "deploy-dry-run-skipped",
+                    Some("deploy"),
+                    "skipped.json",
+                    None,
+                    false,
+                    [],
+                )
+            }],
+        };
+
+        let findings = run(dir.path(), &config);
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("/data/results/0/status"));
+        assert!(findings[0].description.contains("planned"));
+        assert!(findings[0].suggestion.contains("not planned/completed"));
+    }
+
+    #[test]
+    fn empty_dry_run_reported_as_error_is_flagged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("empty.json"),
+            r#"{"success":false,"error":{"code":"no_matches"}}"#,
+        )
+        .expect("fixture");
+        let config = CommandStatusContractConfig {
+            required_commands: Vec::new(),
+            required_output_error_commands: Vec::new(),
+            scenarios: vec![CommandStatusContractScenario {
+                empty_success: true,
+                ..scenario(
+                    "refactor-transform-empty-dry-run",
+                    Some("refactor transform"),
+                    "empty.json",
+                    None,
+                    false,
+                    [],
+                )
+            }],
+        };
+
+        let findings = run(dir.path(), &config);
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("/success"));
+        assert!(findings[0].suggestion.contains("successful empty results"));
+    }
+
     fn scenario<const N: usize>(
         id: &str,
         command: Option<&str>,
@@ -377,6 +585,12 @@ mod tests {
                 .into_iter()
                 .map(|(pointer, value)| (pointer.to_string(), value))
                 .collect::<BTreeMap<_, _>>(),
+            expected_status: None,
+            status_fields: Vec::new(),
+            expected_dry_run: None,
+            dry_run_fields: Vec::new(),
+            expected_success: None,
+            empty_success: false,
         }
     }
 }
