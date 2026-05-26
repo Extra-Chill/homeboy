@@ -111,7 +111,6 @@ function recipeForRequest(request, options) {
     `provider=${provider}`,
     `model=${model}`,
     `provider-plugin-slugs=${providerSlugs}`,
-    `session-id=${request.sandbox_session_id}`,
   ];
 
   return {

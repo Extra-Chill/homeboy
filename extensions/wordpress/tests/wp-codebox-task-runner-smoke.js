@@ -119,12 +119,13 @@ try {
   assert.equal(step.args.includes('provider=opencode'), true);
   assert.equal(step.args.includes('model=opencode-go/kimi-k2.6'), true);
   assert.equal(step.args.includes('provider-plugin-slugs=ai-provider-for-opencode'), true);
-  assert.equal(step.args.includes('session-id=homeboy-audit-fixture-session'), true);
+  assert.equal(step.args.some((arg) => arg.startsWith('session-id=')), false);
 
   const taskArg = step.args.find((arg) => arg.startsWith('task='));
   assert.ok(taskArg);
   const task = JSON.parse(taskArg.slice('task='.length));
   assert.equal(task.schema, 'homeboy/wp-codebox-audit-task/v1');
+  assert.equal(task.sandbox_session_id, 'homeboy-audit-fixture-session');
   assert.equal(task.orchestrator.issue_url, 'https://github.com/Extra-Chill/homeboy-extensions/issues/775');
   assert.equal(task.audit_findings[0].id, 'finding-1');
 
