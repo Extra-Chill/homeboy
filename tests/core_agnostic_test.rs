@@ -281,26 +281,30 @@ const BASELINE: &[ViolationKey] = &[
     },
     ViolationKey {
         path: "src/core/defaults.rs",
-        term: "Cargo.toml",
-    },
-    ViolationKey {
-        path: "src/core/defaults.rs",
         term: "cargo",
     },
     ViolationKey {
-        path: "src/core/defaults.rs",
+        path: "src/core/defaults/builtins.rs",
+        term: "Cargo.toml",
+    },
+    ViolationKey {
+        path: "src/core/defaults/builtins.rs",
+        term: "cargo",
+    },
+    ViolationKey {
+        path: "src/core/defaults/builtins.rs",
         term: "composer",
     },
     ViolationKey {
-        path: "src/core/defaults.rs",
+        path: "src/core/defaults/builtins.rs",
         term: "composer.json",
     },
     ViolationKey {
-        path: "src/core/defaults.rs",
+        path: "src/core/defaults/builtins.rs",
         term: "package.json",
     },
     ViolationKey {
-        path: "src/core/defaults.rs",
+        path: "src/core/defaults/builtins.rs",
         term: "style.css",
     },
     ViolationKey {

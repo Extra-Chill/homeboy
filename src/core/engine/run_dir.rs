@@ -191,6 +191,7 @@ mod tests {
 
     #[test]
     fn create_run_dir() {
+        let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
         assert!(run_dir.path().is_dir());
 
@@ -219,6 +220,7 @@ mod tests {
 
     #[test]
     fn test_annotations_dir() {
+        let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
         assert!(run_dir.annotations_dir().is_dir());
         run_dir.cleanup();
@@ -226,6 +228,7 @@ mod tests {
 
     #[test]
     fn test_step_file() {
+        let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
         assert!(run_dir
             .step_file(files::TRACE_RESULTS)
@@ -236,6 +239,7 @@ mod tests {
 
     #[test]
     fn test_legacy_env_vars() {
+        let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
         let env_vars = run_dir.legacy_env_vars();
         assert!(env_vars.iter().any(|(k, _)| k == "HOMEBOY_RUN_DIR"));
@@ -247,6 +251,7 @@ mod tests {
 
     #[test]
     fn test_from_existing() {
+        let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
         let path = run_dir.path().to_path_buf();
         let existing = RunDir::from_existing(path.clone()).expect("existing run dir should load");
@@ -256,6 +261,7 @@ mod tests {
 
     #[test]
     fn test_cleanup() {
+        let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
         let path = run_dir.path().to_path_buf();
         run_dir.cleanup();
@@ -264,6 +270,7 @@ mod tests {
 
     #[test]
     fn read_step_output_missing_returns_none() {
+        let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
         assert!(run_dir.read_step_output(files::LINT_FINDINGS).is_none());
         run_dir.cleanup();
@@ -271,6 +278,7 @@ mod tests {
 
     #[test]
     fn read_step_output_present() {
+        let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
         let path = run_dir.step_file(files::TEST_RESULTS);
         std::fs::write(&path, r#"{"total":10,"passed":10,"failed":0}"#).expect("write test file");
@@ -286,6 +294,7 @@ mod tests {
 
     #[test]
     fn list_outputs() {
+        let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
         std::fs::write(run_dir.step_file(files::LINT_FINDINGS), "[]").unwrap();
         std::fs::write(run_dir.step_file(files::TEST_RESULTS), "{}").unwrap();

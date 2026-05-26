@@ -30,6 +30,7 @@ pub mod metrics;
 pub mod parsing;
 pub mod report;
 pub mod run;
+pub(crate) mod run_metadata;
 pub(crate) mod side_by_side;
 #[cfg(test)]
 pub(crate) mod test_support;
