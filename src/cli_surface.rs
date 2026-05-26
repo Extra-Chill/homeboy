@@ -169,108 +169,472 @@ pub enum CommandOutputFileMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandJsonFamily {
+    Quality,
+    Workspace,
+    Ops,
+    RawOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutputContractKind {
+    JsonEnvelope,
+    LegacyUntaggedWithDiscriminators,
+    LegacyUntaggedWithGoldenFixtures,
+    RawOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandDescriptor {
+    pub response_mode: CommandResponseMode,
+    pub output_file_mode: CommandOutputFileMode,
+    pub json_family: CommandJsonFamily,
+    pub supports_lab_runner: bool,
+    pub lab_runner_unsupported_reason: Option<&'static str>,
+    pub lab_offload_mutation_flag: Option<&'static str>,
+    pub output_contract: CommandOutputContractKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicOutputVariantContract {
+    pub command: &'static str,
+    pub variant: &'static str,
+    pub discriminator_field: Option<&'static str>,
+    pub discriminator_value: Option<&'static str>,
+    pub golden_fixture: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandResponsePlan {
     pub stdout: CommandStdoutMode,
     pub output_file: CommandOutputFileMode,
 }
 
 impl Commands {
+    pub fn descriptor(&self, has_output_file: bool) -> CommandDescriptor {
+        let output_file_mode = if !has_output_file {
+            CommandOutputFileMode::None
+        } else {
+            match self {
+                Commands::Review(_) => CommandOutputFileMode::ReviewStableArtifact,
+                Commands::Trace(args) if args.json_summary => {
+                    CommandOutputFileMode::TraceJsonSummaryArtifact
+                }
+                _ => CommandOutputFileMode::GenericEnvelope,
+            }
+        };
+
+        match self {
+            Commands::Ssh(args) if args.subcommand.is_none() && args.command.is_empty() => {
+                raw_ops_descriptor(CommandRawOutputMode::InteractivePassthrough, output_file_mode)
+            }
+            Commands::Logs(args) if logs::is_interactive(args) => {
+                raw_ops_descriptor(CommandRawOutputMode::InteractivePassthrough, output_file_mode)
+            }
+            Commands::File(args) if file::is_raw_read(args) => {
+                raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
+            }
+            Commands::Docs(args) => workspace_descriptor(
+                if crate::commands::docs::is_json_mode(args) {
+                    CommandResponseMode::Json
+                } else {
+                    CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
+                },
+                output_file_mode,
+                CommandOutputContractKind::JsonEnvelope,
+            ),
+            Commands::Changelog(args) if changelog::is_show_markdown(args) => workspace_descriptor(
+                CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
+                output_file_mode,
+                CommandOutputContractKind::JsonEnvelope,
+            ),
+            Commands::Review(args) => CommandDescriptor {
+                response_mode: markdown_or_json_response(review::is_markdown_mode(args)),
+                output_file_mode,
+                json_family: CommandJsonFamily::Quality,
+                supports_lab_runner: false,
+                lab_runner_unsupported_reason: None,
+                lab_offload_mutation_flag: None,
+                output_contract: CommandOutputContractKind::JsonEnvelope,
+            },
+            Commands::Trace(args) => CommandDescriptor {
+                response_mode: markdown_or_json_response(trace::is_markdown_mode(args)),
+                output_file_mode,
+                json_family: CommandJsonFamily::Quality,
+                supports_lab_runner: true,
+                lab_runner_unsupported_reason: None,
+                lab_offload_mutation_flag: args.keep_overlay.then_some("--keep-overlay"),
+                output_contract: CommandOutputContractKind::JsonEnvelope,
+            },
+            Commands::Runs(args) => workspace_descriptor(
+                if !has_output_file && args.is_markdown_mode() {
+                    CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
+                } else {
+                    CommandResponseMode::Json
+                },
+                output_file_mode,
+                CommandOutputContractKind::LegacyUntaggedWithDiscriminators,
+            ),
+            Commands::Report(args) if report::is_markdown_mode(args) => workspace_descriptor(
+                CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
+                output_file_mode,
+                CommandOutputContractKind::JsonEnvelope,
+            ),
+            Commands::List => CommandDescriptor {
+                response_mode: CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
+                output_file_mode,
+                json_family: CommandJsonFamily::RawOnly,
+                supports_lab_runner: false,
+                lab_runner_unsupported_reason: None,
+                lab_offload_mutation_flag: None,
+                output_contract: CommandOutputContractKind::RawOnly,
+            },
+            Commands::Test(args) => quality_json_descriptor(
+                output_file_mode,
+                true,
+                args.write.then_some("--write"),
+                CommandOutputContractKind::JsonEnvelope,
+            ),
+            Commands::Bench(args) => quality_json_descriptor(
+                output_file_mode,
+                args.is_run_command(),
+                args.lab_offload_writes_local_state()
+                    .then_some("--baseline/--ratchet"),
+                CommandOutputContractKind::LegacyUntaggedWithGoldenFixtures,
+            ),
+            Commands::Lint(args) => quality_json_descriptor(
+                output_file_mode,
+                true,
+                args.fix.then_some("--fix"),
+                CommandOutputContractKind::JsonEnvelope,
+            ),
+            Commands::Audit(_) | Commands::Observe(_) => quality_json_descriptor(
+                output_file_mode,
+                matches!(self, Commands::Audit(_)),
+                None,
+                CommandOutputContractKind::JsonEnvelope,
+            ),
+            Commands::Project(_)
+            | Commands::Component(_)
+            | Commands::Config(_)
+            | Commands::Extension(_)
+            | Commands::Changelog(_)
+            | Commands::Version(_)
+            | Commands::Build(_)
+            | Commands::Changes(_)
+            | Commands::Release(_)
+            | Commands::Report(_)
+            | Commands::Refactor(_)
+            | Commands::Runner(_)
+            | Commands::Stack(_)
+            | Commands::Undo(_) => CommandDescriptor {
+                response_mode: CommandResponseMode::Json,
+                output_file_mode,
+                json_family: CommandJsonFamily::Workspace,
+                supports_lab_runner: false,
+                lab_runner_unsupported_reason: None,
+                lab_offload_mutation_flag: None,
+                output_contract: CommandOutputContractKind::JsonEnvelope,
+            },
+            Commands::Rig(args) => CommandDescriptor {
+                response_mode: CommandResponseMode::Json,
+                output_file_mode,
+                json_family: CommandJsonFamily::Workspace,
+                supports_lab_runner: false,
+                lab_runner_unsupported_reason: args.is_hot_resource_command().then_some(
+                    "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.",
+                ),
+                lab_offload_mutation_flag: None,
+                output_contract: CommandOutputContractKind::LegacyUntaggedWithDiscriminators,
+            },
+            Commands::Status(_)
+            | Commands::Ci(_)
+            | Commands::Server(_)
+            | Commands::Db(_)
+            | Commands::Deps(_)
+            | Commands::Doctor(_)
+            | Commands::File(_)
+            | Commands::Logs(_)
+            | Commands::Deploy(_)
+            | Commands::Daemon(_)
+            | Commands::Git(_)
+            | Commands::Issues(_)
+            | Commands::SelfCmd(_)
+            | Commands::Auth(_)
+            | Commands::Api(_)
+            | Commands::Http(_)
+            | Commands::Upgrade(_)
+            | Commands::Ssh(_) => ops_json_descriptor(output_file_mode, None),
+            Commands::Fleet(args) => ops_json_descriptor(
+                output_file_mode,
+                args.is_hot_resource_command().then_some(
+                    "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.",
+                ),
+            ),
+            Commands::Triage(_) => ops_json_descriptor(output_file_mode, None),
+        }
+    }
+
     pub fn response_plan(&self, has_output_file: bool) -> CommandResponsePlan {
-        let mode = self.response_mode(has_output_file);
+        let descriptor = self.descriptor(has_output_file);
 
         CommandResponsePlan {
-            stdout: match mode {
+            stdout: match descriptor.response_mode {
                 CommandResponseMode::Json => CommandStdoutMode::JsonEnvelope,
                 CommandResponseMode::Raw(raw_mode) => CommandStdoutMode::Raw(raw_mode),
             },
-            output_file: self.output_file_mode(has_output_file),
+            output_file: descriptor.output_file_mode,
         }
     }
 
     pub fn supports_lab_runner(&self) -> bool {
-        match self {
-            Commands::Audit(_) => true,
-            Commands::Bench(args) if args.is_run_command() => true,
-            Commands::Lint(_) => true,
-            Commands::Test(_) => true,
-            Commands::Trace(_) => true,
-            _ => false,
-        }
+        self.descriptor(false).supports_lab_runner
     }
 
     pub fn lab_runner_unsupported_reason(&self) -> Option<&'static str> {
-        match self {
-            Commands::Rig(args) if args.is_hot_resource_command() => Some(
-                "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.",
-            ),
-            Commands::Fleet(args) if args.is_hot_resource_command() => Some(
-                "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.",
-            ),
-            _ => None,
-        }
+        self.descriptor(false).lab_runner_unsupported_reason
     }
 
     pub fn lab_offload_mutation_flag(&self) -> Option<&'static str> {
-        match self {
-            Commands::Bench(args) if args.lab_offload_writes_local_state() => {
-                Some("--baseline/--ratchet")
-            }
-            Commands::Lint(args) if args.fix => Some("--fix"),
-            Commands::Test(args) if args.write => Some("--write"),
-            Commands::Trace(args) if args.keep_overlay => Some("--keep-overlay"),
-            _ => None,
-        }
+        self.descriptor(false).lab_offload_mutation_flag
     }
 
     pub fn response_mode(&self, has_output_file: bool) -> CommandResponseMode {
-        match self {
-            Commands::Ssh(args) if args.subcommand.is_none() && args.command.is_empty() => {
-                CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough)
-            }
-            Commands::Logs(args) if logs::is_interactive(args) => {
-                CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough)
-            }
-            Commands::File(args) if file::is_raw_read(args) => {
-                CommandResponseMode::Raw(CommandRawOutputMode::PlainText)
-            }
-            Commands::Docs(args) if crate::commands::docs::is_json_mode(args) => {
-                CommandResponseMode::Json
-            }
-            Commands::Docs(_) => CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
-            Commands::Changelog(args) if changelog::is_show_markdown(args) => {
-                CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
-            }
-            Commands::Review(args) if review::is_markdown_mode(args) => {
-                CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
-            }
-            Commands::Trace(args) if trace::is_markdown_mode(args) => {
-                CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
-            }
-            Commands::Runs(args) if !has_output_file && args.is_markdown_mode() => {
-                CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
-            }
-            Commands::Report(args) if report::is_markdown_mode(args) => {
-                CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
-            }
-            Commands::List => CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
-            _ => CommandResponseMode::Json,
-        }
+        self.descriptor(has_output_file).response_mode
     }
 
     pub fn output_file_mode(&self, has_output_file: bool) -> CommandOutputFileMode {
-        if !has_output_file {
-            return CommandOutputFileMode::None;
-        }
-
-        match self {
-            Commands::Review(_) => CommandOutputFileMode::ReviewStableArtifact,
-            Commands::Trace(args) if args.json_summary => {
-                CommandOutputFileMode::TraceJsonSummaryArtifact
-            }
-            _ => CommandOutputFileMode::GenericEnvelope,
-        }
+        self.descriptor(has_output_file).output_file_mode
     }
 }
+
+fn raw_ops_descriptor(
+    raw_mode: CommandRawOutputMode,
+    output_file_mode: CommandOutputFileMode,
+) -> CommandDescriptor {
+    CommandDescriptor {
+        response_mode: CommandResponseMode::Raw(raw_mode),
+        output_file_mode,
+        json_family: CommandJsonFamily::Ops,
+        supports_lab_runner: false,
+        lab_runner_unsupported_reason: None,
+        lab_offload_mutation_flag: None,
+        output_contract: CommandOutputContractKind::JsonEnvelope,
+    }
+}
+
+fn workspace_descriptor(
+    response_mode: CommandResponseMode,
+    output_file_mode: CommandOutputFileMode,
+    output_contract: CommandOutputContractKind,
+) -> CommandDescriptor {
+    CommandDescriptor {
+        response_mode,
+        output_file_mode,
+        json_family: CommandJsonFamily::Workspace,
+        supports_lab_runner: false,
+        lab_runner_unsupported_reason: None,
+        lab_offload_mutation_flag: None,
+        output_contract,
+    }
+}
+
+fn markdown_or_json_response(markdown: bool) -> CommandResponseMode {
+    if markdown {
+        CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
+    } else {
+        CommandResponseMode::Json
+    }
+}
+
+fn quality_json_descriptor(
+    output_file_mode: CommandOutputFileMode,
+    supports_lab_runner: bool,
+    lab_offload_mutation_flag: Option<&'static str>,
+    output_contract: CommandOutputContractKind,
+) -> CommandDescriptor {
+    CommandDescriptor {
+        response_mode: CommandResponseMode::Json,
+        output_file_mode,
+        json_family: CommandJsonFamily::Quality,
+        supports_lab_runner,
+        lab_runner_unsupported_reason: None,
+        lab_offload_mutation_flag,
+        output_contract,
+    }
+}
+
+fn ops_json_descriptor(
+    output_file_mode: CommandOutputFileMode,
+    lab_runner_unsupported_reason: Option<&'static str>,
+) -> CommandDescriptor {
+    CommandDescriptor {
+        response_mode: CommandResponseMode::Json,
+        output_file_mode,
+        json_family: CommandJsonFamily::Ops,
+        supports_lab_runner: false,
+        lab_runner_unsupported_reason,
+        lab_offload_mutation_flag: None,
+        output_contract: CommandOutputContractKind::JsonEnvelope,
+    }
+}
+
+pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
+    PublicOutputVariantContract {
+        command: "bench",
+        variant: "single",
+        discriminator_field: None,
+        discriminator_value: None,
+        golden_fixture: Some("bench_contract.json"),
+    },
+    PublicOutputVariantContract {
+        command: "bench",
+        variant: "comparison",
+        discriminator_field: Some("comparison"),
+        discriminator_value: Some("cross_rig"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "bench",
+        variant: "comparison_summary",
+        discriminator_field: Some("comparison+summary_only"),
+        discriminator_value: Some("cross_rig+true"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "bench",
+        variant: "list",
+        discriminator_field: None,
+        discriminator_value: None,
+        golden_fixture: Some("bench_contract.json"),
+    },
+    PublicOutputVariantContract {
+        command: "runs",
+        variant: "list",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("runs.list"),
+        golden_fixture: Some("runs_contract.json"),
+    },
+    PublicOutputVariantContract {
+        command: "runs",
+        variant: "show",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("runs.show"),
+        golden_fixture: Some("runs_contract.json"),
+    },
+    PublicOutputVariantContract {
+        command: "runs",
+        variant: "artifacts",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("runs.artifacts"),
+        golden_fixture: Some("runs_contract.json"),
+    },
+    PublicOutputVariantContract {
+        command: "runs",
+        variant: "query",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("runs.query"),
+        golden_fixture: Some("runs_contract.json"),
+    },
+    PublicOutputVariantContract {
+        command: "runs",
+        variant: "drift",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("runs.drift"),
+        golden_fixture: Some("runs_contract.json"),
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "list",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.list"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "show",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.show"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "up",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.up"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "check",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.check"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "down",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.down"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "repair",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.repair"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "sync",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.sync"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "status",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.status"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "install",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.install"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "update",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.update"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "sources_list",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.sources.list"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "sources_remove",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.sources.remove"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
+        variant: "app",
+        discriminator_field: Some("command"),
+        discriminator_value: Some("rig.app.*"),
+        golden_fixture: None,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSurface {
@@ -490,6 +854,58 @@ mod tests {
             Commands::List.response_mode(false),
             CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
         );
+    }
+
+    #[test]
+    fn test_command_descriptor_drives_behavioral_routing() {
+        let bench = parsed_command(&["homeboy", "bench"]);
+        let bench_descriptor = bench.descriptor(false);
+        assert_eq!(bench_descriptor.json_family, CommandJsonFamily::Quality);
+        assert!(bench_descriptor.supports_lab_runner);
+        assert_eq!(
+            bench_descriptor.output_contract,
+            CommandOutputContractKind::LegacyUntaggedWithGoldenFixtures
+        );
+
+        let runs = parsed_command(&["homeboy", "runs", "list"]);
+        let runs_descriptor = runs.descriptor(false);
+        assert_eq!(runs_descriptor.json_family, CommandJsonFamily::Workspace);
+        assert_eq!(runs_descriptor.response_mode, CommandResponseMode::Json);
+        assert_eq!(
+            runs_descriptor.output_contract,
+            CommandOutputContractKind::LegacyUntaggedWithDiscriminators
+        );
+
+        let list_descriptor = Commands::List.descriptor(false);
+        assert_eq!(list_descriptor.json_family, CommandJsonFamily::RawOnly);
+        assert_eq!(
+            list_descriptor.response_mode,
+            CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
+        );
+    }
+
+    #[test]
+    fn public_variant_contracts_have_discriminators_or_fixtures() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixtures = root.join("tests/fixtures/golden_json_contracts");
+
+        for contract in PUBLIC_OUTPUT_VARIANT_CONTRACTS {
+            assert!(
+                contract.discriminator_field.is_some() || contract.golden_fixture.is_some(),
+                "{}.{} needs a discriminator or golden fixture",
+                contract.command,
+                contract.variant
+            );
+
+            if let Some(fixture) = contract.golden_fixture {
+                assert!(
+                    fixtures.join(fixture).exists(),
+                    "{}.{} references missing fixture {fixture}",
+                    contract.command,
+                    contract.variant
+                );
+            }
+        }
     }
 
     #[test]

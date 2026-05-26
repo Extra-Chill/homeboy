@@ -1,0 +1,29 @@
+{
+  "scenarios": [
+    {
+      "payload": {
+        "data": {
+          "component": "homeboy",
+          "exit_code": 0,
+          "iterations": 3,
+          "passed": true,
+          "status": "passed"
+        },
+        "success": true
+      },
+      "scenario": "bench single legacy"
+    },
+    {
+      "payload": {
+        "data": {
+          "component": "homeboy",
+          "component_id": "homeboy",
+          "count": 0,
+          "scenarios": []
+        },
+        "success": true
+      },
+      "scenario": "bench list legacy"
+    }
+  ]
+}
