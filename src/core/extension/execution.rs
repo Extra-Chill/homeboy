@@ -6,21 +6,25 @@ use crate::core::engine::{template, validation};
 use crate::core::error::{Error, Result};
 use crate::core::project::{self, Project};
 use crate::core::rig::toolchain;
-use crate::core::server::http::ApiClient;
 use crate::core::server::{
     execute_local_command_in_dir, execute_local_command_interactive,
     execute_local_command_passthrough, execute_local_command_stderr_passthrough, CommandOutput,
 };
-use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+mod action;
+mod readiness;
+
 use super::exec_context;
 use super::load_extension;
-use super::manifest::{ActionConfig, ActionType, ExtensionManifest, HttpMethod, RuntimeConfig};
+use super::manifest::{ExtensionManifest, RuntimeConfig};
 use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
 use super::scope::ExtensionScope;
+
+pub(crate) use action::execute_action;
+pub use readiness::{extension_ready_status, is_extension_compatible, ExtensionReadyStatus};
 
 /// Result of executing a extension.
 pub struct ExtensionRunResult {
@@ -148,137 +152,6 @@ pub fn run_action(
     data: Option<&str>,
 ) -> Result<serde_json::Value> {
     execute_action(extension_id, action_id, project_id, data, None)
-}
-
-pub(crate) fn execute_action(
-    extension_id: &str,
-    action_id: &str,
-    project_id: Option<&str>,
-    data: Option<&str>,
-    payload: Option<&serde_json::Value>,
-) -> Result<serde_json::Value> {
-    let extension = load_extension(extension_id)?;
-
-    if extension.actions.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "extension_id",
-            format!("Extension '{}' has no actions defined", extension_id),
-            Some(extension_id.to_string()),
-            None,
-        ));
-    }
-
-    let action = extension
-        .actions
-        .iter()
-        .find(|a| a.id == action_id)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "action_id",
-                format!(
-                    "Action '{}' not found in extension '{}'",
-                    action_id, extension_id
-                ),
-                Some(action_id.to_string()),
-                None,
-            )
-        })?;
-
-    let selected: Vec<serde_json::Value> = if let Some(data_str) = data {
-        serde_json::from_str(data_str).map_err(|e| {
-            Error::internal_json(e.to_string(), Some("parse action data".to_string()))
-        })?
-    } else {
-        Vec::new()
-    };
-
-    match action.action_type {
-        ActionType::Api => {
-            let pid = validation::require(
-                project_id,
-                "project",
-                "--project is required for API actions",
-            )?;
-
-            let project = project::load(pid)?;
-            let client = ApiClient::new(pid, &project.api)?;
-
-            if action.requires_auth.unwrap_or(false) && !client.is_authenticated() {
-                return Err(Error::validation_invalid_argument(
-                    "auth",
-                    "Not authenticated",
-                    None,
-                    Some(vec!["Run 'homeboy auth login --project <id>' first.".to_string()]),
-                ));
-            }
-
-            let endpoint = validation::require(
-                action.endpoint.as_ref(),
-                "endpoint",
-                "API action missing 'endpoint'",
-            )?;
-
-            let method = action.method.as_ref().unwrap_or(&HttpMethod::Post);
-            let project = project::load(pid)?;
-            let settings = ExtensionScope::effective_settings(extension_id, Some(&project), None)?;
-            let payload = interpolate_action_payload(action, &selected, &settings, payload)?;
-
-            match method {
-                HttpMethod::Get => client.get(endpoint),
-                HttpMethod::Post => client.post(endpoint, &payload),
-                HttpMethod::Put => client.put(endpoint, &payload),
-                HttpMethod::Patch => client.patch(endpoint, &payload),
-                HttpMethod::Delete => client.delete(endpoint),
-            }
-        }
-        ActionType::Builtin => Err(Error::validation_invalid_argument(
-            "action_id",
-            format!("Action '{}' is a builtin action. Builtin actions run in the Desktop app, not the CLI.", action_id),
-            Some(action_id.to_string()),
-            None,
-        )),
-        ActionType::Command => {
-            let command_template = validation::require(
-                action.command.as_ref(),
-                "command",
-                "Command action missing 'command'",
-            )?;
-            let project = project_id.and_then(|pid| project::load(pid).ok());
-            let component = None;
-            let settings = ExtensionScope::effective_settings(extension_id, project.as_ref(), component)?;
-            let payload = interpolate_action_payload(action, &selected, &settings, payload)?;
-            let extension_path = extension.extension_path.as_deref().unwrap_or(".");
-            let vars = vec![("extension_path", extension_path)];
-
-            let project_base_path = project_id
-                .and_then(|pid| project::load(pid).ok())
-                .and_then(|proj| proj.base_path.clone());
-
-            let working_dir =
-                crate::core::engine::text::json_path_str(&payload, &["release", "local_path"]).unwrap_or(extension_path);
-
-            let execution = execute_extension_command(
-                command_template,
-                &vars,
-                Some(working_dir),
-                &build_action_env(
-                    extension_id,
-                    project_id,
-                    &payload,
-                    Some(extension_path),
-                    project_base_path.as_deref(),
-                ),
-                ExtensionExecutionMode::Captured,
-            )?;
-            Ok(serde_json::json!({
-                "stdout": execution.output.stdout,
-                "stderr": execution.output.stderr,
-                "exitCode": execution.exit_code,
-                "success": execution.success,
-                "payload": payload
-            }))
-        }
-    }
 }
 
 fn extension_runtime(extension: &ExtensionManifest) -> Result<&RuntimeConfig> {
@@ -691,7 +564,7 @@ fn build_runtime_env(
     env
 }
 
-fn build_action_env(
+pub(super) fn build_action_env(
     extension_id: &str,
     project_id: Option<&str>,
     payload: &serde_json::Value,
@@ -711,7 +584,7 @@ fn build_action_env(
     )
 }
 
-fn execute_extension_command(
+pub(super) fn execute_extension_command(
     command_template: &str,
     vars: &[(&str, &str)],
     working_dir: Option<&str>,
@@ -902,185 +775,6 @@ fn build_exec_env(
     }
 
     env
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExtensionReadyStatus {
-    pub ready: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-pub fn extension_ready_status(extension: &ExtensionManifest) -> ExtensionReadyStatus {
-    let Some(runtime) = extension.runtime() else {
-        return ExtensionReadyStatus {
-            ready: true,
-            reason: None,
-            detail: None,
-        };
-    };
-
-    let Some(ready_check) = runtime.ready_check.as_ref() else {
-        return ExtensionReadyStatus {
-            ready: true,
-            reason: None,
-            detail: None,
-        };
-    };
-
-    let Some(extension_path) = extension.extension_path.as_ref() else {
-        return ExtensionReadyStatus {
-            ready: false,
-            reason: Some("missing_extension_path".to_string()),
-            detail: Some("ready_check configured but extension_path is missing".to_string()),
-        };
-    };
-
-    let entrypoint = runtime.entrypoint.clone().unwrap_or_default();
-    let vars: Vec<(&str, &str)> = vec![
-        ("extension_path", extension_path.as_str()),
-        ("entrypoint", entrypoint.as_str()),
-    ];
-    let command = template::render(ready_check, &vars);
-    let output = execute_local_command_in_dir(&command, Some(extension_path), None);
-
-    if output.success {
-        return ExtensionReadyStatus {
-            ready: true,
-            reason: None,
-            detail: None,
-        };
-    }
-
-    let detail_output = if output.stderr.trim().is_empty() {
-        output.stdout
-    } else {
-        output.stderr
-    };
-    let detail = detail_output.trim();
-    let detail = if detail.is_empty() {
-        format!(
-            "ready_check '{}' failed with exit code {}",
-            command, output.exit_code
-        )
-    } else {
-        format!(
-            "ready_check '{}' failed with exit code {}: {}",
-            command, output.exit_code, detail
-        )
-    };
-
-    ExtensionReadyStatus {
-        ready: false,
-        reason: Some("ready_check_failed".to_string()),
-        detail: Some(detail),
-    }
-}
-
-/// Check if a extension is compatible with a project.
-pub fn is_extension_compatible(extension: &ExtensionManifest, project: Option<&Project>) -> bool {
-    let Some(ref requires) = extension.requires else {
-        return true;
-    };
-
-    // Required extensions must be installed globally
-    for required_extension in &requires.extensions {
-        if load_extension(required_extension).is_err() {
-            return false;
-        }
-    }
-
-    // Required components must be linked to the project (if project context exists)
-    if let Some(project) = project {
-        for component in &requires.components {
-            if !crate::core::project::has_component(project, component) {
-                return false;
-            }
-        }
-    }
-
-    true
-}
-
-fn interpolate_action_payload(
-    action: &ActionConfig,
-    selected: &[serde_json::Value],
-    settings: &HashMap<String, serde_json::Value>,
-    payload: Option<&serde_json::Value>,
-) -> Result<serde_json::Value> {
-    let payload_template = match &action.payload {
-        Some(p) => p,
-        None => {
-            if let Some(payload) = payload {
-                return Ok(payload.clone());
-            }
-            return Ok(serde_json::Value::Object(serde_json::Map::new()));
-        }
-    };
-
-    let mut result = serde_json::Map::new();
-    for (key, value) in payload_template {
-        let interpolated = interpolate_payload_value(value, selected, settings, payload)?;
-        result.insert(key.clone(), interpolated);
-    }
-
-    Ok(serde_json::Value::Object(result))
-}
-
-fn interpolate_payload_value(
-    value: &serde_json::Value,
-    selected: &[serde_json::Value],
-    settings: &HashMap<String, serde_json::Value>,
-    payload: Option<&serde_json::Value>,
-) -> Result<serde_json::Value> {
-    match value {
-        serde_json::Value::String(template) => {
-            if template == "{{selected}}" {
-                Ok(serde_json::Value::Array(selected.to_vec()))
-            } else if template.starts_with("{{settings.") && template.ends_with("}}") {
-                let key = &template[11..template.len() - 2];
-                Ok(settings
-                    .get(key)
-                    .cloned()
-                    .unwrap_or(serde_json::Value::String(String::new())))
-            } else if template.starts_with("{{payload.") && template.ends_with("}}") {
-                let key = &template[10..template.len() - 2];
-                Ok(payload
-                    .and_then(|payload| payload.get(key))
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null))
-            } else if template.starts_with("{{release.") && template.ends_with("}}") {
-                let key = &template[10..template.len() - 2];
-                Ok(payload
-                    .and_then(|p| p.get("release"))
-                    .and_then(|r| r.get(key))
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null))
-            } else {
-                Ok(serde_json::Value::String(template.clone()))
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            let interpolated: Result<Vec<serde_json::Value>> = arr
-                .iter()
-                .map(|v| interpolate_payload_value(v, selected, settings, payload))
-                .collect();
-            Ok(serde_json::Value::Array(interpolated?))
-        }
-        serde_json::Value::Object(obj) => {
-            let mut result = serde_json::Map::new();
-            for (k, v) in obj {
-                result.insert(
-                    k.clone(),
-                    interpolate_payload_value(v, selected, settings, payload)?,
-                );
-            }
-            Ok(serde_json::Value::Object(result))
-        }
-        _ => Ok(value.clone()),
-    }
 }
 
 #[cfg(test)]
