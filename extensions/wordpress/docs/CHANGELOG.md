@@ -2,6 +2,17 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.0] - 2026-05-26
+
+### Added
+- route audit fanout through refactor source
+
+### Changed
+- Run fanout tasks through WP Codebox recipes
+
+### Fixed
+- accept generic refactor source results
+
 ## [2.101.1] - 2026-05-26
 
 ### Changed
