@@ -161,7 +161,7 @@ enum RunnerCommand {
 
         /// Required extension ID to resolve on the runner. Repeat for multiple extensions.
         #[arg(long = "extension")]
-        extensions: Vec<String>,
+        required_extensions: Vec<String>,
     },
     /// Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
     Connect {
@@ -351,10 +351,13 @@ pub fn run(
         RunnerCommand::Doctor {
             runner_id,
             path,
-            extensions,
+            required_extensions,
         } => map_doctor(doctor::run_with_options(
             &runner_id,
-            doctor::RunnerDoctorOptions { path, extensions },
+            doctor::RunnerDoctorOptions {
+                path,
+                extensions: required_extensions,
+            },
         )),
         RunnerCommand::Connect { id } => map_registry(connect(&id)),
         RunnerCommand::Status { id } => map_registry(status(&id)),
