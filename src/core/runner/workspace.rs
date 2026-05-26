@@ -579,8 +579,11 @@ mod tests {
             let source = tempfile::tempdir().expect("source tempdir");
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
             fs::create_dir_all(source.path().join("src")).expect("src dir");
+            fs::create_dir_all(source.path().join(".git")).expect("git dir");
             fs::create_dir_all(source.path().join("target/debug")).expect("target dir");
             fs::write(source.path().join("src/main.rs"), "fn main() {}\n").expect("source file");
+            fs::write(source.path().join(".git/HEAD"), "ref: refs/heads/main\n")
+                .expect("git metadata");
             fs::write(source.path().join("src/._main.rs"), "appledouble").expect("sidecar file");
             fs::write(source.path().join(".env.local"), "SECRET=1\n").expect("secret file");
             fs::write(source.path().join("target/debug/homeboy"), "binary").expect("build file");
@@ -607,6 +610,7 @@ mod tests {
             assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
             assert_eq!(output.files, 1);
             assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
+            assert!(!Path::new(&output.remote_path).join(".git").exists());
             assert!(!Path::new(&output.remote_path)
                 .join("src/._main.rs")
                 .exists());
