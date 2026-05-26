@@ -11,7 +11,10 @@ Commands:
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
+import tempfile
 
 
 # ============================================================================
@@ -658,6 +661,108 @@ def extract_shared(data):
 # Command Dispatch
 # ============================================================================
 
+def split_setting(value):
+    if not value:
+        return []
+    parts = []
+    for chunk in str(value).replace(os.pathsep, ',').split(','):
+        chunk = chunk.strip()
+        if chunk:
+            parts.append(chunk)
+    return parts
+
+
+def refactor_source(data):
+    """Handle Homeboy's generic extension refactor source command."""
+    if data.get('source') != 'audit':
+        return {'handled': False}
+
+    settings = data.get('settings') or {}
+    output_dir = settings.get('wp_codebox_output_dir') or tempfile.mkdtemp(prefix='homeboy-wp-codebox-audit-')
+    os.makedirs(output_dir, exist_ok=True)
+
+    audit_report_path = os.path.join(output_dir, 'audit-report.json')
+    plan_path = os.path.join(output_dir, 'fanout-plan.json')
+    runs_path = os.path.join(output_dir, 'fanout-run.json')
+    with open(audit_report_path, 'w') as f:
+        json.dump(data.get('audit_result') or {}, f, indent=2)
+        f.write('\n')
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    fanout_script = os.path.join(script_dir, 'agent', 'homeboy-audit-wp-codebox-fanout.cjs')
+    args = [
+        settings.get('node_bin') or 'node',
+        fanout_script,
+        '--audit-report', audit_report_path,
+        '--output', plan_path,
+    ]
+
+    option_map = {
+        'wp_codebox_issue_url': '--issue-url',
+        'wp_codebox_provider': '--provider',
+        'wp_codebox_model': '--model',
+        'wp_codebox_base': '--base',
+        'wp_codebox_branch_prefix': '--branch-prefix',
+    }
+    for setting_key, flag in option_map.items():
+        if settings.get(setting_key):
+            args.extend([flag, settings[setting_key]])
+
+    for plugin_path in split_setting(settings.get('wp_codebox_provider_plugin_paths')):
+        args.extend(['--provider-plugin-path', plugin_path])
+    for secret_env in split_setting(settings.get('wp_codebox_secret_env')):
+        args.extend(['--secret-env', secret_env])
+
+    if data.get('write'):
+        args.append('--execute')
+        args.extend(['--runs-output', runs_path])
+        if settings.get('wp_codebox_command'):
+            args.extend(['--wp-codebox-command', settings['wp_codebox_command']])
+        for arg in shlex.split(settings.get('wp_codebox_args') or ''):
+            args.extend(['--wp-codebox-arg', arg])
+
+    result = subprocess.run(args, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        return {
+            'handled': True,
+            'detected_findings': len((data.get('audit_result') or {}).get('findings') or []),
+            'changed_files': [],
+            'fix_results': [],
+            'warnings': [
+                'WP Codebox audit fan-out failed',
+                result.stderr.strip() or result.stdout.strip(),
+            ],
+        }
+
+    with open(plan_path, 'r') as f:
+        plan = json.load(f)
+
+    fix_results = []
+    for request in plan.get('task_requests') or []:
+        findings = request.get('audit_findings') or []
+        first_finding = findings[0] if findings else {}
+        action = 'executed' if data.get('write') else 'planned'
+        fix_results.append({
+            'file': first_finding.get('file') or request.get('group_key') or 'audit',
+            'rule': 'wp_codebox.audit_fanout',
+            'action': f"{action}:{request.get('group_key')}",
+            'primitive': 'extension_refactor_source',
+        })
+
+    warnings = [
+        f"WP Codebox audit fan-out plan: {plan_path}",
+    ]
+    if data.get('write'):
+        warnings.append(f"WP Codebox audit fan-out run: {runs_path}")
+
+    return {
+        'handled': True,
+        'detected_findings': (plan.get('audit') or {}).get('finding_count'),
+        'changed_files': [],
+        'fix_results': fix_results,
+        'warnings': warnings,
+    }
+
 def main():
     data = json.load(sys.stdin)
     command = data.get('command', '')
@@ -671,6 +776,10 @@ def main():
 
     elif command == 'extract_shared':
         result = extract_shared(data)
+        print(json.dumps(result))
+
+    elif command == 'refactor_source':
+        result = refactor_source(data)
         print(json.dumps(result))
 
     else:

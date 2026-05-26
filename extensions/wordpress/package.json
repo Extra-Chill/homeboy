@@ -25,7 +25,8 @@
     "test:wp-codebox-apply-adapter": "node tests/wp-codebox-apply-adapter-smoke.js",
     "test:audit-wp-codebox-fanout": "node tests/audit-wp-codebox-fanout-smoke.js",
     "test:audit-wp-codebox-execute": "node tests/audit-wp-codebox-fanout-smoke.js",
-    "test:wp-codebox-task-runner": "node tests/wp-codebox-task-runner-smoke.js"
+    "test:wp-codebox-task-runner": "node tests/wp-codebox-task-runner-smoke.js",
+    "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js"
   },
   "devDependencies": {
     "@wp-playground/cli": "^3.1.29",

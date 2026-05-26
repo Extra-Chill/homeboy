@@ -239,6 +239,49 @@ function createApplyBackMetadata(taskRequest, artifactEntry, options) {
   };
 }
 
+function createIssueReport(taskRequest, artifactEntry, options) {
+  const bundle = artifactEntry.bundle_path ? loadWpCodeboxArtifactBundle(artifactEntry.bundle_path) : null;
+  const issueUrl = options.issue_url || taskRequest.orchestrator.issue_url || '';
+  const disposition = artifactEntry.disposition || (artifactEntry.false_positive ? 'false_positive' : 'rejected_artifact');
+  const reason = artifactEntry.reason || artifactEntry.false_positive_reason || artifactEntry.rejection_reason || '';
+  const title = artifactEntry.issue_title || (
+    disposition === 'false_positive'
+      ? `Review Homeboy audit false positive for ${taskRequest.group_key}`
+      : `Review rejected WP Codebox artifact for ${taskRequest.group_key}`
+  );
+  const body = artifactEntry.issue_body || [
+    issueUrl ? `Source tracker: ${issueUrl}` : '',
+    '',
+    `Disposition: ${disposition}`,
+    reason ? `Reason: ${reason}` : '',
+    '',
+    'Findings:',
+    ...taskRequest.audit_findings.map((finding) => `- ${finding.id}: ${finding.kind} in ${finding.file}${finding.line ? `:${finding.line}` : ''}`),
+    bundle ? '' : '',
+    bundle ? `WP Codebox artifact: ${bundle.id}` : '',
+  ].filter(Boolean).join('\n');
+
+  return {
+    schema: 'homeboy/audit-wp-codebox-issue-report/v1',
+    sandbox_session_id: taskRequest.sandbox_session_id,
+    group_key: taskRequest.group_key,
+    disposition,
+    reason,
+    finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
+    artifact: bundle ? {
+      id: bundle.id,
+      bundle_path: bundle.directory,
+      review: bundle.review,
+      changed_files: bundle.changed_files,
+    } : null,
+    issue: {
+      title,
+      body,
+      labels: artifactEntry.labels || ['homeboy-audit', 'wp-codebox', disposition],
+    },
+  };
+}
+
 function createAuditWpCodeboxFanoutPlan(input) {
   const report = input.report || readJson(input.auditReportPath);
   const orchestrator = {
@@ -261,6 +304,12 @@ function createAuditWpCodeboxFanoutPlan(input) {
   };
 
   const task_requests = groups.map((group) => createTaskRequest(group, orchestrator));
+  const issue_reports = task_requests
+    .map((taskRequest) => {
+      const artifactEntry = artifactMap[taskRequest.sandbox_session_id] || artifactMap[taskRequest.group_key];
+      return artifactEntry?.approved === false ? createIssueReport(taskRequest, artifactEntry, options) : null;
+    })
+    .filter(Boolean);
   const apply_back = task_requests
     .map((taskRequest) => {
       const artifactEntry = artifactMap[taskRequest.sandbox_session_id] || artifactMap[taskRequest.group_key];
@@ -281,6 +330,7 @@ function createAuditWpCodeboxFanoutPlan(input) {
     },
     task_requests,
     apply_back,
+    issue_reports,
   };
 }
 
@@ -399,6 +449,7 @@ module.exports = {
   executeAuditWpCodeboxFanout,
   executeAuditWpCodeboxFanoutFromFiles,
   executeWpCodeboxTaskRequest,
+  createIssueReport,
   groupFindings,
   safeBranchSlug,
   sandboxSessionId,

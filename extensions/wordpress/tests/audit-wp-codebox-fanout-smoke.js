@@ -231,17 +231,29 @@ try {
 
   const rejectedPlan = createAuditWpCodeboxFanoutPlan({
     report,
+    issue_url: 'https://github.com/Extra-Chill/homeboy-extensions/issues/769',
     artifact_map: {
       ...artifactMap,
       'docs-reference': {
         bundle_path: docsBundle.bundle,
         approved_files: [docsBundle.changedPath],
         approved: false,
+        false_positive: true,
+        reason: 'Fixture docs-reference rule is intentionally noisy.',
       },
     },
   });
   assert.equal(rejectedPlan.apply_back.length, 1);
   assert.equal(rejectedPlan.apply_back[0].group_key, 'PHPCS Formatting/Auto Fix!');
+  assert.equal(rejectedPlan.issue_reports.length, 1);
+  assert.equal(rejectedPlan.issue_reports[0].schema, 'homeboy/audit-wp-codebox-issue-report/v1');
+  assert.equal(rejectedPlan.issue_reports[0].group_key, 'docs-reference');
+  assert.equal(rejectedPlan.issue_reports[0].disposition, 'false_positive');
+  assert.deepEqual(rejectedPlan.issue_reports[0].finding_ids, ['finding-doc-001']);
+  assert.equal(rejectedPlan.issue_reports[0].artifact.id, docsBundle.artifactId);
+  assert.match(rejectedPlan.issue_reports[0].issue.title, /false positive/);
+  assert.match(rejectedPlan.issue_reports[0].issue.body, /Fixture docs-reference rule is intentionally noisy/);
+  assert.match(rejectedPlan.issue_reports[0].issue.body, /Extra-Chill\/homeboy-extensions\/issues\/769/);
 
   const artifactMapPath = path.join(root, 'artifact-map.json');
   const outputPath = path.join(root, 'fanout-plan.json');

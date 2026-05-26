@@ -332,6 +332,39 @@ convention-exception globs, and convention tag globs (e.g. tagging
 `wordpress:php-role:procedural-helper`). The extension's own smoke
 scripts under `tests/audit-*-smoke.sh` cover regressions in the rule set.
 
+### WP Codebox audit fan-out
+
+The canonical Homeboy mutation path is `homeboy refactor --from audit --write`;
+`audit` remains read-only. WordPress-owned WP Codebox fan-out helpers live under
+`scripts/agent/` so extension orchestration can turn a structured audit report
+into sandbox task requests without teaching Homeboy core about WordPress or WP
+Codebox.
+
+When Homeboy's generic extension refactor-source seam is enabled, the WordPress
+extension handles the audit source with:
+
+```bash
+homeboy refactor <component> \
+  --from audit \
+  --setting refactor.audit.extension=wordpress \
+  --setting wp_codebox_provider=opencode \
+  --setting wp_codebox_model=opencode-go/kimi-k2.6 \
+  --setting wp_codebox_provider_plugin_paths=/Users/chubes/Developer/ai-provider-for-opencode \
+  --setting wp_codebox_secret_env=OPENCODE_API_KEY
+```
+
+`scripts/agent/homeboy-audit-wp-codebox-fanout.cjs` turns a structured audit
+report into one `homeboy/wp-codebox-task-request/v1` request per fix batch. With
+`--execute`, it streams each request to a WP Codebox task runner command such as
+`scripts/agent/homeboy-wp-codebox-task-runner.cjs`, which builds a
+provider-configured `wp-codebox/workspace-recipe/v1` recipe.
+
+Approved artifact-map entries become `apply_back` records for the reviewed
+apply adapter. Rejected entries with `approved: false` become `issue_reports`
+records instead, preserving the finding IDs, artifact evidence, disposition,
+reason, and issue title/body metadata needed to file a follow-up false-positive
+or rejected-artifact tracker.
+
 ## Component settings
 
 Configure per-component in the component's homeboy/component config under
