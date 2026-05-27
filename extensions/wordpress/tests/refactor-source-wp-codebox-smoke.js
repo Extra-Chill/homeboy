@@ -127,6 +127,24 @@ process.stdout.write(JSON.stringify({
   assert.equal(pathInside(writeCommand.root, run.records[0].command.args[artifactsIndex + 1]), false);
   assert.equal(run.records[0].artifact.id.startsWith('artifact-homeboy-audit-'), true);
 
+  const missingSecretResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...writeCommand,
+      settings: {
+        ...writeCommand.settings,
+        wp_codebox_output_dir: path.join(root, 'fanout-missing-secret'),
+      },
+    }),
+    env: {
+      ...process.env,
+      OPENCODE_API_KEY: '',
+    },
+  });
+  assert.notEqual(missingSecretResult.status, 0);
+  assert.match(missingSecretResult.stderr, /WP Codebox audit fan-out failed: 2 of 2 task\(s\) failed/);
+  assert.match(missingSecretResult.stderr, /Required WP Codebox secret environment variable missing: OPENCODE_API_KEY/);
+
   const riskyRoot = path.join(root, 'risky-source');
   const riskyCommand = {
     ...command,

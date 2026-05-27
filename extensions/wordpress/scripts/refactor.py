@@ -721,6 +721,23 @@ def run_with_streamed_stderr(args):
     return subprocess.CompletedProcess(args, process.returncode, stdout, ''.join(stderr_chunks))
 
 
+def wp_codebox_fanout_failure_message(run):
+    if not isinstance(run, dict) or run.get('status') != 'failed':
+        return ''
+
+    records = run.get('records') if isinstance(run.get('records'), list) else []
+    failed_records = [record for record in records if isinstance(record, dict) and record.get('status') == 'failed']
+    detail = ''
+    if failed_records:
+        first = failed_records[0]
+        command = first.get('command') if isinstance(first.get('command'), dict) else {}
+        detail = first.get('stderr') or command.get('error') or first.get('stdout') or ''
+        detail = str(detail).strip()
+
+    summary = f"WP Codebox audit fan-out failed: {len(failed_records)} of {len(records)} task(s) failed"
+    return f"{summary}\n{detail}" if detail else summary
+
+
 def wp_codebox_task_runner_args(data, settings, script_dir):
     component_root = data.get('root') or data.get('component_path') or os.getcwd()
     agents_api_path = settings.get('wp_codebox_agents_api_path') or os.environ.get('HOMEBOY_WP_CODEBOX_AGENTS_API_PATH') or component_root
@@ -808,17 +825,21 @@ def refactor_source(data):
     if result.returncode != 0:
         return {
             'handled': True,
-            'detected_findings': len(source_result.get('findings') or []),
-            'changed_files': [],
-            'fix_results': [],
-            'warnings': [
-                'WP Codebox audit fan-out failed',
-                result.stderr.strip() or result.stdout.strip(),
-            ],
+            'fatal_error': result.stderr.strip() or result.stdout.strip() or 'WP Codebox audit fan-out failed',
         }
 
     with open(plan_path, 'r') as f:
         plan = json.load(f)
+
+    if data.get('write') and os.path.exists(runs_path):
+        with open(runs_path, 'r') as f:
+            run = json.load(f)
+        failure_message = wp_codebox_fanout_failure_message(run)
+        if failure_message:
+            return {
+                'handled': True,
+                'fatal_error': failure_message,
+            }
 
     fix_results = []
     for request in plan.get('task_requests') or []:
@@ -864,6 +885,9 @@ def main():
 
     elif command == 'refactor_source':
         result = refactor_source(data)
+        if result.get('fatal_error'):
+            print(result['fatal_error'], file=sys.stderr)
+            sys.exit(1)
         print(json.dumps(result))
 
     else:
