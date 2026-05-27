@@ -521,14 +521,14 @@ fn resolve_lab_runner_selection_from_default(
         if !command.supports_lab_runner() {
             let reason = command.lab_runner_unsupported_reason();
             let message = reason.map_or_else(
-                || "--runner is only supported for hot Lab-offload commands: lint, test, audit, bench, and trace".to_string(),
+                || "--runner is only supported for hot Lab-offload commands: lint, test, audit, bench, trace, and refactor source runs".to_string(),
                 |reason| format!("--runner is unavailable for this hot command. {reason}"),
             );
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "runner",
                 message,
                 Some(runner_id.to_string()),
-                Some(vec!["Current Lab offload support: audit, bench run, full lint, full test, and trace.".to_string()]),
+                Some(vec!["Current Lab offload support: audit, bench run, full lint, full test, trace, and refactor source runs.".to_string()]),
             ));
         }
 
@@ -780,6 +780,7 @@ fn rewrite_lab_offload_args(args: &[String], remote_path: &str) -> Vec<String> {
     let mut stripped = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
+    let has_force_hot = args.iter().any(|arg| arg == "--force-hot");
     while let Some(arg) = iter.next() {
         if passthrough {
             stripped.push(arg.clone());
@@ -815,6 +816,9 @@ fn rewrite_lab_offload_args(args: &[String], remote_path: &str) -> Vec<String> {
             continue;
         }
         stripped.push(arg.clone());
+    }
+    if !has_force_hot {
+        stripped.insert(1, "--force-hot".to_string());
     }
     stripped
 }
@@ -966,6 +970,7 @@ mod tests {
             rewrite_lab_offload_args(&args, "/home/chubes/Developer/project"),
             vec![
                 "homeboy".to_string(),
+                "--force-hot".to_string(),
                 "lint".to_string(),
                 "--path".to_string(),
                 "/home/chubes/Developer/project".to_string(),
@@ -987,6 +992,7 @@ mod tests {
             rewrite_lab_offload_args(&args, "/home/chubes/Developer/project"),
             vec![
                 "homeboy".to_string(),
+                "--force-hot".to_string(),
                 "test".to_string(),
                 "--path=/home/chubes/Developer/project".to_string()
             ]
@@ -1014,6 +1020,7 @@ mod tests {
             rewritten,
             vec![
                 "homeboy".to_string(),
+                "--force-hot".to_string(),
                 "audit".to_string(),
                 "--path".to_string(),
                 "/home/chubes/Developer/project".to_string(),
@@ -1042,6 +1049,7 @@ mod tests {
             rewrite_lab_offload_args(&args, "/home/chubes/Developer/project"),
             vec![
                 "homeboy".to_string(),
+                "--force-hot".to_string(),
                 "test".to_string(),
                 "--path".to_string(),
                 "/home/chubes/Developer/project".to_string(),
@@ -1068,6 +1076,32 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_lab_offload_args_does_not_duplicate_force_hot() {
+        let args = vec![
+            "homeboy".to_string(),
+            "--force-hot".to_string(),
+            "refactor".to_string(),
+            "--from".to_string(),
+            "audit".to_string(),
+            "--path".to_string(),
+            "/Users/chubes/Developer/project".to_string(),
+        ];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&args, "/home/chubes/Developer/project"),
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "refactor".to_string(),
+                "--from".to_string(),
+                "audit".to_string(),
+                "--path".to_string(),
+                "/home/chubes/Developer/project".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn lab_runner_selection_keeps_explicit_runner_precedence() {
         let command = Commands::Test(test_args_for_path(std::path::Path::new("/tmp/project")));
         let selection = resolve_lab_runner_selection_from_default(
@@ -1086,6 +1120,31 @@ mod tests {
     #[test]
     fn lab_runner_selection_uses_default_for_supported_commands() {
         let command = Commands::Test(test_args_for_path(std::path::Path::new("/tmp/project")));
+        let selection = resolve_lab_runner_selection_from_default(
+            &command,
+            None,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect("selection")
+        .expect("default runner selected");
+
+        assert_eq!(selection.runner_id, "lab-default");
+        assert_eq!(selection.source, LabRunnerSelectionSource::Default);
+    }
+
+    #[test]
+    fn lab_runner_selection_uses_default_for_hot_refactor_sources() {
+        let command = homeboy::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "refactor",
+            "--from",
+            "audit",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("parse")
+        .command;
         let selection = resolve_lab_runner_selection_from_default(
             &command,
             None,

@@ -401,6 +401,28 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
     }
 }
 
+impl RefactorArgs {
+    pub fn is_hot_resource_command(&self) -> bool {
+        self.command.is_none()
+            && (self.all
+                || self
+                    .from
+                    .iter()
+                    .any(|source| matches_hot_refactor_source(source)))
+    }
+
+    pub fn lab_offload_writes_local_state(&self) -> bool {
+        self.write_mode.write || self.commit
+    }
+}
+
+fn matches_hot_refactor_source(source: &str) -> bool {
+    matches!(
+        source.to_ascii_lowercase().as_str(),
+        "all" | "audit" | "lint" | "test"
+    )
+}
+
 #[derive(Serialize)]
 #[serde(tag = "command")]
 pub enum RefactorOutput {

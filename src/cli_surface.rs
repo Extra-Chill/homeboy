@@ -314,6 +314,17 @@ impl Commands {
                 None,
                 CommandOutputContractKind::JsonEnvelope,
             ),
+            Commands::Refactor(args) => CommandDescriptor {
+                response_mode: CommandResponseMode::Json,
+                output_file_mode,
+                json_family: CommandJsonFamily::Workspace,
+                supports_lab_runner: args.is_hot_resource_command(),
+                lab_runner_unsupported_reason: None,
+                lab_offload_mutation_flag: args
+                    .lab_offload_writes_local_state()
+                    .then_some("--write/--commit"),
+                output_contract: CommandOutputContractKind::JsonEnvelope,
+            },
             Commands::Project(_)
             | Commands::Component(_)
             | Commands::Config(_)
@@ -324,7 +335,6 @@ impl Commands {
             | Commands::Changes(_)
             | Commands::Release(_)
             | Commands::Report(_)
-            | Commands::Refactor(_)
             | Commands::Runner(_)
             | Commands::Stack(_)
             | Commands::Undo(_) => CommandDescriptor {
@@ -949,8 +959,14 @@ mod tests {
         assert!(parsed_command(&["homeboy", "lint"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "test"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "audit"]).supports_lab_runner());
+        assert!(parsed_command(&["homeboy", "refactor", "--from", "audit"]).supports_lab_runner());
+        assert!(parsed_command(&["homeboy", "refactor", "--all"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "bench"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "trace"]).supports_lab_runner());
+        assert!(!parsed_command(&[
+            "homeboy", "refactor", "rename", "--from", "old", "--to", "new",
+        ])
+        .supports_lab_runner());
         assert!(!parsed_command(&["homeboy", "rig", "up", "studio"]).supports_lab_runner());
         assert!(
             !parsed_command(&["homeboy", "fleet", "exec", "prod", "wp", "plugin", "list"])
@@ -1022,6 +1038,11 @@ mod tests {
         assert_eq!(
             parsed_command(&["homeboy", "trace", "--keep-overlay"]).lab_offload_mutation_flag(),
             Some("--keep-overlay")
+        );
+        assert_eq!(
+            parsed_command(&["homeboy", "refactor", "--from", "audit", "--write"])
+                .lab_offload_mutation_flag(),
+            Some("--write/--commit")
         );
         assert_eq!(
             parsed_command(&["homeboy", "audit"]).lab_offload_mutation_flag(),

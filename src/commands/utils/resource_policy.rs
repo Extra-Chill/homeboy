@@ -275,6 +275,7 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
         Commands::Bench(args) if args.is_run_command() => "bench",
         Commands::Rig(args) if args.is_hot_resource_command() => "rig up",
         Commands::Fleet(args) if args.is_hot_resource_command() => "fleet exec",
+        Commands::Refactor(args) if args.is_hot_resource_command() => "refactor",
         Commands::Audit(args) if args.changed_since.is_none() && !args.conventions => "audit",
         Commands::Lint(args) if args.is_full_workspace_run() => "lint",
         Commands::Test(args) if args.changed_since.is_none() => "test",
