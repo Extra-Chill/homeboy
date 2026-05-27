@@ -8,8 +8,6 @@ homeboy release [OPTIONS] [COMPONENTS]...
 
 By default Homeboy auto-detects the bump from commit history. Use `--bump <major|minor|patch|VERSION>` to force a bump type or explicit version.
 
-Legacy positional bump syntax is still accepted for compatibility: `homeboy release <COMPONENT> <BUMP_TYPE>`.
-
 ## Options
 
 - `--dry-run`: Preview the release plan without executing

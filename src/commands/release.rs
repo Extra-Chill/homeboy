@@ -155,10 +155,8 @@ pub fn run(
     args: ReleaseArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ReleaseCommandOutput> {
-    let positional = resolve_positional_args(&args)?;
-    let component_ids = resolve_component_ids(&args, &positional.components)?;
-
-    let bump_override = resolve_bump_override(&args, positional.bump);
+    let component_ids = resolve_component_ids(&args, &args.components)?;
+    let bump_override = args.bump.clone();
 
     // Single component: use the original single-release flow
     if component_ids.len() == 1 {
@@ -335,60 +333,6 @@ fn resolve_component_ids(
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct PositionalReleaseArgs {
-    components: Vec<String>,
-    bump: Option<String>,
-}
-
-fn resolve_positional_args(args: &ReleaseArgs) -> homeboy::core::Result<PositionalReleaseArgs> {
-    let mut components = args.components.clone();
-
-    if args.project.is_some() || components.len() < 2 {
-        return Ok(PositionalReleaseArgs {
-            components,
-            bump: None,
-        });
-    }
-
-    let maybe_bump = components.last().map(|value| value.to_lowercase());
-    let Some(bump) = maybe_bump.filter(|value| is_bump_keyword(value)) else {
-        return Ok(PositionalReleaseArgs {
-            components,
-            bump: None,
-        });
-    };
-
-    if args.bump.is_some() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "bump",
-            "Use either a positional bump type or --bump, not both",
-            Some(bump),
-            Some(vec![
-                "Example: homeboy release my-component patch".to_string()
-            ]),
-        ));
-    }
-
-    components.pop();
-    Ok(PositionalReleaseArgs {
-        components,
-        bump: Some(bump),
-    })
-}
-
-fn is_bump_keyword(value: &str) -> bool {
-    matches!(value, "major" | "minor" | "patch")
-}
-
-fn resolve_bump_override(args: &ReleaseArgs, positional_bump: Option<String>) -> Option<String> {
-    if let Some(ref bump) = args.bump {
-        Some(bump.clone())
-    } else {
-        positional_bump
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,47 +355,29 @@ mod tests {
     }
 
     #[test]
-    fn positional_bump_is_not_treated_as_component() {
-        let parsed = resolve_positional_args(&args(&["api", "patch"])).unwrap();
+    fn final_bump_keyword_stays_component() {
+        let release_args = args(&["api", "patch"]);
+        let components = resolve_component_ids(&release_args, &release_args.components).unwrap();
 
-        assert_eq!(parsed.components, vec!["api"]);
-        assert_eq!(parsed.bump.as_deref(), Some("patch"));
-    }
-
-    #[test]
-    fn positional_bump_applies_to_batch_components() {
-        let parsed = resolve_positional_args(&args(&["api", "web", "minor"])).unwrap();
-
-        assert_eq!(parsed.components, vec!["api", "web"]);
-        assert_eq!(parsed.bump.as_deref(), Some("minor"));
+        assert_eq!(components, vec!["api", "patch"]);
     }
 
     #[test]
     fn single_component_named_like_bump_stays_component() {
-        let parsed = resolve_positional_args(&args(&["patch"])).unwrap();
+        let release_args = args(&["patch"]);
+        let components = resolve_component_ids(&release_args, &release_args.components).unwrap();
 
-        assert_eq!(parsed.components, vec!["patch"]);
-        assert_eq!(parsed.bump, None);
+        assert_eq!(components, vec!["patch"]);
     }
 
     #[test]
-    fn positional_bump_conflicts_with_explicit_bump() {
-        let mut release_args = args(&["api", "major"]);
+    fn canonical_bump_flag_does_not_change_components() {
+        let mut release_args = args(&["api"]);
         release_args.bump = Some("minor".to_string());
 
-        let err = resolve_positional_args(&release_args).unwrap_err();
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("positional bump"));
-    }
+        let components = resolve_component_ids(&release_args, &release_args.components).unwrap();
 
-    #[test]
-    fn positional_bump_flows_into_bump_override() {
-        let release_args = args(&["api", "patch"]);
-        let positional = resolve_positional_args(&release_args).unwrap();
-
-        assert_eq!(
-            resolve_bump_override(&release_args, positional.bump).as_deref(),
-            Some("patch")
-        );
+        assert_eq!(components, vec!["api"]);
+        assert_eq!(release_args.bump.as_deref(), Some("minor"));
     }
 }
