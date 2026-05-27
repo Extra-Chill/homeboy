@@ -1,6 +1,8 @@
 use regex::Regex;
 
-use crate::core::runner::{self, Runner, RunnerExecOptions, RunnerKind};
+use crate::core::runner::{
+    self, Runner, RunnerCapabilityPreflight, RunnerExecOptions, RunnerKind, RunnerRequiredTool,
+};
 use crate::core::upgrade::RunnerUpgradeEntry;
 use crate::core::Result;
 
@@ -164,7 +166,16 @@ fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptio
         env: runner.env.clone(),
         capture_patch: false,
         source_snapshot: None,
-        capability_preflight: None,
+        capability_preflight: Some(runner_upgrade_capability_plan()),
+    }
+}
+
+fn runner_upgrade_capability_plan() -> RunnerCapabilityPreflight {
+    RunnerCapabilityPreflight {
+        command: "homeboy upgrade".to_string(),
+        required_tools: vec![RunnerRequiredTool::Homeboy],
+        required_components: Vec::new(),
+        required_env: Vec::new(),
     }
 }
 
@@ -239,6 +250,13 @@ mod tests {
             ]
         );
         assert!(commands.iter().all(|(_, _, allow_ssh)| *allow_ssh));
+
+        let capability_plan = runner_upgrade_capability_plan();
+        assert_eq!(
+            capability_plan.required_tools,
+            vec![RunnerRequiredTool::Homeboy]
+        );
+        assert_eq!(capability_plan.command, "homeboy upgrade");
     }
 
     #[test]
