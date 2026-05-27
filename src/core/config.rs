@@ -58,6 +58,11 @@ pub(crate) trait ConfigEntity: Serialize + DeserializeOwned {
         Ok(Self::config_dir()?.join(format!("{}.json", id)))
     }
 
+    /// Whether this entity accepts `{dir}/{id}.json` entries while listing.
+    fn supports_flat_config_entries() -> bool {
+        true
+    }
+
     /// Entity-specific validation. Override to add custom validation rules.
     fn validate(&self) -> Result<()> {
         Ok(())
@@ -181,8 +186,7 @@ pub(crate) fn list<T: ConfigEntity>() -> Result<Vec<T>> {
                 } else {
                     return None;
                 }
-            } else if e.is_json() {
-                // For flat files: use existing behavior
+            } else if T::supports_flat_config_entries() && e.is_json() {
                 let id = e.path.file_stem()?.to_string_lossy().to_string();
                 (e.path.clone(), id)
             } else {
@@ -394,8 +398,7 @@ pub(crate) fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
                 } else {
                     None
                 }
-            } else if e.is_json() {
-                // For flat files: use existing behavior
+            } else if T::supports_flat_config_entries() && e.is_json() {
                 e.path.file_stem().map(|s| s.to_string_lossy().to_string())
             } else {
                 None

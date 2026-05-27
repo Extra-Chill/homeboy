@@ -13,8 +13,7 @@ pub use helpers::{
 };
 pub use planning::resolve_binary_on_path;
 pub use types::{
-    ExtensionUpgradeEntry, InstallMethod, ProjectMigrationEntry, RunnerUpgradeEntry, UpgradeResult,
-    VersionCheck,
+    ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry, UpgradeResult, VersionCheck,
 };
 pub use validation::check_for_updates;
 

@@ -81,7 +81,7 @@ enum ProjectCommand {
         /// Project ID
         project_id: String,
     },
-    /// Initialize a project directory (migrate from flat file to directory layout)
+    /// Initialize a project directory
     Init {
         /// Project ID
         project_id: String,
