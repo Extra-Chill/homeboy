@@ -64,7 +64,8 @@ function requireArg(name) {
 }
 
 function pluginEntry(source, slug, activate = false) {
-  return { source, slug: slug || path.basename(source), activate };
+  const pluginSlug = (slug || path.basename(source)).split('@')[0].replace(/[^a-zA-Z0-9_-]/g, '-');
+  return { source, slug: pluginSlug, activate };
 }
 
 function providerPluginEntries(request) {
@@ -166,6 +167,22 @@ function writeRecipe(recipe) {
   return recipePath;
 }
 
+function executable(filePath) {
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveCommand(command, args) {
+  if (path.extname(command) === '.js' && !executable(command)) {
+    return { command: process.execPath, args: [command, ...args] };
+  }
+  return { command, args };
+}
+
 function runWpCodebox(recipePath) {
   const wpCodeboxBin = argValue('--wp-codebox-bin') || 'wp-codebox';
   const args = ['recipe-run', '--recipe', recipePath, '--json'];
@@ -184,7 +201,8 @@ function runWpCodebox(recipePath) {
     console.error(JSON.stringify({ command: wpCodeboxBin, args }, null, 2));
   }
 
-  const result = spawnSync(wpCodeboxBin, args, {
+  const resolved = resolveCommand(wpCodeboxBin, args);
+  const result = spawnSync(resolved.command, resolved.args, {
     encoding: 'utf8',
     env: process.env,
     maxBuffer: 1024 * 1024 * 20,
@@ -195,6 +213,9 @@ function runWpCodebox(recipePath) {
   }
   if (result.stderr) {
     process.stderr.write(result.stderr);
+  }
+  if (result.error) {
+    process.stderr.write(`${result.error.message}\n`);
   }
   return result.status ?? 1;
 }
