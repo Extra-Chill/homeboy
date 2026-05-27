@@ -41,7 +41,7 @@ pub(crate) fn run_self_checks_with_passthrough(
     let commands = component.script_commands(capability);
     if commands.is_empty() {
         return Err(Error::validation_invalid_argument(
-            "self_checks",
+            "scripts",
             format!(
                 "Component '{}' has no {} self-check commands configured",
                 component.id,
@@ -267,7 +267,7 @@ fn capture_stream<R: Read>(mut src: R, passthrough: bool, stderr: bool) -> Bound
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::component::{Component, SelfCheckConfig};
+    use crate::core::component::{Component, ComponentScriptsConfig};
 
     #[test]
     fn test_run_self_checks_requires_configured_commands() {
@@ -303,9 +303,12 @@ mod tests {
             "".to_string(),
             None,
         );
-        component.self_checks = Some(SelfCheckConfig {
+        component.scripts = Some(ComponentScriptsConfig {
             lint: vec!["sh one.sh".to_string(), "sh two.sh".to_string()],
             test: Vec::new(),
+            build: Vec::new(),
+            bench: Vec::new(),
+            trace: Vec::new(),
         });
 
         let output = run_self_checks_with_passthrough(
@@ -338,9 +341,12 @@ mod tests {
             "".to_string(),
             None,
         );
-        component.self_checks = Some(SelfCheckConfig {
+        component.scripts = Some(ComponentScriptsConfig {
             lint: vec!["sh lint.sh".to_string()],
             test: Vec::new(),
+            build: Vec::new(),
+            bench: Vec::new(),
+            trace: Vec::new(),
         });
 
         let output = run_self_checks_with_passthrough(
@@ -371,9 +377,12 @@ mod tests {
             "".to_string(),
             None,
         );
-        component.self_checks = Some(SelfCheckConfig {
+        component.scripts = Some(ComponentScriptsConfig {
             lint: vec!["sh large.sh".to_string()],
             test: Vec::new(),
+            build: Vec::new(),
+            bench: Vec::new(),
+            trace: Vec::new(),
         });
 
         let output = run_self_checks_with_passthrough(

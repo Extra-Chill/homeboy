@@ -448,7 +448,7 @@ pub fn run_self_check_lint_workflow(
     let status = if output.success { "passed" } else { "failed" }.to_string();
     let hints = (!output.success).then(|| {
         vec![format!(
-            "Fix the failing self-check command declared in {}'s homeboy.json self_checks.lint",
+            "Fix the failing self-check command declared in {}'s homeboy.json scripts.lint",
             component.id
         )]
     });
@@ -639,7 +639,7 @@ fn process_baseline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::component::SelfCheckConfig;
+    use crate::core::component::ComponentScriptsConfig;
     use crate::core::engine::baseline::BaselineFlags;
 
     fn component(root: &str) -> Component {
@@ -732,9 +732,12 @@ mod tests {
             "".to_string(),
             None,
         );
-        component.self_checks = Some(SelfCheckConfig {
+        component.scripts = Some(ComponentScriptsConfig {
             lint: vec!["sh lint.sh".to_string()],
             test: Vec::new(),
+            build: Vec::new(),
+            bench: Vec::new(),
+            trace: Vec::new(),
         });
 
         let result =

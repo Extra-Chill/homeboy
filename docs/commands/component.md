@@ -81,7 +81,7 @@ Notes:
 
 - If the JSON contains an `id` field that differs from `<id>`, the component is automatically renamed first (equivalent to calling `rename`), then the remaining fields are merged. Project references are updated automatically.
 - `remote_url` and `triage_remote_url` must be GitHub remotes (`https://github.com/<owner>/<repo>.git` or `git@github.com:<owner>/<repo>.git`). Local filesystem paths and unsupported providers are rejected when writing component config.
-- Use `null` in JSON to clear a field (for example, `{"post_version_bump_commands": null}`).
+- Use `null` in JSON to clear a field (for example, `{"changelog_target": null}`).
 
 #### Release configuration
 
@@ -94,7 +94,7 @@ homeboy component set <id> --json '{"release": {"enabled": true, "steps": []}}'
 Components also define extension usage via `extensions`:
 
 ```sh
-homeboy component set <id> --json '{"extensions": {"github": {"settings": {}}, "rust": {"settings": {}}}}'
+homeboy component set <id> --json '{"extensions": {"github": {}, "rust": {}}}'
 ```
 
 `homeboy build`, `homeboy lint`, `homeboy test`, `homeboy bench`, and `homeboy trace` check component-owned `scripts.<capability>` first, then linked extensions. Components do not support a standalone `build_command` field; use `scripts.build` for component-owned shell builds.

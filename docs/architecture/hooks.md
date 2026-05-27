@@ -146,30 +146,6 @@ For non-fatal events (`post:release`, `post:deploy`):
 - Remaining commands continue executing
 - All results are captured in the operation output
 
-## Backward Compatibility
-
-Legacy flat fields (`pre_version_bump_commands`, `post_version_bump_commands`, `post_release_commands`) are still supported in component JSON. They are automatically migrated into the `hooks` map during deserialization:
-
-```json
-{
-  "pre_version_bump_commands": ["cargo build --release"],
-  "post_version_bump_commands": ["git add Cargo.lock"]
-}
-```
-
-is equivalent to:
-
-```json
-{
-  "hooks": {
-    "pre:version:bump": ["cargo build --release"],
-    "post:version:bump": ["git add Cargo.lock"]
-  }
-}
-```
-
-Both formats work. The `hooks` map is the canonical format going forward.
-
 ## Extension Hooks
 
 Extensions declare hooks in their manifest using the same format:

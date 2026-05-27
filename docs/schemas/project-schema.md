@@ -101,7 +101,7 @@ Project configuration defines deployable environments stored in `projects/<id>.j
   - Values are tool-specific setting objects
 - **`extensions`** (object): Extension-specific settings for this project
   - Keys are extension IDs
-  - Values are extension setting objects
+  - Values are flat extension setting objects; `version` is reserved for extension version constraints
 
 ## Example
 
@@ -170,9 +170,7 @@ Project configuration defines deployable environments stored in `projects/<id>.j
   ],
   "extensions": {
     "wordpress": {
-      "settings": {
-        "wp_cli_path": "/usr/local/bin/wp"
-      }
+      "wp_cli_path": "/usr/local/bin/wp"
     }
   }
 }

@@ -19,6 +19,12 @@ Component configuration defines buildable and deployable units stored in `compon
     }
   ],
   "changelog_target": "string",
+  "hooks": {
+    "pre:version:bump": ["shell command"],
+    "post:version:bump": ["shell command"],
+    "post:release": ["shell command"],
+    "post:deploy": ["shell command"]
+  },
   "scripts": {
     "lint": ["shell command"],
     "test": ["shell command"],
@@ -53,7 +59,7 @@ Component configuration defines buildable and deployable units stored in `compon
 - **`changelog_target`** (string): Path to changelog file (relative to `local_path`)
 - **`extensions`** (object): Extension-specific settings
   - Keys are extension IDs (e.g., `"wordpress"`, `"rust"`)
-  - Values are extension setting objects
+  - Values are flat extension setting objects; `version` is reserved for extension version constraints
 - **`scripts`** (object): Component-owned shell commands for extension-shaped capabilities
   - Supported keys: `lint`, `test`, `build`, `bench`, `trace`
   - Each value is an array of shell commands run sequentially in `local_path`
@@ -81,24 +87,16 @@ Component configuration defines buildable and deployable units stored in `compon
 }
 ```
 
-Runtime IDs are extension-owned strings. `source` is `component` for component config or detector output and `extension:<id>` for extension-provided defaults. Legacy component extension settings such as `{ "php": "8.2", "node": "22" }` are still parsed for compatibility; new config should use `runtimes`.
+Runtime IDs are extension-owned strings. `source` is `component` for component config or detector output and `extension:<id>` for extension-provided defaults. Runtime requirements should use `runtimes`.
 
 ### Hook Fields
 
-- **`pre_version_bump_commands`** (array of strings): Commands to run BEFORE version targets are updated
-  - Execution: Sequential, runs in `local_path` directory
-  - Failure behavior: **Fatal** - stops version bump on non-zero exit code
-  - Use case: Validate generated sources before changing version files
-
-- **`post_version_bump_commands`** (array of strings): Commands to run AFTER version files are updated
-  - Execution: Sequential, runs in `local_path` directory
-  - Failure behavior: **Fatal** - stops version bump on non-zero exit code
-  - Use case: Regenerate files that depend on version, run linters, stage additional files
-
-- **`post_release_commands`** (array of strings): Commands to run after the release pipeline completes
-  - Execution: Sequential, runs in `local_path` directory
-  - Failure behavior: **Non-fatal** - logs warnings but doesn't fail the release
-  - Use case: Cleanup tasks, notifications, non-critical post-release actions
+- **`hooks`** (object): Lifecycle hook commands keyed by event name
+  - `pre:version:bump`: Commands to run before version targets are updated
+  - `post:version:bump`: Commands to run after version files are updated
+  - `post:release`: Commands to run after the release pipeline completes
+  - `post:deploy`: Commands to run on the deployment target after deploy
+  - Each value is an array of shell commands run sequentially
 
 ## local_path vs remote_path
 
@@ -133,20 +131,20 @@ Setting `local_path` to the same directory as the deploy target is a misconfigur
     }
   ],
   "changelog_target": "CHANGELOG.md",
-  "pre_version_bump_commands": [
-    "./scripts/verify-generated-sources"
-  ],
-  "post_version_bump_commands": [
-    "./scripts/refresh-versioned-artifacts"
-  ],
-  "post_release_commands": [
-    "echo 'Release complete!'"
-  ],
+  "hooks": {
+    "pre:version:bump": [
+      "./scripts/verify-generated-sources"
+    ],
+    "post:version:bump": [
+      "./scripts/refresh-versioned-artifacts"
+    ],
+    "post:release": [
+      "echo 'Release complete!'"
+    ]
+  },
   "extensions": {
     "wordpress": {
-      "settings": {
-        "php_version": "8.1"
-      }
+      "php_version": "8.1"
     }
   },
   "release": {

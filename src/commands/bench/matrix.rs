@@ -765,7 +765,7 @@ mod tests {
                         "path": "{}",
                         "extensions": {{
                             "nodejs": {{
-                                "settings": {{ "package_manager": "pnpm" }},
+                                "package_manager": "pnpm",
                                 "workspace": "apps/studio"
                             }}
                         }}

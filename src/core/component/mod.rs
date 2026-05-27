@@ -1,4 +1,4 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 
 pub mod audit;
@@ -47,27 +47,35 @@ pub struct VersionTarget {
     pub pattern: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ScopedExtensionConfig {
     /// Version constraint string (e.g., ">=2.0.0", "^1.0").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// Settings passed to the extension at runtime.
     ///
-    /// Populated from both an explicit `"settings": { ... }` sub-object AND
-    /// any flat keys that aren't `version` or `settings`.  This lets both
-    /// formats work:
+    /// Populated from flat keys that aren't reserved struct fields:
     ///
     /// ```json
-    /// // flat (current convention)
     /// { "database_type": "mysql", "mysql_host": "localhost" }
-    /// // nested
-    /// { "settings": { "database_type": "mysql" } }
-    /// // mixed (flat keys merged into settings)
-    /// { "settings": { "a": 1 }, "b": 2 }
     /// ```
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub settings: HashMap<String, serde_json::Value>,
+}
+
+impl serde::Serialize for ScopedExtensionConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let len = self.settings.len() + usize::from(self.version.is_some());
+        let mut map = serializer.serialize_map(Some(len))?;
+        if let Some(version) = self.version.as_ref() {
+            map.serialize_entry("version", version)?;
+        }
+        for (key, value) in &self.settings {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for ScopedExtensionConfig {
@@ -84,16 +92,7 @@ impl<'de> serde::Deserialize<'de> for ScopedExtensionConfig {
             .remove("version")
             .and_then(|v| v.as_str().map(String::from));
 
-        // Start with the explicit "settings" sub-object (if present).
-        let mut settings: HashMap<String, serde_json::Value> = map
-            .remove("settings")
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
-
-        // Merge remaining flat keys — flat keys do NOT overwrite explicit settings.
-        for (key, value) in map {
-            settings.entry(key).or_insert(value);
-        }
+        let settings = map.into_iter().collect();
 
         Ok(ScopedExtensionConfig { version, settings })
     }
@@ -125,14 +124,6 @@ pub struct ScopeConfig {
     pub release: Option<CommandScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet: Option<CommandScopeConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SelfCheckConfig {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lint: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub test: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -195,8 +186,6 @@ pub struct Component {
     pub docs_dir: Option<String>,
     pub docs_dirs: Vec<String>,
     pub scopes: Option<ScopeConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub self_checks: Option<SelfCheckConfig>,
     /// Component-owned shell scripts that satisfy Homeboy command capabilities
     /// without requiring an extension. Resolution order is `scripts.*` first,
     /// then extension-claimed behavior, then not-applicable.
@@ -222,8 +211,6 @@ pub struct Component {
     pub extra_drift_files: Vec<String>,
 }
 
-/// Raw JSON shape for Component — handles backward-compatible deserialization
-/// of legacy hook fields (`pre_version_bump_commands` etc.) into the `hooks` map.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct RawComponent {
     #[serde(default, skip_serializing)]
@@ -244,7 +231,7 @@ struct RawComponent {
     extensions: Option<HashMap<String, ScopedExtensionConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     version_targets: Option<Vec<VersionTarget>>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "changelog_targets")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     changelog_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     changelog_next_section_label: Option<String>,
@@ -252,13 +239,6 @@ struct RawComponent {
     changelog_next_section_aliases: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     hooks: HashMap<String, Vec<String>>,
-    // Legacy hook fields — read from old JSON, merged into hooks
-    #[serde(default, skip_serializing)]
-    pre_version_bump_commands: Vec<String>,
-    #[serde(default, skip_serializing)]
-    post_version_bump_commands: Vec<String>,
-    #[serde(default, skip_serializing)]
-    post_release_commands: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     extract_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,8 +262,6 @@ struct RawComponent {
     #[serde(skip_serializing_if = "Option::is_none")]
     scopes: Option<ScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    self_checks: Option<SelfCheckConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     scripts: Option<ComponentScriptsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audit: Option<AuditConfig>,
@@ -295,28 +273,8 @@ struct RawComponent {
     extra_drift_files: Vec<String>,
 }
 
-/// Insert legacy commands into hooks map if the event key doesn't already exist.
-fn merge_legacy_hook(hooks: &mut HashMap<String, Vec<String>>, event: &str, commands: Vec<String>) {
-    if !commands.is_empty() && !hooks.contains_key(event) {
-        hooks.insert(event.to_string(), commands);
-    }
-}
-
 impl From<RawComponent> for Component {
     fn from(raw: RawComponent) -> Self {
-        let mut hooks = raw.hooks;
-        merge_legacy_hook(
-            &mut hooks,
-            "pre:version:bump",
-            raw.pre_version_bump_commands,
-        );
-        merge_legacy_hook(
-            &mut hooks,
-            "post:version:bump",
-            raw.post_version_bump_commands,
-        );
-        merge_legacy_hook(&mut hooks, "post:release", raw.post_release_commands);
-
         Component {
             id: raw.id,
             aliases: raw.aliases,
@@ -328,7 +286,7 @@ impl From<RawComponent> for Component {
             changelog_target: raw.changelog_target,
             changelog_next_section_label: raw.changelog_next_section_label,
             changelog_next_section_aliases: raw.changelog_next_section_aliases,
-            hooks,
+            hooks: raw.hooks,
             extract_command: raw.extract_command,
             remote_owner: raw.remote_owner,
             deploy_strategy: raw.deploy_strategy,
@@ -340,7 +298,6 @@ impl From<RawComponent> for Component {
             docs_dir: raw.docs_dir,
             docs_dirs: raw.docs_dirs,
             scopes: raw.scopes,
-            self_checks: raw.self_checks,
             scripts: raw.scripts,
             audit: raw.audit,
             dependency_stack: raw.dependency_stack,
@@ -364,9 +321,6 @@ impl From<Component> for RawComponent {
             changelog_next_section_label: c.changelog_next_section_label,
             changelog_next_section_aliases: c.changelog_next_section_aliases,
             hooks: c.hooks,
-            pre_version_bump_commands: Vec::new(),
-            post_version_bump_commands: Vec::new(),
-            post_release_commands: Vec::new(),
             extract_command: c.extract_command,
             remote_owner: c.remote_owner,
             deploy_strategy: c.deploy_strategy,
@@ -378,7 +332,6 @@ impl From<Component> for RawComponent {
             docs_dir: c.docs_dir,
             docs_dirs: c.docs_dirs,
             scopes: c.scopes,
-            self_checks: c.self_checks,
             scripts: c.scripts,
             audit: c.audit,
             dependency_stack: c.dependency_stack,
@@ -453,7 +406,6 @@ impl Component {
             docs_dir: None,
             docs_dirs: Vec::new(),
             scopes: None,
-            self_checks: None,
             scripts: None,
             audit: None,
             dependency_stack: Vec::new(),
@@ -542,25 +494,6 @@ impl Component {
             || (std::path::Path::new(&self.local_path).is_file() && self.deploy_strategy.is_none())
     }
 
-    pub fn self_check_commands(
-        &self,
-        capability: crate::core::extension::ExtensionCapability,
-    ) -> &[String] {
-        let Some(checks) = self.self_checks.as_ref() else {
-            return &[];
-        };
-
-        match capability {
-            crate::core::extension::ExtensionCapability::Lint => &checks.lint,
-            crate::core::extension::ExtensionCapability::Test => &checks.test,
-            _ => &[],
-        }
-    }
-
-    pub fn has_self_check(&self, capability: crate::core::extension::ExtensionCapability) -> bool {
-        !self.self_check_commands(capability).is_empty()
-    }
-
     pub fn script_commands(
         &self,
         capability: crate::core::extension::ExtensionCapability,
@@ -578,8 +511,7 @@ impl Component {
             }
         }
 
-        // Existing `self_checks` remains a lint/test compatibility source.
-        self.self_check_commands(capability)
+        &[]
     }
 
     pub fn has_script(&self, capability: crate::core::extension::ExtensionCapability) -> bool {
@@ -683,6 +615,39 @@ mod tests {
         let parsed: Component = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.priority_labels, Some(vec!["urgent".to_string()]));
+    }
+
+    #[test]
+    fn component_ignores_legacy_hook_fields() {
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "pre_version_bump_commands": ["cargo build"],
+            "post_version_bump_commands": ["cargo test"],
+            "post_release_commands": ["echo done"],
+            "hooks": {
+                "post:deploy": ["wp cache flush"]
+            }
+        }))
+        .unwrap();
+
+        assert!(component.hooks.get("pre:version:bump").is_none());
+        assert!(component.hooks.get("post:version:bump").is_none());
+        assert!(component.hooks.get("post:release").is_none());
+        assert_eq!(
+            component.hooks.get("post:deploy"),
+            Some(&vec!["wp cache flush".to_string()])
+        );
+    }
+
+    #[test]
+    fn component_ignores_changelog_targets_alias() {
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "changelog_targets": "CHANGELOG.md"
+        }))
+        .unwrap();
+
+        assert!(component.changelog_target.is_none());
     }
 
     #[test]
@@ -1121,8 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_extension_config_nested_settings_still_work() {
-        // Explicit "settings" sub-object must still work.
+    fn scoped_extension_config_treats_settings_as_flat_key() {
         let json = serde_json::json!({
             "version": ">=2.0.0",
             "settings": {
@@ -1136,19 +1100,17 @@ mod tests {
         assert_eq!(
             config
                 .settings
-                .get("database_type")
+                .get("settings")
+                .and_then(|v| v.as_object())
+                .and_then(|settings| settings.get("database_type"))
                 .and_then(|v| v.as_str()),
             Some("mysql")
         );
-        assert_eq!(
-            config.settings.get("mysql_host").and_then(|v| v.as_str()),
-            Some("localhost")
-        );
+        assert!(config.settings.get("database_type").is_none());
     }
 
     #[test]
-    fn scoped_extension_config_mixed_flat_and_nested() {
-        // Flat keys merge with nested settings. Explicit settings win on conflict.
+    fn scoped_extension_config_does_not_merge_nested_settings() {
         let json = serde_json::json!({
             "settings": {
                 "database_type": "mysql"
@@ -1158,20 +1120,32 @@ mod tests {
         });
 
         let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
-        // Explicit settings win over flat keys.
         assert_eq!(
             config
                 .settings
                 .get("database_type")
                 .and_then(|v| v.as_str()),
-            Some("mysql"),
-            "explicit settings sub-object should take precedence over flat keys"
+            Some("sqlite"),
+            "flat keys are canonical and must not be overwritten by nested settings"
         );
-        // Flat-only key is captured.
         assert_eq!(
             config.settings.get("mysql_host").and_then(|v| v.as_str()),
             Some("localhost")
         );
+        assert!(config.settings.get("settings").is_some());
+    }
+
+    #[test]
+    fn scoped_extension_config_serializes_flat_settings() {
+        let config = ScopedExtensionConfig {
+            version: Some(">=2.0.0".to_string()),
+            settings: HashMap::from([("package_manager".to_string(), serde_json::json!("pnpm"))]),
+        };
+
+        let json = serde_json::to_value(config).unwrap();
+        assert_eq!(json["version"], serde_json::json!(">=2.0.0"));
+        assert_eq!(json["package_manager"], serde_json::json!("pnpm"));
+        assert!(json.get("settings").is_none());
     }
 
     #[test]
