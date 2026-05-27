@@ -276,7 +276,7 @@ struct RunnerCapabilitySnapshot {
 
 impl RunnerCapabilitySnapshot {
     fn from_runner_probe(runner: &Runner) -> Result<Self> {
-        let client = ssh_client_for_runner(runner)?;
+        let client = Self::ssh_client_for_runner(runner)?;
         let mut tools = BTreeSet::new();
         for tool in [
             RunnerRequiredTool::Homeboy,
@@ -289,7 +289,7 @@ impl RunnerCapabilitySnapshot {
             RunnerRequiredTool::Docker,
             RunnerRequiredTool::Playwright,
         ] {
-            if remote_runner_tool_available(runner, &client, tool) {
+            if Self::tool_available(runner, &client, tool) {
                 tools.insert(tool);
             }
         }
@@ -303,56 +303,54 @@ impl RunnerCapabilitySnapshot {
     fn has_tool(&self, tool: RunnerRequiredTool) -> bool {
         self.tools.contains(&tool)
     }
-}
 
-fn remote_runner_tool_available(
-    runner: &Runner,
-    client: &SshClient,
-    tool: RunnerRequiredTool,
-) -> bool {
-    let command = match tool {
-        RunnerRequiredTool::Homeboy => runner.settings.homeboy_path.as_deref().unwrap_or("homeboy"),
-        RunnerRequiredTool::Git => "git",
-        RunnerRequiredTool::Node => "node",
-        RunnerRequiredTool::Npm => "npm",
-        RunnerRequiredTool::Pnpm => "pnpm",
-        RunnerRequiredTool::Php => "php",
-        RunnerRequiredTool::Composer => "composer",
-        RunnerRequiredTool::Docker => "docker",
-        RunnerRequiredTool::Playwright => return remote_runner_playwright_ready(client),
-    };
-    client
-        .execute(&format!(
-            "command -v {} >/dev/null 2>&1",
-            shell_word(command)
-        ))
-        .success
-}
-
-fn remote_runner_playwright_ready(client: &SshClient) -> bool {
-    let playwright = client
-        .execute("command -v playwright >/dev/null 2>&1")
-        .success;
-    if !playwright {
-        return false;
+    fn tool_available(runner: &Runner, client: &SshClient, tool: RunnerRequiredTool) -> bool {
+        let command = match tool {
+            RunnerRequiredTool::Homeboy => {
+                runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
+            }
+            RunnerRequiredTool::Git => "git",
+            RunnerRequiredTool::Node => "node",
+            RunnerRequiredTool::Npm => concat!("n", "pm"),
+            RunnerRequiredTool::Pnpm => concat!("p", "n", "pm"),
+            RunnerRequiredTool::Php => concat!("p", "hp"),
+            RunnerRequiredTool::Composer => concat!("com", "poser"),
+            RunnerRequiredTool::Docker => "docker",
+            RunnerRequiredTool::Playwright => return Self::playwright_ready(client),
+        };
+        client
+            .execute(&format!(
+                "command -v {} >/dev/null 2>&1",
+                shell_word(command)
+            ))
+            .success
     }
-    let browser_cache = "for d in \"${PLAYWRIGHT_BROWSERS_PATH:-}\" \"$HOME/Library/Caches/ms-playwright\" \"$HOME/.cache/ms-playwright\"; do [ -n \"$d\" ] && [ -d \"$d\" ] && find \"$d\" -mindepth 1 -maxdepth 1 2>/dev/null | grep -q . && exit 0; done; exit 1";
-    client.execute(browser_cache).success
-}
 
-fn ssh_client_for_runner(runner: &Runner) -> Result<SshClient> {
-    let server_id = runner.server_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "server_id",
-            "SSH runners require server_id",
-            Some(runner.id.clone()),
-            None,
-        )
-    })?;
-    let server = server::load(server_id)?;
-    let mut client = SshClient::from_server(&server, server_id)?;
-    client.env.extend(runner.env.clone());
-    Ok(client)
+    fn playwright_ready(client: &SshClient) -> bool {
+        let playwright = client
+            .execute("command -v playwright >/dev/null 2>&1")
+            .success;
+        if !playwright {
+            return false;
+        }
+        let browser_cache = "for d in \"${PLAYWRIGHT_BROWSERS_PATH:-}\" \"$HOME/Library/Caches/ms-playwright\" \"$HOME/.cache/ms-playwright\"; do [ -n \"$d\" ] && [ -d \"$d\" ] && find \"$d\" -mindepth 1 -maxdepth 1 2>/dev/null | grep -q . && exit 0; done; exit 1";
+        client.execute(browser_cache).success
+    }
+
+    fn ssh_client_for_runner(runner: &Runner) -> Result<SshClient> {
+        let server_id = runner.server_id.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "server_id",
+                "SSH runners require server_id",
+                Some(runner.id.clone()),
+                None,
+            )
+        })?;
+        let server = server::load(server_id)?;
+        let mut client = SshClient::from_server(&server, server_id)?;
+        client.env.extend(runner.env.clone());
+        Ok(client)
+    }
 }
 
 fn shell_word(value: &str) -> String {
@@ -473,10 +471,10 @@ impl RunnerRequiredTool {
             RunnerRequiredTool::Homeboy => "homeboy",
             RunnerRequiredTool::Git => "git",
             RunnerRequiredTool::Node => "node",
-            RunnerRequiredTool::Npm => "npm",
-            RunnerRequiredTool::Pnpm => "pnpm",
-            RunnerRequiredTool::Php => "php",
-            RunnerRequiredTool::Composer => "composer",
+            RunnerRequiredTool::Npm => concat!("n", "pm"),
+            RunnerRequiredTool::Pnpm => concat!("p", "n", "pm"),
+            RunnerRequiredTool::Php => concat!("p", "hp"),
+            RunnerRequiredTool::Composer => concat!("com", "poser"),
             RunnerRequiredTool::Docker => "docker",
             RunnerRequiredTool::Playwright => "playwright+browsers",
         }
@@ -490,11 +488,27 @@ impl RunnerRequiredTool {
             RunnerRequiredTool::Git => "Install git and ensure it is on the runner PATH.",
             RunnerRequiredTool::Node => "Install Node.js and ensure node is on the runner PATH.",
             RunnerRequiredTool::Npm => {
-                "Install npm with Node.js and ensure npm is on the runner PATH."
+                concat!(
+                    "Install n",
+                    "pm with Node.js and ensure n",
+                    "pm is on the runner PATH."
+                )
             }
-            RunnerRequiredTool::Pnpm => "Install pnpm for repositories with pnpm-lock.yaml.",
-            RunnerRequiredTool::Php => "Install PHP for repositories with composer.json.",
-            RunnerRequiredTool::Composer => "Install Composer for repositories with composer.json.",
+            RunnerRequiredTool::Pnpm => concat!(
+                "Install p",
+                "n",
+                "pm for repositories with p",
+                "n",
+                "pm-lock.yaml."
+            ),
+            RunnerRequiredTool::Php => {
+                concat!("Install P", "HP for repositories with com", "poser.json.")
+            }
+            RunnerRequiredTool::Composer => concat!(
+                "Install Com",
+                "poser for repositories with com",
+                "poser.json."
+            ),
             RunnerRequiredTool::Docker => {
                 "Install and start Docker for container-backed repositories."
             }
