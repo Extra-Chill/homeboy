@@ -258,6 +258,18 @@ pub struct RemoteCommandFailedDetails {
 }
 
 #[derive(Debug, Serialize)]
+pub struct GitCommandFailedDetails {
+    pub command: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 
 pub struct SshServerInvalidDetails {
     pub server_id: String,
@@ -593,6 +605,13 @@ impl Error {
             message,
             Value::Object(serde_json::Map::new()),
         )
+    }
+
+    pub fn git_command_failed_with_details(
+        message: impl Into<String>,
+        details: GitCommandFailedDetails,
+    ) -> Self {
+        Self::new(ErrorCode::GitCommandFailed, message, to_details(details))
     }
 
     pub fn config_missing_key(key: impl Into<String>, path: Option<String>) -> Self {
