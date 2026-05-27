@@ -16,4 +16,8 @@ fn test_ensure_all_helpers() {
         RUNTIME_HELPER_TESTS_RS.contains("ensure_all_helpers_writes_legacy_bench_fallbacks"),
         "unit tests should cover legacy bench helper materialization"
     );
+    assert!(
+        RUNTIME_HELPER_RS.contains("HOMEBOY_RUNTIME_SIDECAR_WRITER"),
+        "extension env should expose the shared sidecar writer helper"
+    );
 }

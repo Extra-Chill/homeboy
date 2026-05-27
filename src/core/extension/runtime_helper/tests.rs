@@ -22,6 +22,10 @@ fn ensure_all_helpers_writes_all_files() {
             "write test results helper should be in pairs"
         );
         assert!(
+            pairs.iter().any(|(k, _)| k == SIDECAR_WRITER_ENV),
+            "sidecar writer helper should be in pairs"
+        );
+        assert!(
             pairs.iter().any(|(k, _)| k == RESOLVE_CONTEXT_ENV),
             "resolve context helper should be in pairs"
         );
@@ -34,6 +38,72 @@ fn ensure_all_helpers_writes_all_files() {
             "bench PHP helper should be in pairs"
         );
     });
+}
+
+#[test]
+fn sidecar_writer_appends_and_merges_json_arrays() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("sidecar-writer.sh");
+    let target_path = dir.path().join("lint-findings.json");
+    let source_path = dir.path().join("extra-findings.json");
+    std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
+    std::fs::write(&source_path, r#"[{"id":"third","message":"three"}]"#).expect("source");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; HOMEBOY_LINT_FINDINGS_FILE={}; homeboy_append_lint_finding '{{\"id\":\"first\",\"message\":\"one\"}}'; homeboy_append_lint_finding '{{\"id\":\"second\",\"message\":\"two\"}}'; homeboy_merge_lint_findings {}; cat {}",
+            helper_path.display(),
+            target_path.display(),
+            source_path.display(),
+            target_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        r#"[{"id":"first","message":"one"},{"id":"second","message":"two"},{"id":"third","message":"three"}]
+"#
+    );
+}
+
+#[test]
+fn sidecar_writer_supports_test_failure_and_fix_result_wrappers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("sidecar-writer.sh");
+    let failures_path = dir.path().join("test-failures.json");
+    let fixes_path = dir.path().join("fix-results.json");
+    std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; HOMEBOY_TEST_FAILURES_FILE={}; HOMEBOY_FIX_RESULTS_FILE={}; homeboy_write_test_failures '{{\"test_id\":\"suite::case\",\"message\":\"failed\"}}'; homeboy_write_fix_results '{{\"file\":\"src/lib.rs\",\"message\":\"formatted\"}}'; printf '%s\n%s' \"$(cat {})\" \"$(cat {})\"",
+            helper_path.display(),
+            failures_path.display(),
+            fixes_path.display(),
+            failures_path.display(),
+            fixes_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        r#"[{"test_id":"suite::case","message":"failed"}]
+[{"file":"src/lib.rs","message":"formatted"}]"#
+    );
 }
 
 #[test]
