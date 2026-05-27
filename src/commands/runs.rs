@@ -117,7 +117,7 @@ pub struct RunsListArgs {
 }
 
 #[derive(Serialize)]
-#[serde(untagged)]
+#[serde(tag = "variant", content = "payload", rename_all = "snake_case")]
 pub enum RunsOutput {
     List(RunsListOutput),
     Distribution(RunsDistributionOutput),

@@ -15,7 +15,9 @@ use super::runs::{
     DriftValue, QueryGroup, QueryRow, RunsDriftFilters, RunsDriftOutput, RunsQueryFilters,
     SkippedArtifactRow, TestRunsQueryOutput as RunsQueryOutput,
 };
-use super::runs::{RunDetail, RunSummary, RunsArtifactsOutput, RunsListOutput, RunsShowOutput};
+use super::runs::{
+    RunDetail, RunSummary, RunsArtifactsOutput, RunsListOutput, RunsOutput, RunsShowOutput,
+};
 use super::stack::{
     StackInspectOutput, StackListOutput, StackShowOutput, StackStatusOutput, StackSummary,
 };
@@ -41,7 +43,7 @@ fn bench_command_json_contract_matches_golden_fixture() {
         "bench_contract.json",
         json!({
             "scenarios": [
-                scenario("bench single legacy", BenchOutput::Single(BenchCommandOutput {
+                scenario("bench single", BenchOutput::Single(BenchCommandOutput {
                     passed: true,
                     status: "passed".to_string(),
                     component: "homeboy".to_string(),
@@ -58,7 +60,7 @@ fn bench_command_json_contract_matches_golden_fixture() {
                     diagnostics: Vec::new(),
                     ci_context: None,
                 })),
-                scenario("bench list legacy", BenchOutput::List(BenchListWorkflowResult {
+                scenario("bench list", BenchOutput::List(BenchListWorkflowResult {
                     component: "homeboy".to_string(),
                     component_id: "homeboy".to_string(),
                     scenarios: Vec::new(),
@@ -75,11 +77,11 @@ fn runs_command_json_contract_matches_golden_fixture() {
         "runs_contract.json",
         json!({
             "scenarios": [
-                scenario("runs list", RunsListOutput {
+                scenario("runs list", RunsOutput::List(RunsListOutput {
                     command: "runs.list",
                     runs: vec![run_summary()],
-                }),
-                scenario("runs show", RunsShowOutput {
+                })),
+                scenario("runs show", RunsOutput::Show(RunsShowOutput {
                     command: "runs.show",
                     run: RunDetail {
                         summary: run_summary(),
@@ -87,13 +89,13 @@ fn runs_command_json_contract_matches_golden_fixture() {
                         metadata: json!({ "scenario": "contract", "score": 0.98 }),
                         artifacts: vec![artifact_record()],
                     },
-                }),
-                scenario("runs artifacts", RunsArtifactsOutput {
+                })),
+                scenario("runs artifacts", RunsOutput::Artifacts(RunsArtifactsOutput {
                     command: "runs.artifacts",
                     run_id: "run-contract-1".to_string(),
                     artifacts: vec![artifact_record()],
-                }),
-                scenario("runs query json", RunsQueryOutput {
+                })),
+                scenario("runs query json", RunsOutput::Query(RunsQueryOutput {
                     command: "runs.query",
                     filters: RunsQueryFilters {
                         component_id: Some("homeboy".to_string()),
@@ -124,8 +126,8 @@ fn runs_command_json_contract_matches_golden_fixture() {
                     }],
                     table: None,
                     csv: None,
-                }),
-                scenario("runs drift json", RunsDriftOutput {
+                })),
+                scenario("runs drift json", RunsOutput::Drift(RunsDriftOutput {
                     command: "runs.drift",
                     filters: RunsDriftFilters {
                         component_id: Some("homeboy".to_string()),
@@ -148,7 +150,7 @@ fn runs_command_json_contract_matches_golden_fixture() {
                         share_delta: Some(0.45),
                     }],
                     table: None,
-                }),
+                })),
             ]
         }),
     );

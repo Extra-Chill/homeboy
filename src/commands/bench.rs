@@ -275,17 +275,9 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
     filter_passthrough_args(PassthroughCommand::Bench, args)
 }
 
-/// Output envelope for `homeboy bench`.
-///
-/// Two shapes:
-/// - `Single` — bare `bench`, `bench <component>`, or `bench --rig <id>`.
-///   Indistinguishable from the pre-cross-rig output for backward
-///   compatibility (`#[serde(untagged)]`, no wrapper key).
-/// - `Comparison` — `bench --rig <a>,<b>[,...]`. Has a top-level
-///   `comparison: "cross_rig"` discriminator field that consumers can
-///   check.
+/// Tagged output envelope for `homeboy bench`.
 #[derive(Serialize)]
-#[serde(untagged)]
+#[serde(tag = "variant", content = "payload", rename_all = "snake_case")]
 pub enum BenchOutput {
     Single(BenchCommandOutput),
     Comparison(BenchComparisonOutput),
@@ -330,8 +322,8 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
         };
     }
 
-    // No --rig: legacy single bare run. No rig pinning, no rig
-    // snapshot, baseline key untouched. Identical to before this PR.
+    // No --rig: single component run. No rig pinning, no rig
+    // snapshot, baseline key untouched.
     if args.run.rig.is_empty() {
         validate_report_selection_for_single_run(&args.run)?;
         let passthrough_args = filter_homeboy_flags(&args.run.args);
@@ -359,7 +351,7 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
     // --rig with one value: single rig-pinned run. A rig that declares
     // bench.components fans out across those components while preserving
     // one rig-state snapshot. Rigs with only default_component keep the
-    // legacy one-component shape.
+    // one-component payload shape.
     if run_args.rig.len() == 1 {
         validate_report_selection_for_single_run(run_args)?;
         let rig_id = run_args.rig[0].clone();
