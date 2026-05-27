@@ -410,19 +410,56 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
 
 function executeAuditWpCodeboxFanout(input) {
   const plan = input.plan || createAuditWpCodeboxFanoutPlan(input);
-  const records = plan.task_requests.map((taskRequest) => executeWpCodeboxTaskRequest(taskRequest, input));
-  const run = {
+
+  const records = [];
+  const baseRun = {
     schema: 'homeboy/audit-wp-codebox-execution/v1',
     plan_schema: plan.schema,
     orchestrator: plan.orchestrator,
     audit: plan.audit,
+  };
+  const writeRun = (run) => {
+    if (input.runsOutputPath) {
+      writeJson(input.runsOutputPath, run);
+    }
+  };
+
+  writeRun({
+    ...baseRun,
+    records,
+    status: 'incomplete',
+    current_group: null,
+  });
+
+  for (const taskRequest of plan.task_requests) {
+    writeRun({
+      ...baseRun,
+      records,
+      status: 'incomplete',
+      current_group: {
+        sandbox_session_id: taskRequest.sandbox_session_id,
+        group_key: taskRequest.group_key,
+        finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
+      },
+    });
+
+    records.push(executeWpCodeboxTaskRequest(taskRequest, input));
+
+    writeRun({
+      ...baseRun,
+      records,
+      status: 'incomplete',
+      current_group: null,
+    });
+  }
+
+  const run = {
+    ...baseRun,
     records,
     status: records.every((record) => record.status === 'completed') ? 'completed' : 'failed',
   };
 
-  if (input.runsOutputPath) {
-    writeJson(input.runsOutputPath, run);
-  }
+  writeRun(run);
 
   return run;
 }

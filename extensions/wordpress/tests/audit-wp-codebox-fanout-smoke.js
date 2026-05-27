@@ -103,12 +103,20 @@ function createWpCodeboxFixtureCommand(root) {
   const scriptPath = path.join(root, 'fixture-wp-codebox.cjs');
   fs.writeFileSync(scriptPath, `#!/usr/bin/env node
 'use strict';
+const fs = require('node:fs');
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
   const request = JSON.parse(input);
   if (request.group_key === 'docs-reference') {
+    if (process.env.FIXTURE_EXPECT_INCREMENTAL_RUN) {
+      const run = JSON.parse(fs.readFileSync(process.env.FIXTURE_EXPECT_INCREMENTAL_RUN, 'utf8'));
+      if (run.status !== 'incomplete' || run.records.length !== 1 || !run.current_group || run.current_group.group_key !== request.group_key) {
+        process.stderr.write('fixture incremental fanout-run summary missing expected partial state\\n');
+        process.exit(4);
+      }
+    }
     process.stderr.write('fixture docs-reference failure\\n');
     process.exit(3);
   }
@@ -323,9 +331,14 @@ try {
     wpCodeboxCommand: process.execPath,
     wpCodeboxArgs: [fixtureCommand],
     runsOutputPath,
+    env: {
+      FIXTURE_EXPECT_INCREMENTAL_RUN: runsOutputPath,
+    },
   });
   assert.equal(fileExecution.records.length, 2);
-  assert.equal(readJson(runsOutputPath).records.length, 2);
+  const finalRun = readJson(runsOutputPath);
+  assert.equal(finalRun.records.length, 2);
+  assert.equal(Object.hasOwn(finalRun, 'current_group'), false);
 
   const cliExecutionOutput = run(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-audit-wp-codebox-fanout.cjs'),
