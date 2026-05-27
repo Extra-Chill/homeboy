@@ -40,6 +40,8 @@ glob-match = "0.2"
 glob = "0.3"
 zip = "0.6"
 keyring = { version = "3.6", features = ["apple-native"] }
+core-foundation-sys = "0.8"
+security-framework-sys = "2.17"
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls", "socks"] }
 arboard = "3"
 chrono = "0.4"
