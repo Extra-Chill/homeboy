@@ -126,7 +126,7 @@ Scripts that implement extension capabilities. Each script path is relative to t
 
 ## Structured Sidecar Declarations
 
-Extensions can declare which well-known structured sidecars they emit and which schema version each sidecar follows. Declarations are opt-in: if a field is missing, Homeboy preserves the existing backward-compatible behavior and treats that sidecar as legacy/best-effort rather than contract-backed.
+Extensions can declare which well-known structured sidecars they emit and which schema version each sidecar follows. Declarations are explicit contracts: if a field is missing, the extension has not declared that structured sidecar.
 
 ```json
 {
@@ -152,11 +152,11 @@ Extensions can declare which well-known structured sidecars they emit and which 
 
 ### Inspection Behavior
 
-Core exposes declared sidecars through manifest inspection. Consumers that need a guaranteed structured contract should check for a declaration before relying on a sidecar. Consumers that support older extensions may keep the historical fallback behavior when no declaration is present.
+Core exposes declared sidecars through manifest inspection. Consumers that need machine-readable output should require the matching declaration before relying on a sidecar.
 
 ## Audit Configuration
 
-Configuration for documentation-reference analysis, feature detection, and test coverage analysis.
+Configuration for documentation-reference analysis, feature detection, and structural test coverage analysis.
 
 ```json
 {
@@ -209,18 +209,45 @@ Configuration for documentation-reference analysis, feature detection, and test 
 - **`inline_tests`** (boolean): Whether the language uses inline tests (e.g., Rust `#[cfg(test)]`)
 - **`critical_patterns`** (array): Directory patterns that indicate high-priority test coverage (get `Warning` severity instead of `Info`)
 
-## Runtime Configuration
+## Test Drift Configuration
 
-Runtime configuration defines how executable extensions are executed.
+Changed-test and drift workflows use the canonical `test.drift` contract. `audit.test_mapping` is only for structural test coverage checks and does not declare drift behavior.
 
 ```json
 {
-  "runtime": {
-    "run_command": "string",
-    "setup_command": "string",
-    "ready_check": "string",
-    "entrypoint": "string",
-    "env": {}
+  "test": {
+    "extension_script": "scripts/test.sh",
+    "drift": {
+      "source_dirs": ["src"],
+      "test_dirs": ["tests"],
+      "file_extensions": ["rs"],
+      "inline_tests": true
+    }
+  }
+}
+```
+
+### Test Drift Fields
+
+- **`source_dirs`** (array): Source directories to scan relative to the component root
+- **`test_dirs`** (array): Test directories to scan relative to the component root
+- **`file_extensions`** (array): File extensions to include when building source/test glob patterns
+- **`inline_tests`** (boolean): Whether the language supports inline tests
+
+## Executable Runtime Configuration
+
+Executable runtime configuration defines how executable extensions are executed.
+
+```json
+{
+  "executable": {
+    "runtime": {
+      "run_command": "string",
+      "setup_command": "string",
+      "ready_check": "string",
+      "entrypoint": "string",
+      "env": {}
+    }
   }
 }
 ```
@@ -266,7 +293,7 @@ Detector output uses the same shape without the outer `runtime` field:
 }
 ```
 
-Runtime IDs are extension-owned strings. Legacy detector or manifest requirement objects with top-level `php` or `node` string fields are still accepted for compatibility; new manifests should use `runtimes`.
+Runtime IDs are extension-owned strings. Runtime requirements must use the canonical `runtimes` map with object values containing `version`; top-level runtime IDs and string shorthand values are invalid.
 
 ## Platform Configuration
 
@@ -567,9 +594,16 @@ Documentation files live in the extension's `docs/` directory. Topics resolve to
   "version": "1.0.0",
   "description": "WordPress platform integration with WP-CLI",
   "runtime": {
-    "run_command": "wp {{args}}",
-    "setup_command": "curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && sudo mv wp-cli.phar /usr/local/bin/wp",
-    "ready_check": "wp --version"
+    "runtimes": {
+      "php": { "version": "8.2" }
+    }
+  },
+  "executable": {
+    "runtime": {
+      "run_command": "wp {{args}}",
+      "setup_command": "curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && sudo mv wp-cli.phar /usr/local/bin/wp",
+      "ready_check": "wp --version"
+    }
   },
   "platform": {
     "database": {
