@@ -183,6 +183,27 @@ assert_contains "${FALLBACK_BODY}" '| `source_change` | 2 | `src/core/code_audit
 assert_not_contains "${FALLBACK_BODY}" 'No source fixes were reported by the autofix output.' "fallback avoids false no-source-fixes summary"
 assert_not_contains "${FALLBACK_BODY}" 'changed outside the reported source-fix set' "fallback does not misclassify source files as other changes"
 
+LINT_FIX_OUTPUT_DIR="${TMP_DIR}/lint-fix-output"
+mkdir -p "${LINT_FIX_OUTPUT_DIR}"
+cat > "${LINT_FIX_OUTPUT_DIR}/fix.json" <<'JSON'
+{
+  "success": true,
+  "data": {
+    "autofix": {
+      "changed_files": [
+        "inc/wiki/class-intelligence-wiki-brain-coverage-planner.php"
+      ],
+      "files_modified": 1
+    },
+    "component": "intelligence",
+    "status": "passed"
+  }
+}
+JSON
+
+LINT_FIX_REPORT="$(extract_fix_report_from_output "${LINT_FIX_OUTPUT_DIR}")"
+assert_contains "${LINT_FIX_REPORT}" $'source_change	1	inc/wiki/class-intelligence-wiki-brain-coverage-planner.php' "lint --fix report classifies autofix changed files"
+
 BODY_CAPTURE="${TMP_DIR}/synthesized-create.md"
 export BODY_CAPTURE
 export AUTOFIX_FILE_COUNT="1"

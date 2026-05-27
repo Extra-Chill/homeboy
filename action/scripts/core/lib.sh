@@ -182,10 +182,13 @@ extract_fix_details_from_output() {
     [ .[] | select((.command // "") == "refactor.sources" and (.applied // false)) |
       (.changed_files // [])[] | {cat: "source_change", file: .}
     ] as $source_changes |
+    [ .[] | select(((.autofix.changed_files // []) | length) > 0) |
+      (.autofix.changed_files // [])[] | {cat: "source_change", file: .}
+    ] as $lint_autofix_changes |
 
     # Prefer precise structured rows. Fall back to changed_files only when the
     # source run would otherwise look like a metadata-only change.
-    (if ($structured | length) > 0 then $structured else $source_changes end) |
+    (if ($structured | length) > 0 then $structured else ($source_changes + $lint_autofix_changes) end) |
     group_by(.cat) |
     map({
       cat: .[0].cat,
@@ -241,8 +244,11 @@ extract_fix_report_from_output() {
     [ .[] | select((.command // "") == "refactor.sources" and (.applied // false)) |
       (.changed_files // [])[] | {cat: "source_change", file: .}
     ] as $source_changes |
+    [ .[] | select(((.autofix.changed_files // []) | length) > 0) |
+      (.autofix.changed_files // [])[] | {cat: "source_change", file: .}
+    ] as $lint_autofix_changes |
 
-    (if ($structured | length) > 0 then $structured else $source_changes end) |
+    (if ($structured | length) > 0 then $structured else ($source_changes + $lint_autofix_changes) end) |
     group_by(.cat) |
     map({
       cat: .[0].cat,

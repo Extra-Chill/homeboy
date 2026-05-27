@@ -148,7 +148,25 @@ stage_autofix_changes() {
     return 1
   fi
 
-  git add -A
+  local staged_any=false
+  while IFS= read -r file; do
+    [ -n "${file}" ] || continue
+    if [ ! -e "${file}" ] && git ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
+      git add -u -- "${file}"
+      staged_any=true
+      continue
+    fi
+    if [ -e "${file}" ]; then
+      git add -- "${file}"
+      staged_any=true
+    fi
+  done < <(autofix_source_files_from_report)
+
+  if [ "${staged_any}" != "true" ]; then
+    echo "Skipping autofix commit: no reported source files to stage"
+    return 1
+  fi
+
   if git diff --cached --quiet; then
     return 1
   fi
@@ -161,7 +179,6 @@ commit_autofix_changes() {
   AUTOFIX_CHANGED_FILES="$(git diff --cached --name-only | sort)"
   AUTOFIX_FIX_TYPES=""
   AUTOFIX_FINDING_TYPES=""
-  AUTOFIX_REPORT=""
 
   for FIX_CMD in "${FIX_ARRAY[@]}"; do
     FIX_CMD=$(echo "${FIX_CMD}" | xargs)
@@ -171,22 +188,6 @@ commit_autofix_changes() {
     fi
     AUTOFIX_FIX_TYPES+="${BASE}"
   done
-
-  AUTOFIX_DETAILS=""
-  AUTOFIX_TOTAL_FIXES=""
-  # Read fix details from the autofix run's own output (AUTOFIX_OUTPUT_DIR),
-  # not the diagnostic run's output (HOMEBOY_OUTPUT_DIR). The autofix run
-  # captures --output with the actual fix results and fixer categories.
-  local details_dir="${AUTOFIX_OUTPUT_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
-  if [ -n "${details_dir}" ] && [ -d "${details_dir}" ]; then
-    local raw_details
-    raw_details="$(extract_fix_details_from_output "${details_dir}")"
-    if [ -n "${raw_details}" ]; then
-      AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
-      AUTOFIX_DETAILS="$(echo "${raw_details}" | tail -n +2)"
-    fi
-    AUTOFIX_REPORT="$(extract_fix_report_from_output "${details_dir}")"
-  fi
 
   COMMIT_MSG="$(build_autofix_commit_message "${AUTOFIX_FIX_TYPES}" "${AUTOFIX_FILE_COUNT}" "${AUTOFIX_DETAILS}" "${AUTOFIX_TOTAL_FIXES}")"
 
@@ -199,6 +200,23 @@ commit_autofix_changes() {
   GIT_COMMITTER_NAME="${BOT_NAME}" \
   GIT_COMMITTER_EMAIL="${BOT_EMAIL}" \
     git commit -m "${COMMIT_MSG}"
+}
+
+load_autofix_metadata() {
+  AUTOFIX_DETAILS=""
+  AUTOFIX_TOTAL_FIXES=""
+  AUTOFIX_REPORT=""
+
+  local details_dir="${AUTOFIX_OUTPUT_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
+  if [ -n "${details_dir}" ] && [ -d "${details_dir}" ]; then
+    local raw_details
+    raw_details="$(extract_fix_details_from_output "${details_dir}")"
+    if [ -n "${raw_details}" ]; then
+      AUTOFIX_TOTAL_FIXES="$(echo "${raw_details}" | head -1)"
+      AUTOFIX_DETAILS="$(echo "${raw_details}" | tail -n +2)"
+    fi
+    AUTOFIX_REPORT="$(extract_fix_report_from_output "${details_dir}")"
+  fi
 }
 
 push_autofix_commit() {
@@ -267,6 +285,8 @@ if [ -n "${AUTOFIX_OUTPUT_DIR:-}" ] && check_core_guard_block "${AUTOFIX_OUTPUT_
 fi
 
 maybe_update_baseline
+
+load_autofix_metadata
 
 if ! stage_autofix_changes; then
   echo "No autofix changes detected"
