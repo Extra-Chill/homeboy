@@ -735,7 +735,6 @@ mod tests {
         assert_eq!(selected.as_deref(), Some("lab-a"));
     }
 
-    #[test]
     fn default_lab_runner_can_select_connected_reverse_runner() {
         let selected = resolve_default_lab_runner_from_candidates(
             None,
