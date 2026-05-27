@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.10] - 2026-05-27
+
+### Fixed
+- fail wp codebox fanout on task errors
+
 ## [2.102.9] - 2026-05-27
 
 ### Changed
