@@ -76,7 +76,6 @@ echo wp_json_encode( is_array( $homeboy_workload_result ) ? $homeboy_workload_re
 PHP
 
     local agents_api_path="${HOMEBOY_AGENTS_API_PATH:-${AGENTS_API_PATH:-}}"
-    local wp_ai_client_path="${HOMEBOY_WP_AI_CLIENT_PATH:-${WP_AI_CLIENT_PATH:-}}"
     local data_machine_path="${HOMEBOY_DATA_MACHINE_PATH:-${DATA_MACHINE_PATH:-}}"
     local data_machine_code_path="${HOMEBOY_DATA_MACHINE_CODE_PATH:-${DATA_MACHINE_CODE_PATH:-}}"
     if [ -z "$agents_api_path" ]; then
@@ -84,9 +83,6 @@ PHP
     fi
     if [ -z "$data_machine_path" ]; then
         data_machine_path=$(jq -r '.wp_codebox_components.data_machine // .wp_codebox_data_machine_path // empty' "$CONFIG_PATH")
-    fi
-    if [ -z "$wp_ai_client_path" ]; then
-        wp_ai_client_path=$(jq -r '.wp_codebox_components.wp_ai_client // .wp_codebox_wp_ai_client_path // empty' "$CONFIG_PATH")
     fi
     if [ -z "$data_machine_code_path" ]; then
         data_machine_code_path=$(jq -r '.wp_codebox_components.data_machine_code // .wp_codebox_data_machine_code_path // empty' "$CONFIG_PATH")
@@ -102,12 +98,10 @@ PHP
     local extra_plugins_json mounts_json secret_env_json provider_slugs_csv
     extra_plugins_json=$(jq -nc \
         --arg agents "$agents_api_path" \
-        --arg wpAiClient "$wp_ai_client_path" \
         --arg datamachine "$data_machine_path" \
         --arg code "$data_machine_code_path" \
         '[
             {source: $agents, slug: "agents-api", activate: false},
-            (if $wpAiClient != "" then {source: $wpAiClient, slug: "php-ai-client", activate: false} else empty end),
             {source: $datamachine, slug: "data-machine", activate: false},
             {source: $code, slug: "data-machine-code", activate: false}
         ]')
