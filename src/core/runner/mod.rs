@@ -15,17 +15,14 @@ mod evidence;
 mod execution;
 mod offload_changed_since;
 mod offload_metadata;
+mod session;
 mod workspace;
 
 pub use apply::{
     apply_workspace_patch, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
     RunnerWorkspaceApplyStatus,
 };
-pub use connection::{
-    connect, connect_reverse, disconnect, status, statuses, ReverseRunnerConnectOptions,
-    RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind, RunnerSession,
-    RunnerSessionRole, RunnerSessionState, RunnerStatusReport, RunnerTunnelMode,
-};
+pub use connection::{connect, connect_reverse, disconnect, status, statuses};
 pub use evidence::{
     download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,
@@ -40,6 +37,10 @@ pub use offload_changed_since::{
     prepare_git_lab_offload_changed_since,
 };
 pub use offload_metadata::{capture_lab_offload_metadata, lab_offload_metadata};
+pub use session::{
+    ReverseRunnerConnectOptions, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStatusReport, RunnerTunnelMode,
+};
 pub use workspace::{
     sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
