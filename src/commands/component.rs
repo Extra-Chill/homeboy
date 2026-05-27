@@ -770,7 +770,7 @@ fn set(
             None,
             Some(vec![
                 "Arbitrary field updates must use --json or --base64.".to_string(),
-                "Example: homeboy component set <id> --json '{\"remote_path\":\"wp-content/plugins/plugin\"}'".to_string(),
+                "Example: homeboy component set <id> --json '{\"remote_path\":\"services/app\"}'".to_string(),
             ]),
         ));
     }

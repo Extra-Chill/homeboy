@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use homeboy::core::tunnel::{
     self, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth, ServiceTunnelAuthMode,
-    ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelStatus,
+    ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelStatus, ServiceTunnelTarget,
 };
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
@@ -163,14 +163,16 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
         } => expose_service(ExposeServiceTunnelSpec {
             id,
             server_id: server,
-            remote_host,
-            remote_port,
             scheme,
             local_port,
             auth: ServiceTunnelAuth {
                 mode: auth_mode.into(),
                 env_var: auth_env,
                 header: auth_header,
+            },
+            target: ServiceTunnelTarget {
+                host: remote_host,
+                port: remote_port,
             },
             policy: ServiceTunnelPolicy {
                 exposure: ServiceTunnelExposure::PrivateLoopback,

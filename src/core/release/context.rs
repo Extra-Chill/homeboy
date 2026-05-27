@@ -40,6 +40,7 @@ mod tests {
         std::fs::write(
             homeboy_json,
             r#"{
+                "id": "fixture-root",
                 "components": {
                     "fixture": {
                         "type": "nodejs",

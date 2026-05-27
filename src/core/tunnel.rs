@@ -19,8 +19,7 @@ pub struct ServiceTunnel {
     pub description: Option<String>,
 
     pub server_id: String,
-    pub remote_host: String,
-    pub remote_port: u16,
+    pub target: ServiceTunnelTarget,
 
     #[serde(default = "default_scheme")]
     pub scheme: String,
@@ -53,6 +52,12 @@ pub struct ServiceTunnelAuth {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelTarget {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceTunnelExposure {
     PrivateLoopback,
@@ -82,8 +87,7 @@ pub struct ServiceTunnelStatus {
 pub struct ExposeServiceTunnelSpec {
     pub id: String,
     pub server_id: String,
-    pub remote_host: String,
-    pub remote_port: u16,
+    pub target: ServiceTunnelTarget,
     pub scheme: String,
     pub local_port: Option<u16>,
     pub auth: ServiceTunnelAuth,
@@ -124,7 +128,9 @@ impl ConfigEntity for ServiceTunnel {
     }
 
     fn config_path(id: &str) -> Result<PathBuf> {
-        Ok(paths::service_tunnels()?.join(format!("{}.json", id)))
+        Ok(paths::homeboy()?
+            .join("service-tunnels")
+            .join(format!("{}.json", id)))
     }
 
     fn validate(&self) -> Result<()> {
@@ -144,8 +150,7 @@ pub fn expose(spec: ExposeServiceTunnelSpec) -> Result<ServiceTunnel> {
         aliases: Vec::new(),
         description: spec.description,
         server_id: spec.server_id,
-        remote_host: spec.remote_host,
-        remote_port: spec.remote_port,
+        target: spec.target,
         scheme: spec.scheme,
         local_host: default_local_host(),
         local_port: spec.local_port,
@@ -154,12 +159,12 @@ pub fn expose(spec: ExposeServiceTunnelSpec) -> Result<ServiceTunnel> {
     };
     validate_service_tunnel(&tunnel)?;
     save(&tunnel)?;
-    Ok(load(&tunnel.id)?)
+    load(&tunnel.id)
 }
 
 pub fn status(id: &str) -> Result<ServiceTunnelStatus> {
     let tunnel = load(id)?;
-    Ok(status_for(&tunnel))
+    Ok(service_tunnel_status(&tunnel))
 }
 
 pub fn local_url(id: &str) -> Result<String> {
@@ -167,14 +172,14 @@ pub fn local_url(id: &str) -> Result<String> {
     Ok(local_url_for(&tunnel))
 }
 
-pub fn status_for(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
+fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
     ServiceTunnelStatus {
         service_id: tunnel.id.clone(),
         declared: true,
         running: false,
         lifecycle: "declared".to_string(),
         local_url: local_url_for(tunnel),
-        remote_target: format!("{}:{}", tunnel.remote_host, tunnel.remote_port),
+        remote_target: format!("{}:{}", tunnel.target.host, tunnel.target.port),
         policy: tunnel.policy.clone(),
     }
 }
@@ -194,17 +199,17 @@ fn validate_service_tunnel(tunnel: &ServiceTunnel) -> Result<()> {
             suggestions,
         ));
     }
-    if tunnel.remote_host.trim().is_empty() {
+    if tunnel.target.host.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
-            "remote_host",
+            "target.host",
             "remote host is required",
             Some(tunnel.id.clone()),
             None,
         ));
     }
-    if tunnel.remote_port == 0 {
+    if tunnel.target.port == 0 {
         return Err(Error::validation_invalid_argument(
-            "remote_port",
+            "target.port",
             "remote port must be greater than zero",
             Some(tunnel.id.clone()),
             None,
@@ -291,8 +296,10 @@ mod tests {
             let tunnel = expose(ExposeServiceTunnelSpec {
                 id: "context-a8c".to_string(),
                 server_id: "private-host".to_string(),
-                remote_host: "127.0.0.1".to_string(),
-                remote_port: 7331,
+                target: ServiceTunnelTarget {
+                    host: "127.0.0.1".to_string(),
+                    port: 7331,
+                },
                 scheme: "http".to_string(),
                 local_port: Some(8831),
                 auth: ServiceTunnelAuth {
@@ -324,8 +331,10 @@ mod tests {
             let err = expose(ExposeServiceTunnelSpec {
                 id: "bad".to_string(),
                 server_id: "private-host".to_string(),
-                remote_host: "127.0.0.1".to_string(),
-                remote_port: 7331,
+                target: ServiceTunnelTarget {
+                    host: "127.0.0.1".to_string(),
+                    port: 7331,
+                },
                 scheme: "http".to_string(),
                 local_port: None,
                 auth: ServiceTunnelAuth {
