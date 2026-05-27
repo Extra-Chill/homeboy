@@ -53,10 +53,9 @@ homeboy component show <id>
 
 ```sh
 homeboy component set <id> --json <JSON>
-homeboy component set <id> '<JSON>'
+homeboy component set <id> --base64 <BASE64_JSON>
 homeboy component set --json <JSON>   # id may be provided in JSON body
-homeboy component set <id> --key value   # dynamic flags
-homeboy component set <id> --json '{}' -- --key value   # combining --json with dynamic flags
+homeboy component set <id> --changelog-target "CHANGELOG.md"   # dedicated flag
 ```
 
 Updates a component by merging a JSON object into `components/<id>.json`.
@@ -64,17 +63,14 @@ Updates a component by merging a JSON object into `components/<id>.json`.
 Options:
 
 - `--json <JSON>`: JSON object to merge into config (supports `@file` and `-` for stdin)
+- `--base64 <BASE64_JSON>`: Base64-encoded JSON object for shell-sensitive payloads
 - `--replace <field>`: replace array fields instead of union (repeatable)
-- `--key value`: Dynamic flags that map directly to JSON keys (e.g., `--changelog-target "CHANGELOG.md"`)
+- Dedicated flags for common fields: `--local-path`, `--remote-path`, `--build-artifact`, `--extract-command`, `--changelog-target`, `--version-target`, and `--extension`
 
-**Important:** When combining `--json` with dynamic flags, you must add an explicit `--` separator before the dynamic flags:
+Arbitrary field updates must use `--json` or `--base64`. Positional JSON, positional `key=value`, and trailing arbitrary `--key value` updates are not accepted.
 
 ```sh
-# Correct: explicit separator before dynamic flags
-homeboy component set my-plugin --json '{"type":"plugin"}' -- --docs_dir "docs"
-
-# Incorrect: will fail with "unexpected argument"
-homeboy component set my-plugin --json '{"type":"plugin"}' --docs_dir "docs"
+homeboy component set my-plugin --json '{"type":"plugin","docs_dir":"docs"}'
 ```
 
 Notes:
@@ -116,12 +112,12 @@ homeboy component set <id> --json '{"extensions": {"github": {"settings": {}}, "
 To configure changelog tracking for a component:
 
 ```sh
-# Using dynamic flag (recommended)
+# Using dedicated flag (recommended)
 homeboy component set <id> --changelog-target "CHANGELOG.md"
 homeboy component set <id> --changelog-target "docs/CHANGELOG.md"
 
 # Using JSON format
-homeboy component set <id> '{"changelog_target": "docs/CHANGELOG.md"}'
+homeboy component set <id> --json '{"changelog_target": "docs/CHANGELOG.md"}'
 ```
 
 Note: `changelog_target` is a string path relative to `local_path`, not an object.

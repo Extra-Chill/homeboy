@@ -44,10 +44,11 @@ Display fleet configuration including project list.
 
 ```sh
 homeboy fleet set <id> --json <JSON>
-homeboy fleet set <id> '<JSON>'
+homeboy fleet set <id> --base64 <BASE64_JSON>
 ```
 
 Update fleet configuration by merging a JSON object.
+Arbitrary fleet updates must use `--json` or `--base64`; positional JSON and positional `key=value` updates are not accepted.
 
 ### `delete`
 

@@ -292,9 +292,13 @@ fn set(args: super::DynamicSetArgs) -> CmdResult<ProjectOutput> {
     let merged = super::merge_dynamic_args(&args)?.ok_or_else(|| {
         homeboy::core::Error::validation_invalid_argument(
             "spec",
-            "Provide JSON spec, --json flag, --base64 flag, or --key value flags",
+            "Provide --json '<object>' or --base64 <encoded-json>",
             None,
-            None,
+            Some(vec![
+                "Arbitrary project updates must use explicit JSON input.".to_string(),
+                "Example: homeboy project set <id> --json '{\"base_path\":\"/var/www/site\"}'"
+                    .to_string(),
+            ]),
         )
     })?;
     let (json_string, replace_fields) = super::finalize_set_spec(&merged, &args.replace)?;

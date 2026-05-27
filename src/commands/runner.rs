@@ -543,9 +543,13 @@ fn set(args: DynamicSetArgs) -> CmdResult<RunnerOutput> {
     let merged = super::merge_dynamic_args(&args)?.ok_or_else(|| {
         homeboy::core::Error::validation_invalid_argument(
             "spec",
-            "Provide JSON spec, --json flag, --base64 flag, or --key value flags",
+            "Provide --json '<object>' or --base64 <encoded-json>",
             None,
-            None,
+            Some(vec![
+                "Arbitrary runner updates must use explicit JSON input.".to_string(),
+                "Example: homeboy runner set <id> --json '{\"workspace_root\":\"/srv/homeboy\"}'"
+                    .to_string(),
+            ]),
         )
     })?;
     let (json_string, replace_fields) = super::finalize_set_spec(&merged, &args.replace)?;

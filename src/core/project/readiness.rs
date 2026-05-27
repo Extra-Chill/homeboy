@@ -8,13 +8,13 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
     match &project.server_id {
         None => {
             blockers.push(format!(
-                "Missing server_id - set with: homeboy project set {} '{{\"server_id\": \"<server-id>\"}}'",
+                "Missing server_id - set with: homeboy project set {} --json '{{\"server_id\": \"<server-id>\"}}'",
                 project.id
             ));
         }
         Some(sid) if !crate::core::server::exists(sid) => {
             blockers.push(format!(
-                "Server '{}' not found - create with: homeboy server set {} '{{\"host\": \"...\", \"user\": \"...\"}}'",
+                "Server '{}' not found - create with: homeboy server set {} --json '{{\"host\": \"...\", \"user\": \"...\"}}'",
                 sid, sid
             ));
         }
@@ -28,7 +28,7 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
         .unwrap_or(true)
     {
         blockers.push(format!(
-            "Missing base_path - set with: homeboy project set {} '{{\"base_path\": \"/path/to/webroot\"}}'",
+            "Missing base_path - set with: homeboy project set {} --json '{{\"base_path\": \"/path/to/webroot\"}}'",
             project.id
         ));
     }

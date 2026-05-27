@@ -42,14 +42,14 @@ homeboy server show <server_id>
 
 ```sh
 homeboy server set <server_id> --json <JSON>
-homeboy server set <server_id> '<JSON>'
-homeboy server set <server_id> auth.mode=key_plus_password_controlmaster
+homeboy server set <server_id> --base64 <BASE64_JSON>
+homeboy server set <server_id> --json '{"auth":{"mode":"key_plus_password_controlmaster"}}'
 homeboy server set --json <JSON>   # server_id may be provided in JSON body
 ```
 
 Updates a server by merging a JSON object into `servers/<id>.json`. Runner-capable servers store their runner settings under the nested `runner` object; `homeboy runner enable <server_id>` is the preferred CLI for adding that capability.
 
-`key=value` arguments support dotted paths, so `auth.mode=value` is equivalent to `{"auth":{"mode":"value"}}`.
+Arbitrary server updates must use `--json` or `--base64`; positional JSON, positional `key=value`, and dotted-path compatibility updates are not accepted.
 
 Use `null` in JSON to clear a field (for example, `{"identity_file": null}`).
 

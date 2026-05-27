@@ -127,7 +127,7 @@ pub(super) fn deploy_artifact(
                 1,
                 format!(
                     "Archive artifact '{}' requires an extractCommand. \
-                     Add one with: homeboy component set <id> '{{\"extractCommand\": \"unzip -o {{artifact}} && rm {{artifact}}\"}}'",
+                     Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{artifact}} && rm {{artifact}}\"}}'",
                     local_path.display()
                 ),
             ));

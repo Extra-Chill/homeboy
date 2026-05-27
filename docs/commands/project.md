@@ -153,15 +153,17 @@ Only these commands require `server_id`:
 
 ```sh
 homeboy project set <project_id> --json <JSON>
-homeboy project set <project_id> '<JSON>'
+homeboy project set <project_id> --base64 <BASE64_JSON>
 homeboy project set --json <JSON>   # project_id may be provided in JSON body
 ```
 
 Updates a project by merging a JSON object into `projects/<id>.json`.
+Arbitrary project updates must use `--json` or `--base64`; positional JSON and positional `key=value` updates are not accepted.
 
 Options:
 
 - `--json <JSON>`: JSON object to merge into config (supports `@file` and `-` for stdin)
+- `--base64 <BASE64_JSON>`: Base64-encoded JSON object for shell-sensitive payloads
 - `--replace <field>`: replace array fields instead of union (repeatable)
 
 Notes:
