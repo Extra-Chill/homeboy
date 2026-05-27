@@ -2,16 +2,35 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::core::engine::command;
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, GitCommandFailedDetails, Result};
+
+fn git_command_display(args: &[&str]) -> String {
+    if args.is_empty() {
+        "git".to_string()
+    } else {
+        format!("git {}", args.join(" "))
+    }
+}
+
+fn git_cwd_display(git_root: &Path) -> String {
+    git_root.to_string_lossy().to_string()
+}
+
+fn git_failure_message(context: &str, detail: &str) -> String {
+    if detail.trim().is_empty() {
+        context.to_string()
+    } else {
+        format!("{} failed: {}", context, detail.trim())
+    }
+}
 
 /// Clone a git repository to a target directory.
 pub fn clone_repo(url: &str, target_dir: &Path) -> Result<()> {
-    command::run(
-        "git",
+    run_git(
+        Path::new("."),
         &["clone", url, &target_dir.to_string_lossy()],
         "git clone",
-    )
-    .map_err(|e| Error::git_command_failed(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -20,13 +39,11 @@ pub fn clone_repo_at_ref(url: &str, target_dir: &Path, revision: Option<&str>) -
     clone_repo(url, target_dir)?;
 
     if let Some(revision) = revision {
-        command::run_in(
-            &target_dir.to_string_lossy(),
-            "git",
+        run_git(
+            target_dir,
             &["checkout", "--quiet", revision],
             "git checkout",
-        )
-        .map_err(|e| Error::git_command_failed(e.to_string()))?;
+        )?;
     }
 
     Ok(())
@@ -34,8 +51,7 @@ pub fn clone_repo_at_ref(url: &str, target_dir: &Path, revision: Option<&str>) -
 
 /// Pull latest changes in a git repository.
 pub fn pull_repo(repo_dir: &Path) -> Result<()> {
-    command::run_in(&repo_dir.to_string_lossy(), "git", &["pull"], "git pull")
-        .map_err(|e| Error::git_command_failed(e.to_string()))?;
+    run_git(repo_dir, &["pull"], "git pull")?;
     Ok(())
 }
 
@@ -76,17 +92,35 @@ pub fn run_git(git_root: &Path, args: &[&str], context: &str) -> Result<String> 
         .current_dir(git_root)
         .stdin(std::process::Stdio::null())
         .output()
-        .map_err(|e| Error::internal_io(e.to_string(), Some(context.to_string())))?;
+        .map_err(|e| {
+            Error::git_command_failed_with_details(
+                git_failure_message(context, &e.to_string()),
+                GitCommandFailedDetails {
+                    command: git_command_display(args),
+                    cwd: git_cwd_display(git_root),
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    io_error: Some(e.to_string()),
+                },
+            )
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(Error::git_command_failed(if detail.is_empty() {
-            context.to_string()
-        } else {
-            detail
-        }));
+        return Err(Error::git_command_failed_with_details(
+            git_failure_message(context, &detail),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                io_error: None,
+            },
+        ));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -187,9 +221,8 @@ pub fn short_head_revision(dir: &Path) -> Option<String> {
 /// Uses `git ls-files` to respect .gitignore and only include tracked/staged files.
 /// Returns relative paths from the repository root.
 pub(crate) fn list_tracked_markdown_files(path: &Path) -> Result<Vec<String>> {
-    let stdout = command::run_in(
-        &path.to_string_lossy(),
-        "git",
+    let stdout = run_git(
+        path,
         &[
             "ls-files",
             "--cached",
@@ -198,8 +231,7 @@ pub(crate) fn list_tracked_markdown_files(path: &Path) -> Result<Vec<String>> {
             "*.md",
         ],
         "git ls-files",
-    )
-    .map_err(|e| Error::git_command_failed(e.to_string()))?;
+    )?;
 
     Ok(stdout
         .lines()
@@ -214,9 +246,12 @@ pub(crate) fn is_git_repo(path: &str) -> bool {
 
 /// Get the git repository root directory from any path within the repo.
 pub fn get_git_root(path: &str) -> Result<String> {
-    command::run_in(path, "git", &["rev-parse", "--show-toplevel"], "git root")
-        .map(|s| s.trim().to_string())
-        .map_err(|e| Error::git_command_failed(e.to_string()))
+    run_git(
+        Path::new(path),
+        &["rev-parse", "--show-toplevel"],
+        "git root",
+    )
+    .map(|s| s.trim().to_string())
 }
 
 /// Compute the relative path prefix of a component within a monorepo.
@@ -237,4 +272,42 @@ pub fn get_component_path_prefix(local_path: &str) -> Option<String> {
         .strip_prefix(&root)
         .ok()
         .map(|p| p.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_git_failure_includes_command_cwd_exit_stdout_and_stderr() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let err = run_git(dir.path(), &["rev-parse", "--show-toplevel"], "git root")
+            .expect_err("non-repo git command should fail");
+
+        assert_eq!(err.code.as_str(), "git.command_failed");
+        assert_eq!(err.details["command"], "git rev-parse --show-toplevel");
+        assert_eq!(err.details["cwd"], dir.path().to_string_lossy().to_string());
+        assert!(err.details["exit_code"].as_i64().is_some());
+        assert!(err.details["stdout"].as_str().is_some());
+        assert!(err.details["stderr"].as_str().is_some());
+    }
+
+    #[test]
+    fn get_git_root_io_failure_keeps_git_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing");
+
+        let err = get_git_root(&missing.to_string_lossy())
+            .expect_err("missing cwd should report git command failure details");
+
+        assert_eq!(err.code.as_str(), "git.command_failed");
+        assert_ne!(err.message, "IO error");
+        assert_eq!(err.details["command"], "git rev-parse --show-toplevel");
+        assert_eq!(err.details["cwd"], missing.to_string_lossy().to_string());
+        assert!(err.details["exit_code"].is_null());
+        assert!(err.details["io_error"].as_str().is_some());
+        assert_eq!(err.details["stdout"], "");
+        assert_eq!(err.details["stderr"], "");
+    }
 }
