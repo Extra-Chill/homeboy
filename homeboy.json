@@ -156,10 +156,10 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-27T02:10:48Z",
+      "created_at": "2026-05-27T11:19:34Z",
       "item_count": 26,
       "known_fingerprints": [
-        "artifact_portability::observation:6e661ea5-a622-4d7d-9aba-f2651503440e::NonPortableArtifactPath",
+        "artifact_portability::observation:8332962f-6e25-422a-b03d-3f5f4fe4217d::NonPortableArtifactPath",
         "dead_code::src/commands/utils/resource_policy.rs::UnreferencedExport",
         "runner_offload_preflight::src/commands/bench/observation.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/commands/observe.rs::RunnerOffloadPreflight",
@@ -189,8 +189,8 @@
       "metadata": {
         "alignment_score": 0.9154929518699646,
         "known_outliers": [
-          "src/core/observation/records/run_status.rs",
           "src/core/observation/records/triage_items.rs",
+          "src/core/observation/records/run_status.rs",
           "src/core/observation/records/run_builder.rs",
           "src/core/engine/undo/rollback.rs",
           "src/core/engine/undo/entry.rs",
