@@ -67,7 +67,8 @@
         {
           "command": "runs",
           "expected_fields": {
-            "/scenarios/0/payload/data/command": "runs.list",
+            "/scenarios/0/payload/data/payload/command": "runs.list",
+            "/scenarios/0/payload/data/variant": "list",
             "/scenarios/0/payload/success": true
           },
           "file": "tests/fixtures/golden_json_contracts/runs_contract.json",
