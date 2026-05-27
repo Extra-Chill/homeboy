@@ -35,6 +35,19 @@ function usage() {
   process.exit(1);
 }
 
+function writeProgress(event) {
+  const elapsed = event.elapsed_ms === null ? '' : ` elapsed=${event.elapsed_ms}ms`;
+  const artifact = event.artifact_directory ? ` artifact=${event.artifact_directory}` : '';
+  process.stderr.write([
+    '[homeboy wp-codebox fanout]',
+    event.status,
+    `${event.group_index}/${event.group_count}`,
+    `group=${event.group_key}`,
+    `session=${event.sandbox_session_id}`,
+    `${elapsed}${artifact}`.trim(),
+  ].filter(Boolean).join(' ') + '\n');
+}
+
 const auditReportPath = argValue('--audit-report');
 if (!auditReportPath) {
   usage();
@@ -62,6 +75,7 @@ const result = hasFlag('--execute') ? executeAuditWpCodeboxFanoutFromFiles({
   wpCodeboxCommand: argValue('--wp-codebox-command') || 'wp-codebox',
   wpCodeboxArgs: argValues('--wp-codebox-arg'),
   runsOutputPath: argValue('--runs-output') || '',
+  onProgress: writeProgress,
 }) : createAuditWpCodeboxFanoutPlanFromFiles(options);
 
 console.log(JSON.stringify(result, null, 2));

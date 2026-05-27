@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 
 
 # ============================================================================
@@ -700,6 +701,23 @@ def wp_codebox_path_warnings(component_root, output_dir, artifacts_dir, settings
     return warnings
 
 
+def run_with_streamed_stderr(args):
+    stderr_chunks = []
+    process = subprocess.Popen(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def stream_stderr():
+        for chunk in process.stderr:
+            stderr_chunks.append(chunk)
+            sys.stderr.write(chunk)
+            sys.stderr.flush()
+
+    stderr_thread = threading.Thread(target=stream_stderr)
+    stderr_thread.start()
+    stdout, _ = process.communicate()
+    stderr_thread.join()
+    return subprocess.CompletedProcess(args, process.returncode, stdout, ''.join(stderr_chunks))
+
+
 def wp_codebox_task_runner_args(data, settings, script_dir):
     component_root = data.get('root') or data.get('component_path') or os.getcwd()
     agents_api_path = settings.get('wp_codebox_agents_api_path') or os.environ.get('HOMEBOY_WP_CODEBOX_AGENTS_API_PATH') or component_root
@@ -783,7 +801,7 @@ def refactor_source(data):
         for arg in task_runner_args:
             args.extend(['--wp-codebox-arg', arg])
 
-    result = subprocess.run(args, text=True, capture_output=True, check=False)
+    result = run_with_streamed_stderr(args)
     if result.returncode != 0:
         return {
             'handled': True,

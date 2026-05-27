@@ -48,6 +48,27 @@ function tryParseJson(value) {
   }
 }
 
+function progressEvent(status, taskRequest, plan, record = null) {
+  const groupIndex = Number(taskRequest.orchestrator?.group_index || 0) + 1;
+  const groupCount = Number(plan.audit?.group_count || plan.task_requests.length || 0);
+  const startedAt = record?.started_at || new Date().toISOString();
+  const finishedAt = record?.finished_at || '';
+  const elapsedMs = finishedAt ? Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)) : null;
+
+  return {
+    schema: 'homeboy/audit-wp-codebox-progress/v1',
+    status,
+    group_key: taskRequest.group_key,
+    group_index: groupIndex,
+    group_count: groupCount,
+    sandbox_session_id: taskRequest.sandbox_session_id,
+    started_at: startedAt,
+    finished_at: finishedAt,
+    elapsed_ms: elapsedMs,
+    artifact_directory: record?.artifact?.directory || '',
+  };
+}
+
 function auditFindings(report) {
   const candidates = [
     report?.data?.findings,
@@ -410,7 +431,7 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
 
 function executeAuditWpCodeboxFanout(input) {
   const plan = input.plan || createAuditWpCodeboxFanoutPlan(input);
-
+  const onProgress = typeof input.on_progress === 'function' ? input.on_progress : () => {};
   const records = [];
   const baseRun = {
     schema: 'homeboy/audit-wp-codebox-execution/v1',
@@ -443,7 +464,10 @@ function executeAuditWpCodeboxFanout(input) {
       },
     });
 
-    records.push(executeWpCodeboxTaskRequest(taskRequest, input));
+    onProgress(progressEvent('started', taskRequest, plan));
+    const record = executeWpCodeboxTaskRequest(taskRequest, input);
+    records.push(record);
+    onProgress(progressEvent(record.status, taskRequest, plan, record));
 
     writeRun({
       ...baseRun,
@@ -473,6 +497,7 @@ function executeAuditWpCodeboxFanoutFromFiles(options) {
     cwd: options.cwd,
     env: options.env,
     runsOutputPath: options.runsOutputPath,
+    on_progress: options.onProgress,
   });
 }
 

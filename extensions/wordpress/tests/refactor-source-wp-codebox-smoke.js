@@ -109,6 +109,9 @@ process.stdout.write(JSON.stringify({
   assert.equal(writeResult.status, 0, writeResult.stderr || writeResult.stdout);
   const writeResponse = JSON.parse(writeResult.stdout);
   assert.equal(writeResponse.handled, true);
+  assert.match(writeResult.stderr, /\[homeboy wp-codebox fanout\] started 1\/2 group=PHPCS Formatting\/Auto Fix! session=homeboy-audit-/);
+  assert.match(writeResult.stderr, /\[homeboy wp-codebox fanout\] completed 2\/2 group=docs-reference session=homeboy-audit-.*artifact=.*fixture-wp-codebox-artifact-/);
+  assert.doesNotMatch(writeResult.stderr, /OPENCODE_API_KEY/);
   assert.match(writeResponse.warnings[1], /fanout-run\.json/);
   const run = JSON.parse(fs.readFileSync(path.join(writeOutputDir, 'fanout-run.json'), 'utf8'));
   assert.equal(run.status, 'completed');

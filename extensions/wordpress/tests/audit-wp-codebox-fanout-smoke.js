@@ -340,7 +340,7 @@ try {
   assert.equal(finalRun.records.length, 2);
   assert.equal(Object.hasOwn(finalRun, 'current_group'), false);
 
-  const cliExecutionOutput = run(process.execPath, [
+  const cliExecutionResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-audit-wp-codebox-fanout.cjs'),
     '--audit-report',
     auditReportPath,
@@ -351,10 +351,17 @@ try {
     process.execPath,
     '--wp-codebox-arg',
     fixtureCommand,
-  ]);
-  const cliExecution = JSON.parse(cliExecutionOutput);
+    '--secret-env',
+    'FIXTURE_SECRET_TOKEN',
+  ], { encoding: 'utf8' });
+  assert.equal(cliExecutionResult.status, 0, cliExecutionResult.stderr || cliExecutionResult.stdout);
+  const cliExecution = JSON.parse(cliExecutionResult.stdout);
   assert.equal(cliExecution.records.length, 2);
   assert.equal(cliExecution.records[0].schema, 'homeboy/audit-wp-codebox-run/v1');
+  assert.match(cliExecutionResult.stderr, /\[homeboy wp-codebox fanout\] started 1\/2 group=PHPCS Formatting\/Auto Fix! session=homeboy-audit-/);
+  assert.match(cliExecutionResult.stderr, /\[homeboy wp-codebox fanout\] completed 1\/2 group=PHPCS Formatting\/Auto Fix! session=homeboy-audit-.*artifact=\/tmp\/homeboy-audit-/);
+  assert.match(cliExecutionResult.stderr, /\[homeboy wp-codebox fanout\] failed 2\/2 group=docs-reference session=homeboy-audit-/);
+  assert.doesNotMatch(cliExecutionResult.stderr, /FIXTURE_SECRET_TOKEN/);
 
   console.log('Homeboy audit WP Codebox fanout smoke passed');
 } finally {
