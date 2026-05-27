@@ -106,6 +106,13 @@ function secretEnvNames(request) {
   return Array.from(new Set([...(request.secret_env || []), ...argValues('--secret-env')].filter(Boolean)));
 }
 
+function assertRequiredSecretEnvAvailable(request) {
+  const missing = secretEnvNames(request).filter((name) => !process.env[name]);
+  if (missing.length > 0) {
+    throw new Error(`Required WP Codebox secret environment variable missing: ${missing.join(', ')}`);
+  }
+}
+
 function mountEntries() {
   return argValues('--mount').map((value) => {
     const [source, target, mode = 'readwrite'] = value.split(':');
@@ -275,6 +282,7 @@ function runWpCodebox(recipePath) {
 
 try {
   const request = readTaskRequest();
+  assertRequiredSecretEnvAvailable(request);
   const options = {
     agentsApi: requireArg('--agents-api'),
     dataMachine: requireArg('--data-machine'),

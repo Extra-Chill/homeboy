@@ -401,7 +401,8 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
   const stderr = result.stderr || '';
   const parsed = tryParseJson(stdout);
   const artifact = parsed && typeof parsed === 'object' && parsed.artifacts ? parsed.artifacts : null;
-  const success = result.status === 0 && result.error === undefined;
+  const taskFailure = parsed ? wpCodeboxTaskFailure(parsed) : null;
+  const success = result.status === 0 && result.error === undefined && null === taskFailure;
 
   return {
     schema: RUN_SCHEMA,
@@ -413,7 +414,7 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
       args,
       exit_code: result.status,
       signal: result.signal || null,
-      error: result.error ? result.error.message : '',
+      error: result.error ? result.error.message : (taskFailure || ''),
     },
     status: success ? 'completed' : 'failed',
     started_at: startedAt,
@@ -427,6 +428,37 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
       preview_url: artifact.preview?.url || artifact.preview_url || '',
     } : null,
   };
+}
+
+function wpCodeboxTaskFailure(parsed) {
+  if (!parsed || typeof parsed !== 'object') {
+    return null;
+  }
+
+  if (parsed.success === false) {
+    return wpCodeboxErrorMessage(parsed) || 'WP Codebox task reported success=false';
+  }
+
+  const executions = Array.isArray(parsed.executions) ? parsed.executions : [];
+  for (const execution of executions) {
+    const nested = tryParseJson(execution?.stdout || '');
+    if (nested && typeof nested === 'object' && nested.success === false) {
+      return wpCodeboxErrorMessage(nested) || 'WP Codebox nested execution reported success=false';
+    }
+  }
+
+  return null;
+}
+
+function wpCodeboxErrorMessage(parsed) {
+  const error = parsed && typeof parsed === 'object' ? parsed.error : null;
+  if (typeof error === 'string') {
+    return error;
+  }
+  if (error && typeof error === 'object' && typeof error.message === 'string') {
+    return error.message;
+  }
+  return '';
 }
 
 function executeAuditWpCodeboxFanout(input) {

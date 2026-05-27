@@ -117,6 +117,21 @@ process.stdin.on('end', () => {
         process.exit(4);
       }
     }
+    if (process.env.FIXTURE_NESTED_WP_ERROR) {
+      process.stdout.write(JSON.stringify({
+        success: true,
+        executions: [
+          {
+            command: 'wordpress.run-php',
+            stdout: JSON.stringify({
+              success: false,
+              error: { code: 'fixture_wp_error', message: 'Fixture nested WP error' },
+            }),
+          },
+        ],
+      }));
+      process.exit(0);
+    }
     process.stderr.write('fixture docs-reference failure\\n');
     process.exit(3);
   }
@@ -323,6 +338,18 @@ try {
   assert.equal(failedRecord.status, 'failed');
   assert.equal(failedRecord.command.exit_code, 3);
   assert.match(failedRecord.stderr, /fixture docs-reference failure/);
+
+  const nestedErrorExecution = executeAuditWpCodeboxFanout({
+    report,
+    wp_codebox_command: process.execPath,
+    wp_codebox_args: [fixtureCommand],
+    env: { FIXTURE_NESTED_WP_ERROR: '1' },
+  });
+  const nestedFailedRecord = nestedErrorExecution.records.find((record) => record.group_key === 'docs-reference');
+  assert.equal(nestedErrorExecution.status, 'failed');
+  assert.equal(nestedFailedRecord.status, 'failed');
+  assert.equal(nestedFailedRecord.command.exit_code, 0);
+  assert.match(nestedFailedRecord.command.error, /Fixture nested WP error/);
 
   const runsOutputPath = path.join(root, 'fanout-run.json');
   const fileExecution = executeAuditWpCodeboxFanoutFromFiles({

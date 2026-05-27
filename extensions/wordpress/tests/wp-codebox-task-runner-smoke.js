@@ -196,6 +196,28 @@ try {
   assert.equal(riskyResult.status, 0, riskyResult.stderr || riskyResult.stdout);
   assert.match(riskyResult.stderr, /may be captured recursively/);
 
+  const missingSecretResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
+    '--agents-api',
+    '/components/agents-api',
+    '--data-machine',
+    '/components/data-machine',
+    '--data-machine-code',
+    '/components/data-machine-code',
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(request),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: path.join(root, 'capture-missing-secret.json'),
+      OPENCODE_API_KEY: '',
+    },
+  });
+  assert.notEqual(missingSecretResult.status, 0);
+  assert.match(missingSecretResult.stderr, /Required WP Codebox secret environment variable missing: OPENCODE_API_KEY/);
+
   console.log('Homeboy WP Codebox task runner smoke passed');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

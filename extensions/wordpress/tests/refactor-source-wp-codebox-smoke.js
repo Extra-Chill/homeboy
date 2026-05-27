@@ -104,6 +104,10 @@ process.stdout.write(JSON.stringify({
   const writeResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
     encoding: 'utf8',
     input: JSON.stringify(writeCommand),
+    env: {
+      ...process.env,
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
   });
 
   assert.equal(writeResult.status, 0, writeResult.stderr || writeResult.stdout);
