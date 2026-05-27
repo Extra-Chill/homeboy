@@ -28,6 +28,12 @@ fn entry(project_id: &str, variable_name: &str) -> Result<Entry> {
 
 /// Stores a project API variable in the OS keychain.
 pub fn set(project_id: &str, variable_name: &str, value: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return macos::set(project_id, variable_name, value);
+    }
+
+    #[cfg(not(target_os = "macos"))]
     entry(project_id, variable_name)?
         .set_password(value)
         .map_err(keyring_error)
@@ -83,6 +89,185 @@ pub fn missing_error(project_id: &str, variable_name: &str) -> Error {
         project_id, variable_name
     ))
     .with_hint("Use source: \"env\" instead for CI/headless environments")
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::{account_key, SERVICE_NAME};
+    use crate::core::error::{Error, ErrorCode, Result};
+    use core_foundation_sys::array::{kCFTypeArrayCallBacks, CFArrayCreate};
+    use core_foundation_sys::base::{kCFAllocatorDefault, CFRelease, CFTypeRef, OSStatus};
+    use core_foundation_sys::string::{kCFStringEncodingUTF8, CFStringCreateWithCString};
+    use security_framework_sys::base::{errSecDuplicateItem, errSecSuccess, SecAccessRef};
+    use security_framework_sys::base::{SecKeychainItemRef, SecKeychainRef};
+    use security_framework_sys::keychain::{
+        SecKeychainAddGenericPassword, SecKeychainFindGenericPassword,
+    };
+    use security_framework_sys::keychain_item::SecKeychainItemModifyAttributesAndData;
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_void};
+    use std::os::unix::ffi::OsStrExt;
+    use std::ptr;
+
+    enum OpaqueSecTrustedApplicationRef {}
+    type SecTrustedApplicationRef = *mut OpaqueSecTrustedApplicationRef;
+
+    #[link(name = "Security", kind = "framework")]
+    extern "C" {
+        fn SecAccessCreate(
+            descriptor: core_foundation_sys::string::CFStringRef,
+            trustedlist: core_foundation_sys::array::CFArrayRef,
+            accessRef: *mut SecAccessRef,
+        ) -> OSStatus;
+        fn SecKeychainItemSetAccess(itemRef: SecKeychainItemRef, access: SecAccessRef) -> OSStatus;
+        fn SecTrustedApplicationCreateFromPath(
+            path: *const c_char,
+            app: *mut SecTrustedApplicationRef,
+        ) -> OSStatus;
+    }
+
+    pub fn set(project_id: &str, variable_name: &str, value: &str) -> Result<()> {
+        let account = account_key(project_id, variable_name);
+        let mut item = ptr::null_mut();
+        let add_status = unsafe {
+            SecKeychainAddGenericPassword(
+                ptr::null_mut::<std::ffi::c_void>() as SecKeychainRef,
+                SERVICE_NAME.len() as u32,
+                SERVICE_NAME.as_ptr().cast(),
+                account.len() as u32,
+                account.as_ptr().cast(),
+                value.len() as u32,
+                value.as_ptr().cast(),
+                &mut item,
+            )
+        };
+
+        if add_status == errSecDuplicateItem {
+            item = find_item(&account)?;
+            cvt(
+                unsafe {
+                    SecKeychainItemModifyAttributesAndData(
+                        item,
+                        ptr::null(),
+                        value.len() as u32,
+                        value.as_ptr().cast(),
+                    )
+                },
+                "update keychain item",
+            )?;
+        } else {
+            cvt(add_status, "add keychain item")?;
+        }
+
+        set_current_exe_access(item)?;
+        unsafe { CFRelease(item as CFTypeRef) };
+        Ok(())
+    }
+
+    fn find_item(account: &str) -> Result<SecKeychainItemRef> {
+        let mut item = ptr::null_mut();
+        cvt(
+            unsafe {
+                SecKeychainFindGenericPassword(
+                    ptr::null(),
+                    SERVICE_NAME.len() as u32,
+                    SERVICE_NAME.as_ptr().cast(),
+                    account.len() as u32,
+                    account.as_ptr().cast(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut item,
+                )
+            },
+            "find keychain item",
+        )?;
+        Ok(item)
+    }
+
+    fn set_current_exe_access(item: SecKeychainItemRef) -> Result<()> {
+        let exe = std::env::current_exe().map_err(|e| {
+            Error::new(
+                ErrorCode::InternalUnexpected,
+                format!(
+                    "Keychain error: could not resolve current executable: {}",
+                    e
+                ),
+                serde_json::json!({ "error": e.to_string() }),
+            )
+        })?;
+        let exe_path = CString::new(exe.as_os_str().as_bytes()).map_err(|e| {
+            Error::new(
+                ErrorCode::InternalUnexpected,
+                format!("Keychain error: executable path contains a NUL byte: {}", e),
+                serde_json::json!({ "error": e.to_string() }),
+            )
+        })?;
+
+        let mut trusted_app = ptr::null_mut();
+        cvt(
+            unsafe { SecTrustedApplicationCreateFromPath(exe_path.as_ptr(), &mut trusted_app) },
+            "create trusted application",
+        )?;
+
+        let trusted_values = [trusted_app as *const c_void];
+        let trusted_list = unsafe {
+            CFArrayCreate(
+                kCFAllocatorDefault,
+                trusted_values.as_ptr(),
+                trusted_values.len() as isize,
+                &kCFTypeArrayCallBacks,
+            )
+        };
+        if trusted_list.is_null() {
+            unsafe { CFRelease(trusted_app as CFTypeRef) };
+            return Err(security_error(0, "create trusted application list"));
+        }
+
+        let descriptor = unsafe {
+            CFStringCreateWithCString(
+                kCFAllocatorDefault,
+                b"homeboy\0".as_ptr().cast(),
+                kCFStringEncodingUTF8,
+            )
+        };
+        if descriptor.is_null() {
+            unsafe {
+                CFRelease(trusted_list as CFTypeRef);
+                CFRelease(trusted_app as CFTypeRef);
+            }
+            return Err(security_error(0, "create keychain access descriptor"));
+        }
+
+        let mut access = ptr::null_mut();
+        let access_status = unsafe { SecAccessCreate(descriptor, trusted_list, &mut access) };
+        unsafe {
+            CFRelease(descriptor as CFTypeRef);
+            CFRelease(trusted_list as CFTypeRef);
+            CFRelease(trusted_app as CFTypeRef);
+        }
+        cvt(access_status, "create keychain access control")?;
+
+        let set_status = unsafe { SecKeychainItemSetAccess(item, access) };
+        unsafe { CFRelease(access as CFTypeRef) };
+        cvt(set_status, "set keychain item access")
+    }
+
+    fn cvt(status: OSStatus, action: &str) -> Result<()> {
+        if status == errSecSuccess {
+            Ok(())
+        } else {
+            Err(security_error(status, action))
+        }
+    }
+
+    fn security_error(status: OSStatus, action: &str) -> Error {
+        Error::new(
+            ErrorCode::InternalUnexpected,
+            format!("Keychain error: failed to {} ({})", action, status),
+            serde_json::json!({ "status": status, "action": action }),
+        )
+        .with_hint("Use source: \"env\" for CI/headless environments, or unlock/configure the OS keychain for local use")
+    }
 }
 
 #[cfg(test)]
