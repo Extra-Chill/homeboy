@@ -207,11 +207,6 @@ pub fn runner_session_file(id: &str) -> Result<PathBuf> {
     Ok(runner_sessions_dir()?.join(format!("{}.json", id)))
 }
 
-/// Service tunnel declarations directory.
-pub fn service_tunnels() -> Result<PathBuf> {
-    Ok(homeboy()?.join("service-tunnels"))
-}
-
 /// Extension directory path
 pub fn extension(id: &str) -> Result<PathBuf> {
     Ok(extensions()?.join(id))
