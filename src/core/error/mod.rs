@@ -32,6 +32,7 @@ pub enum ErrorCode {
     DocsTopicNotFound,
     RigNotFound,
     RunnerNotFound,
+    ServiceTunnelNotFound,
     RigPipelineFailed,
     RigServiceFailed,
     RigResourceConflict,
@@ -81,6 +82,7 @@ impl ErrorCode {
             ErrorCode::DocsTopicNotFound => "docs.topic_not_found",
             ErrorCode::RigNotFound => "rig.not_found",
             ErrorCode::RunnerNotFound => "runner.not_found",
+            ErrorCode::ServiceTunnelNotFound => "service_tunnel.not_found",
             ErrorCode::RigPipelineFailed => "rig.pipeline_failed",
             ErrorCode::RigServiceFailed => "rig.service_failed",
             ErrorCode::RigResourceConflict => "rig.resource_conflict",
@@ -439,6 +441,15 @@ impl Error {
 
     pub fn runner_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
         Self::entity_not_found(ErrorCode::RunnerNotFound, "Runner", id, suggestions)
+    }
+
+    pub fn service_tunnel_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
+        Self::entity_not_found(
+            ErrorCode::ServiceTunnelNotFound,
+            "Tunnel service",
+            id,
+            suggestions,
+        )
     }
 
     pub fn stack_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
