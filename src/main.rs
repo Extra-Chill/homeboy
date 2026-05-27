@@ -946,7 +946,7 @@ mod tests {
     use homeboy::cli_surface::Commands;
     use homeboy::commands::test::TestArgs;
     use homeboy::commands::utils::args::{
-        BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
+        BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
     };
     fn test_args_for_path(path: &std::path::Path) -> TestArgs {
         TestArgs {
@@ -967,7 +967,6 @@ mod tests {
             ci_job: None,
             setting_args: SettingArgs::default(),
             args: Vec::new(),
-            _json: HiddenJsonArgs::default(),
             json_summary: false,
         }
     }

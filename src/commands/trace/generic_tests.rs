@@ -35,7 +35,6 @@ JSON
                 profile: None,
                 profiles: false,
                 setting_args: SettingArgs::default(),
-                _json: HiddenJsonArgs::default(),
                 json_summary: false,
                 report: None,
                 experiment: None,

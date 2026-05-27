@@ -1,7 +1,7 @@
 use homeboy::commands::lint::{run as run_lint, LintArgs};
 use homeboy::commands::test::{run as run_test, TestArgs};
 use homeboy::commands::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
+    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
 use homeboy::commands::GlobalArgs;
 use std::fs;
@@ -63,7 +63,6 @@ fn lint_args(root: &Path) -> LintArgs {
         force: false,
         setting_args: SettingArgs::default(),
         baseline_args: BaselineArgs::default(),
-        _json: HiddenJsonArgs::default(),
         json_summary: false,
     }
 }
@@ -84,7 +83,6 @@ fn test_args(root: &Path) -> TestArgs {
         ci_job: None,
         setting_args: SettingArgs::default(),
         args: Vec::new(),
-        _json: HiddenJsonArgs::default(),
         json_summary: false,
     }
 }

@@ -32,7 +32,6 @@ fn file_read_json_includes_size_metadata() {
                 command: FileCommand::Read {
                     project_id: project_id.to_string(),
                     path: "sample.txt".to_string(),
-                    _json: true,
                     raw: false,
                 },
             },

@@ -504,16 +504,6 @@ pub struct DryRunArgs {
 }
 
 // ============================================================================
-// HiddenJsonArgs: --json (hidden compatibility flag)
-// ============================================================================
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct HiddenJsonArgs {
-    #[arg(long, hide = true)]
-    pub json: bool,
-}
-
-// ============================================================================
 // SettingArgs: --setting key=value + --setting-json key=<json>
 // ============================================================================
 

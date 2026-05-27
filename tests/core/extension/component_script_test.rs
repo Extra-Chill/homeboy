@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::commands::test::{run as run_test, TestArgs};
 use crate::commands::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
+    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
 use crate::commands::GlobalArgs;
 use crate::core::component::{Component, ComponentScriptsConfig};
@@ -39,7 +39,6 @@ fn test_command_args(root: &Path) -> TestArgs {
         ci_job: None,
         setting_args: SettingArgs::default(),
         args: Vec::new(),
-        _json: HiddenJsonArgs::default(),
         json_summary: false,
     }
 }

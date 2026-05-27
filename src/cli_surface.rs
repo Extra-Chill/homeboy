@@ -30,7 +30,7 @@ pub struct Cli {
     pub artifact_root: Option<PathBuf>,
 
     /// Offload supported hot commands to a connected Homeboy Lab runner.
-    #[arg(long, global = true, hide = true, value_name = "RUNNER_ID")]
+    #[arg(long, global = true, value_name = "RUNNER_ID")]
     pub runner: Option<String>,
 
     #[command(subcommand)]
@@ -998,12 +998,12 @@ mod tests {
     }
 
     #[test]
-    fn test_lab_runner_flag_is_hidden_from_help() {
+    fn test_lab_runner_flag_is_visible_in_help() {
         let root_help = Cli::command()
             .try_get_matches_from(["homeboy", "--help"])
             .expect_err("help exits")
             .to_string();
-        assert!(!root_help.contains("--runner"));
+        assert!(root_help.contains("--runner"));
 
         for args in [
             ["homeboy", "rig", "check", "--help"].as_slice(),
@@ -1014,10 +1014,7 @@ mod tests {
                 .try_get_matches_from(args)
                 .expect_err("help exits")
                 .to_string();
-            assert!(
-                !help.contains("--runner"),
-                "{args:?} help advertised --runner"
-            );
+            assert!(help.contains("--runner"), "{args:?} help omitted --runner");
         }
     }
 

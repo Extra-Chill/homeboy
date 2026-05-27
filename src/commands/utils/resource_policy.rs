@@ -521,7 +521,7 @@ mod tests {
     };
     use crate::commands::lint::LintArgs;
     use crate::commands::utils::args::{
-        BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
+        BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
     };
 
     fn lint_command() -> Commands {
@@ -545,7 +545,6 @@ mod tests {
             force: false,
             setting_args: SettingArgs::default(),
             baseline_args: BaselineArgs::default(),
-            _json: HiddenJsonArgs::default(),
             json_summary: false,
         })
     }

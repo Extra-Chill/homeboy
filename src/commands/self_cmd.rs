@@ -3,7 +3,6 @@ use homeboy::core::engine;
 use homeboy::core::self_status;
 use serde_json::Value;
 
-use crate::commands::utils::args::HiddenJsonArgs;
 use crate::commands::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
@@ -21,10 +20,7 @@ pub enum SelfCommand {
 }
 
 #[derive(Args)]
-pub struct SelfStatusArgs {
-    #[command(flatten)]
-    _json: HiddenJsonArgs,
-}
+pub struct SelfStatusArgs {}
 
 #[derive(Args)]
 pub struct SelfCleanupRuntimeTmpArgs {

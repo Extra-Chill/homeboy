@@ -276,7 +276,6 @@ fn run_args(component: Option<&str>, rig: Vec<String>, scenario_ids: Vec<String>
             regression_threshold: 5.0,
             setting_args: SettingArgs::default(),
             args: Vec::new(),
-            _json: HiddenJsonArgs::default(),
             json_summary: false,
             report: Vec::new(),
             rig,
@@ -1079,7 +1078,6 @@ fn filter_strips_all_boolean_flags() {
         "--ignore-baseline".to_string(),
         "--ratchet".to_string(),
         "--json-summary".to_string(),
-        "--json".to_string(),
     ];
     assert!(filter_homeboy_flags(&args).is_empty());
 }

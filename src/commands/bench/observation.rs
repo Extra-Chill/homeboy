@@ -403,7 +403,7 @@ mod tests {
         DoctorOutput, LoadSummary, ProcessSummary, ResourceRecommendation, RigLeaseSummary,
     };
     use crate::commands::utils::args::{
-        BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
+        BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
     };
     use crate::commands::utils::resource_policy::{self, HotCommand, ResourcePolicyContext};
     use crate::test_support::with_isolated_home;
@@ -461,7 +461,6 @@ mod tests {
             regression_threshold: 5.0,
             setting_args: SettingArgs::default(),
             args: Vec::new(),
-            _json: HiddenJsonArgs::default(),
             json_summary: false,
             report: Vec::new(),
             rig: Vec::new(),
