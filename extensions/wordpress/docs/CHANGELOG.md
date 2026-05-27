@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.13] - 2026-05-27
+
+### Changed
+- Emit agent run evidence references
+
 ## [2.102.12] - 2026-05-27
 
 ### Changed
