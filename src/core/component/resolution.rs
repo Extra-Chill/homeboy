@@ -1,4 +1,6 @@
-use crate::core::component::{discover_from_portable, inventory, load, Component};
+use crate::core::component::{
+    discover_from_portable, inventory, load, try_discover_from_portable, Component,
+};
 use crate::core::error::{Error, Result};
 use crate::core::extension::{self, ExtensionCapability};
 use std::path::{Path, PathBuf};
@@ -189,39 +191,39 @@ fn synthetic_component_for_path(path: &str) -> Component {
     }
 }
 
-fn resolve_path_override(path: &str) -> Component {
-    if let Some(mut discovered) = discover_from_portable(Path::new(path)) {
+fn resolve_path_override(path: &str) -> Result<Component> {
+    if let Some(mut discovered) = try_discover_from_portable(Path::new(path))? {
         discovered.local_path = path.to_string();
         discovered.resolve_remote_path();
-        return discovered;
+        return Ok(discovered);
     }
 
     let dir = Path::new(path);
     if let Some(git_root) = detect_git_root(dir) {
         if git_root != dir {
-            if let Some(mut discovered) = discover_from_portable(&git_root) {
+            if let Some(mut discovered) = try_discover_from_portable(&git_root)? {
                 discovered.local_path = path.to_string();
                 discovered.resolve_remote_path();
-                return discovered;
+                return Ok(discovered);
             }
         }
     }
 
-    synthetic_component_for_path(path)
+    Ok(synthetic_component_for_path(path))
 }
 
-fn path_has_portable_config(path: &Path) -> bool {
-    if discover_from_portable(path).is_some() {
-        return true;
+fn path_has_portable_config(path: &Path) -> Result<bool> {
+    if try_discover_from_portable(path)?.is_some() {
+        return Ok(true);
     }
 
     if let Some(git_root) = detect_git_root(path) {
         if git_root != path {
-            return discover_from_portable(&git_root).is_some();
+            return Ok(try_discover_from_portable(&git_root)?.is_some());
         }
     }
 
-    false
+    Ok(false)
 }
 
 /// Resolve a target from the shared command-facing contract.
@@ -261,7 +263,8 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
         .path_override
         .or_else(|| component_id_is_bare_dir.then_some(component.local_path.as_str()));
     let synthetic = explicit_path
-        .map(|path| !path_has_portable_config(Path::new(path)))
+        .map(|path| path_has_portable_config(Path::new(path)).map(|has_config| !has_config))
+        .transpose()?
         .unwrap_or(false);
     if synthetic && !spec.allow_synthetic {
         return Err(Error::validation_invalid_argument(
@@ -323,13 +326,13 @@ pub fn resolve(id: Option<&str>) -> Result<Component> {
 
     let cwd = std::env::current_dir().map_err(|e| Error::internal_io(e.to_string(), None))?;
 
-    if let Some(component) = discover_from_portable(&cwd) {
+    if let Some(component) = try_discover_from_portable(&cwd)? {
         return Ok(component);
     }
 
     if let Some(git_root) = detect_git_root(&cwd) {
         if git_root != cwd {
-            if let Some(component) = discover_from_portable(&git_root) {
+            if let Some(component) = try_discover_from_portable(&git_root)? {
                 return Ok(component);
             }
         }
@@ -380,7 +383,7 @@ fn resolve_effective_inner(
 
     if let Some(id) = id {
         if let Some(path) = path_override {
-            if let Some(mut discovered) = discover_from_portable(Path::new(path)) {
+            if let Some(mut discovered) = try_discover_from_portable(Path::new(path))? {
                 discovered.id = id.to_string();
                 discovered.local_path = path.to_string();
                 discovered.resolve_remote_path();
@@ -398,7 +401,7 @@ fn resolve_effective_inner(
         } else {
             let id_path = Path::new(id);
             if accept_bare_directory && id_path.is_dir() {
-                if let Some(mut discovered) = discover_from_portable(id_path) {
+                if let Some(mut discovered) = try_discover_from_portable(id_path)? {
                     discovered.local_path = id.to_string();
                     discovered.resolve_remote_path();
                     return Ok(discovered);
@@ -427,7 +430,7 @@ fn resolve_effective_inner(
         }
     } else {
         if let Some(path) = path_override {
-            return Ok(resolve_path_override(path));
+            return resolve_path_override(path);
         }
 
         resolve(None)
@@ -609,6 +612,24 @@ mod tests {
     }
 
     #[test]
+    fn resolve_effective_path_override_rejects_portable_config_without_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path().join("portable-repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        std::fs::write(repo.join("homeboy.json"), r#"{"extensions":{"nodejs":{}}}"#)
+            .expect("write portable config");
+
+        let error = resolve_effective(None, repo.to_str(), None)
+            .expect_err("path-only portable config without id should fail");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(
+            error.to_string().contains("missing required 'id' field"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn target_spec_resolves_registered_component() {
         crate::test_support::with_isolated_home(|home| {
             let repo = home.path().join("registered-repo");
@@ -655,6 +676,24 @@ mod tests {
         assert_eq!(target.component_id, "path-id");
         assert_eq!(target.source_path, repo);
         assert!(!target.synthetic);
+    }
+
+    #[test]
+    fn target_spec_rejects_path_override_portable_config_without_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path().join("path-repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        std::fs::write(repo.join("homeboy.json"), r#"{"remote_path":"remote"}"#)
+            .expect("portable config");
+
+        let error = resolve_target(TargetSpec::new(None, repo.to_str()))
+            .expect_err("portable config without id should fail");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(
+            error.to_string().contains("missing required 'id' field"),
+            "{error}"
+        );
     }
 
     #[test]
