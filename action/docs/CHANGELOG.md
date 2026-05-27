@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.5] - 2026-05-27
+
+### Fixed
+- delegate PR comment tooling footer to core
+- use core failure digest renderer
+
 ## [2.7.4] - 2026-05-27
 
 ### Fixed
