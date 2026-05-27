@@ -92,6 +92,25 @@ function mountEntries() {
   });
 }
 
+function realPathForContainment(filePath) {
+  const resolved = path.resolve(filePath);
+  if (fs.existsSync(resolved)) {
+    return fs.realpathSync(resolved);
+  }
+  return path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved));
+}
+
+function pathInside(parent, candidate) {
+  try {
+    const parentReal = realPathForContainment(parent);
+    const candidateReal = realPathForContainment(candidate);
+    const relative = path.relative(parentReal, candidateReal);
+    return relative === '' || (Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative));
+  } catch {
+    return false;
+  }
+}
+
 function recipeForRequest(request, options) {
   const provider = argValue('--provider') || request.provider || '';
   const model = argValue('--model') || request.model || '';
@@ -186,9 +205,14 @@ function resolveCommand(command, args) {
 function runWpCodebox(recipePath) {
   const wpCodeboxBin = argValue('--wp-codebox-bin') || 'wp-codebox';
   const args = ['recipe-run', '--recipe', recipePath, '--json'];
-  const artifacts = argValue('--artifacts');
-  if (artifacts) {
-    args.push('--artifacts', artifacts);
+  const explicitArtifacts = argValue('--artifacts');
+  const artifacts = explicitArtifacts || fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-artifacts-'));
+  args.push('--artifacts', artifacts);
+  if (explicitArtifacts) {
+    const riskyMount = mountEntries().find((mount) => pathInside(mount.source, explicitArtifacts));
+    if (riskyMount) {
+      console.error(`Warning: WP Codebox artifact directory is inside mounted source ${riskyMount.source} and may be captured recursively: ${explicitArtifacts}`);
+    }
   }
   if (argValue('--preview-hold')) {
     args.push('--preview-hold', argValue('--preview-hold'));

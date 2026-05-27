@@ -15,6 +15,11 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
+function pathInside(parent, candidate) {
+  const relative = path.relative(fs.realpathSync(parent), path.resolve(candidate));
+  return relative === '' || (Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 function createFixtureWpCodebox(root, mode = 0o755) {
   const binPath = path.join(root, 'fixture-wp-codebox.js');
   fs.writeFileSync(binPath, `#!/usr/bin/env node
@@ -151,7 +156,41 @@ try {
     },
   });
   assert.equal(nonExecutableResult.status, 0, nonExecutableResult.stderr || nonExecutableResult.stdout);
-  assert.equal(readJson(nonExecutableCapturePath).argv[0], 'recipe-run');
+  const nonExecutableCapture = readJson(nonExecutableCapturePath);
+  assert.equal(nonExecutableCapture.argv[0], 'recipe-run');
+  const defaultArtifactsIndex = nonExecutableCapture.argv.indexOf('--artifacts');
+  assert.notEqual(defaultArtifactsIndex, -1);
+  assert.equal(pathInside(root, nonExecutableCapture.argv[defaultArtifactsIndex + 1]), false);
+
+  const sourceRoot = path.join(root, 'source-plugin');
+  fs.mkdirSync(sourceRoot, { recursive: true });
+  const riskyArtifacts = path.join(sourceRoot, 'artifacts');
+  const riskyCapturePath = path.join(root, 'capture-risky-artifacts.json');
+  const riskyResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
+    '--agents-api',
+    '/components/agents-api',
+    '--data-machine',
+    '/components/data-machine',
+    '--data-machine-code',
+    '/components/data-machine-code',
+    '--mount',
+    `${sourceRoot}:/wordpress/wp-content/plugins/plugin:readwrite`,
+    '--artifacts',
+    riskyArtifacts,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(request),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: riskyCapturePath,
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(riskyResult.status, 0, riskyResult.stderr || riskyResult.stdout);
+  assert.match(riskyResult.stderr, /may be captured recursively/);
 
   console.log('Homeboy WP Codebox task runner smoke passed');
 } finally {

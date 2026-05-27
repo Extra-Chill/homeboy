@@ -678,6 +678,28 @@ def default_sibling_path(component_root, sibling_name):
     return os.path.join(os.path.dirname(os.path.abspath(component_root)), sibling_name)
 
 
+def path_inside(parent, candidate):
+    try:
+        parent_real = os.path.realpath(parent)
+        candidate_real = os.path.realpath(candidate)
+        return os.path.commonpath([parent_real, candidate_real]) == parent_real
+    except (OSError, ValueError):
+        return False
+
+
+def wp_codebox_path_warnings(component_root, output_dir, artifacts_dir, settings):
+    warnings = []
+    if component_root and settings.get('wp_codebox_output_dir') and path_inside(component_root, output_dir):
+        warnings.append(
+            f"WP Codebox audit fan-out output directory is inside the source tree and may be captured recursively: {output_dir}"
+        )
+    if component_root and settings.get('wp_codebox_artifacts') and path_inside(component_root, artifacts_dir):
+        warnings.append(
+            f"WP Codebox artifact directory is inside the source tree and may be captured recursively: {artifacts_dir}"
+        )
+    return warnings
+
+
 def wp_codebox_task_runner_args(data, settings, script_dir):
     component_root = data.get('root') or data.get('component_path') or os.getcwd()
     agents_api_path = settings.get('wp_codebox_agents_api_path') or os.environ.get('HOMEBOY_WP_CODEBOX_AGENTS_API_PATH') or component_root
@@ -692,8 +714,7 @@ def wp_codebox_task_runner_args(data, settings, script_dir):
     ]
     if settings.get('wp_codebox_bin'):
         args.extend(['--wp-codebox-bin', settings['wp_codebox_bin']])
-    if settings.get('wp_codebox_artifacts'):
-        args.extend(['--artifacts', settings['wp_codebox_artifacts']])
+    args.extend(['--artifacts', settings['wp_codebox_artifacts']])
     for mount in split_setting(settings.get('wp_codebox_mounts')):
         args.extend(['--mount', mount])
     return args
@@ -708,7 +729,15 @@ def refactor_source(data):
 
     settings = data.get('settings') or {}
     output_dir = settings.get('wp_codebox_output_dir') or tempfile.mkdtemp(prefix='homeboy-wp-codebox-audit-')
+    settings['wp_codebox_artifacts'] = settings.get('wp_codebox_artifacts') or tempfile.mkdtemp(prefix='homeboy-wp-codebox-artifacts-')
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(settings['wp_codebox_artifacts'], exist_ok=True)
+    path_warnings = wp_codebox_path_warnings(
+        data.get('root') or data.get('component_path') or os.getcwd(),
+        output_dir,
+        settings['wp_codebox_artifacts'],
+        settings,
+    )
 
     audit_report_path = os.path.join(output_dir, 'audit-report.json')
     plan_path = os.path.join(output_dir, 'fanout-plan.json')
@@ -784,6 +813,7 @@ def refactor_source(data):
 
     warnings = [
         f"WP Codebox audit fan-out plan: {plan_path}",
+        *path_warnings,
     ]
     if data.get('write'):
         warnings.append(f"WP Codebox audit fan-out run: {runs_path}")

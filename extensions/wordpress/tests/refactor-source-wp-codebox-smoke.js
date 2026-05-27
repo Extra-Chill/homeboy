@@ -8,6 +8,11 @@ const { spawnSync } = require('node:child_process');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-refactor-source-wp-codebox-'));
 
+function pathInside(parent, candidate) {
+  const relative = path.relative(fs.realpathSync(parent), path.resolve(candidate));
+  return relative === '' || (Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 try {
   const auditResult = JSON.parse(fs.readFileSync(
     path.join(__dirname, 'fixtures', 'homeboy-audit-wp-codebox-fanout', 'audit-report.json'),
@@ -110,7 +115,30 @@ process.stdout.write(JSON.stringify({
   assert.equal(run.records[0].command.bin, 'node');
   assert.match(run.records[0].command.args[0], /homeboy-wp-codebox-task-runner\.cjs$/);
   assert.equal(run.records[0].command.args.includes('--wp-codebox-bin'), true);
+  const artifactsIndex = run.records[0].command.args.indexOf('--artifacts');
+  assert.notEqual(artifactsIndex, -1);
+  assert.equal(pathInside(writeCommand.root, run.records[0].command.args[artifactsIndex + 1]), false);
   assert.equal(run.records[0].artifact.id.startsWith('artifact-homeboy-audit-'), true);
+
+  const riskyRoot = path.join(root, 'risky-source');
+  const riskyCommand = {
+    ...command,
+    root: riskyRoot,
+    settings: {
+      ...command.settings,
+      wp_codebox_output_dir: path.join(riskyRoot, 'fanout'),
+      wp_codebox_artifacts: path.join(riskyRoot, 'artifacts'),
+    },
+  };
+  fs.mkdirSync(riskyRoot, { recursive: true });
+  const riskyResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
+    encoding: 'utf8',
+    input: JSON.stringify(riskyCommand),
+  });
+  assert.equal(riskyResult.status, 0, riskyResult.stderr || riskyResult.stdout);
+  const riskyResponse = JSON.parse(riskyResult.stdout);
+  assert.match(riskyResponse.warnings.join('\n'), /output directory is inside the source tree/);
+  assert.match(riskyResponse.warnings.join('\n'), /artifact directory is inside the source tree/);
 
   console.log('WordPress refactor source WP Codebox smoke passed');
 } finally {
