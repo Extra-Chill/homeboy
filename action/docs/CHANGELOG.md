@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.3] - 2026-05-27
+
+### Fixed
+- scope autofix stale binary guard
+
 ## [2.7.2] - 2026-05-26
 
 ### Fixed
