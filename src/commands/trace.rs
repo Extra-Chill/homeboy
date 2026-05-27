@@ -17,7 +17,7 @@ use homeboy::core::observation::{
 };
 use homeboy::core::rig::{self, RigSpec};
 
-use super::utils::args::{BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs};
+use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
 
 mod bundle;
@@ -82,9 +82,6 @@ pub struct TraceArgs {
     pub profiles: bool,
     #[command(flatten)]
     pub setting_args: SettingArgs,
-    #[command(flatten)]
-    pub _json: HiddenJsonArgs,
-
     /// Print compact machine-readable summary.
     #[arg(long)]
     pub json_summary: bool,

@@ -747,7 +747,6 @@ fn build_lint_args(args: &ReviewArgs) -> lint::LintArgs {
         extension_override: args.extension_override.clone(),
         setting_args: Default::default(),
         baseline_args: args.baseline_args.clone(),
-        _json: Default::default(),
         json_summary: args.summary,
     }
 }
@@ -768,7 +767,6 @@ fn build_test_args(args: &ReviewArgs) -> test::TestArgs {
         ci_job: None,
         setting_args: Default::default(),
         args: Vec::new(),
-        _json: Default::default(),
         json_summary: args.summary,
     }
 }

@@ -16,7 +16,7 @@ use homeboy::core::refactor::plan::{
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
+    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
 use super::utils::observed_workflow::{finish_observed_workflow, ObservedWorkflowRunner};
 use super::{CmdResult, GlobalArgs};
@@ -86,9 +86,6 @@ pub struct LintArgs {
 
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
-
-    #[command(flatten)]
-    pub _json: HiddenJsonArgs,
 
     /// Print compact machine-readable summary (for CI wrappers)
     #[arg(long)]

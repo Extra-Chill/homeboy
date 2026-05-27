@@ -290,7 +290,6 @@ fn trace_compare_exits_nonzero_for_guardrail_failures() {
         profile: None,
         profiles: false,
         setting_args: SettingArgs::default(),
-        _json: HiddenJsonArgs::default(),
         json_summary: false,
         report: None,
         experiment: None,

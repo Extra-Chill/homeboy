@@ -1,8 +1,6 @@
 use std::fs;
 
-use crate::commands::utils::args::{
-    BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
-};
+use crate::commands::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use crate::commands::GlobalArgs;
 use crate::test_support::with_isolated_home;
 
@@ -47,7 +45,6 @@ fn trace_compare_variant_interleaves_run_order_and_reports_focus_spans() {
                 profile: None,
                 profiles: false,
                 setting_args: SettingArgs::default(),
-                _json: HiddenJsonArgs::default(),
                 json_summary: false,
                 report: None,
                 experiment: None,
@@ -185,7 +182,6 @@ fn trace_compare_variant_uses_component_arg_for_multi_component_named_variants()
                 profile: None,
                 profiles: false,
                 setting_args: SettingArgs::default(),
-                _json: HiddenJsonArgs::default(),
                 json_summary: false,
                 report: None,
                 experiment: None,
@@ -272,7 +268,6 @@ fn trace_compare_variant_reports_unknown_named_variant_for_component_arg() {
                 profile: None,
                 profiles: false,
                 setting_args: SettingArgs::default(),
-                _json: HiddenJsonArgs::default(),
                 json_summary: false,
                 report: None,
                 experiment: None,

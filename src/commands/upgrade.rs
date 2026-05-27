@@ -3,7 +3,6 @@ use homeboy::core::upgrade;
 use serde_json::Value;
 use std::path::PathBuf;
 
-use crate::commands::utils::args::HiddenJsonArgs;
 use crate::commands::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
@@ -39,9 +38,6 @@ pub struct UpgradeArgs {
     /// Homeboy source checkout to use with --method source
     #[arg(long, value_name = "PATH")]
     pub source_path: Option<PathBuf>,
-
-    #[command(flatten)]
-    _json: HiddenJsonArgs,
 }
 
 pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {

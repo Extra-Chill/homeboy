@@ -620,7 +620,7 @@ fn run_rig_workload_preflight(
 mod tests {
     use super::*;
     use crate::commands::utils::args::{
-        BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
+        BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
     };
     use crate::test_support::with_isolated_home;
     use std::fs;
@@ -693,7 +693,6 @@ mod tests {
             regression_threshold: 5.0,
             setting_args: SettingArgs::default(),
             args: Vec::new(),
-            _json: HiddenJsonArgs::default(),
             json_summary: false,
             report: Vec::new(),
             rig: vec!["rig".to_string()],

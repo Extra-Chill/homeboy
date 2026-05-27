@@ -31,9 +31,6 @@ enum FileCommand {
         project_id: String,
         /// Remote file path
         path: String,
-        /// Compatibility flag; file read emits JSON unless --raw is used.
-        #[arg(long, hide = true)]
-        _json: bool,
         /// Output raw content only (no JSON wrapper)
         #[arg(long)]
         raw: bool,
@@ -361,7 +358,6 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
         FileCommand::Read {
             project_id,
             path,
-            _json: _,
             raw,
         } => {
             if raw {

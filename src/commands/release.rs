@@ -8,7 +8,7 @@ use homeboy::core::release::{
 };
 use homeboy::core::scope::{self, Scope};
 
-use super::utils::args::{DryRunArgs, HiddenJsonArgs};
+use super::utils::args::DryRunArgs;
 use super::CmdResult;
 
 #[derive(Args)]
@@ -30,9 +30,6 @@ pub struct ReleaseArgs {
 
     #[command(flatten)]
     dry_run_args: DryRunArgs,
-
-    #[command(flatten)]
-    _json: HiddenJsonArgs,
 
     /// Deploy to all projects using this component after release
     #[arg(long)]
@@ -136,7 +133,6 @@ impl ReleaseArgs {
             outdated,
             path,
             dry_run_args: DryRunArgs { dry_run },
-            _json: HiddenJsonArgs::default(),
             deploy,
             recover,
             head,

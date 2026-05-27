@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use homeboy::core::ci_profile::{self, CiInventory, CiRunOutput, CiRunSelection};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 
-use super::utils::args::{ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs};
+use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
@@ -29,9 +29,6 @@ pub struct CiListArgs {
 
     #[command(flatten)]
     pub extension_override: ExtensionOverrideArgs,
-
-    #[command(flatten)]
-    pub _json: HiddenJsonArgs,
 }
 
 #[derive(Args)]
@@ -49,9 +46,6 @@ pub struct CiRunArgs {
     /// Run all jobs in an extension-declared CI profile.
     #[arg(long, conflicts_with = "job")]
     pub profile: Option<String>,
-
-    #[command(flatten)]
-    pub _json: HiddenJsonArgs,
 }
 
 #[derive(Debug, Serialize)]
@@ -229,7 +223,6 @@ mod tests {
             extension_override: ExtensionOverrideArgs::default(),
             job: None,
             profile: None,
-            _json: HiddenJsonArgs::default(),
         };
 
         assert!(ci_run_selection(&args).is_err());

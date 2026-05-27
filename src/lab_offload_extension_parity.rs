@@ -150,7 +150,7 @@ mod tests {
     use homeboy::cli_surface::Commands;
     use homeboy::commands::test::TestArgs;
     use homeboy::commands::utils::args::{
-        BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
+        BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
     };
     use std::sync::{Mutex, OnceLock};
 
@@ -178,7 +178,6 @@ mod tests {
             ci_job: None,
             setting_args: SettingArgs::default(),
             args: Vec::new(),
-            _json: HiddenJsonArgs::default(),
             json_summary: false,
         }
     }

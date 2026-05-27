@@ -1,8 +1,6 @@
 use std::fs;
 
-use crate::commands::utils::args::{
-    BaselineArgs, HiddenJsonArgs, PositionalComponentArgs, SettingArgs,
-};
+use crate::commands::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use crate::test_support::with_isolated_home;
 
 use homeboy::core::extension::trace as extension_trace;
@@ -23,7 +21,6 @@ fn trace_args_for_rig(rig_id: &str, scenario: &str) -> TraceArgs {
         profile: None,
         profiles: false,
         setting_args: SettingArgs::default(),
-        _json: HiddenJsonArgs::default(),
         json_summary: false,
         report: None,
         experiment: None,

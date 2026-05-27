@@ -19,7 +19,6 @@ fn trace_args_for_rig(rig_id: &str) -> TraceArgs {
         profile: None,
         profiles: false,
         setting_args: SettingArgs::default(),
-        _json: HiddenJsonArgs::default(),
         json_summary: false,
         report: None,
         experiment: None,

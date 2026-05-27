@@ -16,8 +16,8 @@ use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::rig::{self, RigSpec};
 
 use super::utils::args::{
-    filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs,
-    PassthroughCommand, PositionalComponentArgs, SettingArgs,
+    filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,
+    PositionalComponentArgs, SettingArgs,
 };
 use super::{runs, CmdResult, GlobalArgs};
 
@@ -180,9 +180,6 @@ pub struct BenchRunArgs {
     /// Additional arguments to pass to the bench runner (must follow --)
     #[arg(last = true)]
     args: Vec<String>,
-
-    #[command(flatten)]
-    _json: HiddenJsonArgs,
 
     /// Print compact machine-readable summary (for CI wrappers)
     #[arg(long)]

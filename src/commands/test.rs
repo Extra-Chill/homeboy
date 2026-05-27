@@ -18,8 +18,8 @@ use std::path::Path;
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
-    filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, HiddenJsonArgs,
-    PassthroughCommand, PositionalComponentArgs, SettingArgs,
+    filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,
+    PositionalComponentArgs, SettingArgs,
 };
 use super::utils::observed_workflow::{finish_observed_workflow, ObservedWorkflowRunner};
 use super::{CmdResult, GlobalArgs};
@@ -77,9 +77,6 @@ pub struct TestArgs {
     /// Additional arguments to pass to the test runner (must follow --)
     #[arg(last = true)]
     pub args: Vec<String>,
-
-    #[command(flatten)]
-    pub _json: HiddenJsonArgs,
 
     /// Print compact machine-readable summary (for CI wrappers)
     #[arg(long)]
@@ -722,7 +719,6 @@ mod tests {
             "--skip-lint".to_string(),
             "--coverage".to_string(),
             "--write".to_string(),
-            "--json".to_string(),
         ];
         let result = filter_homeboy_flags(&args);
         assert!(result.is_empty());
