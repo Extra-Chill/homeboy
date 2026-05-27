@@ -1039,24 +1039,6 @@ mod tests {
         }
     }
 
-    fn reverse_runner_session(runner_id: &str) -> homeboy::core::runner::RunnerSession {
-        homeboy::core::runner::RunnerSession {
-            runner_id: runner_id.to_string(),
-            mode: homeboy::core::runner::RunnerTunnelMode::Reverse,
-            role: homeboy::core::runner::RunnerSessionRole::Runner,
-            server_id: None,
-            controller_id: Some("controller".to_string()),
-            broker_url: None,
-            remote_daemon_address: None,
-            local_port: None,
-            local_url: None,
-            tunnel_pid: None,
-            remote_daemon_pid: None,
-            homeboy_version: "test".to_string(),
-            connected_at: "2026-05-27T00:00:00Z".to_string(),
-        }
-    }
-
     #[test]
     fn rewrites_lab_offload_path_and_strips_runner_flag_before_remote_exec() {
         let args = vec![
