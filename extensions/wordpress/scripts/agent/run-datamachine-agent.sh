@@ -278,6 +278,99 @@ PHP
         ' >"$RESULTS_FILE"
 }
 
+homeboy_datamachine_agent_attach_evidence_references() {
+    local workflow_run_url=""
+    if [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_RUN_ID:-}" ]; then
+        workflow_run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+    fi
+
+    local updated_results
+    updated_results=$(mktemp "${TMPDIR:-/tmp}/homeboy-datamachine-agent-evidence.XXXXXX")
+    jq \
+        --arg scenarioId "$WORKLOAD_ID" \
+        --arg resultsPath "$RESULTS_FILE" \
+        --arg workflowRunUrl "$workflow_run_url" \
+        '
+        def present($value): $value != null and $value != "" and $value != [] and $value != {};
+        def ref($kind; $path; $label; $source):
+            {kind: $kind, path: $path, label: $label, source: $source, available: present($path)};
+        def inline_ref($kind; $value; $label; $source):
+            {kind: $kind, value: $value, label: $label, source: $source, available: present($value)};
+        def gap($field; $reason):
+            {field: $field, reason: $reason, compatibility_gap: true};
+        def first_field($source; $name):
+            ([$source | .. | objects | .[$name]? | select(present(.))] | first) // null;
+        def first_tool_pr_url($metadata):
+            ([
+                ($metadata.engine_data.github_tool_results // [])[]?,
+                ($metadata.engine_data[]? | objects | .github_tool_results? // [] | .[]?)
+            ] | map(select(.tool_name == "create_github_pull_request" and .success == true and (.url // "") != "") | .url) | first) // "";
+        def pr_url($metadata):
+            $metadata.job_artifact_exports.pr_url
+            // $metadata.fallback_pull_request.result.html_url
+            // $metadata.fallback_pull_request.result.url
+            // $metadata.fallback_pull_request.result.pull_request.html_url
+            // first_tool_pr_url($metadata)
+            // "";
+        def workspace_branch($metadata):
+            $metadata.runner_workspace_capture.status.branch
+            // $metadata.runner_workspace.branch
+            // $metadata.job_artifact_exports.branch
+            // $metadata.fallback_pull_request.input.head
+            // "";
+        def evidence($scenario):
+            ($scenario.metadata // {}) as $metadata
+            | ($scenario.artifacts // {}) as $artifacts
+            | ($metadata.wp_codebox.canonical_artifacts // {}) as $wpPaths
+            | ($metadata.transcript_artifacts // {}) as $transcript
+            | ($metadata.fingerprints // {}) as $fingerprints
+            | ($metadata.runtime_versions // {}) as $runtimeVersions
+            | first_field($metadata; "artifact_verifier_result") as $artifactVerifier
+            | (first_field($metadata; "workspace_policy_result") // $metadata.datamachine_code_policy_attestation // null) as $policyResult
+            | ($artifacts.episode_jsonl.path // $metadata.runtime_episode_trace.path // $metadata.runtime_episode_trace // "") as $episodeTrace
+            | ($artifacts.replay_bundle.path // $metadata.replay_bundle_path // "") as $replayBundle
+            | ($transcript.json // "") as $transcriptJson
+            | {
+                schema: "homeboy/datamachine-agent-evidence-references/v1",
+                scope: "generic-runner-evidence",
+                references: {
+                    homeboy_result_json: ref("json"; $resultsPath; "Homeboy result JSON"; "homeboy"),
+                    wp_codebox_artifact_bundle: ref("directory"; ($wpPaths.directory // ""); "WP Codebox artifact bundle"; "wp-codebox"),
+                    wp_codebox_manifest: ref("json"; ($wpPaths.manifest // ""); "WP Codebox manifest"; "wp-codebox"),
+                    artifact_verifier_result: inline_ref("json"; $artifactVerifier; "Artifact verifier result"; "runner"),
+                    workspace_policy_result: inline_ref("json"; $policyResult; "Workspace policy result"; "data-machine-code"),
+                    runtime_episode_trace: ref("jsonl"; $episodeTrace; "Runtime episode trace"; "homeboy"),
+                    transcript_artifact: ref("json"; $transcriptJson; "Transcript artifact"; "data-machine"),
+                    replay_bundle_artifact: ref("json"; $replayBundle; "Replay bundle artifact"; "homeboy"),
+                    workspace_diff: inline_ref("diff"; ($metadata.runner_workspace_capture.diff // null); "Workspace diff"; "data-machine-code"),
+                    workspace_changed_files: inline_ref("json"; ($metadata.runner_workspace_capture.status.files // $metadata.wp_codebox.changed_files // null); "Workspace changed files"; "runner"),
+                    grader_result: inline_ref("json"; ($metadata.eval_artifact.grade // $metadata.grade // null); "Grader result"; "runner"),
+                    pull_request: inline_ref("url"; pr_url($metadata); "Pull request URL"; "github"),
+                    workspace_branch: inline_ref("git-ref"; workspace_branch($metadata); "Workspace branch"; "runner"),
+                    workflow_run: ref("url"; ($metadata.workflow_run_url // $metadata.eval_artifact.run.workflow_run_url // $workflowRunUrl); "Workflow run"; "github")
+                },
+                fingerprints: {
+                    prompt_sha256: ($fingerprints.prompt.sha256 // ""),
+                    bundle_sha256: ($fingerprints.bundle.sha256 // ""),
+                    tool_policy_sha256: ($fingerprints.tool_policy.sha256 // ""),
+                    provider: ($metadata.provider // ""),
+                    model: ($metadata.model // ""),
+                    runtime: ($metadata.wp_codebox.runtime // null),
+                    versions: $runtimeVersions
+                },
+                compatibility_gaps: ([
+                    if present($artifactVerifier) then empty else gap("artifact_verifier_result"; "No artifact verifier result was supplied by this run.") end,
+                    if present($policyResult) then empty else gap("workspace_policy_result"; "No workspace policy result was supplied by Data Machine Code.") end,
+                    if present($episodeTrace) then empty else gap("runtime_episode_trace"; "No episode trace artifact was generated for this run.") end,
+                    if present($transcriptJson) then empty else gap("transcript_artifact"; "No transcript artifact path was available for this run.") end,
+                    if present($replayBundle) then empty else gap("replay_bundle_artifact"; "No replay bundle artifact was generated for this run.") end
+                ])
+            };
+        .scenarios |= map(if .id == $scenarioId then .metadata.evidence_references = evidence(.) else . end)
+        ' "$RESULTS_FILE" >"$updated_results"
+    mv "$updated_results" "$RESULTS_FILE"
+}
+
 CONFIG_PATH="${HOMEBOY_DATAMACHINE_AGENT_CONFIG_PATH:-}"
 if [ -z "$CONFIG_PATH" ] && [ "${1:-}" != "" ]; then
     CONFIG_PATH="$1"
@@ -518,6 +611,8 @@ if [ -n "$REPLAY_BUNDLE_DIR" ]; then
         --output-dir "$REPLAY_BUNDLE_DIR" \
         --update-results >/dev/null
 fi
+
+homeboy_datamachine_agent_attach_evidence_references
 
 if jq -e "$scenario | .metadata.error?" "$RESULTS_FILE" >/dev/null; then
     echo "ERROR: Data Machine agent workload reported an error" >&2

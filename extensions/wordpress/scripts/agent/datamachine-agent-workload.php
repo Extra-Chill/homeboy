@@ -330,6 +330,18 @@ if ( ! function_exists( 'homeboy_datamachine_agent_result' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_runtime_versions' ) ) {
+    function homeboy_datamachine_agent_runtime_versions(): array {
+        return array_filter(
+            array(
+                'php'       => PHP_VERSION,
+                'wordpress' => function_exists( 'get_bloginfo' ) ? (string) get_bloginfo( 'version' ) : '',
+            ),
+            static fn( $value ) => '' !== $value
+        );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_config' ) ) {
     function homeboy_datamachine_agent_config(): array {
         $raw = trim( (string) getenv( 'HOMEBOY_DATAMACHINE_AGENT_CONFIG' ) );
@@ -2507,6 +2519,7 @@ if ( ! empty( $config['dry_run'] ) ) {
 			'datamachine_provenance' => is_array( $config['datamachine_provenance'] ?? null ) ? $config['datamachine_provenance'] : array(),
 			'datamachine_code_policy_attestation' => is_array( $config['datamachine_code_policy_attestation'] ?? null ) ? $config['datamachine_code_policy_attestation'] : array(),
 			'fingerprints'        => homeboy_datamachine_agent_fingerprints( $config, homeboy_datamachine_agent_scalar( $config, 'prompt' ), homeboy_datamachine_agent_scalar( $config, 'bundle_path' ) ),
+			'runtime_versions'    => homeboy_datamachine_agent_runtime_versions(),
 		)
 	);
 }
@@ -2531,6 +2544,7 @@ $metadata = array(
 	'task_label'   => homeboy_datamachine_agent_scalar( $config, 'task_label', homeboy_datamachine_agent_scalar( $config, 'workload_label' ) ),
 	'prompt'        => $prompt,
 	'fingerprints'  => homeboy_datamachine_agent_fingerprints( $config, $prompt, $bundle_path ),
+	'runtime_versions' => homeboy_datamachine_agent_runtime_versions(),
 	'bundle_exists' => '' !== $bundle_path && is_dir( $bundle_path ),
 	'rules'         => is_array( $config['rules'] ?? null ) ? $config['rules'] : array(),
 	'general_rules' => is_array( $config['general_rules'] ?? null ) ? $config['general_rules'] : array(),

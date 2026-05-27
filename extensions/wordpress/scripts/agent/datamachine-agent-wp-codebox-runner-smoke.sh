@@ -12,6 +12,7 @@ fi
 RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/datamachine-agent-wp-codebox.XXXXXX")
 CONFIG_TMPFILE="$RUNTIME_DIR/config.json"
 RESULTS_TMPFILE="$RUNTIME_DIR/results.json"
+REPLAY_BUNDLE_DIR="$RUNTIME_DIR/replay-bundles"
 FAKE_WP_CODEBOX="$RUNTIME_DIR/wp-codebox.js"
 FAKE_ARGS_FILE="$RUNTIME_DIR/wp-codebox-args.txt"
 BUNDLE_DIR="$RUNTIME_DIR/bundle"
@@ -175,6 +176,7 @@ jq -n \
 FAKE_WP_CODEBOX_ARGS_FILE="$FAKE_ARGS_FILE" \
 HOMEBOY_WP_CODEBOX_BIN="$FAKE_WP_CODEBOX" \
 HOMEBOY_DATAMACHINE_AGENT_RESULTS_FILE="$RESULTS_TMPFILE" \
+HOMEBOY_DATAMACHINE_AGENT_REPLAY_BUNDLE_DIR="$REPLAY_BUNDLE_DIR" \
     bash "$SCRIPT_DIR/run-datamachine-agent.sh" "$CONFIG_TMPFILE"
 
 scenario='.scenarios[] | select(.id == "wp-codebox-runner-smoke")'
@@ -201,6 +203,20 @@ review_artifact=$(jq -r "$scenario | .artifacts.wp_codebox_review.kind // \"miss
 patch_artifact=$(jq -r "$scenario | .artifacts.wp_codebox_patch.kind // \"missing\"" "$RESULTS_TMPFILE")
 if [ "$wp_codebox_success" != "true" ] || [ -z "$artifact_dir" ] || [ "$review_schema" != "wp-codebox/artifact-review/v1" ] || [ "$changed_files_schema" != "wp-codebox/changed-files/v1" ] || [ "$review_artifact" != "review" ] || [ "$patch_artifact" != "patch" ]; then
     echo "ERROR: wp_codebox metadata missing (success=$wp_codebox_success artifact_dir=$artifact_dir)" >&2
+    cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+
+evidence_schema=$(jq -r "$scenario | .metadata.evidence_references.schema // \"missing\"" "$RESULTS_TMPFILE")
+homeboy_result_path=$(jq -r "$scenario | .metadata.evidence_references.references.homeboy_result_json.path // \"\"" "$RESULTS_TMPFILE")
+wp_codebox_bundle_available=$(jq -r "$scenario | .metadata.evidence_references.references.wp_codebox_artifact_bundle.available // false" "$RESULTS_TMPFILE")
+runtime_trace_available=$(jq -r "$scenario | .metadata.evidence_references.references.runtime_episode_trace.available // false" "$RESULTS_TMPFILE")
+replay_bundle_available=$(jq -r "$scenario | .metadata.evidence_references.references.replay_bundle_artifact.available // false" "$RESULTS_TMPFILE")
+verifier_gap=$(jq -r "$scenario | any(.metadata.evidence_references.compatibility_gaps[]?; .field == \"artifact_verifier_result\")" "$RESULTS_TMPFILE")
+policy_gap=$(jq -r "$scenario | any(.metadata.evidence_references.compatibility_gaps[]?; .field == \"workspace_policy_result\")" "$RESULTS_TMPFILE")
+trace_gap=$(jq -r "$scenario | any(.metadata.evidence_references.compatibility_gaps[]?; .field == \"runtime_episode_trace\")" "$RESULTS_TMPFILE")
+if [ "$evidence_schema" != "homeboy/datamachine-agent-evidence-references/v1" ] || [ "$homeboy_result_path" != "$RESULTS_TMPFILE" ] || [ "$wp_codebox_bundle_available" != "true" ] || [ "$runtime_trace_available" != "true" ] || [ "$replay_bundle_available" != "true" ] || [ "$verifier_gap" != "true" ] || [ "$policy_gap" != "true" ] || [ "$trace_gap" != "false" ]; then
+    echo "ERROR: stable evidence references missing or incomplete" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
 fi
