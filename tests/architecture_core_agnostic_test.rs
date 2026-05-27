@@ -310,7 +310,7 @@ const DETECTOR_AGNOSTIC_BASELINE: &[DetectorAgnosticBaseline] = &[
         token: "php",
     },
 ];
-const DETECTOR_AGNOSTIC_BASELINE_OCCURRENCES: usize = 82;
+const DETECTOR_AGNOSTIC_BASELINE_OCCURRENCES: usize = 84;
 
 fn source_file(relative_path: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);

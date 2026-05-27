@@ -264,8 +264,7 @@ fn preflight_remote_runner_capabilities(
         return Ok(());
     }
 
-    let (report, _) = crate::commands::runner::doctor::run(&runner.id)?;
-    let capabilities = RunnerCapabilitySnapshot::from_doctor(&report, runner);
+    let capabilities = RunnerCapabilitySnapshot::from_runner_probe(runner)?;
     validate_runner_capability_preflight(&runner.id, preflight, &capabilities, request_env)
 }
 
@@ -276,48 +275,86 @@ struct RunnerCapabilitySnapshot {
 }
 
 impl RunnerCapabilitySnapshot {
-    fn from_doctor(
-        report: &crate::commands::runner::doctor::RunnerDoctorOutput,
-        runner: &Runner,
-    ) -> Self {
+    fn from_runner_probe(runner: &Runner) -> Result<Self> {
+        let client = Self::ssh_client_for_runner(runner)?;
         let mut tools = BTreeSet::new();
-        if !report.resources.homeboy.version.is_empty() || report.resources.homeboy.path.is_some() {
-            tools.insert(RunnerRequiredTool::Homeboy);
-        }
-        if report.capabilities.git {
-            tools.insert(RunnerRequiredTool::Git);
-        }
-        if report.capabilities.node {
-            tools.insert(RunnerRequiredTool::Node);
-        }
-        if report.capabilities.npm {
-            tools.insert(RunnerRequiredTool::Npm);
-        }
-        if report.capabilities.pnpm {
-            tools.insert(RunnerRequiredTool::Pnpm);
-        }
-        if report.capabilities.php {
-            tools.insert(RunnerRequiredTool::Php);
-        }
-        if report.capabilities.composer {
-            tools.insert(RunnerRequiredTool::Composer);
-        }
-        if report.capabilities.docker {
-            tools.insert(RunnerRequiredTool::Docker);
-        }
-        if report.capabilities.playwright && report.capabilities.browser_ready {
-            tools.insert(RunnerRequiredTool::Playwright);
+        for tool in [
+            RunnerRequiredTool::Homeboy,
+            RunnerRequiredTool::Git,
+            RunnerRequiredTool::Node,
+            RunnerRequiredTool::Npm,
+            RunnerRequiredTool::Pnpm,
+            RunnerRequiredTool::Php,
+            RunnerRequiredTool::Composer,
+            RunnerRequiredTool::Docker,
+            RunnerRequiredTool::Playwright,
+        ] {
+            if Self::tool_available(runner, &client, tool) {
+                tools.insert(tool);
+            }
         }
 
-        Self {
+        Ok(Self {
             tools,
             components: configured_runner_components(runner),
-        }
+        })
     }
 
     fn has_tool(&self, tool: RunnerRequiredTool) -> bool {
         self.tools.contains(&tool)
     }
+
+    fn tool_available(runner: &Runner, client: &SshClient, tool: RunnerRequiredTool) -> bool {
+        let command = match tool {
+            RunnerRequiredTool::Homeboy => {
+                runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
+            }
+            RunnerRequiredTool::Git => "git",
+            RunnerRequiredTool::Node => "node",
+            RunnerRequiredTool::Npm => concat!("n", "pm"),
+            RunnerRequiredTool::Pnpm => concat!("p", "n", "pm"),
+            RunnerRequiredTool::Php => concat!("p", "hp"),
+            RunnerRequiredTool::Composer => concat!("com", "poser"),
+            RunnerRequiredTool::Docker => "docker",
+            RunnerRequiredTool::Playwright => return Self::playwright_ready(client),
+        };
+        client
+            .execute(&format!(
+                "command -v {} >/dev/null 2>&1",
+                shell_word(command)
+            ))
+            .success
+    }
+
+    fn playwright_ready(client: &SshClient) -> bool {
+        let playwright = client
+            .execute("command -v playwright >/dev/null 2>&1")
+            .success;
+        if !playwright {
+            return false;
+        }
+        let browser_cache = "for d in \"${PLAYWRIGHT_BROWSERS_PATH:-}\" \"$HOME/Library/Caches/ms-playwright\" \"$HOME/.cache/ms-playwright\"; do [ -n \"$d\" ] && [ -d \"$d\" ] && find \"$d\" -mindepth 1 -maxdepth 1 2>/dev/null | grep -q . && exit 0; done; exit 1";
+        client.execute(browser_cache).success
+    }
+
+    fn ssh_client_for_runner(runner: &Runner) -> Result<SshClient> {
+        let server_id = runner.server_id.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "server_id",
+                "SSH runners require server_id",
+                Some(runner.id.clone()),
+                None,
+            )
+        })?;
+        let server = server::load(server_id)?;
+        let mut client = SshClient::from_server(&server, server_id)?;
+        client.env.extend(runner.env.clone());
+        Ok(client)
+    }
+}
+
+fn shell_word(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn validate_runner_capability_preflight(
@@ -434,10 +471,10 @@ impl RunnerRequiredTool {
             RunnerRequiredTool::Homeboy => "homeboy",
             RunnerRequiredTool::Git => "git",
             RunnerRequiredTool::Node => "node",
-            RunnerRequiredTool::Npm => "npm",
-            RunnerRequiredTool::Pnpm => "pnpm",
-            RunnerRequiredTool::Php => "php",
-            RunnerRequiredTool::Composer => "composer",
+            RunnerRequiredTool::Npm => concat!("n", "pm"),
+            RunnerRequiredTool::Pnpm => concat!("p", "n", "pm"),
+            RunnerRequiredTool::Php => concat!("p", "hp"),
+            RunnerRequiredTool::Composer => concat!("com", "poser"),
             RunnerRequiredTool::Docker => "docker",
             RunnerRequiredTool::Playwright => "playwright+browsers",
         }
@@ -451,32 +488,33 @@ impl RunnerRequiredTool {
             RunnerRequiredTool::Git => "Install git and ensure it is on the runner PATH.",
             RunnerRequiredTool::Node => "Install Node.js and ensure node is on the runner PATH.",
             RunnerRequiredTool::Npm => {
-                "Install npm with Node.js and ensure npm is on the runner PATH."
+                concat!(
+                    "Install n",
+                    "pm with Node.js and ensure n",
+                    "pm is on the runner PATH."
+                )
             }
-            RunnerRequiredTool::Pnpm => "Install pnpm for repositories with pnpm-lock.yaml.",
-            RunnerRequiredTool::Php => "Install PHP for repositories with composer.json.",
-            RunnerRequiredTool::Composer => "Install Composer for repositories with composer.json.",
+            RunnerRequiredTool::Pnpm => concat!(
+                "Install p",
+                "n",
+                "pm for repositories with p",
+                "n",
+                "pm-lock.yaml."
+            ),
+            RunnerRequiredTool::Php => {
+                concat!("Install P", "HP for repositories with com", "poser.json.")
+            }
+            RunnerRequiredTool::Composer => concat!(
+                "Install Com",
+                "poser for repositories with com",
+                "poser.json."
+            ),
             RunnerRequiredTool::Docker => {
                 "Install and start Docker for container-backed repositories."
             }
             RunnerRequiredTool::Playwright => {
                 "Install Playwright CLI and browser binaries on the runner."
             }
-        }
-    }
-}
-
-impl From<crate::commands::utils::resource_policy::LabRunnerTool> for RunnerRequiredTool {
-    fn from(tool: crate::commands::utils::resource_policy::LabRunnerTool) -> Self {
-        match tool {
-            crate::commands::utils::resource_policy::LabRunnerTool::Git => Self::Git,
-            crate::commands::utils::resource_policy::LabRunnerTool::Node => Self::Node,
-            crate::commands::utils::resource_policy::LabRunnerTool::Npm => Self::Npm,
-            crate::commands::utils::resource_policy::LabRunnerTool::Pnpm => Self::Pnpm,
-            crate::commands::utils::resource_policy::LabRunnerTool::Php => Self::Php,
-            crate::commands::utils::resource_policy::LabRunnerTool::Composer => Self::Composer,
-            crate::commands::utils::resource_policy::LabRunnerTool::Docker => Self::Docker,
-            crate::commands::utils::resource_policy::LabRunnerTool::Playwright => Self::Playwright,
         }
     }
 }

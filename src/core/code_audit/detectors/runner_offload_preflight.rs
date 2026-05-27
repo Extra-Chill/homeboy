@@ -96,7 +96,12 @@ impl<'a> RemoteExecutionSafetyPolicy<'a> {
                 &config.path_translation_markers,
             ),
             capability_preflight_markers: with_defaults(
-                &["RunnerDoctorOutput", "runner doctor", "capability_plan"],
+                &[
+                    "RunnerDoctorOutput",
+                    "runner doctor",
+                    "capability_plan",
+                    "capability_preflight",
+                ],
                 &config.capability_preflight_markers,
             ),
             artifact_capture_markers: with_defaults(&[], &config.artifact_capture_markers),
