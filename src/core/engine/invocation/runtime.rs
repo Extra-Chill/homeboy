@@ -201,16 +201,11 @@ pub fn short_invocation_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_support::home_env_guard;
 
     #[test]
     fn override_env_takes_priority() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = home_env_guard();
         let dir = tempfile::tempdir().expect("tempdir");
         let prior = env::var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
         env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, dir.path());
@@ -226,7 +221,7 @@ mod tests {
 
     #[test]
     fn override_env_blank_falls_back_to_platform() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = home_env_guard();
         let prior = env::var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
         env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, "   ");
 

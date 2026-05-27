@@ -68,7 +68,7 @@ fn write_trace_rig_with_profile(
                         "{component_id}": {{ "path": "{}" }}
                     }},
                     "trace_workloads": {{ "nodejs": [
-                        "${{components.{component_id}.path}}/close-window-running-site.trace.mjs"
+                        {{ "path": "${{components.{component_id}.path}}/close-window-running-site.trace.mjs" }}
                     ] }},
                     "trace_profiles": {{
                         "studio-window-close": {{
@@ -130,7 +130,7 @@ fn rig_component_for_trace_synthesizes_trace_workload_extensions() {
                     "studio": { "path": "/tmp/studio" }
                 },
                 "trace_workloads": {
-                    "nodejs": ["/tmp/create-site.trace.mjs"]
+                    "nodejs": [{ "path": "/tmp/create-site.trace.mjs" }]
                 }
             }"#,
     )

@@ -112,7 +112,7 @@ fn write_trace_experiment_rig(home: &tempfile::TempDir, component_path: &std::pa
                     "studio": {{ "path": "{}" }}
                 }},
                 "trace_workloads": {{ "nodejs": [
-                    "${{components.studio.path}}/product-workflow.trace.mjs"
+                    {{ "path": "${{components.studio.path}}/product-workflow.trace.mjs" }}
                 ] }},
                 "trace_experiments": {{
                     "template": {{

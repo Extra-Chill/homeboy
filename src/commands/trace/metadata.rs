@@ -41,8 +41,7 @@ pub(super) fn trace_span_metadata_for_args(
     };
     Ok(workload
         .trace_span_metadata()
-        .into_iter()
-        .flat_map(|metadata| metadata.iter())
+        .iter()
         .map(|(id, metadata)| (id.clone(), metadata.clone()))
         .collect())
 }

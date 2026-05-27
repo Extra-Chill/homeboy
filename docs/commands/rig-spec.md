@@ -342,7 +342,7 @@ Rig specs can pin benchmark dispatch for `homeboy bench --rig <id>`.
 | `trace_workloads` | object | Out-of-tree trace workloads keyed by extension ID. |
 | `bench_profiles` | object | Named scenario lists used by `homeboy bench --profile <name>`. |
 
-`bench_workloads` and `trace_workloads` entries support either string paths or object form. String paths preserve historical behaviour: workload commands run the full rig check. Object entries use `path` plus optional `check_groups`; when every workload for the selected extension declares `check_groups`, workload commands run only those grouped check-pipeline steps. Trace workload objects can also declare `trace_phase_presets` and `trace_default_phase_preset`.
+`bench_workloads` and `trace_workloads` entries must use object form with a `path` field. Optional `check_groups` scope workload preflights; when every workload for the selected extension declares `check_groups`, workload commands run only those grouped check-pipeline steps. Workloads that omit `check_groups` run the full rig check. Trace workload objects can also declare `trace_phase_presets` and `trace_default_phase_preset`.
 
 Workload paths support `~`, `${env.NAME}`, `${components.<id>.path}`, and `${package.root}` for package-installed rigs.
 
@@ -354,7 +354,9 @@ Workload paths support `~`, `${env.NAME}`, `${components.<id>.path}`, and `${pac
     "warmup_iterations": 2
   },
   "bench_workloads": {
-    "wordpress": ["${package.root}/bench/workloads/studio-cold-start"],
+    "wordpress": [
+      { "path": "${package.root}/bench/workloads/studio-cold-start" }
+    ],
     "nodejs": [
       {
         "path": "${package.root}/bench/workloads/studio-app.bench.mjs",

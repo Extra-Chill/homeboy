@@ -202,8 +202,8 @@ fn write_rig_with_profiles(
                     }},
                     "bench": {{ "default_component": "{component_id}" }},
                     "bench_workloads": {{ "nodejs": [
-                        "${{components.{component_id}.path}}/rig-extra.bench.js",
-                        "${{components.{component_id}.path}}/rig-slow.bench.mjs"
+                        {{ "path": "${{components.{component_id}.path}}/rig-extra.bench.js" }},
+                        {{ "path": "${{components.{component_id}.path}}/rig-slow.bench.mjs" }}
                     ] }},
                     "bench_profiles": {bench_profiles}
                 }}"#,
