@@ -176,14 +176,12 @@ pub fn run_upgrade_with_method(
     if !force {
         let check = check_for_updates()?;
         if !check.update_available {
-            // Even when no binary update is needed, still run extension updates
-            // and config migrations — these are independent of the binary version.
+            // Even when no binary update is needed, still run extension updates.
             let (extensions_updated, extensions_skipped) = if skip_extensions {
                 (vec![], vec![])
             } else {
                 update_all_extensions()
             };
-            let projects_migrated = migrate_all_projects();
             let (runners_updated, runners_skipped) = if skip_runners {
                 (vec![], vec![])
             } else {
@@ -199,7 +197,6 @@ pub fn run_upgrade_with_method(
                 restart_required: false,
                 extensions_updated,
                 extensions_skipped,
-                projects_migrated,
                 runners_updated,
                 runners_skipped,
             });
@@ -217,11 +214,6 @@ pub fn run_upgrade_with_method(
     } else {
         (vec![], vec![])
     };
-
-    // Migrate flat-file projects to directory-based layout.
-    // Runs on every upgrade (even failed ones) since this is a config-only
-    // operation that doesn't depend on the binary version.
-    let projects_migrated = migrate_all_projects();
 
     let (runners_updated, runners_skipped) = if success && !skip_runners {
         runners::upgrade_configured_runners(runner_targets)?
@@ -248,42 +240,9 @@ pub fn run_upgrade_with_method(
         restart_required: success && matches!(install_method, InstallMethod::Source),
         extensions_updated,
         extensions_skipped,
-        projects_migrated,
         runners_updated,
         runners_skipped,
     })
-}
-
-/// Migrate all flat-file projects to directory-based layout.
-/// Best-effort — failures are logged and returned in the result.
-fn migrate_all_projects() -> Vec<ProjectMigrationEntry> {
-    let results = crate::core::project::migrate_all_to_directories();
-
-    if results.is_empty() {
-        return vec![];
-    }
-
-    log_status!(
-        "upgrade",
-        "Migrating {} project(s) to directory layout...",
-        results.len()
-    );
-
-    let mut entries = Vec::new();
-    for (id, success, detail) in results {
-        if success {
-            log_status!("upgrade", "  {} migrated", id);
-        } else {
-            log_status!("upgrade", "  {} failed: {}", id, detail);
-        }
-        entries.push(ProjectMigrationEntry {
-            project_id: id,
-            success,
-            detail,
-        });
-    }
-
-    entries
 }
 
 /// Update all installed extensions. Best-effort — failures are logged and

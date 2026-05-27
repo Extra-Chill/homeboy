@@ -38,8 +38,6 @@ pub struct UpgradeResult {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extensions_skipped: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub projects_migrated: Vec<ProjectMigrationEntry>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runners_updated: Vec<RunnerUpgradeEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runners_skipped: Vec<RunnerUpgradeEntry>,
@@ -57,13 +55,6 @@ pub struct ExtensionUpgradeEntry {
     pub git_root: Option<String>,
     #[serde(flatten)]
     pub source_update: ExtensionSourceUpdate,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectMigrationEntry {
-    pub project_id: String,
-    pub success: bool,
-    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
