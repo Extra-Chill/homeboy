@@ -156,10 +156,10 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-27T12:33:54Z",
+      "created_at": "2026-05-27T13:50:48Z",
       "item_count": 29,
       "known_fingerprints": [
-        "artifact_portability::observation:37f0edaf-aad6-46ee-b474-6c3107eec457::NonPortableArtifactPath",
+        "artifact_portability::observation:d7bfe8c6-3ba6-43a8-a19e-9e24eae24141::NonPortableArtifactPath",
         "dead_code::src/commands/utils/resource_policy.rs::UnreferencedExport",
         "dead_code::src/core/engine/temp.rs::UnreferencedExport",
         "runner_offload_preflight::src/commands/bench/observation.rs::RunnerOffloadPreflight",
