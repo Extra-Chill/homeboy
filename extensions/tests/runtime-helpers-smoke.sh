@@ -5,6 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/failure-trap.sh}"
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/write-test-results.sh}"
+BASH_PREFLIGHT_HELPERS=(
+    "${ROOT_DIR}/nodejs/scripts/lib/bash-preflight.sh"
+    "${ROOT_DIR}/rust/scripts/lib/bash-preflight.sh"
+    "${ROOT_DIR}/wordpress/scripts/lib/bash-preflight.sh"
+)
 
 assert_file() {
     local path="$1"
@@ -38,6 +43,16 @@ assert_not_contains() {
 
 assert_file "$FAILURE_TRAP_HELPER"
 assert_file "$WRITE_TEST_RESULTS_HELPER"
+for bash_preflight_helper in "${BASH_PREFLIGHT_HELPERS[@]}"; do
+    assert_file "$bash_preflight_helper"
+    bash -c 'source "$1"; homeboy_require_bash_version 4' _ "$bash_preflight_helper"
+done
+
+if ! cmp -s "${BASH_PREFLIGHT_HELPERS[0]}" "${BASH_PREFLIGHT_HELPERS[1]}" \
+    || ! cmp -s "${BASH_PREFLIGHT_HELPERS[0]}" "${BASH_PREFLIGHT_HELPERS[2]}"; then
+    echo "Bash preflight helpers should stay identical across installed extension trees" >&2
+    exit 1
+fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -134,6 +149,20 @@ if grep -R --exclude='*smoke.sh' "homeboy_write_test_results()" \
     "$ROOT_DIR/rust/scripts" \
     "$ROOT_DIR/wordpress/scripts/test" >/dev/null; then
     echo "Extension scripts should not define local homeboy_write_test_results functions" >&2
+    exit 1
+fi
+
+if grep "BASH_VERSINFO" \
+    "$ROOT_DIR/nodejs/scripts/bench/bench-runner.sh" \
+    "$ROOT_DIR/nodejs/scripts/build/build-runner.sh" \
+    "$ROOT_DIR/nodejs/scripts/lint/lint-runner.sh" \
+    "$ROOT_DIR/nodejs/scripts/test/test-runner.sh" \
+    "$ROOT_DIR/nodejs/scripts/trace/trace-runner.sh" \
+    "$ROOT_DIR/rust/scripts/bench/bench-runner.sh" \
+    "$ROOT_DIR/wordpress/scripts/bench/bench-runner.sh" \
+    "$ROOT_DIR/wordpress/scripts/lint/lint-runner.sh" \
+    "$ROOT_DIR/wordpress/scripts/test/test-runner.sh" >/dev/null; then
+    echo "Runner scripts should use scripts/lib/bash-preflight.sh instead of local BASH_VERSINFO checks" >&2
     exit 1
 fi
 

@@ -27,12 +27,12 @@ set -euo pipefail
 #   HOMEBOY_CHANGED_TEST_FILES   — newline-separated test files selected by core
 #   HOMEBOY_DEBUG                — verbose
 
-if ((BASH_VERSINFO[0] < 4)); then
-    echo "ERROR: bash 4.0+ required (found ${BASH_VERSION})" >&2
-    exit 1
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${SCRIPT_DIR}/../lib/bash-preflight.sh}"
+# shellcheck source=/dev/null
+source "$BASH_PREFLIGHT_HELPER"
+homeboy_require_bash_version 4
+
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"

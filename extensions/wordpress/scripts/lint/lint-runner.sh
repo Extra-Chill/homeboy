@@ -1,26 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bash 4.0+ required for associative arrays
-if ((BASH_VERSINFO[0] < 4)); then
-    echo "Error: This script requires bash 4.0+ (found ${BASH_VERSION})" >&2
-    case "$(uname -s)" in
-        Darwin)
-            echo "macOS ships with bash 3.2. Install newer bash: brew install bash" >&2
-            ;;
-        Linux)
-            echo "Update bash via your package manager (apt, dnf, pacman, etc.)" >&2
-            ;;
-        MINGW*|MSYS*|CYGWIN*)
-            echo "Update Git Bash or use WSL with a modern bash version" >&2
-            ;;
-        *)
-            echo "Install bash 4.0 or later for your platform" >&2
-            ;;
-    esac
-    exit 1
-fi
-
 # Standalone PHP linting script using PHPCS/PHPCBF
 # Supports fix-only mode via HOMEBOY_FIX_ONLY=1 (sent by `homeboy refactor`)
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
@@ -31,6 +11,11 @@ fi
 # flows go through `homeboy refactor --from lint --write` (#1145).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${SCRIPT_DIR}/../lib/bash-preflight.sh}"
+# shellcheck source=/dev/null
+source "$BASH_PREFLIGHT_HELPER"
+homeboy_require_bash_version 4
+
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
 # shellcheck source=../lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
