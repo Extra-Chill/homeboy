@@ -441,6 +441,7 @@ mod tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use homeboy::core::observation::NewRunRecord;
+    use homeboy::test_support::with_isolated_home;
 
     use super::*;
 
@@ -452,122 +453,118 @@ mod tests {
     #[test]
     fn cleanup_downloads_plans_and_removes_runner_cache() {
         let _guard = artifact_root_test_lock();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let artifact_root = temp.path().join("artifacts");
-        homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
 
-        let run_dir = artifact_root.join("runner").join("local").join("run-1");
-        fs::create_dir_all(&run_dir).expect("run dir");
-        fs::write(run_dir.join("trace.zip"), b"trace").expect("trace");
-        fs::write(run_dir.join("report.json"), b"{}").expect("report");
+            let run_dir = artifact_root.join("runner").join("local").join("run-1");
+            fs::create_dir_all(&run_dir).expect("run dir");
+            fs::write(run_dir.join("trace.zip"), b"trace").expect("trace");
+            fs::write(run_dir.join("report.json"), b"{}").expect("report");
 
-        let dry = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
-            apply: false,
-            runner: Some("local".to_string()),
-            run_id: Some("run-1".to_string()),
-        })
-        .expect("dry-run")
-        .0;
-        let RunsOutput::ArtifactCleanupDownloads(dry) = dry else {
-            panic!("unexpected output");
-        };
-        assert!(dry.dry_run);
-        assert!(!dry.removed);
-        assert_eq!(dry.file_count, 2);
-        assert_eq!(dry.directory_count, 0);
-        assert_eq!(dry.size_bytes, 7);
-        assert!(run_dir.exists());
+            let dry = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
+                apply: false,
+                runner: Some("local".to_string()),
+                run_id: Some("run-1".to_string()),
+            })
+            .expect("dry-run")
+            .0;
+            let RunsOutput::ArtifactCleanupDownloads(dry) = dry else {
+                panic!("unexpected output");
+            };
+            assert!(dry.dry_run);
+            assert!(!dry.removed);
+            assert_eq!(dry.file_count, 2);
+            assert_eq!(dry.directory_count, 0);
+            assert_eq!(dry.size_bytes, 7);
+            assert!(run_dir.exists());
 
-        let applied = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
-            apply: true,
-            runner: Some("local".to_string()),
-            run_id: Some("run-1".to_string()),
-        })
-        .expect("apply")
-        .0;
-        let RunsOutput::ArtifactCleanupDownloads(applied) = applied else {
-            panic!("unexpected output");
-        };
-        assert!(!applied.dry_run);
-        assert!(applied.removed);
-        assert_eq!(applied.file_count, 2);
-        assert_eq!(applied.size_bytes, 7);
-        assert!(!run_dir.exists());
-
-        homeboy::core::set_artifact_root_override(None);
+            let applied = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
+                apply: true,
+                runner: Some("local".to_string()),
+                run_id: Some("run-1".to_string()),
+            })
+            .expect("apply")
+            .0;
+            let RunsOutput::ArtifactCleanupDownloads(applied) = applied else {
+                panic!("unexpected output");
+            };
+            assert!(!applied.dry_run);
+            assert!(applied.removed);
+            assert_eq!(applied.file_count, 2);
+            assert_eq!(applied.size_bytes, 7);
+            assert!(!run_dir.exists());
+        });
     }
 
     #[test]
     fn cleanup_persisted_plans_and_removes_local_artifacts() {
         let _guard = artifact_root_test_lock();
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::env::set_var("XDG_DATA_HOME", temp.path().join("data"));
-        let artifact_root = temp.path().join("artifacts");
-        homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
 
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .start_run(
-                NewRunRecord::builder("bench")
-                    .component_id("homeboy")
-                    .command("homeboy bench")
-                    .metadata(serde_json::json!({ "test": true }))
-                    .build(),
-            )
-            .expect("run");
-        let source = temp.path().join("bench.json");
-        fs::write(&source, b"bench").expect("source");
-        let artifact = store
-            .record_artifact(&run.id, "summary", &source)
-            .expect("artifact");
-        let stored_path = PathBuf::from(&artifact.path);
-        assert!(stored_path.exists());
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("bench")
+                        .component_id("homeboy")
+                        .command("homeboy bench")
+                        .metadata(serde_json::json!({ "test": true }))
+                        .build(),
+                )
+                .expect("run");
+            let source = home.path().join("bench.json");
+            fs::write(&source, b"bench").expect("source");
+            let artifact = store
+                .record_artifact(&run.id, "summary", &source)
+                .expect("artifact");
+            let stored_path = PathBuf::from(&artifact.path);
+            assert!(stored_path.exists());
 
-        let dry = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
-            apply: false,
-            older_than_days: 0,
-            run_id: Some(run.id.clone()),
-            kind: None,
-            artifact_type: None,
-            run_kind: None,
-            component_id: None,
-            limit: 100,
-        })
-        .expect("dry-run")
-        .0;
-        let RunsOutput::ArtifactCleanupPersisted(dry) = dry else {
-            panic!("unexpected output");
-        };
-        assert!(dry.dry_run);
-        assert_eq!(dry.planned_record_count, 1);
-        assert_eq!(dry.planned_file_count, 1);
-        assert_eq!(dry.planned_size_bytes, 5);
-        assert!(stored_path.exists());
-        assert!(store.get_artifact(&artifact.id).expect("get").is_some());
+            let dry = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
+                apply: false,
+                older_than_days: 0,
+                run_id: Some(run.id.clone()),
+                kind: None,
+                artifact_type: None,
+                run_kind: None,
+                component_id: None,
+                limit: 100,
+            })
+            .expect("dry-run")
+            .0;
+            let RunsOutput::ArtifactCleanupPersisted(dry) = dry else {
+                panic!("unexpected output");
+            };
+            assert!(dry.dry_run);
+            assert_eq!(dry.planned_record_count, 1);
+            assert_eq!(dry.planned_file_count, 1);
+            assert_eq!(dry.planned_size_bytes, 5);
+            assert!(stored_path.exists());
+            assert!(store.get_artifact(&artifact.id).expect("get").is_some());
 
-        let applied = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
-            apply: true,
-            older_than_days: 0,
-            run_id: Some(run.id.clone()),
-            kind: None,
-            artifact_type: None,
-            run_kind: None,
-            component_id: None,
-            limit: 100,
-        })
-        .expect("apply")
-        .0;
-        let RunsOutput::ArtifactCleanupPersisted(applied) = applied else {
-            panic!("unexpected output");
-        };
-        assert!(!applied.dry_run);
-        assert_eq!(applied.removed_record_count, 1);
-        assert_eq!(applied.removed_file_count, 1);
-        assert!(!stored_path.exists());
-        assert!(store.get_artifact(&artifact.id).expect("get").is_none());
-
-        homeboy::core::set_artifact_root_override(None);
-        std::env::remove_var("XDG_DATA_HOME");
+            let applied = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
+                apply: true,
+                older_than_days: 0,
+                run_id: Some(run.id.clone()),
+                kind: None,
+                artifact_type: None,
+                run_kind: None,
+                component_id: None,
+                limit: 100,
+            })
+            .expect("apply")
+            .0;
+            let RunsOutput::ArtifactCleanupPersisted(applied) = applied else {
+                panic!("unexpected output");
+            };
+            assert!(!applied.dry_run);
+            assert_eq!(applied.removed_record_count, 1);
+            assert_eq!(applied.removed_file_count, 1);
+            assert!(!stored_path.exists());
+            assert!(store.get_artifact(&artifact.id).expect("get").is_none());
+        });
     }
 
     #[test]
