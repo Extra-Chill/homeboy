@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.199.3] - 2026-05-27
+
+### Changed
+- preflight runner extension parity
+- guard detector implementation agnosticism
+- test rig app update regeneration
+
+### Fixed
+- satisfy runner preflight gates
+- restore core architecture guards
+- pass formatter changed-file scope
+- isolate remote artifact cleanup tests
+- add homeboy artifact retention cleanup
+- upgrade configured runners
+- include git command diagnostics
+- offload hot refactor runs to lab
+- preserve parent-relative deploy paths
+- preflight runner capabilities before remote exec
+- prepare changed-since lab offload base
+- spill large http egress bodies to artifacts
+- audit artifact portability leaks
+- prove runner artifact evidence paths
+- detect unbounded detail output
+
 ## [0.199.2] - 2026-05-26
 
 ### Changed
