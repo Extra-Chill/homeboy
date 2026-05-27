@@ -12,33 +12,6 @@ use std::path::PathBuf;
 use crate::cli_surface::Cli;
 use homeboy::core::component::{self, Component};
 
-/// Normalize version command arguments.
-pub(crate) fn normalize_version_show(args: Vec<String>) -> Vec<String> {
-    if args.len() < 3 {
-        return args;
-    }
-
-    let is_version_cmd = args.get(1).map(|s| s == "version").unwrap_or(false);
-    if !is_version_cmd {
-        return args;
-    }
-
-    let known_subcommands = ["show", "bump", "--help", "-h", "help"];
-    let second_arg = args.get(2).map(|s| s.as_str()).unwrap_or("");
-
-    if known_subcommands.contains(&second_arg) || second_arg.starts_with('-') {
-        return args;
-    }
-
-    let mut result = Vec::with_capacity(args.len() + 1);
-    result.push(args[0].clone());
-    result.push(args[1].clone());
-    result.push("show".to_string());
-    result.extend(args[2..].iter().cloned());
-
-    result
-}
-
 const EXPLICIT_PASSTHROUGH_SENTINEL: &str = "__homeboy_explicit_passthrough__";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,67 +90,23 @@ pub(crate) fn filter_passthrough_args(command: PassthroughCommand, args: &[Strin
     filtered
 }
 
-/// Auto-insert '--' separator before unknown flags for trailing_var_arg commands.
-pub(crate) fn normalize_trailing_flags(args: Vec<String>) -> Vec<String> {
-    let Some(path) = trailing_normalization_path(&args) else {
+/// Mark explicit passthrough arguments so Homeboy-owned flag filtering preserves them.
+pub(crate) fn mark_explicit_passthrough(args: Vec<String>) -> Vec<String> {
+    let explicit_passthrough = matches!(args.get(1).map(String::as_str), Some("test" | "bench"));
+    if !explicit_passthrough {
         return args;
-    };
-    let explicit_passthrough = path == ["test"] || path == ["bench"];
-
-    let Some(known_flags) = known_cli_flags_for_path(&path) else {
-        return args;
-    };
+    }
 
     let mut result = Vec::new();
-    let mut found_separator = false;
-    let mut insert_position: Option<usize> = None;
-
-    let is_known = |flag: &str| -> bool {
-        known_flags
-            .iter()
-            .any(|f| flag == f.flag || flag.starts_with(&format!("{}=", f.flag)))
-    };
-
-    for (i, arg) in args.iter().enumerate() {
+    for arg in args.iter() {
         if arg == "--" {
-            found_separator = true;
             result.push(arg.clone());
-            if explicit_passthrough {
-                result.push(EXPLICIT_PASSTHROUGH_SENTINEL.to_string());
-            }
+            result.push(EXPLICIT_PASSTHROUGH_SENTINEL.to_string());
             continue;
-        }
-        if !found_separator
-            && arg.starts_with("--")
-            && !is_known(arg.as_str())
-            && insert_position.is_none()
-        {
-            insert_position = Some(i);
         }
         result.push(arg.clone());
     }
-
-    if let Some(pos) = insert_position {
-        result.insert(pos, "--".to_string());
-    }
-
     result
-}
-
-fn trailing_normalization_path(args: &[String]) -> Option<Vec<&'static str>> {
-    let path = match (
-        args.get(1).map(String::as_str),
-        args.get(2).map(String::as_str),
-    ) {
-        (Some("component"), Some("set" | "edit" | "merge")) => vec!["component", "set"],
-        (Some("server"), Some("set" | "edit" | "merge")) => vec!["server", "set"],
-        (Some("fleet"), Some("set" | "edit" | "merge")) => vec!["fleet", "set"],
-        (Some("test"), _) => vec!["test"],
-        (Some("bench"), _) => vec!["bench"],
-        (Some("lint"), _) => vec!["lint"],
-        _ => return None,
-    };
-    Some(path)
 }
 
 fn known_cli_flags_for_path(path: &[&str]) -> Option<Vec<CliFlagSpec>> {
@@ -238,47 +167,7 @@ fn arg_takes_value(arg: &Arg) -> bool {
 
 /// Apply all argument normalizations in sequence.
 pub fn normalize(args: Vec<String>) -> Vec<String> {
-    let args = normalize_version_show(args);
-    let args = normalize_trace_compare_variant_scenario(args);
-    normalize_trailing_flags(args)
-}
-
-fn normalize_trace_compare_variant_scenario(args: Vec<String>) -> Vec<String> {
-    if args.get(1).map(|arg| arg.as_str()) != Some("trace")
-        || args.get(2).map(|arg| arg.as_str()) != Some("compare-variant")
-    {
-        return args;
-    }
-
-    let already_has_positional_scenario = args.get(3).is_some_and(|arg| !arg.starts_with('-'));
-    if already_has_positional_scenario {
-        return args;
-    }
-
-    let mut result = Vec::with_capacity(args.len());
-    let mut scenario = None;
-    let mut index = 0;
-    while index < args.len() {
-        let arg = &args[index];
-        if arg == "--scenario" {
-            if let Some(value) = args.get(index + 1) {
-                scenario = Some(value.clone());
-                index += 2;
-                continue;
-            }
-        } else if let Some(value) = arg.strip_prefix("--scenario=") {
-            scenario = Some(value.to_string());
-            index += 1;
-            continue;
-        }
-        result.push(arg.clone());
-        index += 1;
-    }
-
-    if let Some(scenario) = scenario {
-        result.insert(3, scenario);
-    }
-    result
+    mark_explicit_passthrough(args)
 }
 
 // ============================================================================
@@ -405,226 +294,95 @@ mod positional_tests {
 
 #[cfg(test)]
 mod normalize_tests {
-    use super::{normalize, normalize_trailing_flags, EXPLICIT_PASSTHROUGH_SENTINEL};
+    use super::{normalize, EXPLICIT_PASSTHROUGH_SENTINEL};
+    use crate::cli_surface::Cli;
+    use clap::Parser;
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
     }
 
-    /// `--output` placed AFTER a `last = true` subcommand must NOT trigger
-    /// the `--` separator insertion — it's a `global = true` flag on the
-    /// top-level Cli struct and clap routes it there directly. Inserting
-    /// `--` would cause the subcommand's trailing-arg capture to swallow
-    /// the value (homeboy#1532).
     #[test]
-    fn output_after_subcommand_is_not_separated() {
-        let input = argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--output",
-            "/tmp/x.json",
-            "--iterations",
-            "1",
-        ]);
+    fn version_show_shorthand_is_not_rewritten() {
+        let input = argv(&["homeboy", "version", "my-comp"]);
         let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
-
-    /// Equals form must round-trip the same way.
-    #[test]
-    fn output_equals_form_after_subcommand_is_not_separated() {
-        let input = argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--output=/tmp/x.json",
-            "--iterations",
-            "1",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
-
-    /// `bench` owns `--rig` and `--ignore-default-baseline`; they must
-    /// stay on clap's named-argument path, not get swallowed by the
-    /// trailing runner-args capture.
-    #[test]
-    fn bench_rig_flags_after_component_are_not_separated() {
-        let input = argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--rig",
-            "candidate",
-            "--iterations",
-            "1",
-            "--ignore-default-baseline",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
-
-    /// Rig-pinned bench commonly omits the positional component because the
-    /// rig declares `bench.default_component`. Scenario/profile selectors in
-    /// that shape must still bind to BenchRunArgs rather than being captured
-    /// as extension passthrough args.
-    #[test]
-    fn bench_rig_selector_flags_without_component_are_not_separated() {
-        let input = argv(&[
-            "homeboy",
-            "bench",
-            "--rig",
-            "studio-agent-sdk",
-            "--scenario",
-            "studio-agent-runtime",
-            "--iterations",
-            "1",
-            "--runs",
-            "1",
-            "--json-summary",
-            "--ignore-default-baseline",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
-
-    #[test]
-    fn bench_rig_profile_flag_without_component_is_not_separated() {
-        let input = argv(&[
-            "homeboy",
-            "bench",
-            "--rig",
-            "studio-agent-sdk",
-            "--profile",
-            "smoke",
-            "--iterations=1",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
-
-    #[test]
-    fn bench_force_hot_after_subcommand_is_not_separated() {
-        let input = argv(&[
-            "homeboy",
-            "bench",
-            "--rig",
-            "studio-bfb",
-            "--iterations",
-            "1",
-            "--force-hot",
-            "--setting",
-            "studio_site_build_prompt_variant=astro-docs-content-collection",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
-
-    #[test]
-    fn trace_compare_variant_scenario_flag_becomes_positional() {
-        let input = argv(&[
-            "homeboy",
-            "trace",
-            "compare-variant",
-            "--rig",
-            "studio",
-            "--scenario",
-            "studio-app-create-site",
-            "--overlay",
-            "overlays/change.patch",
-            "--output-dir",
-            ".homeboy/experiments/change",
-        ]);
-        let expected = argv(&[
-            "homeboy",
-            "trace",
-            "compare-variant",
-            "studio-app-create-site",
-            "--rig",
-            "studio",
-            "--overlay",
-            "overlays/change.patch",
-            "--output-dir",
-            ".homeboy/experiments/change",
-        ]);
         assert_eq!(normalize(input), expected);
     }
 
     #[test]
-    fn lint_json_summary_after_component_is_not_separated() {
-        let input = argv(&["homeboy", "lint", "my-comp", "--json-summary"]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
+    fn version_show_requires_canonical_subcommand() {
+        let shorthand = normalize(argv(&["homeboy", "version", "my-comp"]));
+        assert!(Cli::try_parse_from(shorthand).is_err());
+
+        let canonical = normalize(argv(&["homeboy", "version", "show", "my-comp"]));
+        assert!(Cli::try_parse_from(canonical).is_ok());
     }
 
-    /// `bench` owns shared-state/concurrency. They must remain named CLI
-    /// flags even when placed after the positional component.
     #[test]
-    fn bench_shared_state_flags_after_component_are_not_separated() {
+    fn trace_compare_variant_scenario_flag_is_not_rewritten() {
         let input = argv(&[
+            "homeboy",
+            "trace",
+            "compare-variant",
+            "--rig",
+            "studio",
+            "--scenario",
+            "studio-app-create-site",
+            "--overlay",
+            "overlays/change.patch",
+            "--output-dir",
+            ".homeboy/experiments/change",
+        ]);
+        let expected = input.clone();
+        assert_eq!(normalize(input), expected);
+    }
+
+    #[test]
+    fn trace_compare_variant_scenario_flag_remains_canonical() {
+        let args = normalize(argv(&[
+            "homeboy",
+            "trace",
+            "compare-variant",
+            "--rig",
+            "studio",
+            "--scenario",
+            "studio-app-create-site",
+            "--overlay",
+            "overlays/change.patch",
+            "--output-dir",
+            ".homeboy/experiments/change",
+        ]));
+
+        assert!(Cli::try_parse_from(args).is_ok());
+    }
+
+    #[test]
+    fn unknown_flag_after_bench_is_not_auto_separated() {
+        let input = argv(&["homeboy", "bench", "my-comp", "--unknown-flag", "value"]);
+        let expected = input.clone();
+        assert_eq!(normalize(input), expected);
+    }
+
+    #[test]
+    fn bench_passthrough_requires_explicit_separator() {
+        let implicit = normalize(argv(&[
             "homeboy",
             "bench",
             "my-comp",
-            "--shared-state",
-            "/tmp/homeboy-bench",
-            "--concurrency=4",
-            "--rig-concurrency",
-            "2",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
+            "--unknown-flag",
+            "value",
+        ]));
+        assert!(Cli::try_parse_from(implicit).is_err());
 
-    /// `bench` owns run-level repetition. It must remain a named CLI flag
-    /// even when placed after the positional component.
-    #[test]
-    fn bench_runs_flag_after_component_is_not_separated() {
-        let input = argv(&[
+        let explicit = normalize(argv(&[
             "homeboy",
             "bench",
             "my-comp",
-            "--runs",
-            "5",
-            "--iterations",
-            "1",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
-
-    /// `bench` owns warmup control. It must remain a named CLI flag even
-    /// when placed after the positional component so clap can reject
-    /// negative values instead of passing them through to the runner.
-    #[test]
-    fn bench_warmup_flag_after_component_is_not_separated() {
-        let input = argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--warmup",
-            "-1",
-            "--iterations",
-            "1",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
-
-    /// Mirror the bench check for `test` (the other `last = true`
-    /// subcommand). Both consumers must accept post-position `--output`.
-    #[test]
-    fn output_after_test_subcommand_is_not_separated() {
-        let input = argv(&[
-            "homeboy",
-            "test",
-            "my-comp",
-            "--output",
-            "/tmp/y.json",
-            "--ratchet",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
+            "--",
+            "--unknown-flag",
+            "value",
+        ]));
+        assert!(Cli::try_parse_from(explicit).is_ok());
     }
 
     #[test]
@@ -648,7 +406,7 @@ mod normalize_tests {
             EXPLICIT_PASSTHROUGH_SENTINEL,
             "--filter=SmokeTest",
         ]);
-        assert_eq!(normalize_trailing_flags(input), expected);
+        assert_eq!(normalize(input), expected);
     }
 
     #[test]
@@ -672,7 +430,7 @@ mod normalize_tests {
             EXPLICIT_PASSTHROUGH_SENTINEL,
             "--filter=Scenario",
         ]);
-        assert_eq!(normalize_trailing_flags(input), expected);
+        assert_eq!(normalize(input), expected);
     }
 
     #[test]
@@ -688,69 +446,6 @@ mod normalize_tests {
             super::filter_passthrough_args(super::PassthroughCommand::Test, &args),
             argv(&["--coverage", "--baseline", "runner-value"])
         );
-    }
-
-    /// A genuinely unknown flag (not on the per-subcommand allow-list,
-    /// not a Cli global) STILL triggers the `--` insertion. This is the
-    /// existing trailing-arg passthrough behaviour the normalizer was
-    /// designed for; the fix must not regress it.
-    #[test]
-    fn unknown_flag_after_bench_still_separated() {
-        let input = argv(&["homeboy", "bench", "my-comp", "--unknown-flag", "value"]);
-        let expected = argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--",
-            "--unknown-flag",
-            "value",
-        ]);
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
-
-    /// `--output` mixed with an unknown flag: separator goes before the
-    /// unknown flag, NOT before `--output`. Captures the most realistic
-    /// repro from the MDI bench cook (driver script with `--output` plus
-    /// dispatcher passthrough flags).
-    #[test]
-    fn output_plus_unknown_flag_separator_before_unknown_only() {
-        let input = argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--output",
-            "/tmp/x.json",
-            "--unknown",
-            "v",
-        ]);
-        let expected = argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--output",
-            "/tmp/x.json",
-            "--",
-            "--unknown",
-            "v",
-        ]);
-        assert_eq!(normalize_trailing_flags(input), expected);
-    }
-
-    /// Pre-subcommand position must continue to work — that's the path
-    /// the existing tests + production users have relied on.
-    #[test]
-    fn output_before_subcommand_is_unchanged() {
-        let input = argv(&[
-            "homeboy",
-            "--output",
-            "/tmp/x.json",
-            "bench",
-            "my-comp",
-            "--iterations",
-            "1",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize_trailing_flags(input), expected);
     }
 }
 
