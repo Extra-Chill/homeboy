@@ -428,11 +428,11 @@ fn run_reconcile_run(
                     Ok((reconcile, exit)) => {
                         let aggregate = aggregate_reconcile_output(&reconcile);
                         totals.commands_processed += 1;
-                        totals.issue_totals.issues_created += aggregate.issue_totals.issues_created;
-                        totals.issue_totals.issues_updated += aggregate.issue_totals.issues_updated;
-                        totals.issue_totals.issues_closed += aggregate.issue_totals.issues_closed;
-                        totals.failures += aggregate.failures;
-                        if exit != 0 && aggregate.failures == 0 {
+                        totals.issue_totals.issues_created += aggregate.0.issues_created;
+                        totals.issue_totals.issues_updated += aggregate.0.issues_updated;
+                        totals.issue_totals.issues_closed += aggregate.0.issues_closed;
+                        totals.failures += aggregate.1;
+                        if exit != 0 && aggregate.1 == 0 {
                             totals.failures += 1;
                         }
                         command_outputs.push(ReconcileRunCommandOutput {
@@ -441,8 +441,8 @@ fn run_reconcile_run(
                             source: source_display,
                             status: ReconcileRunCommandStatus::Processed,
                             warnings: Vec::new(),
-                            issue_totals: aggregate.issue_totals,
-                            failures: aggregate.failures,
+                            issue_totals: aggregate.0,
+                            failures: aggregate.1,
                             reconcile: Some(reconcile),
                         });
                     }
@@ -482,12 +482,6 @@ enum OutputInspection {
     Missing(String),
     Malformed(String),
     Valid(Value),
-}
-
-#[derive(Default)]
-struct ReconcileRunAggregate {
-    issue_totals: ReconcileRunIssueTotals,
-    failures: usize,
 }
 
 fn discover_output_dir(output_dir: Option<String>) -> homeboy::core::Result<PathBuf> {
@@ -569,38 +563,39 @@ fn component_id_from_native_output(value: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn aggregate_reconcile_output(output: &ReconcileOutput) -> ReconcileRunAggregate {
+fn aggregate_reconcile_output(output: &ReconcileOutput) -> (ReconcileRunIssueTotals, usize) {
     if let Some(result) = &output.result {
-        let mut aggregate = ReconcileRunAggregate::default();
+        let mut issue_totals = ReconcileRunIssueTotals::default();
+        let mut failures = 0;
         for execution in &result.executions {
             match execution.outcome {
                 homeboy::core::issues::apply::ExecutionOutcome::Filed { .. } => {
-                    aggregate.issue_totals.issues_created += 1;
+                    issue_totals.issues_created += 1;
                 }
                 homeboy::core::issues::apply::ExecutionOutcome::Updated { .. }
                 | homeboy::core::issues::apply::ExecutionOutcome::UpdatedClosed { .. } => {
-                    aggregate.issue_totals.issues_updated += 1;
+                    issue_totals.issues_updated += 1;
                 }
                 homeboy::core::issues::apply::ExecutionOutcome::Closed { .. }
                 | homeboy::core::issues::apply::ExecutionOutcome::ClosedDuplicate { .. } => {
-                    aggregate.issue_totals.issues_closed += 1;
+                    issue_totals.issues_closed += 1;
                 }
                 homeboy::core::issues::apply::ExecutionOutcome::Failed { .. } => {
-                    aggregate.failures += 1;
+                    failures += 1;
                 }
                 homeboy::core::issues::apply::ExecutionOutcome::Skipped => {}
             }
         }
-        aggregate
+        (issue_totals, failures)
     } else {
-        ReconcileRunAggregate {
-            issue_totals: ReconcileRunIssueTotals {
+        (
+            ReconcileRunIssueTotals {
                 issues_created: output.plan_summary.file_new,
                 issues_updated: output.plan_summary.update + output.plan_summary.update_closed,
                 issues_closed: output.plan_summary.close + output.plan_summary.close_duplicate,
             },
-            failures: 0,
-        }
+            0,
+        )
     }
 }
 
@@ -1002,10 +997,10 @@ mod tests {
 
         let aggregate = aggregate_reconcile_output(&output);
 
-        assert_eq!(aggregate.issue_totals.issues_created, 1);
-        assert_eq!(aggregate.issue_totals.issues_updated, 2);
-        assert_eq!(aggregate.issue_totals.issues_closed, 2);
-        assert_eq!(aggregate.failures, 1);
+        assert_eq!(aggregate.0.issues_created, 1);
+        assert_eq!(aggregate.0.issues_updated, 2);
+        assert_eq!(aggregate.0.issues_closed, 2);
+        assert_eq!(aggregate.1, 1);
     }
 
     #[test]
@@ -1029,10 +1024,10 @@ mod tests {
 
         let aggregate = aggregate_reconcile_output(&output);
 
-        assert_eq!(aggregate.issue_totals.issues_created, 1);
-        assert_eq!(aggregate.issue_totals.issues_updated, 2);
-        assert_eq!(aggregate.issue_totals.issues_closed, 2);
-        assert_eq!(aggregate.failures, 0);
+        assert_eq!(aggregate.0.issues_created, 1);
+        assert_eq!(aggregate.0.issues_updated, 2);
+        assert_eq!(aggregate.0.issues_closed, 2);
+        assert_eq!(aggregate.1, 0);
     }
 
     #[test]
