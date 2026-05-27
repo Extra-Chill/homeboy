@@ -156,11 +156,12 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-27T11:19:34Z",
-      "item_count": 26,
+      "created_at": "2026-05-27T12:33:54Z",
+      "item_count": 29,
       "known_fingerprints": [
-        "artifact_portability::observation:8332962f-6e25-422a-b03d-3f5f4fe4217d::NonPortableArtifactPath",
+        "artifact_portability::observation:37f0edaf-aad6-46ee-b474-6c3107eec457::NonPortableArtifactPath",
         "dead_code::src/commands/utils/resource_policy.rs::UnreferencedExport",
+        "dead_code::src/core/engine/temp.rs::UnreferencedExport",
         "runner_offload_preflight::src/commands/bench/observation.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/commands/observe.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/commands/runs/bundle.rs::RunnerOffloadPreflight",
@@ -181,6 +182,8 @@
         "structural::src/core/code_audit/mod.rs::GodFile",
         "structural::src/core/extension/grammar.rs::GodFile",
         "structural::src/core/extension/lifecycle.rs::GodFile",
+        "structural::src/core/observation/records.rs::HighItemCount",
+        "structural::src/core/observation/store.rs::GodFile",
         "structural::src/core/project/mod.rs::HighItemCount",
         "structural::src/core/refactor/rename/mod.rs::GodFile",
         "structural::src/core/release/executor.rs::GodFile",
