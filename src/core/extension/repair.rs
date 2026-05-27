@@ -5,9 +5,10 @@ use crate::core::git;
 use crate::core::paths;
 use std::path::{Path, PathBuf};
 
+use super::execution::run_setup;
 use super::lifecycle::{
-    derive_id_from_url, is_git_url, rename_dir, resolve_cloned_extension, run_setup_if_configured,
-    slugify_id, write_source_metadata,
+    derive_id_from_url, is_git_url, rename_dir, resolve_cloned_extension, slugify_id,
+    write_source_metadata,
 };
 use super::manifest::ExtensionManifest;
 
@@ -86,8 +87,8 @@ fn replace_from_url(
         return Err(err);
     }
 
+    run_setup_or_restore(&extension_id, &extension_dir, &backup_dir)?;
     remove_existing_install(&backup_dir)?;
-    run_setup_if_configured(&extension_id);
 
     Ok(ReplaceResult {
         extension_id,
@@ -142,8 +143,8 @@ fn replace_from_path(
         return Err(err);
     }
 
+    run_setup_or_restore(&extension_id, &extension_dir, &backup_dir)?;
     remove_existing_install(&backup_dir)?;
-    run_setup_if_configured(&extension_id);
 
     Ok(ReplaceResult {
         extension_id,
@@ -290,6 +291,16 @@ fn remove_existing_install(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn run_setup_or_restore(extension_id: &str, extension_dir: &Path, backup_dir: &Path) -> Result<()> {
+    if let Err(err) = run_setup(extension_id) {
+        let _ = remove_existing_install(extension_dir);
+        let _ = restore_existing_install(backup_dir, extension_dir);
+        return Err(err);
+    }
+
+    Ok(())
+}
+
 fn clean_replace_temp(path: &Path) -> Result<()> {
     if path_exists_or_symlink(path) {
         remove_existing_install(path)?;
@@ -322,6 +333,27 @@ mod tests {
   "version": "{}"
 }}"#,
                 id, version
+            ),
+        )
+        .expect("extension manifest");
+    }
+
+    fn write_extension_fixture_with_setup_command(root: &Path, id: &str, setup_command: &str) {
+        let dir = root.join(id);
+        fs::create_dir_all(&dir).expect("extension dir");
+        fs::write(
+            dir.join(format!("{}.json", id)),
+            format!(
+                r#"{{
+  "name": "{} extension",
+  "version": "1.0.0",
+  "executable": {{
+    "runtime": {{
+      "setup_command": "{}"
+    }}
+  }}
+}}"#,
+                id, setup_command
             ),
         )
         .expect("extension manifest");
@@ -435,6 +467,36 @@ mod tests {
 
             let extension = load_extension("swift").expect("load relinked extension");
             assert_eq!(extension.version, "2.0.0");
+        });
+    }
+
+    #[test]
+    fn relink_fails_and_restores_existing_link_when_setup_fails() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let new_source = home.join("new-source");
+            write_extension_fixture(&old_source, "swift");
+            write_extension_fixture_with_setup_command(
+                &new_source,
+                "swift",
+                "bash {{extension_path}}/scripts/build/setup.sh",
+            );
+
+            install(&old_source.join("swift").to_string_lossy(), Some("swift"))
+                .expect("install linked extension");
+
+            let err = relink("swift", &new_source.join("swift").to_string_lossy())
+                .expect_err("relink should fail when setup fails");
+
+            assert_eq!(err.message, "IO error");
+            assert!(err.details.to_string().contains("Setup command failed"));
+            let installed_path = home.join(".config/homeboy/extensions/swift");
+            assert!(installed_path.is_symlink());
+            assert_eq!(
+                fs::read_link(installed_path).expect("read restored link"),
+                old_source.join("swift")
+            );
         });
     }
 

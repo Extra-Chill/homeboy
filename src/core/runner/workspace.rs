@@ -33,8 +33,6 @@ const DEFAULT_EXCLUDES: &[&str] = &[
     "target/**",
     "dist",
     "dist/**",
-    "build",
-    "build/**",
     ".next",
     ".next/**",
     ".turbo",
@@ -625,9 +623,18 @@ mod tests {
             let source = tempfile::tempdir().expect("source tempdir");
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
             fs::create_dir_all(source.path().join("src")).expect("src dir");
+            fs::create_dir_all(source.path().join("build")).expect("root build dir");
+            fs::create_dir_all(source.path().join("wordpress/scripts/build"))
+                .expect("extension scripts build dir");
             fs::create_dir_all(source.path().join(".git")).expect("git dir");
             fs::create_dir_all(source.path().join("target/debug")).expect("target dir");
             fs::write(source.path().join("src/main.rs"), "fn main() {}\n").expect("source file");
+            fs::write(source.path().join("build/bundle.js"), "artifact").expect("build file");
+            fs::write(
+                source.path().join("wordpress/scripts/build/setup.sh"),
+                "#!/bin/sh\n",
+            )
+            .expect("extension setup source file");
             fs::write(source.path().join(".git/HEAD"), "ref: refs/heads/main\n")
                 .expect("git metadata");
             fs::write(source.path().join("src/._main.rs"), "appledouble").expect("sidecar file");
@@ -655,9 +662,15 @@ mod tests {
 
             assert_eq!(exit_code, 0);
             assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
-            assert_eq!(output.files, 1);
+            assert_eq!(output.files, 3);
             assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
+            assert!(Path::new(&output.remote_path)
+                .join("wordpress/scripts/build/setup.sh")
+                .exists());
             assert!(!Path::new(&output.remote_path).join(".git").exists());
+            assert!(Path::new(&output.remote_path)
+                .join("build/bundle.js")
+                .exists());
             assert!(!Path::new(&output.remote_path)
                 .join("src/._main.rs")
                 .exists());
