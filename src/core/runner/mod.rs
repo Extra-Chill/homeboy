@@ -22,8 +22,9 @@ pub use apply::{
     RunnerWorkspaceApplyStatus,
 };
 pub use connection::{
-    connect, disconnect, status, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerSession, RunnerStatusReport,
+    connect, connect_reverse, disconnect, status, statuses, ReverseRunnerConnectOptions,
+    RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind, RunnerSession,
+    RunnerSessionRole, RunnerSessionState, RunnerStatusReport, RunnerTunnelMode,
 };
 pub use evidence::{
     download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,

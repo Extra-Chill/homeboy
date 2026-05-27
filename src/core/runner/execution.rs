@@ -103,20 +103,22 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     if connected.connected {
         if let Some(session) = connected.session {
-            preflight_remote_runner_capabilities(
-                &runner,
-                options.capability_preflight.as_ref(),
-                &request_env,
-            )?;
-            return exec_via_daemon(
-                &runner,
-                &session.local_url,
-                cwd,
-                options.command,
-                request_env,
-                options.capture_patch,
-                options.source_snapshot,
-            );
+            if let Some(local_url) = session.local_url.as_deref() {
+                preflight_remote_runner_capabilities(
+                    &runner,
+                    options.capability_preflight.as_ref(),
+                    &request_env,
+                )?;
+                return exec_via_daemon(
+                    &runner,
+                    local_url,
+                    cwd,
+                    options.command,
+                    request_env,
+                    options.capture_patch,
+                    options.source_snapshot,
+                );
+            }
         }
     }
 
@@ -568,7 +570,17 @@ pub(crate) fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;
-    daemon_get(&client, &session.local_url, path)
+    let Some(local_url) = session.local_url.as_deref() else {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "runner session does not expose a local daemon URL yet",
+            Some(runner.id),
+            Some(vec![
+                "Reverse tunnel daemon routing is tracked in #2946 and #2948.".to_string(),
+            ]),
+        ));
+    };
+    daemon_get(&client, local_url, path)
 }
 
 fn result_event_data(events: &[JobEvent]) -> Option<Value> {
