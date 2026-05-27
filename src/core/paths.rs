@@ -253,7 +253,7 @@ pub fn join_remote_path(base_path: Option<&str>, path: &str) -> Result<String> {
     }
 
     if path.starts_with('/') {
-        return Ok(path.to_string());
+        return Ok(normalize_remote_path(path));
     }
 
     let Some(base) = resolve_optional_base_path(base_path) else {
@@ -261,9 +261,41 @@ pub fn join_remote_path(base_path: Option<&str>, path: &str) -> Result<String> {
     };
 
     if base.ends_with('/') {
-        Ok(format!("{}{}", base, path))
+        Ok(normalize_remote_path(&format!("{}{}", base, path)))
     } else {
-        Ok(format!("{}/{}", base, path))
+        Ok(normalize_remote_path(&format!("{}/{}", base, path)))
+    }
+}
+
+fn normalize_remote_path(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if absolute => {
+                parts.pop();
+            }
+            ".." if parts.last().is_some_and(|last| *last != "..") => {
+                parts.pop();
+            }
+            ".." => parts.push(part),
+            _ => parts.push(part),
+        }
+    }
+
+    let normalized = parts.join("/");
+    if absolute {
+        if normalized.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{normalized}")
+        }
+    } else if normalized.is_empty() {
+        ".".to_string()
+    } else {
+        normalized
     }
 }
 
@@ -367,6 +399,22 @@ mod tests {
         assert_eq!(
             join_remote_path(Some("/var/www/site/"), "file.json").unwrap(),
             "/var/www/site/file.json"
+        );
+    }
+
+    #[test]
+    fn join_remote_path_normalizes_parent_segments_after_joining_base() {
+        assert_eq!(
+            join_remote_path(Some("/htdocs/__wp__"), "../wp-content/plugins/data-machine").unwrap(),
+            "/htdocs/wp-content/plugins/data-machine"
+        );
+    }
+
+    #[test]
+    fn join_remote_path_normalizes_absolute_parent_segments() {
+        assert_eq!(
+            join_remote_path(None, "/htdocs/__wp__/../wp-content/plugins/data-machine").unwrap(),
+            "/htdocs/wp-content/plugins/data-machine"
         );
     }
 

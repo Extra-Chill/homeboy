@@ -275,7 +275,7 @@ mod tests {
             )
             .expect("resolve path");
 
-            assert_eq!(resolved, "/srv/site/../wp-content/plugins/foo");
+            assert_eq!(resolved, "/srv/wp-content/plugins/foo");
         });
     }
 
@@ -291,7 +291,7 @@ mod tests {
             )
             .expect("resolve path");
 
-            assert_eq!(resolved, "/srv/site/../var/log/app.log");
+            assert_eq!(resolved, "/srv/var/log/app.log");
         });
     }
 
