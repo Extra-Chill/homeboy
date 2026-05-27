@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.12] - 2026-05-27
+
+### Changed
+- Skip PHP AI Client as WP Codebox plugin
+
 ## [2.102.11] - 2026-05-27
 
 ### Fixed
