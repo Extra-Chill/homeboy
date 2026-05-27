@@ -137,6 +137,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::ProjectNoActive => 4,
 
         ErrorCode::RigPipelineFailed
+        | ErrorCode::RunnerPolicyDenied
         | ErrorCode::RigServiceFailed
         | ErrorCode::RigResourceConflict
         | ErrorCode::StackApplyConflict => 20,

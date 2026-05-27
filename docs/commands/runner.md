@@ -173,6 +173,35 @@ homeboy runner set <id> --json '{"workspace_root":"/srv/homeboy","concurrency_li
 Updates a runner by merging a JSON object into the runner config. SSH runner settings live under `servers/<id>.json` as the server's `runner` capability; local runners live under `runners/<id>.json`.
 Arbitrary runner updates must use `--json` or `--base64`; positional `key=value` and trailing arbitrary `--key value` updates are not accepted.
 
+### `trust`
+
+```sh
+homeboy runner trust <runner-id> --project extrachill --command test --command bench --allow-raw-exec false
+homeboy runner trust <runner-id> --workspace-root /home/chubes/Developer --artifact-policy metadata
+homeboy runner trust <runner-id> --peer extra-chill --fingerprint SHA256:...
+```
+
+Persists controller-side trust policy for a runner. Policy is stored in the runner config as `policy`, not in transient CLI state. Repeated values are appended without duplicates.
+
+Policy fields:
+
+- `--project <id>` allows a project to use the runner.
+- `--command <family>` allows a command family such as `test`, `bench`, `lint`, `audit`, `trace`, `cargo`, or `runner.exec`.
+- `--allow-raw-exec <true|false>` controls arbitrary `runner exec` shell access. SSH runner raw exec is denied by default until this is explicitly true.
+- `--workspace-root <path>` limits execution to one or more approved runner workspace roots.
+- `--artifact-policy <label>` records artifact behavior; `none` and `deny` block patch capture.
+- `--peer <id>` records accepted peer/controller server IDs for reverse-runner pairing.
+- `--fingerprint <value>` records expected peer host keys or equivalent fingerprints.
+
+### `pair`
+
+```sh
+homeboy runner pair <runner-id> --peer extra-chill --accept-project extrachill --workspace-root /home/chubes/Developer
+homeboy runner pair <runner-id> --fingerprint SHA256:... --allow-raw-exec false
+```
+
+Persists runner-side pairing policy for trusted controllers. `pair` writes the same durable `policy` object as `trust`, using runner-side option names for accepted peer IDs, accepted project IDs, peer fingerprints, workspace roots, and raw exec policy.
+
 ### `remove`
 
 ```sh
@@ -183,17 +212,18 @@ homeboy runner remove <id>
 
 ```sh
 homeboy runner exec <runner-id> -- <command...>
-homeboy runner exec <runner-id> --cwd /runner/workspace/project -- <command...>
+homeboy runner exec <runner-id> --project extrachill --cwd /runner/workspace/project -- <command...>
 homeboy runner exec <runner-id> --ssh --cwd /runner/workspace/project -- <command...>
 ```
 
-`exec` submits the command to the connected runner daemon when `homeboy runner connect <runner-id>` has established a live loopback tunnel. If no daemon session is connected, local runners execute directly and SSH runners require explicit `--ssh`.
+`exec` submits the command to the connected runner daemon when `homeboy runner connect <runner-id>` has established a live loopback tunnel. If no daemon session is connected, local runners execute directly and SSH runners require explicit `--ssh`. SSH runner raw exec is policy-denied by default until `policy.allow_raw_exec` is explicitly true.
 
 Path rules:
 
 - SSH runners require `workspace_root` so local paths are not silently reused remotely.
 - SSH `--cwd` must be an absolute path under the configured `workspace_root`.
 - Omitting `--cwd` on an SSH runner uses the runner `workspace_root`.
+- `--project <id>` feeds the runner trust policy project allowlist check.
 - `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
 
 ### `workspace sync`

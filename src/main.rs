@@ -721,10 +721,12 @@ fn run_lab_offload_inner(
         runner_id,
         homeboy::core::runner::RunnerExecOptions {
             cwd: Some(remote_cwd),
+            project_id: None,
             allow_ssh: false,
             command,
             env,
             capture_patch,
+            raw_exec: false,
             source_snapshot: Some(source_snapshot),
             capability_preflight,
         },

@@ -23,6 +23,7 @@ pub fn preflight(
             runner_id,
             homeboy::core::runner::RunnerExecOptions {
                 cwd: Some(remote_cwd.to_string()),
+                project_id: None,
                 allow_ssh: false,
                 command: vec![
                     homeboy_path.to_string(),
@@ -32,6 +33,7 @@ pub fn preflight(
                 ],
                 env: Default::default(),
                 capture_patch: false,
+                raw_exec: false,
                 source_snapshot: None,
                 capability_preflight: None,
             },

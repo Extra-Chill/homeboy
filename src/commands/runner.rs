@@ -6,15 +6,16 @@ use serde_json::Value;
 
 use homeboy::core::runner::{
     self, ReverseRunnerConnectOptions, Runner, RunnerConnectReport, RunnerDisconnectReport,
-    RunnerExecOutput, RunnerKind, RunnerStatusReport, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,
+    RunnerExecOutput, RunnerKind, RunnerStatusReport,
 };
-use homeboy::core::server::RunnerSettings;
+use homeboy::core::server::{RunnerPolicy, RunnerSettings};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
 use super::{CmdResult, DynamicSetArgs};
 
 pub mod doctor;
+mod policy;
+mod workspace;
 
 #[derive(Debug, Default, Serialize)]
 pub struct RunnerExtra {
@@ -32,13 +33,6 @@ pub enum RunnerConnectionOutput {
     Disconnect(RunnerDisconnectReport),
 }
 
-#[derive(Debug, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum RunnerWorkspaceOutput {
-    Sync(RunnerWorkspaceSyncOutput),
-    Apply(RunnerWorkspaceApplyOutput),
-}
-
 pub type RunnerOutput = EntityCrudOutput<Runner, RunnerExtra>;
 
 #[derive(Debug, Serialize)]
@@ -47,7 +41,7 @@ pub enum RunnerCommandOutput {
     Registry(RunnerOutput),
     Doctor(doctor::RunnerDoctorOutput),
     Execution(RunnerExecOutput),
-    Workspace(RunnerWorkspaceOutput),
+    Workspace(workspace::RunnerWorkspaceOutput),
 }
 
 #[derive(Args)]
@@ -137,6 +131,64 @@ enum RunnerCommand {
         #[command(flatten)]
         args: DynamicSetArgs,
     },
+    /// Trust a runner for constrained controller-side project execution
+    Trust {
+        /// Runner ID
+        runner_id: String,
+
+        /// Project ID allowed to use this runner. Repeat for multiple projects.
+        #[arg(long = "project")]
+        projects: Vec<String>,
+
+        /// Allowed command family, for example test, bench, lint, audit, trace, cargo, or runner.exec. Repeat or pass comma-separated values.
+        #[arg(long = "command", value_delimiter = ',')]
+        commands: Vec<String>,
+
+        /// Explicitly allow or deny raw runner exec shell commands
+        #[arg(long)]
+        allow_raw_exec: Option<bool>,
+
+        /// Workspace root allowed by policy. Repeat for multiple roots.
+        #[arg(long = "workspace-root")]
+        workspace_roots: Vec<String>,
+
+        /// Artifact behavior for runner jobs, for example copy, metadata, none, or deny
+        #[arg(long)]
+        artifact_policy: Option<String>,
+
+        /// Expected peer/controller server ID. Repeat for multiple peers.
+        #[arg(long = "peer")]
+        peers: Vec<String>,
+
+        /// Expected peer host key/fingerprint. Repeat for multiple fingerprints.
+        #[arg(long = "fingerprint")]
+        fingerprints: Vec<String>,
+    },
+    /// Pair a runner with a trusted peer/controller policy from the runner side
+    Pair {
+        /// Runner ID
+        runner_id: String,
+
+        /// Peer/controller server ID accepted by this runner. Repeat for multiple peers.
+        #[arg(long = "peer")]
+        peers: Vec<String>,
+
+        /// Peer/controller host key/fingerprint. Repeat for multiple fingerprints.
+        #[arg(long = "fingerprint")]
+        fingerprints: Vec<String>,
+
+        /// Project ID accepted from the peer. Repeat for multiple projects.
+        #[arg(long = "accept-project")]
+        projects: Vec<String>,
+
+        /// Workspace root this runner accepts jobs under. Repeat for multiple roots.
+        #[arg(long = "workspace-root")]
+        workspace_roots: Vec<String>,
+
+        /// Explicitly allow or deny raw runner exec shell commands
+        #[arg(long)]
+        allow_raw_exec: Option<bool>,
+    },
     /// Remove a runner configuration
     Remove {
         /// Runner ID
@@ -194,6 +246,10 @@ enum RunnerCommand {
         #[arg(long)]
         cwd: Option<String>,
 
+        /// Project ID used for runner trust policy checks
+        #[arg(long)]
+        project: Option<String>,
+
         /// Allow explicit SSH command execution when no daemon session is connected
         #[arg(long)]
         ssh: bool,
@@ -209,33 +265,7 @@ enum RunnerCommand {
     /// Materialize local workspaces on a configured runner
     Workspace {
         #[command(subcommand)]
-        command: RunnerWorkspaceCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum RunnerWorkspaceCommand {
-    /// Sync a local worktree snapshot into the runner workspace root
-    Sync {
-        /// Runner ID
-        runner_id: String,
-
-        /// Local worktree path to materialize for Lab execution
-        #[arg(long)]
-        path: String,
-
-        /// Sync mode. snapshot includes dirty local files; git requires a clean tree and clones/checks out HEAD remotely.
-        #[arg(long, value_enum, default_value_t = RunnerWorkspaceSyncModeArg::Snapshot)]
-        mode: RunnerWorkspaceSyncModeArg,
-    },
-    /// Apply a Lab-generated patch/delta back to its local source worktree
-    Apply {
-        /// Lab apply JSON artifact path
-        input: String,
-
-        /// Apply even when the local worktree snapshot no longer matches the Lab source snapshot
-        #[arg(long)]
-        force: bool,
+        command: workspace::RunnerWorkspaceCommand,
     },
 }
 
@@ -243,22 +273,6 @@ enum RunnerWorkspaceCommand {
 enum RunnerKindArg {
     Local,
     Ssh,
-}
-
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
-enum RunnerWorkspaceSyncModeArg {
-    #[default]
-    Snapshot,
-    Git,
-}
-
-impl From<RunnerWorkspaceSyncModeArg> for RunnerWorkspaceSyncMode {
-    fn from(value: RunnerWorkspaceSyncModeArg) -> Self {
-        match value {
-            RunnerWorkspaceSyncModeArg::Snapshot => RunnerWorkspaceSyncMode::Snapshot,
-            RunnerWorkspaceSyncModeArg::Git => RunnerWorkspaceSyncMode::Git,
-        }
-    }
 }
 
 impl From<RunnerKindArg> for RunnerKind {
@@ -320,6 +334,46 @@ pub fn run(
         RunnerCommand::List => map_registry(list()),
         RunnerCommand::Show { id } => map_registry(show(&id)),
         RunnerCommand::Set { args } => map_registry(set(args)),
+        RunnerCommand::Trust {
+            runner_id,
+            projects,
+            commands,
+            allow_raw_exec,
+            workspace_roots,
+            artifact_policy,
+            peers,
+            fingerprints,
+        } => map_registry(policy::update(
+            &runner_id,
+            policy::RunnerPolicyPatch::trust(
+                peers,
+                fingerprints,
+                projects,
+                commands,
+                allow_raw_exec,
+                workspace_roots,
+                artifact_policy,
+            ),
+            "runner.trust",
+        )),
+        RunnerCommand::Pair {
+            runner_id,
+            peers,
+            fingerprints,
+            projects,
+            workspace_roots,
+            allow_raw_exec,
+        } => map_registry(policy::update(
+            &runner_id,
+            policy::RunnerPolicyPatch::pair(
+                peers,
+                fingerprints,
+                projects,
+                allow_raw_exec,
+                workspace_roots,
+            ),
+            "runner.pair",
+        )),
         RunnerCommand::Remove { id } => map_registry(remove(&id)),
         RunnerCommand::Doctor {
             runner_id,
@@ -343,20 +397,13 @@ pub fn run(
         RunnerCommand::Exec {
             id,
             cwd,
+            project,
             ssh,
             capture_patch,
             command,
-        } => map_execution(exec(&id, cwd, ssh, capture_patch, command)),
-        RunnerCommand::Workspace { command } => match command {
-            RunnerWorkspaceCommand::Sync {
-                runner_id,
-                path,
-                mode,
-            } => map_workspace(workspace_sync(&runner_id, path, mode)),
-            RunnerWorkspaceCommand::Apply { input, force } => map_workspace_apply(
-                runner::apply_workspace_patch(runner::RunnerWorkspaceApplyOptions { input, force }),
-            ),
-        },
+        } => map_execution(exec(&id, cwd, project, ssh, capture_patch, command)),
+        RunnerCommand::Workspace { command } => workspace::run(command)
+            .map(|(output, exit_code)| (RunnerCommandOutput::Workspace(output), exit_code)),
     }
 }
 
@@ -370,26 +417,6 @@ fn map_doctor(result: CmdResult<doctor::RunnerDoctorOutput>) -> CmdResult<Runner
 
 fn map_execution(result: CmdResult<RunnerExecOutput>) -> CmdResult<RunnerCommandOutput> {
     result.map(|(output, exit_code)| (RunnerCommandOutput::Execution(output), exit_code))
-}
-
-fn map_workspace(result: CmdResult<RunnerWorkspaceSyncOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| {
-        (
-            RunnerCommandOutput::Workspace(RunnerWorkspaceOutput::Sync(output)),
-            exit_code,
-        )
-    })
-}
-
-fn map_workspace_apply(
-    result: CmdResult<RunnerWorkspaceApplyOutput>,
-) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| {
-        (
-            RunnerCommandOutput::Workspace(RunnerWorkspaceOutput::Apply(output)),
-            exit_code,
-        )
-    })
 }
 
 struct RunnerAddInput {
@@ -429,6 +456,7 @@ fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
             settings: input.settings,
             env: HashMap::new(),
             resources: HashMap::<String, Value>::new(),
+            policy: RunnerPolicy::default(),
         };
 
         homeboy::core::config::to_json_string(&new_runner)?
@@ -661,6 +689,7 @@ fn disconnect(id: &str) -> CmdResult<RunnerOutput> {
 fn exec(
     runner_id: &str,
     cwd: Option<String>,
+    project_id: Option<String>,
     allow_ssh: bool,
     capture_patch: bool,
     command: Vec<String>,
@@ -669,27 +698,14 @@ fn exec(
         runner_id,
         runner::RunnerExecOptions {
             cwd,
+            project_id,
             allow_ssh,
             command,
             env: Default::default(),
             capture_patch,
+            raw_exec: true,
             source_snapshot: None,
             capability_preflight: None,
-        },
-    )
-}
-
-fn workspace_sync(
-    runner_id: &str,
-    path: String,
-    mode: RunnerWorkspaceSyncModeArg,
-) -> CmdResult<RunnerWorkspaceSyncOutput> {
-    runner::sync_workspace(
-        runner_id,
-        runner::RunnerWorkspaceSyncOptions {
-            path,
-            mode: RunnerWorkspaceSyncMode::from(mode),
-            changed_since_base: None,
         },
     )
 }

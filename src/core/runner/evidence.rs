@@ -565,7 +565,7 @@ fn decode_component(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::runner::RunnerKind;
-    use crate::core::server::RunnerSettings;
+    use crate::core::server::{RunnerPolicy, RunnerSettings};
     use uuid::Uuid;
 
     fn ssh_runner() -> Runner {
@@ -580,6 +580,7 @@ mod tests {
             },
             env: Default::default(),
             resources: Default::default(),
+            policy: RunnerPolicy::default(),
         }
     }
 

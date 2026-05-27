@@ -14,13 +14,18 @@ use crate::core::source_snapshot::SourceSnapshot;
 use super::evidence::mirror_daemon_evidence;
 use super::{load, status, Runner, RunnerKind};
 
+mod policy;
+use policy::{validate_runner_policy, RunnerPolicyRequest};
+
 #[derive(Debug, Clone)]
 pub struct RunnerExecOptions {
     pub cwd: Option<String>,
+    pub project_id: Option<String>,
     pub allow_ssh: bool,
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
     pub capture_patch: bool,
+    pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
     pub capability_preflight: Option<RunnerCapabilityPreflight>,
 }
@@ -97,6 +102,16 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     let runner = load(runner_id)?;
     let cwd = resolve_cwd(&runner, options.cwd.as_deref())?;
+    validate_runner_policy(
+        &runner,
+        &cwd,
+        RunnerPolicyRequest {
+            project_id: options.project_id.as_deref(),
+            command: &options.command,
+            capture_patch: options.capture_patch,
+            raw_exec: options.raw_exec,
+        },
+    )?;
     let connected = status(runner_id)?;
     let mut request_env = runner.env.clone();
     request_env.extend(options.env.clone());
@@ -104,7 +119,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     if connected.connected {
         if let Some(session) = connected.session {
             if let Some(local_url) = session.local_url.as_deref() {
-                preflight_remote_runner_capabilities(
+                preflight_runner_capability_plan(
                     &runner,
                     options.capability_preflight.as_ref(),
                     &request_env,
@@ -125,7 +140,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     match runner.kind {
         RunnerKind::Local => exec_local(&runner, cwd, options.command, options.env),
         RunnerKind::Ssh if options.allow_ssh => {
-            preflight_remote_runner_capabilities(
+            preflight_runner_capability_plan(
                 &runner,
                 options.capability_preflight.as_ref(),
                 &request_env,
@@ -254,7 +269,7 @@ fn exec_via_daemon(
     ))
 }
 
-fn preflight_remote_runner_capabilities(
+fn preflight_runner_capability_plan(
     runner: &Runner,
     preflight: Option<&RunnerCapabilityPreflight>,
     request_env: &HashMap<String, String>,
@@ -783,7 +798,7 @@ fn string_field(value: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::server::RunnerSettings;
+    use crate::core::server::{RunnerPolicy, RunnerSettings};
 
     fn ssh_runner() -> Runner {
         Runner {
@@ -797,6 +812,16 @@ mod tests {
             },
             env: Default::default(),
             resources: Default::default(),
+            policy: RunnerPolicy::default(),
+        }
+    }
+
+    fn policy_request(options: &RunnerExecOptions) -> RunnerPolicyRequest<'_> {
+        RunnerPolicyRequest {
+            project_id: options.project_id.as_deref(),
+            command: &options.command,
+            capture_patch: options.capture_patch,
+            raw_exec: options.raw_exec,
         }
     }
 
@@ -823,10 +848,12 @@ mod tests {
                 "lab-local",
                 RunnerExecOptions {
                     cwd: None,
+                    project_id: None,
                     allow_ssh: false,
                     command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
                     env: Default::default(),
                     capture_patch: false,
+                    raw_exec: false,
                     source_snapshot: None,
                     capability_preflight: None,
                 },
@@ -843,6 +870,102 @@ mod tests {
             assert!(source_snapshot.snapshot_hash.starts_with("sha256:"));
             assert!(output.job_id.is_none());
         });
+    }
+
+    #[test]
+    fn test_runner_policy_denies_raw_ssh_exec_by_default() {
+        let runner = ssh_runner();
+        let options = RunnerExecOptions {
+            cwd: Some("/srv/homeboy/project".to_string()),
+            project_id: Some("extrachill".to_string()),
+            allow_ssh: true,
+            command: vec!["sh".to_string()],
+            env: Default::default(),
+            capture_patch: false,
+            raw_exec: true,
+            source_snapshot: None,
+            capability_preflight: None,
+        };
+
+        let err = validate_runner_policy(&runner, "/srv/homeboy/project", policy_request(&options))
+            .expect_err("deny raw exec");
+
+        assert_eq!(err.code.as_str(), "runner.policy_denied");
+        assert!(err.message.contains("raw exec is denied by default"));
+    }
+
+    #[test]
+    fn test_runner_policy_enforces_projects_commands_workspace_and_artifacts() {
+        let mut runner = ssh_runner();
+        runner.policy = RunnerPolicy {
+            allow_raw_exec: Some(true),
+            allowed_projects: vec!["extrachill".to_string()],
+            allowed_commands: vec!["cargo".to_string()],
+            workspace_roots: vec!["/srv/homeboy/extrachill".to_string()],
+            artifact_policy: Some("deny".to_string()),
+            ..Default::default()
+        };
+
+        let allowed = RunnerExecOptions {
+            cwd: Some("/srv/homeboy/extrachill/homeboy".to_string()),
+            project_id: Some("extrachill".to_string()),
+            allow_ssh: true,
+            command: vec!["cargo".to_string(), "test".to_string()],
+            env: Default::default(),
+            capture_patch: false,
+            raw_exec: true,
+            source_snapshot: None,
+            capability_preflight: None,
+        };
+        validate_runner_policy(
+            &runner,
+            "/srv/homeboy/extrachill/homeboy",
+            policy_request(&allowed),
+        )
+        .expect("allowed policy");
+
+        let mut denied_project = allowed.clone();
+        denied_project.project_id = Some("wire".to_string());
+        assert_eq!(
+            validate_runner_policy(
+                &runner,
+                "/srv/homeboy/extrachill/homeboy",
+                policy_request(&denied_project),
+            )
+            .expect_err("deny project")
+            .code
+            .as_str(),
+            "runner.policy_denied"
+        );
+
+        let mut denied_command = allowed.clone();
+        denied_command.command = vec!["sh".to_string()];
+        assert!(validate_runner_policy(
+            &runner,
+            "/srv/homeboy/extrachill/homeboy",
+            policy_request(&denied_command)
+        )
+        .expect_err("deny command")
+        .message
+        .contains("command family 'sh'"));
+
+        assert!(
+            validate_runner_policy(&runner, "/srv/homeboy/other", policy_request(&allowed))
+                .expect_err("deny workspace")
+                .message
+                .contains("workspace roots")
+        );
+
+        let mut denied_artifacts = allowed.clone();
+        denied_artifacts.capture_patch = true;
+        assert!(validate_runner_policy(
+            &runner,
+            "/srv/homeboy/extrachill/homeboy",
+            policy_request(&denied_artifacts)
+        )
+        .expect_err("deny artifacts")
+        .message
+        .contains("artifact capture"));
     }
 
     #[test]
