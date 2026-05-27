@@ -26,7 +26,7 @@ pub use inventory::{
 pub use mutations::{delete_safe, merge, rename};
 pub use portable::{
     discover_from_portable, infer_portable_component_id, mutate_portable, portable_json,
-    write_portable_config,
+    try_discover_from_portable, write_portable_config,
 };
 pub use relationships::{associated_projects, projects_using, rename_component, shared_components};
 pub use resolution::{

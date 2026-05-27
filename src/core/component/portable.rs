@@ -28,29 +28,49 @@ pub(crate) fn read_portable_config(repo_path: &Path) -> Result<Option<Value>> {
     Ok(Some(value))
 }
 
-fn portable_component_id_from_value(portable: &Value, dir: &Path) -> Option<String> {
-    // If "id" key exists, it must be non-empty. A blank id in homeboy.json is an error,
-    // not a fallback signal. (#801: blank ids caused split-brain between project/component
-    // discovery and the component registry.)
-    if let Some(id_value) = portable.get("id") {
-        if let Some(id_str) = id_value.as_str() {
-            if id_str.trim().is_empty() {
-                // Blank id is present — log a warning and reject (return None so
-                // discover_from_portable returns None, forcing explicit registration).
-                crate::log_status!(
-                    "warning",
-                    "homeboy.json at {} has a blank 'id' field — skipping. Fix the file or run `homeboy component create`",
-                    dir.display()
-                );
-                return None;
-            }
-            return crate::core::engine::identifier::slugify_id(id_str, "component_id").ok();
-        }
+fn portable_component_id_from_value(portable: &Value, dir: &Path) -> Result<String> {
+    let id_value = portable.get("id").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "id",
+            format!(
+                "homeboy.json at {} is missing required 'id' field",
+                dir.display()
+            ),
+            None,
+            Some(vec![
+                "Add an explicit non-empty id to homeboy.json".to_string(),
+                "Example: \"id\": \"my-component\"".to_string(),
+            ]),
+        )
+    })?;
+
+    let Some(id_str) = id_value.as_str() else {
+        return Err(Error::validation_invalid_argument(
+            "id",
+            format!(
+                "homeboy.json at {} must define 'id' as a non-empty string",
+                dir.display()
+            ),
+            Some(id_value.to_string()),
+            Some(vec![
+                "Set id to a string such as \"my-component\"".to_string()
+            ]),
+        ));
+    };
+
+    if id_str.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "id",
+            format!("homeboy.json at {} has a blank 'id' field", dir.display()),
+            None,
+            Some(vec![
+                "Add an explicit non-empty id to homeboy.json".to_string(),
+                "Example: \"id\": \"my-component\"".to_string(),
+            ]),
+        ));
     }
 
-    // No "id" key at all — infer from directory name (backward compat for minimal configs)
-    let dir_name = dir.file_name()?.to_string_lossy();
-    crate::core::engine::identifier::slugify_id(&dir_name, "component_id").ok()
+    crate::core::engine::identifier::slugify_id(id_str, "component_id")
 }
 
 pub fn infer_portable_component_id(dir: &Path) -> Result<String> {
@@ -63,14 +83,7 @@ pub fn infer_portable_component_id(dir: &Path) -> Result<String> {
         )
     })?;
 
-    portable_component_id_from_value(&portable, dir).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "id",
-            format!("Could not derive component ID from {}", dir.display()),
-            None,
-            None,
-        )
-    })
+    portable_component_id_from_value(&portable, dir)
 }
 
 pub fn portable_json(component: &Component) -> Result<Value> {
@@ -261,7 +274,19 @@ where
 /// If the directory is a git repo and `remote_url` isn't set in the portable config,
 /// auto-detects it from `git remote get-url origin`.
 pub fn discover_from_portable(dir: &Path) -> Option<Component> {
-    let portable = read_portable_config(dir).ok()??;
+    match try_discover_from_portable(dir) {
+        Ok(component) => component,
+        Err(error) => {
+            crate::log_status!("warning", "{}", error);
+            None
+        }
+    }
+}
+
+pub fn try_discover_from_portable(dir: &Path) -> Result<Option<Component>> {
+    let Some(portable) = read_portable_config(dir)? else {
+        return Ok(None);
+    };
 
     let id = portable_component_id_from_value(&portable, dir)?;
     let local_path = dir.to_string_lossy().to_string();
@@ -281,7 +306,7 @@ pub fn discover_from_portable(dir: &Path) -> Option<Component> {
         }
     }
 
-    serde_json::from_value::<Component>(json).ok()
+    Ok(serde_json::from_value::<Component>(json).ok())
 }
 
 #[cfg(test)]
@@ -434,6 +459,84 @@ mod tests {
         assert!(
             result.is_none(),
             "blank id should cause discover to return None"
+        );
+    }
+
+    #[test]
+    fn missing_id_in_homeboy_json_is_validation_error() {
+        let dir = TempDir::new().expect("temp dir");
+        let json = serde_json::json!({
+            "remote_path": "wp-content/plugins/test"
+        });
+        fs::write(
+            dir.path().join("homeboy.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+
+        let error = infer_portable_component_id(dir.path()).expect_err("missing id must fail");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("missing required 'id' field"),
+            "{rendered}"
+        );
+        assert!(
+            error
+                .details
+                .to_string()
+                .contains("Add an explicit non-empty id to homeboy.json"),
+            "{}",
+            error.details
+        );
+    }
+
+    #[test]
+    fn blank_id_in_homeboy_json_is_validation_error() {
+        let dir = TempDir::new().expect("temp dir");
+        let json = serde_json::json!({
+            "id": "   ",
+            "remote_path": "wp-content/plugins/test"
+        });
+        fs::write(
+            dir.path().join("homeboy.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+
+        let error = infer_portable_component_id(dir.path()).expect_err("blank id must fail");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        let rendered = error.to_string();
+        assert!(rendered.contains("blank 'id' field"), "{rendered}");
+        assert!(
+            error
+                .details
+                .to_string()
+                .contains("Add an explicit non-empty id to homeboy.json"),
+            "{}",
+            error.details
+        );
+    }
+
+    #[test]
+    fn missing_id_in_homeboy_json_returns_none_from_discover() {
+        let dir = TempDir::new().expect("temp dir");
+        let json = serde_json::json!({
+            "remote_path": "wp-content/plugins/test"
+        });
+        fs::write(
+            dir.path().join("homeboy.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+
+        let result = discover_from_portable(dir.path());
+
+        assert!(
+            result.is_none(),
+            "missing id should cause discover to return None"
         );
     }
 

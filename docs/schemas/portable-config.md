@@ -6,6 +6,7 @@ A `homeboy.json` file in a repo root defines portable component configuration th
 
 ```json
 {
+  "id": "string",
   "remote_path": "string",
   "build_artifact": "string",
   "extract_command": "string",
@@ -22,12 +23,13 @@ A `homeboy.json` file in a repo root defines portable component configuration th
 }
 ```
 
-All fields are optional. The component `id` is derived from the directory name, and `local_path` is always machine-specific (provided at registration time).
+The component `id` field is required and must be a non-empty string. All other fields are optional. `local_path` is always machine-specific and provided at registration or resolution time.
 
 ## Example
 
 ```json
 {
+  "id": "data-machine",
   "remote_path": "wp-content/plugins/data-machine",
   "version_targets": [
     {
@@ -62,12 +64,12 @@ homeboy component create --local-path /path/to/repo --changelog-target "CHANGELO
 | Field | Why |
 |-------|-----|
 | `local_path` | Absolute path, varies per machine |
-| `id` | Derived from directory name automatically |
 
 ### What goes in homeboy.json
 
 | Field | Description |
 |-------|-------------|
+| `id` | Required stable component identifier |
 | `remote_path` | Deploy target relative to project `base_path` |
 | `build_artifact` | Build output path relative to repo root |
 | `extract_command` | Post-upload command (supports `{artifact}`, `{targetDir}`) |
