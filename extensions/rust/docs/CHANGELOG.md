@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.17.6] - 2026-05-27
+
+### Changed
+- share bash version preflight
+
 ## [1.17.5] - 2026-05-22
 
 ### Fixed
