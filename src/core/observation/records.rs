@@ -76,6 +76,26 @@ pub struct ArtifactRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArtifactCleanupFilter {
+    pub created_before: Option<String>,
+    pub run_id: Option<String>,
+    pub kind: Option<String>,
+    pub artifact_type: Option<String>,
+    pub run_kind: Option<String>,
+    pub component_id: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactCleanupCandidateRecord {
+    pub artifact: ArtifactRecord,
+    pub run_kind: String,
+    pub component_id: Option<String>,
+    pub run_started_at: String,
+    pub run_status: String,
+}
+
 fn default_artifact_type() -> String {
     "file".to_string()
 }

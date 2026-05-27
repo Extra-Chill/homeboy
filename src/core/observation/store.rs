@@ -11,9 +11,10 @@ mod schema;
 mod triage_items;
 
 use super::records::{
-    ArtifactRecord, FindingListFilter, FindingRecord, NewFindingRecord, NewRunRecord,
-    NewTraceRunRecord, NewTraceSpanRecord, NewTriageItemRecord, RunListFilter, RunRecord,
-    RunStatus, TraceRunRecord, TraceSpanRecord, TriageItemRecord, TriagePullRequestSignals,
+    ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, FindingListFilter,
+    FindingRecord, NewFindingRecord, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord,
+    NewTriageItemRecord, RunListFilter, RunRecord, RunStatus, TraceRunRecord, TraceSpanRecord,
+    TriageItemRecord, TriagePullRequestSignals,
 };
 use crate::core::{paths, Error, Result};
 
@@ -562,6 +563,58 @@ impl ObservationStore {
             .map_err(sqlite_error("read artifact record"))
     }
 
+    pub fn list_artifact_cleanup_candidates(
+        &self,
+        filter: ArtifactCleanupFilter,
+    ) -> Result<Vec<ArtifactCleanupCandidateRecord>> {
+        let limit = filter.limit.unwrap_or(1000).clamp(1, 10_000);
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                SELECT a.id, a.run_id, a.kind, a.artifact_type, a.path, a.sha256,
+                       a.size_bytes, a.mime, a.created_at,
+                       r.kind, r.component_id, r.started_at, r.status
+                FROM artifacts a
+                INNER JOIN runs r ON r.id = a.run_id
+                WHERE (?1 IS NULL OR a.created_at < ?1)
+                  AND (?2 IS NULL OR a.run_id = ?2)
+                  AND (?3 IS NULL OR a.kind = ?3)
+                  AND (?4 IS NULL OR a.artifact_type = ?4)
+                  AND (?5 IS NULL OR r.kind = ?5)
+                  AND (?6 IS NULL OR r.component_id = ?6)
+                ORDER BY a.created_at ASC, a.id ASC
+                LIMIT ?7
+                "#,
+            )
+            .map_err(sqlite_error("prepare artifact cleanup candidates"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    filter.created_before.as_deref(),
+                    filter.run_id.as_deref(),
+                    filter.kind.as_deref(),
+                    filter.artifact_type.as_deref(),
+                    filter.run_kind.as_deref(),
+                    filter.component_id.as_deref(),
+                    limit,
+                ],
+                row_to_artifact_cleanup_candidate,
+            )
+            .map_err(sqlite_error("list artifact cleanup candidates"))?;
+
+        collect_rows(rows, "collect artifact cleanup candidates")
+    }
+
+    pub fn delete_artifact_record(&self, artifact_id: &str) -> Result<bool> {
+        validate_required("artifact_id", artifact_id)?;
+        let rows = self
+            .connection
+            .execute("DELETE FROM artifacts WHERE id = ?1", [artifact_id])
+            .map_err(sqlite_error("delete artifact record"))?;
+        Ok(rows > 0)
+    }
+
     pub fn record_trace_run(&self, record: NewTraceRunRecord) -> Result<TraceRunRecord> {
         let run_id = record.run_id.clone();
         validate_required("run_id", &record.run_id)?;
@@ -883,6 +936,18 @@ fn row_to_artifact_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactR
         size_bytes: row.get(6)?,
         mime: row.get(7)?,
         created_at: row.get(8)?,
+    })
+}
+
+fn row_to_artifact_cleanup_candidate(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ArtifactCleanupCandidateRecord> {
+    Ok(ArtifactCleanupCandidateRecord {
+        artifact: row_to_artifact_record(row)?,
+        run_kind: row.get(9)?,
+        component_id: row.get(10)?,
+        run_started_at: row.get(11)?,
+        run_status: row.get(12)?,
     })
 }
 
