@@ -120,7 +120,7 @@ pub fn format_after_write(root: &Path, changed_files: &[PathBuf]) -> Result<Form
 /// Resolve the format command for a set of changed files.
 ///
 /// Checks installed extensions for `scripts.format`.
-fn resolve_format_command(_root: &Path, changed_files: &[PathBuf]) -> Option<String> {
+fn resolve_format_command(root: &Path, changed_files: &[PathBuf]) -> Option<String> {
     // Collect unique file extensions
     let extensions: Vec<String> = changed_files
         .iter()
@@ -144,15 +144,27 @@ fn resolve_format_command(_root: &Path, changed_files: &[PathBuf]) -> Option<Str
                 // Invoke the script directly so its shebang resolves the interpreter.
                 // Wrapping with `sh <script>` bypasses `#!/usr/bin/env bash` and runs
                 // under POSIX sh — which breaks scripts using bash-only features. See #1276.
-                return Some(
-                    crate::core::engine::shell::quote_path(&script_path.to_string_lossy())
-                        .to_string(),
-                );
+                let scoped_args = changed_files
+                    .iter()
+                    .map(|path| scoped_format_arg(root, path))
+                    .map(|path| crate::core::engine::shell::quote_arg(&path))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let script = crate::core::engine::shell::quote_path(&script_path.to_string_lossy())
+                    .to_string();
+                return Some(format!("{script} {scoped_args}"));
             }
         }
     }
 
     None
+}
+
+fn scoped_format_arg(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Find an installed extension that handles a file extension and has scripts.format.
@@ -186,5 +198,14 @@ mod tests {
         let result = format_after_write(dir.path(), &files).unwrap();
         assert!(result.success);
         assert!(result.command.is_none());
+    }
+
+    #[test]
+    fn scoped_format_arg_prefers_paths_relative_to_root() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path().join("component");
+        let file = root.join("src/changed file.php");
+
+        assert_eq!(scoped_format_arg(&root, &file), "src/changed file.php");
     }
 }
