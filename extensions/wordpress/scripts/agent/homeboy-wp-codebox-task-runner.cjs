@@ -65,7 +65,36 @@ function requireArg(name) {
 
 function pluginEntry(source, slug, activate = false) {
   const pluginSlug = (slug || path.basename(source)).split('@')[0].replace(/[^a-zA-Z0-9_-]/g, '-');
-  return { source, slug: pluginSlug, activate };
+  const entry = { source, slug: pluginSlug, activate };
+  const pluginFile = detectPluginMainFile(source, pluginSlug);
+  if (pluginFile) {
+    entry.pluginFile = pluginFile;
+  }
+  return entry;
+}
+
+function detectPluginMainFile(source, pluginSlug) {
+  if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) {
+    return '';
+  }
+
+  const phpFiles = fs.readdirSync(source)
+    .filter((fileName) => fileName.endsWith('.php'))
+    .sort((left, right) => {
+      const preferred = [`${pluginSlug}.php`, 'plugin.php'];
+      const leftIndex = preferred.includes(left) ? preferred.indexOf(left) : preferred.length;
+      const rightIndex = preferred.includes(right) ? preferred.indexOf(right) : preferred.length;
+      return leftIndex - rightIndex || left.localeCompare(right);
+    });
+
+  for (const fileName of phpFiles) {
+    const header = fs.readFileSync(path.join(source, fileName), 'utf8').slice(0, 8192);
+    if (/Plugin Name\s*:/i.test(header)) {
+      return `${pluginSlug}/${fileName}`;
+    }
+  }
+
+  return '';
 }
 
 function providerPluginEntries(request) {
