@@ -28,6 +28,13 @@ pub(crate) fn read_portable_config(repo_path: &Path) -> Result<Option<Value>> {
     Ok(Some(value))
 }
 
+fn explicit_id_hints() -> Vec<String> {
+    vec![
+        "Add an explicit non-empty id to homeboy.json".to_string(),
+        "Example: \"id\": \"my-component\"".to_string(),
+    ]
+}
+
 fn portable_component_id_from_value(portable: &Value, dir: &Path) -> Result<String> {
     let id_value = portable.get("id").ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -37,10 +44,7 @@ fn portable_component_id_from_value(portable: &Value, dir: &Path) -> Result<Stri
                 dir.display()
             ),
             None,
-            Some(vec![
-                "Add an explicit non-empty id to homeboy.json".to_string(),
-                "Example: \"id\": \"my-component\"".to_string(),
-            ]),
+            Some(explicit_id_hints()),
         )
     })?;
 
@@ -63,10 +67,7 @@ fn portable_component_id_from_value(portable: &Value, dir: &Path) -> Result<Stri
             "id",
             format!("homeboy.json at {} has a blank 'id' field", dir.display()),
             None,
-            Some(vec![
-                "Add an explicit non-empty id to homeboy.json".to_string(),
-                "Example: \"id\": \"my-component\"".to_string(),
-            ]),
+            Some(explicit_id_hints()),
         ));
     }
 
