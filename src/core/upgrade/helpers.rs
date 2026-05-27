@@ -6,6 +6,7 @@ use std::process::Command;
 use super::constants::{CRATES_IO_API, GITHUB_RELEASES_API, VERSION};
 use super::execution::execute_upgrade;
 use super::planning::resolve_binary_on_path;
+use super::runners;
 use super::types::*;
 use super::validation::check_for_updates;
 
@@ -152,6 +153,8 @@ pub fn run_upgrade_with_method(
     force: bool,
     method_override: Option<InstallMethod>,
     skip_extensions: bool,
+    skip_runners: bool,
+    runner_targets: &[String],
     source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
     let install_method = method_override.unwrap_or_else(detect_install_method);
@@ -181,6 +184,11 @@ pub fn run_upgrade_with_method(
                 update_all_extensions()
             };
             let projects_migrated = migrate_all_projects();
+            let (runners_updated, runners_skipped) = if skip_runners {
+                (vec![], vec![])
+            } else {
+                runners::upgrade_configured_runners(runner_targets)?
+            };
             return Ok(UpgradeResult {
                 command: "upgrade".to_string(),
                 install_method,
@@ -192,6 +200,8 @@ pub fn run_upgrade_with_method(
                 extensions_updated,
                 extensions_skipped,
                 projects_migrated,
+                runners_updated,
+                runners_skipped,
             });
         }
     }
@@ -213,6 +223,12 @@ pub fn run_upgrade_with_method(
     // operation that doesn't depend on the binary version.
     let projects_migrated = migrate_all_projects();
 
+    let (runners_updated, runners_skipped) = if success && !skip_runners {
+        runners::upgrade_configured_runners(runner_targets)?
+    } else {
+        (vec![], vec![])
+    };
+
     Ok(UpgradeResult {
         command: "upgrade".to_string(),
         install_method,
@@ -233,6 +249,8 @@ pub fn run_upgrade_with_method(
         extensions_updated,
         extensions_skipped,
         projects_migrated,
+        runners_updated,
+        runners_skipped,
     })
 }
 

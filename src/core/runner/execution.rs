@@ -35,6 +35,7 @@ pub struct RunnerCapabilityPreflight {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RunnerRequiredTool {
+    Homeboy,
     Git,
     Node,
     Npm,
@@ -280,6 +281,9 @@ impl RunnerCapabilitySnapshot {
         runner: &Runner,
     ) -> Self {
         let mut tools = BTreeSet::new();
+        if !report.resources.homeboy.version.is_empty() || report.resources.homeboy.path.is_some() {
+            tools.insert(RunnerRequiredTool::Homeboy);
+        }
         if report.capabilities.git {
             tools.insert(RunnerRequiredTool::Git);
         }
@@ -427,6 +431,7 @@ impl RunnerCapabilityPreflight {
 impl RunnerRequiredTool {
     pub fn id(self) -> &'static str {
         match self {
+            RunnerRequiredTool::Homeboy => "homeboy",
             RunnerRequiredTool::Git => "git",
             RunnerRequiredTool::Node => "node",
             RunnerRequiredTool::Npm => "npm",
@@ -440,6 +445,9 @@ impl RunnerRequiredTool {
 
     fn remediation(self) -> &'static str {
         match self {
+            RunnerRequiredTool::Homeboy => {
+                "Install Homeboy on the runner and ensure the configured homeboy_path works."
+            }
             RunnerRequiredTool::Git => "Install git and ensure it is on the runner PATH.",
             RunnerRequiredTool::Node => "Install Node.js and ensure node is on the runner PATH.",
             RunnerRequiredTool::Npm => {
