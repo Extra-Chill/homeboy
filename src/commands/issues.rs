@@ -209,9 +209,8 @@ pub struct ReconcileRunCommandOutput {
     pub source: String,
     pub status: ReconcileRunCommandStatus,
     pub warnings: Vec<String>,
-    pub issues_created: usize,
-    pub issues_updated: usize,
-    pub issues_closed: usize,
+    #[serde(flatten)]
+    pub issue_totals: ReconcileRunIssueTotals,
     pub failures: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconcile: Option<ReconcileOutput>,
@@ -229,27 +228,22 @@ pub enum ReconcileRunCommandStatus {
 #[derive(Default, Serialize)]
 pub struct ReconcileRunTotals {
     pub commands_processed: usize,
+    #[serde(flatten)]
+    pub issue_totals: ReconcileRunIssueTotals,
+    pub failures: usize,
+}
+
+#[derive(Clone, Copy, Default, Serialize)]
+pub struct ReconcileRunIssueTotals {
     pub issues_created: usize,
     pub issues_updated: usize,
     pub issues_closed: usize,
-    pub failures: usize,
 }
 
 struct ReconcileCommandRequest {
     component_id: String,
     findings: Option<String>,
     from_output: Vec<(String, String)>,
-    run_url: Option<String>,
-    no_refresh_closed: bool,
-    list_limit: usize,
-    apply: bool,
-    path: Option<String>,
-}
-
-struct ReconcileRunRequest {
-    component_id: String,
-    output_dir: Option<String>,
-    commands: Vec<String>,
     run_url: Option<String>,
     no_refresh_closed: bool,
     list_limit: usize,
@@ -292,7 +286,7 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
             apply,
             path,
         } => {
-            let output = run_reconcile_run(ReconcileRunRequest {
+            let output = run_reconcile_run(
                 component_id,
                 output_dir,
                 commands,
@@ -301,7 +295,7 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
                 list_limit,
                 apply,
                 path,
-            })?;
+            )?;
             let exit = if output.totals.failures > 0 { 1 } else { 0 };
             Ok((IssuesCommandOutput::ReconcileRun(output), exit))
         }
@@ -370,9 +364,19 @@ fn run_reconcile_command(
     }
 }
 
-fn run_reconcile_run(request: ReconcileRunRequest) -> homeboy::core::Result<ReconcileRunOutput> {
-    let output_dir = discover_output_dir(request.output_dir)?;
-    let commands = normalize_reconcile_run_commands(request.commands);
+#[allow(clippy::too_many_arguments)]
+fn run_reconcile_run(
+    component_id: String,
+    output_dir: Option<String>,
+    commands: Vec<String>,
+    run_url: Option<String>,
+    no_refresh_closed: bool,
+    list_limit: usize,
+    apply: bool,
+    path: Option<String>,
+) -> homeboy::core::Result<ReconcileRunOutput> {
+    let output_dir = discover_output_dir(output_dir)?;
+    let commands = normalize_reconcile_run_commands(commands);
     let mut command_outputs = Vec::new();
     let mut totals = ReconcileRunTotals::default();
 
@@ -384,13 +388,11 @@ fn run_reconcile_run(request: ReconcileRunRequest) -> homeboy::core::Result<Reco
             OutputInspection::Missing(reason) => {
                 command_outputs.push(ReconcileRunCommandOutput {
                     command,
-                    component_id: request.component_id.clone(),
+                    component_id: component_id.clone(),
                     source: source_display,
                     status: ReconcileRunCommandStatus::SkippedMissingOutput,
                     warnings: vec![reason],
-                    issues_created: 0,
-                    issues_updated: 0,
-                    issues_closed: 0,
+                    issue_totals: ReconcileRunIssueTotals::default(),
                     failures: 0,
                     reconcile: None,
                 });
@@ -399,38 +401,36 @@ fn run_reconcile_run(request: ReconcileRunRequest) -> homeboy::core::Result<Reco
                 totals.failures += 1;
                 command_outputs.push(ReconcileRunCommandOutput {
                     command,
-                    component_id: request.component_id.clone(),
+                    component_id: component_id.clone(),
                     source: source_display,
                     status: ReconcileRunCommandStatus::SkippedMalformedOutput,
                     warnings: vec![reason],
-                    issues_created: 0,
-                    issues_updated: 0,
-                    issues_closed: 0,
+                    issue_totals: ReconcileRunIssueTotals::default(),
                     failures: 1,
                     reconcile: None,
                 });
             }
             OutputInspection::Valid(value) => {
-                let command_component_id = component_id_from_native_output(&value)
-                    .unwrap_or_else(|| request.component_id.clone());
+                let command_component_id =
+                    component_id_from_native_output(&value).unwrap_or_else(|| component_id.clone());
                 let result = run_reconcile_command(ReconcileCommandRequest {
                     component_id: command_component_id.clone(),
                     findings: None,
                     from_output: vec![(command.clone(), source_display.clone())],
-                    run_url: request.run_url.clone(),
-                    no_refresh_closed: request.no_refresh_closed,
-                    list_limit: request.list_limit,
-                    apply: request.apply,
-                    path: request.path.clone(),
+                    run_url: run_url.clone(),
+                    no_refresh_closed,
+                    list_limit,
+                    apply,
+                    path: path.clone(),
                 });
 
                 match result {
                     Ok((reconcile, exit)) => {
                         let aggregate = aggregate_reconcile_output(&reconcile);
                         totals.commands_processed += 1;
-                        totals.issues_created += aggregate.issues_created;
-                        totals.issues_updated += aggregate.issues_updated;
-                        totals.issues_closed += aggregate.issues_closed;
+                        totals.issue_totals.issues_created += aggregate.issue_totals.issues_created;
+                        totals.issue_totals.issues_updated += aggregate.issue_totals.issues_updated;
+                        totals.issue_totals.issues_closed += aggregate.issue_totals.issues_closed;
                         totals.failures += aggregate.failures;
                         if exit != 0 && aggregate.failures == 0 {
                             totals.failures += 1;
@@ -441,9 +441,7 @@ fn run_reconcile_run(request: ReconcileRunRequest) -> homeboy::core::Result<Reco
                             source: source_display,
                             status: ReconcileRunCommandStatus::Processed,
                             warnings: Vec::new(),
-                            issues_created: aggregate.issues_created,
-                            issues_updated: aggregate.issues_updated,
-                            issues_closed: aggregate.issues_closed,
+                            issue_totals: aggregate.issue_totals,
                             failures: aggregate.failures,
                             reconcile: Some(reconcile),
                         });
@@ -456,9 +454,7 @@ fn run_reconcile_run(request: ReconcileRunRequest) -> homeboy::core::Result<Reco
                             source: source_display,
                             status: ReconcileRunCommandStatus::Failed,
                             warnings: vec![err.to_string()],
-                            issues_created: 0,
-                            issues_updated: 0,
-                            issues_closed: 0,
+                            issue_totals: ReconcileRunIssueTotals::default(),
                             failures: 1,
                             reconcile: None,
                         });
@@ -470,9 +466,9 @@ fn run_reconcile_run(request: ReconcileRunRequest) -> homeboy::core::Result<Reco
 
     Ok(ReconcileRunOutput {
         command: "issues.reconcile-run".to_string(),
-        component_id: request.component_id,
+        component_id,
         output_dir: output_dir.display().to_string(),
-        applied: request.apply,
+        applied: apply,
         commands: command_outputs,
         totals,
     })
@@ -490,9 +486,7 @@ enum OutputInspection {
 
 #[derive(Default)]
 struct ReconcileRunAggregate {
-    issues_created: usize,
-    issues_updated: usize,
-    issues_closed: usize,
+    issue_totals: ReconcileRunIssueTotals,
     failures: usize,
 }
 
@@ -581,15 +575,15 @@ fn aggregate_reconcile_output(output: &ReconcileOutput) -> ReconcileRunAggregate
         for execution in &result.executions {
             match execution.outcome {
                 homeboy::core::issues::apply::ExecutionOutcome::Filed { .. } => {
-                    aggregate.issues_created += 1;
+                    aggregate.issue_totals.issues_created += 1;
                 }
                 homeboy::core::issues::apply::ExecutionOutcome::Updated { .. }
                 | homeboy::core::issues::apply::ExecutionOutcome::UpdatedClosed { .. } => {
-                    aggregate.issues_updated += 1;
+                    aggregate.issue_totals.issues_updated += 1;
                 }
                 homeboy::core::issues::apply::ExecutionOutcome::Closed { .. }
                 | homeboy::core::issues::apply::ExecutionOutcome::ClosedDuplicate { .. } => {
-                    aggregate.issues_closed += 1;
+                    aggregate.issue_totals.issues_closed += 1;
                 }
                 homeboy::core::issues::apply::ExecutionOutcome::Failed { .. } => {
                     aggregate.failures += 1;
@@ -600,9 +594,11 @@ fn aggregate_reconcile_output(output: &ReconcileOutput) -> ReconcileRunAggregate
         aggregate
     } else {
         ReconcileRunAggregate {
-            issues_created: output.plan_summary.file_new,
-            issues_updated: output.plan_summary.update + output.plan_summary.update_closed,
-            issues_closed: output.plan_summary.close + output.plan_summary.close_duplicate,
+            issue_totals: ReconcileRunIssueTotals {
+                issues_created: output.plan_summary.file_new,
+                issues_updated: output.plan_summary.update + output.plan_summary.update_closed,
+                issues_closed: output.plan_summary.close + output.plan_summary.close_duplicate,
+            },
             failures: 0,
         }
     }
@@ -1006,9 +1002,9 @@ mod tests {
 
         let aggregate = aggregate_reconcile_output(&output);
 
-        assert_eq!(aggregate.issues_created, 1);
-        assert_eq!(aggregate.issues_updated, 2);
-        assert_eq!(aggregate.issues_closed, 2);
+        assert_eq!(aggregate.issue_totals.issues_created, 1);
+        assert_eq!(aggregate.issue_totals.issues_updated, 2);
+        assert_eq!(aggregate.issue_totals.issues_closed, 2);
         assert_eq!(aggregate.failures, 1);
     }
 
@@ -1033,9 +1029,9 @@ mod tests {
 
         let aggregate = aggregate_reconcile_output(&output);
 
-        assert_eq!(aggregate.issues_created, 1);
-        assert_eq!(aggregate.issues_updated, 2);
-        assert_eq!(aggregate.issues_closed, 2);
+        assert_eq!(aggregate.issue_totals.issues_created, 1);
+        assert_eq!(aggregate.issue_totals.issues_updated, 2);
+        assert_eq!(aggregate.issue_totals.issues_closed, 2);
         assert_eq!(aggregate.failures, 0);
     }
 
@@ -1052,17 +1048,21 @@ mod tests {
                 source: "/tmp/homeboy-output/audit.json".to_string(),
                 status: ReconcileRunCommandStatus::Processed,
                 warnings: Vec::new(),
-                issues_created: 1,
-                issues_updated: 2,
-                issues_closed: 3,
+                issue_totals: ReconcileRunIssueTotals {
+                    issues_created: 1,
+                    issues_updated: 2,
+                    issues_closed: 3,
+                },
                 failures: 0,
                 reconcile: None,
             }],
             totals: ReconcileRunTotals {
                 commands_processed: 1,
-                issues_created: 1,
-                issues_updated: 2,
-                issues_closed: 3,
+                issue_totals: ReconcileRunIssueTotals {
+                    issues_created: 1,
+                    issues_updated: 2,
+                    issues_closed: 3,
+                },
                 failures: 0,
             },
         };
