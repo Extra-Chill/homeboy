@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "${TMPDIR}"' EXIT
+
+BIN_DIR="${TMPDIR}/bin"
+OUTPUT_DIR="${TMPDIR}/output"
+SUMMARY_FILE="${TMPDIR}/summary.md"
+ENV_FILE="${TMPDIR}/github-env"
+ARGS_FILE="${TMPDIR}/homeboy-args"
+mkdir -p "${BIN_DIR}" "${OUTPUT_DIR}"
+
+cat > "${BIN_DIR}/homeboy" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "${HOMEBOY_STUB_ARGS_FILE}"
+cat <<'MARKDOWN'
+## Failure Digest
+
+### Test Failure Digest
+- Failed tests: **1**
+MARKDOWN
+STUB
+chmod +x "${BIN_DIR}/homeboy"
+
+export PATH="${BIN_DIR}:${PATH}"
+export HOMEBOY_STUB_ARGS_FILE="${ARGS_FILE}"
+export HOMEBOY_OUTPUT_DIR="${OUTPUT_DIR}"
+export RESULTS='{"test":"fail"}'
+export GITHUB_SERVER_URL="https://github.com"
+export GITHUB_REPOSITORY="Extra-Chill/homeboy-action"
+export GITHUB_RUN_ID="12345"
+export HOMEBOY_CLI_VERSION="homeboy 1.2.3"
+export HOMEBOY_EXTENSION_ID="nodejs"
+export HOMEBOY_EXTENSION_SOURCE="https://github.com/Extra-Chill/homeboy-extensions"
+export HOMEBOY_EXTENSION_REVISION="abc123"
+export HOMEBOY_ACTION_REPOSITORY="Extra-Chill/homeboy-action"
+export HOMEBOY_ACTION_REF="v2"
+export COMMANDS="test,audit"
+export AUTOFIX_ENABLED="true"
+export AUTOFIX_ATTEMPTED="true"
+export AUTOFIX_COMMANDS="test"
+export GITHUB_ENV="${ENV_FILE}"
+export GITHUB_STEP_SUMMARY="${SUMMARY_FILE}"
+
+bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
+
+DIGEST_FILE="${OUTPUT_DIR}/failure-digest.md"
+TOOLING_JSON="${OUTPUT_DIR}/failure-digest-tooling.json"
+
+if [ ! -f "${DIGEST_FILE}" ]; then
+  echo "missing digest file" >&2
+  exit 1
+fi
+
+grep -F "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" "${ENV_FILE}" >/dev/null
+grep -F "### Test Failure Digest" "${SUMMARY_FILE}" >/dev/null
+
+grep -Fx -- "report" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "failure-digest" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "--output-dir" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "${OUTPUT_DIR}" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "--results" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "${RESULTS}" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "--run-url" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "https://github.com/Extra-Chill/homeboy-action/actions/runs/12345" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "--tooling-json" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "${TOOLING_JSON}" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "--commands" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "test,audit" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "--autofix-commands" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "test" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "--autofix-enabled" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "--autofix-attempted" "${ARGS_FILE}" >/dev/null
+
+jq -e \
+  '.homeboy_cli_version == "homeboy 1.2.3" and
+   .extension_id == "nodejs" and
+   .extension_source == "https://github.com/Extra-Chill/homeboy-extensions" and
+   .extension_revision == "abc123" and
+   .action_repository == "Extra-Chill/homeboy-action" and
+   .action_ref == "v2"' \
+  "${TOOLING_JSON}" >/dev/null
+
+echo "generate failure digest wrapper checks passed"

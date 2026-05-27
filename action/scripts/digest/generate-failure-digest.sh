@@ -21,27 +21,61 @@ if [ -z "${OUTPUT_DIR}" ] || [ ! -d "${OUTPUT_DIR}" ]; then
   exit 0
 fi
 
-DIGEST_FILE=$(python3 "${GITHUB_ACTION_PATH}/scripts/digest/build-failure-digest.py" \
-  "${OUTPUT_DIR}" \
-  "${RESULTS_JSON}" \
-  "${RUN_URL}" \
-  "${HOMEBOY_CLI_VERSION}" \
-  "${HOMEBOY_EXTENSION_ID}" \
-  "${HOMEBOY_EXTENSION_SOURCE}" \
-  "${HOMEBOY_EXTENSION_REVISION}" \
-  "${HOMEBOY_ACTION_REPOSITORY}" \
-  "${HOMEBOY_ACTION_REF}" \
-  "${COMMANDS_CSV}" \
-  "${AUTOFIX_ENABLED}" \
-  "${AUTOFIX_ATTEMPTED}" \
-  "${AUTOFIX_COMMANDS}" \
-  2>/dev/null || true)
-if [ -z "${DIGEST_FILE}" ] || [ ! -f "${DIGEST_FILE}" ]; then
+TOOLING_JSON="${OUTPUT_DIR}/failure-digest-tooling.json"
+DIGEST_FILE="${OUTPUT_DIR}/failure-digest.md"
+
+jq -n \
+  --arg homeboy_cli_version "${HOMEBOY_CLI_VERSION}" \
+  --arg extension_id "${HOMEBOY_EXTENSION_ID}" \
+  --arg extension_source "${HOMEBOY_EXTENSION_SOURCE}" \
+  --arg extension_revision "${HOMEBOY_EXTENSION_REVISION}" \
+  --arg action_repository "${HOMEBOY_ACTION_REPOSITORY}" \
+  --arg action_ref "${HOMEBOY_ACTION_REF}" \
+  '{
+    homeboy_cli_version: $homeboy_cli_version,
+    extension_id: $extension_id,
+    extension_source: $extension_source,
+    extension_revision: $extension_revision,
+    action_repository: $action_repository,
+    action_ref: $action_ref
+  }' > "${TOOLING_JSON}"
+
+ARGS=(
+  report failure-digest
+  --output-dir "${OUTPUT_DIR}"
+  --results "${RESULTS_JSON}"
+  --run-url "${RUN_URL}"
+  --tooling-json "${TOOLING_JSON}"
+  --commands "${COMMANDS_CSV}"
+  --autofix-commands "${AUTOFIX_COMMANDS}"
+)
+
+if [ "${AUTOFIX_ENABLED}" = "true" ]; then
+  ARGS+=(--autofix-enabled)
+fi
+
+if [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
+  ARGS+=(--autofix-attempted)
+fi
+
+if ! homeboy "${ARGS[@]}" > "${DIGEST_FILE}" 2>/dev/null; then
+  rm -f "${DIGEST_FILE}"
+fi
+
+if [ ! -f "${DIGEST_FILE}" ]; then
   echo "Failure digest generation returned no file"
   exit 0
 fi
 
-echo "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" >> "${GITHUB_ENV}"
+if [ ! -s "${DIGEST_FILE}" ]; then
+  echo "Failure digest generation returned no file"
+  rm -f "${DIGEST_FILE}"
+  exit 0
+fi
+
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" >> "${GITHUB_ENV}"
+fi
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
