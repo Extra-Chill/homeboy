@@ -573,6 +573,7 @@ runs:
         AUTOFIX_LABEL: ${{ inputs.autofix-label }}
         AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
         AUTOFIX_MODE: ${{ inputs.autofix-mode }}
+        BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
         PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
         PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         PR_NUMBER: ${{ github.event.pull_request.number }}

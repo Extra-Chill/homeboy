@@ -37,7 +37,7 @@ TARGET_REF="refs/remotes/homeboy-autofix-target/${TARGET_BRANCH}"
 ORIGINAL_HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
 BUILT_HEAD_SHA="${HOMEBOY_CLI_HEAD_SHA:-}"
 
-if [ -n "${BUILT_HEAD_SHA}" ] && [ -n "${ORIGINAL_HEAD_SHA}" ] && [ "${BUILT_HEAD_SHA}" != "${ORIGINAL_HEAD_SHA}" ]; then
+if should_enforce_source_binary_freshness && [ -n "${ORIGINAL_HEAD_SHA}" ] && [ "${BUILT_HEAD_SHA}" != "${ORIGINAL_HEAD_SHA}" ]; then
   echo "Skipping autofix: installed homeboy binary was built from ${BUILT_HEAD_SHA}, but checkout is at ${ORIGINAL_HEAD_SHA}" 
   echo "attempted=false" >> "${GITHUB_OUTPUT}"
   echo "status=skipped-stale-binary" >> "${GITHUB_OUTPUT}"
@@ -239,7 +239,7 @@ else
   echo "Fetched latest PR head ${TARGET_REPO}:${TARGET_BRANCH}"
   if git show-ref --verify --quiet "${TARGET_REF}"; then
     TARGET_HEAD_SHA="$(git rev-parse "${TARGET_REF}" 2>/dev/null || true)"
-    if [ -n "${BUILT_HEAD_SHA}" ] && [ -n "${TARGET_HEAD_SHA}" ] && [ "${BUILT_HEAD_SHA}" != "${TARGET_HEAD_SHA}" ]; then
+    if should_enforce_source_binary_freshness && [ -n "${TARGET_HEAD_SHA}" ] && [ "${BUILT_HEAD_SHA}" != "${TARGET_HEAD_SHA}" ]; then
       echo "Skipping autofix: installed homeboy binary was built from ${BUILT_HEAD_SHA}, but latest PR head is ${TARGET_HEAD_SHA}"
       echo "attempted=false" >> "${GITHUB_OUTPUT}"
       echo "status=skipped-stale-binary" >> "${GITHUB_OUTPUT}"

@@ -63,6 +63,10 @@ pr_is_active() {
   esac
 }
 
+should_enforce_source_binary_freshness() {
+  [ "${BINARY_SOURCE:-}" = "source" ] && [ -n "${HOMEBOY_CLI_HEAD_SHA:-}" ]
+}
+
 # Build an informative autofix commit message.
 # Subject: chore(ci): homeboy autofix — audit (7 files, 33 fixes)
 # Body: per-category fix counts with affected files.
