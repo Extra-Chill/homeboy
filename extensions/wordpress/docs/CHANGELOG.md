@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.9] - 2026-05-27
+
+### Changed
+- share bash version preflight
+
+### Fixed
+- align runner step fallback with core
+
 ## [2.102.8] - 2026-05-27
 
 ### Fixed
