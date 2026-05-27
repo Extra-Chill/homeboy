@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.4] - 2026-05-27
+
+### Fixed
+- persist WP Codebox fanout runs incrementally
+- keep WP Codebox fanout artifacts external
+
 ## [2.102.3] - 2026-05-27
 
 ### Fixed
