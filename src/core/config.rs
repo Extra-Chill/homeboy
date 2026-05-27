@@ -109,11 +109,12 @@ fn entity_metadata<T: ConfigEntity>() -> ConfigEntityMetadata {
     }
 }
 
-fn config_entity_registry() -> [ConfigEntityMetadata; 5] {
+fn config_entity_registry() -> [ConfigEntityMetadata; 6] {
     [
         entity_metadata::<crate::core::project::Project>(),
         entity_metadata::<crate::core::server::Server>(),
         entity_metadata::<crate::core::runner::Runner>(),
+        entity_metadata::<crate::core::tunnel::ServiceTunnel>(),
         entity_metadata::<crate::core::extension::ExtensionManifest>(),
         entity_metadata::<crate::core::fleet::Fleet>(),
     ]
