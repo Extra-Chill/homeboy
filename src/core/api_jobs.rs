@@ -60,6 +60,20 @@ pub struct Job {
     pub source_snapshot: Option<SourceSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by_runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<JobArtifactMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +86,69 @@ pub struct JobEvent {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobArtifactMetadata {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteRunnerJobRequest {
+    pub runner_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default = "default_runner_exec_operation")]
+    pub operation: String,
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub capture_patch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot: Option<SourceSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteRunnerJobClaim {
+    pub job: Job,
+    pub request: RemoteRunnerJobRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteRunnerJobResult {
+    pub exit_code: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<JobArtifactMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredRemoteRunnerJob {
+    request: RemoteRunnerJobRequest,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -96,6 +173,8 @@ struct JobStoreInner {
 struct StoredJob {
     job: Job,
     events: Vec<JobEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_runner: Option<StoredRemoteRunnerJob>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -168,6 +247,13 @@ impl JobStore {
             event_count: 0,
             source_snapshot,
             stale_reason: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
         };
 
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
@@ -176,6 +262,7 @@ impl JobStore {
             StoredJob {
                 job: job.clone(),
                 events: Vec::new(),
+                remote_runner: None,
             },
         );
         drop(inner);
@@ -184,6 +271,221 @@ impl JobStore {
             .expect("newly-created job must accept queued status event");
         self.get(job.id)
             .expect("newly-created job must be readable after insert")
+    }
+
+    pub(crate) fn submit_remote_runner_job(&self, request: RemoteRunnerJobRequest) -> Result<Job> {
+        if request.runner_id.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "runner_id",
+                "remote runner job requires a runner id",
+                None,
+                None,
+            ));
+        }
+        if request.command.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "command",
+                "remote runner job requires a command",
+                None,
+                None,
+            ));
+        }
+
+        let now = timestamp_ms();
+        let job = Job {
+            id: Uuid::new_v4(),
+            operation: request.operation.clone(),
+            status: JobStatus::Queued,
+            created_at_ms: now,
+            updated_at_ms: now,
+            started_at_ms: None,
+            finished_at_ms: None,
+            event_count: 0,
+            source_snapshot: request.source_snapshot.clone(),
+            stale_reason: None,
+            target_runner_id: Some(request.runner_id.clone()),
+            target_project_id: request.project_id.clone(),
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+        };
+
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        inner.jobs.insert(
+            job.id,
+            StoredJob {
+                job: job.clone(),
+                events: Vec::new(),
+                remote_runner: Some(StoredRemoteRunnerJob { request }),
+            },
+        );
+        drop(inner);
+
+        self.append_status_event(job.id, JobStatus::Queued, "remote runner job queued")?;
+        self.get(job.id)
+    }
+
+    pub(crate) fn claim_remote_runner_job(
+        &self,
+        runner_id: &str,
+        project_id: Option<&str>,
+        lease_ms: u64,
+    ) -> Result<Option<RemoteRunnerJobClaim>> {
+        if runner_id.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "runner_id",
+                "remote runner claim requires a runner id",
+                None,
+                None,
+            ));
+        }
+
+        let now = timestamp_ms();
+        let lease_ms = lease_ms.max(1);
+        let mut claimed: Option<(Uuid, RemoteRunnerJobRequest)> = None;
+        {
+            let mut inner = self.inner.lock().expect("job store mutex poisoned");
+            let mut candidates: Vec<_> = inner
+                .jobs
+                .values_mut()
+                .filter(|stored| {
+                    stored.remote_runner.is_some()
+                        && stored.job.status == JobStatus::Queued
+                        && stored.job.target_runner_id.as_deref() == Some(runner_id)
+                        && project_matches(stored.job.target_project_id.as_deref(), project_id)
+                })
+                .collect();
+            candidates.sort_by_key(|stored| {
+                (
+                    queued_event_sequence(stored),
+                    stored.job.created_at_ms,
+                    stored.job.id,
+                )
+            });
+            if let Some(stored) = candidates.into_iter().next() {
+                stored.job.status = JobStatus::Running;
+                stored.job.updated_at_ms = now;
+                stored.job.started_at_ms = Some(now);
+                stored.job.claim_id = Some(Uuid::new_v4().to_string());
+                stored.job.claimed_by_runner_id = Some(runner_id.to_string());
+                stored.job.claimed_at_ms = Some(now);
+                stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms));
+                let request = stored
+                    .remote_runner
+                    .as_ref()
+                    .expect("filtered remote runner job has request")
+                    .request
+                    .clone();
+                claimed = Some((stored.job.id, request));
+            }
+        }
+
+        let Some((job_id, request)) = claimed else {
+            return Ok(None);
+        };
+
+        self.persist()?;
+        self.append_status_event(job_id, JobStatus::Running, "remote runner job claimed")?;
+        Ok(Some(RemoteRunnerJobClaim {
+            job: self.get(job_id)?,
+            request,
+        }))
+    }
+
+    pub(crate) fn append_remote_runner_event(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        kind: JobEventKind,
+        message: Option<String>,
+        data: Option<Value>,
+    ) -> Result<JobEvent> {
+        self.ensure_remote_runner_claim(job_id, runner_id)?;
+        self.append_event(job_id, kind, message, data)
+    }
+
+    pub(crate) fn finish_remote_runner_job(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        result: RemoteRunnerJobResult,
+    ) -> Result<Job> {
+        self.ensure_remote_runner_claim(job_id, runner_id)?;
+        let status = if result.exit_code == 0 {
+            JobStatus::Succeeded
+        } else {
+            JobStatus::Failed
+        };
+        self.ensure_transition(job_id, status)?;
+
+        let result_data = serde_json::to_value(&result).map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("serialize remote runner job result".to_string()),
+            )
+        })?;
+        self.append_event(job_id, JobEventKind::Result, None, Some(result_data))?;
+        if result.exit_code != 0 {
+            self.append_event(
+                job_id,
+                JobEventKind::Error,
+                Some(format!(
+                    "remote runner job exited with code {}",
+                    result.exit_code
+                )),
+                Some(json_exit_code(result.exit_code)),
+            )?;
+        }
+
+        {
+            let mut inner = self.inner.lock().expect("job store mutex poisoned");
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            stored.job.artifacts = result.artifacts;
+        }
+        self.persist()?;
+
+        self.transition(
+            job_id,
+            status,
+            if status == JobStatus::Succeeded {
+                "remote runner job succeeded".to_string()
+            } else {
+                format!(
+                    "remote runner job failed with exit code {}",
+                    result.exit_code
+                )
+            },
+        )
+    }
+
+    pub(crate) fn reconcile_expired_remote_runner_claims(&self, now_ms: u64) -> Result<Vec<Job>> {
+        let expired_ids = {
+            let inner = self.inner.lock().expect("job store mutex poisoned");
+            inner
+                .jobs
+                .values()
+                .filter(|stored| {
+                    stored.remote_runner.is_some()
+                        && stored.job.status == JobStatus::Running
+                        && stored
+                            .job
+                            .claim_expires_at_ms
+                            .is_some_and(|expires_at| expires_at <= now_ms)
+                })
+                .map(|stored| stored.job.id)
+                .collect::<Vec<_>>()
+        };
+
+        let mut reconciled = Vec::new();
+        for job_id in expired_ids {
+            reconciled.push(self.fail(job_id, "remote runner claim expired")?);
+        }
+        Ok(reconciled)
     }
 
     pub(crate) fn get(&self, job_id: Uuid) -> Result<Job> {
@@ -366,6 +668,40 @@ impl JobStore {
         validate_transition(stored.job.status, next_status)
     }
 
+    fn ensure_remote_runner_claim(&self, job_id: Uuid, runner_id: &str) -> Result<()> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        if stored.remote_runner.is_none() {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "job is not a remote runner job",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        if stored.job.claimed_by_runner_id.as_deref() != Some(runner_id) {
+            return Err(Error::validation_invalid_argument(
+                "runner_id",
+                "remote runner job is not claimed by this runner",
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+        if stored.job.status != JobStatus::Running {
+            return Err(Error::validation_invalid_argument(
+                "status",
+                "remote runner job must be running before events or results are returned",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+
+        Ok(())
+    }
+
     fn append_status_event(
         &self,
         job_id: Uuid,
@@ -441,7 +777,9 @@ fn reconcile_stale_jobs(durable: &mut DurableJobStore, event_retention_limit: us
         .unwrap_or(0);
 
     for stored in &mut durable.jobs {
-        if matches!(stored.job.status, JobStatus::Queued | JobStatus::Running) {
+        if matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+            && !(stored.remote_runner.is_some() && stored.job.status == JobStatus::Queued)
+        {
             let reason = "daemon restarted before the job reached a terminal status".to_string();
             stored.job.status = JobStatus::Failed;
             stored.job.updated_at_ms = now;
@@ -540,6 +878,33 @@ fn validate_transition(current: JobStatus, next: JobStatus) -> Result<()> {
     }
 }
 
+fn default_runner_exec_operation() -> String {
+    "runner.exec".to_string()
+}
+
+fn project_matches(job_project_id: Option<&str>, claim_project_id: Option<&str>) -> bool {
+    claim_project_id.is_none() || job_project_id == claim_project_id
+}
+
+fn queued_event_sequence(stored: &StoredJob) -> u64 {
+    stored
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == JobEventKind::Status
+                && event
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data["status"] == serde_json::json!("queued"))
+        })
+        .map(|event| event.sequence)
+        .unwrap_or(u64::MAX)
+}
+
+fn json_exit_code(exit_code: i32) -> Value {
+    serde_json::json!({ "exit_code": exit_code })
+}
+
 fn job_not_found(job_id: Uuid) -> Error {
     Error::validation_invalid_argument("job_id", "job not found", Some(job_id.to_string()), None)
 }
@@ -553,6 +918,8 @@ fn timestamp_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use serde_json::json;
 
     use super::*;
@@ -964,5 +1331,257 @@ mod tests {
         assert!(reopened_events
             .windows(2)
             .all(|pair| pair[0].sequence < pair[1].sequence));
+    }
+
+    #[test]
+    fn remote_runner_job_submit_targets_runner_and_project() {
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+            .expect("remote runner job queues");
+
+        assert_eq!(job.status, JobStatus::Queued);
+        assert_eq!(job.operation, "runner.exec");
+        assert_eq!(job.target_runner_id.as_deref(), Some("homeboy-lab"));
+        assert_eq!(job.target_project_id.as_deref(), Some("extrachill"));
+        assert_eq!(job.event_count, 1);
+
+        let events = store.events(job.id).expect("events are readable");
+        assert_eq!(events[0].kind, JobEventKind::Status);
+        assert_eq!(events[0].data, Some(json!({ "status": "queued" })));
+    }
+
+    #[test]
+    fn remote_runner_job_claim_returns_oldest_matching_job() {
+        let store = JobStore::default();
+        let other = store
+            .submit_remote_runner_job(remote_runner_request("other-lab", Some("extrachill")))
+            .expect("other runner job queues");
+        let first = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+            .expect("first runner job queues");
+        let second = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+            .expect("second runner job queues");
+
+        let claim = store
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000)
+            .expect("claim succeeds")
+            .expect("matching job is claimed");
+
+        assert_eq!(claim.job.id, first.id);
+        assert_eq!(claim.request.runner_id, "homeboy-lab");
+        assert_eq!(claim.job.status, JobStatus::Running);
+        assert_eq!(
+            claim.job.claimed_by_runner_id.as_deref(),
+            Some("homeboy-lab")
+        );
+        assert!(claim.job.claim_id.is_some());
+        assert!(claim.job.claim_expires_at_ms.is_some());
+        assert_eq!(
+            store.get(other.id).expect("other job").status,
+            JobStatus::Queued
+        );
+        assert_eq!(
+            store.get(second.id).expect("second job").status,
+            JobStatus::Queued
+        );
+    }
+
+    #[test]
+    fn remote_runner_job_claim_can_be_filtered_by_project() {
+        let store = JobStore::default();
+        let wire = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("wire")))
+            .expect("wire job queues");
+        let events = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("events")))
+            .expect("events job queues");
+
+        let claim = store
+            .claim_remote_runner_job("homeboy-lab", Some("events"), 30_000)
+            .expect("claim succeeds")
+            .expect("events job is claimed");
+
+        assert_eq!(claim.job.id, events.id);
+        assert_eq!(
+            store.get(wire.id).expect("wire job").status,
+            JobStatus::Queued
+        );
+    }
+
+    #[test]
+    fn remote_runner_job_result_records_terminal_state_and_artifacts() {
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+            .expect("remote runner job queues");
+        store
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000)
+            .expect("claim succeeds")
+            .expect("job is claimed");
+        store
+            .append_remote_runner_event(
+                job.id,
+                "homeboy-lab",
+                JobEventKind::Stdout,
+                Some("running tests".to_string()),
+                None,
+            )
+            .expect("runner appends stdout");
+
+        let completed = store
+            .finish_remote_runner_job(
+                job.id,
+                "homeboy-lab",
+                RemoteRunnerJobResult {
+                    exit_code: 0,
+                    stdout: Some("ok".to_string()),
+                    stderr: None,
+                    data: Some(json!({ "summary": "passed" })),
+                    artifacts: vec![JobArtifactMetadata {
+                        id: "report".to_string(),
+                        name: Some("report.json".to_string()),
+                        path: Some("/srv/homeboy/report.json".to_string()),
+                        url: None,
+                        mime: Some("application/json".to_string()),
+                        size_bytes: Some(42),
+                        sha256: Some("abc123".to_string()),
+                        metadata: Some(json!({ "kind": "test_report" })),
+                    }],
+                },
+            )
+            .expect("runner completes job");
+
+        assert_eq!(completed.status, JobStatus::Succeeded);
+        assert_eq!(completed.artifacts.len(), 1);
+        assert_eq!(completed.artifacts[0].id, "report");
+
+        let events = store.events(job.id).expect("events are readable");
+        assert!(events
+            .iter()
+            .any(|event| event.kind == JobEventKind::Stdout));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == JobEventKind::Result));
+        assert_eq!(
+            events.last().unwrap().data,
+            Some(json!({ "status": "succeeded" }))
+        );
+    }
+
+    #[test]
+    fn remote_runner_job_failed_result_records_error_and_terminal_state() {
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+            .expect("remote runner job queues");
+        store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000)
+            .expect("claim succeeds")
+            .expect("job is claimed");
+
+        let failed = store
+            .finish_remote_runner_job(
+                job.id,
+                "homeboy-lab",
+                RemoteRunnerJobResult {
+                    exit_code: 1,
+                    stdout: None,
+                    stderr: Some("nope".to_string()),
+                    data: None,
+                    artifacts: Vec::new(),
+                },
+            )
+            .expect("runner fails job");
+
+        assert_eq!(failed.status, JobStatus::Failed);
+        let events = store.events(job.id).expect("events are readable");
+        assert!(events.iter().any(|event| {
+            event.kind == JobEventKind::Error
+                && event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("code 1"))
+        }));
+    }
+
+    #[test]
+    fn cancelled_remote_runner_job_cannot_be_claimed() {
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+            .expect("remote runner job queues");
+        store.cancel(job.id, "user requested").expect("job cancels");
+
+        let claim = store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000)
+            .expect("claim request succeeds");
+
+        assert!(claim.is_none());
+    }
+
+    #[test]
+    fn expired_remote_runner_claims_are_reconciled_as_failed() {
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+            .expect("remote runner job queues");
+        let claim = store
+            .claim_remote_runner_job("homeboy-lab", None, 1)
+            .expect("claim succeeds")
+            .expect("job is claimed");
+
+        let reconciled = store
+            .reconcile_expired_remote_runner_claims(
+                claim.job.claim_expires_at_ms.expect("claim expiry") + 1,
+            )
+            .expect("claims reconcile");
+
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].id, job.id);
+        assert_eq!(reconciled[0].status, JobStatus::Failed);
+        assert!(store.events(job.id).expect("events").iter().any(|event| {
+            event.kind == JobEventKind::Error
+                && event.message.as_deref() == Some("remote runner claim expired")
+        }));
+    }
+
+    #[test]
+    fn remote_runner_jobs_persist_request_and_claim_state() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open(&path).expect("durable store opens");
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+            .expect("remote runner job queues");
+
+        let reopened = JobStore::open(&path).expect("durable store reopens");
+        let claim = reopened
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000)
+            .expect("claim succeeds")
+            .expect("persisted job is claimed");
+
+        assert_eq!(claim.job.id, job.id);
+        assert_eq!(claim.request.command, vec!["homeboy", "test"]);
+        assert_eq!(claim.request.project_id.as_deref(), Some("extrachill"));
+    }
+
+    fn remote_runner_request(runner_id: &str, project_id: Option<&str>) -> RemoteRunnerJobRequest {
+        RemoteRunnerJobRequest {
+            runner_id: runner_id.to_string(),
+            project_id: project_id.map(str::to_string),
+            operation: "runner.exec".to_string(),
+            command: vec!["homeboy".to_string(), "test".to_string()],
+            cwd: Some("/srv/extrachill".to_string()),
+            env: HashMap::new(),
+            capture_patch: true,
+            source_snapshot: Some(SourceSnapshot::existing_remote(
+                runner_id,
+                "/srv/extrachill",
+                Some("/srv"),
+            )),
+            metadata: Some(json!({ "submitted_by": "controller" })),
+        }
     }
 }
