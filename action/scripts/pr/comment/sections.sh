@@ -68,11 +68,6 @@ append_review_report_section() {
     return 0
   fi
 
-  if [[ "${review_md}" != *"finding(s) across"* ]]; then
-    SECTION_BODY+="> :warning: \`homeboy review --report=pr-comment\` returned an unexpected report shape. Check the action logs for details."$'\n\n'
-    return 0
-  fi
-
   SECTION_BODY+="${review_md}"$'\n\n'
 
   # Exit code 1 means the review found issues, which is exactly when the PR
@@ -276,13 +271,13 @@ build_section_body() {
   append_observation_artifact_guidance
 }
 
-# Build the shared `tooling` section body written at the bottom of every
-# Homeboy Results comment. This section is re-rendered idempotently by every
-# invocation of `post-pr-comment.sh` so versions always reflect the latest
-# run. Pinned last via `--section-order lint,build,test,audit,tooling`.
+# Build the shared tooling footer written at the bottom of every Homeboy Results
+# comment. The footer is handed to Homeboy core with `git pr comment
+# --footer-file`, so section merging, idempotency, and footer placement stay in
+# the core PR-comment surface.
 #
 # Writes to stdout so the caller can redirect to a tmp file.
-build_tooling_section() {
+build_tooling_footer() {
   local cli_version="${HOMEBOY_CLI_VERSION:-unknown}"
   local extension_id="${HOMEBOY_EXTENSION_ID:-auto}"
   local extension_source="${HOMEBOY_EXTENSION_SOURCE:-auto}"

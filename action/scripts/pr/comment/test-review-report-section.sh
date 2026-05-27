@@ -36,6 +36,10 @@ trap 'rm -rf "${fake_bin}"' EXIT
 cat > "${fake_bin}/homeboy" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${HOMEBOY_REVIEW_CALL_LOG}"
+if [ "${HOMEBOY_REVIEW_OUTPUT_MODE:-}" = "custom" ]; then
+  printf 'Custom core-rendered markdown without action-side shape coupling\n'
+  exit 0
+fi
 printf ':zap: Scope: **changed files only** (since `origin/main`)\n\n'
 printf '> :wrench: **autofix:** applied — 2 file(s) fixed via lint\n'
 printf '> :warning: **binary-source:** fallback release binary (source build failed)\n\n'
@@ -81,6 +85,11 @@ assert_contains "${SECTION_BODY}" "https://github.com/Extra-Chill/homeboy-action
 assert_not_contains "${SECTION_BODY}" ":x: **audit** _(changed files only)_" "legacy per-command audit block skipped"
 assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--banner autofix=applied — 2 file(s) fixed via lint" "autofix banner passed to core"
 assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--banner binary-source=fallback release binary (source build failed)" "binary-source banner passed to core"
+
+export HOMEBOY_REVIEW_OUTPUT_MODE="custom"
+build_section_body
+assert_contains "${SECTION_BODY}" "Custom core-rendered markdown without action-side shape coupling" "custom core markdown is appended without report-shape checks"
+unset HOMEBOY_REVIEW_OUTPUT_MODE
 
 export EXTRA_ARGS="--format json"
 build_section_body

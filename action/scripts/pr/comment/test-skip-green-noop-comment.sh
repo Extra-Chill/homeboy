@@ -87,20 +87,23 @@ assert_equals "" "$(cat "${HOMEBOY_CALL_LOG}")" "clean run does not call homeboy
 
 output="$(RESULTS='{"audit":"fail"}' run_post_comment)"
 assert_contains "${output}" "PR comment posted successfully" "failed run comments"
-assert_equals "2" "$(wc -l < "${HOMEBOY_CALL_LOG}" | xargs)" "failed run posts section and tooling"
+assert_equals "1" "$(wc -l < "${HOMEBOY_CALL_LOG}" | xargs)" "failed run posts section with tooling footer"
+assert_contains "$(cat "${HOMEBOY_CALL_LOG}")" "--footer-file" "failed run delegates tooling footer to core"
 
 export COMMANDS="refactor"
 export AUTOFIX_ENABLED="true"
 export AUTOFIX_COMMITTED="true"
 output="$(RESULTS='{"refactor":"pass"}' run_post_comment)"
 assert_contains "${output}" "PR comment posted successfully" "autofix-applied run comments"
-assert_equals "2" "$(wc -l < "${HOMEBOY_CALL_LOG}" | xargs)" "autofix-applied run posts section and tooling"
+assert_equals "1" "$(wc -l < "${HOMEBOY_CALL_LOG}" | xargs)" "autofix-applied run posts section with tooling footer"
+assert_contains "$(cat "${HOMEBOY_CALL_LOG}")" "--footer-file" "autofix-applied run delegates tooling footer to core"
 
 export COMMANDS="audit"
 export AUTOFIX_ENABLED="false"
 export AUTOFIX_COMMITTED="false"
 output="$(RESULTS='{"audit":"mystery"}' run_post_comment)"
 assert_contains "${output}" "PR comment posted successfully" "unknown-status run comments"
-assert_equals "2" "$(wc -l < "${HOMEBOY_CALL_LOG}" | xargs)" "unknown-status run posts section and tooling"
+assert_equals "1" "$(wc -l < "${HOMEBOY_CALL_LOG}" | xargs)" "unknown-status run posts section with tooling footer"
+assert_contains "$(cat "${HOMEBOY_CALL_LOG}")" "--footer-file" "unknown-status run delegates tooling footer to core"
 
 printf 'All green no-op PR comment checks passed.\n'

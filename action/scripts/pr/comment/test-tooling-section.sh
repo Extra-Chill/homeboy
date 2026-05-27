@@ -40,12 +40,12 @@ export HOMEBOY_ACTION_REF="feature/footer-test"
 
 source "${ROOT}/scripts/pr/comment/sections.sh"
 
-tooling_section="$(build_tooling_section)"
+tooling_footer="$(build_tooling_footer)"
 
-assert_contains "${tooling_section}" '- Homeboy CLI: `homeboy 1.2.3`' "tooling section includes CLI version"
-assert_contains "${tooling_section}" '- Action: `Extra-Chill/homeboy-action@feature/footer-test`' "tooling section renders actual action ref"
-assert_not_contains "${tooling_section}" 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1' "tooling section does not hardcode v1 footer"
-assert_not_contains "${tooling_section}" 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v2' "tooling section does not hardcode v2 footer"
-assert_not_contains "${tooling_section}" '---' "tooling section has no redundant footer separator"
+assert_contains "${tooling_footer}" '- Homeboy CLI: `homeboy 1.2.3`' "tooling footer includes CLI version"
+assert_contains "${tooling_footer}" '- Action: `Extra-Chill/homeboy-action@feature/footer-test`' "tooling footer renders actual action ref"
+assert_not_contains "${tooling_footer}" 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1' "tooling footer does not hardcode v1 footer"
+assert_not_contains "${tooling_footer}" 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v2' "tooling footer does not hardcode v2 footer"
+assert_not_contains "${tooling_footer}" '---' "tooling footer has no redundant separator"
 
-printf 'All tooling section checks passed.\n'
+printf 'All tooling footer checks passed.\n'
