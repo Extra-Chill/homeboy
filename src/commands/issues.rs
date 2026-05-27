@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use homeboy::core::code_audit::FindingConfidence;
 use homeboy::core::issues::{
@@ -98,6 +99,50 @@ enum IssuesCommand {
         path: Option<String>,
     },
 
+    /// Reconcile all structured command outputs in one CI run.
+    ///
+    /// Discovers `<command>.json` files in an output directory, runs the
+    /// existing per-command reconcile pipeline, and returns aggregate totals
+    /// suitable for GitHub Action consumption.
+    ReconcileRun {
+        /// Default component ID. Per-output component metadata overrides this
+        /// when present in the command JSON.
+        component_id: String,
+
+        /// Directory containing structured command outputs such as
+        /// `audit.json`, `lint.json`, and `test.json`. Defaults to
+        /// HOMEBOY_OUTPUT_DIR when omitted.
+        #[arg(long, value_name = "DIR")]
+        output_dir: Option<String>,
+
+        /// Comma-separated command list to inspect in the output directory.
+        #[arg(long, value_delimiter = ',', default_value = "audit,lint,test")]
+        commands: Vec<String>,
+
+        /// Optional run URL appended to generated issue bodies.
+        #[arg(long, value_name = "URL")]
+        run_url: Option<String>,
+
+        /// Don't refresh the body of closed-not_planned issues with the
+        /// latest finding count.
+        #[arg(long)]
+        no_refresh_closed: bool,
+
+        /// Cap the number of issues fetched from the tracker for dedup
+        /// analysis per command.
+        #[arg(long, default_value_t = 200)]
+        list_limit: usize,
+
+        /// Actually perform the reconcile actions. Default is dry-run.
+        #[arg(long)]
+        apply: bool,
+
+        /// Workspace path to discover the component from a portable
+        /// homeboy.json (CI runners, ad-hoc clones).
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+
     /// Convert native command output into the canonical reconcile input shape.
     BuildFindings {
         /// Native Homeboy command output to normalize. Repeatable as
@@ -115,6 +160,7 @@ enum IssuesCommand {
 #[serde(untagged)]
 pub enum IssuesCommandOutput {
     Reconcile(ReconcileOutput),
+    ReconcileRun(ReconcileRunOutput),
     BuildFindings(ReconcileFindingsInput),
 }
 
@@ -146,6 +192,65 @@ pub struct ReconcileOutputSummary {
     pub skip: usize,
 }
 
+#[derive(Serialize)]
+pub struct ReconcileRunOutput {
+    pub command: String,
+    pub component_id: String,
+    pub output_dir: String,
+    pub applied: bool,
+    pub commands: Vec<ReconcileRunCommandOutput>,
+    pub totals: ReconcileRunTotals,
+}
+
+#[derive(Serialize)]
+pub struct ReconcileRunCommandOutput {
+    pub command: String,
+    pub component_id: String,
+    pub source: String,
+    pub status: ReconcileRunCommandStatus,
+    pub warnings: Vec<String>,
+    #[serde(flatten)]
+    pub issue_totals: ReconcileRunIssueTotals,
+    pub failures: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconcile: Option<ReconcileOutput>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconcileRunCommandStatus {
+    Processed,
+    SkippedMissingOutput,
+    SkippedMalformedOutput,
+    Failed,
+}
+
+#[derive(Default, Serialize)]
+pub struct ReconcileRunTotals {
+    pub commands_processed: usize,
+    #[serde(flatten)]
+    pub issue_totals: ReconcileRunIssueTotals,
+    pub failures: usize,
+}
+
+#[derive(Clone, Copy, Default, Serialize)]
+pub struct ReconcileRunIssueTotals {
+    pub issues_created: usize,
+    pub issues_updated: usize,
+    pub issues_closed: usize,
+}
+
+struct ReconcileCommandRequest {
+    component_id: String,
+    findings: Option<String>,
+    from_output: Vec<(String, String)>,
+    run_url: Option<String>,
+    no_refresh_closed: bool,
+    list_limit: usize,
+    apply: bool,
+    path: Option<String>,
+}
+
 pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCommandOutput> {
     match args.command {
         IssuesCommand::Reconcile {
@@ -159,46 +264,40 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
             apply,
             path,
         } => {
-            let findings_input = read_reconcile_input(findings.as_deref(), &from_output, run_url)?;
-            let command_label = findings_input.command.clone();
-            let groups = into_issue_groups(findings_input, &component_id);
-
-            let config = build_reconcile_config(no_refresh_closed);
-
-            // Default tracker = GitHub against the component's remote.
-            let tracker_impl = GithubTracker::new(component_id.clone()).with_path(path.clone());
-
-            // Fetch existing issues for label-scoping.
-            let existing = tracker_impl.list_issues(&command_label, list_limit)?;
-
-            // Pure decision.
-            let plan = reconcile_scoped(&groups, &existing, &config, &command_label, &component_id);
-            let plan_lines = render_plan_lines(&plan);
-            let plan_summary = summarize_plan(&plan);
-
-            if apply {
-                let result = apply_plan(plan, &tracker_impl)?;
-                let exit = if result.failed_count > 0 { 1 } else { 0 };
-                let output = ReconcileOutput {
-                    component_id,
-                    command: command_label,
-                    applied: true,
-                    plan_summary,
-                    result: Some(result),
-                    plan_lines,
-                };
-                Ok((IssuesCommandOutput::Reconcile(output), exit))
-            } else {
-                let output = ReconcileOutput {
-                    component_id,
-                    command: command_label,
-                    applied: false,
-                    plan_summary,
-                    result: None,
-                    plan_lines,
-                };
-                Ok((IssuesCommandOutput::Reconcile(output), 0))
-            }
+            let (output, exit) = run_reconcile_command(ReconcileCommandRequest {
+                component_id,
+                findings,
+                from_output,
+                run_url,
+                no_refresh_closed,
+                list_limit,
+                apply,
+                path,
+            })?;
+            Ok((IssuesCommandOutput::Reconcile(output), exit))
+        }
+        IssuesCommand::ReconcileRun {
+            component_id,
+            output_dir,
+            commands,
+            run_url,
+            no_refresh_closed,
+            list_limit,
+            apply,
+            path,
+        } => {
+            let output = run_reconcile_run(
+                component_id,
+                output_dir,
+                commands,
+                run_url,
+                no_refresh_closed,
+                list_limit,
+                apply,
+                path,
+            )?;
+            let exit = if output.totals.failures > 0 { 1 } else { 0 };
+            Ok((IssuesCommandOutput::ReconcileRun(output), exit))
         }
         IssuesCommand::BuildFindings {
             from_output,
@@ -207,6 +306,296 @@ pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCom
             let findings_input = build_findings_input(&from_output, run_url)?;
             Ok((IssuesCommandOutput::BuildFindings(findings_input), 0))
         }
+    }
+}
+
+fn run_reconcile_command(
+    request: ReconcileCommandRequest,
+) -> homeboy::core::Result<(ReconcileOutput, i32)> {
+    let findings_input = read_reconcile_input(
+        request.findings.as_deref(),
+        &request.from_output,
+        request.run_url,
+    )?;
+    let command_label = findings_input.command.clone();
+    let groups = into_issue_groups(findings_input, &request.component_id);
+
+    let config = build_reconcile_config(request.no_refresh_closed);
+
+    // Default tracker = GitHub against the component's remote.
+    let tracker_impl = GithubTracker::new(request.component_id.clone()).with_path(request.path);
+
+    // Fetch existing issues for label-scoping.
+    let existing = tracker_impl.list_issues(&command_label, request.list_limit)?;
+
+    // Pure decision.
+    let plan = reconcile_scoped(
+        &groups,
+        &existing,
+        &config,
+        &command_label,
+        &request.component_id,
+    );
+    let plan_lines = render_plan_lines(&plan);
+    let plan_summary = summarize_plan(&plan);
+
+    if request.apply {
+        let result = apply_plan(plan, &tracker_impl)?;
+        let exit = if result.failed_count > 0 { 1 } else { 0 };
+        let output = ReconcileOutput {
+            component_id: request.component_id,
+            command: command_label,
+            applied: true,
+            plan_summary,
+            result: Some(result),
+            plan_lines,
+        };
+        Ok((output, exit))
+    } else {
+        let output = ReconcileOutput {
+            component_id: request.component_id,
+            command: command_label,
+            applied: false,
+            plan_summary,
+            result: None,
+            plan_lines,
+        };
+        Ok((output, 0))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_reconcile_run(
+    component_id: String,
+    output_dir: Option<String>,
+    commands: Vec<String>,
+    run_url: Option<String>,
+    no_refresh_closed: bool,
+    list_limit: usize,
+    apply: bool,
+    path: Option<String>,
+) -> homeboy::core::Result<ReconcileRunOutput> {
+    let output_dir = discover_output_dir(output_dir)?;
+    let commands = normalize_reconcile_run_commands(commands);
+    let mut command_outputs = Vec::new();
+    let mut totals = ReconcileRunTotals::default();
+
+    for command in commands {
+        let source = output_dir.join(format!("{command}.json"));
+        let source_display = source.display().to_string();
+
+        match inspect_reconcile_run_output(&source) {
+            OutputInspection::Missing(reason) => {
+                command_outputs.push(ReconcileRunCommandOutput {
+                    command,
+                    component_id: component_id.clone(),
+                    source: source_display,
+                    status: ReconcileRunCommandStatus::SkippedMissingOutput,
+                    warnings: vec![reason],
+                    issue_totals: ReconcileRunIssueTotals::default(),
+                    failures: 0,
+                    reconcile: None,
+                });
+            }
+            OutputInspection::Malformed(reason) => {
+                totals.failures += 1;
+                command_outputs.push(ReconcileRunCommandOutput {
+                    command,
+                    component_id: component_id.clone(),
+                    source: source_display,
+                    status: ReconcileRunCommandStatus::SkippedMalformedOutput,
+                    warnings: vec![reason],
+                    issue_totals: ReconcileRunIssueTotals::default(),
+                    failures: 1,
+                    reconcile: None,
+                });
+            }
+            OutputInspection::Valid(value) => {
+                let command_component_id =
+                    component_id_from_native_output(&value).unwrap_or_else(|| component_id.clone());
+                let result = run_reconcile_command(ReconcileCommandRequest {
+                    component_id: command_component_id.clone(),
+                    findings: None,
+                    from_output: vec![(command.clone(), source_display.clone())],
+                    run_url: run_url.clone(),
+                    no_refresh_closed,
+                    list_limit,
+                    apply,
+                    path: path.clone(),
+                });
+
+                match result {
+                    Ok((reconcile, exit)) => {
+                        let aggregate = aggregate_reconcile_output(&reconcile);
+                        totals.commands_processed += 1;
+                        totals.issue_totals.issues_created += aggregate.0.issues_created;
+                        totals.issue_totals.issues_updated += aggregate.0.issues_updated;
+                        totals.issue_totals.issues_closed += aggregate.0.issues_closed;
+                        totals.failures += aggregate.1;
+                        if exit != 0 && aggregate.1 == 0 {
+                            totals.failures += 1;
+                        }
+                        command_outputs.push(ReconcileRunCommandOutput {
+                            command,
+                            component_id: command_component_id,
+                            source: source_display,
+                            status: ReconcileRunCommandStatus::Processed,
+                            warnings: Vec::new(),
+                            issue_totals: aggregate.0,
+                            failures: aggregate.1,
+                            reconcile: Some(reconcile),
+                        });
+                    }
+                    Err(err) => {
+                        totals.failures += 1;
+                        command_outputs.push(ReconcileRunCommandOutput {
+                            command,
+                            component_id: command_component_id,
+                            source: source_display,
+                            status: ReconcileRunCommandStatus::Failed,
+                            warnings: vec![err.to_string()],
+                            issue_totals: ReconcileRunIssueTotals::default(),
+                            failures: 1,
+                            reconcile: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ReconcileRunOutput {
+        command: "issues.reconcile-run".to_string(),
+        component_id,
+        output_dir: output_dir.display().to_string(),
+        applied: apply,
+        commands: command_outputs,
+        totals,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile-run helpers
+// ---------------------------------------------------------------------------
+
+enum OutputInspection {
+    Missing(String),
+    Malformed(String),
+    Valid(Value),
+}
+
+fn discover_output_dir(output_dir: Option<String>) -> homeboy::core::Result<PathBuf> {
+    match output_dir.or_else(|| std::env::var("HOMEBOY_OUTPUT_DIR").ok()) {
+        Some(dir) if !dir.trim().is_empty() => Ok(PathBuf::from(dir)),
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
+            "output-dir",
+            "Missing --output-dir and HOMEBOY_OUTPUT_DIR is not set",
+            None,
+            Some(vec![
+                "Pass --output-dir <dir>".to_string(),
+                "Set HOMEBOY_OUTPUT_DIR to the structured output directory".to_string(),
+            ]),
+        )),
+    }
+}
+
+fn normalize_reconcile_run_commands(commands: Vec<String>) -> Vec<String> {
+    commands
+        .into_iter()
+        .flat_map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|command| matches!(command.as_str(), "audit" | "lint" | "test"))
+        .collect()
+}
+
+fn inspect_reconcile_run_output(path: &Path) -> OutputInspection {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return OutputInspection::Missing(format!(
+                "No structured output found at {}",
+                path.display()
+            ))
+        }
+    };
+
+    if metadata.len() == 0 {
+        return OutputInspection::Missing(format!(
+            "Structured output is empty at {}",
+            path.display()
+        ));
+    }
+
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return OutputInspection::Malformed(format!(
+                "Could not read structured output at {}: {}",
+                path.display(),
+                err
+            ))
+        }
+    };
+
+    match serde_json::from_str(&raw) {
+        Ok(value) => OutputInspection::Valid(value),
+        Err(err) => OutputInspection::Malformed(format!(
+            "Structured output is malformed at {}: {}",
+            path.display(),
+            err
+        )),
+    }
+}
+
+fn component_id_from_native_output(value: &Value) -> Option<String> {
+    value
+        .pointer("/data/component_id")
+        .or_else(|| value.pointer("/data/component"))
+        .or_else(|| value.get("component_id"))
+        .or_else(|| value.get("component"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+fn aggregate_reconcile_output(output: &ReconcileOutput) -> (ReconcileRunIssueTotals, usize) {
+    if let Some(result) = &output.result {
+        let mut issue_totals = ReconcileRunIssueTotals::default();
+        let mut failures = 0;
+        for execution in &result.executions {
+            match execution.outcome {
+                homeboy::core::issues::apply::ExecutionOutcome::Filed { .. } => {
+                    issue_totals.issues_created += 1;
+                }
+                homeboy::core::issues::apply::ExecutionOutcome::Updated { .. }
+                | homeboy::core::issues::apply::ExecutionOutcome::UpdatedClosed { .. } => {
+                    issue_totals.issues_updated += 1;
+                }
+                homeboy::core::issues::apply::ExecutionOutcome::Closed { .. }
+                | homeboy::core::issues::apply::ExecutionOutcome::ClosedDuplicate { .. } => {
+                    issue_totals.issues_closed += 1;
+                }
+                homeboy::core::issues::apply::ExecutionOutcome::Failed { .. } => {
+                    failures += 1;
+                }
+                homeboy::core::issues::apply::ExecutionOutcome::Skipped => {}
+            }
+        }
+        (issue_totals, failures)
+    } else {
+        (
+            ReconcileRunIssueTotals {
+                issues_created: output.plan_summary.file_new,
+                issues_updated: output.plan_summary.update + output.plan_summary.update_closed,
+                issues_closed: output.plan_summary.close + output.plan_summary.close_duplicate,
+            },
+            0,
+        )
     }
 }
 
@@ -428,7 +817,6 @@ fn parse_confidence(raw: &str) -> Option<FindingConfidence> {
 fn build_reconcile_config(no_refresh_closed: bool) -> ReconcileConfig {
     ReconcileConfig {
         refresh_closed_not_planned: !no_refresh_closed,
-        ..ReconcileConfig::default()
     }
 }
 
@@ -500,6 +888,12 @@ fn summarize_plan(plan: &ReconcilePlan) -> ReconcileOutputSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::core::issues::apply::{ExecutionOutcome, ReconcileExecution};
+    use homeboy::core::issues::{ReconcilePlan, ReconcileResult};
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parse_findings_accepts_confidence_per_group() {
@@ -527,5 +921,175 @@ mod tests {
         let config = build_reconcile_config(true);
 
         assert!(!config.refresh_closed_not_planned);
+    }
+
+    #[test]
+    fn reconcile_run_discovers_output_dir_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("HOMEBOY_OUTPUT_DIR").ok();
+        std::env::set_var("HOMEBOY_OUTPUT_DIR", "/tmp/homeboy-output");
+
+        let discovered = discover_output_dir(None).unwrap();
+
+        assert_eq!(discovered, PathBuf::from("/tmp/homeboy-output"));
+        match old {
+            Some(value) => std::env::set_var("HOMEBOY_OUTPUT_DIR", value),
+            None => std::env::remove_var("HOMEBOY_OUTPUT_DIR"),
+        }
+    }
+
+    #[test]
+    fn reconcile_run_reports_missing_and_malformed_outputs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("audit.json");
+        let malformed = dir.path().join("lint.json");
+        std::fs::write(&malformed, "not json").expect("write malformed output");
+
+        let missing_result = inspect_reconcile_run_output(&missing);
+        let malformed_result = inspect_reconcile_run_output(&malformed);
+
+        assert!(matches!(missing_result, OutputInspection::Missing(_)));
+        assert!(matches!(malformed_result, OutputInspection::Malformed(_)));
+    }
+
+    #[test]
+    fn reconcile_run_aggregates_applied_execution_totals() {
+        let output = ReconcileOutput {
+            component_id: "homeboy".to_string(),
+            command: "audit".to_string(),
+            applied: true,
+            plan_summary: ReconcileOutputSummary::default(),
+            plan_lines: Vec::new(),
+            result: Some(ReconcileResult {
+                plan: ReconcilePlan::new("homeboy", Vec::new()),
+                executions: vec![
+                    ReconcileExecution {
+                        summary: "file".to_string(),
+                        outcome: ExecutionOutcome::Filed { number: 1 },
+                    },
+                    ReconcileExecution {
+                        summary: "update".to_string(),
+                        outcome: ExecutionOutcome::Updated { number: 2 },
+                    },
+                    ReconcileExecution {
+                        summary: "update closed".to_string(),
+                        outcome: ExecutionOutcome::UpdatedClosed { number: 3 },
+                    },
+                    ReconcileExecution {
+                        summary: "close".to_string(),
+                        outcome: ExecutionOutcome::Closed { number: 4 },
+                    },
+                    ReconcileExecution {
+                        summary: "duplicate".to_string(),
+                        outcome: ExecutionOutcome::ClosedDuplicate { number: 5, keep: 4 },
+                    },
+                    ReconcileExecution {
+                        summary: "failed".to_string(),
+                        outcome: ExecutionOutcome::Failed {
+                            error: "boom".to_string(),
+                        },
+                    },
+                ],
+                counts: Default::default(),
+                failed_count: 1,
+            }),
+        };
+
+        let aggregate = aggregate_reconcile_output(&output);
+
+        assert_eq!(aggregate.0.issues_created, 1);
+        assert_eq!(aggregate.0.issues_updated, 2);
+        assert_eq!(aggregate.0.issues_closed, 2);
+        assert_eq!(aggregate.1, 1);
+    }
+
+    #[test]
+    fn reconcile_run_aggregates_dry_run_plan_totals() {
+        let output = ReconcileOutput {
+            component_id: "homeboy".to_string(),
+            command: "audit".to_string(),
+            applied: false,
+            plan_summary: ReconcileOutputSummary {
+                total_actions: 5,
+                file_new: 1,
+                update: 1,
+                update_closed: 1,
+                close: 1,
+                close_duplicate: 1,
+                skip: 0,
+            },
+            result: None,
+            plan_lines: Vec::new(),
+        };
+
+        let aggregate = aggregate_reconcile_output(&output);
+
+        assert_eq!(aggregate.0.issues_created, 1);
+        assert_eq!(aggregate.0.issues_updated, 2);
+        assert_eq!(aggregate.0.issues_closed, 2);
+        assert_eq!(aggregate.1, 0);
+    }
+
+    #[test]
+    fn reconcile_run_output_serializes_structured_json() {
+        let output = ReconcileRunOutput {
+            command: "issues.reconcile-run".to_string(),
+            component_id: "homeboy".to_string(),
+            output_dir: "/tmp/homeboy-output".to_string(),
+            applied: true,
+            commands: vec![ReconcileRunCommandOutput {
+                command: "audit".to_string(),
+                component_id: "homeboy".to_string(),
+                source: "/tmp/homeboy-output/audit.json".to_string(),
+                status: ReconcileRunCommandStatus::Processed,
+                warnings: Vec::new(),
+                issue_totals: ReconcileRunIssueTotals {
+                    issues_created: 1,
+                    issues_updated: 2,
+                    issues_closed: 3,
+                },
+                failures: 0,
+                reconcile: None,
+            }],
+            totals: ReconcileRunTotals {
+                commands_processed: 1,
+                issue_totals: ReconcileRunIssueTotals {
+                    issues_created: 1,
+                    issues_updated: 2,
+                    issues_closed: 3,
+                },
+                failures: 0,
+            },
+        };
+
+        let value = serde_json::to_value(output).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "command": "issues.reconcile-run",
+                "component_id": "homeboy",
+                "output_dir": "/tmp/homeboy-output",
+                "applied": true,
+                "commands": [{
+                    "command": "audit",
+                    "component_id": "homeboy",
+                    "source": "/tmp/homeboy-output/audit.json",
+                    "status": "processed",
+                    "warnings": [],
+                    "issues_created": 1,
+                    "issues_updated": 2,
+                    "issues_closed": 3,
+                    "failures": 0
+                }],
+                "totals": {
+                    "commands_processed": 1,
+                    "issues_created": 1,
+                    "issues_updated": 2,
+                    "issues_closed": 3,
+                    "failures": 0
+                }
+            })
+        );
     }
 }
