@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.6] - 2026-05-27
+
+### Fixed
+- format only scoped files
+
 ## [2.102.5] - 2026-05-27
 
 ### Fixed
