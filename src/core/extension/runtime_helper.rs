@@ -10,6 +10,7 @@ mod assets;
 pub const RUNNER_STEPS_ENV: &str = "HOMEBOY_RUNTIME_RUNNER_STEPS";
 pub const FAILURE_TRAP_ENV: &str = "HOMEBOY_RUNTIME_FAILURE_TRAP";
 pub const WRITE_TEST_RESULTS_ENV: &str = "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS";
+pub const SIDECAR_WRITER_ENV: &str = "HOMEBOY_RUNTIME_SIDECAR_WRITER";
 pub const RESOLVE_CONTEXT_ENV: &str = "HOMEBOY_RUNTIME_RESOLVE_CONTEXT";
 pub const BENCH_HELPER_SH_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_SH";
 pub const BENCH_HELPER_JS_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_JS";
@@ -39,6 +40,12 @@ const HELPERS: &[RuntimeHelper] = &[
         filename: "write-test-results.sh",
         content: assets::WRITE_TEST_RESULTS_SH,
         env_var: WRITE_TEST_RESULTS_ENV,
+        legacy_fallback: false,
+    },
+    RuntimeHelper {
+        filename: "sidecar-writer.sh",
+        content: assets::SIDECAR_WRITER_SH,
+        env_var: SIDECAR_WRITER_ENV,
         legacy_fallback: false,
     },
     RuntimeHelper {
