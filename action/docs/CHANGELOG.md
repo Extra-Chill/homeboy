@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.4] - 2026-05-27
+
+### Fixed
+- stage reported autofix files
+
 ## [2.7.3] - 2026-05-27
 
 ### Fixed
