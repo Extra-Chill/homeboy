@@ -179,8 +179,6 @@ pub enum CommandJsonFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutputContractKind {
     JsonEnvelope,
-    LegacyUntaggedWithDiscriminators,
-    LegacyUntaggedWithGoldenFixtures,
     RawOnly,
 }
 
@@ -273,7 +271,7 @@ impl Commands {
                     CommandResponseMode::Json
                 },
                 output_file_mode,
-                CommandOutputContractKind::LegacyUntaggedWithDiscriminators,
+                CommandOutputContractKind::JsonEnvelope,
             ),
             Commands::Report(args) if report::is_markdown_mode(args) => workspace_descriptor(
                 CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
@@ -300,7 +298,7 @@ impl Commands {
                 args.is_run_command(),
                 args.lab_offload_writes_local_state()
                     .then_some("--baseline/--ratchet"),
-                CommandOutputContractKind::LegacyUntaggedWithGoldenFixtures,
+                CommandOutputContractKind::JsonEnvelope,
             ),
             Commands::Lint(args) => quality_json_descriptor(
                 output_file_mode,
@@ -355,7 +353,7 @@ impl Commands {
                     "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.",
                 ),
                 lab_offload_mutation_flag: None,
-                output_contract: CommandOutputContractKind::LegacyUntaggedWithDiscriminators,
+                output_contract: CommandOutputContractKind::JsonEnvelope,
             },
             Commands::Status(_)
             | Commands::Ci(_)
@@ -493,155 +491,148 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
     PublicOutputVariantContract {
         command: "bench",
         variant: "single",
-        discriminator_field: None,
-        discriminator_value: None,
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("single"),
         golden_fixture: Some("bench_contract.json"),
     },
     PublicOutputVariantContract {
         command: "bench",
         variant: "comparison",
-        discriminator_field: Some("comparison"),
-        discriminator_value: Some("cross_rig"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("comparison"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "bench",
         variant: "comparison_summary",
-        discriminator_field: Some("comparison+summary_only"),
-        discriminator_value: Some("cross_rig+true"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("comparison_summary"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "bench",
         variant: "list",
-        discriminator_field: None,
-        discriminator_value: None,
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("list"),
         golden_fixture: Some("bench_contract.json"),
     },
     PublicOutputVariantContract {
         command: "runs",
         variant: "list",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("runs.list"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("list"),
         golden_fixture: Some("runs_contract.json"),
     },
     PublicOutputVariantContract {
         command: "runs",
         variant: "show",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("runs.show"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("show"),
         golden_fixture: Some("runs_contract.json"),
     },
     PublicOutputVariantContract {
         command: "runs",
         variant: "artifacts",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("runs.artifacts"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("artifacts"),
         golden_fixture: Some("runs_contract.json"),
     },
     PublicOutputVariantContract {
         command: "runs",
         variant: "query",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("runs.query"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("query"),
         golden_fixture: Some("runs_contract.json"),
     },
     PublicOutputVariantContract {
         command: "runs",
         variant: "drift",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("runs.drift"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("drift"),
         golden_fixture: Some("runs_contract.json"),
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "list",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.list"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("list"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "show",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.show"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("show"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "up",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.up"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("up"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "check",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.check"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("check"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "down",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.down"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("down"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "repair",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.repair"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("repair"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "sync",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.sync"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("sync"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "status",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.status"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("status"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "install",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.install"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("install"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "update",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.update"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("update"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
-        variant: "sources_list",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.sources.list"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
-        command: "rig",
-        variant: "sources_remove",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.sources.remove"),
+        variant: "sources",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("sources"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",
         variant: "app",
-        discriminator_field: Some("command"),
-        discriminator_value: Some("rig.app.*"),
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("app"),
         golden_fixture: None,
     },
 ];
@@ -874,7 +865,7 @@ mod tests {
         assert!(bench_descriptor.supports_lab_runner);
         assert_eq!(
             bench_descriptor.output_contract,
-            CommandOutputContractKind::LegacyUntaggedWithGoldenFixtures
+            CommandOutputContractKind::JsonEnvelope
         );
 
         let runs = parsed_command(&["homeboy", "runs", "list"]);
@@ -883,7 +874,7 @@ mod tests {
         assert_eq!(runs_descriptor.response_mode, CommandResponseMode::Json);
         assert_eq!(
             runs_descriptor.output_contract,
-            CommandOutputContractKind::LegacyUntaggedWithDiscriminators
+            CommandOutputContractKind::JsonEnvelope
         );
 
         let list_descriptor = Commands::List.descriptor(false);

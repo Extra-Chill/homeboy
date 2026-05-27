@@ -1433,12 +1433,7 @@ fn filter_handles_mixed() {
 }
 
 #[test]
-fn bench_output_single_serializes_without_wrapper_key() {
-    // Backcompat: single-rig and bare-bench output must serialize
-    // identically to the pre-cross-rig shape (no top-level
-    // discriminator field). The `untagged` enum representation
-    // gives us that for free, but pin it with a test so a future
-    // refactor can't quietly break consumers.
+fn bench_output_single_serializes_with_tagged_payload() {
     let single = BenchCommandOutput {
         passed: true,
         status: "passed".to_string(),
@@ -1457,20 +1452,32 @@ fn bench_output_single_serializes_without_wrapper_key() {
         ci_context: None,
     };
     let value = serde_json::to_value(BenchOutput::Single(single)).unwrap();
-    assert!(value.get("comparison").is_none());
-    assert_eq!(value.get("passed"), Some(&serde_json::Value::Bool(true)));
     assert_eq!(
-        value.get("component"),
+        value.get("variant"),
+        Some(&serde_json::Value::String("single".to_string()))
+    );
+    let payload = value
+        .get("payload")
+        .expect("single bench output has payload");
+    assert_eq!(payload.get("passed"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(
+        payload.get("component"),
         Some(&serde_json::Value::String("studio".to_string()))
     );
 }
 
 #[test]
-fn bench_output_comparison_serializes_with_discriminator() {
+fn bench_output_comparison_serializes_with_tagged_payload() {
     let (cmp, _) = aggregate_comparison("studio".to_string(), 10, Vec::new());
     let value = serde_json::to_value(BenchOutput::Comparison(cmp)).unwrap();
     assert_eq!(
-        value.get("comparison"),
+        value.get("variant"),
+        Some(&serde_json::Value::String("comparison".to_string()))
+    );
+    assert_eq!(
+        value
+            .get("payload")
+            .and_then(|payload| payload.get("comparison")),
         Some(&serde_json::Value::String("cross_rig".to_string()))
     );
 }

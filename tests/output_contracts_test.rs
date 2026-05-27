@@ -252,7 +252,7 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
         "bench",
         vec![
             variant_contract(
-                "single_legacy",
+                "single",
                 json!({
                     "passed": true,
                     "status": "passed",
@@ -287,7 +287,7 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
                 }),
             ),
             variant_contract(
-                "list_legacy",
+                "list",
                 json!({
                     "component": "homeboy",
                     "component_id": "homeboy",
@@ -340,7 +340,13 @@ fn typed_output_value<T: Serialize>(output: T) -> Value {
 }
 
 fn variant_contract(name: &'static str, value: Value) -> VariantContract {
-    VariantContract { name, value }
+    VariantContract {
+        name,
+        value: json!({
+            "variant": name,
+            "payload": value,
+        }),
+    }
 }
 
 fn assert_unique_variant_signatures(group: &str, contracts: Vec<VariantContract>) {
@@ -358,6 +364,10 @@ fn assert_unique_variant_signatures(group: &str, contracts: Vec<VariantContract>
 }
 
 fn variant_signature(value: &Value) -> String {
+    if let Some(variant) = value.get("variant").and_then(Value::as_str) {
+        return format!("variant={variant}");
+    }
+
     if let Some(command) = value.get("command").and_then(Value::as_str) {
         return format!("command={command}");
     }

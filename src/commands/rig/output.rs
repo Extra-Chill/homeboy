@@ -8,11 +8,9 @@ use serde::Serialize;
 use crate::commands::runs::RunsOutput;
 use homeboy::core::rig::{self, RigResourcesSpec, RigSpec};
 
-/// Tagged union of every rig command's output. `untagged` so each variant
-/// serializes to its own shape — consumers discriminate on the `command`
-/// field inside the shape.
+/// Tagged union of every rig command's output.
 #[derive(Serialize)]
-#[serde(untagged)]
+#[serde(tag = "variant", content = "payload", rename_all = "snake_case")]
 pub enum RigCommandOutput {
     List(RigListOutput),
     Show(RigShowOutput),
@@ -153,7 +151,7 @@ pub struct RigSourcesOutput {
 }
 
 #[derive(Serialize)]
-#[serde(untagged)]
+#[serde(tag = "variant", content = "payload", rename_all = "snake_case")]
 pub enum RigSourcesReport {
     List(rig::RigSourceListResult),
     Remove(rig::RigSourceRemoveResult),
