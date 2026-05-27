@@ -109,7 +109,7 @@ fn run_add_from_audit(source: &str, write: bool) -> CmdResult<RefactorOutput> {
         source.to_string()
     };
 
-    let json_content = crate::commands::merge_json_sources(Some(&effective_source), &[])?;
+    let json_content = crate::commands::merge_json_sources(Some(&effective_source))?;
     let audit: CodeAuditResult = if let Some(data) = json_content.get("data") {
         serde_json::from_value(data.clone())
     } else {

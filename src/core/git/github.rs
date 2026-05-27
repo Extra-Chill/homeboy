@@ -590,7 +590,7 @@ pub(super) fn resolve_component_github(
                 ),
                 None,
                 Some(vec![
-                    "Set it: homeboy component set <id> -- --remote_url https://github.com/<owner>/<repo>".to_string(),
+                    "Set it: homeboy component set <id> --json '{\"remote_url\":\"https://github.com/<owner>/<repo>\"}'".to_string(),
                     "Or configure a git remote in the component's local_path".to_string(),
                     "Or pass --path <workspace> to discover from a portable homeboy.json".to_string(),
                 ]),

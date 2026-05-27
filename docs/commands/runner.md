@@ -166,11 +166,12 @@ homeboy runner show <id>
 
 ```sh
 homeboy runner set <id> --json <JSON>
-homeboy runner set <id> workspace_root=/srv/homeboy
-homeboy runner set <id> -- --concurrency_limit 4
+homeboy runner set <id> --base64 <BASE64_JSON>
+homeboy runner set <id> --json '{"workspace_root":"/srv/homeboy","concurrency_limit":4}'
 ```
 
 Updates a runner by merging a JSON object into the runner config. SSH runner settings live under `servers/<id>.json` as the server's `runner` capability; local runners live under `runners/<id>.json`.
+Arbitrary runner updates must use `--json` or `--base64`; positional `key=value` and trailing arbitrary `--key value` updates are not accepted.
 
 ### `remove`
 

@@ -838,6 +838,69 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_set_commands_require_canonical_update_inputs() {
+        for args in [
+            [
+                "homeboy",
+                "server",
+                "set",
+                "sandbox",
+                "auth.mode=key_plus_password_controlmaster",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "project",
+                "set",
+                "sandbox",
+                r#"{"base_path":"/srv/site"}"#,
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "runner",
+                "set",
+                "sandbox",
+                "--",
+                "--concurrency_limit",
+                "4",
+            ]
+            .as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "dynamic set compatibility form should not parse: {args:?}"
+            );
+        }
+
+        for args in [
+            [
+                "homeboy",
+                "server",
+                "set",
+                "sandbox",
+                "--json",
+                r#"{"host":"example.com"}"#,
+            ]
+            .as_slice(),
+            ["homeboy", "project", "set", "sandbox", "--base64", "e30="].as_slice(),
+            [
+                "homeboy",
+                "component",
+                "set",
+                "sandbox",
+                "--changelog-target",
+                "CHANGELOG.md",
+            ]
+            .as_slice(),
+        ] {
+            Cli::try_parse_from(args).unwrap_or_else(|error| {
+                panic!("canonical dynamic set form failed to parse: {args:?}\n{error}")
+            });
+        }
+    }
+
+    #[test]
     fn test_response_mode() {
         assert_eq!(
             parsed_command(&["homeboy", "status"]).response_mode(false),

@@ -1,6 +1,6 @@
 use base64::Engine;
 use clap::Args;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 pub type CmdResult<T> = homeboy::core::Result<(T, i32)>;
 
@@ -49,60 +49,27 @@ pub fn parse_key_json(s: &str) -> Result<(String, serde_json::Value), String> {
 pub struct GlobalArgs {}
 
 /// Shared arguments for dynamic set commands.
-///
-/// Allows arbitrary `--key value` pairs that map directly to JSON keys.
-/// Also accepts positional `key=value` pairs for copy-pasteable remediation
-/// commands. Flag names become JSON keys with no case conversion.
-///
-/// # Combining --json with dynamic flags
-///
-/// When using both `--json` and dynamic `--key value` flags, you MUST add
-/// an explicit `--` separator before the dynamic flags:
-///
-/// ```sh
-/// # Correct: explicit separator before dynamic flags
-/// homeboy component set my-component --json '{"type":"plugin"}' -- --extract_command "unzip -o artifact.zip"
-///
-/// # Incorrect: will fail with "unexpected argument"
-/// homeboy component set my-component --json '{"type":"plugin"}' --extract_command "unzip -o artifact.zip"
-/// ```
-///
-/// This is required because without the positional JSON spec, the parser
-/// cannot determine where dynamic trailing arguments begin.
 #[derive(Args, Default, Debug)]
 pub struct DynamicSetArgs {
     /// Entity ID (optional if provided in JSON body)
     pub id: Option<String>,
 
-    /// JSON spec (positional, supports @file and - for stdin)
-    pub spec: Option<String>,
-
-    /// Explicit JSON spec (takes precedence over positional)
+    /// JSON object to merge into the entity (supports @file and - for stdin)
     #[arg(long, value_name = "JSON")]
     pub json: Option<String>,
 
-    /// Base64-encoded JSON spec (bypasses shell escaping issues)
+    /// Base64-encoded JSON object (bypasses shell escaping issues)
     #[arg(long, value_name = "BASE64")]
     pub base64: Option<String>,
 
     /// Replace these fields instead of merging arrays
     #[arg(long, value_name = "FIELD")]
     pub replace: Vec<String>,
-
-    /// Dynamic key=value flags (e.g., --remote_path /var/www).
-    /// When combined with --json, add '--' separator first:
-    /// `homeboy component set ID --json '{}' -- --key value`
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    pub extra: Vec<String>,
 }
 
 impl DynamicSetArgs {
-    /// Get the JSON spec from --base64, --json, or positional argument.
-    /// Priority: --base64 > --json > positional spec
-    ///
-    /// If the positional `spec` looks like a flag (starts with `--`), it was
-    /// misrouted by clap after a `--` separator and is not a JSON spec.
-    /// Use `effective_extra()` to recover it as a key-value flag.
+    /// Get the JSON spec from --base64 or --json.
+    /// Priority: --base64 > --json.
     pub fn json_spec(&self) -> Result<Option<String>, homeboy::core::Error> {
         // Base64 takes priority - decode and return
         if let Some(b64) = &self.base64 {
@@ -126,137 +93,17 @@ impl DynamicSetArgs {
             })?;
             return Ok(Some(decoded_str));
         }
-        // If spec looks like a dynamic set argument, it was misrouted — not a JSON spec
-        if let Some(ref s) = self.spec {
-            if is_dynamic_set_arg(s) {
-                return Ok(self.json.clone());
-            }
-        }
-        Ok(self.json.clone().or_else(|| self.spec.clone()))
+        Ok(self.json.clone())
     }
-
-    /// Return the full list of trailing key-value args, including any flag
-    /// that was misrouted into the `spec` positional by clap.
-    ///
-    /// When `--` separates trailing args, clap assigns the first positional
-    /// after the ID to `spec`. If that value is a dynamic set argument, it
-    /// belongs with `extra`.
-    pub fn effective_extra(&self) -> Vec<String> {
-        match &self.spec {
-            Some(s) if is_dynamic_set_arg(s) => {
-                let mut combined = vec![s.clone()];
-                combined.extend(self.extra.iter().cloned());
-                combined
-            }
-            _ => self.extra.clone(),
-        }
-    }
-}
-
-fn is_dynamic_set_arg(arg: &str) -> bool {
-    arg.starts_with("--") || parse_key_value_arg(arg).is_some()
 }
 
 // ============================================================================
 // JSON Input Parsing (CLI layer)
 // ============================================================================
 
-/// Parse --key value and key=value pairs into a JSON object.
-fn parse_kv_flags(extra: &[String]) -> homeboy::core::Result<Value> {
-    let mut obj = Map::new();
-    let mut iter = extra.iter().peekable();
-
-    while let Some(arg) = iter.next() {
-        if let Some((key, value)) = parse_key_value_arg(arg) {
-            insert_path_value(&mut obj, &key, parse_value(&value));
-        } else if let Some(key) = arg.strip_prefix("--") {
-            let value = iter.next().ok_or_else(|| {
-                homeboy::core::Error::validation_invalid_argument(
-                    key,
-                    format!("Missing value for flag --{}", key),
-                    None,
-                    None,
-                )
-            })?;
-            let parsed = parse_value(value);
-            insert_path_value(&mut obj, key, parsed);
-        }
-    }
-
-    Ok(Value::Object(obj))
-}
-
-fn parse_key_value_arg(arg: &str) -> Option<(String, String)> {
-    let (key, value) = arg.split_once('=')?;
-    if key.is_empty() || key.starts_with('-') {
-        return None;
-    }
-    Some((key.to_string(), value.to_string()))
-}
-
-fn insert_path_value(obj: &mut Map<String, Value>, key: &str, value: Value) {
-    let mut parts = key.split('.').filter(|part| !part.is_empty()).peekable();
-    let Some(first) = parts.next() else {
-        return;
-    };
-
-    if parts.peek().is_none() {
-        obj.insert(first.to_string(), value);
-        return;
-    }
-
-    let mut current = obj
-        .entry(first.to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-
-    while let Some(part) = parts.next() {
-        if parts.peek().is_none() {
-            if let Value::Object(map) = current {
-                map.insert(part.to_string(), value);
-            }
-            return;
-        }
-
-        if !current.is_object() {
-            *current = Value::Object(Map::new());
-        }
-        let Value::Object(map) = current else {
-            return;
-        };
-        current = map
-            .entry(part.to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-    }
-}
-
-/// Parse a string value into appropriate JSON type.
-/// Order: JSON literal → bool → number → string
-fn parse_value(s: &str) -> Value {
-    // Try JSON first (handles arrays, objects, quoted strings)
-    if let Ok(v) = serde_json::from_str(s) {
-        return v;
-    }
-    // Try bool
-    if s == "true" {
-        return json!(true);
-    }
-    if s == "false" {
-        return json!(false);
-    }
-    // Try number
-    if let Ok(n) = s.parse::<i64>() {
-        return json!(n);
-    }
-    if let Ok(n) = s.parse::<f64>() {
-        return json!(n);
-    }
-    // Default to string
-    json!(s)
-}
-
-/// Merge JSON spec with --key value flags. Flags override spec values.
-pub fn merge_json_sources(spec: Option<&str>, extra: &[String]) -> homeboy::core::Result<Value> {
-    let mut base = if let Some(spec) = spec {
+/// Parse the canonical JSON spec for a set-style update.
+pub fn merge_json_sources(spec: Option<&str>) -> homeboy::core::Result<Value> {
+    let base = if let Some(spec) = spec {
         let raw = homeboy::core::config::read_json_spec_to_string(spec)?;
         serde_json::from_str(&raw).map_err(|e| {
             let hint = if raw.contains('\\') {
@@ -283,15 +130,6 @@ pub fn merge_json_sources(spec: Option<&str>, extra: &[String]) -> homeboy::core
         Value::Object(Map::new())
     };
 
-    if !extra.is_empty() {
-        let flags = parse_kv_flags(extra)?;
-        if let (Value::Object(base_obj), Value::Object(flags_obj)) = (&mut base, flags) {
-            for (k, v) in flags_obj {
-                base_obj.insert(k, v);
-            }
-        }
-    }
-
     Ok(base)
 }
 
@@ -300,14 +138,13 @@ pub fn merge_json_sources(spec: Option<&str>, extra: &[String]) -> homeboy::core
 // ============================================================================
 
 /// Merge JSON sources from `DynamicSetArgs` into a single JSON value.
-/// Returns `None` if no JSON/base64/key-value input was provided.
+/// Returns `None` if no JSON/base64 input was provided.
 pub fn merge_dynamic_args(args: &DynamicSetArgs) -> homeboy::core::Result<Option<Value>> {
     let spec = args.json_spec()?;
-    let extra = args.effective_extra();
-    if spec.is_none() && extra.is_empty() {
+    if spec.is_none() {
         return Ok(None);
     }
-    Ok(Some(merge_json_sources(spec.as_deref(), &extra)?))
+    Ok(Some(merge_json_sources(spec.as_deref())?))
 }
 
 /// Serialize a merged JSON value to a string and compute the full replace
@@ -389,10 +226,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn merge_dynamic_args_accepts_positional_key_value_pair() {
+    fn merge_dynamic_args_accepts_explicit_json() {
         let args = DynamicSetArgs {
             id: Some("sandbox".to_string()),
-            spec: Some("auth.mode=key_plus_password_controlmaster".to_string()),
+            json: Some(r#"{"auth":{"mode":"key_plus_password_controlmaster"}}"#.to_string()),
             ..Default::default()
         };
 
@@ -405,11 +242,12 @@ mod tests {
     }
 
     #[test]
-    fn merge_dynamic_args_accepts_dotted_flag_path() {
+    fn merge_dynamic_args_accepts_base64_json() {
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(r#"{"auth":{"mode":"key_plus_password_controlmaster"}}"#);
         let args = DynamicSetArgs {
             id: Some("sandbox".to_string()),
-            spec: Some("--auth.mode".to_string()),
-            extra: vec!["key_plus_password_controlmaster".to_string()],
+            base64: Some(encoded),
             ..Default::default()
         };
 

@@ -71,8 +71,7 @@ enum ComponentCommand {
     /// Update component configuration fields
     ///
     /// Supports dedicated flags for common fields (e.g., --local-path, --changelog-target)
-    /// as well as --json for arbitrary updates. When combining --json with dynamic
-    /// trailing flags, use '--' separator.
+    /// as well as --json/--base64 for arbitrary object updates.
     #[command(visible_aliases = ["edit", "merge"])]
     Set {
         #[command(flatten)]
@@ -763,13 +762,16 @@ fn set(
     extensions: Vec<String>,
 ) -> CmdResult<ComponentOutput> {
     // Check if there's any input at all
-    let has_dynamic = args.json_spec()?.is_some() || !args.effective_extra().is_empty();
+    let has_dynamic = args.json_spec()?.is_some();
     if !has_dynamic && !flags.has_any() && version_targets.is_empty() && extensions.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "spec",
-            "Provide a flag (e.g., --local-path), --json spec, --base64, --key value, --version-target, or --extension",
+            "Provide a dedicated flag (e.g., --local-path), --json '<object>', --base64 <encoded-json>, --version-target, or --extension",
             None,
-            None,
+            Some(vec![
+                "Arbitrary field updates must use --json or --base64.".to_string(),
+                "Example: homeboy component set <id> --json '{\"remote_path\":\"wp-content/plugins/plugin\"}'".to_string(),
+            ]),
         ));
     }
 
