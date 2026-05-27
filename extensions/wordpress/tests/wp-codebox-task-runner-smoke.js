@@ -15,8 +15,8 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
-function createFixtureWpCodebox(root) {
-  const binPath = path.join(root, 'fixture-wp-codebox.cjs');
+function createFixtureWpCodebox(root, mode = 0o755) {
+  const binPath = path.join(root, 'fixture-wp-codebox.js');
   fs.writeFileSync(binPath, `#!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
@@ -34,7 +34,7 @@ process.stdout.write(JSON.stringify({
   },
 }));
 `);
-  fs.chmodSync(binPath, 0o755);
+  fs.chmodSync(binPath, mode);
   return binPath;
 }
 
@@ -49,7 +49,7 @@ try {
     group_key: 'PHPCS Formatting/Auto Fix!',
     provider: 'opencode',
     model: 'opencode-go/kimi-k2.6',
-    provider_plugin_paths: ['/plugins/ai-provider-for-opencode'],
+    provider_plugin_paths: ['/plugins/ai-provider-for-opencode@fix-opencode-tool-choice'],
     secret_env: ['OPENCODE_API_KEY'],
     orchestrator: {
       id: 'homeboy-extensions/audit-wp-codebox-fanout',
@@ -128,6 +128,30 @@ try {
   assert.equal(task.sandbox_session_id, 'homeboy-audit-fixture-session');
   assert.equal(task.orchestrator.issue_url, 'https://github.com/Extra-Chill/homeboy-extensions/issues/775');
   assert.equal(task.audit_findings[0].id, 'finding-1');
+
+  const nonExecutableCapturePath = path.join(root, 'capture-non-executable.json');
+  const nonExecutableFixture = createFixtureWpCodebox(root, 0o644);
+  const nonExecutableResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin',
+    nonExecutableFixture,
+    '--agents-api',
+    '/components/agents-api',
+    '--data-machine',
+    '/components/data-machine',
+    '--data-machine-code',
+    '/components/data-machine-code',
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(request),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: nonExecutableCapturePath,
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(nonExecutableResult.status, 0, nonExecutableResult.stderr || nonExecutableResult.stdout);
+  assert.equal(readJson(nonExecutableCapturePath).argv[0], 'recipe-run');
 
   console.log('Homeboy WP Codebox task runner smoke passed');
 } finally {
