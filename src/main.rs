@@ -174,7 +174,8 @@ fn main() -> std::process::ExitCode {
         Ok(Some(selection)) => {
             if matches!(selection.source, LabRunnerSelectionSource::Default) {
                 eprintln!(
-                    "Lab offload: auto-selected default runner `{}`.",
+                    "Lab offload: auto-selected default {} runner `{}`.",
+                    selection.mode.label(),
                     selection.runner_id
                 );
             }
@@ -199,6 +200,7 @@ fn main() -> std::process::ExitCode {
                                 LabRunnerSelectionSource::Default => "automatic",
                             },
                             Some(&selection.runner_id),
+                            Some(selection.mode.metadata_value()),
                             "fallback",
                             None,
                             Some(&reason),
@@ -218,6 +220,7 @@ fn main() -> std::process::ExitCode {
                 homeboy::core::runner::capture_lab_offload_metadata(
                     homeboy::core::runner::lab_offload_metadata(
                         "automatic",
+                        None,
                         None,
                         "skipped",
                         None,
@@ -309,6 +312,7 @@ enum LabRunnerSelectionSource {
 struct LabRunnerSelection {
     runner_id: String,
     source: LabRunnerSelectionSource,
+    mode: homeboy::core::runner::RunnerTunnelMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,10 +331,10 @@ fn prepare_lab_runner_for_offload(
     if runner.kind != homeboy::core::runner::RunnerKind::Ssh {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "runner",
-            "Lab offload requires a remote SSH runner; local runners would execute on this machine",
+            "Lab offload requires a remote direct SSH or reverse-connected runner; local runners would execute on this machine",
             Some(runner.id),
             Some(vec![
-                "Register an SSH runner before using Lab offload.".to_string()
+                "Register a direct SSH runner or configure a reverse-connected runner before using Lab offload.".to_string()
             ]),
         ));
     }
@@ -468,11 +472,37 @@ fn prepare_lab_runner_for_offload_with(
 ) -> homeboy::core::Result<LabRunnerPreparation> {
     let status = status_fn(&selection.runner_id)?;
     if status.connected {
+        eprintln!(
+            "Lab offload: runner `{}` is connected via {} mode.",
+            selection.runner_id,
+            status_tunnel_mode(&status).label()
+        );
         return Ok(LabRunnerPreparation::Ready);
     }
 
+    if status_tunnel_mode(&status) == homeboy::core::runner::RunnerTunnelMode::Reverse {
+        let reason = format!(
+            "reverse-connected runner `{}` is not currently connected",
+            selection.runner_id
+        );
+        return match selection.source {
+            LabRunnerSelectionSource::Default => Ok(LabRunnerPreparation::FallBackLocal { reason }),
+            LabRunnerSelectionSource::Explicit => {
+                Err(homeboy::core::Error::validation_invalid_argument(
+                    "runner",
+                    format!("Lab offload requires reverse runner `{}` to have an active reverse session", selection.runner_id),
+                    Some(selection.runner_id.clone()),
+                    Some(vec![
+                        "Start the reverse runner session on the Lab machine before using --runner.".to_string(),
+                        "Use --force-hot to run the command locally instead of offloading.".to_string(),
+                    ]),
+                ))
+            }
+        };
+    }
+
     eprintln!(
-        "Lab offload: runner `{}` is not connected; attempting connection.",
+        "Lab offload: direct SSH runner `{}` is not connected; attempting connection.",
         selection.runner_id
     );
     let (report, _) = connect_fn(&selection.runner_id)?;
@@ -545,6 +575,7 @@ fn resolve_lab_runner_selection_from_default(
         return Ok(Some(LabRunnerSelection {
             runner_id: runner_id.to_string(),
             source: LabRunnerSelectionSource::Explicit,
+            mode: runner_status_tunnel_mode(runner_id),
         }));
     }
 
@@ -552,10 +583,31 @@ fn resolve_lab_runner_selection_from_default(
         return Ok(None);
     }
 
-    Ok(default_runner.map(|runner_id| LabRunnerSelection {
-        runner_id,
-        source: LabRunnerSelectionSource::Default,
-    }))
+    default_runner
+        .map(|runner_id| {
+            Ok(LabRunnerSelection {
+                mode: runner_status_tunnel_mode(&runner_id),
+                runner_id,
+                source: LabRunnerSelectionSource::Default,
+            })
+        })
+        .transpose()
+}
+
+fn runner_status_tunnel_mode(runner_id: &str) -> homeboy::core::runner::RunnerTunnelMode {
+    homeboy::core::runner::status(runner_id).map_or(
+        homeboy::core::runner::RunnerTunnelMode::DirectSsh,
+        |status| status_tunnel_mode(&status),
+    )
+}
+
+fn status_tunnel_mode(
+    status: &homeboy::core::runner::RunnerStatusReport,
+) -> homeboy::core::runner::RunnerTunnelMode {
+    status.session.as_ref().map_or(
+        homeboy::core::runner::RunnerTunnelMode::DirectSsh,
+        |session| session.mode.clone(),
+    )
 }
 
 fn exit_code_to_u8(code: i32) -> u8 {
@@ -614,26 +666,29 @@ fn run_lab_offload_inner(
     capture_patch: bool,
 ) -> homeboy::core::Result<i32> {
     let runner = homeboy::core::runner::load(runner_id)?;
+    let status = homeboy::core::runner::status(runner_id)?;
     if runner.kind != homeboy::core::runner::RunnerKind::Ssh {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "runner",
-            "Lab offload requires a remote SSH runner; local runners would execute on this machine",
+            "Lab offload requires a remote direct SSH or reverse-connected runner; local runners would execute on this machine",
             Some(runner.id),
             Some(vec![
-                "Register an SSH runner and run `homeboy runner connect <runner-id>` first."
+                "Register a direct SSH runner or configure a reverse-connected runner first."
                     .to_string(),
             ]),
         ));
     }
 
-    let status = homeboy::core::runner::status(runner_id)?;
     if !status.connected {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "runner",
-            "Lab offload requires a connected runner daemon",
+            format!(
+                "Lab offload requires a connected {} runner daemon",
+                status_tunnel_mode(&status).label()
+            ),
             Some(runner_id.to_string()),
             Some(vec![format!(
-                "Run `homeboy runner connect {runner_id}` before using --runner."
+                "Connect runner `{runner_id}` before using --runner."
             )]),
         ));
     }
@@ -708,6 +763,7 @@ fn run_lab_offload_inner(
             LabRunnerSelectionSource::Default => "automatic",
         },
         Some(runner_id),
+        Some(status_tunnel_mode(&status).metadata_value()),
         "offloaded",
         Some(&remote_cwd),
         None,
@@ -983,6 +1039,24 @@ mod tests {
         }
     }
 
+    fn reverse_runner_session(runner_id: &str) -> homeboy::core::runner::RunnerSession {
+        homeboy::core::runner::RunnerSession {
+            runner_id: runner_id.to_string(),
+            mode: homeboy::core::runner::RunnerTunnelMode::Reverse,
+            role: homeboy::core::runner::RunnerSessionRole::Runner,
+            server_id: None,
+            controller_id: Some("controller".to_string()),
+            broker_url: None,
+            remote_daemon_address: None,
+            local_port: None,
+            local_url: None,
+            tunnel_pid: None,
+            remote_daemon_pid: None,
+            homeboy_version: "test".to_string(),
+            connected_at: "2026-05-27T00:00:00Z".to_string(),
+        }
+    }
+
     #[test]
     fn rewrites_lab_offload_path_and_strips_runner_flag_before_remote_exec() {
         let args = vec![
@@ -1247,6 +1321,7 @@ mod tests {
         let selection = LabRunnerSelection {
             runner_id: "lab".to_string(),
             source: LabRunnerSelectionSource::Default,
+            mode: homeboy::core::runner::RunnerTunnelMode::DirectSsh,
         };
 
         let prepared = prepare_lab_runner_for_offload_with(
@@ -1272,6 +1347,7 @@ mod tests {
         let selection = LabRunnerSelection {
             runner_id: "lab".to_string(),
             source: LabRunnerSelectionSource::Default,
+            mode: homeboy::core::runner::RunnerTunnelMode::DirectSsh,
         };
 
         let prepared = prepare_lab_runner_for_offload_with(
@@ -1318,6 +1394,7 @@ mod tests {
         let selection = LabRunnerSelection {
             runner_id: "lab".to_string(),
             source: LabRunnerSelectionSource::Default,
+            mode: homeboy::core::runner::RunnerTunnelMode::DirectSsh,
         };
 
         let prepared = prepare_lab_runner_for_offload_with(
@@ -1365,10 +1442,69 @@ mod tests {
     }
 
     #[test]
+    fn lab_runner_preparation_falls_back_for_disconnected_default_reverse_runner_without_connecting(
+    ) {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+            mode: homeboy::core::runner::RunnerTunnelMode::Reverse,
+        };
+
+        let prepared = prepare_lab_runner_for_offload_with(
+            &selection,
+            |runner_id| {
+                Ok(homeboy::core::runner::RunnerStatusReport {
+                    runner_id: runner_id.to_string(),
+                    connected: false,
+                    state: homeboy::core::runner::RunnerSessionState::Recorded,
+                    session: Some(reverse_runner_session(runner_id)),
+                    session_path: "/tmp/lab.json".to_string(),
+                })
+            },
+            |_| panic!("reverse runner sessions are supplied by the reverse substrate"),
+        )
+        .expect("prepared");
+
+        assert_eq!(
+            prepared,
+            LabRunnerPreparation::FallBackLocal {
+                reason: "reverse-connected runner `lab` is not currently connected".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn lab_runner_preparation_errors_for_disconnected_explicit_reverse_runner() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+            mode: homeboy::core::runner::RunnerTunnelMode::Reverse,
+        };
+
+        let err = prepare_lab_runner_for_offload_with(
+            &selection,
+            |runner_id| {
+                Ok(homeboy::core::runner::RunnerStatusReport {
+                    runner_id: runner_id.to_string(),
+                    connected: false,
+                    state: homeboy::core::runner::RunnerSessionState::Recorded,
+                    session: Some(reverse_runner_session(runner_id)),
+                    session_path: "/tmp/lab.json".to_string(),
+                })
+            },
+            |_| panic!("reverse runner sessions are supplied by the reverse substrate"),
+        )
+        .expect_err("explicit reverse runner should error");
+
+        assert!(err.message.contains("requires reverse runner `lab`"));
+    }
+
+    #[test]
     fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
         let selection = LabRunnerSelection {
             runner_id: "lab".to_string(),
             source: LabRunnerSelectionSource::Explicit,
+            mode: homeboy::core::runner::RunnerTunnelMode::DirectSsh,
         };
 
         let err = prepare_lab_runner_for_offload_with(
