@@ -127,6 +127,7 @@ pub enum RunsOutput {
     Artifacts(RunsArtifactsOutput),
     ArtifactGet(RunsArtifactGetOutput),
     ArtifactCleanupDownloads(RunsArtifactCleanupDownloadsOutput),
+    ArtifactCleanupPersisted(RunsArtifactCleanupPersistedOutput),
     Findings(RunsFindingsOutput),
     Finding(RunsFindingOutput),
     LatestFinding(RunsLatestFindingOutput),
@@ -171,6 +172,8 @@ enum RunsArtifactCommand {
     Get(RunsArtifactGetArgs),
     /// Plan or delete locally cached runner artifact downloads
     CleanupDownloads(RunsArtifactCleanupDownloadsArgs),
+    /// Plan or delete persisted local run artifacts and their database records
+    CleanupPersisted(RunsArtifactCleanupPersistedArgs),
 }
 
 #[derive(Args, Clone)]
@@ -218,6 +221,70 @@ pub struct RunsArtifactCleanupDownloadsOutput {
     pub directory_count: usize,
     pub size_bytes: u64,
     pub paths: Vec<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct RunsArtifactCleanupPersistedArgs {
+    /// Delete planned artifact files/directories and their DB rows. Without this flag, only reports the plan.
+    #[arg(long)]
+    pub apply: bool,
+    /// Only include artifacts older than this many days.
+    #[arg(long, default_value_t = 30)]
+    pub older_than_days: i64,
+    /// Limit cleanup to one run id.
+    #[arg(long)]
+    pub run_id: Option<String>,
+    /// Limit cleanup to one artifact kind.
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// Limit cleanup to one artifact type (`file` or `directory`).
+    #[arg(long = "type")]
+    pub artifact_type: Option<String>,
+    /// Limit cleanup to one run kind (`bench`, `trace`, etc.).
+    #[arg(long)]
+    pub run_kind: Option<String>,
+    /// Limit cleanup to one component id.
+    #[arg(long = "component")]
+    pub component_id: Option<String>,
+    /// Maximum artifact rows to inspect in one invocation.
+    #[arg(long, default_value_t = 1000)]
+    pub limit: i64,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactCleanupPersistedOutput {
+    pub command: &'static str,
+    pub dry_run: bool,
+    pub artifact_root: String,
+    pub older_than_days: i64,
+    pub inspected_count: usize,
+    pub planned_record_count: usize,
+    pub planned_file_count: usize,
+    pub planned_directory_count: usize,
+    pub planned_size_bytes: u64,
+    pub removed_record_count: usize,
+    pub removed_file_count: usize,
+    pub removed_directory_count: usize,
+    pub removed_size_bytes: u64,
+    pub skipped_count: usize,
+    pub rows: Vec<RunsArtifactCleanupPersistedRow>,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactCleanupPersistedRow {
+    pub artifact_id: String,
+    pub run_id: String,
+    pub run_kind: String,
+    pub component_id: Option<String>,
+    pub kind: String,
+    #[serde(rename = "type")]
+    pub artifact_type: String,
+    pub path: String,
+    pub created_at: String,
+    pub exists: bool,
+    pub action: String,
+    pub reason: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -324,6 +391,7 @@ fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
     match args.command {
         RunsArtifactCommand::Get(args) => artifact_get(args),
         RunsArtifactCommand::CleanupDownloads(args) => remote_artifact::cleanup_downloads(args),
+        RunsArtifactCommand::CleanupPersisted(args) => remote_artifact::cleanup_persisted(args),
     }
 }
 

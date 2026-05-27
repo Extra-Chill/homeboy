@@ -1,13 +1,15 @@
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use homeboy::core::observation::ArtifactRecord;
+use chrono::{Duration, Utc};
+use homeboy::core::observation::{ArtifactCleanupFilter, ArtifactRecord, ObservationStore};
 use homeboy::core::runner;
 
 use super::{
     CmdResult, RunsArtifactCleanupDownloadsArgs, RunsArtifactCleanupDownloadsOutput,
-    RunsArtifactGetOutput, RunsOutput,
+    RunsArtifactCleanupPersistedArgs, RunsArtifactCleanupPersistedOutput,
+    RunsArtifactCleanupPersistedRow, RunsArtifactGetOutput, RunsOutput,
 };
 
 pub fn is_remote_artifact(artifact: &ArtifactRecord) -> bool {
@@ -60,6 +62,229 @@ pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<Ru
         }),
         0,
     ))
+}
+
+pub fn cleanup_persisted(args: RunsArtifactCleanupPersistedArgs) -> CmdResult<RunsOutput> {
+    if args.older_than_days < 0 {
+        return Err(crate::core::Error::validation_invalid_argument(
+            "older_than_days",
+            "--older-than-days must be zero or greater",
+            Some(args.older_than_days.to_string()),
+            None,
+        ));
+    }
+
+    let artifact_root = homeboy::core::artifact_root()?;
+    let created_before = (Utc::now() - Duration::days(args.older_than_days)).to_rfc3339();
+    let store = ObservationStore::open_initialized()?;
+    let candidates = store.list_artifact_cleanup_candidates(ArtifactCleanupFilter {
+        created_before: Some(created_before),
+        run_id: args.run_id.clone(),
+        kind: args.kind.clone(),
+        artifact_type: args.artifact_type.clone(),
+        run_kind: args.run_kind.clone(),
+        component_id: args.component_id.clone(),
+        limit: Some(args.limit),
+    })?;
+
+    let mut rows = Vec::new();
+    let mut planned_record_count = 0;
+    let mut planned_file_count = 0;
+    let mut planned_directory_count = 0;
+    let mut planned_size_bytes = 0;
+    let mut removed_record_count = 0;
+    let mut removed_file_count = 0;
+    let mut removed_directory_count = 0;
+    let mut removed_size_bytes = 0;
+    let mut skipped_count = 0;
+
+    for candidate in candidates.iter() {
+        let mut row = classify_persisted_artifact(candidate, &artifact_root)?;
+        if row.action == "remove" {
+            planned_record_count += 1;
+            planned_size_bytes += row.size_bytes;
+            match row.artifact_type.as_str() {
+                "directory" => planned_directory_count += 1,
+                _ => planned_file_count += usize::from(row.exists),
+            }
+            if args.apply {
+                apply_persisted_artifact_cleanup(&store, &candidate.artifact, &artifact_root)?;
+                removed_record_count += 1;
+                removed_size_bytes += row.size_bytes;
+                match row.artifact_type.as_str() {
+                    "directory" => removed_directory_count += 1,
+                    _ => removed_file_count += usize::from(row.exists),
+                }
+                row.action = "removed".to_string();
+            }
+        } else {
+            skipped_count += 1;
+        }
+        rows.push(row);
+    }
+
+    Ok((
+        RunsOutput::ArtifactCleanupPersisted(RunsArtifactCleanupPersistedOutput {
+            command: "runs.artifact.cleanup-persisted",
+            dry_run: !args.apply,
+            artifact_root: artifact_root.display().to_string(),
+            older_than_days: args.older_than_days,
+            inspected_count: candidates.len(),
+            planned_record_count,
+            planned_file_count,
+            planned_directory_count,
+            planned_size_bytes,
+            removed_record_count,
+            removed_file_count,
+            removed_directory_count,
+            removed_size_bytes,
+            skipped_count,
+            rows,
+        }),
+        0,
+    ))
+}
+
+fn classify_persisted_artifact(
+    candidate: &homeboy::core::observation::ArtifactCleanupCandidateRecord,
+    artifact_root: &Path,
+) -> crate::core::Result<RunsArtifactCleanupPersistedRow> {
+    let artifact = &candidate.artifact;
+    let path = persisted_artifact_path_from_record(artifact_root, &artifact.path);
+    let mut exists = false;
+    let mut size_bytes = 0;
+    let (action, reason) = if artifact.artifact_type == "url"
+        || runner::is_remote_runner_artifact_path(&artifact.path)
+        || artifact.path.starts_with("metadata-only:")
+    {
+        ("skip", "artifact is not local persisted bytes")
+    } else if let Some(metadata) = symlink_metadata_if_exists(&path)? {
+        exists = true;
+        if !path_is_within_root(&path, artifact_root) {
+            ("skip", "existing artifact path is outside artifact root")
+        } else if metadata.file_type().is_symlink() {
+            ("skip", "artifact path is a symlink")
+        } else {
+            size_bytes = path_size_bytes(&path, &metadata)?;
+            ("remove", "artifact bytes and DB row are eligible")
+        }
+    } else {
+        ("remove", "artifact bytes are missing; DB row is stale")
+    };
+
+    Ok(RunsArtifactCleanupPersistedRow {
+        artifact_id: artifact.id.clone(),
+        run_id: artifact.run_id.clone(),
+        run_kind: candidate.run_kind.clone(),
+        component_id: candidate.component_id.clone(),
+        kind: artifact.kind.clone(),
+        artifact_type: artifact.artifact_type.clone(),
+        path: artifact.path.clone(),
+        created_at: artifact.created_at.clone(),
+        exists,
+        action: action.to_string(),
+        reason: reason.to_string(),
+        size_bytes,
+    })
+}
+
+fn apply_persisted_artifact_cleanup(
+    store: &ObservationStore,
+    artifact: &ArtifactRecord,
+    artifact_root: &Path,
+) -> crate::core::Result<()> {
+    let path = persisted_artifact_path_from_record(artifact_root, &artifact.path);
+    if let Some(metadata) = symlink_metadata_if_exists(&path)? {
+        if metadata.file_type().is_symlink() || !path_is_within_root(&path, artifact_root) {
+            return Err(crate::core::Error::validation_invalid_argument(
+                "path",
+                "artifact path failed cleanup safety revalidation",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+        if metadata.is_dir() {
+            fs::remove_dir_all(&path).map_err(|err| persisted_artifact_remove_error(&path, err))?;
+        } else {
+            fs::remove_file(&path).map_err(|err| persisted_artifact_remove_error(&path, err))?;
+        }
+    }
+    store.delete_artifact_record(&artifact.id)?;
+    Ok(())
+}
+
+fn persisted_artifact_path_from_record(artifact_root: &Path, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path
+    } else {
+        artifact_root.join(path)
+    }
+}
+
+fn symlink_metadata_if_exists(path: &Path) -> crate::core::Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(crate::core::Error::internal_io(
+            err.to_string(),
+            Some(format!("read persisted artifact {}", path.display())),
+        )),
+    }
+}
+
+fn path_is_within_root(path: &Path, artifact_root: &Path) -> bool {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return false;
+    }
+    let root = fs::canonicalize(artifact_root).unwrap_or_else(|_| artifact_root.to_path_buf());
+    let candidate = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    candidate.starts_with(root)
+}
+
+fn path_size_bytes(path: &Path, metadata: &fs::Metadata) -> crate::core::Result<u64> {
+    if metadata.is_dir() {
+        let mut total = 0;
+        for entry in
+            fs::read_dir(path).map_err(|err| persisted_artifact_read_dir_error(path, err))?
+        {
+            let entry = entry.map_err(|err| persisted_artifact_read_dir_error(path, err))?;
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
+                crate::core::Error::internal_io(
+                    err.to_string(),
+                    Some(format!("read persisted artifact {}", entry_path.display())),
+                )
+            })?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            total += path_size_bytes(&entry_path, &metadata)?;
+        }
+        Ok(total)
+    } else {
+        Ok(metadata.len())
+    }
+}
+
+fn persisted_artifact_read_dir_error(path: &Path, err: io::Error) -> crate::core::Error {
+    crate::core::Error::internal_io(
+        err.to_string(),
+        Some(format!(
+            "read persisted artifact directory {}",
+            path.display()
+        )),
+    )
+}
+
+fn persisted_artifact_remove_error(path: &Path, err: io::Error) -> crate::core::Error {
+    crate::core::Error::internal_io(
+        err.to_string(),
+        Some(format!("remove persisted artifact {}", path.display())),
+    )
 }
 
 #[derive(Debug, Default)]
@@ -213,11 +438,20 @@ fn relative_cleanup_path(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use homeboy::core::observation::NewRunRecord;
 
     use super::*;
 
+    fn artifact_root_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
     #[test]
     fn cleanup_downloads_plans_and_removes_runner_cache() {
+        let _guard = artifact_root_test_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let artifact_root = temp.path().join("artifacts");
         homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
@@ -261,6 +495,79 @@ mod tests {
         assert!(!run_dir.exists());
 
         homeboy::core::set_artifact_root_override(None);
+    }
+
+    #[test]
+    fn cleanup_persisted_plans_and_removes_local_artifacts() {
+        let _guard = artifact_root_test_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("XDG_DATA_HOME", temp.path().join("data"));
+        let artifact_root = temp.path().join("artifacts");
+        homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
+
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("bench")
+                    .component_id("homeboy")
+                    .command("homeboy bench")
+                    .metadata(serde_json::json!({ "test": true }))
+                    .build(),
+            )
+            .expect("run");
+        let source = temp.path().join("bench.json");
+        fs::write(&source, b"bench").expect("source");
+        let artifact = store
+            .record_artifact(&run.id, "summary", &source)
+            .expect("artifact");
+        let stored_path = PathBuf::from(&artifact.path);
+        assert!(stored_path.exists());
+
+        let dry = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
+            apply: false,
+            older_than_days: 0,
+            run_id: Some(run.id.clone()),
+            kind: None,
+            artifact_type: None,
+            run_kind: None,
+            component_id: None,
+            limit: 100,
+        })
+        .expect("dry-run")
+        .0;
+        let RunsOutput::ArtifactCleanupPersisted(dry) = dry else {
+            panic!("unexpected output");
+        };
+        assert!(dry.dry_run);
+        assert_eq!(dry.planned_record_count, 1);
+        assert_eq!(dry.planned_file_count, 1);
+        assert_eq!(dry.planned_size_bytes, 5);
+        assert!(stored_path.exists());
+        assert!(store.get_artifact(&artifact.id).expect("get").is_some());
+
+        let applied = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
+            apply: true,
+            older_than_days: 0,
+            run_id: Some(run.id.clone()),
+            kind: None,
+            artifact_type: None,
+            run_kind: None,
+            component_id: None,
+            limit: 100,
+        })
+        .expect("apply")
+        .0;
+        let RunsOutput::ArtifactCleanupPersisted(applied) = applied else {
+            panic!("unexpected output");
+        };
+        assert!(!applied.dry_run);
+        assert_eq!(applied.removed_record_count, 1);
+        assert_eq!(applied.removed_file_count, 1);
+        assert!(!stored_path.exists());
+        assert!(store.get_artifact(&artifact.id).expect("get").is_none());
+
+        homeboy::core::set_artifact_root_override(None);
+        std::env::remove_var("XDG_DATA_HOME");
     }
 
     #[test]

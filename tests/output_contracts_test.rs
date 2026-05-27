@@ -123,6 +123,26 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
                 }),
             ),
             variant_contract(
+                "artifact_cleanup_persisted",
+                json!({
+                    "command": "runs.artifact.cleanup-persisted",
+                    "dry_run": true,
+                    "artifact_root": "/tmp/homeboy/artifacts",
+                    "older_than_days": 30,
+                    "inspected_count": 0,
+                    "planned_record_count": 0,
+                    "planned_file_count": 0,
+                    "planned_directory_count": 0,
+                    "planned_size_bytes": 0,
+                    "removed_record_count": 0,
+                    "removed_file_count": 0,
+                    "removed_directory_count": 0,
+                    "removed_size_bytes": 0,
+                    "skipped_count": 0,
+                    "rows": []
+                }),
+            ),
+            variant_contract(
                 "findings",
                 json!({ "command": "runs.findings", "findings": [] }),
             ),

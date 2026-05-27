@@ -1,4 +1,5 @@
 use clap::{Args, Subcommand};
+use homeboy::core::engine;
 use homeboy::core::self_status;
 use serde_json::Value;
 
@@ -15,6 +16,8 @@ pub struct SelfArgs {
 pub enum SelfCommand {
     /// Report active binary, version, and nearby install/update signals
     Status(SelfStatusArgs),
+    /// Plan or delete orphaned Homeboy runtime temp entries
+    CleanupRuntimeTmp(SelfCleanupRuntimeTmpArgs),
 }
 
 #[derive(Args)]
@@ -23,11 +26,38 @@ pub struct SelfStatusArgs {
     _json: HiddenJsonArgs,
 }
 
+#[derive(Args)]
+pub struct SelfCleanupRuntimeTmpArgs {
+    /// Delete planned temp entries. Without this flag, only reports the plan.
+    #[arg(long)]
+    pub apply: bool,
+    /// Only include entries older than this many days.
+    #[arg(long, default_value_t = 7)]
+    pub older_than_days: u64,
+    /// Only include entries whose directory/file name starts with this prefix.
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// Maximum temp entries to inspect in one invocation.
+    #[arg(long, default_value_t = 1000)]
+    pub limit: usize,
+}
+
 pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         SelfCommand::Status(_) => {
             let status = self_status::collect_status();
             let json = serde_json::to_value(status)
+                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
+            Ok((json, 0))
+        }
+        SelfCommand::CleanupRuntimeTmp(args) => {
+            let output = engine::temp::cleanup_runtime_tmp(
+                args.apply,
+                args.older_than_days,
+                args.prefix.as_deref(),
+                args.limit,
+            )?;
+            let json = serde_json::to_value(output)
                 .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
             Ok((json, 0))
         }
