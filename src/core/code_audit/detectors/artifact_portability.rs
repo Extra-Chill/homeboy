@@ -133,7 +133,7 @@ fn metadata_path_findings(
             &field.path,
             field.value,
             description,
-            "Store the artifact under Homeboy's artifact root and persist that path, or persist a runner-artifact:// token with a mirrored artifact row",
+            "Store the artifact under the configured artifact root and persist that path, or persist a runner-artifact:// token with a mirrored artifact row",
         ));
     }
     findings

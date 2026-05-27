@@ -742,11 +742,30 @@ fn lab_runner_capability_preflight(
         required_tools: plan
             .required_tools
             .into_iter()
-            .map(homeboy::core::runner::RunnerRequiredTool::from)
+            .map(lab_runner_required_tool)
             .collect(),
         required_components: Vec::new(),
         required_env: Vec::new(),
     })
+}
+
+fn lab_runner_required_tool(
+    tool: resource_policy::LabRunnerTool,
+) -> homeboy::core::runner::RunnerRequiredTool {
+    match tool {
+        resource_policy::LabRunnerTool::Git => homeboy::core::runner::RunnerRequiredTool::Git,
+        resource_policy::LabRunnerTool::Node => homeboy::core::runner::RunnerRequiredTool::Node,
+        resource_policy::LabRunnerTool::Npm => homeboy::core::runner::RunnerRequiredTool::Npm,
+        resource_policy::LabRunnerTool::Pnpm => homeboy::core::runner::RunnerRequiredTool::Pnpm,
+        resource_policy::LabRunnerTool::Php => homeboy::core::runner::RunnerRequiredTool::Php,
+        resource_policy::LabRunnerTool::Composer => {
+            homeboy::core::runner::RunnerRequiredTool::Composer
+        }
+        resource_policy::LabRunnerTool::Docker => homeboy::core::runner::RunnerRequiredTool::Docker,
+        resource_policy::LabRunnerTool::Playwright => {
+            homeboy::core::runner::RunnerRequiredTool::Playwright
+        }
+    }
 }
 
 fn lab_offload_source_path(args: &[String]) -> homeboy::core::Result<PathBuf> {
