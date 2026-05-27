@@ -713,7 +713,10 @@ def run_with_streamed_stderr(args):
 
     stderr_thread = threading.Thread(target=stream_stderr)
     stderr_thread.start()
-    stdout, _ = process.communicate()
+    # Do not use communicate() here: it also reads stderr, racing the streaming
+    # thread and dropping progress lines from the captured stderr buffer.
+    stdout = process.stdout.read()
+    process.wait()
     stderr_thread.join()
     return subprocess.CompletedProcess(args, process.returncode, stdout, ''.join(stderr_chunks))
 
