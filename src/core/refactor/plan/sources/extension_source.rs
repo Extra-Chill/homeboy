@@ -58,8 +58,9 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
             ]),
         ));
     };
-    let response: ExtensionRefactorSourceResponse =
-        serde_json::from_value(value).map_err(|err| {
+    let response_value = unwrap_refactor_source_payload(value);
+    let response: ExtensionRefactorSourceResponse = serde_json::from_value(response_value)
+        .map_err(|err| {
             Error::validation_invalid_argument(
                 setting_key.clone(),
                 format!(
@@ -106,6 +107,17 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
         },
         fix_results: response.fix_results,
     }))
+}
+
+fn unwrap_refactor_source_payload(value: serde_json::Value) -> serde_json::Value {
+    if value.get("variant").and_then(serde_json::Value::as_str) != Some("refactor_source") {
+        return value;
+    }
+
+    value
+        .get("payload")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
 }
 
 pub(super) fn read_optional_json(path: &Path) -> Option<serde_json::Value> {
@@ -167,7 +179,7 @@ mod tests {
         fs::write(
             extension_dir.join("refactor-source.sh"),
             format!(
-                "#!/bin/sh\ncat > '{}'\nprintf '%s' '{{\"handled\":true,\"detected_findings\":2,\"changed_files\":[\"src/lib.rs\"],\"fix_results\":[{{\"file\":\"src/lib.rs\",\"rule\":\"demo\"}}],\"warnings\":[\"extension handled\"]}}'\n",
+                "#!/bin/sh\ncat > '{}'\nprintf '%s' '{{\"variant\":\"refactor_source\",\"payload\":{{\"handled\":true,\"detected_findings\":2,\"changed_files\":[\"src/lib.rs\"],\"fix_results\":[{{\"file\":\"src/lib.rs\",\"rule\":\"demo\"}}],\"warnings\":[\"extension handled\"]}}}}'\n",
                 capture_file.display()
             ),
         )
