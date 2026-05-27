@@ -19,10 +19,7 @@ pub(super) fn upgrade_configured_runners(
         "Updating {} configured runner(s)...",
         runners.len()
     );
-    Ok(upgrade_runners_with_executor(
-        &runners,
-        |runner_id, options| runner::exec(runner_id, options),
-    ))
+    Ok(upgrade_runners_with_executor(&runners, runner::exec))
 }
 
 fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Runner>> {
