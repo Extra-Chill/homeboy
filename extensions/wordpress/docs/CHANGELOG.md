@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.7] - 2026-05-27
+
+### Fixed
+- keep streamed fanout stderr deterministic
+
 ## [2.102.6] - 2026-05-27
 
 ### Fixed
