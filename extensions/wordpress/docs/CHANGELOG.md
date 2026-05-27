@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.3] - 2026-05-27
+
+### Fixed
+- normalize WP Codebox runner plugin slugs
+
 ## [2.102.2] - 2026-05-26
 
 ### Fixed
