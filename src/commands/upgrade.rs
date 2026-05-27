@@ -24,6 +24,14 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub skip_extensions: bool,
 
+    /// Skip configured runner upgrades after the local upgrade
+    #[arg(long)]
+    pub skip_runners: bool,
+
+    /// Upgrade only the named configured runner. Repeat to target multiple runners.
+    #[arg(long = "runner", value_name = "RUNNER_ID")]
+    pub runners: Vec<String>,
+
     /// Override install method detection (homebrew|cargo|source|binary)
     #[arg(long)]
     pub method: Option<String>,
@@ -65,6 +73,8 @@ pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         args.force,
         method_override,
         args.skip_extensions,
+        args.skip_runners,
+        &args.runners,
         args.source_path.as_deref(),
     )?;
     let json = serde_json::to_value(&result)

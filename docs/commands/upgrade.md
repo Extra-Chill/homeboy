@@ -10,13 +10,16 @@ homeboy upgrade [OPTIONS]
 
 Upgrades Homeboy to the latest version. The command auto-detects the installation method (Homebrew, Cargo, source build, or downloaded release binary) and runs the appropriate upgrade process.
 
-By default, after a successful upgrade, Homeboy restarts itself to use the new version.
+By default, after a successful local upgrade, Homeboy also checks configured SSH runners and runs their configured Homeboy binary through the same upgrade path. This keeps lab runners from drifting behind the local CLI.
 
 ## Options
 
 - `--check`: Check for updates without installing. Returns version information without making changes.
 - `--force`: Force upgrade even if already at the latest version.
 - `--no-restart`: Skip automatic restart after upgrade. Useful for scripted environments.
+- `--skip-extensions`: Skip automatic extension updates.
+- `--skip-runners`: Skip automatic configured runner upgrades.
+- `--runner`: Upgrade only the named configured runner. Repeat to target multiple runners.
 - `--method`: Override install method detection (`homebrew|cargo|source|binary`).
 
 ## Installation Method Detection
@@ -62,6 +65,18 @@ Force reinstall:
 homeboy upgrade --force
 ```
 
+Upgrade only a specific runner after the local upgrade:
+
+```sh
+homeboy upgrade --runner lab
+```
+
+Upgrade locally without touching configured runners:
+
+```sh
+homeboy upgrade --skip-runners
+```
+
 ## JSON output
 
 > Note: all command output is wrapped in the global JSON envelope described in the [JSON output contract](../architecture/output-system.md).
@@ -83,6 +98,11 @@ homeboy upgrade --force
 - `upgraded`: Boolean indicating if upgrade was performed
 - `message`: Human-readable status message
 - `restart_required`: Boolean indicating if a restart is needed (true only for source installs)
+- `extensions_updated`: Extension upgrade entries when installed extensions were checked
+- `extensions_skipped`: Extension IDs that could not be updated
+- `projects_migrated`: Project config migration entries
+- `runners_updated`: Runner upgrade entries for configured runners that completed successfully
+- `runners_skipped`: Runner upgrade entries for configured runners that failed or could not verify a version
 
 ## Exit code
 
