@@ -546,7 +546,7 @@ pub fn run_self_check_test_workflow(
         autofix: None,
         hints: (!output.success).then(|| {
             vec![format!(
-                "Fix the failing self-check command declared in {}'s homeboy.json self_checks.test",
+                "Fix the failing self-check command declared in {}'s homeboy.json scripts.test",
                 component.id
             )]
         }),
@@ -563,7 +563,7 @@ pub fn run_self_check_test_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::component::SelfCheckConfig;
+    use crate::core::component::ComponentScriptsConfig;
     use crate::core::extension::test::TestFailure;
 
     #[test]
@@ -672,9 +672,12 @@ mod tests {
             "".to_string(),
             None,
         );
-        component.self_checks = Some(SelfCheckConfig {
+        component.scripts = Some(ComponentScriptsConfig {
             lint: Vec::new(),
             test: vec!["sh test.sh".to_string()],
+            build: Vec::new(),
+            bench: Vec::new(),
+            trace: Vec::new(),
         });
 
         let result =

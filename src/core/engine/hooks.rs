@@ -51,8 +51,6 @@ pub enum HookFailureMode {
 /// 1. Extension hooks (platform behavior) — from all linked extensions, in extension iteration order
 /// 2. Component hooks (user customization)
 ///
-/// Legacy fields (`pre_version_bump_commands`, etc.) are migrated into the `hooks` map
-/// during deserialization, so they are already included here.
 pub fn resolve_hooks(component: &Component, event: &str) -> Vec<String> {
     let mut commands = Vec::new();
 
@@ -67,9 +65,7 @@ pub fn resolve_hooks(component: &Component, event: &str) -> Vec<String> {
         }
     }
 
-    // Component hooks second (from the new `hooks` map).
-    // Legacy fields (pre_version_bump_commands, etc.) are already merged into this
-    // map during deserialization via RawComponent, so no separate fallback is needed.
+    // Component hooks second.
     if let Some(component_commands) = component.hooks.get(event) {
         commands.extend(component_commands.clone());
     }

@@ -261,7 +261,7 @@ fn test_rig_component_deserializes_extension_config() {
                     "path": "~/Developer/studio",
                     "extensions": {
                         "nodejs": {
-                            "settings": { "package_manager": "pnpm" },
+                            "package_manager": "pnpm",
                             "workspace": "apps/studio"
                         }
                     }
@@ -295,7 +295,7 @@ fn test_rig_component_extension_config_round_trips() {
             "studio": {
                 "path": "/tmp/studio",
                 "extensions": {
-                    "nodejs": { "settings": { "package_manager": "pnpm" } }
+                    "nodejs": { "package_manager": "pnpm" }
                 }
             }
         }
