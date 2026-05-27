@@ -1,36 +1,34 @@
 #!/usr/bin/env bash
 
-# Shared step filtering for extension runners.
+# Direct-invocation fallback for Homeboy core's shared runner-step helper.
+# Keep this file aligned with homeboy/src/core/extension/runtime/runner-steps.sh.
 #
-# HOMEBOY_STEP is a comma-separated allowlist. When set, only listed steps run.
-# HOMEBOY_SKIP is a comma-separated denylist. Denylist wins when both are set.
-
-homeboy_step_list_contains() {
-    local list="$1"
-    local needle="$2"
-    local item
-
-    IFS=',' read -ra _homeboy_step_items <<< "$list"
-    for item in "${_homeboy_step_items[@]}"; do
-        item="${item//[[:space:]]/}"
-        if [ "$item" = "$needle" ]; then
-            return 0
-        fi
-    done
-
-    return 1
-}
+# Reads HOMEBOY_STEP / HOMEBOY_SKIP as comma-separated step names and exposes
+# should_run_step <name> with the same semantics as Homeboy core's
+# RunnerStepFilter:
+# - HOMEBOY_STEP present => only listed steps run
+# - HOMEBOY_SKIP present => listed steps are skipped
+# - empty step name => runs by default
 
 should_run_step() {
-    local step="$1"
+    local step_name="${1:-}"
+    step_name="$(printf '%s' "$step_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
-    if [ -n "${HOMEBOY_SKIP:-}" ] && homeboy_step_list_contains "${HOMEBOY_SKIP}" "$step"; then
-        return 1
+    if [ -z "$step_name" ]; then
+        return 0
     fi
 
     if [ -n "${HOMEBOY_STEP:-}" ]; then
-        homeboy_step_list_contains "${HOMEBOY_STEP}" "$step"
-        return $?
+        case ",${HOMEBOY_STEP}," in
+            *",${step_name},"*) ;;
+            *) return 1 ;;
+        esac
+    fi
+
+    if [ -n "${HOMEBOY_SKIP:-}" ]; then
+        case ",${HOMEBOY_SKIP}," in
+            *",${step_name},"*) return 1 ;;
+        esac
     fi
 
     return 0
