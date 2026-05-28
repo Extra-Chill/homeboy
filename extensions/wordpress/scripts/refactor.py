@@ -738,6 +738,103 @@ def wp_codebox_fanout_failure_message(run):
     return f"{summary}\n{detail}" if detail else summary
 
 
+def wp_codebox_artifact_changed_files(artifact_dir):
+    changed_files_path = os.path.join(artifact_dir, 'files', 'changed-files.json')
+    with open(changed_files_path, 'r') as f:
+        changed_files = json.load(f)
+    files = changed_files.get('files') if isinstance(changed_files, dict) else []
+    relative_paths = []
+    for entry in files if isinstance(files, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        relative_path = entry.get('relativePath') or entry.get('relative_path')
+        if not relative_path:
+            file_path = str(entry.get('path') or '').lstrip('/')
+            marker = '/workspace/'
+            if marker in f"/{file_path}":
+                parts = file_path.split('/')
+                relative_path = '/'.join(parts[2:]) if len(parts) > 2 else ''
+            else:
+                marker = '/wp-content/plugins/'
+                if marker in f"/{file_path}":
+                    relative_path = file_path.split('wp-content/plugins/', 1)[1].split('/', 1)[1]
+        if relative_path and not os.path.isabs(relative_path) and '..' not in relative_path.split('/'):
+            relative_paths.append(relative_path)
+    return sorted(set(relative_paths))
+
+
+def wp_codebox_patch_paths(patch):
+    paths = []
+    for line in patch.splitlines():
+        if not line.startswith('diff --git '):
+            continue
+        parts = line.split()
+        if len(parts) >= 4 and parts[3].startswith('b/'):
+            paths.append(parts[3][2:])
+    return paths
+
+
+def strip_patch_path(file_path, strip_components):
+    parts = [part for part in file_path.split('/') if part]
+    if strip_components >= len(parts):
+        return ''
+    return '/'.join(parts[strip_components:])
+
+
+def wp_codebox_patch_strip(patch, relative_paths):
+    patch_paths = wp_codebox_patch_paths(patch)
+    if not patch_paths:
+        raise RuntimeError('WP Codebox patch does not contain diff headers')
+    expected = set(relative_paths)
+    for strip_components in range(0, 8):
+        stripped = {strip_patch_path(file_path, strip_components) for file_path in patch_paths}
+        if stripped and stripped == expected:
+            return strip_components
+    raise RuntimeError('WP Codebox patch paths do not match changed-files.json relative paths')
+
+
+def apply_wp_codebox_artifact_patch(component_root, artifact_dir):
+    patch_path = os.path.join(artifact_dir, 'files', 'patch.diff')
+    if not os.path.isfile(patch_path):
+        return []
+    relative_paths = wp_codebox_artifact_changed_files(artifact_dir)
+    if not relative_paths:
+        return []
+    with open(patch_path, 'r') as f:
+        patch = f.read()
+    if not patch.strip():
+        return []
+
+    # git apply counts the leading a/ and b/ prefixes that diff headers include;
+    # wp_codebox_patch_strip() compares paths after removing those prefixes.
+    strip_components = wp_codebox_patch_strip(patch, relative_paths) + 1
+    result = subprocess.run(
+        ['git', 'apply', '--binary', f'-p{strip_components}', patch_path],
+        cwd=component_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or '').strip()
+        raise RuntimeError(f"WP Codebox patch apply failed for {artifact_dir}: {detail}")
+    return relative_paths
+
+
+def apply_wp_codebox_fanout_artifacts(component_root, run):
+    changed_files = []
+    records = run.get('records') if isinstance(run, dict) and isinstance(run.get('records'), list) else []
+    for record in records:
+        if not isinstance(record, dict) or record.get('status') != 'completed':
+            continue
+        artifact = record.get('artifact') if isinstance(record.get('artifact'), dict) else {}
+        artifact_dir = artifact.get('directory') or ''
+        if not artifact_dir:
+            continue
+        changed_files.extend(apply_wp_codebox_artifact_patch(component_root, artifact_dir))
+    return sorted(set(changed_files))
+
+
 def wp_codebox_task_runner_args(data, settings, script_dir):
     component_root = data.get('root') or data.get('component_path') or os.getcwd()
     agents_api_path = settings.get('wp_codebox_agents_api_path') or os.environ.get('HOMEBOY_WP_CODEBOX_AGENTS_API_PATH') or component_root
@@ -831,6 +928,7 @@ def refactor_source(data):
     with open(plan_path, 'r') as f:
         plan = json.load(f)
 
+    changed_files = []
     if data.get('write') and os.path.exists(runs_path):
         with open(runs_path, 'r') as f:
             run = json.load(f)
@@ -839,6 +937,14 @@ def refactor_source(data):
             return {
                 'handled': True,
                 'fatal_error': failure_message,
+            }
+        try:
+            component_root = data.get('root') or data.get('component_path') or os.getcwd()
+            changed_files = apply_wp_codebox_fanout_artifacts(component_root, run)
+        except RuntimeError as error:
+            return {
+                'handled': True,
+                'fatal_error': str(error),
             }
 
     fix_results = []
@@ -863,7 +969,7 @@ def refactor_source(data):
     return {
         'handled': True,
         'detected_findings': (plan.get('audit') or {}).get('finding_count'),
-        'changed_files': [],
+        'changed_files': changed_files,
         'fix_results': fix_results,
         'warnings': warnings,
     }

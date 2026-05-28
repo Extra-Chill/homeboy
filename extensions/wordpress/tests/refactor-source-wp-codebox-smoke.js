@@ -73,6 +73,30 @@ const stepArgs = recipe.workflow.steps[0].args;
 const task = JSON.parse(stepArgs.find((arg) => arg.startsWith('task=')).slice('task='.length));
 const sessionId = task.sandbox_session_id;
 const artifactDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'fixture-wp-codebox-artifact-'));
+if (task.group_key === 'PHPCS Formatting/Auto Fix!') {
+  const filesDirectory = path.join(artifactDirectory, 'files');
+  fs.mkdirSync(filesDirectory, { recursive: true });
+  fs.writeFileSync(path.join(filesDirectory, 'changed-files.json'), JSON.stringify({
+    schema: 'wp-codebox/changed-files/v1',
+    files: [
+      {
+        path: '/workspace/agents-api/src/example.php',
+        status: 'modified',
+        mountTarget: '/workspace/agents-api',
+        relativePath: 'src/example.php'
+      }
+    ]
+  }, null, 2) + '\\n');
+  fs.writeFileSync(path.join(filesDirectory, 'patch.diff'), [
+    'diff --git a/workspace/agents-api/src/example.php b/workspace/agents-api/src/example.php',
+    '--- a/workspace/agents-api/src/example.php',
+    '+++ b/workspace/agents-api/src/example.php',
+    '@@ -1 +1 @@',
+    '-before',
+    '+after',
+    ''
+  ].join('\\n'));
+}
 process.stdout.write(JSON.stringify({
   session: { id: sessionId },
   artifacts: {
@@ -100,6 +124,8 @@ process.stdout.write(JSON.stringify({
   fs.mkdirSync(writeCommand.settings.wp_codebox_agents_api_path, { recursive: true });
   fs.mkdirSync(writeCommand.settings.wp_codebox_data_machine_path, { recursive: true });
   fs.mkdirSync(writeCommand.settings.wp_codebox_data_machine_code_path, { recursive: true });
+  fs.mkdirSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src', 'example.php'), 'before\n');
 
   const writeResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
     encoding: 'utf8',
@@ -113,6 +139,8 @@ process.stdout.write(JSON.stringify({
   assert.equal(writeResult.status, 0, writeResult.stderr || writeResult.stdout);
   const writeResponse = JSON.parse(writeResult.stdout);
   assert.equal(writeResponse.handled, true);
+  assert.deepEqual(writeResponse.changed_files, ['src/example.php']);
+  assert.equal(fs.readFileSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src', 'example.php'), 'utf8'), 'after\n');
   assert.match(writeResult.stderr, /\[homeboy wp-codebox fanout\] started 1\/2 group=PHPCS Formatting\/Auto Fix! session=homeboy-audit-/);
   assert.match(writeResult.stderr, /\[homeboy wp-codebox fanout\] completed 2\/2 group=docs-reference session=homeboy-audit-.*artifact=.*fixture-wp-codebox-artifact-/);
   assert.doesNotMatch(writeResult.stderr, /OPENCODE_API_KEY/);
