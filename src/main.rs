@@ -185,14 +185,16 @@ fn main() -> std::process::ExitCode {
             match prepare_lab_runner_for_offload(&selection) {
                 Ok(LabRunnerPreparation::Ready) => {
                     let capture_patch = cli.command.lab_offload_mutation_flag().is_some();
-                    return run_lab_offload(
+                    if let Some(exit_code) = run_lab_offload(
                         &selection.runner_id,
                         selection.source,
                         &cli.command,
                         &normalized,
                         output_file.as_deref(),
                         capture_patch,
-                    );
+                    ) {
+                        return exit_code;
+                    }
                 }
                 Ok(LabRunnerPreparation::FallBackLocal { reason }) => {
                     homeboy::core::runner::capture_lab_offload_metadata(
@@ -640,7 +642,7 @@ fn run_lab_offload(
     normalized_args: &[String],
     output_file: Option<&str>,
     capture_patch: bool,
-) -> std::process::ExitCode {
+) -> Option<std::process::ExitCode> {
     match run_lab_offload_inner(
         runner_id,
         source,
@@ -649,12 +651,13 @@ fn run_lab_offload(
         output_file,
         capture_patch,
     ) {
-        Ok(exit_code) => std::process::ExitCode::from(exit_code_to_u8(exit_code)),
+        Ok(Some(exit_code)) => Some(std::process::ExitCode::from(exit_code_to_u8(exit_code))),
+        Ok(None) => None,
         Err(err) => {
             let (json_result, exit_code) =
                 output::map_cmd_result_to_json::<serde_json::Value>(Err(err));
             emit_json_result(json_result, output_file, exit_code);
-            std::process::ExitCode::from(exit_code_to_u8(exit_code))
+            Some(std::process::ExitCode::from(exit_code_to_u8(exit_code)))
         }
     }
 }
@@ -666,7 +669,7 @@ fn run_lab_offload_inner(
     normalized_args: &[String],
     output_file: Option<&str>,
     capture_patch: bool,
-) -> homeboy::core::Result<i32> {
+) -> homeboy::core::Result<Option<i32>> {
     let runner = homeboy::core::runner::load(runner_id)?;
     let status = homeboy::core::runner::status(runner_id)?;
     if runner.kind != homeboy::core::runner::RunnerKind::Ssh {
@@ -706,7 +709,72 @@ fn run_lab_offload_inner(
         )
     })?;
     let source_path = lab_offload_source_path(normalized_args)?;
-    let capability_preflight = lab_runner_capability_preflight(command_kind, &source_path);
+    let capability_plan = lab_runner_capability_contract(command_kind, &source_path)
+        .map(homeboy::core::runner::lab_runner_capability_plan);
+    if let Some(plan) = &capability_plan {
+        let mode = match source {
+            LabRunnerSelectionSource::Default => {
+                homeboy::core::runner::LabRunnerGateMode::Automatic
+            }
+            LabRunnerSelectionSource::Explicit => {
+                homeboy::core::runner::LabRunnerGateMode::Explicit
+            }
+        };
+        let decision = match homeboy::core::runner::evaluate_lab_runner_capabilities_for_runner(
+            &runner, plan, mode,
+        ) {
+            Ok(decision) => decision,
+            Err(err) if matches!(source, LabRunnerSelectionSource::Default) => {
+                let reason = format!("runner capability preflight failed: {}", err.message);
+                homeboy::core::runner::capture_lab_offload_metadata(
+                    homeboy::core::runner::lab_offload_metadata(
+                        "automatic",
+                        Some(runner_id),
+                        Some(status_tunnel_mode(&status).metadata_value()),
+                        "fallback",
+                        None,
+                        Some(&reason),
+                    ),
+                );
+                eprintln!("Lab offload: {reason}; running locally.");
+                return Ok(None);
+            }
+            Err(err) => return Err(err),
+        };
+
+        match decision {
+            homeboy::core::runner::LabRunnerGateDecision::Eligible => {}
+            homeboy::core::runner::LabRunnerGateDecision::Missing {
+                reason,
+                remediation,
+                ..
+            } => match source {
+                LabRunnerSelectionSource::Default => {
+                    homeboy::core::runner::capture_lab_offload_metadata(
+                        homeboy::core::runner::lab_offload_metadata(
+                            "automatic",
+                            Some(runner_id),
+                            Some(status_tunnel_mode(&status).metadata_value()),
+                            "fallback",
+                            None,
+                            Some(&reason),
+                        ),
+                    );
+                    eprintln!("Lab offload: {reason}; running locally.");
+                    return Ok(None);
+                }
+                LabRunnerSelectionSource::Explicit => {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "runner_capabilities",
+                        reason,
+                        Some(runner_id.to_string()),
+                        Some(remediation),
+                    ));
+                }
+            },
+        }
+    }
+    let capability_preflight = capability_plan.map(Into::into);
     let capability_plan_preflight = lab_offload_extension_parity::after_capability_plan();
     let sync_mode =
         if homeboy::core::runner::lab_offload_changed_since_ref(normalized_args).is_some() {
@@ -799,43 +867,92 @@ fn run_lab_offload_inner(
         })?;
     }
     print!("{}", exec_output.stdout);
-    Ok(exit_code)
+    Ok(Some(exit_code))
 }
 
-fn lab_runner_capability_preflight(
+fn lab_runner_capability_contract(
     command: &Commands,
     source_path: &Path,
-) -> Option<homeboy::core::runner::RunnerCapabilityPreflight> {
-    let plan = resource_policy::lab_runner_capability_plan(command, source_path)?;
-    Some(homeboy::core::runner::RunnerCapabilityPreflight {
-        command: plan.command.to_string(),
-        required_tools: plan
-            .required_tools
-            .into_iter()
-            .map(lab_runner_required_tool)
-            .collect(),
-        required_components: Vec::new(),
-        required_env: Vec::new(),
+) -> Option<homeboy::core::runner::LabRunnerCapabilityContract> {
+    if !command.supports_lab_runner() {
+        return None;
+    }
+
+    let command_label = match command {
+        Commands::Bench(args) if args.is_run_command() => "bench",
+        Commands::Refactor(args) if args.is_hot_resource_command() => "refactor",
+        Commands::Audit(args) if args.changed_since.is_none() && !args.conventions => "audit",
+        Commands::Lint(args) if args.is_full_workspace_run() => "lint",
+        Commands::Test(args) if args.changed_since.is_none() => "test",
+        Commands::Trace(_) => "trace",
+        _ => return None,
+    };
+
+    let mut required_tools = Vec::new();
+
+    if source_path.join("package.json").is_file() {
+        push_unique(
+            &mut required_tools,
+            homeboy::core::runner::RunnerRequiredTool::Node,
+        );
+        push_unique(
+            &mut required_tools,
+            homeboy::core::runner::RunnerRequiredTool::Npm,
+        );
+    }
+
+    if source_path.join("pnpm-lock.yaml").is_file() {
+        push_unique(
+            &mut required_tools,
+            homeboy::core::runner::RunnerRequiredTool::Node,
+        );
+        push_unique(
+            &mut required_tools,
+            homeboy::core::runner::RunnerRequiredTool::Pnpm,
+        );
+    }
+
+    if source_path.join("composer.json").is_file() {
+        push_unique(
+            &mut required_tools,
+            homeboy::core::runner::RunnerRequiredTool::Php,
+        );
+        push_unique(
+            &mut required_tools,
+            homeboy::core::runner::RunnerRequiredTool::Composer,
+        );
+    }
+
+    if has_docker_signal(source_path) {
+        push_unique(
+            &mut required_tools,
+            homeboy::core::runner::RunnerRequiredTool::Docker,
+        );
+    }
+
+    Some(homeboy::core::runner::LabRunnerCapabilityContract {
+        command: command_label,
+        required_tools,
+        requires_playwright: matches!(command, Commands::Trace(_)),
     })
 }
 
-fn lab_runner_required_tool(
-    tool: resource_policy::LabRunnerTool,
-) -> homeboy::core::runner::RunnerRequiredTool {
-    match tool {
-        resource_policy::LabRunnerTool::Git => homeboy::core::runner::RunnerRequiredTool::Git,
-        resource_policy::LabRunnerTool::Node => homeboy::core::runner::RunnerRequiredTool::Node,
-        resource_policy::LabRunnerTool::Npm => homeboy::core::runner::RunnerRequiredTool::Npm,
-        resource_policy::LabRunnerTool::Pnpm => homeboy::core::runner::RunnerRequiredTool::Pnpm,
-        resource_policy::LabRunnerTool::Php => homeboy::core::runner::RunnerRequiredTool::Php,
-        resource_policy::LabRunnerTool::Composer => {
-            homeboy::core::runner::RunnerRequiredTool::Composer
-        }
-        resource_policy::LabRunnerTool::Docker => homeboy::core::runner::RunnerRequiredTool::Docker,
-        resource_policy::LabRunnerTool::Playwright => {
-            homeboy::core::runner::RunnerRequiredTool::Playwright
-        }
+fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
+    if !items.contains(&item) {
+        items.push(item);
     }
+}
+
+fn has_docker_signal(source_path: &Path) -> bool {
+    [
+        "Dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+    ]
+    .iter()
+    .any(|name| source_path.join(name).is_file())
 }
 
 fn lab_offload_source_path(args: &[String]) -> homeboy::core::Result<PathBuf> {
@@ -1008,9 +1125,10 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        lab_offload_source_path, prepare_lab_runner_for_offload_with,
-        resolve_lab_runner_selection_from_default, rewrite_lab_offload_args, LabRunnerPreparation,
-        LabRunnerSelection, LabRunnerSelectionSource,
+        lab_offload_source_path, lab_runner_capability_contract,
+        prepare_lab_runner_for_offload_with, resolve_lab_runner_selection_from_default,
+        rewrite_lab_offload_args, LabRunnerPreparation, LabRunnerSelection,
+        LabRunnerSelectionSource,
     };
     use clap::Parser;
     use homeboy::cli_surface::Commands;
@@ -1039,6 +1157,34 @@ mod tests {
             args: Vec::new(),
             json_summary: false,
         }
+    }
+
+    #[test]
+    fn lab_runner_capability_contract_detects_workspace_tool_signals() {
+        let dir = tempfile::tempdir().expect("temp project");
+        std::fs::write(dir.path().join("package.json"), "{}").expect("package.json");
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), "lockfileVersion: '9'\n")
+            .expect("pnpm-lock");
+        std::fs::write(dir.path().join("composer.json"), "{}").expect("composer.json");
+        std::fs::write(dir.path().join("Dockerfile"), "FROM scratch\n").expect("Dockerfile");
+        let command = homeboy::cli_surface::Cli::try_parse_from(["homeboy", "lint"])
+            .expect("parse")
+            .command;
+
+        let contract = lab_runner_capability_contract(&command, dir.path()).expect("contract");
+
+        assert_eq!(contract.command, "lint");
+        assert_eq!(
+            contract.required_tools,
+            vec![
+                homeboy::core::runner::RunnerRequiredTool::Node,
+                homeboy::core::runner::RunnerRequiredTool::Npm,
+                homeboy::core::runner::RunnerRequiredTool::Pnpm,
+                homeboy::core::runner::RunnerRequiredTool::Php,
+                homeboy::core::runner::RunnerRequiredTool::Composer,
+                homeboy::core::runner::RunnerRequiredTool::Docker,
+            ]
+        );
     }
 
     #[test]
