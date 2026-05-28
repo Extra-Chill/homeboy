@@ -1038,6 +1038,14 @@ jobs:
           path: ${{ steps.transcript-artifact.outputs.path }}
           if-no-files-found: error
 
+      - name: Upload agent results artifact
+        if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.transcript_artifact_name }}-results
+          path: ${{ runner.temp }}/run-results.json
+          if-no-files-found: warn
+
       - name: Upload replay bundle artifact
         if: ${{ always() && inputs.run_agent && inputs.replay_bundle_artifact_name != '' }}
         uses: actions/upload-artifact@v4
