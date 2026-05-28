@@ -140,10 +140,6 @@ const BASELINE: &[ViolationKey] = &[
         term: "wordpress",
     },
     ViolationKey {
-        path: "src/commands/component.rs",
-        term: "wp-content",
-    },
-    ViolationKey {
         path: "src/commands/doctor/resources.rs",
         term: "cargo",
     },
@@ -493,7 +489,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 158;
+const BASELINE_OCCURRENCES: usize = 157;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
