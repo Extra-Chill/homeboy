@@ -6,6 +6,7 @@ mod compare;
 mod corpus_tests;
 mod distribution;
 mod drift;
+mod evidence;
 mod findings;
 mod gh_actions;
 mod latest;
@@ -35,6 +36,7 @@ pub use common::RunSummary;
 use compare::{compare_runs, RunsCompareArgs, RunsCompareOutput};
 pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
 use drift::{runs_drift, RunsDriftArgs};
+use evidence::{evidence, RunsEvidenceOutput};
 use findings::{RunsFindingOutput, RunsFindingsOutput};
 use gh_actions::GhActionsImportOutput;
 use latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
@@ -73,6 +75,8 @@ enum RunsCommand {
     Reconcile(RunsReconcileArgs),
     /// Show one persisted observation run
     Show { run_id: String },
+    /// Show stable evidence registry data for one run
+    Evidence { run_id: String },
     /// List artifacts recorded for one run
     Artifacts { run_id: String },
     /// Retrieve or sync recorded run artifacts
@@ -124,6 +128,7 @@ pub enum RunsOutput {
     LatestRun(RunsLatestRunOutput),
     Compare(RunsCompareOutput),
     Show(RunsShowOutput),
+    Evidence(RunsEvidenceOutput),
     Artifacts(RunsArtifactsOutput),
     ArtifactGet(RunsArtifactGetOutput),
     ArtifactCleanupDownloads(RunsArtifactCleanupDownloadsOutput),
@@ -306,6 +311,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Compare(args) => compare_runs(args),
         RunsCommand::Reconcile(args) => reconcile_runs(args),
         RunsCommand::Show { run_id } => show_run(&run_id),
+        RunsCommand::Evidence { run_id } => evidence(&run_id),
         RunsCommand::Artifacts { run_id } => artifacts(&run_id),
         RunsCommand::Artifact(args) => artifact_command(args),
         RunsCommand::Findings(args) => findings::findings(args),

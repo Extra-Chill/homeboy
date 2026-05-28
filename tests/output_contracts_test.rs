@@ -97,6 +97,21 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
             variant_contract("compare", json!({ "command": "runs.compare", "rows": [] })),
             variant_contract("show", json!({ "command": "runs.show", "run": {} })),
             variant_contract(
+                "evidence",
+                json!({
+                    "command": "runs.evidence",
+                    "run_id": "run-1",
+                    "run": {},
+                    "metadata": {},
+                    "heartbeat": {},
+                    "artifact_index": {},
+                    "retention": {},
+                    "failure": {},
+                    "disk_budget": {},
+                    "evidence_links": []
+                }),
+            ),
+            variant_contract(
                 "artifacts",
                 json!({ "command": "runs.artifacts", "run_id": "run-1", "artifacts": [] }),
             ),

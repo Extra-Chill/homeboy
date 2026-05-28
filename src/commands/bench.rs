@@ -185,6 +185,12 @@ pub struct BenchRunArgs {
     #[arg(long)]
     json_summary: bool,
 
+    /// Write machine-readable long-loop heartbeat/status JSON to this path.
+    /// The file is updated when the observation starts and again when it
+    /// finishes or errors.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) status_file: Option<PathBuf>,
+
     /// Include a combined comparison report artifact. Currently supports
     /// `side-by-side` for multi-rig bench comparisons.
     #[arg(long = "report", value_enum)]

@@ -48,7 +48,7 @@ pub(super) fn start(start: BenchObservationStart<'_>) -> Option<BenchObservation
         start.rig_snapshot,
         start.run_dir,
     );
-    ActiveObservation::start_best_effort(
+    let observation = ActiveObservation::start_best_effort(
         NewRunRecord::builder("bench")
             .component_id(start.component_id)
             .command(bench_observation_command(
@@ -63,7 +63,18 @@ pub(super) fn start(start: BenchObservationStart<'_>) -> Option<BenchObservation
             .metadata(metadata.clone())
             .build(),
     )
-    .map(BenchObservation)
+    .map(BenchObservation);
+    if let Some(observation) = &observation {
+        write_status_file(
+            start.args,
+            start.run_dir,
+            observation,
+            "running",
+            None,
+            None,
+        );
+    }
+    observation
 }
 
 pub(super) fn finish_success(
@@ -87,6 +98,14 @@ pub(super) fn finish_success(
         rig_id: observation.0.rig_id().map(str::to_string),
         store_path: observation.0.store_path(),
     };
+    write_status_file(
+        &observation.0.initial_metadata().clone(),
+        run_dir,
+        &observation,
+        workflow.status.as_str(),
+        Some(workflow),
+        None,
+    );
     observation.0.finish(status, Some(metadata));
     Some(summary)
 }
@@ -134,7 +153,84 @@ pub(super) fn finish_error(
             "error": error.to_string(),
         }),
     );
+    write_status_file(
+        &observation.0.initial_metadata().clone(),
+        run_dir,
+        &observation,
+        "error",
+        None,
+        Some(error),
+    );
     observation.0.finish_error(Some(metadata));
+}
+
+trait BenchStatusTarget {
+    fn status_file(&self) -> Option<PathBuf>;
+}
+
+impl BenchStatusTarget for BenchRunArgs {
+    fn status_file(&self) -> Option<PathBuf> {
+        self.status_file.clone()
+    }
+}
+
+impl BenchStatusTarget for serde_json::Value {
+    fn status_file(&self) -> Option<PathBuf> {
+        self.get("status_file")
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from)
+    }
+}
+
+fn write_status_file<T: BenchStatusTarget>(
+    target: &T,
+    run_dir: &RunDir,
+    observation: &BenchObservation,
+    status: &str,
+    workflow: Option<&BenchRunWorkflowResult>,
+    error: Option<&homeboy::core::Error>,
+) {
+    let Some(path) = target.status_file() else {
+        return;
+    };
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let _ = fs::create_dir_all(parent);
+    }
+    let artifacts = observation
+        .0
+        .store()
+        .list_artifacts(observation.run_id())
+        .unwrap_or_default();
+    let payload = serde_json::json!({
+        "schema": "homeboy/bench-status/v1",
+        "command": "bench.status",
+        "run_id": observation.run_id(),
+        "kind": observation.0.run().kind,
+        "status": status,
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+        "started_at": observation.0.run().started_at,
+        "finished": workflow.is_some() || error.is_some(),
+        "component_id": observation.0.component_id(),
+        "rig_id": observation.0.rig_id(),
+        "homeboy_version": observation.0.run().homeboy_version,
+        "git_sha": observation.0.run().git_sha,
+        "cwd": observation.0.run().cwd,
+        "run_dir": run_dir.path().to_string_lossy().to_string(),
+        "observation_store": observation.0.store_path(),
+        "artifact_count": artifacts.len(),
+        "artifacts": artifacts,
+        "failure": workflow.and_then(|workflow| workflow.failure.as_ref()),
+        "error": error.map(|error| error.to_string()),
+        "exit_code": workflow.map(|workflow| workflow.exit_code),
+        "gate_failures": workflow.map(|workflow| workflow.gate_failures.clone()).unwrap_or_default(),
+        "hints": workflow.and_then(|workflow| workflow.hints.clone()).unwrap_or_default(),
+    });
+    if let Ok(json) = serde_json::to_vec_pretty(&payload) {
+        let _ = fs::write(path, json);
+    }
 }
 
 fn bench_observation_command(
@@ -188,6 +284,7 @@ fn bench_observation_initial_metadata(
         "profile": args.profile,
         "selected_scenarios": selected_scenarios,
         "shared_state": args.shared_state.as_ref().map(|path| path.to_string_lossy().to_string()),
+        "status_file": args.status_file.as_ref().map(|path| path.to_string_lossy().to_string()),
         "run_dir": run_dir.path().to_string_lossy().to_string(),
         "rig_state": rig_snapshot,
         "resource_policy": resource_policy,
@@ -462,6 +559,7 @@ mod tests {
             setting_args: SettingArgs::default(),
             args: Vec::new(),
             json_summary: false,
+            status_file: None,
             report: Vec::new(),
             rig: Vec::new(),
             rig_order: BenchRigOrder::Input,
@@ -584,6 +682,65 @@ mod tests {
                 .expect("persisted transcript path");
             assert_ne!(persisted_transcript, "bench-artifacts/cold/transcript.json");
             assert!(PathBuf::from(persisted_transcript).is_file());
+        });
+    }
+
+    #[test]
+    fn bench_observation_writes_status_file_at_start_and_finish() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let run_dir = RunDir::create().expect("run dir");
+            fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
+            fs::write(run_dir.step_file(run_dir::files::RESOURCE_SUMMARY), b"{}")
+                .expect("resources");
+            let status_file = home.path().join("bench-status.json");
+            let mut args = bench_args();
+            args.status_file = Some(status_file.clone());
+            let selected_scenarios = vec!["cold".to_string()];
+
+            let observation = start(BenchObservationStart {
+                component_id: "homeboy",
+                component_label: "homeboy",
+                source_path: home.path(),
+                args: &args,
+                selected_scenarios: &selected_scenarios,
+                rig_id: None,
+                rig_snapshot: None,
+                run_dir: &run_dir,
+            })
+            .expect("start observation");
+            let started: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(&status_file).expect("read started status"),
+            )
+            .expect("started status json");
+            assert_eq!(started["schema"], "homeboy/bench-status/v1");
+            assert_eq!(started["status"], "running");
+            assert_eq!(started["finished"], false);
+
+            let mut workflow = BenchRunWorkflowResult {
+                status: "passed".to_string(),
+                component: "homeboy".to_string(),
+                exit_code: 0,
+                iterations: 10,
+                results: Some(bench_results("homeboy", "cold", 42.0)),
+                gate_failures: Vec::new(),
+                baseline_comparison: None,
+                hints: Some(vec!["persisted".to_string()]),
+                failure: None,
+                diagnostics: Vec::new(),
+            };
+            let run_id = observation.run_id().to_string();
+            finish_success(Some(observation), &mut workflow, &run_dir).expect("finish observation");
+            let finished: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(&status_file).expect("read finished status"),
+            )
+            .expect("finished status json");
+            assert_eq!(finished["run_id"], run_id);
+            assert_eq!(finished["status"], "passed");
+            assert_eq!(finished["finished"], true);
+            assert_eq!(finished["exit_code"], 0);
+            assert_eq!(finished["artifact_count"], 2);
+            assert_eq!(finished["hints"][0], "persisted");
         });
     }
 

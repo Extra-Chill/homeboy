@@ -1,0 +1,489 @@
+use std::fs;
+use std::path::Path;
+
+use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
+use serde::Serialize;
+use serde_json::Value;
+
+use super::{reconcile, require_run, run_summary, CmdResult, RunSummary, RunsOutput};
+
+#[derive(Serialize)]
+pub struct RunsEvidenceOutput {
+    pub command: &'static str,
+    pub run_id: String,
+    pub run: RunSummary,
+    pub homeboy_version: Option<String>,
+    pub metadata: RunsEvidenceMetadata,
+    pub heartbeat: RunsEvidenceHeartbeat,
+    pub artifact_index: RunsEvidenceArtifactIndex,
+    pub retention: RunsEvidenceRetention,
+    pub failure: RunsEvidenceFailureSummary,
+    pub disk_budget: RunsEvidenceDiskBudget,
+    pub evidence_links: Vec<RunsEvidenceLink>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEvidenceMetadata {
+    pub cost: Value,
+    pub timing: Value,
+    pub version: Value,
+    pub host: Value,
+    pub runtime: Value,
+}
+
+#[derive(Serialize)]
+pub struct RunsEvidenceHeartbeat {
+    pub status: String,
+    pub stale: bool,
+    pub stale_reason: Option<String>,
+    pub owner_pid: Option<u32>,
+    pub updated_at: String,
+}
+
+#[derive(Serialize)]
+pub struct RunsEvidenceArtifactIndex {
+    pub count: usize,
+    pub file_count: usize,
+    pub directory_count: usize,
+    pub url_count: usize,
+    pub missing_count: usize,
+    pub total_size_bytes: u64,
+    pub artifacts: Vec<RunsEvidenceArtifact>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEvidenceArtifact {
+    pub id: String,
+    pub kind: String,
+    #[serde(rename = "type")]
+    pub artifact_type: String,
+    pub path: String,
+    pub url: Option<String>,
+    pub size_bytes: Option<i64>,
+    pub sha256: Option<String>,
+    pub created_at: String,
+    pub exists: bool,
+    pub retention_candidate: bool,
+}
+
+#[derive(Serialize)]
+pub struct RunsEvidenceRetention {
+    pub artifact_root: String,
+    pub default_retention_days: i64,
+    pub cleanup_command: String,
+}
+
+#[derive(Serialize)]
+pub struct RunsEvidenceFailureSummary {
+    pub failed: bool,
+    pub status: String,
+    pub exit_code: Option<i64>,
+    pub error: Option<String>,
+    pub failure: Value,
+    pub gate_failures: Vec<String>,
+    pub hints: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEvidenceDiskBudget {
+    pub path: String,
+    pub available_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub used_percent: Option<f64>,
+    pub status: String,
+    pub warning: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEvidenceLink {
+    pub kind: String,
+    pub target: String,
+    pub label: String,
+}
+
+pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
+    let store = ObservationStore::open_initialized()?;
+    let run = require_run(&store, run_id)?;
+    let artifacts = store.list_artifacts(run_id)?;
+    let artifact_root = homeboy::core::artifact_root()?;
+    let artifact_index = evidence_artifact_index(&artifacts);
+    let disk_budget = evidence_disk_budget(&artifact_root);
+    let stale_reason = reconcile::running_status_note(&run);
+    let metadata = evidence_metadata(&run.metadata_json);
+    let failure = evidence_failure_summary(&run);
+    let links = evidence_links(&artifacts);
+
+    Ok((
+        RunsOutput::Evidence(RunsEvidenceOutput {
+            command: "runs.evidence",
+            run_id: run.id.clone(),
+            run: run_summary(run.clone()),
+            homeboy_version: run.homeboy_version.clone(),
+            metadata,
+            heartbeat: RunsEvidenceHeartbeat {
+                status: run.status.clone(),
+                stale: stale_reason.is_some(),
+                stale_reason,
+                owner_pid: homeboy::core::observation::run_owner_pid(&run),
+                updated_at: run
+                    .finished_at
+                    .clone()
+                    .unwrap_or_else(|| run.started_at.clone()),
+            },
+            artifact_index,
+            retention: RunsEvidenceRetention {
+                artifact_root: artifact_root.display().to_string(),
+                default_retention_days: 30,
+                cleanup_command: format!(
+                    "homeboy runs artifact cleanup-persisted --run-id {} --older-than-days 30",
+                    run.id
+                ),
+            },
+            failure,
+            disk_budget,
+            evidence_links: links,
+        }),
+        0,
+    ))
+}
+
+fn evidence_metadata(metadata: &Value) -> RunsEvidenceMetadata {
+    RunsEvidenceMetadata {
+        cost: pick_metadata(metadata, &["cost", "costs", "usage", "token_usage"]),
+        timing: pick_metadata(
+            metadata,
+            &["timing", "timings", "duration", "scenario_metrics"],
+        ),
+        version: pick_metadata(metadata, &["version", "versions", "homeboy_version"]),
+        host: pick_metadata(
+            metadata,
+            &["host", "hostname", "machine", "resource_policy"],
+        ),
+        runtime: pick_metadata(metadata, &["runtime", "runner", "ci_context", "rig_state"]),
+    }
+}
+
+fn pick_metadata(metadata: &Value, keys: &[&str]) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in keys {
+        if let Some(value) = metadata.get(*key) {
+            out.insert((*key).to_string(), value.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifactIndex {
+    let mut file_count = 0;
+    let mut directory_count = 0;
+    let mut url_count = 0;
+    let mut missing_count = 0;
+    let mut total_size_bytes = 0u64;
+    let artifacts = artifacts
+        .iter()
+        .map(|artifact| {
+            let exists = artifact_exists(artifact);
+            if !exists {
+                missing_count += 1;
+            }
+            match artifact.artifact_type.as_str() {
+                "file" => file_count += 1,
+                "directory" => directory_count += 1,
+                "url" => url_count += 1,
+                _ => {}
+            }
+            let size = artifact_size_bytes(artifact);
+            total_size_bytes = total_size_bytes.saturating_add(size);
+            RunsEvidenceArtifact {
+                id: artifact.id.clone(),
+                kind: artifact.kind.clone(),
+                artifact_type: artifact.artifact_type.clone(),
+                path: artifact.path.clone(),
+                url: artifact
+                    .url
+                    .clone()
+                    .or_else(|| (artifact.artifact_type == "url").then(|| artifact.path.clone())),
+                size_bytes: artifact.size_bytes,
+                sha256: artifact.sha256.clone(),
+                created_at: artifact.created_at.clone(),
+                exists,
+                retention_candidate: artifact.artifact_type != "url",
+            }
+        })
+        .collect::<Vec<_>>();
+
+    RunsEvidenceArtifactIndex {
+        count: artifacts.len(),
+        file_count,
+        directory_count,
+        url_count,
+        missing_count,
+        total_size_bytes,
+        artifacts,
+    }
+}
+
+fn artifact_exists(artifact: &ArtifactRecord) -> bool {
+    if artifact.artifact_type == "url" {
+        return true;
+    }
+    Path::new(&artifact.path).exists()
+}
+
+fn artifact_size_bytes(artifact: &ArtifactRecord) -> u64 {
+    if let Some(size) = artifact
+        .size_bytes
+        .and_then(|size| u64::try_from(size).ok())
+    {
+        return size;
+    }
+    let path = Path::new(&artifact.path);
+    if path.is_file() {
+        return fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    }
+    if path.is_dir() {
+        return directory_size_bytes(path);
+    }
+    0
+}
+
+fn directory_size_bytes(path: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                directory_size_bytes(&path)
+            } else {
+                fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
+fn evidence_failure_summary(run: &RunRecord) -> RunsEvidenceFailureSummary {
+    let metadata = &run.metadata_json;
+    let exit_code = metadata.get("exit_code").and_then(|value| value.as_i64());
+    let error = metadata
+        .get("error")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    RunsEvidenceFailureSummary {
+        failed: !matches!(run.status.as_str(), "pass" | "passed"),
+        status: run.status.clone(),
+        exit_code,
+        error,
+        failure: metadata.get("failure").cloned().unwrap_or(Value::Null),
+        gate_failures: string_array(metadata.get("gate_failures")),
+        hints: string_array(metadata.get("hints")),
+    }
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn evidence_links(artifacts: &[ArtifactRecord]) -> Vec<RunsEvidenceLink> {
+    artifacts
+        .iter()
+        .filter_map(|artifact| {
+            if artifact.artifact_type == "url" {
+                return Some(RunsEvidenceLink {
+                    kind: artifact.kind.clone(),
+                    target: artifact
+                        .url
+                        .clone()
+                        .unwrap_or_else(|| artifact.path.clone()),
+                    label: artifact.kind.clone(),
+                });
+            }
+            if artifact.path.is_empty() {
+                None
+            } else {
+                Some(RunsEvidenceLink {
+                    kind: artifact.kind.clone(),
+                    target: artifact.path.clone(),
+                    label: artifact.kind.clone(),
+                })
+            }
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn evidence_disk_budget(path: &Path) -> RunsEvidenceDiskBudget {
+    let c_path = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
+        Ok(path) => path,
+        Err(_) => return unavailable_disk_budget(path, "path contains an interior NUL byte"),
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return unavailable_disk_budget(path, "statvfs failed");
+    }
+    let stat = unsafe { stat.assume_init() };
+    let block_size = u128::from(stat.f_frsize.max(1));
+    let total = u64::try_from(u128::from(stat.f_blocks).saturating_mul(block_size)).ok();
+    let available = u64::try_from(u128::from(stat.f_bavail).saturating_mul(block_size)).ok();
+    let used_percent = match (total, available) {
+        (Some(total), Some(available)) if total > 0 => {
+            Some(((total.saturating_sub(available)) as f64 / total as f64) * 100.0)
+        }
+        _ => None,
+    };
+    let warning = match (available, total) {
+        (Some(available), Some(total)) if total > 0 && available < total / 10 => {
+            Some("artifact filesystem has less than 10% free space".to_string())
+        }
+        (Some(available), _) if available < 5 * 1024 * 1024 * 1024 => {
+            Some("artifact filesystem has less than 5 GiB free space".to_string())
+        }
+        _ => None,
+    };
+    RunsEvidenceDiskBudget {
+        path: path.display().to_string(),
+        available_bytes: available,
+        total_bytes: total,
+        used_percent,
+        status: if warning.is_some() { "warning" } else { "ok" }.to_string(),
+        warning,
+    }
+}
+
+#[cfg(not(unix))]
+fn evidence_disk_budget(path: &Path) -> RunsEvidenceDiskBudget {
+    unavailable_disk_budget(
+        path,
+        "disk budget probing is not implemented for this platform",
+    )
+}
+
+fn unavailable_disk_budget(path: &Path, warning: &str) -> RunsEvidenceDiskBudget {
+    RunsEvidenceDiskBudget {
+        path: path.display().to_string(),
+        available_bytes: None,
+        total_bytes: None,
+        used_percent: None,
+        status: "unknown".to_string(),
+        warning: Some(warning.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
+    use homeboy::test_support::with_isolated_home;
+    use serde_json::Value;
+
+    use super::*;
+
+    struct XdgGuard(Option<String>);
+
+    impl XdgGuard {
+        fn unset() -> Self {
+            let prior = std::env::var("XDG_DATA_HOME").ok();
+            std::env::remove_var("XDG_DATA_HOME");
+            Self(prior)
+        }
+    }
+
+    impl Drop for XdgGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
+        NewRunRecord::builder(kind)
+            .component_id(component_id)
+            .command(format!("homeboy {kind} {component_id}"))
+            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+            .homeboy_version("test-version")
+            .git_sha(Some("abc123".to_string()))
+            .rig_id(rig_id)
+            .metadata(metadata)
+            .build()
+    }
+
+    #[test]
+    fn evidence_command_reports_registry_artifacts_retention_and_failure_summary() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let artifact_root = home.path().join("agent-readable-artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({
+                        "exit_code": 1,
+                        "error": "boom",
+                        "gate_failures": ["p95_ms exceeded"],
+                        "hints": ["inspect artifacts"],
+                        "scenario_metrics": [{"scenario_id":"cold","metrics":{"p95_ms":42.0}}],
+                        "resource_policy": {"hot_command":"bench"}
+                    }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish run");
+            let artifact_path = home.path().join("bench-results.json");
+            std::fs::write(&artifact_path, b"{}").expect("artifact");
+            store
+                .record_artifact(&run.id, "bench_results", &artifact_path)
+                .expect("record artifact");
+            store
+                .record_url_artifact(&run.id, "review", "https://example.test/evidence")
+                .expect("record url");
+
+            let (output, _) = evidence(&run.id).expect("evidence");
+            let RunsOutput::Evidence(output) = output else {
+                panic!("expected evidence output");
+            };
+
+            assert_eq!(output.command, "runs.evidence");
+            assert_eq!(output.run_id, run.id);
+            assert_eq!(output.run.kind, "bench");
+            assert_eq!(output.artifact_index.count, 2);
+            assert_eq!(output.artifact_index.file_count, 1);
+            assert_eq!(output.artifact_index.url_count, 1);
+            assert_eq!(output.artifact_index.missing_count, 0);
+            assert_eq!(output.retention.default_retention_days, 30);
+            assert!(output
+                .retention
+                .artifact_root
+                .contains("agent-readable-artifacts"));
+            assert!(output
+                .retention
+                .cleanup_command
+                .contains("cleanup-persisted --run-id"));
+            assert!(output.failure.failed);
+            assert_eq!(output.failure.exit_code, Some(1));
+            assert_eq!(output.failure.gate_failures, vec!["p95_ms exceeded"]);
+            assert_eq!(output.failure.hints, vec!["inspect artifacts"]);
+            assert!(!output.evidence_links.is_empty());
+            assert!(
+                output.disk_budget.available_bytes.is_some()
+                    || output.disk_budget.warning.is_some()
+            );
+            homeboy::core::set_artifact_root_override(None);
+        });
+    }
+}
