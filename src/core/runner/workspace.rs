@@ -39,8 +39,6 @@ const DEFAULT_EXCLUDES: &[&str] = &[
     ".turbo/**",
     ".cache",
     ".cache/**",
-    "vendor",
-    "vendor/**",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -603,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn default_excludes_filter_dependencies_and_secrets() {
+    fn default_excludes_filter_generated_outputs_and_secrets() {
         let root = Path::new("/repo");
 
         assert!(is_excluded(
@@ -631,6 +629,11 @@ mod tests {
             Path::new("/repo/src/main.rs"),
             DEFAULT_EXCLUDES
         ));
+        assert!(!is_excluded(
+            root,
+            Path::new("/repo/vendor/autoload.php"),
+            DEFAULT_EXCLUDES
+        ));
     }
 
     #[test]
@@ -640,12 +643,14 @@ mod tests {
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
             fs::create_dir_all(source.path().join("src")).expect("src dir");
             fs::create_dir_all(source.path().join("build")).expect("root build dir");
+            fs::create_dir_all(source.path().join("vendor")).expect("vendor dir");
             fs::create_dir_all(source.path().join("wordpress/scripts/build"))
                 .expect("extension scripts build dir");
             fs::create_dir_all(source.path().join(".git")).expect("git dir");
             fs::create_dir_all(source.path().join("target/debug")).expect("target dir");
             fs::write(source.path().join("src/main.rs"), "fn main() {}\n").expect("source file");
             fs::write(source.path().join("build/bundle.js"), "artifact").expect("build file");
+            fs::write(source.path().join("vendor/autoload.php"), "<?php\n").expect("vendor file");
             fs::write(
                 source.path().join("wordpress/scripts/build/setup.sh"),
                 "#!/bin/sh\n",
@@ -678,8 +683,11 @@ mod tests {
 
             assert_eq!(exit_code, 0);
             assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
-            assert_eq!(output.files, 3);
+            assert_eq!(output.files, 4);
             assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
+            assert!(Path::new(&output.remote_path)
+                .join("vendor/autoload.php")
+                .exists());
             assert!(Path::new(&output.remote_path)
                 .join("wordpress/scripts/build/setup.sh")
                 .exists());
