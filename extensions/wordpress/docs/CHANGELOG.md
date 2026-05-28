@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.18] - 2026-05-28
+
+### Fixed
+- rely on core wp ai client in agent ci
+
 ## [2.102.17] - 2026-05-28
 
 ### Changed
