@@ -129,6 +129,9 @@ if [ "${1:-}" = "clone" ]; then
  * Plugin Name: Data Machine
  */
 PHP
+            cat > "${clone_path}/composer.json" <<'JSON'
+{"name":"extra-chill/data-machine"}
+JSON
             exit 0
             ;;
     esac
@@ -137,6 +140,18 @@ fi
 exit 1
 SH
 chmod +x "${CLONE_BIN_DIR}/git"
+
+cat > "${CLONE_BIN_DIR}/composer" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "install" ]; then
+    mkdir -p vendor
+    : > vendor/autoload.php
+    exit 0
+fi
+exit 1
+SH
+chmod +x "${CLONE_BIN_DIR}/composer"
 
 source "$HELPER"
 
@@ -177,6 +192,11 @@ fallback_data_machine="${FALLBACK_CACHE_DIR}/homeboy-deps/data-machine"
 if ! grep -F -- "$fallback_data_machine" <<< "$fallback_resolved" >/dev/null; then
     echo "FAIL: data-machine dependency should resolve from Extra-Chill/data-machine" >&2
     printf '%s\n' "$fallback_resolved" >&2
+    exit 1
+fi
+
+if [ ! -f "${fallback_data_machine}/vendor/autoload.php" ]; then
+    echo "FAIL: cloned dependency Composer dependencies were not installed" >&2
     exit 1
 fi
 

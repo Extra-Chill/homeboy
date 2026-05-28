@@ -223,6 +223,10 @@ _homeboy_clone_dependency() {
     fi
 
     if git clone --depth 1 --quiet "$repo_url" "$clone_path" 2>/dev/null; then
+        if ! _homeboy_prepare_cloned_dependency "$clone_path"; then
+            rm -rf "$clone_path" 2>/dev/null || true
+            return 1
+        fi
         printf '%s\n' "$clone_path"
         return 0
     fi
@@ -230,6 +234,24 @@ _homeboy_clone_dependency() {
     # Clone failed — clean up partial clone
     rm -rf "$clone_path" 2>/dev/null || true
     return 1
+}
+
+_homeboy_prepare_cloned_dependency() {
+    local clone_path="${1:-}"
+
+    [ -n "$clone_path" ] && [ -d "$clone_path" ] || return 1
+    [ -f "${clone_path}/composer.json" ] || return 0
+    [ ! -f "${clone_path}/vendor/autoload.php" ] || return 0
+
+    if ! command -v composer >/dev/null 2>&1; then
+        echo "Warning: Validation dependency '${clone_path}' has composer.json but composer is not available." >&2
+        return 0
+    fi
+
+    if ! ( cd "$clone_path" && composer install --no-dev --no-interaction --quiet ); then
+        echo "Warning: Could not install Composer dependencies for validation dependency '${clone_path}'." >&2
+        return 1
+    fi
 }
 
 _homeboy_known_dependency_github_org() {
