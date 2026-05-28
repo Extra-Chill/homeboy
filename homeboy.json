@@ -157,10 +157,10 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-27T21:46:10Z",
+      "created_at": "2026-05-28T04:12:17Z",
       "item_count": 30,
       "known_fingerprints": [
-        "artifact_portability::observation:fc27b993-5ca1-4c9b-811f-8a2416f45b56::NonPortableArtifactPath",
+        "artifact_portability::observation:a0bbd668-2ed8-4341-afef-57d11b9ba5bd::NonPortableArtifactPath",
         "dead_code::src/commands/utils/resource_policy.rs::UnreferencedExport",
         "dead_code::src/commands/utils/resource_policy.rs::UnreferencedExport",
         "dead_code::src/core/engine/temp.rs::UnreferencedExport",
@@ -192,7 +192,7 @@
         "structural::src/core/rig/pipeline.rs::HighItemCount"
       ],
       "metadata": {
-        "alignment_score": 0.9154929518699646,
+        "alignment_score": 0.9166666865348816,
         "known_outliers": [
           "src/core/observation/records/run_status.rs",
           "src/core/observation/records/triage_items.rs",
