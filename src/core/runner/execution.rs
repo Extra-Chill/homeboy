@@ -5,7 +5,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::core::api_jobs::{Job, JobEvent, JobStatus};
+use crate::core::api_jobs::{Job, JobEvent, JobStatus, RemoteRunnerJobRequest};
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::server::{self, SshClient};
@@ -13,7 +13,7 @@ use crate::core::source_snapshot::SourceSnapshot;
 
 use super::capabilities::{runner_capability_snapshot, validate_runner_capability_preflight};
 use super::evidence::mirror_daemon_evidence;
-use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind};
+use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
 
 mod policy;
 use policy::{validate_runner_policy, RunnerPolicyRequest};
@@ -36,6 +36,7 @@ pub struct RunnerExecOptions {
 pub enum RunnerExecMode {
     Daemon,
     Local,
+    ReverseBroker,
     Ssh,
 }
 
@@ -98,12 +99,12 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     if connected.connected {
         if let Some(session) = connected.session {
+            preflight_runner_capability_plan(
+                &runner,
+                options.capability_preflight.as_ref(),
+                &request_env,
+            )?;
             if let Some(local_url) = session.local_url.as_deref() {
-                preflight_runner_capability_plan(
-                    &runner,
-                    options.capability_preflight.as_ref(),
-                    &request_env,
-                )?;
                 return exec_via_daemon(
                     &runner,
                     local_url,
@@ -113,6 +114,20 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                     options.capture_patch,
                     options.source_snapshot,
                 );
+            }
+            if session.mode == RunnerTunnelMode::Reverse {
+                if let Some(broker_url) = session.broker_url.as_deref() {
+                    return exec_via_reverse_broker(
+                        &runner,
+                        broker_url,
+                        cwd,
+                        options.project_id,
+                        options.command,
+                        request_env,
+                        options.capture_patch,
+                        options.source_snapshot,
+                    );
+                }
             }
         }
     }
@@ -137,6 +152,111 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             ]),
         )),
     }
+}
+
+fn exec_via_reverse_broker(
+    runner: &Runner,
+    broker_url: &str,
+    cwd: String,
+    project_id: Option<String>,
+    command: Vec<String>,
+    env: HashMap<String, String>,
+    capture_patch: bool,
+    source_snapshot_override: Option<SourceSnapshot>,
+) -> Result<(RunnerExecOutput, i32)> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| Error::internal_unexpected(format!("build broker HTTP client: {err}")))?;
+    let source_snapshot = source_snapshot_override.unwrap_or_else(|| {
+        SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
+    });
+    let request = RemoteRunnerJobRequest {
+        runner_id: runner.id.clone(),
+        project_id,
+        operation: "runner.exec".to_string(),
+        command: command.clone(),
+        cwd: Some(cwd.clone()),
+        env,
+        capture_patch,
+        source_snapshot: Some(source_snapshot.clone()),
+        metadata: Some(json!({
+            "transport": "reverse_broker",
+        })),
+    };
+    let data = daemon_post(
+        &client,
+        broker_url,
+        "/runner/jobs",
+        serde_json::to_value(&request).map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("serialize reverse runner job request".to_string()),
+            )
+        })?,
+        "submit reverse runner job",
+    )?;
+    let body = data.get("body").unwrap_or(&data);
+    let job_value = body
+        .get("job")
+        .ok_or_else(|| Error::internal_unexpected("reverse broker submit returned no job"))?;
+    let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse reverse broker job".to_string()),
+        )
+    })?;
+
+    let deadline = Instant::now() + Duration::from_secs(60 * 60);
+    while !matches!(
+        job.status,
+        JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+    ) {
+        if Instant::now() >= deadline {
+            return Err(Error::internal_unexpected(format!(
+                "reverse runner job {} did not finish before timeout",
+                job.id
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        job = fetch_daemon_job(&client, broker_url, &job.id.to_string())?;
+    }
+    let events = fetch_daemon_events(&client, broker_url, &job.id.to_string())?;
+
+    let result = result_event_data(&events).unwrap_or_else(|| json!({}));
+    let stdout = string_field(&result, "stdout");
+    let stderr = string_field(&result, "stderr");
+    let exit_code = result
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .unwrap_or_else(|| {
+            if job.status == JobStatus::Succeeded {
+                0
+            } else {
+                1
+            }
+        });
+
+    Ok((
+        RunnerExecOutput {
+            command: "runner.exec",
+            runner_id: runner.id.clone(),
+            mode: RunnerExecMode::ReverseBroker,
+            argv: command,
+            remote_cwd: cwd,
+            exit_code,
+            stdout,
+            stderr,
+            source_snapshot: Some(source_snapshot),
+            job_id: Some(job.id.to_string()),
+            job: Some(job),
+            job_events: Some(events),
+            mirror_run_id: None,
+            patch: None,
+        },
+        exit_code,
+    ))
 }
 
 fn exec_via_daemon(
@@ -287,6 +407,33 @@ fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result<Value> {
         Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
     })?;
     if !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "daemon request failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    envelope
+        .data
+        .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
+}
+
+fn daemon_post(
+    client: &Client,
+    local_url: &str,
+    path: &str,
+    body: Value,
+    action: &str,
+) -> Result<Value> {
+    let response = client
+        .post(format!("{}{}", local_url.trim_end_matches('/'), path))
+        .json(&body)
+        .send()
+        .map_err(|err| Error::internal_unexpected(format!("{action}: {err}")))?;
+    let status_code = response.status().as_u16();
+    let envelope: DaemonEnvelope = response.json().map_err(|err| {
+        Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
+    })?;
+    if status_code >= 400 || !envelope.success {
         return Err(Error::internal_unexpected(format!(
             "daemon request failed: {}",
             envelope.error.unwrap_or(Value::Null)
@@ -709,6 +856,95 @@ mod tests {
             let err = daemon_api_get("lab-local", "/runs").expect_err("requires daemon");
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
             assert!(err.message.contains("connected to a daemon"));
+        });
+    }
+
+    #[test]
+    fn reverse_broker_exec_submits_job_and_polls_result() {
+        crate::test_support::with_isolated_home(|_| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let addr = listener.local_addr().expect("addr");
+            drop(listener);
+            std::thread::spawn(move || {
+                let _ = crate::core::daemon::serve(addr);
+            });
+            for _ in 0..100 {
+                if std::net::TcpStream::connect(addr).is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let broker_url = format!("http://{addr}");
+            let worker_broker_url = broker_url.clone();
+            let worker = std::thread::spawn(move || {
+                let client = Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .build()
+                    .expect("client");
+                let claim = loop {
+                    let response: Value = client
+                        .post(format!("{}/runner/jobs/claim", worker_broker_url))
+                        .json(&json!({
+                            "runner_id": "lab",
+                            "lease_ms": 30_000,
+                        }))
+                        .send()
+                        .expect("claim response")
+                        .json()
+                        .expect("claim json");
+                    let claim = response["data"]["body"]["claim"].clone();
+                    if !claim.is_null() {
+                        break claim;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                };
+                let job_id = claim["job"]["id"].as_str().expect("job id").to_string();
+                client
+                    .post(format!("{}/runner/jobs/{job_id}/events", worker_broker_url))
+                    .json(&json!({
+                        "runner_id": "lab",
+                        "kind": "progress",
+                        "message": "running test worker"
+                    }))
+                    .send()
+                    .expect("event response");
+                client
+                    .post(format!("{}/runner/jobs/{job_id}/finish", worker_broker_url))
+                    .json(&json!({
+                        "runner_id": "lab",
+                        "result": {
+                            "exit_code": 0,
+                            "stdout": "reverse ok",
+                            "stderr": ""
+                        }
+                    }))
+                    .send()
+                    .expect("finish response");
+            });
+
+            let (output, exit_code) = exec_via_reverse_broker(
+                &ssh_runner(),
+                &broker_url,
+                "/srv/homeboy/project".to_string(),
+                Some("extrachill".to_string()),
+                vec!["homeboy".to_string(), "test".to_string()],
+                Default::default(),
+                false,
+                None,
+            )
+            .expect("reverse broker exec");
+            worker.join().expect("worker joins");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(output.mode, RunnerExecMode::ReverseBroker);
+            assert_eq!(output.stdout, "reverse ok");
+            assert_eq!(output.runner_id, "lab");
+            assert!(output.job_id.is_some());
+            assert!(output
+                .job_events
+                .expect("events")
+                .iter()
+                .any(|event| { event.kind == crate::core::api_jobs::JobEventKind::Progress }));
         });
     }
 }
