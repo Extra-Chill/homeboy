@@ -1,5 +1,22 @@
 use super::manifest::ExtensionManifest;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefactorScriptFailure {
+    pub script_path: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub io_error: Option<String>,
+    pub json_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefactorScriptOutcome {
+    Missing,
+    Succeeded(serde_json::Value),
+    Failed(RefactorScriptFailure),
+}
+
 // ============================================================================
 // Refactor Script Protocol
 // ============================================================================
@@ -20,41 +37,107 @@ pub fn run_refactor_script(
     extension: &ExtensionManifest,
     command: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    let extension_path = extension.extension_path.as_deref()?;
-    let script_rel = extension.refactor_script()?;
+    match run_refactor_script_with_outcome(extension, command) {
+        RefactorScriptOutcome::Succeeded(value) => Some(value),
+        RefactorScriptOutcome::Missing => None,
+        RefactorScriptOutcome::Failed(failure) => {
+            if !failure.stderr.trim().is_empty() {
+                crate::log_status!(
+                    "refactor",
+                    "Extension script error: {}",
+                    failure.stderr.trim()
+                );
+            }
+            None
+        }
+    }
+}
+
+pub fn run_refactor_script_with_outcome(
+    extension: &ExtensionManifest,
+    command: &serde_json::Value,
+) -> RefactorScriptOutcome {
+    let Some(extension_path) = extension.extension_path.as_deref() else {
+        return RefactorScriptOutcome::Missing;
+    };
+    let Some(script_rel) = extension.refactor_script() else {
+        return RefactorScriptOutcome::Missing;
+    };
     let script_path = std::path::Path::new(extension_path).join(script_rel);
 
     if !script_path.exists() {
-        return None;
+        return RefactorScriptOutcome::Missing;
     }
 
     // Invoke the script directly so its shebang resolves the interpreter.
     // Wrapping with `sh -c <script>` bypasses `#!/usr/bin/env bash` and runs
     // under POSIX sh — which breaks scripts using bash-only features. See #1276.
-    let output = std::process::Command::new(&script_path)
+    let output = match std::process::Command::new(&script_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .ok()
-        .and_then(|mut child| {
-            use std::io::Write;
-            if let Some(ref mut stdin) = child.stdin {
-                let _ = stdin.write_all(command.to_string().as_bytes());
-            }
-            child.wait_with_output().ok()
-        })?;
+    {
+        Ok(child) => child,
+        Err(err) => {
+            return RefactorScriptOutcome::Failed(RefactorScriptFailure {
+                script_path: script_path.to_string_lossy().to_string(),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                io_error: Some(err.to_string()),
+                json_error: None,
+            });
+        }
+    };
+
+    let mut child = output;
+    let wait_result = {
+        use std::io::Write;
+        if let Some(ref mut stdin) = child.stdin {
+            let _ = stdin.write_all(command.to_string().as_bytes());
+        }
+        child.wait_with_output()
+    };
+    let output = match wait_result {
+        Ok(output) => output,
+        Err(err) => {
+            return RefactorScriptOutcome::Failed(RefactorScriptFailure {
+                script_path: script_path.to_string_lossy().to_string(),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                io_error: Some(err.to_string()),
+                json_error: None,
+            });
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.is_empty() {
-            crate::log_status!("refactor", "Extension script error: {}", stderr.trim());
-        }
-        return None;
+        return RefactorScriptOutcome::Failed(RefactorScriptFailure {
+            script_path: script_path.to_string_lossy().to_string(),
+            exit_code: output.status.code(),
+            stdout,
+            stderr,
+            io_error: None,
+            json_error: None,
+        });
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(&stdout).ok()
+    match serde_json::from_str(&stdout) {
+        Ok(value) => RefactorScriptOutcome::Succeeded(value),
+        Err(err) => RefactorScriptOutcome::Failed(RefactorScriptFailure {
+            script_path: script_path.to_string_lossy().to_string(),
+            exit_code: output.status.code(),
+            stdout,
+            stderr,
+            io_error: None,
+            json_error: Some(err.to_string()),
+        }),
+    }
 }
 
 /// Output from a `parse_items` refactor command.

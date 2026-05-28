@@ -29,6 +29,7 @@ pub enum ErrorCode {
     FleetNotFound,
     ExtensionNotFound,
     ExtensionUnsupported,
+    ExtensionExecutionFailed,
     DocsTopicNotFound,
     RigNotFound,
     RunnerNotFound,
@@ -80,6 +81,7 @@ impl ErrorCode {
             ErrorCode::FleetNotFound => "fleet.not_found",
             ErrorCode::ExtensionNotFound => "extension.not_found",
             ErrorCode::ExtensionUnsupported => "extension.unsupported",
+            ErrorCode::ExtensionExecutionFailed => "extension.execution_failed",
             ErrorCode::DocsTopicNotFound => "docs.topic_not_found",
             ErrorCode::RigNotFound => "rig.not_found",
             ErrorCode::RunnerNotFound => "runner.not_found",
@@ -197,6 +199,26 @@ pub struct InvalidArgumentDetails {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tried: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionExecutionFailedDetails {
+    pub extension_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -346,6 +368,31 @@ impl Error {
         }
 
         Self::new(ErrorCode::ValidationInvalidJson, "Invalid JSON", details)
+    }
+
+    pub fn extension_execution_failed(
+        extension_id: impl Into<String>,
+        source: Option<String>,
+        command: impl Into<String>,
+        message: impl Into<String>,
+        details: ExtensionExecutionFailedDetails,
+    ) -> Self {
+        let extension_id = extension_id.into();
+        let command = command.into();
+        Self::new(
+            ErrorCode::ExtensionExecutionFailed,
+            format!(
+                "Extension '{}' failed {}{}: {}",
+                extension_id,
+                command,
+                source
+                    .as_deref()
+                    .map(|source| format!(" source '{}'", source))
+                    .unwrap_or_default(),
+                message.into()
+            ),
+            to_details(details),
+        )
     }
 
     pub fn validation_multiple_errors(errors: Vec<ValidationErrorItem>) -> Self {

@@ -19,6 +19,8 @@ struct ExtensionRefactorSourceResponse {
     fix_results: Vec<FixApplied>,
     #[serde(default)]
     warnings: Vec<String>,
+    #[serde(default)]
+    fatal_error: Option<String>,
 }
 
 pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
@@ -43,20 +45,31 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
         "write": write,
         "settings": settings.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
     });
-    let Some(value) = extension::run_refactor_script(&manifest, &command) else {
-        return Err(Error::validation_invalid_argument(
-            setting_key.clone(),
-            format!(
-                "Extension '{}' did not handle refactor source '{}'",
-                extension_id, source
-            ),
-            None,
-            Some(vec![
-                "Remove the setting to use Homeboy's built-in refactor source".to_string(),
-                "Or update the extension refactor script to support command=refactor_source"
-                    .to_string(),
-            ]),
-        ));
+    let value = match extension::run_refactor_script_with_outcome(&manifest, &command) {
+        extension::RefactorScriptOutcome::Succeeded(value) => value,
+        extension::RefactorScriptOutcome::Missing => {
+            return Err(Error::validation_invalid_argument(
+                setting_key.clone(),
+                format!(
+                    "Extension '{}' did not handle refactor source '{}'",
+                    extension_id, source
+                ),
+                None,
+                Some(vec![
+                    "Remove the setting to use Homeboy's built-in refactor source".to_string(),
+                    "Or update the extension refactor script to support command=refactor_source"
+                        .to_string(),
+                ]),
+            ));
+        }
+        extension::RefactorScriptOutcome::Failed(failure) => {
+            return Err(refactor_source_failure_error(
+                extension_id,
+                source,
+                &failure,
+                Vec::new(),
+            ));
+        }
     };
     let response_value = unwrap_refactor_source_payload(value);
     let response: ExtensionRefactorSourceResponse = serde_json::from_value(response_value)
@@ -86,6 +99,38 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
         ));
     }
 
+    if let Some(fatal_error) = response
+        .fatal_error
+        .as_deref()
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+    {
+        return Err(refactor_source_failure_error(
+            extension_id,
+            source,
+            &extension::RefactorScriptFailure {
+                script_path: manifest
+                    .extension_path
+                    .as_deref()
+                    .and_then(|extension_path| {
+                        manifest.refactor_script().map(|script| {
+                            Path::new(extension_path)
+                                .join(script)
+                                .to_string_lossy()
+                                .to_string()
+                        })
+                    })
+                    .unwrap_or_default(),
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: fatal_error.to_string(),
+                io_error: None,
+                json_error: None,
+            },
+            response.warnings.clone(),
+        ));
+    }
+
     let fix_summary = if response.fix_results.is_empty() {
         None
     } else {
@@ -107,6 +152,77 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
         },
         fix_results: response.fix_results,
     }))
+}
+
+fn refactor_source_failure_error(
+    extension_id: &str,
+    source: &str,
+    failure: &extension::RefactorScriptFailure,
+    warnings: Vec<String>,
+) -> Error {
+    let message = refactor_source_failure_message(failure);
+    Error::extension_execution_failed(
+        extension_id,
+        Some(source.to_string()),
+        "refactor_source",
+        message,
+        crate::core::error::ExtensionExecutionFailedDetails {
+            extension_id: extension_id.to_string(),
+            source: Some(source.to_string()),
+            command: "refactor_source".to_string(),
+            script_path: if failure.script_path.is_empty() {
+                None
+            } else {
+                Some(failure.script_path.clone())
+            },
+            exit_code: failure.exit_code,
+            stdout: failure.stdout.clone(),
+            stderr: failure.stderr.clone(),
+            io_error: failure.io_error.clone(),
+            json_error: failure.json_error.clone(),
+            warnings,
+        },
+    )
+}
+
+fn refactor_source_failure_message(failure: &extension::RefactorScriptFailure) -> String {
+    if let Some(error) = failure
+        .io_error
+        .as_deref()
+        .filter(|error| !error.is_empty())
+    {
+        return error.to_string();
+    }
+
+    if let Some(error) = failure
+        .json_error
+        .as_deref()
+        .filter(|error| !error.is_empty())
+    {
+        return format!("invalid JSON response: {error}");
+    }
+
+    let detail = failure
+        .stderr
+        .trim()
+        .lines()
+        .next()
+        .filter(|line| !line.is_empty())
+        .or_else(|| {
+            failure
+                .stdout
+                .trim()
+                .lines()
+                .next()
+                .filter(|line| !line.is_empty())
+        });
+
+    match (failure.exit_code, detail) {
+        (Some(code), Some(detail)) => format!("exit {code}: {detail}"),
+        (Some(code), None) => format!("exit {code}"),
+        (None, Some(detail)) => detail.to_string(),
+        (None, None) => "extension refactor script failed".to_string(),
+    }
 }
 
 fn unwrap_refactor_source_payload(value: serde_json::Value) -> serde_json::Value {
@@ -195,6 +311,38 @@ mod tests {
         }
     }
 
+    fn write_failing_refactor_source_extension(home: &Path, id: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(&extension_dir).unwrap();
+        fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": "Failing Refactor Source Fixture",
+                "version": "0.0.0",
+                "scripts": {
+                    "refactor": "refactor-source.sh"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        fs::write(
+            extension_dir.join("refactor-source.sh"),
+            "#!/bin/sh\nprintf '%s\n' 'WP Codebox audit fan-out failed: 7 of 11 task(s) failed' >&2\nprintf '%s\n' 'artifact: /tmp/homeboy-wp-codebox-audit-o7yqgh91/fanout-run.json' >&2\nexit 17\n",
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = extension_dir.join("refactor-source.sh");
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(script, permissions).unwrap();
+        }
+    }
+
     #[test]
     fn extension_refactor_source_dispatch_uses_generic_source_result() {
         crate::test_support::with_isolated_home(|home| {
@@ -260,6 +408,51 @@ mod tests {
             assert_eq!(command["settings"]["extension.setting"], "value");
             assert_eq!(command["source_result"]["lint_findings"][0]["id"], "lint-1");
             assert!(command.get("audit_result").is_none());
+
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn extension_refactor_source_failure_reports_execution_error() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tmp_dir("failing-extension-dispatch");
+            fs::create_dir_all(&root).unwrap();
+            write_failing_refactor_source_extension(home.path(), "generic");
+
+            let err = match try_extension_refactor_source_stage(
+                "audit",
+                &test_component(&root),
+                &root,
+                &serde_json::json!({
+                    "component_id": "component",
+                    "findings": []
+                }),
+                true,
+                &[(
+                    "refactor.audit.extension".to_string(),
+                    "generic".to_string(),
+                )],
+            ) {
+                Ok(_) => {
+                    panic!("non-zero handled extension failure should surface as execution failure")
+                }
+                Err(err) => err,
+            };
+
+            assert_eq!(err.code, crate::core::ErrorCode::ExtensionExecutionFailed);
+            assert!(err
+                .message
+                .contains("Extension 'generic' failed refactor_source source 'audit'"));
+            assert!(err.message.contains("WP Codebox audit fan-out failed"));
+            assert!(!err.message.contains("did not handle refactor source"));
+            assert_eq!(err.details["extension_id"], "generic");
+            assert_eq!(err.details["source"], "audit");
+            assert_eq!(err.details["exit_code"], 17);
+            assert!(err.details["stderr"]
+                .as_str()
+                .unwrap()
+                .contains("/tmp/homeboy-wp-codebox-audit-o7yqgh91/fanout-run.json"));
 
             let _ = fs::remove_dir_all(root);
         });

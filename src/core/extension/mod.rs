@@ -73,7 +73,8 @@ pub use manifest::{
     VersionPatternConfig,
 };
 pub use refactor_protocol::{
-    run_refactor_script, AdjustedItem, ParsedItem, RelatedTests, ResolvedImports, RewrittenImport,
+    run_refactor_script, run_refactor_script_with_outcome, AdjustedItem, ParsedItem,
+    RefactorScriptFailure, RefactorScriptOutcome, RelatedTests, ResolvedImports, RewrittenImport,
 };
 pub use registry::{
     available_extension_ids, extension_path, find_extension_by_tool, find_extension_for_file_ext,
