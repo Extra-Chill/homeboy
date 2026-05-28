@@ -157,13 +157,14 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-28T04:58:32Z",
-      "item_count": 30,
+      "created_at": "2026-05-28T13:32:47Z",
+      "item_count": 31,
       "known_fingerprints": [
-        "artifact_portability::observation:41bf29db-d59c-4889-9ceb-7d4d4c82953c::NonPortableArtifactPath",
+        "artifact_portability::observation:bc02b1da-647d-4194-adb8-f39389893be0::NonPortableArtifactPath",
         "dead_code::src/commands/utils/resource_policy.rs::UnreferencedExport",
         "dead_code::src/commands/utils/resource_policy.rs::UnreferencedExport",
         "dead_code::src/core/engine/temp.rs::UnreferencedExport",
+        "intra-method-duplication::src/core/extension/refactor_protocol.rs::IntraMethodDuplicate",
         "runner_offload_preflight::src/commands/bench/observation.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/commands/observe.rs::RunnerOffloadPreflight",
         "runner_offload_preflight::src/commands/runs/bundle.rs::RunnerOffloadPreflight",
