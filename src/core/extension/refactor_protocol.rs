@@ -1,5 +1,39 @@
 use super::manifest::ExtensionManifest;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefactorScriptRunError {
+    pub script_path: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub io_error: Option<String>,
+}
+
+impl RefactorScriptRunError {
+    pub fn summary(&self) -> String {
+        let status = match self.exit_code {
+            Some(code) => format!("exit code {code}"),
+            None => "terminated by signal".to_string(),
+        };
+        let output = first_non_empty_excerpt([self.stderr.as_str(), self.stdout.as_str()]);
+
+        match (&self.io_error, output) {
+            (Some(io_error), Some(output)) => format!("{status}: {io_error}; {output}"),
+            (Some(io_error), None) => format!("{status}: {io_error}"),
+            (None, Some(output)) => format!("{status}: {output}"),
+            (None, None) => status,
+        }
+    }
+}
+
+fn first_non_empty_excerpt<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    values
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(|value| value.chars().take(500).collect())
+}
+
 // ============================================================================
 // Refactor Script Protocol
 // ============================================================================
@@ -20,13 +54,27 @@ pub fn run_refactor_script(
     extension: &ExtensionManifest,
     command: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    let extension_path = extension.extension_path.as_deref()?;
-    let script_rel = extension.refactor_script()?;
+    run_refactor_script_result(extension, command)
+        .ok()
+        .flatten()
+}
+
+pub fn run_refactor_script_result(
+    extension: &ExtensionManifest,
+    command: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, RefactorScriptRunError> {
+    let Some(extension_path) = extension.extension_path.as_deref() else {
+        return Ok(None);
+    };
+    let Some(script_rel) = extension.refactor_script() else {
+        return Ok(None);
+    };
     let script_path = std::path::Path::new(extension_path).join(script_rel);
 
     if !script_path.exists() {
-        return None;
+        return Ok(None);
     }
+    let script_path_string = script_path.to_string_lossy().to_string();
 
     // Invoke the script directly so its shebang resolves the interpreter.
     // Wrapping with `sh -c <script>` bypasses `#!/usr/bin/env bash` and runs
@@ -36,25 +84,57 @@ pub fn run_refactor_script(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .ok()
+        .map_err(|err| RefactorScriptRunError {
+            script_path: script_path_string.clone(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            io_error: Some(err.to_string()),
+        })
         .and_then(|mut child| {
             use std::io::Write;
             if let Some(ref mut stdin) = child.stdin {
                 let _ = stdin.write_all(command.to_string().as_bytes());
             }
-            child.wait_with_output().ok()
+            child
+                .wait_with_output()
+                .map_err(|err| RefactorScriptRunError {
+                    script_path: script_path_string.clone(),
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    io_error: Some(err.to_string()),
+                })
         })?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if !stderr.is_empty() {
             crate::log_status!("refactor", "Extension script error: {}", stderr.trim());
         }
-        return None;
+        return Err(RefactorScriptRunError {
+            script_path: script_path_string,
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr,
+            io_error: None,
+        });
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(&stdout).ok()
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if stdout.trim().is_empty() {
+        return Ok(None);
+    }
+
+    serde_json::from_str(&stdout)
+        .map(Some)
+        .map_err(|err| RefactorScriptRunError {
+            script_path: script_path_string,
+            exit_code: output.status.code(),
+            stdout,
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            io_error: Some(format!("invalid JSON output: {err}")),
+        })
 }
 
 /// Output from a `parse_items` refactor command.
@@ -145,6 +225,10 @@ mod tests {
         }))
         .unwrap();
         assert!(run_refactor_script(&manifest, &serde_json::json!({})).is_none());
+        assert_eq!(
+            run_refactor_script_result(&manifest, &serde_json::json!({})).unwrap(),
+            None
+        );
     }
 
     #[test]

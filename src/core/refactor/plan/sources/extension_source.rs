@@ -1,7 +1,7 @@
 use crate::core::component::Component;
 use crate::core::extension;
 use crate::core::refactor::auto::{self, FixApplied};
-use crate::core::Error;
+use crate::core::{Error, ErrorCode};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -19,6 +19,12 @@ struct ExtensionRefactorSourceResponse {
     fix_results: Vec<FixApplied>,
     #[serde(default)]
     warnings: Vec<String>,
+    #[serde(default)]
+    fatal: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
@@ -43,23 +49,34 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
         "write": write,
         "settings": settings.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
     });
-    let Some(value) = extension::run_refactor_script(&manifest, &command) else {
-        return Err(Error::validation_invalid_argument(
-            setting_key.clone(),
-            format!(
-                "Extension '{}' did not handle refactor source '{}'",
-                extension_id, source
-            ),
-            None,
-            Some(vec![
-                "Remove the setting to use Homeboy's built-in refactor source".to_string(),
-                "Or update the extension refactor script to support command=refactor_source"
-                    .to_string(),
-            ]),
-        ));
+    let value = match extension::run_refactor_script_result(&manifest, &command) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return Err(Error::validation_invalid_argument(
+                setting_key.clone(),
+                format!(
+                    "Extension '{}' did not handle refactor source '{}'",
+                    extension_id, source
+                ),
+                None,
+                Some(vec![
+                    "Remove the setting to use Homeboy's built-in refactor source".to_string(),
+                    "Or update the extension refactor script to support command=refactor_source"
+                        .to_string(),
+                ]),
+            ));
+        }
+        Err(err) => {
+            return Err(extension_refactor_source_execution_error(
+                &setting_key,
+                extension_id,
+                source,
+                &err,
+            ));
+        }
     };
     let response_value = unwrap_refactor_source_payload(value);
-    let response: ExtensionRefactorSourceResponse = serde_json::from_value(response_value)
+    let response: ExtensionRefactorSourceResponse = serde_json::from_value(response_value.clone())
         .map_err(|err| {
             Error::validation_invalid_argument(
                 setting_key.clone(),
@@ -86,6 +103,16 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
         ));
     }
 
+    if let Some(reason) = response_fatal_reason(&response) {
+        return Err(extension_refactor_source_fatal_response_error(
+            &setting_key,
+            extension_id,
+            source,
+            &reason,
+            response_value,
+        ));
+    }
+
     let fix_summary = if response.fix_results.is_empty() {
         None
     } else {
@@ -107,6 +134,76 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
         },
         fix_results: response.fix_results,
     }))
+}
+
+fn response_fatal_reason(response: &ExtensionRefactorSourceResponse) -> Option<String> {
+    response
+        .fatal
+        .as_deref()
+        .or(response.error.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            response
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|status| status.eq_ignore_ascii_case("failed"))
+                .map(|status| format!("extension reported status {status}"))
+        })
+}
+
+fn extension_refactor_source_fatal_response_error(
+    setting_key: &str,
+    extension_id: &str,
+    source: &str,
+    reason: &str,
+    response: serde_json::Value,
+) -> Error {
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!(
+            "Invalid argument '{}': Extension '{}' failed while handling refactor source '{}': {}",
+            setting_key, extension_id, source, reason
+        ),
+        serde_json::json!({
+            "field": setting_key,
+            "problem": "extension_refactor_source_failed",
+            "extension_id": extension_id,
+            "source": source,
+            "response": response,
+        }),
+    )
+}
+
+fn extension_refactor_source_execution_error(
+    setting_key: &str,
+    extension_id: &str,
+    source: &str,
+    err: &extension::RefactorScriptRunError,
+) -> Error {
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!(
+            "Invalid argument '{}': Extension '{}' failed while handling refactor source '{}': {}",
+            setting_key,
+            extension_id,
+            source,
+            err.summary()
+        ),
+        serde_json::json!({
+            "field": setting_key,
+            "problem": "extension_refactor_source_failed",
+            "extension_id": extension_id,
+            "source": source,
+            "script_path": err.script_path,
+            "exit_code": err.exit_code,
+            "stdout": err.stdout,
+            "stderr": err.stderr,
+            "io_error": err.io_error,
+        }),
+    )
 }
 
 fn unwrap_refactor_source_payload(value: serde_json::Value) -> serde_json::Value {
@@ -195,6 +292,79 @@ mod tests {
         }
     }
 
+    fn write_failing_refactor_source_extension(home: &Path, id: &str, artifact_file: &Path) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(&extension_dir).unwrap();
+        fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": "Failing Refactor Source Fixture",
+                "version": "0.0.0",
+                "scripts": {
+                    "refactor": "refactor-source.sh"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        fs::write(
+            extension_dir.join("refactor-source.sh"),
+            format!(
+                "#!/bin/sh
+cat > /dev/null
+printf '%s\n' '{{\"variant\":\"refactor_source\",\"payload\":{{\"handled\":true,\"fatal\":\"fanout failed\",\"artifact\":\"{}\"}}}}'
+printf '%s\n' 'fatal: WP Codebox fanout failed; artifact={}' >&2
+exit 42
+",
+                artifact_file.display(),
+                artifact_file.display()
+            ),
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = extension_dir.join("refactor-source.sh");
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(script, permissions).unwrap();
+        }
+    }
+
+    fn write_fatal_response_refactor_source_extension(home: &Path, id: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(&extension_dir).unwrap();
+        fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": "Fatal Response Refactor Source Fixture",
+                "version": "0.0.0",
+                "scripts": {
+                    "refactor": "refactor-source.sh"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        fs::write(
+            extension_dir.join("refactor-source.sh"),
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s' '{\"variant\":\"refactor_source\",\"payload\":{\"handled\":true,\"fatal\":\"fanout failed after handling\",\"warnings\":[\"artifact=/tmp/fanout-run.json\"]}}'\n",
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = extension_dir.join("refactor-source.sh");
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(script, permissions).unwrap();
+        }
+    }
+
     #[test]
     fn extension_refactor_source_dispatch_uses_generic_source_result() {
         crate::test_support::with_isolated_home(|home| {
@@ -260,6 +430,99 @@ mod tests {
             assert_eq!(command["settings"]["extension.setting"], "value");
             assert_eq!(command["source_result"]["lint_findings"][0]["id"], "lint-1");
             assert!(command.get("audit_result").is_none());
+
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn extension_refactor_source_preserves_handled_failure_output() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tmp_dir("generic-extension-fatal");
+            fs::create_dir_all(&root).unwrap();
+            let artifact_file = root.join("fanout-run.json");
+            write_failing_refactor_source_extension(home.path(), "fatal-source", &artifact_file);
+
+            let result = try_extension_refactor_source_stage(
+                "audit",
+                &test_component(&root),
+                &root,
+                &serde_json::json!({
+                    "component_id": "component",
+                    "findings": []
+                }),
+                true,
+                &[(
+                    "refactor.audit.extension".to_string(),
+                    "fatal-source".to_string(),
+                )],
+            );
+            let err = match result {
+                Ok(_) => panic!("fatal extension result should fail the source stage"),
+                Err(err) => err,
+            };
+
+            let message = err.to_string();
+            assert!(message.contains(
+                "Extension 'fatal-source' failed while handling refactor source 'audit'"
+            ));
+            assert!(message.contains("exit code 42"));
+            assert!(message.contains("WP Codebox fanout failed"));
+            assert!(!message.contains("did not handle refactor source"));
+
+            assert_eq!(err.details["extension_id"], "fatal-source");
+            assert_eq!(err.details["source"], "audit");
+            assert_eq!(err.details["exit_code"], 42);
+            assert!(err.details["stderr"]
+                .as_str()
+                .unwrap()
+                .contains(artifact_file.to_string_lossy().as_ref()));
+            assert!(err.details["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("\"handled\":true"));
+
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn extension_refactor_source_reports_handled_fatal_response() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tmp_dir("generic-extension-fatal-response");
+            fs::create_dir_all(&root).unwrap();
+            write_fatal_response_refactor_source_extension(home.path(), "fatal-response");
+
+            let result = try_extension_refactor_source_stage(
+                "audit",
+                &test_component(&root),
+                &root,
+                &serde_json::json!({
+                    "component_id": "component",
+                    "findings": []
+                }),
+                true,
+                &[(
+                    "refactor.audit.extension".to_string(),
+                    "fatal-response".to_string(),
+                )],
+            );
+            let err = match result {
+                Ok(_) => panic!("handled fatal extension response should fail the source stage"),
+                Err(err) => err,
+            };
+
+            let message = err.to_string();
+            assert!(message.contains(
+                "Extension 'fatal-response' failed while handling refactor source 'audit'"
+            ));
+            assert!(message.contains("fanout failed after handling"));
+            assert!(!message.contains("did not handle refactor source"));
+            assert_eq!(err.details["response"]["handled"], true);
+            assert_eq!(
+                err.details["response"]["warnings"][0],
+                "artifact=/tmp/fanout-run.json"
+            );
 
             let _ = fs::remove_dir_all(root);
         });
