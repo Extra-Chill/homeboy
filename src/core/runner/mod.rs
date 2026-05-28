@@ -7,7 +7,7 @@ use crate::core::config::{self, ConfigEntity};
 use crate::core::defaults;
 use crate::core::error::{Error, Result};
 use crate::core::output::{BatchResult, CreateOutput, CreateResult, MergeOutput, MergeResult};
-use crate::core::server::{self, RunnerSettings, ServerRunner};
+use crate::core::server::{self, RunnerPolicy, RunnerSettings, ServerRunner};
 
 mod apply;
 mod connection;
@@ -67,6 +67,8 @@ pub struct Runner {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub resources: HashMap<String, Value>,
+    #[serde(default, skip_serializing_if = "RunnerPolicy::is_empty")]
+    pub policy: RunnerPolicy,
 }
 
 impl ConfigEntity for Runner {
@@ -359,6 +361,7 @@ fn runner_from_server(server_id: &str, runner: ServerRunner) -> Runner {
         settings: runner.settings,
         env: runner.env,
         resources: runner.resources,
+        policy: runner.policy,
     }
 }
 
@@ -438,6 +441,42 @@ mod tests {
             assert_eq!(runner.settings.concurrency_limit, Some(2));
             assert_eq!(runner.env.get("RUST_LOG").map(String::as_str), Some("info"));
             assert_eq!(runner.resources.get("cpu"), Some(&Value::from(8)));
+        });
+    }
+
+    #[test]
+    fn runner_registry_persists_trust_policy() {
+        test_support::with_isolated_home(|_| {
+            let spec = r#"{
+                "id": "lab-local",
+                "kind": "local",
+                "policy": {
+                    "accepted_peer_ids": ["extra-chill"],
+                    "accepted_peer_fingerprints": ["SHA256:abc123"],
+                    "allowed_projects": ["extrachill"],
+                    "allowed_commands": ["test", "bench"],
+                    "allow_raw_exec": false,
+                    "workspace_roots": ["/home/chubes/Developer"],
+                    "artifact_policy": "metadata"
+                }
+            }"#;
+
+            create(spec, false).expect("create runner");
+            let runner = load("lab-local").expect("load runner");
+
+            assert_eq!(runner.policy.accepted_peer_ids, vec!["extra-chill"]);
+            assert_eq!(
+                runner.policy.accepted_peer_fingerprints,
+                vec!["SHA256:abc123"]
+            );
+            assert_eq!(runner.policy.allowed_projects, vec!["extrachill"]);
+            assert_eq!(runner.policy.allowed_commands, vec!["test", "bench"]);
+            assert_eq!(runner.policy.allow_raw_exec, Some(false));
+            assert_eq!(
+                runner.policy.workspace_roots,
+                vec!["/home/chubes/Developer"]
+            );
+            assert_eq!(runner.policy.artifact_policy.as_deref(), Some("metadata"));
         });
     }
 
@@ -570,6 +609,7 @@ mod tests {
                 settings: RunnerSettings::default(),
                 env: HashMap::new(),
                 resources: HashMap::new(),
+                policy: RunnerPolicy::default(),
             };
             config::save(&standalone_ssh_runner).expect("save standalone ssh runner");
 

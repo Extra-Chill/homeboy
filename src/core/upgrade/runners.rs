@@ -158,10 +158,12 @@ fn runner_homeboy_version(
 fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptions {
     RunnerExecOptions {
         cwd: None,
+        project_id: None,
         allow_ssh: true,
         command,
         env: runner.env.clone(),
         capture_patch: false,
+        raw_exec: false,
         source_snapshot: None,
         capability_preflight: Some(runner_upgrade_capability_plan()),
     }
@@ -310,6 +312,7 @@ mod tests {
             },
             env: HashMap::new(),
             resources: HashMap::new(),
+            policy: Default::default(),
         }
     }
 
