@@ -5,7 +5,7 @@ use crate::commands::{
     api, audit, auth, bench, build, changelog, changes, ci, component, config, daemon, db, deploy,
     deps, doctor, extension, file, fleet, git, http, issues, lint, logs, observe, project,
     refactor, release, report, review, rig, runner, runs, self_cmd, server, ssh, stack, status,
-    test, trace, triage, undo, upgrade, version,
+    test, trace, triage, tunnel, undo, upgrade, version,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -119,6 +119,8 @@ pub enum Commands {
     /// Manage local and SSH execution runners
     #[command(visible_alias = "runners")]
     Runner(runner::RunnerArgs),
+    /// Manage private service tunnel declarations
+    Tunnel(tunnel::TunnelArgs),
     /// Inspect persisted observation runs and artifacts
     Runs(runs::RunsArgs),
     /// Inspect the active Homeboy binary and install signals
@@ -334,6 +336,7 @@ impl Commands {
             | Commands::Release(_)
             | Commands::Report(_)
             | Commands::Runner(_)
+            | Commands::Tunnel(_)
             | Commands::Stack(_)
             | Commands::Undo(_) => CommandDescriptor {
                 response_mode: CommandResponseMode::Json,

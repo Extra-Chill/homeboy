@@ -40,6 +40,7 @@ pub mod source_snapshot;
 pub mod stack;
 pub mod top_n;
 pub mod triage;
+pub mod tunnel;
 pub mod update_check_cache;
 pub mod upgrade;
 

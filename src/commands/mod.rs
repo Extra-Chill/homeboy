@@ -212,6 +212,7 @@ pub mod status;
 pub mod test;
 pub mod trace;
 pub mod triage;
+pub mod tunnel;
 pub mod undo;
 pub mod upgrade;
 pub mod utils;
