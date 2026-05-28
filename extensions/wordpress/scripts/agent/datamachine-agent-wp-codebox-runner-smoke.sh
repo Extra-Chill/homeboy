@@ -19,14 +19,13 @@ BUNDLE_DIR="$RUNTIME_DIR/bundle"
 AGENTS_API_DIR="$RUNTIME_DIR/agents-api"
 DATA_MACHINE_DIR="$RUNTIME_DIR/data-machine"
 DATA_MACHINE_CODE_DIR="$RUNTIME_DIR/data-machine-code"
-PHP_AI_CLIENT_DIR="$RUNTIME_DIR/php-ai-client"
 
 cleanup() {
     rm -rf "$RUNTIME_DIR"
 }
 trap cleanup EXIT
 
-mkdir -p "$BUNDLE_DIR" "$AGENTS_API_DIR" "$DATA_MACHINE_DIR" "$DATA_MACHINE_CODE_DIR" "$PHP_AI_CLIENT_DIR"
+mkdir -p "$BUNDLE_DIR" "$AGENTS_API_DIR" "$DATA_MACHINE_DIR" "$DATA_MACHINE_CODE_DIR"
 printf '{"agent":{"slug":"wp-codebox-smoke-agent"}}\n' > "$BUNDLE_DIR/manifest.json"
 
 cat > "$FAKE_WP_CODEBOX" <<'NODE'
@@ -88,7 +87,7 @@ for (const expected of ['wp-codebox.agent-sandbox-run', 'HOMEBOY_DATAMACHINE_AGE
   }
 }
 if (recipe.inputs?.extraPlugins?.some((plugin) => plugin.slug === 'php-ai-client')) {
-  throw new Error('php-ai-client is a Composer library and must not be mounted as a WP Codebox extra plugin')
+  throw new Error('WP AI Client is provided by WordPress core and must not be mounted as a WP Codebox extra plugin')
 }
 if (!recipe.inputs?.mounts?.some((mount) => mount.source.endsWith('/bundle') && mount.target === '/wordpress/wp-content/plugins/bundle' && mount.mode === 'readonly')) {
   throw new Error('missing bundle readonly mount in recipe')
@@ -176,7 +175,6 @@ jq -n \
     --arg agentsApi "$AGENTS_API_DIR" \
     --arg dataMachine "$DATA_MACHINE_DIR" \
     --arg dataMachineCode "$DATA_MACHINE_CODE_DIR" \
-    --arg phpAiClient "$PHP_AI_CLIENT_DIR" \
     '{
         component_id: "wp-codebox-smoke-component",
         component_path: env.PWD,
@@ -195,7 +193,6 @@ jq -n \
         prompt: "Smoke the WP Codebox runner adapter.",
         wp_codebox_components: {
             agents_api: $agentsApi,
-            wp_ai_client: $phpAiClient,
             data_machine: $dataMachine,
             data_machine_code: $dataMachineCode
         }
