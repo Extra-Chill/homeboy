@@ -116,6 +116,28 @@ process.stdin.on('end', () => {
     setInterval(() => {}, 1000);
     return;
   }
+  if (process.env.FIXTURE_PROVIDER_ERROR_GROUP === request.group_key) {
+    process.stdout.write(JSON.stringify({
+      success: false,
+      outcome: {
+        kind: 'provider_error',
+        retryable: true,
+        provider: 'openai',
+        provider_error: {
+          code: 'rate_limit_exceeded',
+          message: 'Fixture provider returned 429',
+          retryable: true,
+        },
+        metadata: {
+          datamachine: {
+            completed: false,
+            max_turns_reached: false,
+          },
+        },
+      },
+    }));
+    process.exit(2);
+  }
   if (request.group_key === 'docs-reference') {
     if (process.env.FIXTURE_EXPECT_INCREMENTAL_RUN) {
       const run = JSON.parse(fs.readFileSync(process.env.FIXTURE_EXPECT_INCREMENTAL_RUN, 'utf8'));
@@ -211,6 +233,62 @@ try {
   }, null, true);
   assert.equal(falsePositiveOutcome.kind, 'false_positive_pr');
   assert.equal(falsePositiveOutcome.false_positive_pr_url, 'https://github.com/Extra-Chill/homeboy-extensions/pull/779');
+  assert.deepEqual(falsePositiveOutcome.finding_ids, ['finding-phpcs-001', 'finding-phpcs-002']);
+
+  const structuredFixOutcome = taskOutcome(phpcsRequest, {
+    outcome: {
+      kind: 'fix_pr',
+      pr_url: 'https://github.com/Extra-Chill/homeboy-extensions/pull/780',
+      remediation_summary: 'Fixture fix PR opened.',
+    },
+  }, { id: 'artifact-fixture-fix' }, true);
+  assert.equal(structuredFixOutcome.kind, 'fix_pr');
+  assert.equal(structuredFixOutcome.pr_url, 'https://github.com/Extra-Chill/homeboy-extensions/pull/780');
+  assert.equal(structuredFixOutcome.artifact_id, 'artifact-fixture-fix');
+  assert.equal(structuredFixOutcome.remediation_summary, 'Fixture fix PR opened.');
+  assert.deepEqual(structuredFixOutcome.finding_ids, ['finding-phpcs-001', 'finding-phpcs-002']);
+
+  const providerErrorOutcome = taskOutcome(phpcsRequest, {
+    outcome: {
+      kind: 'provider_error',
+      retryable: true,
+      provider: 'openai',
+      provider_error: {
+        code: 'rate_limit_exceeded',
+        message: 'Fixture provider returned 429',
+        retryable: true,
+      },
+      metadata: {
+        datamachine: {
+          completed: false,
+          max_turns_reached: false,
+        },
+      },
+    },
+  }, null, false, 'WP Codebox task reported success=false');
+  assert.equal(providerErrorOutcome.kind, 'provider_error');
+  assert.equal(providerErrorOutcome.retryable, true);
+  assert.equal(providerErrorOutcome.provider_error.code, 'rate_limit_exceeded');
+  assert.equal(providerErrorOutcome.failure, 'Fixture provider returned 429');
+  assert.deepEqual(providerErrorOutcome.finding_ids, ['finding-phpcs-001', 'finding-phpcs-002']);
+  assert.equal(providerErrorOutcome.metadata.datamachine.completed, false);
+
+  const noPrOutcome = taskOutcome(docsRequest, {
+    outcome: {
+      kind: 'agent_no_pr_outcome',
+      message: 'Agent completed without opening a required PR.',
+      metadata: {
+        datamachine: {
+          completed: true,
+          max_turns_reached: false,
+        },
+      },
+    },
+  }, null, true);
+  assert.equal(noPrOutcome.kind, 'agent_no_pr_outcome');
+  assert.equal(noPrOutcome.failure, 'Agent completed without opening a required PR.');
+  assert.deepEqual(noPrOutcome.finding_ids, ['finding-doc-001']);
+  assert.equal(noPrOutcome.metadata.datamachine.completed, true);
 
   const phpcsBundle = createBundle(
     root,
@@ -379,6 +457,24 @@ try {
   assert.equal(nestedFailedRecord.command.exit_code, 0);
   assert.match(nestedFailedRecord.command.error, /Fixture nested WP error/);
 
+  const providerRunsOutputPath = path.join(root, 'fanout-provider-error-run.json');
+  const providerErrorExecution = await executeAuditWpCodeboxFanout({
+    report,
+    wp_codebox_command: process.execPath,
+    wp_codebox_args: [fixtureCommand],
+    runsOutputPath: providerRunsOutputPath,
+    env: { FIXTURE_PROVIDER_ERROR_GROUP: 'PHPCS Formatting/Auto Fix!' },
+  });
+  const providerFailedRecord = providerErrorExecution.records.find((record) => record.group_key === 'PHPCS Formatting/Auto Fix!');
+  assert.equal(providerErrorExecution.status, 'failed');
+  assert.equal(providerFailedRecord.status, 'failed');
+  assert.equal(providerFailedRecord.outcome.kind, 'provider_error');
+  assert.equal(providerFailedRecord.outcome.retryable, true);
+  assert.equal(providerFailedRecord.outcome.provider_error.message, 'Fixture provider returned 429');
+  assert.deepEqual(providerFailedRecord.outcome.finding_ids, ['finding-phpcs-001', 'finding-phpcs-002']);
+  const providerFinalRun = readJson(providerRunsOutputPath);
+  assert.equal(providerFinalRun.outcomes.find((outcome) => outcome.kind === 'provider_error').retryable, true);
+
   const timeoutRunsOutputPath = path.join(root, 'fanout-timeout-run.json');
   const timeoutExecution = await executeAuditWpCodeboxFanout({
     report,
@@ -450,6 +546,25 @@ try {
   assert.match(cliExecutionResult.stderr, /\[homeboy wp-codebox fanout\] completed 1\/2 group=PHPCS Formatting\/Auto Fix! session=homeboy-audit-.*artifact=\/tmp\/homeboy-audit-/);
   assert.match(cliExecutionResult.stderr, /\[homeboy wp-codebox fanout\] failed 2\/2 group=docs-reference session=homeboy-audit-/);
   assert.doesNotMatch(cliExecutionResult.stderr, /FIXTURE_SECRET_TOKEN/);
+
+  const cliProviderExecutionResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-audit-wp-codebox-fanout.cjs'),
+    '--audit-report',
+    auditReportPath,
+    '--execute',
+    '--wp-codebox-command',
+    process.execPath,
+    '--wp-codebox-arg',
+    fixtureCommand,
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      FIXTURE_PROVIDER_ERROR_GROUP: 'PHPCS Formatting/Auto Fix!',
+    },
+  });
+  assert.equal(cliProviderExecutionResult.status, 0, cliProviderExecutionResult.stderr || cliProviderExecutionResult.stdout);
+  assert.match(cliProviderExecutionResult.stderr, /failed 1\/2 group=PHPCS Formatting\/Auto Fix! .* outcome=provider_error retryable=yes failure=Fixture provider returned 429/);
 
   console.log('Homeboy audit WP Codebox fanout smoke passed');
 } finally {

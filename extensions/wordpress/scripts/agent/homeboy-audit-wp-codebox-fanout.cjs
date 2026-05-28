@@ -38,13 +38,16 @@ function usage() {
 function writeProgress(event) {
   const elapsed = event.elapsed_ms === null ? '' : ` elapsed=${event.elapsed_ms}ms`;
   const artifact = event.artifact_directory ? ` artifact=${event.artifact_directory}` : '';
+  const outcome = event.outcome_kind ? ` outcome=${event.outcome_kind}` : '';
+  const retryable = event.retryable === null ? '' : ` retryable=${event.retryable ? 'yes' : 'no'}`;
+  const failure = event.failure ? ` failure=${event.failure}` : '';
   process.stderr.write([
     '[homeboy wp-codebox fanout]',
     event.status,
     `${event.group_index}/${event.group_count}`,
     `group=${event.group_key}`,
     `session=${event.sandbox_session_id}`,
-    `${elapsed}${artifact}`.trim(),
+    `${elapsed}${artifact}${outcome}${retryable}${failure}`.trim(),
   ].filter(Boolean).join(' ') + '\n');
 }
 

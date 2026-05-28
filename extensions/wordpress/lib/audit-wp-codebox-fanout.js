@@ -24,6 +24,13 @@ const TASK_SCHEMA = 'homeboy/wp-codebox-task-request/v1';
 const RUN_SCHEMA = 'homeboy/audit-wp-codebox-run/v1';
 const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_TASK_TIMEOUT_SECONDS = 45 * 60;
+const WP_CODEBOX_STRUCTURED_OUTCOME_KINDS = new Set([
+  'fix_pr',
+  'false_positive_pr',
+  'provider_error',
+  'agent_no_pr_outcome',
+  'max_turns_exceeded',
+]);
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -69,6 +76,9 @@ function progressEvent(status, taskRequest, plan, record = null) {
     finished_at: finishedAt,
     elapsed_ms: elapsedMs,
     artifact_directory: record?.artifact?.directory || '',
+    outcome_kind: record?.outcome?.kind || '',
+    retryable: record?.outcome?.retryable ?? null,
+    failure: record?.outcome?.failure || '',
   };
 }
 
@@ -561,8 +571,12 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
 }
 
 function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', timedOut = false) {
+  const explicit = explicitWpCodeboxOutcome(parsed);
+  if (isStructuredWpCodeboxOutcome(explicit)) {
+    return structuredTaskOutcome(taskRequest, explicit, artifact, errorMessage);
+  }
+
   const urls = pullRequestUrls(parsed);
-  const explicit = parsed && typeof parsed === 'object' ? parsed.outcome || parsed.result || parsed : {};
   const falsePositive = Boolean(
     explicit.kind === 'false_positive_pr' ||
     explicit.false_positive ||
@@ -601,6 +615,62 @@ function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', 
     artifact_id: artifact?.id || '',
     failure,
   };
+}
+
+function explicitWpCodeboxOutcome(parsed) {
+  if (!parsed || typeof parsed !== 'object') {
+    return {};
+  }
+  if (parsed.outcome && typeof parsed.outcome === 'object') {
+    return parsed.outcome;
+  }
+  if (parsed.result?.outcome && typeof parsed.result.outcome === 'object') {
+    return parsed.result.outcome;
+  }
+  if (parsed.result && typeof parsed.result === 'object') {
+    return parsed.result;
+  }
+  return parsed;
+}
+
+function isStructuredWpCodeboxOutcome(explicit) {
+  return Boolean(explicit && typeof explicit === 'object' && WP_CODEBOX_STRUCTURED_OUTCOME_KINDS.has(explicit.kind));
+}
+
+function structuredTaskOutcome(taskRequest, explicit, artifact, errorMessage = '') {
+  const urls = pullRequestUrls(explicit);
+  const kind = explicit.kind;
+  const falsePositive = kind === 'false_positive_pr' || Boolean(explicit.false_positive || explicit.falsePositive);
+  const prUrl = explicit.pr_url || explicit.pull_request_url || explicit.pullRequestUrl || urls[0] || '';
+  const falsePositivePrUrl = explicit.false_positive_pr_url || explicit.falsePositivePullRequestUrl || (falsePositive ? prUrl : '');
+  const failure = explicit.failure || wpCodeboxOutcomeErrorMessage(explicit) || errorMessage || '';
+  const retryable = explicit.retryable ?? explicit.provider_error?.retryable ?? explicit.error?.retryable;
+
+  return {
+    ...explicit,
+    schema: 'homeboy/audit-wp-codebox-finding-outcome/v1',
+    kind,
+    finding_id: taskRequest.finding_id || taskRequest.audit_findings?.[0]?.id || '',
+    finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
+    sandbox_session_id: taskRequest.sandbox_session_id,
+    pr_url: prUrl,
+    false_positive_pr_url: falsePositivePrUrl,
+    false_positive: falsePositive,
+    artifact_id: explicit.artifact_id || artifact?.id || '',
+    failure,
+    ...(retryable === undefined ? {} : { retryable: Boolean(retryable) }),
+  };
+}
+
+function wpCodeboxOutcomeErrorMessage(explicit) {
+  const candidates = [
+    explicit.message,
+    explicit.provider_message,
+    explicit.provider_error?.message,
+    explicit.error?.message,
+    typeof explicit.error === 'string' ? explicit.error : '',
+  ];
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate.trim()) || '';
 }
 
 function taskOutcomeSucceeded(outcome) {
