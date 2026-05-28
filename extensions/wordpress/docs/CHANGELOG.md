@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.17] - 2026-05-28
+
+### Changed
+- Validate live-run wp-gym eval rows
+
 ## [2.102.16] - 2026-05-28
 
 ### Changed
