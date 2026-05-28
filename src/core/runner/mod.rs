@@ -14,6 +14,7 @@ mod capabilities;
 mod connection;
 mod evidence;
 mod execution;
+mod lab;
 mod offload_changed_since;
 mod offload_metadata;
 mod session;
@@ -35,6 +36,10 @@ pub use evidence::{
 };
 pub(crate) use execution::daemon_api_get;
 pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
+pub use lab::{
+    execute_lab_offload, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
+    LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,
+};
 pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since,
