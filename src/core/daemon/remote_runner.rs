@@ -7,6 +7,8 @@ use crate::core::api_jobs::{
     JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult,
 };
 use crate::core::error::{Error, Result};
+use crate::core::paths;
+use crate::core::runner::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
 #[derive(Debug, Clone, Deserialize)]
 struct ClaimRequest {
@@ -33,6 +35,16 @@ struct FinishRequest {
     result: RemoteRunnerJobResult,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct SessionRequest {
+    runner_id: String,
+    controller_id: String,
+    #[serde(default)]
+    broker_url: Option<String>,
+    #[serde(default)]
+    homeboy_version: Option<String>,
+}
+
 pub(super) fn route(
     method: &str,
     path: &str,
@@ -40,6 +52,10 @@ pub(super) fn route(
     job_store: &JobStore,
 ) -> HttpResponse {
     match (method, path) {
+        ("POST", "/runner/sessions") => match register_session(body) {
+            Ok(body) => daemon_endpoint_response("runner.sessions.register", body),
+            Err(err) => error_response(400, err),
+        },
         ("POST", "/runner/jobs") => match enqueue(body, job_store) {
             Ok(body) => daemon_endpoint_response("runner.jobs.submit", body),
             Err(err) => error_response(400, err),
@@ -58,10 +74,74 @@ pub(super) fn route(
                 Some(vec![
                     "Use /runner/jobs, /runner/jobs/claim, /runner/jobs/<job-id>/events, or /runner/jobs/<job-id>/finish."
                         .to_string(),
+                    "Use /runner/sessions to register reverse runner sessions.".to_string(),
                 ]),
             ),
         ),
     }
+}
+
+fn register_session(body: Option<Value>) -> Result<Value> {
+    let request: SessionRequest = parse_body(body, "remote runner session request")?;
+    if request.runner_id.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "runner_id",
+            "remote runner session requires a runner id",
+            None,
+            None,
+        ));
+    }
+    if request.controller_id.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "controller_id",
+            "remote runner session requires a controller id",
+            None,
+            None,
+        ));
+    }
+
+    let session = RunnerSession {
+        runner_id: request.runner_id.clone(),
+        mode: RunnerTunnelMode::Reverse,
+        role: RunnerSessionRole::Controller,
+        server_id: None,
+        controller_id: Some(request.controller_id.clone()),
+        broker_url: request.broker_url.clone(),
+        remote_daemon_address: None,
+        local_port: None,
+        local_url: None,
+        tunnel_pid: None,
+        remote_daemon_pid: None,
+        homeboy_version: request
+            .homeboy_version
+            .clone()
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+        connected_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let path = paths::runner_session_file(&session.runner_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
+        })?;
+    }
+    let serialized = serde_json::to_string_pretty(&session).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("serialize runner session".to_string()),
+        )
+    })?;
+    std::fs::write(&path, serialized).map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
+    })?;
+
+    Ok(json!({
+        "command": "api.runner.sessions.register",
+        "session": session,
+        "session_path": path.display().to_string(),
+    }))
 }
 
 fn enqueue(body: Option<Value>, job_store: &JobStore) -> Result<Value> {

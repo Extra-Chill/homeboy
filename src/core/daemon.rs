@@ -269,10 +269,12 @@ where
             body: json!({ "error": "method_not_allowed" }),
             artifact: None,
         },
-        ("POST", "/runner/jobs") | ("POST", "/runner/jobs/claim") => {
-            remote_runner::route(method, path, body, job_store)
+        ("POST", "/runner/sessions")
+        | ("POST", "/runner/jobs")
+        | ("POST", "/runner/jobs/claim") => remote_runner::route(method, path, body, job_store),
+        ("GET", "/runner/sessions") | ("GET", "/runner/jobs") | ("GET", "/runner/jobs/claim") => {
+            method_not_allowed()
         }
-        ("GET", "/runner/jobs") | ("GET", "/runner/jobs/claim") => method_not_allowed(),
         ("POST", path) if path.starts_with("/runner/jobs/") => {
             remote_runner::route(method, path, body, job_store)
         }

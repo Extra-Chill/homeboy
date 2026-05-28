@@ -330,6 +330,49 @@ fn routes_remote_runner_job_broker_lifecycle() {
 }
 
 #[test]
+fn routes_remote_runner_session_registration() {
+    let _home = HomeGuard::new();
+    crate::core::runner::create(
+        r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/home/chubes/Developer"}"#,
+        false,
+    )
+    .expect("create runner");
+    let store = JobStore::default();
+
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/runner/sessions",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "controller_id": "extra-chill",
+            "broker_url": "http://127.0.0.1:49152",
+            "homeboy_version": "test-version"
+        })),
+        &store,
+    );
+
+    assert_eq!(response.status_code, 200);
+    assert_eq!(response.body["endpoint"], "runner.sessions.register");
+    assert_eq!(
+        response.body["body"]["session"]["role"],
+        serde_json::json!("controller")
+    );
+
+    let status = crate::core::runner::status("homeboy-lab").expect("runner status");
+    assert!(status.connected);
+    assert_eq!(
+        status.state,
+        crate::core::runner::RunnerSessionState::Connected
+    );
+    let session = status.session.expect("session");
+    assert_eq!(session.controller_id.as_deref(), Some("extra-chill"));
+    assert_eq!(
+        session.broker_url.as_deref(),
+        Some("http://127.0.0.1:49152")
+    );
+}
+
+#[test]
 fn routes_json_body_to_analysis_enqueue() {
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
