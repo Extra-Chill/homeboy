@@ -54,6 +54,7 @@ fn make_args(
             setting_args: SettingArgs::default(),
             args: Vec::new(),
             json_summary: false,
+            status_file: None,
             report: Vec::new(),
             rig,
             rig_order: super::BenchRigOrder::Input,

@@ -694,6 +694,7 @@ mod tests {
             setting_args: SettingArgs::default(),
             args: Vec::new(),
             json_summary: false,
+            status_file: None,
             report: Vec::new(),
             rig: vec!["rig".to_string()],
             rig_order: crate::commands::bench::BenchRigOrder::Input,

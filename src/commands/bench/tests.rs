@@ -277,6 +277,7 @@ fn run_args(component: Option<&str>, rig: Vec<String>, scenario_ids: Vec<String>
             setting_args: SettingArgs::default(),
             args: Vec::new(),
             json_summary: false,
+            status_file: None,
             report: Vec::new(),
             rig,
             rig_order: BenchRigOrder::Input,
