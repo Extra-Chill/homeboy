@@ -221,6 +221,17 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
                     "values": []
                 }),
             ),
+            variant_contract(
+                "loop_sync",
+                json!({
+                    "command": "runs.loop-sync",
+                    "dry_run": true,
+                    "archive_root": "/tmp/loop-archives",
+                    "run_id": null,
+                    "synced_artifacts": [],
+                    "triage": {}
+                }),
+            ),
         ],
     );
 

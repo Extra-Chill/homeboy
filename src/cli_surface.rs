@@ -555,6 +555,13 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         golden_fixture: Some("runs_contract.json"),
     },
     PublicOutputVariantContract {
+        command: "runs",
+        variant: "loop_sync",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("loop_sync"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
         command: "rig",
         variant: "list",
         discriminator_field: Some("variant"),
