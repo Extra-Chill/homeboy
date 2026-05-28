@@ -31,7 +31,12 @@ jq -n '{
                 engine_data: {
                     foo: { bar: "baz" },
                     deep: { nested: 42 }
-                }
+                },
+                transcript_artifacts: [[{
+                    json: "/tmp/transcript.json",
+                    summary: "nested transcript",
+                    content: "nested transcript content"
+                }]]
             }
         },
         {
@@ -62,6 +67,8 @@ stdout=$(GITHUB_OUTPUT="$GITHUB_OUTPUT_TMPFILE" bash "$EXTRACTOR" \
     --scenario fixture-agent \
     --field foo_bar=metadata.engine_data.foo.bar \
     --field expression='(.metadata.engine_data.foo | if type == "object" then (.bar // "") else "" end)' \
+    --field transcript_json='(.metadata.transcript_artifacts | if type == "array" then (flatten | map(select(type == "object")) | .[0].json? // "") elif type == "object" then (.json? // "") else "" end)' \
+    --field transcript_summary='(.metadata.transcript_artifacts | if type == "array" then (flatten | map(select(type == "object")) | .[0].summary? // "") elif type == "object" then (.summary? // "") else "" end)' \
     --field nested=metadata.engine_data.deep.nested \
     --field missing=metadata.engine_data.missing \
     --required-field foo_bar \
@@ -70,6 +77,8 @@ stdout=$(GITHUB_OUTPUT="$GITHUB_OUTPUT_TMPFILE" bash "$EXTRACTOR" \
 
 if grep -F "foo_bar:" <<<"$stdout" | grep -F "baz" >/dev/null \
     && grep -F "expression:" <<<"$stdout" | grep -F "baz" >/dev/null \
+    && grep -F "transcript_json:" <<<"$stdout" | grep -F "/tmp/transcript.json" >/dev/null \
+    && grep -F "transcript_summary:" <<<"$stdout" | grep -F "nested transcript" >/dev/null \
     && grep -F "nested:" <<<"$stdout" | grep -F "42" >/dev/null; then
     pass "stdout includes projected key/value pairs"
 else
@@ -79,6 +88,8 @@ fi
 
 if grep -Fx "foo_bar=baz" "$GITHUB_OUTPUT_TMPFILE" >/dev/null \
     && grep -Fx "expression=baz" "$GITHUB_OUTPUT_TMPFILE" >/dev/null \
+    && grep -Fx "transcript_json=/tmp/transcript.json" "$GITHUB_OUTPUT_TMPFILE" >/dev/null \
+    && grep -Fx "transcript_summary=nested transcript" "$GITHUB_OUTPUT_TMPFILE" >/dev/null \
     && grep -Fx "nested=42" "$GITHUB_OUTPUT_TMPFILE" >/dev/null \
     && grep -Fx "missing=" "$GITHUB_OUTPUT_TMPFILE" >/dev/null; then
     pass "GITHUB_OUTPUT includes projected key=value lines"
