@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.24] - 2026-05-28
+
+### Changed
+- Allow no-change agent runs without PR requirement
+
 ## [2.102.23] - 2026-05-28
 
 ### Changed
