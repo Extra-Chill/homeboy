@@ -104,10 +104,19 @@ function normalizeFinding(finding, index) {
 }
 
 function groupFindings(findings) {
-  return findings.map((finding, index) => ({
-    key: finding.id,
+  const groupsByKey = new Map();
+  for (const finding of findings) {
+    const key = finding.fix_batch_key || finding.kind;
+    if (!groupsByKey.has(key)) {
+      groupsByKey.set(key, []);
+    }
+    groupsByKey.get(key).push(finding);
+  }
+
+  return Array.from(groupsByKey.entries()).map(([key, groupedFindings], index) => ({
+    key,
     index,
-    findings: [finding],
+    findings: groupedFindings,
   }));
 }
 
@@ -121,23 +130,25 @@ function sandboxSessionId(orchestrator, group) {
 }
 
 function taskPrompt(group) {
-  const finding = group.findings[0] || {};
-  const location = `${finding.file || ''}${finding.line ? `:${finding.line}` : ''}`;
+  const findings = group.findings || [];
+  const findingList = findings
+    .map((finding) => {
+      const location = `${finding.file || ''}${finding.line ? `:${finding.line}` : ''}`;
+      return `- ${finding.id}: ${finding.kind}${location ? ` in ${location}` : ''}${finding.message ? ` — ${finding.message}` : ''}`;
+    })
+    .join('\n');
 
   return [
-    `Fix Homeboy audit finding ${finding.id || group.key}.`,
+    `Fix the Homeboy audit remediation group ${group.key}.`,
     '',
     'Expected outcome:',
-    '- Open a pull request that fixes this audit finding, or',
-    '- If the finding is a false positive, fix the audit detector/config/test path that produced it and open a pull request for that correction.',
+    '- Open a pull request that fixes every finding in this remediation group, or',
+    '- If the group is a false positive, fix the audit detector/config/test path that produced it and open a pull request for that correction.',
     '',
-    'Return machine-readable outcome metadata when possible, including the PR URL, false-positive PR URL, or explicit failure reason.',
+    'Return machine-readable outcome metadata when possible, including the PR URL, false-positive PR URL, or explicit failure reason. The parent run reconciles this outcome back to each finding ID.',
     '',
     'Finding evidence:',
-    `- id: ${finding.id || group.key}`,
-    `- kind: ${finding.kind || 'unknown'}`,
-    location ? `- location: ${location}` : '',
-    finding.message ? `- message: ${finding.message}` : '',
+    findingList,
   ].join('\n\n');
 }
 
@@ -147,7 +158,6 @@ function createTaskRequest(group, orchestrator) {
     schema: TASK_SCHEMA,
     sandbox_session_id,
     group_key: group.key,
-    finding_id: group.findings[0]?.id || group.key,
     orchestrator: {
       id: orchestrator.id,
       run_id: orchestrator.run_id,
@@ -166,7 +176,7 @@ function createTaskRequest(group, orchestrator) {
       severity: finding.severity,
     })),
     task: {
-      title: `Fix Homeboy audit finding ${group.findings[0]?.id || group.key}`,
+      title: `Fix Homeboy audit remediation group ${group.key}`,
       prompt: taskPrompt(group),
     },
   };
