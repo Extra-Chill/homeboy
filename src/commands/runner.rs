@@ -35,6 +35,8 @@ pub enum RunnerConnectionOutput {
 
 pub type RunnerOutput = EntityCrudOutput<Runner, RunnerExtra>;
 
+const REDACTED_ENV_VALUE: &str = "[redacted]";
+
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum RunnerCommandOutput {
@@ -408,7 +410,26 @@ pub fn run(
 }
 
 fn map_registry(result: CmdResult<RunnerOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::Registry(output), exit_code))
+    result.map(|(mut output, exit_code)| {
+        redact_runner_output_env(&mut output);
+        (RunnerCommandOutput::Registry(output), exit_code)
+    })
+}
+
+fn redact_runner_output_env(output: &mut RunnerOutput) {
+    if let Some(runner) = output.entity.as_mut() {
+        redact_runner_env(runner);
+    }
+
+    for runner in &mut output.entities {
+        redact_runner_env(runner);
+    }
+}
+
+fn redact_runner_env(runner: &mut Runner) {
+    for value in runner.env.values_mut() {
+        *value = REDACTED_ENV_VALUE.to_string();
+    }
 }
 
 fn map_doctor(result: CmdResult<doctor::RunnerDoctorOutput>) -> CmdResult<RunnerCommandOutput> {
@@ -708,4 +729,70 @@ fn exec(
             capability_preflight: None,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runner_with_env(id: &str) -> Runner {
+        Runner {
+            id: id.to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: RunnerSettings::default(),
+            env: HashMap::from([
+                ("OPENCODE_API_KEY".to_string(), "secret-token".to_string()),
+                ("PATH".to_string(), "/secret/bin".to_string()),
+            ]),
+            resources: HashMap::new(),
+            policy: RunnerPolicy::default(),
+        }
+    }
+
+    #[test]
+    fn registry_entity_output_redacts_runner_env_values() {
+        let (output, exit_code) = map_registry(Ok((
+            RunnerOutput {
+                command: "runner.show".to_string(),
+                entity: Some(runner_with_env("lab")),
+                ..Default::default()
+            },
+            0,
+        )))
+        .expect("map output");
+
+        assert_eq!(exit_code, 0);
+        let value = serde_json::to_value(output).expect("serialize output");
+        assert_eq!(
+            value["entity"]["env"]["OPENCODE_API_KEY"],
+            REDACTED_ENV_VALUE
+        );
+        assert_eq!(value["entity"]["env"]["PATH"], REDACTED_ENV_VALUE);
+        assert!(!value.to_string().contains("secret-token"));
+        assert!(!value.to_string().contains("/secret/bin"));
+    }
+
+    #[test]
+    fn registry_list_output_redacts_runner_env_values() {
+        let (output, _) = map_registry(Ok((
+            RunnerOutput {
+                command: "runner.list".to_string(),
+                entities: vec![runner_with_env("lab")],
+                ..Default::default()
+            },
+            0,
+        )))
+        .expect("map output");
+
+        let value = serde_json::to_value(output).expect("serialize output");
+        assert_eq!(
+            value["entities"][0]["env"]["OPENCODE_API_KEY"],
+            REDACTED_ENV_VALUE
+        );
+        assert_eq!(value["entities"][0]["env"]["PATH"], REDACTED_ENV_VALUE);
+        assert!(!value.to_string().contains("secret-token"));
+        assert!(!value.to_string().contains("/secret/bin"));
+    }
 }
