@@ -201,14 +201,12 @@ fn default_app_preflight() -> Vec<AppLauncherPreflight> {
 }
 
 /// Bench composition for a rig. Pins which component(s) `homeboy bench
-/// --rig <id>` benchmarks when no explicit component is passed. The
-/// singular `default_component` remains supported for existing specs;
-/// new multi-component rigs should use `components`.
+/// --rig <id>` benchmarks when no explicit component is passed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchSpec {
     /// Component ID to benchmark when `homeboy rig bench <rig>` is invoked
     /// without `--component`. Optional — `--component` is required at the
-    /// CLI when this isn't set.
+    /// CLI when this isn't set and `components` is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_component: Option<String>,
 
@@ -299,18 +297,8 @@ impl BenchMetricGateCondition {
 }
 
 /// Rig-owned extension workload declaration.
-///
-/// The string shorthand keeps existing rig specs valid. Object form lets a
-/// workload opt into scoped rig preflights by naming the check groups it needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum WorkloadSpec {
-    Path(String),
-    Detailed(WorkloadEntry),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkloadEntry {
+pub struct WorkloadSpec {
     pub path: String,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -456,76 +444,45 @@ pub enum TraceExperimentArtifactSpec {
 
 impl WorkloadSpec {
     pub fn path(&self) -> &str {
-        match self {
-            WorkloadSpec::Path(path) => path,
-            WorkloadSpec::Detailed(entry) => &entry.path,
-        }
+        &self.path
     }
 
     pub fn check_groups(&self) -> Option<&[String]> {
-        match self {
-            WorkloadSpec::Path(_) => None,
-            WorkloadSpec::Detailed(entry) => entry.check_groups.as_deref(),
-        }
+        self.check_groups.as_deref()
     }
 
     pub fn port_range_size(&self) -> Option<u16> {
-        match self {
-            WorkloadSpec::Path(_) => None,
-            WorkloadSpec::Detailed(entry) => entry.port_range_size,
-        }
+        self.port_range_size
     }
 
     pub fn named_leases(&self) -> &[String] {
-        match self {
-            WorkloadSpec::Path(_) => &[],
-            WorkloadSpec::Detailed(entry) => &entry.named_leases,
-        }
+        &self.named_leases
     }
 
     pub fn trace_phase_preset(&self, name: &str) -> Option<&[String]> {
-        match self {
-            WorkloadSpec::Path(_) => None,
-            WorkloadSpec::Detailed(entry) => entry
-                .trace_phase_presets
-                .get(name)
-                .map(|phases| phases.as_slice()),
-        }
+        self.trace_phase_presets
+            .get(name)
+            .map(|phases| phases.as_slice())
     }
 
-    pub fn trace_span_metadata(&self) -> Option<&HashMap<String, TraceSpanMetadata>> {
-        match self {
-            WorkloadSpec::Path(_) => None,
-            WorkloadSpec::Detailed(entry) => Some(&entry.trace_span_metadata),
-        }
+    pub fn trace_span_metadata(&self) -> &HashMap<String, TraceSpanMetadata> {
+        &self.trace_span_metadata
     }
 
     pub fn trace_default_phase_preset(&self) -> Option<&str> {
-        match self {
-            WorkloadSpec::Path(_) => None,
-            WorkloadSpec::Detailed(entry) => entry.trace_default_phase_preset.as_deref(),
-        }
+        self.trace_default_phase_preset.as_deref()
     }
 
-    pub fn trace_variants(&self) -> Option<&HashMap<String, TraceVariantSpec>> {
-        match self {
-            WorkloadSpec::Path(_) => None,
-            WorkloadSpec::Detailed(entry) => Some(&entry.trace_variants),
-        }
+    pub fn trace_variants(&self) -> &HashMap<String, TraceVariantSpec> {
+        &self.trace_variants
     }
 
     pub fn trace_guardrails(&self) -> &[TraceGuardrailSpec] {
-        match self {
-            WorkloadSpec::Path(_) => &[],
-            WorkloadSpec::Detailed(entry) => &entry.trace_guardrails,
-        }
+        &self.trace_guardrails
     }
 
     pub fn trace_probes(&self) -> &[TraceProbeConfig] {
-        match self {
-            WorkloadSpec::Path(_) => &[],
-            WorkloadSpec::Detailed(entry) => &entry.trace_probes,
-        }
+        &self.trace_probes
     }
 }
 
@@ -570,7 +527,7 @@ mod tests {
 
     #[test]
     fn test_trace_phase_preset() {
-        let workload = WorkloadSpec::Detailed(WorkloadEntry {
+        let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
             check_groups: None,
             port_range_size: None,
@@ -584,17 +541,16 @@ mod tests {
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
-        });
+        };
 
         assert_eq!(workload.trace_phase_preset("missing"), None);
         assert_eq!(
             workload.trace_phase_preset("startup"),
             Some(["launch".to_string(), "ready".to_string()].as_slice())
         );
-        assert_eq!(
-            WorkloadSpec::Path("trace.mjs".to_string()).trace_phase_preset("startup"),
-            None
-        );
+        let workload_without_preset: WorkloadSpec =
+            serde_json::from_str(r#"{"path":"trace.mjs"}"#).expect("parse workload");
+        assert_eq!(workload_without_preset.trace_phase_preset("startup"), None);
     }
 
     #[test]
@@ -618,7 +574,6 @@ mod tests {
 
         let metadata = workload
             .trace_span_metadata()
-            .expect("metadata")
             .get("phase.boot_to_ready")
             .expect("span metadata");
         assert!(metadata.critical);
@@ -627,9 +582,10 @@ mod tests {
         assert!(metadata.prewarmable);
         assert_eq!(metadata.blocks.as_deref(), Some("first_site_render"));
         assert_eq!(metadata.category.as_deref(), Some("wordpress_boot"));
-        assert!(WorkloadSpec::Path("/tmp/legacy.trace.mjs".to_string())
-            .trace_span_metadata()
-            .is_none());
+        let workload_without_metadata: WorkloadSpec =
+            serde_json::from_str(r#"{"path":"/tmp/no-metadata.trace.mjs"}"#)
+                .expect("parse workload");
+        assert!(workload_without_metadata.trace_span_metadata().is_empty());
     }
 
     #[test]
@@ -686,9 +642,9 @@ mod tests {
             TraceProbeConfig::CmdRun { command, args }
                 if command == "kimaki" && args == &vec!["--help".to_string()]
         ));
-        assert!(WorkloadSpec::Path("/tmp/legacy.trace.mjs".to_string())
-            .trace_probes()
-            .is_empty());
+        let workload_without_probes: WorkloadSpec =
+            serde_json::from_str(r#"{"path":"/tmp/no-probes.trace.mjs"}"#).expect("parse workload");
+        assert!(workload_without_probes.trace_probes().is_empty());
     }
 
     #[test]
@@ -736,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_trace_default_phase_preset() {
-        let workload = WorkloadSpec::Detailed(WorkloadEntry {
+        let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
             check_groups: None,
             port_range_size: None,
@@ -747,18 +703,17 @@ mod tests {
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
-        });
+        };
 
         assert_eq!(workload.trace_default_phase_preset(), Some("startup"));
-        assert_eq!(
-            WorkloadSpec::Path("trace.mjs".to_string()).trace_default_phase_preset(),
-            None
-        );
+        let workload_without_default: WorkloadSpec =
+            serde_json::from_str(r#"{"path":"trace.mjs"}"#).expect("parse workload");
+        assert_eq!(workload_without_default.trace_default_phase_preset(), None);
     }
 
     #[test]
     fn test_port_range_size() {
-        let workload = WorkloadSpec::Detailed(WorkloadEntry {
+        let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
             check_groups: None,
             port_range_size: Some(8),
@@ -769,18 +724,17 @@ mod tests {
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
-        });
+        };
 
         assert_eq!(workload.port_range_size(), Some(8));
-        assert_eq!(
-            WorkloadSpec::Path("bench.mjs".to_string()).port_range_size(),
-            None
-        );
+        let workload_without_ports: WorkloadSpec =
+            serde_json::from_str(r#"{"path":"bench.mjs"}"#).expect("parse workload");
+        assert_eq!(workload_without_ports.port_range_size(), None);
     }
 
     #[test]
     fn test_named_leases() {
-        let workload = WorkloadSpec::Detailed(WorkloadEntry {
+        let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
             check_groups: None,
             port_range_size: None,
@@ -791,12 +745,12 @@ mod tests {
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
-        });
+        };
 
         assert_eq!(workload.named_leases(), &["browser-profile".to_string()]);
-        assert!(WorkloadSpec::Path("bench.mjs".to_string())
-            .named_leases()
-            .is_empty());
+        let workload_without_leases: WorkloadSpec =
+            serde_json::from_str(r#"{"path":"bench.mjs"}"#).expect("parse workload");
+        assert!(workload_without_leases.named_leases().is_empty());
     }
 
     #[test]
@@ -839,7 +793,7 @@ mod tests {
             workload.trace_guardrails()[0].check.command.as_deref(),
             Some("npm run smoke:list-sites")
         );
-        let variants = workload.trace_variants().expect("variants");
+        let variants = workload.trace_variants();
         assert_eq!(
             variants["fast-install"].trace_guardrails[0]
                 .check

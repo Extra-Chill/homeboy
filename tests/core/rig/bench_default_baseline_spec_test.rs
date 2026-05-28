@@ -80,10 +80,10 @@ fn test_rig_spec_deserializes_bench_workloads_by_extension() {
             "id": "studio",
             "bench_workloads": {
                 "wordpress": [
-                    "/private/benches/cold-boot.php",
-                    "~/benches/wc-loaded.php"
+                    { "path": "/private/benches/cold-boot.php" },
+                    { "path": "~/benches/wc-loaded.php" }
                 ],
-                "nodejs": ["/private/benches/electron-startup.bench.ts"]
+                "nodejs": [{ "path": "/private/benches/electron-startup.bench.ts" }]
             }
         }"#,
     )
@@ -117,10 +117,10 @@ fn test_rig_spec_deserializes_trace_workloads_by_extension() {
             "id": "studio",
             "trace_workloads": {
                 "nodejs": [
-                    "${package.root}/bench/studio-app-create-site.trace.mjs",
-                    "~/traces/window-close.trace.mjs"
+                    { "path": "${package.root}/bench/studio-app-create-site.trace.mjs" },
+                    { "path": "~/traces/window-close.trace.mjs" }
                 ],
-                "wordpress": ["/private/traces/wp-admin-load.trace.php"]
+                "wordpress": [{ "path": "/private/traces/wp-admin-load.trace.php" }]
             }
         }"#,
     )
@@ -180,10 +180,9 @@ fn test_trace_phase_preset() {
         workload.trace_phase_preset("startup"),
         Some(["launch".to_string(), "ready".to_string()].as_slice())
     );
-    assert_eq!(
-        WorkloadSpec::Path("trace.mjs".to_string()).trace_phase_preset("startup"),
-        None
-    );
+    let workload_without_preset: WorkloadSpec =
+        serde_json::from_str(r#"{"path":"trace.mjs"}"#).expect("parse workload");
+    assert_eq!(workload_without_preset.trace_phase_preset("startup"), None);
 }
 
 #[test]
@@ -210,10 +209,9 @@ fn test_trace_default_phase_preset() {
         .expect("nodejs trace workload");
 
     assert_eq!(workload.trace_default_phase_preset(), Some("startup"));
-    assert_eq!(
-        WorkloadSpec::Path("trace.mjs".to_string()).trace_default_phase_preset(),
-        None
-    );
+    let workload_without_default: WorkloadSpec =
+        serde_json::from_str(r#"{"path":"trace.mjs"}"#).expect("parse workload");
+    assert_eq!(workload_without_default.trace_default_phase_preset(), None);
 }
 
 #[test]

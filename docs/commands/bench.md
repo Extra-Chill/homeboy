@@ -428,7 +428,9 @@ bench workflows:
     "default_baseline_rig": "studio-trunk"
   },
   "bench_workloads": {
-    "wordpress": ["${package.root}/bench/studio-admin.php"]
+    "wordpress": [
+      { "path": "${package.root}/bench/studio-admin.php" }
+    ]
   }
 }
 ```
@@ -447,7 +449,7 @@ bench workflows:
   passes `--ignore-default-baseline`, or the candidate rig declares a
   multi-component `bench.components` matrix.
 - `bench_workloads` supplies rig-owned workload files keyed by extension ID.
-  Paths support `~`, `${env.NAME}`, `${components.<id>.path}`, and
+  Entries must be objects with a `path` field. Paths support `~`, `${env.NAME}`, `${components.<id>.path}`, and
   `${package.root}` expansion. `${package.root}` resolves to the installed
   rig package root, so portable rig packages can keep workload files next
   to the rig spec without hardcoded machine paths.
