@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.27] - 2026-05-28
+
+### Changed
+- Install Composer deps for cloned validation dependencies
+
 ## [2.102.26] - 2026-05-28
 
 ### Fixed
