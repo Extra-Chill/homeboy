@@ -23,6 +23,7 @@ const PLAN_SCHEMA = 'homeboy/audit-wp-codebox-fanout/v1';
 const TASK_SCHEMA = 'homeboy/wp-codebox-task-request/v1';
 const RUN_SCHEMA = 'homeboy/audit-wp-codebox-run/v1';
 const DEFAULT_CONCURRENCY = 3;
+const DEFAULT_TASK_TIMEOUT_SECONDS = 15 * 60;
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -436,10 +437,12 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
   const args = options.wp_codebox_args || [];
   const requestJson = `${JSON.stringify(taskRequest, null, 2)}\n`;
   const startedAt = new Date().toISOString();
+  const taskTimeoutSeconds = normalizeTaskTimeoutSeconds(options.task_timeout_seconds);
 
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd: options.cwd || process.cwd(),
+      detached: true,
       env: {
         ...process.env,
         ...(options.env || {}),
@@ -452,7 +455,24 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
     let stdout = '';
     let stderr = '';
     let spawnError = null;
+    let timedOut = false;
+    let timeout = null;
+    let forceKillTimeout = null;
+    let killedProcessGroup = false;
+    let forceKilledProcessGroup = false;
     const maxBuffer = options.max_buffer || 1024 * 1024 * 10;
+
+    if (taskTimeoutSeconds > 0) {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        killedProcessGroup = killProcessTree(child, 'SIGTERM');
+        forceKillTimeout = setTimeout(() => {
+          forceKilledProcessGroup = killProcessTree(child, 'SIGKILL');
+        }, 5000);
+        forceKillTimeout.unref?.();
+      }, taskTimeoutSeconds * 1000);
+      timeout.unref?.();
+    }
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -472,12 +492,19 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
       spawnError = error;
     });
     child.on('close', (code, signal) => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      if (forceKillTimeout) {
+        clearTimeout(forceKillTimeout);
+      }
       const finishedAt = new Date().toISOString();
       const parsed = tryParseJson(stdout);
       const artifact = parsed && typeof parsed === 'object' && parsed.artifacts ? parsed.artifacts : null;
       const taskFailure = parsed ? wpCodeboxTaskFailure(parsed) : null;
-      const errorMessage = spawnError ? spawnError.message : (taskFailure || '');
-      const success = code === 0 && !spawnError && null === taskFailure;
+      const timeoutError = timedOut ? `WP Codebox task timed out after ${taskTimeoutSeconds} seconds` : '';
+      const errorMessage = timeoutError || (spawnError ? spawnError.message : (taskFailure || ''));
+      const success = code === 0 && !spawnError && null === taskFailure && !timedOut;
 
       resolve({
         schema: RUN_SCHEMA,
@@ -490,6 +517,10 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
           exit_code: code,
           signal: signal || null,
           error: errorMessage,
+          timed_out: timedOut,
+          timeout_seconds: taskTimeoutSeconds,
+          killed_process_group: killedProcessGroup,
+          force_killed_process_group: forceKilledProcessGroup,
         },
         status: success ? 'completed' : 'failed',
         started_at: startedAt,
@@ -506,6 +537,19 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
     });
     child.stdin.end(requestJson);
   });
+}
+
+function killProcessTree(child, signal) {
+  if (!child.pid) {
+    return child.kill(signal);
+  }
+
+  try {
+    process.kill(-child.pid, signal);
+    return true;
+  } catch {
+    return child.kill(signal);
+  }
 }
 
 function wpCodeboxTaskFailure(parsed) {
@@ -626,6 +670,7 @@ function executeAuditWpCodeboxFanoutFromFiles(options) {
     cwd: options.cwd,
     env: options.env,
     concurrency: options.concurrency,
+    task_timeout_seconds: options.taskTimeoutSeconds,
     runsOutputPath: options.runsOutputPath,
     on_progress: options.onProgress,
   });
@@ -637,6 +682,14 @@ function normalizeConcurrency(value) {
     return DEFAULT_CONCURRENCY;
   }
   return Math.min(parsed, 16);
+}
+
+function normalizeTaskTimeoutSeconds(value) {
+  const parsed = Number.parseInt(value || DEFAULT_TASK_TIMEOUT_SECONDS, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return DEFAULT_TASK_TIMEOUT_SECONDS;
+  }
+  return parsed;
 }
 
 function runningGroup(taskRequest) {
@@ -671,6 +724,7 @@ module.exports = {
   RUN_SCHEMA,
   TASK_SCHEMA,
   DEFAULT_CONCURRENCY,
+  DEFAULT_TASK_TIMEOUT_SECONDS,
   auditFindings,
   createAuditWpCodeboxFanoutPlan,
   createAuditWpCodeboxFanoutPlanFromFiles,

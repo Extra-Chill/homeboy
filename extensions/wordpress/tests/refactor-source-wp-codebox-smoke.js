@@ -119,6 +119,7 @@ process.stdout.write(JSON.stringify({
       wp_codebox_agents_api_path: path.join(root, 'agents-api'),
       wp_codebox_data_machine_path: path.join(root, 'data-machine'),
       wp_codebox_data_machine_code_path: path.join(root, 'data-machine-code'),
+      wp_codebox_task_timeout_seconds: 2,
     },
   };
   fs.mkdirSync(writeCommand.settings.wp_codebox_agents_api_path, { recursive: true });
@@ -148,6 +149,7 @@ process.stdout.write(JSON.stringify({
   const run = JSON.parse(fs.readFileSync(path.join(writeOutputDir, 'fanout-run.json'), 'utf8'));
   assert.equal(run.status, 'completed');
   assert.equal(run.records[0].command.bin, 'node');
+  assert.equal(run.records[0].command.timeout_seconds, 2);
   assert.match(run.records[0].command.args[0], /homeboy-wp-codebox-task-runner\.cjs$/);
   assert.equal(run.records[0].command.args.includes('--wp-codebox-bin'), true);
   const artifactsIndex = run.records[0].command.args.indexOf('--artifacts');

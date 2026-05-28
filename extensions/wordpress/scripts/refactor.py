@@ -907,6 +907,8 @@ def refactor_source(data):
         args.extend(['--secret-env', secret_env])
     if settings.get('wp_codebox_concurrency'):
         args.extend(['--concurrency', str(settings['wp_codebox_concurrency'])])
+    if settings.get('wp_codebox_task_timeout_seconds'):
+        args.extend(['--task-timeout-seconds', str(settings['wp_codebox_task_timeout_seconds'])])
 
     if data.get('write'):
         args.append('--execute')

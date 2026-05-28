@@ -109,6 +109,12 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
   const request = JSON.parse(input);
+  if (process.env.FIXTURE_HANG_GROUP === request.group_key) {
+    process.stdout.write('fixture partial stdout before timeout\\n');
+    process.stderr.write('fixture partial stderr before timeout\\n');
+    setInterval(() => {}, 1000);
+    return;
+  }
   if (request.group_key === 'docs-reference') {
     if (process.env.FIXTURE_EXPECT_INCREMENTAL_RUN) {
       const run = JSON.parse(fs.readFileSync(process.env.FIXTURE_EXPECT_INCREMENTAL_RUN, 'utf8'));
@@ -352,6 +358,34 @@ try {
   assert.equal(nestedFailedRecord.command.exit_code, 0);
   assert.match(nestedFailedRecord.command.error, /Fixture nested WP error/);
 
+  const timeoutRunsOutputPath = path.join(root, 'fanout-timeout-run.json');
+  const timeoutExecution = await executeAuditWpCodeboxFanout({
+    report,
+    wp_codebox_command: process.execPath,
+    wp_codebox_args: [fixtureCommand],
+    concurrency: 1,
+    task_timeout_seconds: 1,
+    runsOutputPath: timeoutRunsOutputPath,
+    env: { FIXTURE_HANG_GROUP: 'PHPCS Formatting/Auto Fix!' },
+  });
+  assert.equal(timeoutExecution.status, 'failed');
+  assert.equal(timeoutExecution.records.length, 2);
+  const timeoutRecord = timeoutExecution.records.find((record) => record.group_key === 'PHPCS Formatting/Auto Fix!');
+  assert.equal(timeoutRecord.status, 'failed');
+  assert.equal(timeoutRecord.command.timed_out, true);
+  assert.equal(timeoutRecord.command.timeout_seconds, 1);
+  assert.equal(timeoutRecord.command.killed_process_group, true);
+  assert.match(timeoutRecord.command.error, /timed out after 1 seconds/);
+  assert.match(timeoutRecord.stdout, /fixture partial stdout before timeout/);
+  assert.match(timeoutRecord.stderr, /fixture partial stderr before timeout/);
+  const timeoutFollowupRecord = timeoutExecution.records.find((record) => record.group_key === 'docs-reference');
+  assert.equal(timeoutFollowupRecord.status, 'failed');
+  assert.equal(timeoutFollowupRecord.command.exit_code, 3);
+  const timeoutFinalRun = readJson(timeoutRunsOutputPath);
+  assert.equal(timeoutFinalRun.status, 'failed');
+  assert.equal(timeoutFinalRun.records.length, 2);
+  assert.equal(Object.hasOwn(timeoutFinalRun, 'current_group'), false);
+
   const runsOutputPath = path.join(root, 'fanout-run.json');
   const fileExecution = await executeAuditWpCodeboxFanoutFromFiles({
     auditReportPath,
@@ -380,6 +414,8 @@ try {
     process.execPath,
     '--wp-codebox-arg',
     fixtureCommand,
+    '--task-timeout-seconds',
+    '2',
     '--secret-env',
     'FIXTURE_SECRET_TOKEN',
   ], { encoding: 'utf8' });

@@ -31,7 +31,7 @@ function hasFlag(name) {
 }
 
 function usage() {
-  console.error('Usage: homeboy-audit-wp-codebox-fanout.cjs --audit-report <report.json> [--execute --concurrency <n> --wp-codebox-command <bin> --wp-codebox-arg <arg> --runs-output <run.json>] [--artifact-map <map.json>] [--output <plan.json>] [--issue-url <url>]');
+  console.error('Usage: homeboy-audit-wp-codebox-fanout.cjs --audit-report <report.json> [--execute --concurrency <n> --task-timeout-seconds <n> --wp-codebox-command <bin> --wp-codebox-arg <arg> --runs-output <run.json>] [--artifact-map <map.json>] [--output <plan.json>] [--issue-url <url>]');
   process.exit(1);
 }
 
@@ -77,6 +77,7 @@ async function main() {
     wpCodeboxArgs: argValues('--wp-codebox-arg'),
     runsOutputPath: argValue('--runs-output') || '',
     concurrency: argValue('--concurrency') || undefined,
+    taskTimeoutSeconds: argValue('--task-timeout-seconds') || undefined,
     onProgress: writeProgress,
   }) : createAuditWpCodeboxFanoutPlanFromFiles(options);
 
