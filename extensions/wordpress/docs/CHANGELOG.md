@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.20] - 2026-05-28
+
+### Changed
+- Handle nested transcript artifacts
+
 ## [2.102.19] - 2026-05-28
 
 ### Fixed
