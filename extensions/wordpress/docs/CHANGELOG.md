@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.16] - 2026-05-28
+
+### Changed
+- Project agent runs to wp-gym eval rows
+- Run WP Codebox verifier and policy checks
+
 ## [2.102.15] - 2026-05-28
 
 ### Fixed
