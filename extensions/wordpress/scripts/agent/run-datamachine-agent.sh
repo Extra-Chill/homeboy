@@ -181,6 +181,20 @@ PHP
         exit $wp_codebox_exit
     fi
 
+    local wp_codebox_artifact_bundle
+    wp_codebox_artifact_bundle=$(jq -r '.artifacts.directory // empty' "$wp_codebox_output")
+
+    local artifact_verifier_result="$RUNTIME_DIR/wp-codebox-artifact-verifier.json"
+    local workspace_policy_result="$RUNTIME_DIR/wp-codebox-workspace-policy.json"
+    homeboy_datamachine_agent_run_artifact_verifier \
+        "$wp_codebox_bin" \
+        "$wp_codebox_artifact_bundle" \
+        "$artifact_verifier_result"
+    homeboy_datamachine_agent_run_workspace_policy_check \
+        "$wp_codebox_bin" \
+        "$wp_codebox_artifact_bundle" \
+        "$workspace_policy_result"
+
     local wp_codebox_review_input="$RUNTIME_DIR/wp-codebox-review.json"
     local wp_codebox_changed_files_input="$RUNTIME_DIR/wp-codebox-changed-files.json"
     local wp_codebox_artifacts_json="$RUNTIME_DIR/wp-codebox-artifacts.json"
@@ -202,6 +216,8 @@ PHP
         --slurpfile run "$wp_codebox_output" \
         --slurpfile review "$wp_codebox_review_input" \
         --slurpfile changedFiles "$wp_codebox_changed_files_input" \
+        --slurpfile verifier "$artifact_verifier_result" \
+        --slurpfile policy "$workspace_policy_result" \
         '
         ($run[0].artifacts // {}) as $artifacts
         | {
@@ -227,7 +243,9 @@ PHP
                 review: ($artifacts.reviewPath // "")
             } | with_entries(select(.value != "")),
             review_payload: ($review[0] // null),
-            changed_files: ($changedFiles[0] // null)
+            changed_files: ($changedFiles[0] // null),
+            artifact_verifier_result: ($verifier[0] // null),
+            workspace_policy_result: ($policy[0] // null)
         }
         ' >"$wp_codebox_artifacts_json"
 
@@ -267,6 +285,8 @@ PHP
                             runtime: ($run[0].runtime // null),
                             artifacts: ($run[0].artifacts // null),
                             canonical_artifacts: ($wpPaths // {}),
+                            artifact_verifier_result: ($wpArtifacts.artifact_verifier_result // null),
+                            workspace_policy_result: ($wpArtifacts.workspace_policy_result // null),
                             review_payload: ($wpArtifacts.review_payload // null),
                             changed_files: ($wpArtifacts.changed_files // null),
                             error: ($run[0].error // null)
@@ -276,6 +296,148 @@ PHP
             ]
         }
         ' >"$RESULTS_FILE"
+}
+
+homeboy_datamachine_agent_wp_codebox_command() {
+    local wp_codebox_bin="$1"
+    shift
+
+    local wp_codebox_command=("$wp_codebox_bin")
+    case "$wp_codebox_bin" in
+        *.js)
+            wp_codebox_command=(node "$wp_codebox_bin")
+            ;;
+    esac
+
+    "${wp_codebox_command[@]}" "$@"
+}
+
+homeboy_datamachine_agent_write_check_result() {
+    local output_path="$1"
+    local check_name="$2"
+    local required="$3"
+    local skipped_reason="$4"
+    local exit_code="$5"
+    local stdout_path="$6"
+
+    jq -n \
+        --arg check "$check_name" \
+        --argjson required "$required" \
+        --arg skippedReason "$skipped_reason" \
+        --argjson exitCode "$exit_code" \
+        --rawfile stdout "$stdout_path" \
+        '
+        ($stdout | fromjson? // null) as $jsonOutput
+        | {
+            schema: "homeboy/wp-codebox-post-run-check/v1",
+            check: $check,
+            required: $required,
+            skipped: ($skippedReason != ""),
+            skipped_reason: $skippedReason,
+            exit_code: $exitCode,
+            success: (($skippedReason == "") and ($exitCode == 0) and (($jsonOutput.success // $jsonOutput.valid // true) == true)),
+            output: $jsonOutput,
+            stdout: (if $jsonOutput == null then $stdout else null end)
+        }
+        | with_entries(select(.value != null and .value != ""))
+        ' >"$output_path"
+}
+
+homeboy_datamachine_agent_run_artifact_verifier() {
+    local wp_codebox_bin="$1"
+    local artifact_bundle="$2"
+    local result_path="$3"
+    local stdout_path="$RUNTIME_DIR/wp-codebox-artifact-verifier.stdout"
+    local required
+
+    required=$(jq -r 'if (.require_artifact_verifier // .wp_codebox_require_artifact_verifier // true) then "true" else "false" end' <<<"$CONFIG_JSON")
+    printf '' >"$stdout_path"
+
+    if [ -z "$artifact_bundle" ]; then
+        homeboy_datamachine_agent_write_check_result "$result_path" "artifact_verifier" "$required" "artifact_bundle_missing" 1 "$stdout_path"
+    else
+        set +e
+        homeboy_datamachine_agent_wp_codebox_command "$wp_codebox_bin" artifacts verify --artifacts "$artifact_bundle" --json >"$stdout_path" 2>&1
+        local verifier_exit=$?
+        set -e
+        homeboy_datamachine_agent_write_check_result "$result_path" "artifact_verifier" "$required" "" "$verifier_exit" "$stdout_path"
+    fi
+
+    if [ "$required" = "true" ] && ! jq -e '.success == true' "$result_path" >/dev/null; then
+        echo "ERROR: required WP Codebox artifact verification failed or was unavailable" >&2
+        cat "$result_path" >&2
+        exit 1
+    fi
+}
+
+homeboy_datamachine_agent_workspace_policy_args_json() {
+    jq -c '
+        def string_array($value):
+            if ($value | type) == "array" then [$value[] | select(type == "string" and . != "")]
+            elif ($value | type) == "string" and $value != "" then [$value]
+            else [] end;
+        (.workspace_policy_check // {}) as $check
+        | string_array($check.args // .workspace_policy_args // [])
+    ' <<<"$CONFIG_JSON"
+}
+
+homeboy_datamachine_agent_workspace_policy_available() {
+    jq -e '
+        (.workspace_policy_check // {}) as $check
+        | (($check.enabled // false) == true)
+            or (($check.args // .workspace_policy_args // []) | if type == "array" then length > 0 elif type == "string" then . != "" else false end)
+            or ((.workspace_policy_input // .workspace_policy_path // .workspace_policy // null) != null)
+    ' <<<"$CONFIG_JSON" >/dev/null
+}
+
+homeboy_datamachine_agent_run_workspace_policy_check() {
+    local wp_codebox_bin="$1"
+    local artifact_bundle="$2"
+    local result_path="$3"
+    local stdout_path="$RUNTIME_DIR/wp-codebox-workspace-policy.stdout"
+    local input_path="$RUNTIME_DIR/wp-codebox-workspace-policy-input.json"
+    local required
+
+    required=$(jq -r 'if (.require_workspace_policy // .wp_codebox_require_workspace_policy // false) then "true" else "false" end' <<<"$CONFIG_JSON")
+    printf '' >"$stdout_path"
+
+    if ! homeboy_datamachine_agent_workspace_policy_available; then
+        homeboy_datamachine_agent_write_check_result "$result_path" "workspace_policy" "$required" "policy_inputs_missing" 1 "$stdout_path"
+    else
+        jq '
+            {
+                workspace_policy_input: (.workspace_policy_input // null),
+                workspace_policy_path: (.workspace_policy_path // null),
+                workspace_policy: (.workspace_policy // null),
+                runner_workspace: (.runner_workspace // null),
+                runner_workspace_result: (.runner_workspace_result // null),
+                artifact_bundle: $artifactBundle
+            }
+        ' --arg artifactBundle "$artifact_bundle" <<<"$CONFIG_JSON" >"$input_path"
+
+        local policy_args_json
+        policy_args_json=$(homeboy_datamachine_agent_workspace_policy_args_json)
+        local policy_args=(workspace-policy check --json --input "$input_path")
+        if [ -n "$artifact_bundle" ]; then
+            policy_args+=(--artifacts "$artifact_bundle")
+        fi
+        while IFS= read -r policy_arg; do
+            [ -n "$policy_arg" ] || continue
+            policy_args+=("$policy_arg")
+        done < <(jq -r '.[]' <<<"$policy_args_json")
+
+        set +e
+        homeboy_datamachine_agent_wp_codebox_command "$wp_codebox_bin" "${policy_args[@]}" >"$stdout_path" 2>&1
+        local policy_exit=$?
+        set -e
+        homeboy_datamachine_agent_write_check_result "$result_path" "workspace_policy" "$required" "" "$policy_exit" "$stdout_path"
+    fi
+
+    if [ "$required" = "true" ] && ! jq -e '.success == true' "$result_path" >/dev/null; then
+        echo "ERROR: required WP Codebox workspace policy check failed or was unavailable" >&2
+        cat "$result_path" >&2
+        exit 1
+    fi
 }
 
 homeboy_datamachine_agent_attach_evidence_references() {

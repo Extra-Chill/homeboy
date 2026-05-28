@@ -39,7 +39,31 @@ const argsFile = process.env.FAKE_WP_CODEBOX_ARGS_FILE
 if (!argsFile) {
   throw new Error('FAKE_WP_CODEBOX_ARGS_FILE is required')
 }
-fs.writeFileSync(argsFile, `${args.join('\n')}\n`)
+fs.appendFileSync(argsFile, `${args.join('\n')}\n---\n`)
+
+if (args[0] === 'artifacts' && args[1] === 'verify') {
+  if (!args.includes('--artifacts') || !args.includes('--json')) {
+    throw new Error('artifact verifier missing --artifacts or --json')
+  }
+  process.stdout.write(JSON.stringify({
+    success: true,
+    schema: 'wp-codebox/artifact-verification/v1',
+    checks: [{ id: 'manifest', status: 'passed' }],
+  }) + '\n')
+  process.exit(0)
+}
+
+if (args[0] === 'workspace-policy' && args[1] === 'check') {
+  if (!args.includes('--input') || !args.includes('--json')) {
+    throw new Error('workspace policy check missing --input or --json')
+  }
+  process.stdout.write(JSON.stringify({
+    success: true,
+    schema: 'wp-codebox/workspace-policy-check/v1',
+    checks: [{ id: 'allowed-files', status: 'passed' }],
+  }) + '\n')
+  process.exit(0)
+}
 
 for (const expected of ['recipe-run', '--recipe', '--json']) {
   if (!args.includes(expected)) {
@@ -164,6 +188,10 @@ jq -n \
         dry_run: true,
         provider: "example-provider",
         model: "example-model",
+        workspace_policy_check: {
+            enabled: true,
+            args: ["--scope", "smoke"]
+        },
         prompt: "Smoke the WP Codebox runner adapter.",
         wp_codebox_components: {
             agents_api: $agentsApi,
@@ -212,16 +240,16 @@ homeboy_result_path=$(jq -r "$scenario | .metadata.evidence_references.reference
 wp_codebox_bundle_available=$(jq -r "$scenario | .metadata.evidence_references.references.wp_codebox_artifact_bundle.available // false" "$RESULTS_TMPFILE")
 runtime_trace_available=$(jq -r "$scenario | .metadata.evidence_references.references.runtime_episode_trace.available // false" "$RESULTS_TMPFILE")
 replay_bundle_available=$(jq -r "$scenario | .metadata.evidence_references.references.replay_bundle_artifact.available // false" "$RESULTS_TMPFILE")
-verifier_gap=$(jq -r "$scenario | any(.metadata.evidence_references.compatibility_gaps[]?; .field == \"artifact_verifier_result\")" "$RESULTS_TMPFILE")
-policy_gap=$(jq -r "$scenario | any(.metadata.evidence_references.compatibility_gaps[]?; .field == \"workspace_policy_result\")" "$RESULTS_TMPFILE")
+verifier_available=$(jq -r "$scenario | .metadata.evidence_references.references.artifact_verifier_result.available // false" "$RESULTS_TMPFILE")
+policy_available=$(jq -r "$scenario | .metadata.evidence_references.references.workspace_policy_result.available // false" "$RESULTS_TMPFILE")
 trace_gap=$(jq -r "$scenario | any(.metadata.evidence_references.compatibility_gaps[]?; .field == \"runtime_episode_trace\")" "$RESULTS_TMPFILE")
-if [ "$evidence_schema" != "homeboy/datamachine-agent-evidence-references/v1" ] || [ "$homeboy_result_path" != "$RESULTS_TMPFILE" ] || [ "$wp_codebox_bundle_available" != "true" ] || [ "$runtime_trace_available" != "true" ] || [ "$replay_bundle_available" != "true" ] || [ "$verifier_gap" != "true" ] || [ "$policy_gap" != "true" ] || [ "$trace_gap" != "false" ]; then
+if [ "$evidence_schema" != "homeboy/datamachine-agent-evidence-references/v1" ] || [ "$homeboy_result_path" != "$RESULTS_TMPFILE" ] || [ "$wp_codebox_bundle_available" != "true" ] || [ "$runtime_trace_available" != "true" ] || [ "$replay_bundle_available" != "true" ] || [ "$verifier_available" != "true" ] || [ "$policy_available" != "true" ] || [ "$trace_gap" != "false" ]; then
     echo "ERROR: stable evidence references missing or incomplete" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
 fi
 
-if ! grep -qx 'recipe-run' "$FAKE_ARGS_FILE" || ! grep -qx -- '--recipe' "$FAKE_ARGS_FILE"; then
+if ! grep -qx 'recipe-run' "$FAKE_ARGS_FILE" || ! grep -qx -- '--recipe' "$FAKE_ARGS_FILE" || ! grep -qx 'artifacts' "$FAKE_ARGS_FILE" || ! grep -qx 'workspace-policy' "$FAKE_ARGS_FILE"; then
     echo "ERROR: expected wp-codebox recipe-run invocation" >&2
     cat "$FAKE_ARGS_FILE" >&2
     exit 1
