@@ -7,6 +7,23 @@ pub enum RunnerTunnelMode {
     Reverse,
 }
 
+impl RunnerTunnelMode {
+    pub fn label(&self) -> &'static str {
+        self.labels().0
+    }
+
+    pub fn metadata_value(&self) -> &'static str {
+        self.labels().1
+    }
+
+    fn labels(&self) -> (&'static str, &'static str) {
+        match self {
+            RunnerTunnelMode::DirectSsh => ("direct SSH", "direct_ssh"),
+            RunnerTunnelMode::Reverse => ("reverse-connected", "reverse"),
+        }
+    }
+}
+
 fn default_tunnel_mode() -> RunnerTunnelMode {
     RunnerTunnelMode::DirectSsh
 }

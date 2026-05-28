@@ -151,10 +151,15 @@ pub fn resolve_default_lab_runner() -> Result<Option<String>> {
             if runner.kind != RunnerKind::Ssh {
                 return None;
             }
-            let connected = status(&runner.id).ok()?.connected;
+            let status = status(&runner.id).ok()?;
+            let mode = status
+                .session
+                .as_ref()
+                .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
             Some(DefaultLabRunnerCandidate {
                 id: runner.id,
-                connected,
+                mode,
+                connected: status.connected,
             })
         }),
     ))
@@ -163,6 +168,7 @@ pub fn resolve_default_lab_runner() -> Result<Option<String>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DefaultLabRunnerCandidate {
     id: String,
+    mode: RunnerTunnelMode,
     connected: bool,
 }
 
@@ -632,10 +638,12 @@ mod tests {
             vec![
                 DefaultLabRunnerCandidate {
                     id: "lab-a".to_string(),
+                    mode: RunnerTunnelMode::DirectSsh,
                     connected: true,
                 },
                 DefaultLabRunnerCandidate {
                     id: "lab-b".to_string(),
+                    mode: RunnerTunnelMode::Reverse,
                     connected: true,
                 },
             ],
@@ -651,10 +659,12 @@ mod tests {
             vec![
                 DefaultLabRunnerCandidate {
                     id: "lab-a".to_string(),
+                    mode: RunnerTunnelMode::DirectSsh,
                     connected: false,
                 },
                 DefaultLabRunnerCandidate {
                     id: "lab-b".to_string(),
+                    mode: RunnerTunnelMode::Reverse,
                     connected: true,
                 },
             ],
@@ -666,6 +676,7 @@ mod tests {
             None,
             vec![DefaultLabRunnerCandidate {
                 id: "lab-a".to_string(),
+                mode: RunnerTunnelMode::DirectSsh,
                 connected: false,
             }],
         );
@@ -680,10 +691,12 @@ mod tests {
             vec![
                 DefaultLabRunnerCandidate {
                     id: "lab-a".to_string(),
+                    mode: RunnerTunnelMode::DirectSsh,
                     connected: false,
                 },
                 DefaultLabRunnerCandidate {
                     id: "lab-b".to_string(),
+                    mode: RunnerTunnelMode::Reverse,
                     connected: false,
                 },
             ],
@@ -693,10 +706,12 @@ mod tests {
             vec![
                 DefaultLabRunnerCandidate {
                     id: "lab-a".to_string(),
+                    mode: RunnerTunnelMode::DirectSsh,
                     connected: true,
                 },
                 DefaultLabRunnerCandidate {
                     id: "lab-b".to_string(),
+                    mode: RunnerTunnelMode::Reverse,
                     connected: true,
                 },
             ],
@@ -712,10 +727,25 @@ mod tests {
             Some("lab-a"),
             vec![DefaultLabRunnerCandidate {
                 id: "lab-a".to_string(),
+                mode: RunnerTunnelMode::Reverse,
                 connected: false,
             }],
         );
 
         assert_eq!(selected.as_deref(), Some("lab-a"));
+    }
+
+    #[test]
+    fn default_lab_runner_can_select_connected_reverse_runner() {
+        let selected = resolve_default_lab_runner_from_candidates(
+            None,
+            vec![DefaultLabRunnerCandidate {
+                id: "homeboy-lab".to_string(),
+                mode: RunnerTunnelMode::Reverse,
+                connected: true,
+            }],
+        );
+
+        assert_eq!(selected.as_deref(), Some("homeboy-lab"));
     }
 }

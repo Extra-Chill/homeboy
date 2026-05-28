@@ -1,6 +1,7 @@
 pub fn lab_offload_metadata(
     source: &str,
     runner_id: Option<&str>,
+    runner_mode: Option<&str>,
     status: &str,
     remote_workspace: Option<&str>,
     fallback_reason: Option<&str>,
@@ -9,6 +10,7 @@ pub fn lab_offload_metadata(
         "source": source,
         "status": status,
         "runner_id": runner_id,
+        "runner_mode": runner_mode,
         "remote_workspace": remote_workspace,
         "fallback_reason": fallback_reason,
     })
@@ -29,6 +31,7 @@ mod tests {
         let explicit = lab_offload_metadata(
             "explicit",
             Some("lab-explicit"),
+            Some("direct_ssh"),
             "offloaded",
             Some("/srv/homeboy/project"),
             None,
@@ -36,12 +39,14 @@ mod tests {
         assert_eq!(explicit["source"], "explicit");
         assert_eq!(explicit["status"], "offloaded");
         assert_eq!(explicit["runner_id"], "lab-explicit");
+        assert_eq!(explicit["runner_mode"], "direct_ssh");
         assert_eq!(explicit["remote_workspace"], "/srv/homeboy/project");
         assert!(explicit["fallback_reason"].is_null());
 
         let fallback = lab_offload_metadata(
             "automatic",
             Some("lab"),
+            Some("reverse"),
             "fallback",
             None,
             Some("runner connect timed out after 3s"),
@@ -56,6 +61,7 @@ mod tests {
 
         let skipped = lab_offload_metadata(
             "automatic",
+            None,
             None,
             "skipped",
             None,

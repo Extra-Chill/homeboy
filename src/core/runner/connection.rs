@@ -17,7 +17,6 @@ use super::session::{
     RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStatusReport, RunnerTunnelMode,
 };
 use super::{load, Runner, RunnerKind};
-
 #[derive(Debug, Clone, Deserialize)]
 struct CliEnvelope {
     success: bool,
