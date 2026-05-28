@@ -219,6 +219,22 @@ fn snapshot_identity(local_path: &Path) -> Result<String> {
 fn git_snapshot(local_path: &Path, changed_since_base: Option<&str>) -> Result<GitSnapshot> {
     let status = git_output(local_path, &["status", "--porcelain=v1"])?;
     if !status.trim().is_empty() {
+        if changed_since_base.is_some() {
+            return Err(Error::validation_invalid_argument(
+                "mode",
+                "git workspace sync requires a clean working tree for changed-since Lab offload; snapshot sync cannot honor --changed-since because it excludes .git metadata",
+                Some("git".to_string()),
+                Some(vec![
+                    "Commit or stash local changes before offloading a --changed-since command."
+                        .to_string(),
+                    "Run with --force-hot to execute the changed-since command locally."
+                        .to_string(),
+                    "Omit --changed-since to use snapshot Lab offload for dirty local changes."
+                        .to_string(),
+                ]),
+            ));
+        }
+
         return Err(Error::validation_invalid_argument(
             "mode",
             "git workspace sync requires a clean working tree; use --mode snapshot to include dirty local changes",
@@ -694,5 +710,69 @@ mod tests {
         assert!(command.contains("rev-parse --verify -q 'def456^{commit}'"));
         assert!(command.contains("fetch origin def456"));
         assert!(command.contains("checkout --detach abc123"));
+    }
+
+    #[test]
+    fn dirty_git_sync_without_changed_since_suggests_snapshot_mode() {
+        let source = dirty_git_repo();
+
+        let err = match git_snapshot(source.path(), None) {
+            Ok(_) => panic!("dirty git sync should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.message.contains("use --mode snapshot"));
+    }
+
+    #[test]
+    fn dirty_changed_since_git_sync_explains_snapshot_is_unavailable() {
+        let source = dirty_git_repo();
+
+        let err = match git_snapshot(source.path(), Some("abc123")) {
+            Ok(_) => panic!("dirty changed-since git sync should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.message.contains("requires a clean working tree"));
+        assert!(err
+            .message
+            .contains("snapshot sync cannot honor --changed-since"));
+        assert!(err.message.contains("because it excludes .git metadata"));
+        assert!(!err.message.contains("use --mode snapshot"));
+        let hint_text = err.details["tried"]
+            .as_array()
+            .expect("changed-since error includes recovery options")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(hint_text.contains("--force-hot"));
+        assert!(hint_text.contains("Omit --changed-since"));
+    }
+
+    fn dirty_git_repo() -> tempfile::TempDir {
+        let source = tempfile::tempdir().expect("source tempdir");
+        git(source.path(), &["init"]);
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test User"]);
+        fs::write(source.path().join("file.txt"), "base\n").expect("write base");
+        git(source.path(), &["add", "."]);
+        git(source.path(), &["commit", "-m", "base"]);
+        fs::write(source.path().join("file.txt"), "dirty\n").expect("write dirty file");
+        source
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
