@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.200.1] - 2026-05-28
+
+### Changed
+- Add benchmark evidence monitor
+- Add private service tunnel declarations
+
+### Fixed
+- rebase reverse offload on tunnel substrate
+- satisfy reverse runner audit gates
+- support reverse runner hot offload selection
+- correct dirty changed-since lab sync guidance
+- redact runner env output
+
 ## [0.200.0] - 2026-05-28
 
 ### Added
