@@ -1191,25 +1191,18 @@ mod tests {
     }
 
     #[test]
-    fn runtime_requirements_accept_generic_and_legacy_shapes() {
+    fn runtime_requirements_accept_canonical_shape_only() {
         let generic: homeboy::core::extension::RuntimeRequirementsConfig =
             serde_json::from_value(serde_json::json!({
                 "runtimes": {
                     "python": { "version": "3.12" },
-                    "ruby": "3.3"
+                    "ruby": { "version": "3.3" }
                 }
             }))
             .expect("generic requirements");
 
         assert_eq!(generic.runtimes["python"].version, "3.12");
         assert_eq!(generic.runtimes["ruby"].version, "3.3");
-
-        let legacy: homeboy::core::extension::RuntimeRequirementsConfig =
-            serde_json::from_value(serde_json::json!({ "php": "8.2", "node": "22" }))
-                .expect("legacy requirements");
-
-        assert_eq!(legacy.runtimes["php"].version, "8.2");
-        assert_eq!(legacy.runtimes["node"].version, "22");
     }
 
     #[test]
