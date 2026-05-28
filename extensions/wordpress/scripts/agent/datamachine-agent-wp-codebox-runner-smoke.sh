@@ -140,6 +140,7 @@ const output = {
     model: 'example-model',
     agent_slug: 'wp-codebox-smoke-agent',
     flow_slug: 'wp-codebox-smoke-flow',
+    transcript_artifacts: [[{ json: '/tmp/wp-codebox-smoke-transcript.json', summary: 'Nested transcript fixture' }]],
     engine_data: {
       ok: true,
     },
@@ -239,8 +240,9 @@ runtime_trace_available=$(jq -r "$scenario | .metadata.evidence_references.refer
 replay_bundle_available=$(jq -r "$scenario | .metadata.evidence_references.references.replay_bundle_artifact.available // false" "$RESULTS_TMPFILE")
 verifier_available=$(jq -r "$scenario | .metadata.evidence_references.references.artifact_verifier_result.available // false" "$RESULTS_TMPFILE")
 policy_available=$(jq -r "$scenario | .metadata.evidence_references.references.workspace_policy_result.available // false" "$RESULTS_TMPFILE")
+transcript_path=$(jq -r "$scenario | .metadata.evidence_references.references.transcript_artifact.path // \"\"" "$RESULTS_TMPFILE")
 trace_gap=$(jq -r "$scenario | any(.metadata.evidence_references.compatibility_gaps[]?; .field == \"runtime_episode_trace\")" "$RESULTS_TMPFILE")
-if [ "$evidence_schema" != "homeboy/datamachine-agent-evidence-references/v1" ] || [ "$homeboy_result_path" != "$RESULTS_TMPFILE" ] || [ "$wp_codebox_bundle_available" != "true" ] || [ "$runtime_trace_available" != "true" ] || [ "$replay_bundle_available" != "true" ] || [ "$verifier_available" != "true" ] || [ "$policy_available" != "true" ] || [ "$trace_gap" != "false" ]; then
+if [ "$evidence_schema" != "homeboy/datamachine-agent-evidence-references/v1" ] || [ "$homeboy_result_path" != "$RESULTS_TMPFILE" ] || [ "$wp_codebox_bundle_available" != "true" ] || [ "$runtime_trace_available" != "true" ] || [ "$replay_bundle_available" != "true" ] || [ "$verifier_available" != "true" ] || [ "$policy_available" != "true" ] || [ "$transcript_path" != "/tmp/wp-codebox-smoke-transcript.json" ] || [ "$trace_gap" != "false" ]; then
     echo "ERROR: stable evidence references missing or incomplete" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1

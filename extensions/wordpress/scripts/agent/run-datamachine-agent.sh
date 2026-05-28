@@ -486,14 +486,13 @@ homeboy_datamachine_agent_attach_evidence_references() {
             ($scenario.metadata // {}) as $metadata
             | ($scenario.artifacts // {}) as $artifacts
             | ($metadata.wp_codebox.canonical_artifacts // {}) as $wpPaths
-            | ($metadata.transcript_artifacts // {}) as $transcript
             | ($metadata.fingerprints // {}) as $fingerprints
             | ($metadata.runtime_versions // {}) as $runtimeVersions
             | first_field($metadata; "artifact_verifier_result") as $artifactVerifier
             | (first_field($metadata; "workspace_policy_result") // $metadata.datamachine_code_policy_attestation // null) as $policyResult
             | ($artifacts.episode_jsonl.path // $metadata.runtime_episode_trace.path // $metadata.runtime_episode_trace // "") as $episodeTrace
             | ($artifacts.replay_bundle.path // $metadata.replay_bundle_path // "") as $replayBundle
-            | ($transcript.json // "") as $transcriptJson
+            | (first_field($metadata.transcript_artifacts; "json") // "") as $transcriptJson
             | {
                 schema: "homeboy/datamachine-agent-evidence-references/v1",
                 scope: "generic-runner-evidence",
