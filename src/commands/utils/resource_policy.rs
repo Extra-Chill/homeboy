@@ -3,7 +3,7 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli_surface::Commands;
+use crate::cli_surface::{Commands, LabCommandPortability, LabCommandRequiredTool};
 
 use crate::commands::doctor::resources::{DoctorOutput, ResourceRecommendation};
 use crate::commands::runner::doctor::RunnerDoctorOutput;
@@ -271,24 +271,13 @@ pub fn reset_captured_context_for_test() {
 }
 
 pub fn hot_command(command: &Commands) -> Option<HotCommand> {
-    let label = match command {
-        Commands::Bench(args) if args.is_run_command() => "bench",
-        Commands::Rig(args) if args.is_hot_resource_command() => "rig up",
-        Commands::Fleet(args) if args.is_hot_resource_command() => "fleet exec",
-        Commands::Refactor(args) if args.is_hot_resource_command() => "refactor",
-        Commands::Audit(args) if args.changed_since.is_none() && !args.conventions => "audit",
-        Commands::Lint(args) if args.is_full_workspace_run() => "lint",
-        Commands::Test(args) if args.changed_since.is_none() => "test",
-        _ => return None,
-    };
+    let contract = command.lab_contract()?;
 
-    if command.supports_lab_runner() {
-        Some(HotCommand::lab_supported(label))
-    } else {
-        Some(HotCommand::local_only(
-            label,
-            command.lab_runner_unsupported_reason(),
-        ))
+    match contract.portability {
+        LabCommandPortability::Portable => Some(HotCommand::lab_supported(contract.hot_label)),
+        LabCommandPortability::LocalOnly(reason) => {
+            Some(HotCommand::local_only(contract.hot_label, Some(reason)))
+        }
     }
 }
 
@@ -296,6 +285,7 @@ pub fn lab_runner_capability_plan(
     command: &Commands,
     source_path: &Path,
 ) -> Option<LabRunnerCapabilityPlan> {
+    let contract = command.lab_contract()?;
     let hot_command = hot_command(command)?;
     let mut required_tools = vec![LabRunnerTool::Git];
 
@@ -318,14 +308,20 @@ pub fn lab_runner_capability_plan(
         push_unique(&mut required_tools, LabRunnerTool::Docker);
     }
 
-    if matches!(command, Commands::Trace(_)) {
-        push_unique(&mut required_tools, LabRunnerTool::Playwright);
+    for tool in contract.extra_required_tools {
+        push_unique(&mut required_tools, lab_runner_tool(*tool));
     }
 
     Some(LabRunnerCapabilityPlan {
         command: hot_command.label,
         required_tools,
     })
+}
+
+fn lab_runner_tool(tool: LabCommandRequiredTool) -> LabRunnerTool {
+    match tool {
+        LabCommandRequiredTool::Playwright => LabRunnerTool::Playwright,
+    }
 }
 
 pub fn evaluate_lab_runner_capabilities(

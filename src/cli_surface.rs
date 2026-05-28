@@ -8,6 +8,12 @@ use crate::commands::{
     test, trace, triage, tunnel, undo, upgrade, version,
 };
 
+mod lab_contract;
+pub use lab_contract::{
+    LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabSourcePathMode,
+    LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
+};
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
@@ -224,7 +230,7 @@ impl Commands {
             }
         };
 
-        match self {
+        let mut descriptor = match self {
             Commands::Ssh(args) if args.subcommand.is_none() && args.command.is_empty() => {
                 raw_ops_descriptor(CommandRawOutputMode::InteractivePassthrough, output_file_mode)
             }
@@ -383,7 +389,10 @@ impl Commands {
                 ),
             ),
             Commands::Triage(_) => ops_json_descriptor(output_file_mode, None),
-        }
+        };
+
+        lab_contract::apply_lab_contract_to_descriptor(&mut descriptor, self.lab_contract());
+        descriptor
     }
 
     pub fn response_plan(&self, has_output_file: bool) -> CommandResponsePlan {
@@ -399,15 +408,21 @@ impl Commands {
     }
 
     pub fn supports_lab_runner(&self) -> bool {
-        self.descriptor(false).supports_lab_runner
+        self.lab_contract()
+            .is_some_and(|contract| matches!(contract.portability, LabCommandPortability::Portable))
     }
 
     pub fn lab_runner_unsupported_reason(&self) -> Option<&'static str> {
-        self.descriptor(false).lab_runner_unsupported_reason
+        self.lab_contract()
+            .and_then(|contract| match contract.portability {
+                LabCommandPortability::Portable => None,
+                LabCommandPortability::LocalOnly(reason) => Some(reason),
+            })
     }
 
     pub fn lab_offload_mutation_flag(&self) -> Option<&'static str> {
-        self.descriptor(false).lab_offload_mutation_flag
+        self.lab_contract()
+            .and_then(|contract| contract.mutation_flag)
     }
 
     pub fn response_mode(&self, has_output_file: bool) -> CommandResponseMode {
@@ -1042,6 +1057,68 @@ mod tests {
         let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
         assert_eq!(cli.runner.as_deref(), Some("lab-a"));
         assert!(cli.command.supports_lab_runner());
+    }
+
+    #[test]
+    fn test_lab_command_contracts_cover_hot_commands() {
+        let supported = [
+            (parsed_command(&["homeboy", "lint"]), "lint"),
+            (parsed_command(&["homeboy", "test"]), "test"),
+            (parsed_command(&["homeboy", "audit"]), "audit"),
+            (parsed_command(&["homeboy", "bench"]), "bench"),
+            (parsed_command(&["homeboy", "trace"]), "trace"),
+            (
+                parsed_command(&["homeboy", "refactor", "--from", "audit"]),
+                "refactor",
+            ),
+        ];
+
+        for (command, label) in supported {
+            let contract = command.lab_contract().expect("hot contract");
+            assert_eq!(contract.hot_label, label);
+            assert_eq!(contract.portability, LabCommandPortability::Portable);
+            assert_eq!(contract.source_path_mode, LabSourcePathMode::CwdOrPathFlag);
+            assert_eq!(
+                contract.workspace_mode_policy,
+                LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+            );
+        }
+
+        let trace = parsed_command(&["homeboy", "trace"])
+            .lab_contract()
+            .expect("trace contract");
+        assert_eq!(trace.extra_required_tools, LAB_TRACE_EXTRA_TOOLS);
+        assert!(!trace.requires_extension_parity);
+
+        let lint = parsed_command(&["homeboy", "lint"])
+            .lab_contract()
+            .expect("lint contract");
+        assert!(lint.requires_extension_parity);
+
+        let rig = parsed_command(&["homeboy", "rig", "up", "studio"])
+            .lab_contract()
+            .expect("rig up contract");
+        assert_eq!(rig.hot_label, "rig up");
+        assert!(matches!(
+            rig.portability,
+            LabCommandPortability::LocalOnly(reason) if reason.contains("single-workspace Lab snapshot")
+        ));
+
+        let fleet = parsed_command(&["homeboy", "fleet", "exec", "prod", "wp", "plugin", "list"])
+            .lab_contract()
+            .expect("fleet exec contract");
+        assert_eq!(fleet.hot_label, "fleet exec");
+        assert!(matches!(
+            fleet.portability,
+            LabCommandPortability::LocalOnly(reason) if reason.contains("config parity")
+        ));
+
+        assert!(parsed_command(&["homeboy", "status"])
+            .lab_contract()
+            .is_none());
+        assert!(parsed_command(&["homeboy", "bench", "list"])
+            .lab_contract()
+            .is_none());
     }
 
     #[test]
