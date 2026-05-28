@@ -13,6 +13,7 @@ const {
   executeAuditWpCodeboxFanoutFromFiles,
   safeBranchSlug,
   taskOutcome,
+  taskOutcomeSucceeded,
 } = require('../lib/audit-wp-codebox-fanout');
 const { artifactContentDigest } = require('../lib/wp-codebox-apply-adapter');
 
@@ -256,6 +257,27 @@ try {
   assert.equal(nestedArtifactOutcome.kind, 'fix_artifact');
   assert.equal(nestedArtifactOutcome.artifact.id, 'artifact-fixture-nested');
   assert.deepEqual(nestedArtifactOutcome.finding_ids, ['finding-phpcs-001', 'finding-phpcs-002']);
+
+  const artifactOnlyBundle = createBundle(
+    root,
+    'artifact-only-bundle',
+    '/wordpress/wp-content/plugins/fixture-plugin/src/ArtifactOnly.php',
+    'src/ArtifactOnly.php'
+  );
+  const artifactOnlyOutcome = taskOutcome(phpcsRequest, {
+    success: true,
+    artifacts: {
+      id: artifactOnlyBundle.artifactId,
+      directory: artifactOnlyBundle.bundle,
+    },
+    executions: [
+      {
+        stdout: JSON.stringify({ output: 'Agent completed with a reviewed artifact.' }),
+      },
+    ],
+  }, { id: artifactOnlyBundle.artifactId, directory: artifactOnlyBundle.bundle }, true);
+  assert.equal(artifactOnlyOutcome.kind, 'fix_artifact');
+  assert.equal(artifactOnlyOutcome.artifact.changed_files[0].relative_path, 'src/ArtifactOnly.php');
   const falsePositiveOutcome = taskOutcome(phpcsRequest, {
     outcome: {
       kind: 'false_positive_pr',
@@ -316,10 +338,31 @@ try {
       },
     },
   }, null, true);
-  assert.equal(noPrOutcome.kind, 'agent_no_pr_outcome');
+  assert.equal(noPrOutcome.kind, 'unable_to_remediate');
   assert.equal(noPrOutcome.failure, 'Agent completed without opening a required PR.');
   assert.deepEqual(noPrOutcome.finding_ids, ['finding-doc-001']);
   assert.equal(noPrOutcome.metadata.datamachine.completed, true);
+
+  const zeroChangeOutcome = taskOutcome(docsRequest, {
+    success: true,
+    artifacts: {
+      id: 'artifact-zero-change',
+      directory: path.join(root, 'zero-change-artifact'),
+    },
+  }, { id: 'artifact-zero-change', directory: path.join(root, 'zero-change-artifact') }, true);
+  assert.equal(zeroChangeOutcome.kind, 'unable_to_remediate');
+  assert.equal(taskOutcomeSucceeded(zeroChangeOutcome), true);
+  assert.deepEqual(zeroChangeOutcome.finding_ids, ['finding-doc-001']);
+
+  const noopOutcome = taskOutcome(docsRequest, {
+    outcome: {
+      kind: 'noop_artifact',
+      false_positive: true,
+    },
+  }, null, true);
+  assert.equal(noopOutcome.kind, 'noop_artifact');
+  assert.equal(noopOutcome.false_positive, true);
+  assert.equal(taskOutcomeSucceeded(noopOutcome), true);
 
   const phpcsBundle = createBundle(
     root,

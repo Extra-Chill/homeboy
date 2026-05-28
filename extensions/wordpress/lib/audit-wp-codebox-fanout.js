@@ -31,6 +31,8 @@ const WP_CODEBOX_STRUCTURED_OUTCOME_KINDS = new Set([
   'false_positive_pr',
   'provider_error',
   'agent_no_pr_outcome',
+  'noop_artifact',
+  'unable_to_remediate',
   'max_turns_exceeded',
 ]);
 
@@ -157,7 +159,7 @@ function taskPrompt(group) {
     '- Produce a reviewed WP Codebox artifact that fixes every finding in this remediation group, or',
     '- If the group is a false positive, produce a reviewed artifact that fixes the audit detector/config/test path that produced it.',
     '',
-    'The parent orchestrator applies accepted artifacts and opens pull requests outside the sandbox. Return machine-readable outcome metadata when possible, including an explicit artifact outcome or failure reason. The parent run reconciles this outcome back to each finding ID.',
+    'The parent orchestrator applies accepted artifacts and opens pull requests outside the sandbox. Return machine-readable outcome metadata for every terminal result: fix_artifact, false_positive_artifact, noop_artifact, unable_to_remediate, provider_error, max_turns_exceeded, or explicit_failure. The parent run reconciles this outcome back to each finding ID.',
     '',
     'Finding evidence:',
     findingList,
@@ -578,6 +580,20 @@ function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', 
     return structuredTaskOutcome(taskRequest, explicit, artifact, errorMessage);
   }
 
+  const changedFiles = artifactChangedFiles(artifact);
+  if (success && changedFiles.length > 0) {
+    const falsePositive = outputLooksFalsePositive(parsed);
+    return structuredTaskOutcome(taskRequest, {
+      kind: falsePositive ? 'false_positive_artifact' : 'fix_artifact',
+      artifact: {
+        id: artifact?.id || '',
+        directory: artifact?.directory || artifact?.path || '',
+        changed_files: changedFiles,
+      },
+      false_positive: falsePositive,
+    }, artifact, errorMessage);
+  }
+
   const urls = pullRequestUrls(parsed);
   const falsePositive = Boolean(
     explicit.kind === 'false_positive_pr' ||
@@ -589,7 +605,7 @@ function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', 
   );
   const prUrl = explicit.pr_url || explicit.pull_request_url || explicit.pullRequestUrl || urls[0] || '';
   const falsePositivePrUrl = explicit.false_positive_pr_url || explicit.falsePositivePullRequestUrl || (falsePositive ? prUrl : '');
-  let kind = 'explicit_failure';
+  let kind = success ? 'unable_to_remediate' : 'explicit_failure';
 
   if (timedOut) {
     kind = 'timeout';
@@ -602,7 +618,7 @@ function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', 
   if (!success) {
     failure = errorMessage;
   } else if (kind === 'explicit_failure') {
-    failure = 'WP Codebox task completed without PR outcome';
+    failure = 'WP Codebox task failed without a structured outcome';
   }
 
   return {
@@ -617,6 +633,28 @@ function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', 
     artifact_id: artifact?.id || '',
     failure,
   };
+}
+
+function artifactChangedFiles(artifact) {
+  const directory = artifact?.directory || artifact?.path || '';
+  if (!directory) {
+    return [];
+  }
+  const changedFilesPath = path.join(directory, 'files', 'changed-files.json');
+  if (!fs.existsSync(changedFilesPath)) {
+    return [];
+  }
+  const decoded = readJson(changedFilesPath);
+  return (Array.isArray(decoded.files) ? decoded.files : []).map((file) => ({
+    path: file.path || '',
+    relative_path: file.relativePath || file.relative_path || '',
+    status: file.status || '',
+  })).filter((file) => file.path || file.relative_path);
+}
+
+function outputLooksFalsePositive(parsed) {
+  const text = JSON.stringify(parsed || {}).toLowerCase();
+  return text.includes('false positive') || text.includes('false_positive');
 }
 
 function explicitWpCodeboxOutcome(parsed) {
@@ -677,7 +715,7 @@ function isStructuredWpCodeboxOutcome(explicit) {
 
 function structuredTaskOutcome(taskRequest, explicit, artifact, errorMessage = '') {
   const urls = pullRequestUrls(explicit);
-  const kind = explicit.kind;
+  const kind = explicit.kind === 'agent_no_pr_outcome' ? 'unable_to_remediate' : explicit.kind;
   const falsePositive = ['false_positive_artifact', 'false_positive_pr'].includes(kind) || Boolean(explicit.false_positive || explicit.falsePositive);
   const prUrl = explicit.pr_url || explicit.pull_request_url || explicit.pullRequestUrl || urls[0] || '';
   const falsePositivePrUrl = explicit.false_positive_pr_url || explicit.falsePositivePullRequestUrl || (falsePositive ? prUrl : '');
@@ -712,7 +750,7 @@ function wpCodeboxOutcomeErrorMessage(explicit) {
 }
 
 function taskOutcomeSucceeded(outcome) {
-  return ['fix_artifact', 'false_positive_artifact', 'fix_pr', 'false_positive_pr'].includes(outcome?.kind);
+  return ['fix_artifact', 'false_positive_artifact', 'noop_artifact', 'unable_to_remediate', 'fix_pr', 'false_positive_pr'].includes(outcome?.kind);
 }
 
 function pullRequestUrls(value, urls = []) {
