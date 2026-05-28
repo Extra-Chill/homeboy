@@ -470,17 +470,16 @@ homeboy_datamachine_agent_attach_evidence_references() {
                 ($metadata.engine_data[]? | objects | .github_tool_results? // [] | .[]?)
             ] | map(select(.tool_name == "create_github_pull_request" and .success == true and (.url // "") != "") | .url) | first) // "";
         def pr_url($metadata):
-            $metadata.job_artifact_exports.pr_url
-            // $metadata.fallback_pull_request.result.html_url
-            // $metadata.fallback_pull_request.result.url
-            // $metadata.fallback_pull_request.result.pull_request.html_url
+            first_field($metadata.job_artifact_exports; "pr_url")
+            // first_field($metadata.fallback_pull_request; "html_url")
+            // first_field($metadata.fallback_pull_request; "url")
             // first_tool_pr_url($metadata)
             // "";
         def workspace_branch($metadata):
-            $metadata.runner_workspace_capture.status.branch
-            // $metadata.runner_workspace.branch
-            // $metadata.job_artifact_exports.branch
-            // $metadata.fallback_pull_request.input.head
+            first_field($metadata.runner_workspace_capture; "branch")
+            // first_field($metadata.runner_workspace; "branch")
+            // first_field($metadata.job_artifact_exports; "branch")
+            // first_field($metadata.fallback_pull_request; "head")
             // "";
         def evidence($scenario):
             ($scenario.metadata // {}) as $metadata
