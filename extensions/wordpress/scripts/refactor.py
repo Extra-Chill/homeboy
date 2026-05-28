@@ -849,6 +849,8 @@ def wp_codebox_task_runner_args(data, settings, script_dir):
     ]
     if settings.get('wp_codebox_bin'):
         args.extend(['--wp-codebox-bin', settings['wp_codebox_bin']])
+    if settings.get('wp_codebox_max_turns'):
+        args.extend(['--max-turns', str(settings['wp_codebox_max_turns'])])
     args.extend(['--artifacts', settings['wp_codebox_artifacts']])
     for mount in split_setting(settings.get('wp_codebox_mounts')):
         args.extend(['--mount', mount])

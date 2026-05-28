@@ -31,7 +31,7 @@ function hasFlag(name) {
 }
 
 function usage() {
-  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--artifacts <dir>]');
+  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--max-turns <n>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--artifacts <dir>]');
   process.exit(1);
 }
 
@@ -167,6 +167,7 @@ function recipeForRequest(request, options) {
   });
 
   const providerSlugs = providerPluginEntries(request).map((plugin) => plugin.slug).join(',');
+  const maxTurns = argValue('--max-turns') || request.max_turns || request.maxTurns || '';
   const stepArgs = [
     `task=${task}`,
     'agent=sandbox-agent',
@@ -175,6 +176,9 @@ function recipeForRequest(request, options) {
     `model=${model}`,
     `provider-plugin-slugs=${providerSlugs}`,
   ];
+  if (maxTurns) {
+    stepArgs.push(`max-turns=${maxTurns}`);
+  }
 
   return {
     schema: 'wp-codebox/workspace-recipe/v1',

@@ -93,6 +93,8 @@ try {
     '/components/data-machine-code',
     '--mount',
     '/repo/plugin:/wordpress/wp-content/plugins/plugin:readwrite',
+    '--max-turns',
+    '80',
     '--artifacts',
     path.join(root, 'artifacts'),
   ], {
@@ -127,6 +129,7 @@ try {
   assert.equal(step.command, 'wp-codebox.agent-sandbox-run');
   assert.equal(step.args.includes('provider=opencode'), true);
   assert.equal(step.args.includes('model=opencode-go/kimi-k2.6'), true);
+  assert.equal(step.args.includes('max-turns=80'), true);
   assert.equal(step.args.includes('provider-plugin-slugs=example-provider'), true);
   assert.equal(step.args.some((arg) => arg.startsWith('session-id=')), false);
 
