@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.25] - 2026-05-28
+
+### Fixed
+- group wp codebox audit remediation
+
 ## [2.102.24] - 2026-05-28
 
 ### Changed
