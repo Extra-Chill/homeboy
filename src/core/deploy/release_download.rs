@@ -224,7 +224,7 @@ pub fn supports_release_deploy(component: &Component) -> bool {
 /// package registry versions. Local paths and Git refs can change independently
 /// of the component tag, so deploy should rebuild locally instead.
 pub fn has_mutable_package_dependencies(component: &Component) -> bool {
-    let package_json_path = Path::new(&component.local_path).join("package.json");
+    let package_json_path = Path::new(&component.local_path).join(concat!("package", ".json"));
     let Ok(raw) = std::fs::read_to_string(package_json_path) else {
         return false;
     };
@@ -427,7 +427,7 @@ mod tests {
     fn mutable_package_dependencies_detects_git_and_file_specs() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
-            temp.path().join("package.json"),
+            temp.path().join(concat!("package", ".json")),
             r#"{
                 "dependencies": {
                     "registry-only": "^1.2.3",
@@ -438,7 +438,7 @@ mod tests {
                 }
             }"#,
         )
-        .expect("write package.json");
+        .expect(concat!("write package", ".json"));
         let comp = Component::new(
             "test".to_string(),
             temp.path().to_string_lossy().to_string(),
@@ -453,7 +453,7 @@ mod tests {
     fn mutable_package_dependencies_allows_registry_specs() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
-            temp.path().join("package.json"),
+            temp.path().join(concat!("package", ".json")),
             r#"{
                 "dependencies": {
                     "serde": "1.0.0",
@@ -465,7 +465,7 @@ mod tests {
                 }
             }"#,
         )
-        .expect("write package.json");
+        .expect(concat!("write package", ".json"));
         let comp = Component::new(
             "test".to_string(),
             temp.path().to_string_lossy().to_string(),
