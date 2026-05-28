@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.201.0] - 2026-05-28
+
+### Added
+- declare lab command contracts
+
+### Changed
+- Add continuous loop archive sync triage
+
+### Fixed
+- keep lab capability planning out of main
+- split lab command contract surface
+- move lab capability planning into core runner
+- preserve refactor source extension failures
+- preserve Composer vendor in lab snapshots
+- skip release artifacts for mutable deps
+
 ## [0.200.1] - 2026-05-28
 
 ### Changed
