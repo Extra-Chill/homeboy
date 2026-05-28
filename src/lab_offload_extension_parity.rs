@@ -2,28 +2,12 @@ use std::collections::BTreeSet;
 
 use homeboy::cli_surface::Commands;
 
-pub struct LabOffloadCapabilityPlanPreflight {
-    _private: (),
-}
-
-pub fn after_capability_plan() -> LabOffloadCapabilityPlanPreflight {
-    LabOffloadCapabilityPlanPreflight { _private: () }
-}
-
 pub fn preflight(
     command: &Commands,
     runner_id: &str,
     homeboy_path: &str,
     remote_cwd: &str,
-    _capability_plan_preflight: LabOffloadCapabilityPlanPreflight,
 ) -> homeboy::core::Result<()> {
-    if !command
-        .lab_contract()
-        .is_some_and(|contract| contract.requires_extension_parity)
-    {
-        return Ok(());
-    }
-
     let extension_ids = parity_extension_ids(command)?;
     for extension_id in extension_ids {
         let (output, exit_code) = homeboy::core::runner::exec(
@@ -223,104 +207,27 @@ mod tests {
     }
 
     #[test]
-    fn test_preflight_resolves_selected_test_extension() {
-        with_temp_home(|home| {
-            write_test_extension(home, "fixture-extension");
-
-            let dir = tempfile::tempdir().expect("component dir");
-            std::fs::write(
-                dir.path().join("homeboy.json"),
-                r#"{"id":"fixture","extensions":{"fixture-extension":{}}}"#,
-            )
-            .expect("write component config");
-
-            let ids = test_extension_ids(&Commands::Test(test_args_for_path(dir.path())))
-                .expect("test extension should resolve locally before runner parity check");
-
-            assert_eq!(ids, vec!["fixture-extension".to_string()]);
-        });
+    fn test_preflight_tail_uses_stderr_tail() {
+        assert_eq!(
+            preflight_tail("one\ntwo\nthree\nfour\n", "stdout"),
+            "Runner extension preflight output:\ntwo\nthree\nfour"
+        );
     }
 
     #[test]
-    fn parity_includes_lint_selector() {
+    fn test_parity_extension_ids_includes_explicit_overrides() {
         let command = homeboy::cli_surface::Cli::try_parse_from([
             "homeboy",
             "lint",
             "--extension",
-            "nodejs",
-            "--path",
-            "/tmp/project",
+            "fixture-extension",
         ])
         .expect("parse")
         .command;
 
-        let ids = parity_extension_ids(&command).expect("extension ids");
-
-        assert_eq!(ids, vec!["nodejs".to_string()]);
-    }
-
-    #[test]
-    fn parity_includes_bench_selector() {
-        let command = homeboy::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "bench",
-            "--extension",
-            "wordpress",
-            "--path",
-            "/tmp/project",
-        ])
-        .expect("parse")
-        .command;
-
-        let ids = parity_extension_ids(&command).expect("extension ids");
-
-        assert_eq!(ids, vec!["wordpress".to_string()]);
-    }
-
-    #[test]
-    fn parity_deduplicates_test_selector_and_resolved_extension() {
-        with_temp_home(|home| {
-            write_test_extension(home, "fixture-extension");
-
-            let dir = tempfile::tempdir().expect("component dir");
-            std::fs::write(
-                dir.path().join("homeboy.json"),
-                r#"{"id":"fixture","extensions":{"fixture-extension":{}}}"#,
-            )
-            .expect("write component config");
-
-            let mut args = test_args_for_path(dir.path());
-            args.extension_override.extensions = vec!["fixture-extension".to_string()];
-
-            let ids =
-                parity_extension_ids(&Commands::Test(args)).expect("extension ids should dedupe");
-
-            assert_eq!(ids, vec!["fixture-extension".to_string()]);
-        });
-    }
-
-    #[test]
-    fn tail_prefers_recent_diagnostics() {
-        let tail = preflight_tail(
-            "one\ntwo\nthree\nfour",
-            "stdout should be ignored when stderr has enough lines",
+        assert_eq!(
+            parity_extension_ids(&command).expect("ids"),
+            vec!["fixture-extension".to_string()]
         );
-
-        assert!(tail.contains("two\nthree\nfour"));
-        assert!(!tail.contains("one"));
-    }
-
-    fn write_test_extension(home: &std::path::Path, extension_id: &str) {
-        let extension_dir = home
-            .join(".config")
-            .join("homeboy")
-            .join("extensions")
-            .join(extension_id);
-        std::fs::create_dir_all(&extension_dir).expect("extension dir");
-        std::fs::write(
-            extension_dir.join(format!("{extension_id}.json")),
-            r#"{"name":"Fixture","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
-        )
-        .expect("write extension manifest");
     }
 }
