@@ -23,7 +23,7 @@ const PLAN_SCHEMA = 'homeboy/audit-wp-codebox-fanout/v1';
 const TASK_SCHEMA = 'homeboy/wp-codebox-task-request/v1';
 const RUN_SCHEMA = 'homeboy/audit-wp-codebox-run/v1';
 const DEFAULT_CONCURRENCY = 3;
-const DEFAULT_TASK_TIMEOUT_SECONDS = 15 * 60;
+const DEFAULT_TASK_TIMEOUT_SECONDS = 45 * 60;
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -61,6 +61,7 @@ function progressEvent(status, taskRequest, plan, record = null) {
     schema: 'homeboy/audit-wp-codebox-progress/v1',
     status,
     group_key: taskRequest.group_key,
+    finding_id: taskRequest.finding_id || taskRequest.audit_findings?.[0]?.id || '',
     group_index: groupIndex,
     group_count: groupCount,
     sandbox_session_id: taskRequest.sandbox_session_id,
@@ -103,19 +104,10 @@ function normalizeFinding(finding, index) {
 }
 
 function groupFindings(findings) {
-  const groupsByKey = new Map();
-  for (const finding of findings) {
-    const key = finding.fix_batch_key || finding.kind;
-    if (!groupsByKey.has(key)) {
-      groupsByKey.set(key, []);
-    }
-    groupsByKey.get(key).push(finding);
-  }
-
-  return Array.from(groupsByKey.entries()).map(([key, groupedFindings], index) => ({
-    key,
+  return findings.map((finding, index) => ({
+    key: finding.id,
     index,
-    findings: groupedFindings,
+    findings: [finding],
   }));
 }
 
@@ -123,20 +115,29 @@ function sandboxSessionId(orchestrator, group) {
   return `homeboy-audit-${sha256(JSON.stringify({
     run_id: orchestrator.run_id,
     report_id: orchestrator.report_id,
-    group_key: group.key,
+    finding_id: group.findings[0]?.id || group.key,
     finding_ids: group.findings.map((finding) => finding.id),
   })).slice(0, 16)}`;
 }
 
 function taskPrompt(group) {
-  const findingList = group.findings
-    .map((finding) => `- ${finding.id}: ${finding.kind} in ${finding.file}${finding.line ? `:${finding.line}` : ''}`)
-    .join('\n');
+  const finding = group.findings[0] || {};
+  const location = `${finding.file || ''}${finding.line ? `:${finding.line}` : ''}`;
 
   return [
-    `Fix the grouped Homeboy audit findings for batch ${group.key}.`,
-    'Return a WP Codebox artifact bundle with changed-files, patch, and review metadata.',
-    findingList,
+    `Fix Homeboy audit finding ${finding.id || group.key}.`,
+    '',
+    'Expected outcome:',
+    '- Open a pull request that fixes this audit finding, or',
+    '- If the finding is a false positive, fix the audit detector/config/test path that produced it and open a pull request for that correction.',
+    '',
+    'Return machine-readable outcome metadata when possible, including the PR URL, false-positive PR URL, or explicit failure reason.',
+    '',
+    'Finding evidence:',
+    `- id: ${finding.id || group.key}`,
+    `- kind: ${finding.kind || 'unknown'}`,
+    location ? `- location: ${location}` : '',
+    finding.message ? `- message: ${finding.message}` : '',
   ].join('\n\n');
 }
 
@@ -146,6 +147,7 @@ function createTaskRequest(group, orchestrator) {
     schema: TASK_SCHEMA,
     sandbox_session_id,
     group_key: group.key,
+    finding_id: group.findings[0]?.id || group.key,
     orchestrator: {
       id: orchestrator.id,
       run_id: orchestrator.run_id,
@@ -164,7 +166,7 @@ function createTaskRequest(group, orchestrator) {
       severity: finding.severity,
     })),
     task: {
-      title: `Fix Homeboy audit batch ${group.key}`,
+      title: `Fix Homeboy audit finding ${group.findings[0]?.id || group.key}`,
       prompt: taskPrompt(group),
     },
   };
@@ -216,7 +218,7 @@ function createApplyBackMetadata(taskRequest, artifactEntry, options) {
     artifact_content_digest: artifactEntry.artifact_content_digest,
   });
   const branch = artifactEntry.branch || `${options.branch_prefix || 'fix/homeboy-audit'}/${safeBranchSlug(taskRequest.group_key)}`;
-  const title = artifactEntry.pr_title || `Fix Homeboy audit batch ${taskRequest.group_key}`;
+  const title = artifactEntry.pr_title || `Fix Homeboy audit finding ${taskRequest.group_key}`;
   const issueUrl = options.issue_url || taskRequest.orchestrator.issue_url || '';
 
   return {
@@ -255,7 +257,7 @@ function createApplyBackMetadata(taskRequest, artifactEntry, options) {
       body: [
         issueUrl ? `Closes ${issueUrl}` : '',
         '',
-        `Applies WP Codebox artifact ${verified.artifactId} for Homeboy audit batch ${taskRequest.group_key}.`,
+        `Applies WP Codebox artifact ${verified.artifactId} for Homeboy audit finding ${taskRequest.group_key}.`,
       ].filter(Boolean).join('\n'),
       labels: artifactEntry.labels || ['homeboy-audit', 'wp-codebox'],
     },
@@ -350,6 +352,7 @@ function createAuditWpCodeboxFanoutPlan(input) {
       report_id: orchestrator.report_id,
       finding_count: task_requests.reduce((count, request) => count + request.audit_findings.length, 0),
       group_count: task_requests.length,
+      task_count: task_requests.length,
     },
     task_requests,
     apply_back,
@@ -404,12 +407,15 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
   const parsed = tryParseJson(stdout);
   const artifact = parsed && typeof parsed === 'object' && parsed.artifacts ? parsed.artifacts : null;
   const taskFailure = parsed ? wpCodeboxTaskFailure(parsed) : null;
-  const success = result.status === 0 && result.error === undefined && null === taskFailure;
+  const commandSuccess = result.status === 0 && result.error === undefined && null === taskFailure;
+  const outcome = taskOutcome(taskRequest, parsed, artifact, commandSuccess, taskFailure || (result.error ? result.error.message : ''));
+  const success = taskOutcomeSucceeded(outcome);
 
   return {
     schema: RUN_SCHEMA,
     sandbox_session_id: taskRequest.sandbox_session_id,
     group_key: taskRequest.group_key,
+    finding_id: taskRequest.finding_id || taskRequest.audit_findings[0]?.id || '',
     finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
     command: {
       bin: command,
@@ -424,6 +430,7 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
     stdout,
     stderr,
     result: parsed,
+    outcome,
     artifact: artifact ? {
       id: artifact.id || '',
       directory: artifact.directory || artifact.path || '',
@@ -504,12 +511,15 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
       const taskFailure = parsed ? wpCodeboxTaskFailure(parsed) : null;
       const timeoutError = timedOut ? `WP Codebox task timed out after ${taskTimeoutSeconds} seconds` : '';
       const errorMessage = timeoutError || (spawnError ? spawnError.message : (taskFailure || ''));
-      const success = code === 0 && !spawnError && null === taskFailure && !timedOut;
+      const commandSuccess = code === 0 && !spawnError && null === taskFailure && !timedOut;
+      const outcome = taskOutcome(taskRequest, parsed, artifact, commandSuccess, errorMessage, timedOut);
+      const success = taskOutcomeSucceeded(outcome);
 
       resolve({
         schema: RUN_SCHEMA,
         sandbox_session_id: taskRequest.sandbox_session_id,
         group_key: taskRequest.group_key,
+        finding_id: taskRequest.finding_id || taskRequest.audit_findings[0]?.id || '',
         finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
         command: {
           bin: command,
@@ -528,6 +538,7 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
         stdout,
         stderr,
         result: parsed,
+        outcome,
         artifact: artifact ? {
           id: artifact.id || '',
           directory: artifact.directory || artifact.path || '',
@@ -537,6 +548,73 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
     });
     child.stdin.end(requestJson);
   });
+}
+
+function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', timedOut = false) {
+  const urls = pullRequestUrls(parsed);
+  const explicit = parsed && typeof parsed === 'object' ? parsed.outcome || parsed.result || parsed : {};
+  const falsePositive = Boolean(
+    explicit.kind === 'false_positive_pr' ||
+    explicit.false_positive ||
+    explicit.falsePositive ||
+    explicit.false_positive_pr_url ||
+    explicit.falsePositivePullRequestUrl ||
+    explicit.disposition === 'false_positive'
+  );
+  const prUrl = explicit.pr_url || explicit.pull_request_url || explicit.pullRequestUrl || urls[0] || '';
+  const falsePositivePrUrl = explicit.false_positive_pr_url || explicit.falsePositivePullRequestUrl || (falsePositive ? prUrl : '');
+  let kind = 'explicit_failure';
+
+  if (timedOut) {
+    kind = 'timeout';
+  } else if (falsePositive && falsePositivePrUrl) {
+    kind = 'false_positive_pr';
+  } else if (prUrl) {
+    kind = 'fix_pr';
+  }
+  let failure = '';
+  if (!success) {
+    failure = errorMessage;
+  } else if (kind === 'explicit_failure') {
+    failure = 'WP Codebox task completed without PR outcome';
+  }
+
+  return {
+    schema: 'homeboy/audit-wp-codebox-finding-outcome/v1',
+    kind,
+    finding_id: taskRequest.finding_id || taskRequest.audit_findings?.[0]?.id || '',
+    finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
+    sandbox_session_id: taskRequest.sandbox_session_id,
+    pr_url: prUrl,
+    false_positive_pr_url: falsePositivePrUrl,
+    false_positive: falsePositive,
+    artifact_id: artifact?.id || '',
+    failure,
+  };
+}
+
+function taskOutcomeSucceeded(outcome) {
+  return ['fix_pr', 'false_positive_pr'].includes(outcome?.kind);
+}
+
+function pullRequestUrls(value, urls = []) {
+  if (!value || urls.length >= 10) {
+    return urls;
+  }
+  if (typeof value === 'string') {
+    if (/^https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/\d+/.test(value)) {
+      urls.push(value);
+    }
+    return urls;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry) => pullRequestUrls(entry, urls));
+    return urls;
+  }
+  if (typeof value === 'object') {
+    Object.values(value).forEach((entry) => pullRequestUrls(entry, urls));
+  }
+  return Array.from(new Set(urls));
 }
 
 function killProcessTree(child, signal) {
@@ -653,6 +731,7 @@ async function executeAuditWpCodeboxFanout(input) {
   const run = {
     ...baseRun,
     records,
+    outcomes: records.flatMap((record) => record.outcome ? [record.outcome] : []),
     status: records.every((record) => record.status === 'completed') ? 'completed' : 'failed',
   };
 
@@ -696,6 +775,7 @@ function runningGroup(taskRequest) {
   return {
     sandbox_session_id: taskRequest.sandbox_session_id,
     group_key: taskRequest.group_key,
+    finding_id: taskRequest.finding_id || taskRequest.audit_findings[0]?.id || '',
     finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
   };
 }
@@ -733,6 +813,9 @@ module.exports = {
   executeWpCodeboxTaskRequest,
   createIssueReport,
   groupFindings,
+  pullRequestUrls,
   safeBranchSlug,
   sandboxSessionId,
+  taskOutcome,
+  taskOutcomeSucceeded,
 };

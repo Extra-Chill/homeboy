@@ -46,14 +46,14 @@ try {
   assert.equal(response.handled, true);
   assert.equal(response.detected_findings, 3);
   assert.equal(response.changed_files.length, 0);
-  assert.equal(response.fix_results.length, 2);
+  assert.equal(response.fix_results.length, 3);
   assert.equal(response.fix_results[0].rule, 'wp_codebox.audit_fanout');
   assert.equal(response.fix_results[0].primitive, 'extension_refactor_source');
   assert.match(response.warnings[0], /fanout-plan\.json/);
 
   const plan = JSON.parse(fs.readFileSync(path.join(outputDir, 'fanout-plan.json'), 'utf8'));
   assert.equal(plan.schema, 'homeboy/audit-wp-codebox-fanout/v1');
-  assert.equal(plan.task_requests.length, 2);
+  assert.equal(plan.task_requests.length, 3);
   assert.equal(plan.task_requests[0].provider, 'opencode');
   assert.equal(plan.task_requests[0].model, 'opencode-go/kimi-k2.6');
   assert.deepEqual(plan.task_requests[0].provider_plugin_paths, ['/plugins/ai-provider-for-opencode']);
@@ -73,7 +73,7 @@ const stepArgs = recipe.workflow.steps[0].args;
 const task = JSON.parse(stepArgs.find((arg) => arg.startsWith('task=')).slice('task='.length));
 const sessionId = task.sandbox_session_id;
 const artifactDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'fixture-wp-codebox-artifact-'));
-if (task.group_key === 'PHPCS Formatting/Auto Fix!') {
+if (task.group_key === 'finding-phpcs-001') {
   const filesDirectory = path.join(artifactDirectory, 'files');
   fs.mkdirSync(filesDirectory, { recursive: true });
   fs.writeFileSync(path.join(filesDirectory, 'changed-files.json'), JSON.stringify({
@@ -102,6 +102,9 @@ process.stdout.write(JSON.stringify({
   artifacts: {
     id: 'artifact-' + sessionId,
     directory: artifactDirectory
+  },
+  outcome: {
+    pr_url: 'https://github.com/Extra-Chill/homeboy-extensions/pull/' + (task.group_key === 'finding-phpcs-001' ? '777' : '778')
   }
 }));
 `);
@@ -142,8 +145,8 @@ process.stdout.write(JSON.stringify({
   assert.equal(writeResponse.handled, true);
   assert.deepEqual(writeResponse.changed_files, ['src/example.php']);
   assert.equal(fs.readFileSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src', 'example.php'), 'utf8'), 'after\n');
-  assert.match(writeResult.stderr, /\[homeboy wp-codebox fanout\] started 1\/2 group=PHPCS Formatting\/Auto Fix! session=homeboy-audit-/);
-  assert.match(writeResult.stderr, /\[homeboy wp-codebox fanout\] completed 2\/2 group=docs-reference session=homeboy-audit-.*artifact=.*fixture-wp-codebox-artifact-/);
+  assert.match(writeResult.stderr, /\[homeboy wp-codebox fanout\] started 1\/3 group=finding-phpcs-001 session=homeboy-audit-/);
+  assert.match(writeResult.stderr, /\[homeboy wp-codebox fanout\] completed 3\/3 group=finding-doc-001 session=homeboy-audit-.*artifact=.*fixture-wp-codebox-artifact-/);
   assert.doesNotMatch(writeResult.stderr, /OPENCODE_API_KEY/);
   assert.match(writeResponse.warnings[1], /fanout-run\.json/);
   const run = JSON.parse(fs.readFileSync(path.join(writeOutputDir, 'fanout-run.json'), 'utf8'));
@@ -172,7 +175,7 @@ process.stdout.write(JSON.stringify({
     },
   });
   assert.notEqual(missingSecretResult.status, 0);
-  assert.match(missingSecretResult.stderr, /WP Codebox audit fan-out failed: 2 of 2 task\(s\) failed/);
+  assert.match(missingSecretResult.stderr, /WP Codebox audit fan-out failed: 3 of 3 task\(s\) failed/);
   assert.match(missingSecretResult.stderr, /Required WP Codebox secret environment variable missing: OPENCODE_API_KEY/);
 
   const riskyRoot = path.join(root, 'risky-source');
