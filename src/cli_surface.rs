@@ -196,6 +196,43 @@ pub struct CommandDescriptor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabCommandContract {
+    pub hot_label: &'static str,
+    pub portability: LabCommandPortability,
+    pub source_path_mode: LabSourcePathMode,
+    pub workspace_mode_policy: LabWorkspaceModePolicy,
+    pub mutation_flag: Option<&'static str>,
+    pub requires_extension_parity: bool,
+    pub extra_required_tools: &'static [LabCommandRequiredTool],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabCommandPortability {
+    Portable,
+    LocalOnly(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabSourcePathMode {
+    CwdOrPathFlag,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabWorkspaceModePolicy {
+    ChangedSinceGitElseSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabCommandRequiredTool {
+    Playwright,
+}
+
+const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
+const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
+const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
+const FLEET_EXEC_LAB_UNSUPPORTED_REASON: &str = "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicOutputVariantContract {
     pub command: &'static str,
     pub variant: &'static str,
@@ -211,6 +248,55 @@ pub struct CommandResponsePlan {
 }
 
 impl Commands {
+    pub fn lab_contract(&self) -> Option<LabCommandContract> {
+        let contract = match self {
+            Commands::Audit(args) if args.changed_since.is_none() && !args.conventions => {
+                lab_portable_contract("audit", None, true, LAB_NO_EXTRA_TOOLS)
+            }
+            Commands::Bench(args) if args.is_run_command() => lab_portable_contract(
+                "bench",
+                args.lab_offload_writes_local_state()
+                    .then_some("--baseline/--ratchet"),
+                true,
+                LAB_NO_EXTRA_TOOLS,
+            ),
+            Commands::Fleet(args) if args.is_hot_resource_command() => {
+                lab_local_only_contract("fleet exec", FLEET_EXEC_LAB_UNSUPPORTED_REASON)
+            }
+            Commands::Lint(args) if args.is_full_workspace_run() => lab_portable_contract(
+                "lint",
+                args.fix.then_some("--fix"),
+                true,
+                LAB_NO_EXTRA_TOOLS,
+            ),
+            Commands::Refactor(args) if args.is_hot_resource_command() => lab_portable_contract(
+                "refactor",
+                args.lab_offload_writes_local_state()
+                    .then_some("--write/--commit"),
+                false,
+                LAB_NO_EXTRA_TOOLS,
+            ),
+            Commands::Rig(args) if args.is_hot_resource_command() => {
+                lab_local_only_contract("rig up", RIG_UP_LAB_UNSUPPORTED_REASON)
+            }
+            Commands::Test(args) if args.changed_since.is_none() => lab_portable_contract(
+                "test",
+                args.write.then_some("--write"),
+                true,
+                LAB_NO_EXTRA_TOOLS,
+            ),
+            Commands::Trace(args) => lab_portable_contract(
+                "trace",
+                args.keep_overlay.then_some("--keep-overlay"),
+                false,
+                LAB_TRACE_EXTRA_TOOLS,
+            ),
+            _ => return None,
+        };
+
+        Some(contract)
+    }
+
     pub fn descriptor(&self, has_output_file: bool) -> CommandDescriptor {
         let output_file_mode = if !has_output_file {
             CommandOutputFileMode::None
@@ -224,7 +310,7 @@ impl Commands {
             }
         };
 
-        match self {
+        let mut descriptor = match self {
             Commands::Ssh(args) if args.subcommand.is_none() && args.command.is_empty() => {
                 raw_ops_descriptor(CommandRawOutputMode::InteractivePassthrough, output_file_mode)
             }
@@ -383,7 +469,10 @@ impl Commands {
                 ),
             ),
             Commands::Triage(_) => ops_json_descriptor(output_file_mode, None),
-        }
+        };
+
+        apply_lab_contract_to_descriptor(&mut descriptor, self.lab_contract());
+        descriptor
     }
 
     pub fn response_plan(&self, has_output_file: bool) -> CommandResponsePlan {
@@ -399,15 +488,21 @@ impl Commands {
     }
 
     pub fn supports_lab_runner(&self) -> bool {
-        self.descriptor(false).supports_lab_runner
+        self.lab_contract()
+            .is_some_and(|contract| matches!(contract.portability, LabCommandPortability::Portable))
     }
 
     pub fn lab_runner_unsupported_reason(&self) -> Option<&'static str> {
-        self.descriptor(false).lab_runner_unsupported_reason
+        self.lab_contract()
+            .and_then(|contract| match contract.portability {
+                LabCommandPortability::Portable => None,
+                LabCommandPortability::LocalOnly(reason) => Some(reason),
+            })
     }
 
     pub fn lab_offload_mutation_flag(&self) -> Option<&'static str> {
-        self.descriptor(false).lab_offload_mutation_flag
+        self.lab_contract()
+            .and_then(|contract| contract.mutation_flag)
     }
 
     pub fn response_mode(&self, has_output_file: bool) -> CommandResponseMode {
@@ -416,6 +511,49 @@ impl Commands {
 
     pub fn output_file_mode(&self, has_output_file: bool) -> CommandOutputFileMode {
         self.descriptor(has_output_file).output_file_mode
+    }
+}
+
+fn apply_lab_contract_to_descriptor(
+    descriptor: &mut CommandDescriptor,
+    contract: Option<LabCommandContract>,
+) {
+    descriptor.supports_lab_runner = contract
+        .is_some_and(|contract| matches!(contract.portability, LabCommandPortability::Portable));
+    descriptor.lab_runner_unsupported_reason =
+        contract.and_then(|contract| match contract.portability {
+            LabCommandPortability::Portable => None,
+            LabCommandPortability::LocalOnly(reason) => Some(reason),
+        });
+    descriptor.lab_offload_mutation_flag = contract.and_then(|contract| contract.mutation_flag);
+}
+
+fn lab_portable_contract(
+    hot_label: &'static str,
+    mutation_flag: Option<&'static str>,
+    requires_extension_parity: bool,
+    extra_required_tools: &'static [LabCommandRequiredTool],
+) -> LabCommandContract {
+    LabCommandContract {
+        hot_label,
+        portability: LabCommandPortability::Portable,
+        source_path_mode: LabSourcePathMode::CwdOrPathFlag,
+        workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+        mutation_flag,
+        requires_extension_parity,
+        extra_required_tools,
+    }
+}
+
+fn lab_local_only_contract(hot_label: &'static str, reason: &'static str) -> LabCommandContract {
+    LabCommandContract {
+        hot_label,
+        portability: LabCommandPortability::LocalOnly(reason),
+        source_path_mode: LabSourcePathMode::CwdOrPathFlag,
+        workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+        mutation_flag: None,
+        requires_extension_parity: false,
+        extra_required_tools: LAB_NO_EXTRA_TOOLS,
     }
 }
 
@@ -1042,6 +1180,68 @@ mod tests {
         let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
         assert_eq!(cli.runner.as_deref(), Some("lab-a"));
         assert!(cli.command.supports_lab_runner());
+    }
+
+    #[test]
+    fn test_lab_command_contracts_cover_hot_commands() {
+        let supported = [
+            (parsed_command(&["homeboy", "lint"]), "lint"),
+            (parsed_command(&["homeboy", "test"]), "test"),
+            (parsed_command(&["homeboy", "audit"]), "audit"),
+            (parsed_command(&["homeboy", "bench"]), "bench"),
+            (parsed_command(&["homeboy", "trace"]), "trace"),
+            (
+                parsed_command(&["homeboy", "refactor", "--from", "audit"]),
+                "refactor",
+            ),
+        ];
+
+        for (command, label) in supported {
+            let contract = command.lab_contract().expect("hot contract");
+            assert_eq!(contract.hot_label, label);
+            assert_eq!(contract.portability, LabCommandPortability::Portable);
+            assert_eq!(contract.source_path_mode, LabSourcePathMode::CwdOrPathFlag);
+            assert_eq!(
+                contract.workspace_mode_policy,
+                LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+            );
+        }
+
+        let trace = parsed_command(&["homeboy", "trace"])
+            .lab_contract()
+            .expect("trace contract");
+        assert_eq!(trace.extra_required_tools, LAB_TRACE_EXTRA_TOOLS);
+        assert!(!trace.requires_extension_parity);
+
+        let lint = parsed_command(&["homeboy", "lint"])
+            .lab_contract()
+            .expect("lint contract");
+        assert!(lint.requires_extension_parity);
+
+        let rig = parsed_command(&["homeboy", "rig", "up", "studio"])
+            .lab_contract()
+            .expect("rig up contract");
+        assert_eq!(rig.hot_label, "rig up");
+        assert!(matches!(
+            rig.portability,
+            LabCommandPortability::LocalOnly(reason) if reason.contains("single-workspace Lab snapshot")
+        ));
+
+        let fleet = parsed_command(&["homeboy", "fleet", "exec", "prod", "wp", "plugin", "list"])
+            .lab_contract()
+            .expect("fleet exec contract");
+        assert_eq!(fleet.hot_label, "fleet exec");
+        assert!(matches!(
+            fleet.portability,
+            LabCommandPortability::LocalOnly(reason) if reason.contains("config parity")
+        ));
+
+        assert!(parsed_command(&["homeboy", "status"])
+            .lab_contract()
+            .is_none());
+        assert!(parsed_command(&["homeboy", "bench", "list"])
+            .lab_contract()
+            .is_none());
     }
 
     #[test]
