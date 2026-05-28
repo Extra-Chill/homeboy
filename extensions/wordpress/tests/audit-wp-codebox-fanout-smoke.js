@@ -224,7 +224,38 @@ try {
   assert.match(phpcsRequest.task.prompt, /remediation group PHPCS Formatting\/Auto Fix!/);
   assert.match(phpcsRequest.task.prompt, /finding-phpcs-001/);
   assert.match(phpcsRequest.task.prompt, /finding-phpcs-002/);
-  assert.match(phpcsRequest.task.prompt, /false positive/);
+  assert.match(phpcsRequest.task.prompt, /reviewed artifact/);
+  assert.match(phpcsRequest.task.prompt, /opens pull requests outside the sandbox/);
+
+  const nestedArtifactOutcome = taskOutcome(phpcsRequest, {
+    success: true,
+    executions: [
+      {
+        command: 'wordpress.run-php',
+        stdout: JSON.stringify({
+          command: 'agent-sandbox.run',
+          output: JSON.stringify({
+            agent_runtime: {
+              success: true,
+              result: {
+                outcome: {
+                  kind: 'fix_artifact',
+                  artifact: {
+                    id: 'artifact-fixture-nested',
+                    directory: '/tmp/artifact-fixture-nested',
+                    changed_files: [{ relative_path: 'src/Example.php' }],
+                  },
+                },
+              },
+            },
+          }),
+        }),
+      },
+    ],
+  }, { id: 'artifact-fixture-nested' }, true);
+  assert.equal(nestedArtifactOutcome.kind, 'fix_artifact');
+  assert.equal(nestedArtifactOutcome.artifact.id, 'artifact-fixture-nested');
+  assert.deepEqual(nestedArtifactOutcome.finding_ids, ['finding-phpcs-001', 'finding-phpcs-002']);
   const falsePositiveOutcome = taskOutcome(phpcsRequest, {
     outcome: {
       kind: 'false_positive_pr',

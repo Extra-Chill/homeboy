@@ -25,6 +25,8 @@ const RUN_SCHEMA = 'homeboy/audit-wp-codebox-run/v1';
 const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_TASK_TIMEOUT_SECONDS = 45 * 60;
 const WP_CODEBOX_STRUCTURED_OUTCOME_KINDS = new Set([
+  'fix_artifact',
+  'false_positive_artifact',
   'fix_pr',
   'false_positive_pr',
   'provider_error',
@@ -152,10 +154,10 @@ function taskPrompt(group) {
     `Fix the Homeboy audit remediation group ${group.key}.`,
     '',
     'Expected outcome:',
-    '- Open a pull request that fixes every finding in this remediation group, or',
-    '- If the group is a false positive, fix the audit detector/config/test path that produced it and open a pull request for that correction.',
+    '- Produce a reviewed WP Codebox artifact that fixes every finding in this remediation group, or',
+    '- If the group is a false positive, produce a reviewed artifact that fixes the audit detector/config/test path that produced it.',
     '',
-    'Return machine-readable outcome metadata when possible, including the PR URL, false-positive PR URL, or explicit failure reason. The parent run reconciles this outcome back to each finding ID.',
+    'The parent orchestrator applies accepted artifacts and opens pull requests outside the sandbox. Return machine-readable outcome metadata when possible, including an explicit artifact outcome or failure reason. The parent run reconciles this outcome back to each finding ID.',
     '',
     'Finding evidence:',
     findingList,
@@ -627,10 +629,46 @@ function explicitWpCodeboxOutcome(parsed) {
   if (parsed.result?.outcome && typeof parsed.result.outcome === 'object') {
     return parsed.result.outcome;
   }
+  if (parsed.agent_runtime?.result?.outcome && typeof parsed.agent_runtime.result.outcome === 'object') {
+    return parsed.agent_runtime.result.outcome;
+  }
+  if (parsed.output && typeof parsed.output === 'string') {
+    const output = tryParseJsonFragment(parsed.output);
+    const outcome = explicitWpCodeboxOutcome(output);
+    if (isStructuredWpCodeboxOutcome(outcome)) {
+      return outcome;
+    }
+  }
+  for (const execution of Array.isArray(parsed.executions) ? parsed.executions : []) {
+    for (const stream of ['stdout', 'stderr']) {
+      const decoded = tryParseJsonFragment(execution?.[stream] || '');
+      const outcome = explicitWpCodeboxOutcome(decoded);
+      if (isStructuredWpCodeboxOutcome(outcome)) {
+        return outcome;
+      }
+    }
+  }
   if (parsed.result && typeof parsed.result === 'object') {
     return parsed.result;
   }
   return parsed;
+}
+
+function tryParseJsonFragment(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return null;
+  }
+  const direct = tryParseJson(text);
+  if (direct) {
+    return direct;
+  }
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) {
+    return null;
+  }
+  return tryParseJson(text.slice(start, end + 1));
 }
 
 function isStructuredWpCodeboxOutcome(explicit) {
@@ -640,7 +678,7 @@ function isStructuredWpCodeboxOutcome(explicit) {
 function structuredTaskOutcome(taskRequest, explicit, artifact, errorMessage = '') {
   const urls = pullRequestUrls(explicit);
   const kind = explicit.kind;
-  const falsePositive = kind === 'false_positive_pr' || Boolean(explicit.false_positive || explicit.falsePositive);
+  const falsePositive = ['false_positive_artifact', 'false_positive_pr'].includes(kind) || Boolean(explicit.false_positive || explicit.falsePositive);
   const prUrl = explicit.pr_url || explicit.pull_request_url || explicit.pullRequestUrl || urls[0] || '';
   const falsePositivePrUrl = explicit.false_positive_pr_url || explicit.falsePositivePullRequestUrl || (falsePositive ? prUrl : '');
   const failure = explicit.failure || wpCodeboxOutcomeErrorMessage(explicit) || errorMessage || '';
@@ -674,7 +712,7 @@ function wpCodeboxOutcomeErrorMessage(explicit) {
 }
 
 function taskOutcomeSucceeded(outcome) {
-  return ['fix_pr', 'false_positive_pr'].includes(outcome?.kind);
+  return ['fix_artifact', 'false_positive_artifact', 'fix_pr', 'false_positive_pr'].includes(outcome?.kind);
 }
 
 function pullRequestUrls(value, urls = []) {
