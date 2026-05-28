@@ -151,8 +151,8 @@ pub fn execute_lab_offload(
             .build(),
         );
         return Ok(LabOffloadOutcome::RunLocal {
-            plan,
             metadata: Some(lab_offload_metadata(
+                &plan,
                 "automatic",
                 None,
                 None,
@@ -160,6 +160,7 @@ pub fn execute_lab_offload(
                 None,
                 Some(reason),
             )),
+            plan,
             messages: Vec::new(),
         });
     };
@@ -204,8 +205,8 @@ pub fn execute_lab_offload(
                 .build(),
             );
             return Ok(LabOffloadOutcome::RunLocal {
-                plan,
                 metadata: Some(lab_offload_metadata(
+                    &plan,
                     selection.source.metadata_value(),
                     Some(&selection.runner_id),
                     Some(selection.mode.metadata_value()),
@@ -213,6 +214,7 @@ pub fn execute_lab_offload(
                     None,
                     Some(&reason),
                 )),
+                plan,
                 messages: vec![format!("Lab offload: {reason}; running locally.")],
             });
         }
@@ -429,6 +431,7 @@ fn run_lab_offload_inner(
         remote_cwd
     );
     let lab_metadata = lab_offload_metadata(
+        &plan,
         selection.source.metadata_value(),
         Some(runner_id),
         Some(status_tunnel_mode(&runner_status).metadata_value()),
@@ -513,8 +516,8 @@ fn automatic_capability_fallback(
     reason: String,
 ) -> LabOffloadOutcome {
     LabOffloadOutcome::RunLocal {
-        plan,
         metadata: Some(lab_offload_metadata(
+            &plan,
             "automatic",
             Some(runner_id),
             Some(status_tunnel_mode(runner_status).metadata_value()),
@@ -522,6 +525,7 @@ fn automatic_capability_fallback(
             None,
             Some(&reason),
         )),
+        plan,
         messages: vec![format!("Lab offload: {reason}; running locally.")],
     }
 }
