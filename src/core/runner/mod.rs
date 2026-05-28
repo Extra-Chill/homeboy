@@ -10,6 +10,7 @@ use crate::core::output::{BatchResult, CreateOutput, CreateResult, MergeOutput, 
 use crate::core::server::{self, RunnerPolicy, RunnerSettings, ServerRunner};
 
 mod apply;
+mod capabilities;
 mod connection;
 mod evidence;
 mod execution;
@@ -22,16 +23,18 @@ pub use apply::{
     apply_workspace_patch, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
     RunnerWorkspaceApplyStatus,
 };
+pub use capabilities::{
+    evaluate_lab_runner_capabilities_for_runner, lab_runner_capability_plan,
+    lab_runner_capability_preflight, LabRunnerCapabilityContract, LabRunnerCapabilityPlan,
+    LabRunnerGateDecision, LabRunnerGateMode, RunnerCapabilityPreflight, RunnerRequiredTool,
+};
 pub use connection::{connect, connect_reverse, disconnect, status, statuses};
 pub use evidence::{
     download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,
 };
 pub(crate) use execution::daemon_api_get;
-pub use execution::{
-    exec, RunnerCapabilityPreflight, RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
-    RunnerRequiredTool,
-};
+pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
 pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since,
