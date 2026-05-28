@@ -3,142 +3,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use clap::Args;
 use homeboy::core::observation::{ArtifactRecord, NewRunRecord, ObservationStore, RunStatus};
 use homeboy::core::{Error, Result};
-use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{CmdResult, RunsOutput};
+mod types;
 
-#[derive(Args, Clone)]
-pub struct RunsLoopSyncArgs {
-    /// Local directory containing copied remote loop archives.
-    pub archive_root: PathBuf,
-
-    /// Optional component label for filtering the resulting observation run.
-    #[arg(long = "component")]
-    pub component_id: Option<String>,
-
-    /// Optional rig/loop label for filtering the resulting observation run.
-    #[arg(long)]
-    pub rig: Option<String>,
-
-    /// Optional free-form labels recorded in run metadata.
-    #[arg(long = "label")]
-    pub labels: Vec<String>,
-
-    /// Mark heartbeat/session files stale after this many minutes.
-    #[arg(long, default_value_t = 120)]
-    pub stale_after_minutes: u64,
-
-    /// Retention budget used for reporting old archive candidates.
-    #[arg(long, default_value_t = 30)]
-    pub retention_days: u64,
-
-    /// Maximum ranked patch candidates to include in triage output.
-    #[arg(long, default_value_t = 20)]
-    pub patch_limit: usize,
-
-    /// Inspect and triage without writing observation runs or artifacts.
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
-#[derive(Serialize)]
-pub struct RunsLoopSyncOutput {
-    pub command: &'static str,
-    pub dry_run: bool,
-    pub archive_root: String,
-    pub run_id: Option<String>,
-    pub synced_artifacts: Vec<ArtifactRecord>,
-    pub triage: LoopTriageSummary,
-}
-
-#[derive(Clone, Serialize)]
-pub struct LoopTriageSummary {
-    pub heartbeat: LoopHeartbeatSummary,
-    pub disk: LoopDiskSummary,
-    pub retention: LoopRetentionSummary,
-    pub archive_count: usize,
-    pub report_count: usize,
-    pub patch_count: usize,
-    pub reviewer_failure_count: usize,
-    pub stale_job_count: usize,
-    pub patch_candidates: Vec<LoopPatchCandidate>,
-    pub reviewer_failures: Vec<LoopReviewerFailure>,
-    pub indexed_files: Vec<LoopIndexedFile>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct LoopHeartbeatSummary {
-    pub status: String,
-    pub stale: bool,
-    pub stale_after_minutes: u64,
-    pub latest_path: Option<String>,
-    pub latest_modified_at: Option<String>,
-    pub latest_age_seconds: Option<u64>,
-    pub payload: Value,
-}
-
-#[derive(Clone, Serialize)]
-pub struct LoopDiskSummary {
-    pub path: String,
-    pub available_bytes: Option<u64>,
-    pub total_bytes: Option<u64>,
-    pub used_percent: Option<f64>,
-    pub status: String,
-    pub warning: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct LoopRetentionSummary {
-    pub retention_days: u64,
-    pub candidate_count: usize,
-    pub candidate_bytes: u64,
-    pub candidates: Vec<String>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct LoopPatchCandidate {
-    pub path: String,
-    pub fingerprint: String,
-    pub rank: i64,
-    pub size_bytes: u64,
-    pub modified_at: Option<String>,
-    pub duplicate_count: usize,
-    pub labels: Vec<String>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct LoopReviewerFailure {
-    pub path: String,
-    pub reason: String,
-    pub modified_at: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct LoopIndexedFile {
-    pub path: String,
-    pub kind: String,
-    pub size_bytes: u64,
-    pub modified_at: Option<String>,
-}
-
-#[derive(Clone)]
-struct LoopInventory {
-    archive_root: PathBuf,
-    archives: Vec<PathBuf>,
-    reports: Vec<LoopIndexedFile>,
-    heartbeat_files: Vec<LoopIndexedFile>,
-    stale_jobs: Vec<LoopIndexedFile>,
-    reviewer_failures: Vec<LoopReviewerFailure>,
-    patch_candidates: Vec<LoopPatchCandidate>,
-    indexed_files: Vec<LoopIndexedFile>,
-    retention_candidates: Vec<LoopIndexedFile>,
-    total_size_bytes: u64,
-}
+use super::{disk, CmdResult, RunsOutput};
+use types::*;
+pub use types::{RunsLoopSyncArgs, RunsLoopSyncOutput};
 
 pub fn loop_sync(args: RunsLoopSyncArgs) -> CmdResult<RunsOutput> {
     if !args.archive_root.is_dir() {
@@ -359,7 +233,11 @@ fn loop_triage_summary(inventory: &LoopInventory, args: &RunsLoopSyncArgs) -> Lo
     let heartbeat = latest_heartbeat(inventory, args.stale_after_minutes);
     LoopTriageSummary {
         heartbeat,
-        disk: disk_summary(&inventory.archive_root),
+        disk: disk::disk_budget(
+            &inventory.archive_root,
+            "archive",
+            "disk budget probing is not implemented for this platform",
+        ),
         retention: retention_summary(inventory, args.retention_days),
         archive_count: inventory.archives.len(),
         report_count: inventory.reports.len(),
@@ -606,62 +484,6 @@ fn io_error(action: &str, path: &Path, error: std::io::Error) -> Error {
         error.to_string(),
         Some(format!("{action} {}", path.display())),
     )
-}
-
-#[cfg(unix)]
-fn disk_summary(path: &Path) -> LoopDiskSummary {
-    let c_path = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
-        Ok(path) => path,
-        Err(_) => return unavailable_disk_summary(path, "path contains an interior NUL byte"),
-    };
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
-    if rc != 0 {
-        return unavailable_disk_summary(path, "statvfs failed");
-    }
-    let stat = unsafe { stat.assume_init() };
-    let block_size = u128::from(stat.f_frsize.max(1));
-    let total = u64::try_from(u128::from(stat.f_blocks).saturating_mul(block_size)).ok();
-    let available = u64::try_from(u128::from(stat.f_bavail).saturating_mul(block_size)).ok();
-    let used_percent = match (total, available) {
-        (Some(total), Some(available)) if total > 0 => {
-            Some(((total.saturating_sub(available)) as f64 / total as f64) * 100.0)
-        }
-        _ => None,
-    };
-    let warning = match (available, total) {
-        (Some(available), Some(total)) if total > 0 && available < total / 10 => {
-            Some("archive filesystem has less than 10% free space".to_string())
-        }
-        (Some(available), _) if available < 5 * 1024 * 1024 * 1024 => {
-            Some("archive filesystem has less than 5 GiB free space".to_string())
-        }
-        _ => None,
-    };
-    LoopDiskSummary {
-        path: path.display().to_string(),
-        available_bytes: available,
-        total_bytes: total,
-        used_percent,
-        status: if warning.is_some() { "warning" } else { "ok" }.to_string(),
-        warning,
-    }
-}
-
-#[cfg(not(unix))]
-fn disk_summary(path: &Path) -> LoopDiskSummary {
-    unavailable_disk_summary(path, "disk probing is not implemented for this platform")
-}
-
-fn unavailable_disk_summary(path: &Path, warning: &str) -> LoopDiskSummary {
-    LoopDiskSummary {
-        path: path.display().to_string(),
-        available_bytes: None,
-        total_bytes: None,
-        used_percent: None,
-        status: "unknown".to_string(),
-        warning: Some(warning.to_string()),
-    }
 }
 
 #[cfg(test)]

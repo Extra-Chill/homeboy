@@ -5,7 +5,7 @@ use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{reconcile, require_run, run_summary, CmdResult, RunSummary, RunsOutput};
+use super::{disk, reconcile, require_run, run_summary, CmdResult, RunSummary, RunsOutput};
 
 #[derive(Serialize)]
 pub struct RunsEvidenceOutput {
@@ -84,15 +84,7 @@ pub struct RunsEvidenceFailureSummary {
     pub hints: Vec<String>,
 }
 
-#[derive(Serialize)]
-pub struct RunsEvidenceDiskBudget {
-    pub path: String,
-    pub available_bytes: Option<u64>,
-    pub total_bytes: Option<u64>,
-    pub used_percent: Option<f64>,
-    pub status: String,
-    pub warning: Option<String>,
-}
+pub type RunsEvidenceDiskBudget = disk::DiskBudget;
 
 #[derive(Serialize)]
 pub struct RunsEvidenceLink {
@@ -107,7 +99,11 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let artifacts = store.list_artifacts(run_id)?;
     let artifact_root = homeboy::core::artifact_root()?;
     let artifact_index = evidence_artifact_index(&artifacts);
-    let disk_budget = evidence_disk_budget(&artifact_root);
+    let disk_budget = disk::disk_budget(
+        &artifact_root,
+        "artifact",
+        "disk budget probing is not implemented for this platform",
+    );
     let stale_reason = reconcile::running_status_note(&run);
     let metadata = evidence_metadata(&run.metadata_json);
     let failure = evidence_failure_summary(&run);
@@ -319,65 +315,6 @@ fn evidence_links(artifacts: &[ArtifactRecord]) -> Vec<RunsEvidenceLink> {
             }
         })
         .collect()
-}
-
-#[cfg(unix)]
-fn evidence_disk_budget(path: &Path) -> RunsEvidenceDiskBudget {
-    let c_path = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
-        Ok(path) => path,
-        Err(_) => return unavailable_disk_budget(path, "path contains an interior NUL byte"),
-    };
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
-    if rc != 0 {
-        return unavailable_disk_budget(path, "statvfs failed");
-    }
-    let stat = unsafe { stat.assume_init() };
-    let block_size = u128::from(stat.f_frsize.max(1));
-    let total = u64::try_from(u128::from(stat.f_blocks).saturating_mul(block_size)).ok();
-    let available = u64::try_from(u128::from(stat.f_bavail).saturating_mul(block_size)).ok();
-    let used_percent = match (total, available) {
-        (Some(total), Some(available)) if total > 0 => {
-            Some(((total.saturating_sub(available)) as f64 / total as f64) * 100.0)
-        }
-        _ => None,
-    };
-    let warning = match (available, total) {
-        (Some(available), Some(total)) if total > 0 && available < total / 10 => {
-            Some("artifact filesystem has less than 10% free space".to_string())
-        }
-        (Some(available), _) if available < 5 * 1024 * 1024 * 1024 => {
-            Some("artifact filesystem has less than 5 GiB free space".to_string())
-        }
-        _ => None,
-    };
-    RunsEvidenceDiskBudget {
-        path: path.display().to_string(),
-        available_bytes: available,
-        total_bytes: total,
-        used_percent,
-        status: if warning.is_some() { "warning" } else { "ok" }.to_string(),
-        warning,
-    }
-}
-
-#[cfg(not(unix))]
-fn evidence_disk_budget(path: &Path) -> RunsEvidenceDiskBudget {
-    unavailable_disk_budget(
-        path,
-        "disk budget probing is not implemented for this platform",
-    )
-}
-
-fn unavailable_disk_budget(path: &Path, warning: &str) -> RunsEvidenceDiskBudget {
-    RunsEvidenceDiskBudget {
-        path: path.display().to_string(),
-        available_bytes: None,
-        total_bytes: None,
-        used_percent: None,
-        status: "unknown".to_string(),
-        warning: Some(warning.to_string()),
-    }
 }
 
 #[cfg(test)]

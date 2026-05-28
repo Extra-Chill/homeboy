@@ -4,6 +4,7 @@ mod common;
 mod compare;
 #[cfg(test)]
 mod corpus_tests;
+mod disk;
 mod distribution;
 mod drift;
 mod evidence;
