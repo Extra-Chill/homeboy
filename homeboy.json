@@ -157,12 +157,11 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-28T13:32:47Z",
-      "item_count": 31,
+      "created_at": "2026-05-28T22:36:23Z",
+      "item_count": 30,
       "known_fingerprints": [
-        "artifact_portability::observation:bc02b1da-647d-4194-adb8-f39389893be0::NonPortableArtifactPath",
-        "dead_code::src/commands/utils/resource_policy.rs::UnreferencedExport",
-        "dead_code::src/commands/utils/resource_policy.rs::UnreferencedExport",
+        "Daemon::src/core/daemon/patch_capture.rs::MissingMethod",
+        "artifact_portability::observation:4c4e3655-f14c-4e22-b28e-9e30e0cbab0d::NonPortableArtifactPath",
         "dead_code::src/core/engine/temp.rs::UnreferencedExport",
         "intra-method-duplication::src/core/extension/refactor_protocol.rs::IntraMethodDuplicate",
         "runner_offload_preflight::src/commands/bench/observation.rs::RunnerOffloadPreflight",
@@ -193,16 +192,17 @@
         "structural::src/core/rig/pipeline.rs::HighItemCount"
       ],
       "metadata": {
-        "alignment_score": 0.9166666865348816,
+        "alignment_score": 0.9066666960716248,
         "known_outliers": [
-          "src/core/observation/records/triage_items.rs",
+          "src/core/daemon/patch_capture.rs",
           "src/core/observation/records/run_status.rs",
+          "src/core/observation/records/triage_items.rs",
           "src/core/observation/records/run_builder.rs",
           "src/core/engine/undo/rollback.rs",
           "src/core/engine/undo/entry.rs",
           "src/core/engine/undo/snapshot.rs"
         ],
-        "outliers_count": 6
+        "outliers_count": 7
       }
     }
   },
