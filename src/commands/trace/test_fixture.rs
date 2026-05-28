@@ -129,8 +129,8 @@ pub(super) fn write_trace_rig(
                         "{component_id}": {{ "path": "{}" }}
                     }},
                     "trace_workloads": {{ "nodejs": [
-                        "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs",
-                        "${{components.{component_id}.path}}/studio-list-sites.trace.mjs"
+                        {{ "path": "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs" }},
+                        {{ "path": "${{components.{component_id}.path}}/studio-list-sites.trace.mjs" }}
                     ] }}
                 }}"#,
             path.display()
@@ -267,7 +267,7 @@ pub(super) fn write_trace_rig_with_variant(
                         "{component_id}": {{ "path": "{}" }}
                     }},
                     "trace_workloads": {{ "nodejs": [
-                        "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs"
+                        {{ "path": "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs" }}
                     ] }},
                     "trace_variants": {{
                         "fresh-install-mode": {{

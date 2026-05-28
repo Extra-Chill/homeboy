@@ -667,7 +667,7 @@ mod tests {
     fn rig_bench_components_falls_back_to_default_component() {
         let rig_spec: RigSpec = serde_json::from_str(
             r#"{
-                "id": "legacy",
+                "id": "single-component-rig",
                 "bench": { "default_component": "homeboy" }
             }"#,
         )
@@ -724,7 +724,7 @@ mod tests {
             r#"{
                 "id": "studio-bfb",
                 "bench": {
-                    "default_component": "studio",
+                    "components": ["studio"],
                     "metric_gates": {
                         "wordpress-is-dead": {
                             "native_block_quality_pass": { "equals": 1 },

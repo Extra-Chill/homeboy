@@ -99,7 +99,7 @@ fn manifest_parses_declared_structured_sidecar_schema_versions() {
 }
 
 #[test]
-fn missing_sidecar_declarations_preserve_legacy_behavior() {
+fn missing_sidecar_declarations_have_no_structured_contract() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
@@ -112,6 +112,61 @@ fn missing_sidecar_declarations_preserve_legacy_behavior() {
     assert_eq!(manifest.test_results_schema_version(), None);
     assert_eq!(manifest.test_failures_schema_version(), None);
     assert!(manifest.structured_sidecars().is_empty());
+}
+
+#[test]
+fn manifest_rejects_legacy_discovery_marker_alias() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "provides": {
+            "discoveryMarkers": [{ "all": ["package.json"] }]
+        }
+    }))
+    .expect_err("camelCase discovery marker alias should be rejected");
+
+    assert!(err.to_string().contains("discoveryMarkers"));
+}
+
+#[test]
+fn runtime_requirements_reject_legacy_top_level_and_string_shapes() {
+    let top_level = serde_json::from_value::<RuntimeRequirementsConfig>(serde_json::json!({
+        "php": { "version": "8.2" },
+        "node": { "version": "22" }
+    }))
+    .expect_err("top-level runtime aliases should be rejected");
+    assert!(top_level.to_string().contains("unknown field"));
+
+    let shorthand = serde_json::from_value::<RuntimeRequirementsConfig>(serde_json::json!({
+        "runtimes": {
+            "node": "22"
+        }
+    }))
+    .expect_err("runtime string shorthand should be rejected");
+    assert!(shorthand.to_string().contains("string"));
+}
+
+#[test]
+fn test_drift_ignores_audit_test_mapping_fallback() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "audit": {
+            "test_mapping": {
+                "source_dirs": ["src"],
+                "test_dirs": ["tests"],
+                "test_file_pattern": "tests/{dir}/{name}_test.{ext}",
+                "inline_tests": true
+            }
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        manifest.test_mapping().map(|mapping| mapping.inline_tests),
+        Some(true)
+    );
+    assert_eq!(manifest.test_drift(), None);
 }
 
 #[test]

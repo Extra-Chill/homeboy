@@ -356,9 +356,14 @@ fn connect_runner_for_offload(
             return Ok((
                 homeboy::core::runner::RunnerConnectReport {
                     runner_id: runner_id.to_string(),
+                    mode: Some(session.mode),
+                    role: Some(session.role),
                     connected: true,
-                    local_url: Some(session.local_url),
-                    remote_daemon_address: Some(session.remote_daemon_address),
+                    recorded: None,
+                    local_url: session.local_url,
+                    broker_url: session.broker_url,
+                    controller_id: session.controller_id,
+                    remote_daemon_address: session.remote_daemon_address,
                     tunnel_pid: session.tunnel_pid,
                     remote_daemon_pid: session.remote_daemon_pid,
                     homeboy_version: Some(session.homeboy_version),
@@ -389,8 +394,13 @@ fn connect_runner_for_offload(
     Ok((
         homeboy::core::runner::RunnerConnectReport {
             runner_id: runner_id.to_string(),
+            mode: None,
+            role: None,
             connected: false,
+            recorded: None,
             local_url: None,
+            broker_url: None,
+            controller_id: None,
             remote_daemon_address: None,
             tunnel_pid: None,
             remote_daemon_pid: None,
@@ -711,10 +721,12 @@ fn run_lab_offload_inner(
         runner_id,
         homeboy::core::runner::RunnerExecOptions {
             cwd: Some(remote_cwd),
+            project_id: None,
             allow_ssh: false,
             command,
             env,
             capture_patch,
+            raw_exec: false,
             source_snapshot: Some(source_snapshot),
             capability_preflight,
         },
@@ -1243,6 +1255,7 @@ mod tests {
                 Ok(homeboy::core::runner::RunnerStatusReport {
                     runner_id: runner_id.to_string(),
                     connected: true,
+                    state: homeboy::core::runner::RunnerSessionState::Connected,
                     session: None,
                     session_path: "/tmp/lab.json".to_string(),
                 })
@@ -1267,6 +1280,7 @@ mod tests {
                 Ok(homeboy::core::runner::RunnerStatusReport {
                     runner_id: runner_id.to_string(),
                     connected: false,
+                    state: homeboy::core::runner::RunnerSessionState::Disconnected,
                     session: None,
                     session_path: "/tmp/lab.json".to_string(),
                 })
@@ -1275,8 +1289,13 @@ mod tests {
                 Ok((
                     homeboy::core::runner::RunnerConnectReport {
                         runner_id: runner_id.to_string(),
+                        mode: Some(homeboy::core::runner::RunnerTunnelMode::DirectSsh),
+                        role: Some(homeboy::core::runner::RunnerSessionRole::Controller),
                         connected: true,
+                        recorded: None,
                         local_url: Some("http://127.0.0.1:1234".to_string()),
+                        broker_url: None,
+                        controller_id: None,
                         remote_daemon_address: Some("127.0.0.1:5678".to_string()),
                         tunnel_pid: None,
                         remote_daemon_pid: Some(42),
@@ -1307,6 +1326,7 @@ mod tests {
                 Ok(homeboy::core::runner::RunnerStatusReport {
                     runner_id: runner_id.to_string(),
                     connected: false,
+                    state: homeboy::core::runner::RunnerSessionState::Disconnected,
                     session: None,
                     session_path: "/tmp/lab.json".to_string(),
                 })
@@ -1315,8 +1335,13 @@ mod tests {
                 Ok((
                     homeboy::core::runner::RunnerConnectReport {
                         runner_id: runner_id.to_string(),
+                        mode: None,
+                        role: None,
                         connected: false,
+                        recorded: None,
                         local_url: None,
+                        broker_url: None,
+                        controller_id: None,
                         remote_daemon_address: None,
                         tunnel_pid: None,
                         remote_daemon_pid: None,
@@ -1352,6 +1377,7 @@ mod tests {
                 Ok(homeboy::core::runner::RunnerStatusReport {
                     runner_id: runner_id.to_string(),
                     connected: false,
+                    state: homeboy::core::runner::RunnerSessionState::Disconnected,
                     session: None,
                     session_path: "/tmp/lab.json".to_string(),
                 })
@@ -1360,8 +1386,13 @@ mod tests {
                 Ok((
                     homeboy::core::runner::RunnerConnectReport {
                         runner_id: runner_id.to_string(),
+                        mode: None,
+                        role: None,
                         connected: false,
+                        recorded: None,
                         local_url: None,
+                        broker_url: None,
+                        controller_id: None,
                         remote_daemon_address: None,
                         tunnel_pid: None,
                         remote_daemon_pid: None,

@@ -565,7 +565,7 @@ fn decode_component(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::runner::RunnerKind;
-    use crate::core::server::RunnerSettings;
+    use crate::core::server::{RunnerPolicy, RunnerSettings};
     use uuid::Uuid;
 
     fn ssh_runner() -> Runner {
@@ -580,6 +580,7 @@ mod tests {
             },
             env: Default::default(),
             resources: Default::default(),
+            policy: RunnerPolicy::default(),
         }
     }
 
@@ -642,6 +643,13 @@ mod tests {
                 event_count: 0,
                 source_snapshot: None,
                 stale_reason: None,
+                target_runner_id: None,
+                target_project_id: None,
+                claim_id: None,
+                claimed_by_runner_id: None,
+                claimed_at_ms: None,
+                claim_expires_at_ms: None,
+                artifacts: Vec::new(),
             };
             let run = mirror_job_run(
                 &store,
@@ -684,6 +692,13 @@ mod tests {
                 event_count: 0,
                 source_snapshot: None,
                 stale_reason: None,
+                target_runner_id: None,
+                target_project_id: None,
+                claim_id: None,
+                claimed_by_runner_id: None,
+                claimed_at_ms: None,
+                claim_expires_at_ms: None,
+                artifacts: Vec::new(),
             };
             let run_id = format!("runner-exec-{job_id}");
             let artifact_id = format!("runner-fix-patch-{job_id}");
@@ -749,6 +764,13 @@ mod tests {
                 event_count: 0,
                 source_snapshot: None,
                 stale_reason: None,
+                target_runner_id: None,
+                target_project_id: None,
+                claim_id: None,
+                claimed_by_runner_id: None,
+                claimed_at_ms: None,
+                claim_expires_at_ms: None,
+                artifacts: Vec::new(),
             };
             let artifact_id = format!("runner-fix-patch-{job_id}");
             let patch = json!({

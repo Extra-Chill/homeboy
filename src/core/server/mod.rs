@@ -68,6 +68,24 @@ pub struct RunnerSettings {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerPolicy {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_peer_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_peer_fingerprints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_projects: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_raw_exec: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_policy: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerRunner {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<String>,
@@ -77,6 +95,20 @@ pub struct ServerRunner {
     pub env: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub resources: HashMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "RunnerPolicy::is_empty")]
+    pub policy: RunnerPolicy,
+}
+
+impl RunnerPolicy {
+    pub fn is_empty(&self) -> bool {
+        self.accepted_peer_ids.is_empty()
+            && self.accepted_peer_fingerprints.is_empty()
+            && self.allowed_projects.is_empty()
+            && self.allowed_commands.is_empty()
+            && self.allow_raw_exec.is_none()
+            && self.workspace_roots.is_empty()
+            && self.artifact_policy.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

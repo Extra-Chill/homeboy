@@ -89,9 +89,7 @@ fn component_source_path(component: &Component) -> PathBuf {
 
 /// Resolve drift detection options from the component's linked test extension.
 ///
-/// `test.drift` is the primary contract. Installed extensions that only have
-/// the older `audit.test_mapping` shape still work through the manifest
-/// accessor fallback.
+/// `test.drift` is the manifest contract for extension-owned drift behavior.
 pub fn resolve_drift_options(
     component: &Component,
     since: &str,

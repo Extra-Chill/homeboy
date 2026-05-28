@@ -3,12 +3,12 @@ use crate::core::config::ConfigEntity;
 use crate::core::engine::run_dir;
 use crate::core::error::{Error, Result};
 use crate::core::paths;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-// Keep legacy manifest examples on this baselined module while leaf config
-// structs live in focused files: .php extensions, cargo checks, phpcs/phpstan steps.
+// Keep broad manifest examples on this baselined module while leaf config
+// structs live in focused files: PHP extensions, cargo checks, phpcs/phpstan steps.
 pub use super::manifest_action_config::{
     ActionConfig, InputConfig, OutputConfig, OutputSchema, RuntimeConfig, SelectOption,
     SettingConfig,
@@ -122,17 +122,6 @@ pub struct TestDriftConfig {
     pub inline_tests: bool,
 }
 
-impl From<&TestMappingConfig> for TestDriftConfig {
-    fn from(config: &TestMappingConfig) -> Self {
-        Self {
-            source_dirs: config.source_dirs.clone(),
-            test_dirs: config.test_dirs.clone(),
-            file_extensions: Vec::new(),
-            inline_tests: config.inline_tests,
-        }
-    }
-}
-
 fn default_test_prefix() -> String {
     "test_".to_string()
 }
@@ -234,7 +223,8 @@ pub struct PlatformCapability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentEnvConfig {
     /// Script path relative to the extension directory.
-    /// Runs from the component root and emits JSON such as {"php":"8.1"}.
+    /// Runs from the component root and emits JSON such as
+    /// {"runtimes":{"php":{"version":"8.1"}}}.
     pub detect_script: String,
 }
 
@@ -307,6 +297,7 @@ pub struct CiLocalContext {
 
 /// What a extension provides: file extensions it handles and capabilities it supports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProvidesConfig {
     /// File extensions this extension can process (e.g., ["php", "inc"]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -317,11 +308,7 @@ pub struct ProvidesConfig {
     /// Component-root marker rules used to suggest this extension for an
     /// unattached component. Core evaluates these generically; extension
     /// manifests own the ecosystem-specific file/glob knowledge.
-    #[serde(
-        default,
-        alias = "discoveryMarkers",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discovery_markers: Vec<DiscoveryMarkerConfig>,
 }
 
@@ -463,8 +450,7 @@ pub struct ExtensionManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autofix_verify: Option<AutofixVerifyConfig>,
     /// Schema version for structured CI annotations emitted under the
-    /// `annotations/` run-dir sidecar. Absent means no declared annotations
-    /// contract; existing consumers keep legacy best-effort behavior.
+    /// `annotations/` run-dir sidecar.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations_schema_version: Option<String>,
 
@@ -567,14 +553,9 @@ impl ExtensionManifest {
 
     /// Convenience accessor for the test drift selection contract.
     ///
-    /// `test.drift` is the primary home. `audit.test_mapping` remains a
-    /// fallback so installed extensions keep their existing drift behavior until
-    /// their manifests are refreshed.
+    /// Only the canonical `test.drift` field declares drift behavior.
     pub fn test_drift(&self) -> Option<TestDriftConfig> {
-        self.test
-            .as_ref()
-            .and_then(|t| t.drift.clone())
-            .or_else(|| self.test_mapping().map(TestDriftConfig::from))
+        self.test.as_ref().and_then(|t| t.drift.clone())
     }
 
     /// Convenience accessor for extension-supplied generic audit detector rules.
@@ -590,9 +571,8 @@ impl ExtensionManifest {
 
     /// Structured sidecars this extension explicitly declares.
     ///
-    /// Missing declarations are intentional backward compatibility: older
-    /// extensions may still emit the well-known files, but core should only
-    /// treat a sidecar as contract-backed when it appears here.
+    /// Missing declarations mean the extension has no structured sidecar
+    /// contract for that output.
     pub fn structured_sidecars(&self) -> Vec<StructuredSidecarDeclaration> {
         let mut sidecars = Vec::new();
 
@@ -856,66 +836,17 @@ impl ConfigEntity for ExtensionManifest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeRequirementsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtimes: HashMap<String, RuntimeRequirementConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeRequirementConfig {
     pub version: String,
-}
-
-impl<'de> Deserialize<'de> for RuntimeRequirementsConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct RuntimeRequirementsWire {
-            #[serde(default)]
-            runtimes: HashMap<String, RuntimeRequirementWire>,
-            #[serde(default)]
-            node: Option<RuntimeRequirementWire>,
-            #[serde(default)]
-            php: Option<RuntimeRequirementWire>,
-        }
-
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum RuntimeRequirementWire {
-            Version(String),
-            Object { version: String },
-        }
-
-        impl RuntimeRequirementWire {
-            fn into_config(self) -> RuntimeRequirementConfig {
-                match self {
-                    RuntimeRequirementWire::Version(version) => {
-                        RuntimeRequirementConfig { version }
-                    }
-                    RuntimeRequirementWire::Object { version } => {
-                        RuntimeRequirementConfig { version }
-                    }
-                }
-            }
-        }
-
-        let wire = RuntimeRequirementsWire::deserialize(deserializer)?;
-        let mut runtimes = HashMap::new();
-        if let Some(requirement) = wire.node {
-            runtimes.insert("node".to_string(), requirement.into_config());
-        }
-        if let Some(requirement) = wire.php {
-            runtimes.insert("php".to_string(), requirement.into_config());
-        }
-        for (id, requirement) in wire.runtimes {
-            runtimes.insert(id, requirement.into_config());
-        }
-
-        Ok(Self { runtimes })
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

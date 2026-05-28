@@ -44,11 +44,11 @@ pub fn workloads_for_extension(
 /// Return the scoped check groups required by all rig-owned workloads for an
 /// extension.
 ///
-/// `None` means at least one relevant workload uses the legacy string shorthand
-/// (or the extension declares no rig-owned workloads), so callers should keep
-/// the historical full `rig check` behaviour. `Some(groups)` means every
-/// workload opted into scoped preflights; an empty vector intentionally means no
-/// rig check-pipeline step is required.
+/// `None` means at least one relevant workload omits `check_groups` (or the
+/// extension declares no rig-owned workloads), so callers should keep the full
+/// `rig check` behaviour. `Some(groups)` means every workload opted into scoped
+/// preflights; an empty vector intentionally means no rig check-pipeline step is
+/// required.
 pub fn check_groups_for_extension_workloads(
     rig_spec: &RigSpec,
     kind: RigWorkloadKind,

@@ -179,8 +179,8 @@ pub struct LintConfig {
     pub extension_script: Option<String>,
 
     /// Schema version for the structured `lint-findings.json` sidecar emitted
-    /// by this extension. Absent means legacy extension behavior: Homeboy may
-    /// still read the sidecar, but the extension has not declared a contract.
+    /// by this extension. Absent means the extension has no declared findings
+    /// sidecar contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub findings_schema_version: Option<String>,
 
@@ -213,11 +213,13 @@ pub struct TestConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_parse: Option<ParseSpec>,
     /// Schema version for the structured `test-results.json` sidecar emitted
-    /// by this extension. Absent preserves legacy stdout/sidecar fallback.
+    /// by this extension. Absent means the extension has no declared results
+    /// sidecar contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub results_schema_version: Option<String>,
     /// Schema version for the structured `test-failures.json` sidecar emitted
-    /// by this extension. Absent means failure analysis remains best-effort.
+    /// by this extension. Absent means the extension has no declared failures
+    /// sidecar contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failures_schema_version: Option<String>,
     /// Source/test selection contract used by changed-test and drift workflows.

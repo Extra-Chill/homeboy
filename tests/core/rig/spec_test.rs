@@ -3,7 +3,7 @@
 
 use crate::core::rig::{
     PipelineStep, RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathSpec, SymlinkSpec,
-    TraceVariantSpec, WorkloadEntry, WorkloadSpec,
+    TraceVariantSpec, WorkloadSpec,
 };
 
 /// Canonical fixture matching the studio-playground-dev shape used as the
@@ -273,9 +273,10 @@ fn test_spec_check_step_parses_groups() {
 
 #[test]
 fn test_check_groups() {
-    let legacy = WorkloadSpec::Path("/tmp/legacy.trace.mjs".to_string());
-    assert_eq!(legacy.path(), "/tmp/legacy.trace.mjs");
-    assert!(legacy.check_groups().is_none());
+    let unscoped: WorkloadSpec = serde_json::from_str(r#"{ "path": "/tmp/unscoped.trace.mjs" }"#)
+        .expect("parse unscoped workload");
+    assert_eq!(unscoped.path(), "/tmp/unscoped.trace.mjs");
+    assert!(unscoped.check_groups().is_none());
 
     let detailed: WorkloadSpec = serde_json::from_str(
         r#"{
@@ -307,7 +308,9 @@ fn test_trace_default_phase_preset() {
     let workload = workload_with_trace_metadata();
 
     assert_eq!(workload.trace_default_phase_preset(), Some("startup"));
-    assert!(WorkloadSpec::Path("/tmp/legacy.trace.mjs".to_string())
+    let workload_without_default: WorkloadSpec =
+        serde_json::from_str(r#"{ "path": "/tmp/no-default.trace.mjs" }"#).expect("parse workload");
+    assert!(workload_without_default
         .trace_default_phase_preset()
         .is_none());
 }
@@ -315,7 +318,7 @@ fn test_trace_default_phase_preset() {
 #[test]
 fn test_trace_variants() {
     let workload = workload_with_trace_metadata();
-    let variants = workload.trace_variants().expect("variants");
+    let variants = workload.trace_variants();
 
     assert_eq!(
         variants.get("fresh-install-mode"),
@@ -326,13 +329,14 @@ fn test_trace_variants() {
             trace_guardrails: Vec::new(),
         })
     );
-    assert!(WorkloadSpec::Path("/tmp/legacy.trace.mjs".to_string())
-        .trace_variants()
-        .is_none());
+    let workload_without_variants: WorkloadSpec =
+        serde_json::from_str(r#"{ "path": "/tmp/no-variants.trace.mjs" }"#)
+            .expect("parse workload");
+    assert!(workload_without_variants.trace_variants().is_empty());
 }
 
 fn workload_with_trace_metadata() -> WorkloadSpec {
-    WorkloadSpec::Detailed(WorkloadEntry {
+    WorkloadSpec {
         path: "/tmp/scoped.trace.mjs".to_string(),
         check_groups: Some(vec!["desktop-app".to_string()]),
         port_range_size: None,
@@ -354,7 +358,7 @@ fn workload_with_trace_metadata() -> WorkloadSpec {
         )]),
         trace_guardrails: Vec::new(),
         trace_probes: Vec::new(),
-    })
+    }
 }
 
 #[test]

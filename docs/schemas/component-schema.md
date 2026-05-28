@@ -87,7 +87,7 @@ Component configuration defines buildable and deployable units stored in `compon
 }
 ```
 
-Runtime IDs are extension-owned strings. `source` is `component` for component config or detector output and `extension:<id>` for extension-provided defaults. Runtime requirements should use `runtimes`.
+Runtime IDs are extension-owned strings. `source` is `component` for component config or detector output and `extension:<id>` for extension-provided defaults. Component extension settings and detector output must use the canonical `runtimes` map with object values containing `version`.
 
 ### Hook Fields
 

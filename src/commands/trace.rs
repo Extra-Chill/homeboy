@@ -1360,11 +1360,9 @@ fn trace_variants_for_args<'a>(
         if trace_workload_scenario_id(workload.path()) != scenario {
             continue;
         }
-        if let Some(workload_variants) = workload.trace_variants() {
-            for (name, variant) in workload_variants {
-                if trace_variant_matches_component(variant, component_id) {
-                    variants.insert(name.clone(), variant);
-                }
+        for (name, variant) in workload.trace_variants() {
+            if trace_variant_matches_component(variant, component_id) {
+                variants.insert(name.clone(), variant);
             }
         }
     }

@@ -72,7 +72,9 @@ clone of the base spec.
   },
   "bench": { "default_component": "studio" },
   "bench_workloads": {
-    "nodejs": ["${package.root}/bench/studio-agent-runtime.bench.mjs"]
+    "nodejs": [
+      { "path": "${package.root}/bench/studio-agent-runtime.bench.mjs" }
+    ]
   },
   "matrix": {
     "axes": {
@@ -102,7 +104,7 @@ clone of the base spec.
               { "op": "add", "path": "/components/studio/extensions/nodejs/studio_bfb_plugin_path", "value": "~/Developer/block-format-bridge@refresh-expanded-h2bc" },
               { "op": "add", "path": "/resources/exclusive/-", "value": "studio-agent-bfb-bench" },
               { "op": "add", "path": "/resources/paths/-", "value": "${components.block-format-bridge.path}" },
-              { "op": "add", "path": "/bench_workloads/nodejs/-", "value": "${package.root}/bench/studio-bfb-write-path.bench.mjs" }
+              { "op": "add", "path": "/bench_workloads/nodejs/-", "value": { "path": "${package.root}/bench/studio-bfb-write-path.bench.mjs" } }
             ]
           }
         }
@@ -416,7 +418,9 @@ The matrix shape can collapse them into one base rig:
   },
   "bench": { "default_component": "studio" },
   "bench_workloads": {
-    "nodejs": ["${package.root}/bench/studio-agent-runtime.bench.mjs"]
+    "nodejs": [
+      { "path": "${package.root}/bench/studio-agent-runtime.bench.mjs" }
+    ]
   },
   "pipeline": {
     "up": [
@@ -455,7 +459,7 @@ The matrix shape can collapse them into one base rig:
             "patch": [
               { "op": "add", "path": "/components/block-format-bridge", "value": { "path": "~/Developer/block-format-bridge@refresh-expanded-h2bc", "branch": "refresh-expanded-h2bc" } },
               { "op": "add", "path": "/components/studio/extensions/nodejs/studio_bfb_plugin_path", "value": "~/Developer/block-format-bridge@refresh-expanded-h2bc" },
-              { "op": "add", "path": "/bench_workloads/nodejs/-", "value": "${package.root}/bench/studio-bfb-write-path.bench.mjs" },
+              { "op": "add", "path": "/bench_workloads/nodejs/-", "value": { "path": "${package.root}/bench/studio-bfb-write-path.bench.mjs" } },
               { "op": "add", "path": "/resources/exclusive/-", "value": "studio-agent-bfb-bench" },
               { "op": "add", "path": "/resources/paths/-", "value": "${components.block-format-bridge.path}" },
               { "op": "add", "path": "/resources/process_patterns/-", "value": "wordpress-server-child.mjs" }

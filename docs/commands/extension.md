@@ -20,7 +20,7 @@ homeboy extension list [-p|--project <project_id>]
 homeboy extension show <extension_id>
 ```
 
-Print detailed manifest, runtime, compatibility, and readiness information for one installed extension.
+Print detailed manifest, runtime, capability, and readiness information for one installed extension.
 
 ### `run`
 
