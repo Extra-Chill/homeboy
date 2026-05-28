@@ -14,6 +14,8 @@ use homeboy::commands::utils::{args, entity_suggest, resource_policy, response a
 use homeboy::core::extension::load_all_extensions;
 
 mod lab_offload_extension_parity;
+#[cfg(test)]
+mod reverse_lab_offload_tests;
 
 struct ExtensionCliCommand {
     tool: String,

@@ -208,7 +208,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
 }
 
 pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
-    let runner = load(runner_id)?;
+    load(runner_id)?;
     let session_path = session_path(runner_id)?;
     let session = read_session(runner_id)?;
     let state = session_state(session.as_ref());
