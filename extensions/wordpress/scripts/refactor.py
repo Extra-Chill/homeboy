@@ -905,6 +905,8 @@ def refactor_source(data):
         args.extend(['--provider-plugin-path', plugin_path])
     for secret_env in split_setting(settings.get('wp_codebox_secret_env')):
         args.extend(['--secret-env', secret_env])
+    if settings.get('wp_codebox_concurrency'):
+        args.extend(['--concurrency', str(settings['wp_codebox_concurrency'])])
 
     if data.get('write'):
         args.append('--execute')

@@ -8,7 +8,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 /**
  * Internal dependencies
@@ -22,6 +22,7 @@ const {
 const PLAN_SCHEMA = 'homeboy/audit-wp-codebox-fanout/v1';
 const TASK_SCHEMA = 'homeboy/wp-codebox-task-request/v1';
 const RUN_SCHEMA = 'homeboy/audit-wp-codebox-run/v1';
+const DEFAULT_CONCURRENCY = 3;
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -430,6 +431,83 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
   };
 }
 
+function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
+  const command = options.wp_codebox_command || 'wp-codebox';
+  const args = options.wp_codebox_args || [];
+  const requestJson = `${JSON.stringify(taskRequest, null, 2)}\n`;
+  const startedAt = new Date().toISOString();
+
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd || process.cwd(),
+      env: {
+        ...process.env,
+        ...(options.env || {}),
+        HOMEBOY_WP_CODEBOX_TASK_REQUEST: requestJson,
+        HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID: taskRequest.sandbox_session_id,
+        HOMEBOY_WP_CODEBOX_GROUP_KEY: taskRequest.group_key,
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let spawnError = null;
+    const maxBuffer = options.max_buffer || 1024 * 1024 * 10;
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.length > maxBuffer) {
+        child.kill();
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      if (stderr.length > maxBuffer) {
+        child.kill();
+      }
+    });
+    child.on('error', (error) => {
+      spawnError = error;
+    });
+    child.on('close', (code, signal) => {
+      const finishedAt = new Date().toISOString();
+      const parsed = tryParseJson(stdout);
+      const artifact = parsed && typeof parsed === 'object' && parsed.artifacts ? parsed.artifacts : null;
+      const taskFailure = parsed ? wpCodeboxTaskFailure(parsed) : null;
+      const errorMessage = spawnError ? spawnError.message : (taskFailure || '');
+      const success = code === 0 && !spawnError && null === taskFailure;
+
+      resolve({
+        schema: RUN_SCHEMA,
+        sandbox_session_id: taskRequest.sandbox_session_id,
+        group_key: taskRequest.group_key,
+        finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
+        command: {
+          bin: command,
+          args,
+          exit_code: code,
+          signal: signal || null,
+          error: errorMessage,
+        },
+        status: success ? 'completed' : 'failed',
+        started_at: startedAt,
+        finished_at: finishedAt,
+        stdout,
+        stderr,
+        result: parsed,
+        artifact: artifact ? {
+          id: artifact.id || '',
+          directory: artifact.directory || artifact.path || '',
+          preview_url: artifact.preview?.url || artifact.preview_url || '',
+        } : null,
+      });
+    });
+    child.stdin.end(requestJson);
+  });
+}
+
 function wpCodeboxTaskFailure(parsed) {
   if (!parsed || typeof parsed !== 'object') {
     return null;
@@ -461,10 +539,12 @@ function wpCodeboxErrorMessage(parsed) {
   return '';
 }
 
-function executeAuditWpCodeboxFanout(input) {
+async function executeAuditWpCodeboxFanout(input) {
   const plan = input.plan || createAuditWpCodeboxFanoutPlan(input);
   const onProgress = typeof input.on_progress === 'function' ? input.on_progress : () => {};
   const records = [];
+  const running = new Map();
+  const concurrency = normalizeConcurrency(input.concurrency);
   const baseRun = {
     schema: 'homeboy/audit-wp-codebox-execution/v1',
     plan_schema: plan.schema,
@@ -484,29 +564,46 @@ function executeAuditWpCodeboxFanout(input) {
     current_group: null,
   });
 
-  for (const taskRequest of plan.task_requests) {
+  const writeIncompleteRun = () => {
     writeRun({
       ...baseRun,
       records,
       status: 'incomplete',
-      current_group: {
-        sandbox_session_id: taskRequest.sandbox_session_id,
-        group_key: taskRequest.group_key,
-        finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
-      },
+      current_group: firstRunningGroup(running),
+      current_groups: runningGroups(running),
     });
+  };
+
+  let nextIndex = 0;
+  const startNext = () => {
+    if (nextIndex >= plan.task_requests.length) {
+      return false;
+    }
+    const taskRequest = plan.task_requests[nextIndex];
+    nextIndex += 1;
+
+    running.set(taskRequest.sandbox_session_id, runningGroup(taskRequest));
+    writeIncompleteRun();
 
     onProgress(progressEvent('started', taskRequest, plan));
-    const record = executeWpCodeboxTaskRequest(taskRequest, input);
-    records.push(record);
-    onProgress(progressEvent(record.status, taskRequest, plan, record));
-
-    writeRun({
-      ...baseRun,
-      records,
-      status: 'incomplete',
-      current_group: null,
+    const promise = executeWpCodeboxTaskRequestAsync(taskRequest, input).then((record) => {
+      running.delete(taskRequest.sandbox_session_id);
+      records.push(record);
+      records.sort((left, right) => taskOrder(plan, left) - taskOrder(plan, right));
+      onProgress(progressEvent(record.status, taskRequest, plan, record));
+      writeIncompleteRun();
+      startNext();
     });
+    running.get(taskRequest.sandbox_session_id).promise = promise;
+    return true;
+  };
+
+  while (running.size < concurrency && startNext()) {
+    // Start the first batch.
+  }
+
+  while (running.size > 0) {
+    await Promise.race(Array.from(running.values()).map((group) => group.promise));
   }
 
   const run = {
@@ -528,15 +625,52 @@ function executeAuditWpCodeboxFanoutFromFiles(options) {
     wp_codebox_args: options.wpCodeboxArgs || [],
     cwd: options.cwd,
     env: options.env,
+    concurrency: options.concurrency,
     runsOutputPath: options.runsOutputPath,
     on_progress: options.onProgress,
   });
+}
+
+function normalizeConcurrency(value) {
+  const parsed = Number.parseInt(value || DEFAULT_CONCURRENCY, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return DEFAULT_CONCURRENCY;
+  }
+  return Math.min(parsed, 16);
+}
+
+function runningGroup(taskRequest) {
+  return {
+    sandbox_session_id: taskRequest.sandbox_session_id,
+    group_key: taskRequest.group_key,
+    finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
+  };
+}
+
+function firstRunningGroup(running) {
+  const group = runningGroups(running)[0];
+  if (!group) {
+    return null;
+  }
+  return group;
+}
+
+function runningGroups(running) {
+  return Array.from(running.values()).map((group) => {
+    const { promise, ...serializable } = group;
+    return serializable;
+  });
+}
+
+function taskOrder(plan, record) {
+  return plan.task_requests.findIndex((taskRequest) => taskRequest.sandbox_session_id === record.sandbox_session_id);
 }
 
 module.exports = {
   PLAN_SCHEMA,
   RUN_SCHEMA,
   TASK_SCHEMA,
+  DEFAULT_CONCURRENCY,
   auditFindings,
   createAuditWpCodeboxFanoutPlan,
   createAuditWpCodeboxFanoutPlanFromFiles,

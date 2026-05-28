@@ -157,6 +157,7 @@ const auditReportPath = path.join(__dirname, 'fixtures', 'homeboy-audit-wp-codeb
 const report = readJson(auditReportPath);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-audit-wp-codebox-fanout-'));
 
+async function main() {
 try {
   const initialPlan = createAuditWpCodeboxFanoutPlan({
     report,
@@ -317,7 +318,7 @@ try {
   assert.equal(cliPlan.task_requests[0].provider, 'codex');
 
   const fixtureCommand = createWpCodeboxFixtureCommand(root);
-  const execution = executeAuditWpCodeboxFanout({
+  const execution = await executeAuditWpCodeboxFanout({
     report,
     issue_url: 'https://github.com/Extra-Chill/homeboy-extensions/issues/773',
     provider: 'codex',
@@ -339,7 +340,7 @@ try {
   assert.equal(failedRecord.command.exit_code, 3);
   assert.match(failedRecord.stderr, /fixture docs-reference failure/);
 
-  const nestedErrorExecution = executeAuditWpCodeboxFanout({
+  const nestedErrorExecution = await executeAuditWpCodeboxFanout({
     report,
     wp_codebox_command: process.execPath,
     wp_codebox_args: [fixtureCommand],
@@ -352,11 +353,12 @@ try {
   assert.match(nestedFailedRecord.command.error, /Fixture nested WP error/);
 
   const runsOutputPath = path.join(root, 'fanout-run.json');
-  const fileExecution = executeAuditWpCodeboxFanoutFromFiles({
+  const fileExecution = await executeAuditWpCodeboxFanoutFromFiles({
     auditReportPath,
     issueUrl: 'https://github.com/Extra-Chill/homeboy-extensions/issues/773',
     wpCodeboxCommand: process.execPath,
     wpCodeboxArgs: [fixtureCommand],
+    concurrency: 1,
     runsOutputPath,
     env: {
       FIXTURE_EXPECT_INCREMENTAL_RUN: runsOutputPath,
@@ -394,3 +396,9 @@ try {
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
+}
+
+main().catch((error) => {
+  console.error(error && error.stack ? error.stack : String(error));
+  process.exit(1);
+});

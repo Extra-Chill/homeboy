@@ -31,7 +31,7 @@ function hasFlag(name) {
 }
 
 function usage() {
-  console.error('Usage: homeboy-audit-wp-codebox-fanout.cjs --audit-report <report.json> [--execute --wp-codebox-command <bin> --wp-codebox-arg <arg> --runs-output <run.json>] [--artifact-map <map.json>] [--output <plan.json>] [--issue-url <url>]');
+  console.error('Usage: homeboy-audit-wp-codebox-fanout.cjs --audit-report <report.json> [--execute --concurrency <n> --wp-codebox-command <bin> --wp-codebox-arg <arg> --runs-output <run.json>] [--artifact-map <map.json>] [--output <plan.json>] [--issue-url <url>]');
   process.exit(1);
 }
 
@@ -70,12 +70,20 @@ const options = {
   reviewedAt: argValue('--reviewed-at') || undefined,
 };
 
-const result = hasFlag('--execute') ? executeAuditWpCodeboxFanoutFromFiles({
-  ...options,
-  wpCodeboxCommand: argValue('--wp-codebox-command') || 'wp-codebox',
-  wpCodeboxArgs: argValues('--wp-codebox-arg'),
-  runsOutputPath: argValue('--runs-output') || '',
-  onProgress: writeProgress,
-}) : createAuditWpCodeboxFanoutPlanFromFiles(options);
+async function main() {
+  const result = hasFlag('--execute') ? await executeAuditWpCodeboxFanoutFromFiles({
+    ...options,
+    wpCodeboxCommand: argValue('--wp-codebox-command') || 'wp-codebox',
+    wpCodeboxArgs: argValues('--wp-codebox-arg'),
+    runsOutputPath: argValue('--runs-output') || '',
+    concurrency: argValue('--concurrency') || undefined,
+    onProgress: writeProgress,
+  }) : createAuditWpCodeboxFanoutPlanFromFiles(options);
 
-console.log(JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(result, null, 2));
+}
+
+main().catch((error) => {
+  console.error(error && error.stack ? error.stack : String(error));
+  process.exit(1);
+});
