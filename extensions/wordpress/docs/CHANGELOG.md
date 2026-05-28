@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.26] - 2026-05-28
+
+### Fixed
+- pass WP Codebox max turns setting
+
 ## [2.102.25] - 2026-05-28
 
 ### Fixed
