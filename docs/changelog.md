@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.201.3] - 2026-05-28
+
+### Fixed
+- route reverse runner exec through broker
+- add reverse runner broker routes
+
 ## [0.201.2] - 2026-05-28
 
 ### Fixed
