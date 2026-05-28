@@ -6,6 +6,7 @@ EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORKLOAD_PATH="$SCRIPT_DIR/datamachine-agent-workload.php"
 REPLAY_BUNDLE_BUILDER="$SCRIPT_DIR/build-replay-bundle.js"
 WPGYM_EVAL_ROW_PROJECTOR="$SCRIPT_DIR/project-wpgym-eval-row.js"
+WPGYM_EVAL_ROW_VALIDATOR="$SCRIPT_DIR/validate-wpgym-eval-row.js"
 
 homeboy_datamachine_agent_bundle_clone_url() {
     local repo_url="${1:-}"
@@ -788,6 +789,17 @@ if [ -f "$WPGYM_EVAL_ROW_PROJECTOR" ]; then
         wpgym_projector_args+=(--benchmark-mode)
     fi
     node "$WPGYM_EVAL_ROW_PROJECTOR" "${wpgym_projector_args[@]}" >/dev/null
+
+    if [ "$(jq -r 'if (.wp_gym_eval.benchmark_mode // false) then "1" else "0" end' "$CONFIG_PATH")" = "1" ]; then
+        if [ ! -f "$WPGYM_EVAL_ROW_VALIDATOR" ]; then
+            echo "ERROR: wp-gym eval row validator missing at $WPGYM_EVAL_ROW_VALIDATOR" >&2
+            exit 1
+        fi
+        node "$WPGYM_EVAL_ROW_VALIDATOR" \
+            --results "$RESULTS_FILE" \
+            --scenario "$WORKLOAD_ID" \
+            --config "$CONFIG_PATH" >/dev/null
+    fi
 fi
 
 if jq -e "$scenario | .metadata.error?" "$RESULTS_FILE" >/dev/null; then

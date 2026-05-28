@@ -167,6 +167,7 @@ function projectionReferences(scenario) {
 		transcript: firstReference(scenario, 'transcript_artifact', 'transcript_json'),
 		verifier: firstReference(scenario, 'artifact_verifier_result'),
 		policy: firstReference(scenario, 'workspace_policy_result'),
+		grader_result: firstReference(scenario, 'grader_result'),
 		workflow: firstReference(scenario, 'workflow_run'),
 		pull_request: firstReference(scenario, 'pull_request'),
 		homeboy_result: firstReference(scenario, 'homeboy_result_json'),

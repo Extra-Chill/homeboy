@@ -18,6 +18,7 @@
     "test:page-profiler": "node tests/page-profiler-smoke.js",
     "test:datamachine-agent-wp-codebox-runner": "bash scripts/agent/datamachine-agent-wp-codebox-runner-smoke.sh",
     "test:project-wpgym-eval-row": "bash scripts/agent/project-wpgym-eval-row-smoke.sh",
+    "test:validate-wpgym-eval-row": "bash scripts/agent/validate-wpgym-eval-row-smoke.sh",
     "test:agent-terminal-actions": "node tests/agent-terminal-actions-smoke.js",
     "test:terminal-action-server": "node tests/terminal-action-server-smoke.js",
     "test:playground-readiness": "node tests/playground-readiness-smoke.js",

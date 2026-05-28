@@ -106,6 +106,7 @@ function resolveReviewUrl(config, scenario) {
 function transcriptReferences(config, scenario) {
 	const artifacts = scenario.artifacts && typeof scenario.artifacts === 'object' ? scenario.artifacts : {};
 	const metadata = scenario.metadata && typeof scenario.metadata === 'object' ? scenario.metadata : {};
+	const transcriptArtifacts = metadata.transcript_artifacts && typeof metadata.transcript_artifacts === 'object' ? metadata.transcript_artifacts : {};
 	const references = [];
 
 	for (const [name, artifact] of Object.entries(artifacts)) {
@@ -121,6 +122,12 @@ function transcriptReferences(config, scenario) {
 		if (metadata[key]) {
 			references.push({ name: key, path: metadata[key] });
 		}
+	}
+	if (transcriptArtifacts.json) {
+		references.push({ name: 'transcript_json', path: transcriptArtifacts.json });
+	}
+	if (transcriptArtifacts.summary) {
+		references.push({ name: 'transcript_summary', path: transcriptArtifacts.summary });
 	}
 
 	if (config.transcript_dir) {
@@ -141,10 +148,13 @@ function artifactReferences(scenario, config, bundlePath, episodeJsonlPath = '')
 	}
 
 	const metadata = scenario.metadata && typeof scenario.metadata === 'object' ? scenario.metadata : {};
+	const transcriptArtifacts = metadata.transcript_artifacts && typeof metadata.transcript_artifacts === 'object' ? metadata.transcript_artifacts : {};
 	for (const [name, referencePath] of Object.entries({
 		transcript_json: metadata.transcript_json,
 		transcript_summary: metadata.transcript_summary,
 		action_log: metadata.action_log,
+		transcript_artifact_json: transcriptArtifacts.json,
+		transcript_artifact_summary: transcriptArtifacts.summary,
 	})) {
 		if (referencePath) {
 			references.push({ name, path: referencePath, kind: 'metadata', required: /transcript|action/.test(name) });
