@@ -5,9 +5,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use homeboy::core::runner::{
-    self, Runner, RunnerConnectReport, RunnerDisconnectReport, RunnerExecOutput, RunnerKind,
-    RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOutput,
+    self, ReverseRunnerConnectOptions, Runner, RunnerConnectReport, RunnerDisconnectReport,
+    RunnerExecOutput, RunnerKind, RunnerStatusReport, RunnerWorkspaceApplyOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,
 };
 use homeboy::core::server::RunnerSettings;
 use homeboy::core::{EntityCrudOutput, MergeOutput};
@@ -20,6 +20,8 @@ pub mod doctor;
 pub struct RunnerExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<RunnerConnectionOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<RunnerStatusReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,13 +158,25 @@ enum RunnerCommand {
     },
     /// Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
     Connect {
-        /// Runner ID
+        /// Runner ID for direct SSH connect, or controller/broker ID when --reverse is set
         id: String,
+
+        /// Record a runner-initiated reverse tunnel session substrate
+        #[arg(long)]
+        reverse: bool,
+
+        /// Runner ID initiating the reverse connection
+        #[arg(long = "reverse-runner")]
+        reverse_runner: Option<String>,
+
+        /// Broker/controller URL observed by the reverse runner
+        #[arg(long)]
+        broker_url: Option<String>,
     },
     /// Show persisted runner tunnel status
     Status {
-        /// Runner ID
-        id: String,
+        /// Runner ID. Omit to show all runner session states.
+        id: Option<String>,
     },
     /// Close a runner tunnel and remove its persisted session state
     Disconnect {
@@ -318,8 +332,13 @@ pub fn run(
                 extensions: required_extensions,
             },
         )),
-        RunnerCommand::Connect { id } => map_registry(connect(&id)),
-        RunnerCommand::Status { id } => map_registry(status(&id)),
+        RunnerCommand::Connect {
+            id,
+            reverse,
+            reverse_runner,
+            broker_url,
+        } => map_registry(connect(&id, reverse, reverse_runner, broker_url)),
+        RunnerCommand::Status { id } => map_registry(status(id.as_deref())),
         RunnerCommand::Disconnect { id } => map_registry(disconnect(&id)),
         RunnerCommand::Exec {
             id,
@@ -445,6 +464,10 @@ fn list() -> CmdResult<RunnerOutput> {
         RunnerOutput {
             command: "runner.list".to_string(),
             entities: runner::list()?,
+            extra: RunnerExtra {
+                sessions: runner::statuses()?,
+                ..Default::default()
+            },
             ..Default::default()
         },
         0,
@@ -554,14 +577,36 @@ fn remove(id: &str) -> CmdResult<RunnerOutput> {
     ))
 }
 
-fn connect(id: &str) -> CmdResult<RunnerOutput> {
-    let (report, exit_code) = runner::connect(id)?;
+fn connect(
+    id: &str,
+    reverse: bool,
+    runner_id: Option<String>,
+    broker_url: Option<String>,
+) -> CmdResult<RunnerOutput> {
+    let (report, exit_code) = if reverse {
+        let runner_id = runner_id.ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "runner",
+                "Provide --reverse-runner <runner-id> when using --reverse",
+                None,
+                None,
+            )
+        })?;
+        runner::connect_reverse(ReverseRunnerConnectOptions {
+            controller_id: id.to_string(),
+            runner_id,
+            broker_url,
+        })?
+    } else {
+        runner::connect(id)?
+    };
     Ok((
         RunnerOutput {
             command: "runner.connect".to_string(),
-            id: Some(id.to_string()),
+            id: Some(report.runner_id.clone()),
             extra: RunnerExtra {
                 connection: Some(RunnerConnectionOutput::Connect(report)),
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -569,13 +614,28 @@ fn connect(id: &str) -> CmdResult<RunnerOutput> {
     ))
 }
 
-fn status(id: &str) -> CmdResult<RunnerOutput> {
+fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
+    if let Some(id) = id {
+        return Ok((
+            RunnerOutput {
+                command: "runner.status".to_string(),
+                id: Some(id.to_string()),
+                extra: RunnerExtra {
+                    connection: Some(RunnerConnectionOutput::Status(runner::status(id)?)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        ));
+    }
+
     Ok((
         RunnerOutput {
             command: "runner.status".to_string(),
-            id: Some(id.to_string()),
             extra: RunnerExtra {
-                connection: Some(RunnerConnectionOutput::Status(runner::status(id)?)),
+                sessions: runner::statuses()?,
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -590,6 +650,7 @@ fn disconnect(id: &str) -> CmdResult<RunnerOutput> {
             id: Some(id.to_string()),
             extra: RunnerExtra {
                 connection: Some(RunnerConnectionOutput::Disconnect(runner::disconnect(id)?)),
+                ..Default::default()
             },
             ..Default::default()
         },

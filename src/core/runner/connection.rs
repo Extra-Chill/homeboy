@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::core::engine::shell;
@@ -12,69 +12,11 @@ use crate::core::error::{Error, Result};
 use crate::core::paths;
 use crate::core::server::{self, Server, ServerAuthMode, SshClient};
 
+use super::session::{
+    ReverseRunnerConnectOptions, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStatusReport, RunnerTunnelMode,
+};
 use super::{load, Runner, RunnerKind};
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerSession {
-    pub runner_id: String,
-    pub server_id: Option<String>,
-    pub remote_daemon_address: String,
-    pub local_port: u16,
-    pub local_url: String,
-    pub tunnel_pid: Option<u32>,
-    pub remote_daemon_pid: Option<u32>,
-    pub homeboy_version: String,
-    pub connected_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerFailureKind {
-    SshFailure,
-    MissingRemoteHomeboy,
-    DaemonStartupFailure,
-    TunnelFailure,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RunnerConnectReport {
-    pub runner_id: String,
-    pub connected: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub local_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote_daemon_address: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tunnel_pid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote_daemon_pid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub homeboy_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure_kind: Option<RunnerFailureKind>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure_message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RunnerStatusReport {
-    pub runner_id: String,
-    pub connected: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session: Option<RunnerSession>,
-    pub session_path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RunnerDisconnectReport {
-    pub runner_id: String,
-    pub disconnected: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session: Option<RunnerSession>,
-    pub session_path: String,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 struct CliEnvelope {
@@ -93,7 +35,7 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
             runner_id,
             session_path,
             RunnerFailureKind::SshFailure,
-            "only SSH runners are supported by runner connect in this wave".to_string(),
+            "only SSH runners are supported by direct runner connect in this wave".to_string(),
         ));
     };
 
@@ -169,10 +111,14 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
 
     let session = RunnerSession {
         runner_id: runner.id.clone(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: RunnerSessionRole::Controller,
         server_id: Some(server_id),
-        remote_daemon_address: daemon.address,
-        local_port,
-        local_url: format!("http://127.0.0.1:{}", local_port),
+        controller_id: None,
+        broker_url: None,
+        remote_daemon_address: Some(daemon.address),
+        local_port: Some(local_port),
+        local_url: Some(format!("http://127.0.0.1:{}", local_port)),
         tunnel_pid: tunnel.pid,
         remote_daemon_pid: daemon.pid,
         homeboy_version: version,
@@ -183,12 +129,77 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     Ok((
         RunnerConnectReport {
             runner_id: runner.id,
+            mode: Some(session.mode.clone()),
+            role: Some(session.role.clone()),
             connected: true,
-            local_url: Some(session.local_url.clone()),
-            remote_daemon_address: Some(session.remote_daemon_address.clone()),
+            recorded: None,
+            local_url: session.local_url.clone(),
+            broker_url: None,
+            controller_id: None,
+            remote_daemon_address: session.remote_daemon_address.clone(),
             tunnel_pid: session.tunnel_pid,
             remote_daemon_pid: session.remote_daemon_pid,
             homeboy_version: Some(session.homeboy_version.clone()),
+            session_path: Some(session_path.display().to_string()),
+            failure_kind: None,
+            failure_message: None,
+        },
+        0,
+    ))
+}
+
+pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerConnectReport, i32)> {
+    if options.runner_id.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "Reverse runner connect requires --reverse-runner <runner-id>",
+            None,
+            None,
+        ));
+    }
+    if options.controller_id.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "controller",
+            "Reverse runner connect requires a controller or broker ID",
+            None,
+            None,
+        ));
+    }
+
+    let runner = load(&options.runner_id)?;
+    let session_path = session_path(&runner.id)?;
+    let homeboy_version = env!("CARGO_PKG_VERSION").to_string();
+    let session = RunnerSession {
+        runner_id: runner.id.clone(),
+        mode: RunnerTunnelMode::Reverse,
+        role: RunnerSessionRole::Runner,
+        server_id: runner.server_id.clone(),
+        controller_id: Some(options.controller_id.clone()),
+        broker_url: options.broker_url.clone(),
+        remote_daemon_address: None,
+        local_port: None,
+        local_url: None,
+        tunnel_pid: None,
+        remote_daemon_pid: None,
+        homeboy_version,
+        connected_at: Utc::now().to_rfc3339(),
+    };
+    write_session(&session)?;
+
+    Ok((
+        RunnerConnectReport {
+            runner_id: runner.id,
+            mode: Some(RunnerTunnelMode::Reverse),
+            role: Some(RunnerSessionRole::Runner),
+            connected: false,
+            recorded: Some(true),
+            local_url: None,
+            broker_url: options.broker_url,
+            controller_id: Some(options.controller_id),
+            remote_daemon_address: None,
+            tunnel_pid: None,
+            remote_daemon_pid: None,
+            homeboy_version: Some(session.homeboy_version),
             session_path: Some(session_path.display().to_string()),
             failure_kind: None,
             failure_message: None,
@@ -201,13 +212,23 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     load(runner_id)?;
     let session_path = session_path(runner_id)?;
     let session = read_session(runner_id)?;
-    let connected = session.as_ref().is_some_and(session_is_live);
+    let state = session_state(session.as_ref());
+    let connected = state == RunnerSessionState::Connected;
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected,
+        state,
         session,
         session_path: session_path.display().to_string(),
     })
+}
+
+pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
+    let mut reports = Vec::new();
+    for runner in super::list()? {
+        reports.push(status(&runner.id)?);
+    }
+    Ok(reports)
 }
 
 pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
@@ -493,12 +514,26 @@ fn wait_for_tcp(port: u16, timeout: Duration) -> bool {
 }
 
 fn session_is_live(session: &RunnerSession) -> bool {
+    if session.mode != RunnerTunnelMode::DirectSsh {
+        return false;
+    }
     if let Some(pid) = session.tunnel_pid {
         if !crate::core::process::pid_is_running(pid) {
             return false;
         }
     }
-    wait_for_tcp(session.local_port, Duration::from_millis(200))
+    session
+        .local_port
+        .is_some_and(|port| wait_for_tcp(port, Duration::from_millis(200)))
+}
+
+fn session_state(session: Option<&RunnerSession>) -> RunnerSessionState {
+    match session {
+        Some(session) if session.mode == RunnerTunnelMode::Reverse => RunnerSessionState::Recorded,
+        Some(session) if session_is_live(session) => RunnerSessionState::Connected,
+        Some(_) => RunnerSessionState::Disconnected,
+        None => RunnerSessionState::Disconnected,
+    }
 }
 
 fn session_path(runner_id: &str) -> Result<PathBuf> {
@@ -548,8 +583,13 @@ fn failed_connect(
     (
         RunnerConnectReport {
             runner_id: runner_id.to_string(),
+            mode: None,
+            role: None,
             connected: false,
+            recorded: None,
             local_url: None,
+            broker_url: None,
+            controller_id: None,
             remote_daemon_address: None,
             tunnel_pid: None,
             remote_daemon_pid: None,
@@ -667,10 +707,14 @@ mod tests {
                 .expect("create runner");
             let session = RunnerSession {
                 runner_id: "lab-local".to_string(),
+                mode: RunnerTunnelMode::DirectSsh,
+                role: RunnerSessionRole::Controller,
                 server_id: None,
-                remote_daemon_address: "127.0.0.1:49152".to_string(),
-                local_port: 49153,
-                local_url: "http://127.0.0.1:49153".to_string(),
+                controller_id: None,
+                broker_url: None,
+                remote_daemon_address: Some("127.0.0.1:49152".to_string()),
+                local_port: Some(49153),
+                local_url: Some("http://127.0.0.1:49153".to_string()),
                 tunnel_pid: None,
                 remote_daemon_pid: None,
                 homeboy_version: "test".to_string(),
@@ -685,6 +729,65 @@ mod tests {
             assert!(report.disconnected);
             assert_eq!(report.session.expect("session").runner_id, "lab-local");
             assert!(!path.exists());
+        });
+    }
+
+    #[test]
+    fn records_reverse_runner_session_without_marking_transport_live() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/home/chubes/Developer"}"#,
+                false,
+            )
+            .expect("create runner");
+
+            let (report, exit_code) = connect_reverse(ReverseRunnerConnectOptions {
+                controller_id: "extra-chill".to_string(),
+                runner_id: "homeboy-lab".to_string(),
+                broker_url: Some("https://extrachill.com/homeboy/tunnel".to_string()),
+            })
+            .expect("record reverse session");
+
+            assert_eq!(exit_code, 0);
+            assert!(!report.connected);
+            assert_eq!(report.recorded, Some(true));
+            assert_eq!(report.mode, Some(RunnerTunnelMode::Reverse));
+            assert_eq!(report.role, Some(RunnerSessionRole::Runner));
+            assert_eq!(report.controller_id.as_deref(), Some("extra-chill"));
+
+            let status = status("homeboy-lab").expect("status");
+            assert!(!status.connected);
+            assert_eq!(status.state, RunnerSessionState::Recorded);
+            let session = status.session.expect("session");
+            assert_eq!(session.mode, RunnerTunnelMode::Reverse);
+            assert_eq!(session.role, RunnerSessionRole::Runner);
+            assert_eq!(session.controller_id.as_deref(), Some("extra-chill"));
+            assert_eq!(
+                session.broker_url.as_deref(),
+                Some("https://extrachill.com/homeboy/tunnel")
+            );
+            assert_eq!(session.local_url, None);
+            assert_eq!(session.local_port, None);
+        });
+    }
+
+    #[test]
+    fn status_lists_reverse_session_records() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false)
+                .expect("create runner");
+            connect_reverse(ReverseRunnerConnectOptions {
+                controller_id: "extra-chill".to_string(),
+                runner_id: "homeboy-lab".to_string(),
+                broker_url: None,
+            })
+            .expect("record reverse session");
+
+            let reports = statuses().expect("statuses");
+
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0].runner_id, "homeboy-lab");
+            assert_eq!(reports[0].state, RunnerSessionState::Recorded);
         });
     }
 }
