@@ -17,6 +17,13 @@ pub fn preflight(
     remote_cwd: &str,
     _capability_plan_preflight: LabOffloadCapabilityPlanPreflight,
 ) -> homeboy::core::Result<()> {
+    if !command
+        .lab_contract()
+        .is_some_and(|contract| contract.requires_extension_parity)
+    {
+        return Ok(());
+    }
+
     let extension_ids = parity_extension_ids(command)?;
     for extension_id in extension_ids {
         let (output, exit_code) = homeboy::core::runner::exec(
