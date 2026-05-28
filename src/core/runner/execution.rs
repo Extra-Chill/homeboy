@@ -11,6 +11,7 @@ use crate::core::error::{Error, Result};
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 
+use super::broker_http;
 use super::capabilities::{runner_capability_snapshot, validate_runner_capability_preflight};
 use super::evidence::mirror_daemon_evidence;
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
@@ -184,7 +185,7 @@ fn exec_via_reverse_broker(
             "transport": "reverse_broker",
         })),
     };
-    let data = daemon_post(
+    let data = broker_http::post_json(
         &client,
         broker_url,
         "/runner/jobs",
@@ -407,33 +408,6 @@ fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result<Value> {
         Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
     })?;
     if !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "daemon request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
-    }
-    envelope
-        .data
-        .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
-}
-
-fn daemon_post(
-    client: &Client,
-    local_url: &str,
-    path: &str,
-    body: Value,
-    action: &str,
-) -> Result<Value> {
-    let response = client
-        .post(format!("{}{}", local_url.trim_end_matches('/'), path))
-        .json(&body)
-        .send()
-        .map_err(|err| Error::internal_unexpected(format!("{action}: {err}")))?;
-    let status_code = response.status().as_u16();
-    let envelope: DaemonEnvelope = response.json().map_err(|err| {
-        Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
-    })?;
-    if status_code >= 400 || !envelope.success {
         return Err(Error::internal_unexpected(format!(
             "daemon request failed: {}",
             envelope.error.unwrap_or(Value::Null)

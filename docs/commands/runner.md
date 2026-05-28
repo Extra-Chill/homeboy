@@ -137,6 +137,23 @@ The broker exposes `POST /runner/jobs`, `POST /runner/jobs/claim`,
 controllers can queue work and reverse runners can claim, stream progress, and
 return results without inbound access to the lab machine.
 
+### `work`
+
+```sh
+homeboy runner work <runner-id> --broker-url <url>
+homeboy runner work <runner-id> --broker-url <url> --project extrachill --lease-ms 30000
+```
+
+Claims one brokered reverse-runner job for the runner, executes it on the runner
+machine under the runner's local policy, streams a progress event, and finishes
+the broker job with stdout, stderr, and exit code. This is the runner-side half
+of reverse `runner exec`; it uses outbound HTTP from the lab to the controller
+broker and does not require inbound SSH or a public listening port on the lab.
+
+The command exits `0` when no job is available, with `claimed: false` in the JSON
+payload. When a job is claimed, the process exit code matches the executed
+command's exit code.
+
 ### `status`
 
 ```sh

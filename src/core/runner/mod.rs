@@ -10,6 +10,7 @@ use crate::core::output::{BatchResult, CreateOutput, CreateResult, MergeOutput, 
 use crate::core::server::{self, RunnerPolicy, RunnerSettings, ServerRunner};
 
 mod apply;
+mod broker_http;
 mod capabilities;
 mod connection;
 mod evidence;
@@ -18,6 +19,7 @@ mod lab;
 mod offload_changed_since;
 mod offload_metadata;
 mod session;
+mod worker;
 mod workspace;
 
 pub use apply::{
@@ -49,6 +51,7 @@ pub use session::{
     ReverseRunnerConnectOptions, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
     RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStatusReport, RunnerTunnelMode,
 };
+pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub use workspace::{
     sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
