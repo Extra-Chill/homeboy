@@ -4,12 +4,14 @@ mod common;
 mod compare;
 #[cfg(test)]
 mod corpus_tests;
+mod disk;
 mod distribution;
 mod drift;
 mod evidence;
 mod findings;
 mod gh_actions;
 mod latest;
+mod loop_sync;
 mod query;
 mod reconcile;
 mod remote;
@@ -40,6 +42,7 @@ use evidence::{evidence, RunsEvidenceOutput};
 use findings::{RunsFindingOutput, RunsFindingsOutput};
 use gh_actions::GhActionsImportOutput;
 use latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
+use loop_sync::{loop_sync, RunsLoopSyncArgs, RunsLoopSyncOutput};
 use query::{runs_query, RunsQueryArgs, RunsQueryOutput};
 use reconcile::{reconcile_runs, RunsReconcileArgs, RunsReconcileOutput};
 
@@ -96,6 +99,8 @@ enum RunsCommand {
     Query(RunsQueryArgs),
     /// Window-based distribution drift over a JSONPath metric.
     Drift(RunsDriftArgs),
+    /// Sync continuous-loop archive directories into observation artifacts.
+    LoopSync(RunsLoopSyncArgs),
 }
 
 #[derive(Args, Clone, Default)]
@@ -144,6 +149,7 @@ pub enum RunsOutput {
     ImportFromGhActions(GhActionsImportOutput),
     Query(RunsQueryOutput),
     Drift(RunsDriftOutput),
+    LoopSync(RunsLoopSyncOutput),
 }
 
 #[derive(Serialize)]
@@ -321,6 +327,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Import(args) => import_runs(args),
         RunsCommand::Query(args) => runs_query(args),
         RunsCommand::Drift(args) => runs_drift(args),
+        RunsCommand::LoopSync(args) => loop_sync(args),
     }
 }
 
