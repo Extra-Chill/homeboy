@@ -162,6 +162,7 @@ knobs to `run-datamachine-agent.sh`:
 - GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.
+- Eval projection: `wp_gym_benchmark_mode` turns missing wp-gym replay/evidence references into errors.
 - Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `enable_terminal_actions`, `wp_cli_tool_name`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`, `fallback_pull_request`.
 
 `bundle_repo` is for cross-repo consumers. The shell runner clones the bundle
@@ -242,6 +243,19 @@ references, and grader metadata. The runner also attaches
 result JSON so downstream JSONL publishers can link failure rows back to the
 bundle. The metadata key keeps the historical name until the artifact schema is
 renamed.
+
+The runner also projects each Data Machine agent scenario into
+`metadata.wp_gym_eval_row`. This is a compatibility scaffold for the canonical
+wp-gym row tracked in https://github.com/Automattic/wp-gym/issues/117. The row
+uses `schema_name: "wp-gym.eval_artifact_row"`, `schema_version: 0`, and
+`projection_version: "homeboy-extensions.compat.1"` until the upstream wp-gym
+validator lands. Evaluation semantics live under `evaluation`; Homeboy, Data
+Machine, Data Machine Code, GitHub workflow/PR, verifier, policy, and artifact
+references live under `orchestration`. Missing replay, transcript, runtime trace,
+verifier, policy, workflow, PR, or artifact evidence is reported in
+`compatibility_gaps`. Set reusable workflow input `wp_gym_benchmark_mode: true`
+or runner config `wp_gym_eval.benchmark_mode: true` to turn those gaps into
+projection errors for benchmark-mode jobs.
 
 Final-state review URLs are only emitted when the caller supplies a hosted review
 URL in runner config or scenario metadata. The default bundle records

@@ -146,6 +146,10 @@ name: Data Machine Agent CI (reusable)
         description: JSON object of zero-weight behavioral probes to preserve in eval metadata.
         type: string
         default: "{}"
+      wp_gym_benchmark_mode:
+        description: Fail the wp-gym eval row projection when required replay/evidence references are missing.
+        type: boolean
+        default: false
       comment_pr_summary:
         type: boolean
         default: false
@@ -612,6 +616,7 @@ jobs:
           GENERAL_RULES: ${{ inputs.general_rules }}
           TASK_RULES: ${{ inputs.task_rules }}
           PROBES: ${{ inputs.probes }}
+          WP_GYM_BENCHMARK_MODE: ${{ inputs.wp_gym_benchmark_mode }}
           DRY_RUN: ${{ inputs.dry_run }}
           EXTRA_WP_CONFIG_DEFINES: ${{ inputs.extra_wp_config_defines }}
           EXTRA_PLAYGROUND_FILE_MOUNTS: ${{ inputs.extra_playground_file_mounts }}
@@ -798,6 +803,7 @@ jobs:
             --argjson generalRules "$general_rules_json" \
             --argjson taskRules "$task_rules_json" \
             --argjson probes "$probes_json" \
+            --argjson wpGymBenchmarkMode "$WP_GYM_BENCHMARK_MODE" \
             '{
               component_id: "datamachine-agent-ci-driver",
               component_path: $componentPath,
@@ -857,6 +863,9 @@ jobs:
               general_rules: $generalRules,
               task_rules: $taskRules,
               probes: $probes,
+              wp_gym_eval: {
+                benchmark_mode: $wpGymBenchmarkMode
+              },
               execute_workflow_path: $executeWorkflowPath,
               success_requires_pr: $successRequiresPr,
               success_completion_outcomes: $successCompletionOutcomes,
