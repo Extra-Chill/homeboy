@@ -4,6 +4,32 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.200.0] - 2026-05-28
+
+### Added
+- add runner trust policy
+- add runtime sidecar writer helper
+
+### Changed
+- Add reverse runner job queue primitives
+- Add reverse runner session substrate
+- Require canonical extension manifest schema
+- Require explicit portable component ids
+- Remove legacy untagged output contracts
+- Add issues reconcile-run command
+
+### Fixed
+- add id to release context test fixture
+- require object rig workload specs
+- trust homeboy for macos keychain items
+- require canonical dynamic set inputs
+- remove hidden compatibility flags
+- require canonical cli argument forms
+- remove legacy component manifest fields
+- remove release positional bump shorthand
+- remove standalone ssh runner compatibility
+- preserve extension setup in runner snapshots
+
 ## [0.199.4] - 2026-05-27
 
 ### Fixed
