@@ -254,6 +254,82 @@ fn routes_job_inspection_against_daemon_job_store() {
 }
 
 #[test]
+fn routes_remote_runner_job_broker_lifecycle() {
+    let store = JobStore::default();
+    let submit = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "project_id": "extrachill",
+            "command": ["homeboy", "test", "data-machine"],
+            "cwd": "/home/chubes/Developer/data-machine"
+        })),
+        &store,
+    );
+
+    assert_eq!(submit.status_code, 200);
+    assert_eq!(submit.body["endpoint"], "runner.jobs.submit");
+    assert_eq!(submit.body["body"]["command"], "api.runner.jobs.submit");
+    let job_id = submit.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id")
+        .to_string();
+
+    let claim = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs/claim",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "project_id": "extrachill",
+            "lease_ms": 30000
+        })),
+        &store,
+    );
+
+    assert_eq!(claim.status_code, 200);
+    assert_eq!(claim.body["endpoint"], "runner.jobs.claim");
+    assert_eq!(claim.body["body"]["claim"]["job"]["id"], job_id);
+    assert_eq!(
+        claim.body["body"]["claim"]["request"]["command"],
+        serde_json::json!(["homeboy", "test", "data-machine"])
+    );
+
+    let event = route_with_job_store_and_body(
+        "POST",
+        &format!("/runner/jobs/{job_id}/events"),
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "kind": "progress",
+            "data": { "phase": "running" }
+        })),
+        &store,
+    );
+
+    assert_eq!(event.status_code, 200);
+    assert_eq!(event.body["endpoint"], "runner.jobs.events.append");
+    assert_eq!(event.body["body"]["event"]["kind"], "progress");
+
+    let finish = route_with_job_store_and_body(
+        "POST",
+        &format!("/runner/jobs/{job_id}/finish"),
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "result": {
+                "exit_code": 0,
+                "stdout": "ok",
+                "stderr": ""
+            }
+        })),
+        &store,
+    );
+
+    assert_eq!(finish.status_code, 200);
+    assert_eq!(finish.body["endpoint"], "runner.jobs.finish");
+    assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
+}
+
+#[test]
 fn routes_json_body_to_analysis_enqueue() {
     let store = JobStore::default();
     let response = route_with_job_store_and_body(

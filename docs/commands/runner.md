@@ -119,6 +119,7 @@ Lab offload selection.
 
 ```sh
 homeboy runner connect <runner-id>
+homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>
 ```
 
 Starts a loopback-only Homeboy daemon on the runner and opens an SSH tunnel to
@@ -126,6 +127,13 @@ it. This is the preferred Lab execution path because later `runner exec` calls
 can use the daemon session instead of ad-hoc SSH command execution. The JSON
 payload uses `command: "runner.connect"` and reports connection state such as
 the runner ID, tunnel endpoint, daemon endpoint, and persisted session metadata.
+
+Reverse runner connections record the runner-initiated session substrate and use
+the controller daemon as the broker. The broker exposes `POST /runner/jobs`,
+`POST /runner/jobs/claim`, `POST /runner/jobs/<job-id>/events`, and
+`POST /runner/jobs/<job-id>/finish` so controllers can queue work and reverse
+runners can claim, stream progress, and return results without inbound access to
+the lab machine.
 
 ### `status`
 

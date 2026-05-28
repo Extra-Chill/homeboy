@@ -17,6 +17,7 @@ use crate::core::source_snapshot::SourceSnapshot;
 
 mod artifact_download;
 mod patch_capture;
+mod remote_runner;
 pub use artifact_download::ArtifactDownload;
 use patch_capture::{capture_baseline, capture_patch_report};
 
@@ -268,7 +269,34 @@ where
             body: json!({ "error": "method_not_allowed" }),
             artifact: None,
         },
+        ("POST", "/runner/jobs") | ("POST", "/runner/jobs/claim") => {
+            remote_runner::route(method, path, body, job_store)
+        }
+        ("GET", "/runner/jobs") | ("GET", "/runner/jobs/claim") => method_not_allowed(),
+        ("POST", path) if path.starts_with("/runner/jobs/") => {
+            remote_runner::route(method, path, body, job_store)
+        }
         _ => route_read_only_api(method, path, body, job_store, analysis_runner),
+    }
+}
+
+pub(super) fn daemon_endpoint_response(endpoint: &str, body: serde_json::Value) -> HttpResponse {
+    HttpResponse {
+        status_code: 200,
+        body: json!({
+            "status": 200,
+            "endpoint": endpoint,
+            "body": body,
+        }),
+        artifact: None,
+    }
+}
+
+fn method_not_allowed() -> HttpResponse {
+    HttpResponse {
+        status_code: 405,
+        body: json!({ "error": "method_not_allowed" }),
+        artifact: None,
     }
 }
 
