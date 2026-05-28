@@ -15,6 +15,25 @@ use std::path::{Path, PathBuf};
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
 
+const PACKAGE_DEPENDENCY_FIELDS: &[&str] = &[
+    "dependencies",
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+];
+
+const MUTABLE_DEPENDENCY_PREFIXES: &[&str] = &[
+    "file:",
+    "link:",
+    "git+",
+    "github:",
+    "git://",
+    "git@",
+    "ssh://git@",
+    "https://github.com/",
+    "http://github.com/",
+];
+
 /// Parsed GitHub owner/repo from a remote URL.
 #[derive(Debug, Clone)]
 pub struct GitHubRepo {
@@ -199,6 +218,39 @@ pub fn supports_release_deploy(component: &Component) -> bool {
     has_remote && has_artifact
 }
 
+/// Detect package dependency specs that are resolved from mutable sources.
+///
+/// Release artifacts are safe to reuse when dependencies resolve from immutable
+/// package registry versions. Local paths and Git refs can change independently
+/// of the component tag, so deploy should rebuild locally instead.
+pub fn has_mutable_package_dependencies(component: &Component) -> bool {
+    let package_json_path = Path::new(&component.local_path).join("package.json");
+    let Ok(raw) = std::fs::read_to_string(package_json_path) else {
+        return false;
+    };
+    let Ok(package_json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+
+    PACKAGE_DEPENDENCY_FIELDS.iter().any(|field| {
+        package_json
+            .get(field)
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|dependencies| {
+                dependencies
+                    .values()
+                    .any(|spec| spec.as_str().is_some_and(is_mutable_dependency_spec))
+            })
+    })
+}
+
+fn is_mutable_dependency_spec(spec: &str) -> bool {
+    let spec = spec.trim().to_ascii_lowercase();
+    MUTABLE_DEPENDENCY_PREFIXES
+        .iter()
+        .any(|prefix| spec.starts_with(prefix))
+}
+
 /// Auto-detect the git remote URL from a local repository.
 ///
 /// Runs `git remote get-url origin` in the given directory.
@@ -369,5 +421,58 @@ mod tests {
         // No build_artifact → false
         comp.build_artifact = None;
         assert!(!supports_release_deploy(&comp));
+    }
+
+    #[test]
+    fn mutable_package_dependencies_detects_git_and_file_specs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{
+                "dependencies": {
+                    "registry-only": "^1.2.3",
+                    "tokens": "github:Extra-Chill/extrachill-tokens#v0.7.2"
+                },
+                "devDependencies": {
+                    "components": "file:../components"
+                }
+            }"#,
+        )
+        .expect("write package.json");
+        let comp = Component::new(
+            "test".to_string(),
+            temp.path().to_string_lossy().to_string(),
+            "/remote".to_string(),
+            Some("test.zip".to_string()),
+        );
+
+        assert!(has_mutable_package_dependencies(&comp));
+    }
+
+    #[test]
+    fn mutable_package_dependencies_allows_registry_specs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{
+                "dependencies": {
+                    "serde": "1.0.0",
+                    "react": "^19.0.0",
+                    "private-registry": "npm:@scope/pkg@1.2.3"
+                },
+                "optionalDependencies": {
+                    "optional": "~2.0.0"
+                }
+            }"#,
+        )
+        .expect("write package.json");
+        let comp = Component::new(
+            "test".to_string(),
+            temp.path().to_string_lossy().to_string(),
+            "/remote".to_string(),
+            Some("test.zip".to_string()),
+        );
+
+        assert!(!has_mutable_package_dependencies(&comp));
     }
 }

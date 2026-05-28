@@ -160,8 +160,10 @@ fn should_try_download_release_artifact(
     !is_git_deploy
         && !is_file_deploy
         && !config.head
+        && !config.tagged
         && !config.skip_build
         && release_download::supports_release_deploy(component)
+        && !release_download::has_mutable_package_dependencies(component)
 }
 
 fn failed_component_deploy_result(
@@ -793,6 +795,115 @@ mod tests {
         };
 
         assert!(!should_try_download_release_artifact(
+            &component, &config, false, false
+        ));
+    }
+
+    #[test]
+    fn tagged_deploy_skips_release_artifact_download() {
+        let component = Component {
+            id: "example".to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("build/example.zip".to_string()),
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: false,
+            tagged: true,
+        };
+
+        assert!(!should_try_download_release_artifact(
+            &component, &config, false, false
+        ));
+    }
+
+    #[test]
+    fn mutable_package_dependencies_skip_release_artifact_download() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{
+                "dependencies": {
+                    "tokens": "github:Extra-Chill/extrachill-tokens#v0.7.2"
+                }
+            }"#,
+        )
+        .expect("write package.json");
+        let component = Component {
+            id: "example".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("build/example.zip".to_string()),
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: false,
+            tagged: false,
+        };
+
+        assert!(!should_try_download_release_artifact(
+            &component, &config, false, false
+        ));
+    }
+
+    #[test]
+    fn registry_package_dependencies_allow_release_artifact_download() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{
+                "dependencies": {
+                    "tokens": "^0.7.2"
+                }
+            }"#,
+        )
+        .expect("write package.json");
+        let component = Component {
+            id: "example".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("build/example.zip".to_string()),
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: false,
+            tagged: false,
+        };
+
+        assert!(should_try_download_release_artifact(
             &component, &config, false, false
         ));
     }
