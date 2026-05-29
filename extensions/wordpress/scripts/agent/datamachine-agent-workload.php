@@ -1572,6 +1572,21 @@ if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_root' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_normalize_workspace_path' ) ) {
+    function homeboy_datamachine_agent_normalize_workspace_path( string $path ): string {
+        $path  = trim( str_replace( '\\', '/', $path ), '/' );
+        $parts = array();
+        foreach ( explode( '/', $path ) as $part ) {
+            if ( '' === $part || '.' === $part || '..' === $part ) {
+                continue;
+            }
+            $parts[] = $part;
+        }
+
+        return implode( '/', $parts );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_capture_enabled' ) ) {
     function homeboy_datamachine_agent_runner_workspace_capture_enabled( array $config ): bool {
         $workspace = homeboy_datamachine_agent_runner_workspace_config( $config );
@@ -1602,6 +1617,145 @@ if ( ! function_exists( 'homeboy_datamachine_agent_persist_runner_workspace_alia
             'root'   => $root,
         );
         update_option( 'datamachine_code_workspace_aliases', $aliases, false );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_scope_runner_workspace_path' ) ) {
+    function homeboy_datamachine_agent_scope_runner_workspace_path( string $path, string $root ) {
+        $root = homeboy_datamachine_agent_normalize_workspace_path( $root );
+        if ( '' === $root ) {
+            return $path;
+        }
+
+        $path = str_replace( '\\', '/', $path );
+        if ( str_starts_with( $path, '/' ) || 1 === preg_match( '#^[a-zA-Z][a-zA-Z0-9+.-]*://#', $path ) ) {
+            return false;
+        }
+
+        $segments = array();
+        foreach ( explode( '/', $path ) as $segment ) {
+            if ( '' === $segment || '.' === $segment ) {
+                continue;
+            }
+            if ( '..' === $segment || str_contains( $segment, "\0" ) ) {
+                return false;
+            }
+            $segments[] = $segment;
+        }
+
+        return empty( $segments ) ? $root : $root . '/' . implode( '/', $segments );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_scope_runner_workspace_patch' ) ) {
+    function homeboy_datamachine_agent_scope_runner_workspace_patch( string $patch, string $root ) {
+        if ( '' === $root ) {
+            return $patch;
+        }
+
+        $lines = explode( "\n", $patch );
+        foreach ( $lines as &$line ) {
+            if ( 1 === preg_match( '/^(diff --git) a\/(.+) b\/(.+)$/', $line, $matches ) ) {
+                $from = homeboy_datamachine_agent_scope_runner_workspace_path( $matches[2], $root );
+                $to   = homeboy_datamachine_agent_scope_runner_workspace_path( $matches[3], $root );
+                if ( false === $from || false === $to ) {
+                    return false;
+                }
+                $line = $matches[1] . ' a/' . $from . ' b/' . $to;
+                continue;
+            }
+
+            if ( 1 === preg_match( '/^(---|\+\+\+) ([ab])\/(.+)$/', $line, $matches ) ) {
+                $path = homeboy_datamachine_agent_scope_runner_workspace_path( $matches[3], $root );
+                if ( false === $path ) {
+                    return false;
+                }
+                $line = $matches[1] . ' ' . $matches[2] . '/' . $path;
+            }
+        }
+        unset( $line );
+
+        return implode( "\n", $lines );
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_apply_runner_workspace_alias_parameters' ) ) {
+    function homeboy_datamachine_agent_apply_runner_workspace_alias_parameters( array $parameters, array $alias_config ): array {
+        $root = (string) ( $alias_config['root'] ?? '' );
+        if ( '' !== $root && array_key_exists( 'pattern', $parameters ) && ! array_key_exists( 'path', $parameters ) ) {
+            $parameters['path'] = '';
+        }
+
+        if ( '' !== $root && array_key_exists( 'path', $parameters ) ) {
+            $path = homeboy_datamachine_agent_scope_runner_workspace_path( (string) $parameters['path'], $root );
+            if ( false === $path ) {
+                $parameters['_homeboy_workspace_alias_error'] = 'Path is outside the scoped workspace.';
+            } else {
+                $parameters['path'] = $path;
+            }
+        }
+
+        if ( '' !== $root && isset( $parameters['paths'] ) && is_array( $parameters['paths'] ) ) {
+            $paths = array();
+            foreach ( $parameters['paths'] as $path ) {
+                $scoped = homeboy_datamachine_agent_scope_runner_workspace_path( (string) $path, $root );
+                if ( false === $scoped ) {
+                    $parameters['_homeboy_workspace_alias_error'] = 'Path is outside the scoped workspace.';
+                    break;
+                }
+                $paths[] = $scoped;
+            }
+            $parameters['paths'] = $paths;
+        }
+
+        if ( '' !== $root && isset( $parameters['patch'] ) && is_string( $parameters['patch'] ) ) {
+            $patch = homeboy_datamachine_agent_scope_runner_workspace_patch( $parameters['patch'], $root );
+            if ( false === $patch ) {
+                $parameters['_homeboy_workspace_alias_error'] = 'Patch contains a path outside the scoped workspace.';
+            } else {
+                $parameters['patch'] = $patch;
+            }
+        }
+
+        return $parameters;
+    }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_sanitize_runner_workspace_alias_result' ) ) {
+    function homeboy_datamachine_agent_sanitize_runner_workspace_alias_result( $value, array $alias_config ) {
+        if ( is_array( $value ) ) {
+            $sanitized = array();
+            foreach ( $value as $key => $item ) {
+                if ( in_array( $key, array( 'content', 'patch' ), true ) ) {
+                    $sanitized[ $key ] = $item;
+                    continue;
+                }
+                $sanitized[ $key ] = homeboy_datamachine_agent_sanitize_runner_workspace_alias_result( $item, $alias_config );
+            }
+            return $sanitized;
+        }
+
+        if ( ! is_string( $value ) ) {
+            return $value;
+        }
+
+        $alias  = (string) ( $alias_config['alias'] ?? '' );
+        $handle = (string) ( $alias_config['target'] ?? '' );
+        $root   = homeboy_datamachine_agent_normalize_workspace_path( (string) ( $alias_config['root'] ?? '' ) );
+        if ( '' !== $root ) {
+            $value = str_replace( array( 'a/' . $root . '/', 'b/' . $root . '/' ), array( 'a/', 'b/' ), $value );
+            $value = str_replace( $root . '/', '', $value );
+            $value = $value === $root ? '' : $value;
+        }
+        if ( '' !== $alias && '' !== $handle ) {
+            $value = str_replace( $handle, $alias, $value );
+            if ( str_contains( $handle, '@' ) ) {
+                list( $repo, $slug ) = explode( '@', $handle, 2 );
+                $value = str_replace( array( $repo, $slug ), array( $alias, $alias ), $value );
+            }
+        }
+
+        return $value;
     }
 }
 
@@ -1744,11 +1898,16 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
 
         public function handle_tool_call( array $parameters, array $tool_def = array() ): array {
             $parameters = $this->apply_forced_parameters( $parameters, $tool_def );
+            $parameters = $this->apply_workspace_alias_parameters( $parameters, $tool_def );
+            if ( isset( $parameters['_homeboy_workspace_alias_error'] ) ) {
+                return $this->error( (string) ( $tool_def['tool_name'] ?? '' ), (string) $parameters['_homeboy_workspace_alias_error'] );
+            }
 
             $response = isset( $tool_def['homeboy_original_tool'] ) && is_array( $tool_def['homeboy_original_tool'] )
                 ? $this->call_original_tool( $parameters, $tool_def['homeboy_original_tool'] )
                 : $this->call_ability_tool( $parameters, $tool_def );
 
+            $response = $this->sanitize_workspace_alias_response( $response, $tool_def );
             $this->record( $parameters, $tool_def, $response );
             return $response;
         }
@@ -1760,6 +1919,24 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
             }
 
             return array_replace_recursive( $parameters, $forced_parameters );
+        }
+
+        private function apply_workspace_alias_parameters( array $parameters, array $tool_def ): array {
+            $alias_config = is_array( $tool_def['homeboy_workspace_alias'] ?? null ) ? $tool_def['homeboy_workspace_alias'] : array();
+            if ( empty( $alias_config ) ) {
+                return $parameters;
+            }
+
+            return homeboy_datamachine_agent_apply_runner_workspace_alias_parameters( $parameters, $alias_config );
+        }
+
+        private function sanitize_workspace_alias_response( array $response, array $tool_def ): array {
+            $alias_config = is_array( $tool_def['homeboy_workspace_alias'] ?? null ) ? $tool_def['homeboy_workspace_alias'] : array();
+            if ( empty( $alias_config ) ) {
+                return $response;
+            }
+
+            return homeboy_datamachine_agent_sanitize_runner_workspace_alias_result( $response, $alias_config );
         }
 
         private function call_original_tool( array $parameters, array $original_tool ): array {
@@ -2068,6 +2245,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_register_tool_recorders' ) ) 
                     $tools[ $tool_name ]['homeboy_original_tool']      = $original_tool;
                     $tools[ $tool_name ]['homeboy_record']             = is_array( $recorder['record'] ?? null ) ? $recorder['record'] : array();
                     $tools[ $tool_name ]['homeboy_forced_parameters'] = is_array( $recorder['forced_parameters'] ?? null ) ? $recorder['forced_parameters'] : array();
+                    $tools[ $tool_name ]['homeboy_workspace_alias']    = is_array( $recorder['workspace_alias'] ?? null ) ? $recorder['workspace_alias'] : array();
                 }
 
                 return $tools;
@@ -2303,6 +2481,12 @@ if ( ! function_exists( 'homeboy_datamachine_agent_apply_runner_workspace' ) ) {
         $agent_alias  = homeboy_datamachine_agent_runner_workspace_alias( $config );
         $agent_root   = homeboy_datamachine_agent_runner_workspace_root( $config );
         $agent_handle = '' !== $agent_alias ? $agent_alias : $handle;
+        $forced_handle = '' !== $agent_alias ? $handle : $agent_handle;
+        $alias_config  = '' !== $agent_alias ? array(
+            'alias'  => $agent_alias,
+            'target' => $handle,
+            'root'   => $agent_root,
+        ) : array();
         if ( '' !== $agent_alias ) {
             homeboy_datamachine_agent_persist_runner_workspace_alias( $agent_alias, $handle, $agent_root );
             add_filter(
@@ -2330,18 +2514,26 @@ if ( ! function_exists( 'homeboy_datamachine_agent_apply_runner_workspace' ) ) {
         $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
         $record_config    = array( 'tool_results_key' => $tool_results_key );
         foreach ( array( 'workspace_ls', 'workspace_read', 'workspace_grep', 'workspace_write', 'workspace_edit', 'workspace_apply_patch', 'workspace_delete' ) as $tool_name ) {
-            $recorders[] = array(
+            $recorder = array(
                 'tool'              => $tool_name,
-                'forced_parameters' => array( 'repo' => $agent_handle ),
+                'forced_parameters' => array( 'repo' => $forced_handle ),
                 'record'            => $record_config,
             );
+            if ( ! empty( $alias_config ) ) {
+                $recorder['workspace_alias'] = $alias_config;
+            }
+            $recorders[] = $recorder;
         }
         foreach ( array( 'workspace_git_status', 'workspace_git_log', 'workspace_git_diff', 'workspace_git_pull', 'workspace_git_add', 'workspace_git_commit', 'workspace_git_push' ) as $tool_name ) {
-            $recorders[] = array(
+            $recorder = array(
                 'tool'              => $tool_name,
-                'forced_parameters' => array( 'name' => $agent_handle ),
+                'forced_parameters' => array( 'name' => $forced_handle ),
                 'record'            => $record_config,
             );
+            if ( ! empty( $alias_config ) ) {
+                $recorder['workspace_alias'] = $alias_config;
+            }
+            $recorders[] = $recorder;
         }
         $config['tool_recorders'] = $recorders;
 

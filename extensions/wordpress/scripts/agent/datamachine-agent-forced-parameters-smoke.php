@@ -333,8 +333,13 @@ namespace {
         }
     }
 
-    if ( 'current-project' !== ( $alias_workspace_recorder['forced_parameters']['name'] ?? null ) ) {
-        fwrite( STDERR, "Expected alias runner workspace mode to scope git tools to the opaque alias.\n" );
+    if ( 'demo@agent-run-openai-gpt-5-5' !== ( $alias_workspace_recorder['forced_parameters']['name'] ?? null ) ) {
+        fwrite( STDERR, "Expected alias runner workspace mode to dispatch git tools to the real workspace handle.\n" );
+        exit( 1 );
+    }
+
+    if ( 'current-project' !== ( $alias_workspace_recorder['workspace_alias']['alias'] ?? null ) ) {
+        fwrite( STDERR, "Expected alias runner workspace mode to retain the opaque alias for response sanitization.\n" );
         exit( 1 );
     }
 
@@ -357,6 +362,35 @@ namespace {
 
     if ( '.agent-workspace/current-project' !== ( $persisted_aliases['current-project']['root'] ?? null ) ) {
         fwrite( STDERR, "Expected alias runner workspace mode to persist the scoped alias root for tool requests.\n" );
+        exit( 1 );
+    }
+
+    $scoped_parameters = homeboy_datamachine_agent_apply_runner_workspace_alias_parameters(
+        array(
+            'repo' => 'demo@agent-run-openai-gpt-5-5',
+            'path' => 'plugins/sample.php',
+        ),
+        $alias_workspace_recorder['workspace_alias']
+    );
+
+    if ( '.agent-workspace/current-project/plugins/sample.php' !== ( $scoped_parameters['path'] ?? null ) ) {
+        fwrite( STDERR, "Expected alias runner workspace mode to scope workspace file paths before dispatch.\n" );
+        exit( 1 );
+    }
+
+    $sanitized_response = homeboy_datamachine_agent_sanitize_runner_workspace_alias_result(
+        array(
+            'success' => true,
+            'data'    => array(
+                'repo' => 'demo@agent-run-openai-gpt-5-5',
+                'path' => '.agent-workspace/current-project/plugins/sample.php',
+            ),
+        ),
+        $alias_workspace_recorder['workspace_alias']
+    );
+
+    if ( 'current-project' !== ( $sanitized_response['data']['repo'] ?? null ) || 'plugins/sample.php' !== ( $sanitized_response['data']['path'] ?? null ) ) {
+        fwrite( STDERR, "Expected alias runner workspace mode to sanitize workspace tool responses.\n" );
         exit( 1 );
     }
 
