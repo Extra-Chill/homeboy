@@ -107,6 +107,29 @@ if (task.group_key === 'PHPCS Formatting/Auto Fix!') {
       ''
     ].join('\\n'));
   }
+} else if (task.group_key === 'docs-reference') {
+  const filesDirectory = path.join(artifactDirectory, 'files');
+  fs.mkdirSync(filesDirectory, { recursive: true });
+  fs.writeFileSync(path.join(filesDirectory, 'changed-files.json'), JSON.stringify({
+    schema: 'wp-codebox/changed-files/v1',
+    files: [
+      {
+        path: '/workspace/homeboy-extensions/wordpress/docs/example.md',
+        status: 'modified',
+        mountTarget: '/workspace/homeboy-extensions',
+        relativePath: 'wordpress/docs/example.md'
+      }
+    ]
+  }, null, 2) + '\\n');
+  fs.writeFileSync(path.join(filesDirectory, 'patch.diff'), [
+    'diff --git a/workspace/homeboy-extensions/wordpress/docs/example.md b/workspace/homeboy-extensions/wordpress/docs/example.md',
+    '--- a/workspace/homeboy-extensions/wordpress/docs/example.md',
+    '+++ b/workspace/homeboy-extensions/wordpress/docs/example.md',
+    '@@ -1 +1 @@',
+    '-stale',
+    '+fresh',
+    ''
+  ].join('\\n'));
 }
 process.stdout.write(JSON.stringify({
   session: { id: sessionId },
@@ -144,7 +167,9 @@ process.stdout.write(JSON.stringify({
   fs.mkdirSync(writeCommand.settings.wp_codebox_homeboy_path, { recursive: true });
   fs.mkdirSync(writeCommand.settings.wp_codebox_homeboy_extensions_path, { recursive: true });
   fs.mkdirSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(writeCommand.settings.wp_codebox_homeboy_extensions_path, 'wordpress', 'docs'), { recursive: true });
   fs.writeFileSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src', 'example.php'), 'before\n');
+  fs.writeFileSync(path.join(writeCommand.settings.wp_codebox_homeboy_extensions_path, 'wordpress', 'docs', 'example.md'), 'stale\n');
 
   const writeResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
     encoding: 'utf8',
@@ -158,8 +183,9 @@ process.stdout.write(JSON.stringify({
   assert.equal(writeResult.status, 0, writeResult.stderr || writeResult.stdout);
   const writeResponse = JSON.parse(writeResult.stdout);
   assert.equal(writeResponse.handled, true);
-  assert.deepEqual(writeResponse.changed_files, ['src/example.php']);
+  assert.deepEqual(writeResponse.changed_files, ['agents-api:src/example.php', 'homeboy-extensions:wordpress/docs/example.md']);
   assert.equal(fs.readFileSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src', 'example.php'), 'utf8'), 'after\n');
+  assert.equal(fs.readFileSync(path.join(writeCommand.settings.wp_codebox_homeboy_extensions_path, 'wordpress', 'docs', 'example.md'), 'utf8'), 'fresh\n');
   assert.match(writeResult.stderr, /\[homeboy wp-codebox fanout\] started 1\/2 group=PHPCS Formatting\/Auto Fix! session=homeboy-audit-/);
   assert.match(writeResult.stderr, /\[homeboy wp-codebox fanout\] completed 2\/2 group=docs-reference session=homeboy-audit-.*artifact=.*fixture-wp-codebox-artifact-/);
   assert.doesNotMatch(writeResult.stderr, /OPENCODE_API_KEY/);
@@ -195,7 +221,7 @@ process.stdout.write(JSON.stringify({
   assert.notEqual(invalidPatchResult.status, 0);
   assert.match(invalidPatchResult.stderr, /WP Codebox artifact apply failed for group PHPCS Formatting\/Auto Fix! artifact artifact-homeboy-audit-/);
   assert.match(invalidPatchResult.stderr, /artifact directory: .*fixture-wp-codebox-artifact-/);
-  assert.match(invalidPatchResult.stderr, /patch path: .*files\/patch\.diff/);
+  assert.match(invalidPatchResult.stderr, /patch path: .*files\/patch-agents-api\.diff/);
   assert.match(invalidPatchResult.stderr, /fanout run evidence: .*fanout-invalid-patch\/fanout-run\.json/);
   assert.match(invalidPatchResult.stderr, /git diff header lacks filename information|patch with only garbage/);
   assert.ok(fs.existsSync(path.join(root, 'fanout-invalid-patch', 'fanout-run.json')));

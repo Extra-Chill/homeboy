@@ -679,6 +679,32 @@ def default_sibling_path(component_root, sibling_name):
     return os.path.join(os.path.dirname(os.path.abspath(component_root)), sibling_name)
 
 
+def wp_codebox_workspace_slug_from_path(source):
+    return re.sub(r'[^a-zA-Z0-9_-]', '-', os.path.basename(str(source or '')).split('@')[0])
+
+
+def add_wp_codebox_workspace_root(workspace_roots, source, preferred_slug=''):
+    if not source or not os.path.isdir(source):
+        return
+    slugs = [wp_codebox_workspace_slug_from_path(source)]
+    if preferred_slug:
+        slugs.append(preferred_slug)
+    for slug in slugs:
+        if slug:
+            workspace_roots[slug] = source
+
+
+def wp_codebox_workspace_roots(component_root, settings):
+    agents_api_path = settings.get('wp_codebox_agents_api_path') or os.environ.get('HOMEBOY_WP_CODEBOX_AGENTS_API_PATH') or component_root
+    homeboy_path = settings.get('wp_codebox_homeboy_path') or os.environ.get('HOMEBOY_WP_CODEBOX_HOMEBOY_PATH') or default_sibling_path(component_root, 'homeboy')
+    homeboy_extensions_path = settings.get('wp_codebox_homeboy_extensions_path') or os.environ.get('HOMEBOY_WP_CODEBOX_HOMEBOY_EXTENSIONS_PATH') or default_sibling_path(component_root, 'homeboy-extensions')
+    workspace_roots = {'': component_root}
+    add_wp_codebox_workspace_root(workspace_roots, agents_api_path, 'agents-api')
+    add_wp_codebox_workspace_root(workspace_roots, homeboy_path, 'homeboy')
+    add_wp_codebox_workspace_root(workspace_roots, homeboy_extensions_path, 'homeboy-extensions')
+    return workspace_roots
+
+
 def path_inside(parent, candidate):
     try:
         parent_real = os.path.realpath(parent)
@@ -739,14 +765,19 @@ def wp_codebox_fanout_failure_message(run):
 
 
 def wp_codebox_artifact_changed_files(artifact_dir):
+    return sorted(set(entry['relative_path'] for entry in wp_codebox_artifact_changed_file_entries(artifact_dir)))
+
+
+def wp_codebox_artifact_changed_file_entries(artifact_dir):
     changed_files_path = os.path.join(artifact_dir, 'files', 'changed-files.json')
     with open(changed_files_path, 'r') as f:
         changed_files = json.load(f)
     files = changed_files.get('files') if isinstance(changed_files, dict) else []
-    relative_paths = []
+    entries = []
     for entry in files if isinstance(files, list) else []:
         if not isinstance(entry, dict):
             continue
+        workspace_slug = wp_codebox_workspace_slug(entry)
         relative_path = entry.get('relativePath') or entry.get('relative_path')
         if not relative_path:
             file_path = str(entry.get('path') or '').lstrip('/')
@@ -759,8 +790,22 @@ def wp_codebox_artifact_changed_files(artifact_dir):
                 if marker in f"/{file_path}":
                     relative_path = file_path.split('wp-content/plugins/', 1)[1].split('/', 1)[1]
         if relative_path and not os.path.isabs(relative_path) and '..' not in relative_path.split('/'):
-            relative_paths.append(relative_path)
-    return sorted(set(relative_paths))
+            entries.append({
+                'workspace_slug': workspace_slug,
+                'relative_path': relative_path,
+            })
+    unique = {}
+    for entry in entries:
+        unique[(entry['workspace_slug'], entry['relative_path'])] = entry
+    return sorted(unique.values(), key=lambda item: (item['workspace_slug'], item['relative_path']))
+
+
+def wp_codebox_workspace_slug(entry):
+    for value in [entry.get('mountTarget'), entry.get('mount_target'), entry.get('path')]:
+        parts = str(value or '').lstrip('/').split('/')
+        if len(parts) >= 2 and parts[0] == 'workspace' and parts[1]:
+            return parts[1]
+    return ''
 
 
 def wp_codebox_patch_paths(patch):
@@ -772,6 +817,40 @@ def wp_codebox_patch_paths(patch):
         if len(parts) >= 4 and parts[3].startswith('b/'):
             paths.append(parts[3][2:])
     return paths
+
+
+def wp_codebox_patch_path_workspace(file_path):
+    parts = [part for part in file_path.split('/') if part]
+    if len(parts) >= 2 and parts[0] == 'workspace':
+        return parts[1]
+    return ''
+
+
+def wp_codebox_patch_section_workspace(section):
+    for file_path in wp_codebox_patch_paths(section):
+        workspace_slug = wp_codebox_patch_path_workspace(file_path)
+        if workspace_slug:
+            return workspace_slug
+    return ''
+
+
+def wp_codebox_filter_patch_for_workspace(patch, workspace_slug):
+    if not workspace_slug:
+        return patch
+    sections = []
+    current = []
+    for line in patch.splitlines():
+        if line.startswith('diff --git ') and current:
+            section = '\n'.join(current) + '\n'
+            if wp_codebox_patch_section_workspace(section) == workspace_slug:
+                sections.append(section)
+            current = []
+        current.append(line)
+    if current:
+        section = '\n'.join(current) + '\n'
+        if wp_codebox_patch_section_workspace(section) == workspace_slug:
+            sections.append(section)
+    return ''.join(sections)
 
 
 def strip_patch_path(file_path, strip_components):
@@ -829,18 +908,24 @@ def raise_wp_codebox_artifact_apply_error(record, artifact_dir, patch_path, run_
     })
 
 
-def apply_wp_codebox_artifact_patch(component_root, artifact_dir, record=None, run_path=''):
+def write_wp_codebox_workspace_patch(patch, artifact_dir, workspace_slug):
+    patch_dir = os.path.join(artifact_dir, 'files')
+    if not workspace_slug:
+        return os.path.join(patch_dir, 'patch.diff')
+    patch_path = os.path.join(patch_dir, f'patch-{workspace_slug}.diff')
+    with open(patch_path, 'w') as f:
+        f.write(patch)
+    return patch_path
+
+
+def apply_wp_codebox_patch_to_root(component_root, artifact_dir, relative_paths, patch, record=None, run_path='', workspace_slug=''):
     patch_path = os.path.join(artifact_dir, 'files', 'patch.diff')
-    if not os.path.isfile(patch_path):
-        return []
     try:
-        relative_paths = wp_codebox_artifact_changed_files(artifact_dir)
         if not relative_paths:
             return []
-        with open(patch_path, 'r') as f:
-            patch = f.read()
         if not patch.strip():
             return []
+        patch_path = write_wp_codebox_workspace_patch(patch, artifact_dir, workspace_slug)
 
         # git apply counts the leading a/ and b/ prefixes that diff headers include;
         # wp_codebox_patch_strip() compares paths after removing those prefixes.
@@ -862,7 +947,50 @@ def apply_wp_codebox_artifact_patch(component_root, artifact_dir, record=None, r
     return relative_paths
 
 
-def apply_wp_codebox_fanout_artifacts(component_root, run, run_path=''):
+def apply_wp_codebox_artifact_patch(component_root, artifact_dir, record=None, run_path='', workspace_roots=None):
+    patch_path = os.path.join(artifact_dir, 'files', 'patch.diff')
+    if not os.path.isfile(patch_path):
+        return []
+    with open(patch_path, 'r') as f:
+        patch = f.read()
+    entries = wp_codebox_artifact_changed_file_entries(artifact_dir)
+    if not entries:
+        return []
+    workspace_roots = workspace_roots or {'': component_root}
+    entries_by_workspace = {}
+    for entry in entries:
+        workspace_slug = entry['workspace_slug']
+        entries_by_workspace.setdefault(workspace_slug, []).append(entry['relative_path'])
+
+    changed_files = []
+    for workspace_slug, relative_paths in entries_by_workspace.items():
+        apply_root = workspace_roots.get(workspace_slug) or (component_root if not workspace_slug else '')
+        if not apply_root:
+            raise_wp_codebox_artifact_apply_error(
+                record or {},
+                artifact_dir,
+                patch_path,
+                run_path,
+                RuntimeError(f'no apply root configured for WP Codebox workspace {workspace_slug}'),
+            )
+        workspace_patch = wp_codebox_filter_patch_for_workspace(patch, workspace_slug)
+        applied_paths = apply_wp_codebox_patch_to_root(
+            apply_root,
+            artifact_dir,
+            sorted(set(relative_paths)),
+            workspace_patch,
+            record,
+            run_path,
+            workspace_slug,
+        )
+        changed_files.extend([
+            f'{workspace_slug}:{file_path}' if workspace_slug else file_path
+            for file_path in applied_paths
+        ])
+    return changed_files
+
+
+def apply_wp_codebox_fanout_artifacts(component_root, run, run_path='', workspace_roots=None):
     changed_files = []
     records = run.get('records') if isinstance(run, dict) and isinstance(run.get('records'), list) else []
     for record in records:
@@ -872,7 +1000,7 @@ def apply_wp_codebox_fanout_artifacts(component_root, run, run_path=''):
         artifact_dir = artifact.get('directory') or ''
         if not artifact_dir:
             continue
-        changed_files.extend(apply_wp_codebox_artifact_patch(component_root, artifact_dir, record, run_path))
+        changed_files.extend(apply_wp_codebox_artifact_patch(component_root, artifact_dir, record, run_path, workspace_roots))
     return sorted(set(changed_files))
 
 
@@ -993,7 +1121,12 @@ def refactor_source(data):
             }
         try:
             component_root = data.get('root') or data.get('component_path') or os.getcwd()
-            changed_files = apply_wp_codebox_fanout_artifacts(component_root, run, runs_path)
+            changed_files = apply_wp_codebox_fanout_artifacts(
+                component_root,
+                run,
+                runs_path,
+                wp_codebox_workspace_roots(component_root, settings),
+            )
         except RuntimeError as error:
             return {
                 'handled': True,
