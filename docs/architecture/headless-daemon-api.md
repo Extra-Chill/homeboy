@@ -69,7 +69,7 @@ VPS systemd service
           |
 private tunnel / private network only
           |
-Homeboy Lab reverse runner
+Runner machine
   POST /runner/sessions
   POST /runner/jobs/claim
   POST /runner/jobs/:id/events

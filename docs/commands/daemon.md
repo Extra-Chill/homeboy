@@ -58,7 +58,7 @@ Extra Chill-compatible private setup:
 3. Install the rendered `systemd_unit` as `/etc/systemd/system/homeboy-broker.service`.
 4. Run `systemctl daemon-reload && systemctl enable --now homeboy-broker`.
 5. Verify with `systemctl status homeboy-broker`, `homeboy daemon status`, and `curl -fsS http://127.0.0.1:7421/health` on the VPS.
-6. Reach the broker from Homeboy Lab through a private SSH tunnel or private network URL, then use reverse runner connection commands against that private broker URL.
+6. Reach the broker from the runner machine through a private SSH tunnel or private network URL, then use reverse runner connection commands against that private broker URL.
 
 Operational caveats:
 

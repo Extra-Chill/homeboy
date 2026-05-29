@@ -46,7 +46,7 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
 - **`identity_file`** (string): Path to SSH private key file for authentication
 - **`kind`** (string): Optional server classification for extensions and project-specific behavior
 - **`auth`** (object): Optional SSH authentication/session policy
-- **`runner`** (object): Optional runner capability for Homeboy Lab execution on this server
+- **`runner`** (object): Optional runner capability for Homeboy execution on this server
 - **`forward_agent`** (boolean): Enable SSH agent forwarding (default: false)
 
 ## Example
@@ -80,7 +80,7 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
 
 ## Runner Capability
 
-Use `homeboy runner enable <server_id>` to make an SSH server runner-capable. The server ID is also the runner ID, matching the common Homeboy Lab model: one machine, one server, one runner-capable server.
+Use `homeboy runner enable <server_id>` to make an SSH server runner-capable. The server ID is also the runner ID, matching the common runner-machine model: one machine, one server, one runner-capable server.
 
 ## Managed SSH Sessions
 
