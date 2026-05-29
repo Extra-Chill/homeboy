@@ -21,7 +21,7 @@ path = "src/main.rs"
 # Bench binaries follow the homeboy-extensions/rust convention:
 # any [[bin]] whose name starts with `bench-` is discoverable by
 # `homeboy bench homeboy`. See src/bin/bench-*.rs for the workload
-# contract (reads HOMEBOY_BENCH_ITERATIONS, emits {timings_ns: [...]}).
+# contract (reads HOMEBOY_BENCH_ITERATIONS, emits timings plus optional memory evidence).
 [[bin]]
 name = "bench-audit-self"
 path = "src/bin/bench-audit-self.rs"

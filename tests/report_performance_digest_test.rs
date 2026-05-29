@@ -79,6 +79,7 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
                 "results": {
                     "scenarios": [{
                         "id": "fixture-scenario",
+                        "memory": { "peak_bytes": 8388608 },
                         "runs_summary": {
                             "elapsed_ms": { "n": 2, "mean": 100, "stdev": 25, "cv_pct": 25, "p50": 100, "p95": 130 }
                         }
@@ -118,6 +119,9 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
 
     assert!(report.resource_summary.is_some());
     assert_eq!(report.budget_findings.len(), 1);
+    assert_eq!(report.benchmark_memory.len(), 1);
+    assert_eq!(report.benchmark_memory[0].scenario, "fixture-scenario");
+    assert_eq!(report.benchmark_memory[0].peak_bytes, 8388608);
     assert!(report
         .baseline_health
         .iter()
@@ -149,6 +153,8 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
     assert!(report.markdown.contains("### Resource Summary"));
     assert!(report.markdown.contains("- Duration: **12345 ms**"));
     assert!(report.markdown.contains("fixture workload"));
+    assert!(report.markdown.contains("### Benchmark Memory"));
+    assert!(report.markdown.contains("| `fixture-scenario` | 8.0 MiB |"));
     assert!(report.markdown.contains("### Bench Budget Findings"));
     assert!(report.markdown.contains("| `metric.max_value` | fixture-subject | 42 | 20 | count | error | Metric exceeded budget |"));
     assert!(report.markdown.contains("### Baseline Health"));
@@ -196,6 +202,7 @@ fn reads_persisted_uuid_prefixed_artifacts() {
             }],
             "scenarios": [{
                 "id": "audit-self",
+                "metrics": { "peak_rss_bytes": 41943040 },
                 "runs_summary": {
                     "p95_ms": { "n": 3, "mean": 100, "stdev": 30, "cv_pct": 30, "p50": 100, "p95": 140 }
                 }
@@ -214,6 +221,9 @@ fn reads_persisted_uuid_prefixed_artifacts() {
         Some("persisted bench")
     );
     assert_eq!(report.budget_findings.len(), 1);
+    assert_eq!(report.benchmark_memory.len(), 1);
+    assert_eq!(report.benchmark_memory[0].scenario, "audit-self");
+    assert_eq!(report.benchmark_memory[0].peak_bytes, 41943040);
     assert!(report
         .baseline_health
         .iter()
