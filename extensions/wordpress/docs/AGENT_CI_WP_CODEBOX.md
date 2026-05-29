@@ -130,16 +130,13 @@ The runner converts the agent config into a single WP Codebox sandbox run:
   status/diff, commits, pushes, and opens or reuses a fallback PR after the run.
 - `ability_tools` can expose additional WordPress abilities as tools during the
   agent run.
-- `enable_terminal_actions` exposes host-side terminal actions through the
-  WordPress extension's `agent-terminal-actions` helper for runner-owned tools
-  that must execute like a real shell command. The default `run_wp_cli` tool runs
-  through `WP_CLI::runcommand()` when WP-CLI is available in the active
-  WordPress runtime. When the runtime has WordPress loaded but no `WP_CLI`
-  class, supported commands (`wp eval ...`, `wp plugin list`, `wp plugin
-  activate ...`, and `&&` chains of those commands) run against runtime
-  WordPress APIs. Other WP-CLI commands fall back to a `wp_cli` terminal action
-  as `wp ...` through `bash -lc` with the runtime root as the command boundary
-  and return exit code, stdout, and stderr. Use `wp_cli_tool_name` only when a
+- `enable_terminal_actions` exposes terminal actions through the WordPress
+  extension's `agent-terminal-actions` helper for runner-owned tools that must
+  execute like a real command. In WP Codebox agent runs, the default
+  `run_wp_cli` tool posts to the authenticated runtime WP-CLI bridge injected by
+  `wp-codebox.agent-sandbox-run`; the bridge executes the command with WP
+  Codebox's `wordpress.wp-cli` primitive inside the active Playground runtime
+  and returns exit code, stdout, and stderr. Use `wp_cli_tool_name` only when a
   consumer needs a different agent-facing tool name.
 - `pipeline_step_patches` and `flow_step_patches` can adjust imported bundle
   step configuration before execution.
