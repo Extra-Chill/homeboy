@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -7,8 +8,7 @@ use crate::commands::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
 use crate::commands::GlobalArgs;
-use crate::core::cargo_target::CARGO_TARGET_DIR_ENV;
-use crate::core::component::{Component, ComponentScriptsConfig};
+use crate::core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
 use crate::core::engine::run_dir::RunDir;
 use crate::core::extension::component_script::{
     run_component_scripts, run_component_scripts_with_env, run_component_scripts_with_run_dir,
@@ -70,34 +70,6 @@ fn script_component(root: &Path, command: &str) -> Component {
     component
 }
 
-fn rust_script_component(root: &Path, command: &str) -> Component {
-    let mut component = script_component(root, command);
-    component.remote_url = Some("https://github.com/Extra-Chill/homeboy.git".to_string());
-    component
-}
-
-fn without_process_cargo_target_dir<R>(body: impl FnOnce() -> R) -> R {
-    let prior = std::env::var(CARGO_TARGET_DIR_ENV).ok();
-    std::env::remove_var(CARGO_TARGET_DIR_ENV);
-    let result = body();
-    match prior {
-        Some(value) => std::env::set_var(CARGO_TARGET_DIR_ENV, value),
-        None => std::env::remove_var(CARGO_TARGET_DIR_ENV),
-    }
-    result
-}
-
-fn with_process_cargo_target_dir<R>(value: &Path, body: impl FnOnce() -> R) -> R {
-    let prior = std::env::var(CARGO_TARGET_DIR_ENV).ok();
-    std::env::set_var(CARGO_TARGET_DIR_ENV, value);
-    let result = body();
-    match prior {
-        Some(value) => std::env::set_var(CARGO_TARGET_DIR_ENV, value),
-        None => std::env::remove_var(CARGO_TARGET_DIR_ENV),
-    }
-    result
-}
-
 #[test]
 fn test_run_component_scripts() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -131,134 +103,55 @@ fn test_run_component_scripts_with_env() {
 }
 
 #[test]
-fn rust_component_scripts_default_to_shared_cargo_target_dir() {
-    with_isolated_home(|home| {
-        without_process_cargo_target_dir(|| {
-            let primary = tempfile::tempdir().expect("primary temp dir");
-            let worktree = tempfile::tempdir().expect("worktree temp dir");
-            fs::write(
-                primary.path().join("Cargo.toml"),
-                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-            )
-            .expect("primary Cargo.toml");
-            fs::write(
-                worktree.path().join("Cargo.toml"),
-                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-            )
-            .expect("worktree Cargo.toml");
-
-            let primary_component = rust_script_component(
-                primary.path(),
-                "printf '%s' \"$CARGO_TARGET_DIR\" > cargo-target",
-            );
-            let worktree_component = rust_script_component(
-                worktree.path(),
-                "printf '%s' \"$CARGO_TARGET_DIR\" > cargo-target",
-            );
-
-            let primary_output = run_component_scripts(
-                &primary_component,
-                ExtensionCapability::Test,
-                primary.path(),
-                false,
-            )
-            .expect("primary component script should run");
-            let worktree_output = run_component_scripts(
-                &worktree_component,
-                ExtensionCapability::Test,
-                worktree.path(),
-                false,
-            )
-            .expect("worktree component script should run");
-
-            assert!(primary_output.success);
-            assert!(worktree_output.success);
-            let primary_target = fs::read_to_string(primary.path().join("cargo-target")).unwrap();
-            let worktree_target = fs::read_to_string(worktree.path().join("cargo-target")).unwrap();
-
-            assert_eq!(primary_target, worktree_target);
-            assert!(
-                primary_target.starts_with(
-                    &home
-                        .path()
-                        .join(".local/share/homeboy/cargo-targets")
-                        .to_string_lossy()
-                        .to_string()
-                ),
-                "target dir should live under Homeboy data dir: {primary_target}"
-            );
-            assert!(
-                primary_target.contains("fixture-"),
-                "target dir should include component identity label: {primary_target}"
-            );
-        });
-    });
-}
-
-#[test]
-fn rust_component_scripts_respect_explicit_cargo_target_dir() {
-    with_isolated_home(|_| {
-        without_process_cargo_target_dir(|| {
-            let dir = tempfile::tempdir().expect("temp dir");
-            fs::write(
-                dir.path().join("Cargo.toml"),
-                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-            )
-            .expect("Cargo.toml");
-            let explicit = dir.path().join("custom-target");
-            let component = rust_script_component(
-                dir.path(),
-                "printf '%s' \"$CARGO_TARGET_DIR\" > cargo-target",
-            );
-
-            let output = run_component_scripts_with_env(
-                &component,
-                ExtensionCapability::Test,
-                dir.path(),
-                false,
-                &[(
-                    CARGO_TARGET_DIR_ENV.to_string(),
-                    explicit.to_string_lossy().to_string(),
-                )],
-                &[],
-            )
-            .expect("component script should run");
-
-            assert!(output.success);
-            assert_eq!(
-                fs::read_to_string(dir.path().join("cargo-target")).unwrap(),
-                explicit.to_string_lossy()
-            );
-        });
-    });
-}
-
-#[test]
-fn rust_component_scripts_respect_process_cargo_target_dir() {
+fn component_scripts_include_linked_extension_env_provider_output() {
     with_isolated_home(|_| {
         let dir = tempfile::tempdir().expect("temp dir");
+        let extension_dir = crate::core::paths::extensions()
+            .expect("extensions path")
+            .join("fixture-env");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
         fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            extension_dir.join("fixture-env.json"),
+            r#"{
+                "name": "Fixture Env",
+                "version": "1.0.0",
+                "env_provider": { "script": "env.sh" }
+            }"#,
         )
-        .expect("Cargo.toml");
-        let explicit = dir.path().join("process-target");
-        with_process_cargo_target_dir(&explicit, || {
-            let component = rust_script_component(
-                dir.path(),
-                "printf '%s' \"$CARGO_TARGET_DIR\" > cargo-target",
-            );
+        .expect("extension manifest");
+        fs::write(
+            extension_dir.join("env.sh"),
+            "#!/bin/sh\nprintf '{\"FIXTURE_ENV\":\"%s\"}' \"$EXTRA_VALUE\"\n",
+        )
+        .expect("extension env script");
+        let mut permissions = fs::metadata(extension_dir.join("env.sh"))
+            .expect("extension env metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(extension_dir.join("env.sh"), permissions)
+            .expect("extension env executable");
 
-            let output =
-                run_component_scripts(&component, ExtensionCapability::Test, dir.path(), false)
-                    .expect("component script should run");
+        let mut component = script_component(dir.path(), "printf '%s' \"$FIXTURE_ENV\" > marker");
+        component.extensions = Some(HashMap::from([(
+            "fixture-env".to_string(),
+            ScopedExtensionConfig::default(),
+        )]));
 
-            assert!(output.success);
-            assert_eq!(
-                fs::read_to_string(dir.path().join("cargo-target")).unwrap(),
-                explicit.to_string_lossy()
-            );
-        });
+        let output = run_component_scripts_with_env(
+            &component,
+            ExtensionCapability::Test,
+            dir.path(),
+            false,
+            &[("EXTRA_VALUE".to_string(), "provided".to_string())],
+            &[],
+        )
+        .expect("component script should run");
+
+        assert!(output.success);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("marker")).unwrap(),
+            "provided"
+        );
     });
 }
 

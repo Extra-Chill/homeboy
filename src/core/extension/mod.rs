@@ -3,6 +3,7 @@ pub mod build;
 mod capability;
 mod compiler_warning_contract;
 pub mod component_script;
+mod env_provider;
 mod execution;
 mod fingerprint;
 pub mod grammar;

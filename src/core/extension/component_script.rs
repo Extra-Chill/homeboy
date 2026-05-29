@@ -4,7 +4,9 @@ use crate::core::component::Component;
 use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
 use crate::core::engine::run_dir::RunDir;
 use crate::core::error::{Error, Result};
-use crate::core::extension::{exec_context, ExtensionCapability, RunnerOutput};
+use crate::core::extension::{
+    env_provider, exec_context, load_extension, ExtensionCapability, RunnerOutput,
+};
 
 #[derive(Debug, Clone)]
 pub struct ComponentScriptOutput {
@@ -69,7 +71,7 @@ pub(crate) fn run_component_scripts_with_env(
 
     let mut stdout = String::new();
     let mut stderr = String::new();
-    let env = component_script_env(component, source_path, extra_env);
+    let env = component_script_env(component, source_path, extra_env)?;
 
     for command in commands {
         if passthrough {
@@ -144,7 +146,7 @@ fn component_script_env(
     component: &Component,
     source_path: &Path,
     extra_env: &[(String, String)],
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>> {
     let source_path_value = source_path.to_string_lossy().to_string();
     let mut env = vec![
         (
@@ -163,11 +165,22 @@ fn component_script_env(
         (exec_context::COMPONENT_PATH.to_string(), source_path_value),
         (exec_context::SETTINGS_JSON.to_string(), "{}".to_string()),
     ];
-    if let Ok(cargo_env) = crate::core::cargo_target::env_vars(component, source_path, extra_env) {
-        env.extend(cargo_env);
+    if let Some(extensions) = &component.extensions {
+        let mut extension_ids = extensions.keys().collect::<Vec<_>>();
+        extension_ids.sort();
+        for extension_id in extension_ids {
+            let extension = load_extension(extension_id)?;
+            let mut provider_env = env.clone();
+            provider_env.extend(extra_env.iter().cloned());
+            env.extend(env_provider::env_vars(
+                &extension,
+                source_path,
+                &provider_env,
+            )?);
+        }
     }
     env.extend(extra_env.iter().cloned());
-    env
+    Ok(env)
 }
 
 fn command_with_args(command: &str, script_args: &[String]) -> String {

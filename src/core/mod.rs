@@ -3,7 +3,6 @@
 pub mod config;
 pub mod api_jobs;
 pub mod budget;
-pub(crate) mod cargo_target;
 pub mod ci_profile;
 pub mod code_audit;
 pub mod component;
