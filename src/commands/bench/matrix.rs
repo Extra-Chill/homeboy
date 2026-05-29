@@ -30,6 +30,15 @@ struct RigBenchContext {
 fn prepare_rig_bench_context(rig_id: &str) -> homeboy::core::Result<RigBenchContext> {
     let spec = rig::load(rig_id)?;
     let lease = rig::lease::acquire_active_run_lease(&spec, "bench")?;
+    if let Some(prepare) = rig::run_bench_prepare(&spec)? {
+        if !prepare.success {
+            return Err(homeboy::core::Error::rig_pipeline_failed(
+                &spec.id,
+                "bench_prepare",
+                "rig bench preparation failed; refusing to run bench workload",
+            ));
+        }
+    }
     let snapshot = rig::snapshot_state(&spec);
     let package_root =
         rig::read_source_metadata(&spec.id).map(|metadata| PathBuf::from(metadata.package_path));

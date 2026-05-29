@@ -39,6 +39,14 @@ pub struct CheckReport {
     pub success: bool,
 }
 
+/// Report from a bench preparation pipeline.
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchPrepareReport {
+    pub rig_id: String,
+    pub pipeline: PipelineOutcome,
+    pub success: bool,
+}
+
 /// Report from `rig down`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DownReport {
@@ -197,6 +205,24 @@ pub fn run_check_groups(rig: &RigSpec, groups: &[String]) -> Result<CheckReport>
         success: outcome.is_success(),
         pipeline: outcome,
     })
+}
+
+/// Run rig-owned setup required before timed bench workloads.
+///
+/// Missing `bench_prepare` pipelines are a no-op so existing rigs keep their
+/// previous bench behavior. Declared steps fail fast because workload timing
+/// must not start when dependency/bootstrap preparation is incomplete.
+pub fn run_bench_prepare(rig: &RigSpec) -> Result<Option<BenchPrepareReport>> {
+    if !rig.pipeline.contains_key("bench_prepare") {
+        return Ok(None);
+    }
+
+    let outcome = run_pipeline(rig, "bench_prepare", true)?;
+    Ok(Some(BenchPrepareReport {
+        rig_id: rig.id.clone(),
+        success: outcome.is_success(),
+        pipeline: outcome,
+    }))
 }
 
 /// Tear down a rig. Runs the `down` pipeline if defined, then stops every
