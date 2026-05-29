@@ -148,7 +148,7 @@ fn process_tree_snapshot(root_pid: u32) -> Option<ProcessSnapshot> {
     let root_pid = root_pid as i32;
     stats.get(&root_pid)?;
 
-    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    let mut children: std::collections::HashMap<i32, Vec<i32>> = std::collections::HashMap::new();
     for stat in stats.values() {
         children.entry(stat.ppid).or_default().push(stat.pid);
     }
