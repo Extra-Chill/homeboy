@@ -41,9 +41,11 @@ fi
 
 RESULTS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/rust-bench-smoke-results.XXXXXX")
 LIST_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/rust-bench-list-smoke-results.XXXXXX")
+CARGO_TIMING_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/rust-bench-cargo-timing-results.XXXXXX")
+ARTIFACT_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/rust-bench-artifacts.XXXXXX")
 
 # shellcheck disable=SC2064
-trap "rm -f '$RESULTS_TMPFILE' '$LIST_TMPFILE'" EXIT
+trap "rm -f '$RESULTS_TMPFILE' '$LIST_TMPFILE' '$CARGO_TIMING_TMPFILE'; rm -rf '$ARTIFACT_TMPDIR'" EXIT
 
 echo "============================================"
 echo "Rust bench harness smoke test"
@@ -98,6 +100,31 @@ for _required_key in mean_ms p50_ms p95_ms p99_ms min_ms max_ms; do
     echo "  ✓ all scenarios have $_required_key"
 done
 
+for _required_phase in bench_discovery_ms cargo_build_ms result_parse_ms; do
+    PHASE_VALUE="$(jq -r --arg k "$_required_phase" '.metric_groups.rust_runner_phases_ms[$k] // "missing"' "$RESULTS_TMPFILE")"
+    if [ "$PHASE_VALUE" = "missing" ]; then
+        echo "  ✗ missing Rust runner phase metric: $_required_phase" >&2
+        cat "$RESULTS_TMPFILE" >&2
+        exit 1
+    fi
+    echo "  ✓ Rust runner phase metric present: $_required_phase=$PHASE_VALUE"
+done
+
+TIMELINE_COUNT="$(jq -r '.timeline | length' "$RESULTS_TMPFILE")"
+if [ "$TIMELINE_COUNT" -lt 5 ]; then
+    echo "  ✗ expected Rust runner timeline spans, got $TIMELINE_COUNT" >&2
+    cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+echo "  ✓ Rust runner timeline spans: $TIMELINE_COUNT"
+
+MISSING_WORKLOAD_PHASES="$(jq -r '.scenarios[] | select((.metadata.rust_runner.workload_run_ms // null) == null) | .id' "$RESULTS_TMPFILE")"
+if [ -n "$MISSING_WORKLOAD_PHASES" ]; then
+    echo "  ✗ missing per-scenario workload phase timing: $MISSING_WORKLOAD_PHASES" >&2
+    exit 1
+fi
+echo "  ✓ all scenarios carry workload phase timing metadata"
+
 # Every scenario's iteration count must match.
 MISMATCH="$(jq -r --argjson n "$ITERATIONS" '.scenarios[] | select(.iterations != $n) | .id' "$RESULTS_TMPFILE")"
 if [ -n "$MISMATCH" ]; then
@@ -133,6 +160,41 @@ if [ -n "$EXECUTED" ]; then
     exit 1
 fi
 echo "  ✓ list-only scenarios have iterations=0 and empty metrics"
+
+if jq -e 'has("metric_groups") or has("timeline") or has("artifacts")' "$LIST_TMPFILE" >/dev/null; then
+    echo "  ✗ list-only mode unexpectedly emitted execution evidence" >&2
+    cat "$LIST_TMPFILE" >&2
+    exit 1
+fi
+echo "  ✓ list-only mode emits discovery only"
+
+echo
+echo "── Validating optional Cargo timing artifact ──"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_PATH="$FIXTURE_DIR" \
+HOMEBOY_COMPONENT_ID="bench-noop-fixture" \
+HOMEBOY_BENCH_ITERATIONS=1 \
+HOMEBOY_RUST_BENCH_CARGO_TIMINGS=1 \
+HOMEBOY_BENCH_RESULTS_ARTIFACT_DIR="$ARTIFACT_TMPDIR" \
+HOMEBOY_BENCH_RESULTS_FILE="$CARGO_TIMING_TMPFILE" \
+    bash "${SCRIPT_DIR}/bench-runner.sh"
+
+CARGO_TIMING_STATUS="$(jq -r '.metadata.rust_runner.cargo_timing_status // "missing"' "$CARGO_TIMING_TMPFILE")"
+if [ "$CARGO_TIMING_STATUS" != "captured" ]; then
+    echo "  ✗ expected cargo_timing_status=captured, got $CARGO_TIMING_STATUS" >&2
+    cat "$CARGO_TIMING_TMPFILE" >&2
+    exit 1
+fi
+echo "  ✓ Cargo timing status captured"
+
+CARGO_TIMING_ARTIFACT="$(jq -r '.artifacts.cargo_timing.path // ""' "$CARGO_TIMING_TMPFILE")"
+if [ -z "$CARGO_TIMING_ARTIFACT" ] || [ ! -s "$CARGO_TIMING_ARTIFACT" ]; then
+    echo "  ✗ missing Cargo timing artifact at $CARGO_TIMING_ARTIFACT" >&2
+    cat "$CARGO_TIMING_TMPFILE" >&2
+    exit 1
+fi
+echo "  ✓ Cargo timing artifact: $CARGO_TIMING_ARTIFACT"
 
 # The busy workload must report a non-zero timing. The noop workload can
 # legitimately round to 0 on fast machines after release optimization.
