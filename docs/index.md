@@ -10,7 +10,7 @@ Homeboy is a config-driven automation engine for development and deployment auto
 
 ## Operator Guides
 
-- [Controller VPS to Homeboy Lab reverse runner](operators/controller-vps-lab-reverse-runner.md) - Setup, smoke evidence, and troubleshooting for the gated reverse-runner path tracked by #2993 and #2950
+- [Controller to runner reverse-runner setup](operators/controller-runner-reverse-runner.md) - Setup, smoke evidence, and troubleshooting for the gated reverse-runner path tracked by #2993 and #2950
 
 ## CLI
 

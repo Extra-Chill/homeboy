@@ -8,17 +8,17 @@ homeboy server <COMMAND>
 
 ## Subcommands
 
-## Homeboy Lab Onboarding
+## Runner Machine Onboarding
 
-For a normal Lab machine, use one ID for the machine and its runner capability:
+For a normal runner machine, use one ID for the machine and its runner capability:
 
 ```sh
-homeboy server create homeboy-lab --host 192.168.86.63 --user chubes --port 22
-homeboy runner enable homeboy-lab --workspace-root /home/chubes/Developer --concurrency-limit 4 --artifact-policy copy
-homeboy runner connect homeboy-lab
+homeboy server create <runner-id> --host <host> --user <user> --port 22
+homeboy runner enable <runner-id> --workspace-root <workspace-root> --concurrency-limit 4 --artifact-policy copy
+homeboy runner connect <runner-id>
 ```
 
-This records `homeboy-lab` as the SSH server and enables runner settings on the same server record.
+This records `<runner-id>` as the SSH server and enables runner settings on the same server record.
 
 ### `create`
 

@@ -4,6 +4,12 @@ Homeboy is CLI-first, but the daemon is the stable local UI and automation
 surface for clients that should not shell out and parse terminal output. The
 daemon remains a local Homeboy engine, not a hosted control plane.
 
+For reverse runner work, a VPS can run the daemon as a broker service while
+still keeping the daemon itself on loopback. Use `homeboy daemon broker-config`
+to render the `systemd` unit and private tunnel/proxy scaffolding. Public broker
+exposure remains blocked until the broker auth/pairing work in
+[#2990](https://github.com/Extra-Chill/homeboy/issues/2990) lands.
+
 ## Scope
 
 The daemon owns a loopback-only HTTP contract for:
@@ -13,6 +19,18 @@ The daemon owns a loopback-only HTTP contract for:
 - long-running lint, test, audit, and bench jobs
 - structured job events and final results
 - future mutating operations behind explicit capabilities and confirmations
+
+Reverse runner broker routes add a private controller/runner job exchange:
+
+- `POST /runner/sessions` for runner-initiated session registration
+- `POST /runner/jobs` for the controller to enqueue work
+- `POST /runner/jobs/claim` for a reverse runner to claim queued work
+- `POST /runner/jobs/:id/events` for runner progress events
+- `POST /runner/jobs/:id/finish` for terminal runner results
+
+These routes are not safe as an unauthenticated public service. Until #2990 is
+available, deploy them only on loopback plus private SSH/VPN/Zero Trust tunnel
+access.
 
 The CLI remains usable without the daemon. Daemon routes reuse Homeboy core and
 command adapters so desktop, web, agent, and CLI workflows do not fork product
@@ -29,7 +47,7 @@ homeboy daemon start
         +-- binds 127.0.0.1:<port>
         +-- writes pid/address/token metadata to the daemon state file
         |
-homeboy daemon status --format=json
+homeboy daemon status
         |
         +-- returns the current loopback address and process state
 ```
@@ -37,6 +55,29 @@ homeboy daemon status --format=json
 Remote runner clients use `homeboy runner connect <runner-id>` to create an SSH
 loopback tunnel to a runner daemon. The client still talks to a local loopback
 URL; Homeboy owns the SSH tunnel and rejects non-loopback daemon addresses.
+
+Reverse runners invert that flow. The controller/VPS runs `homeboy daemon serve`
+as a loopback broker, and the lab connects out to a private broker URL so the lab
+does not need inbound ports:
+
+```text
+VPS systemd service
+  homeboy daemon serve --addr 127.0.0.1:7421
+          |
+          +-- /var/lib/homeboy/.config/homeboy/daemon/state.json
+          +-- /var/lib/homeboy/.config/homeboy/daemon/jobs.json
+          |
+private tunnel / private network only
+          |
+Runner machine
+  POST /runner/sessions
+  POST /runner/jobs/claim
+  POST /runner/jobs/:id/events
+  POST /runner/jobs/:id/finish
+```
+
+Use `homeboy daemon broker-config` on the target VPS to render the
+service unit, proxy snippets, safe exposure state, and operational commands.
 
 ## Minimum Dashboard Surface
 
@@ -81,6 +122,19 @@ Events are append-only records. They are safe for UIs to render incrementally an
 safe for runners to mirror as evidence. The final result event carries the same
 structured result shape as the corresponding CLI command, including artifacts,
 findings, summaries, and CI context when a CI profile/job selector was used.
+
+The packaged broker service sets `HOME=/var/lib/homeboy`, so the daemon durable
+job store is `/var/lib/homeboy/.config/homeboy/daemon/jobs.json`. The store keeps
+bounded per-job events and supports restart recovery for queued broker jobs. It
+is operational state, not a durable audit archive; important evidence should
+still be persisted as Homeboy observations or artifacts.
+
+Restart behavior:
+
+- queued remote-runner jobs stay queued across daemon restart
+- broker-owned running jobs are marked failed as stale when the store is reopened
+- active reverse-runner claims remain lease-scoped until expiry
+- runners should retry claim after lease expiry when the broker restarts mid-job
 
 ## Client Replacement Order
 
@@ -147,6 +201,7 @@ another.
 ## Default-Deny Rules
 
 - Bind to loopback by default.
+- Keep VPS broker services on a stable loopback port and expose them only through private tunnels until broker auth/pairing lands.
 - Treat daemon tokens/capabilities as local secrets.
 - Reject mutating routes until they declare required capabilities.
 - Require preview/apply for high-risk writes.

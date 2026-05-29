@@ -35,17 +35,17 @@ homeboy runner enable <server-id> --workspace-root <path>
 homeboy runner enable <server-id> --workspace-root <path> --concurrency-limit 4 --artifact-policy copy
 ```
 
-Enables runner capability on an existing SSH server. This is the recommended Homeboy Lab onboarding path:
+Enables runner capability on an existing SSH server. This is the recommended onboarding path for any machine that should accept Homeboy runner work:
 
 ```sh
-homeboy server create homeboy-lab --host 192.168.86.63 --user chubes --port 22
-homeboy runner enable homeboy-lab --workspace-root /home/chubes/Developer --concurrency-limit 4 --artifact-policy copy
-homeboy runner connect homeboy-lab
+homeboy server create <runner-id> --host <host> --user <user> --port 22
+homeboy runner enable <runner-id> --workspace-root <workspace-root> --concurrency-limit 4 --artifact-policy copy
+homeboy runner connect <runner-id>
 ```
 
-After this, `homeboy-lab` is both the server ID and the runner ID.
+After this, `<runner-id>` is both the server ID and the runner ID.
 
-Hot commands that support Lab offload (`audit`, full `lint`, `test`, `bench run`, and `trace`) auto-select a default Lab runner when `--runner` is omitted. Selection is conservative:
+Hot commands that support runner offload (`audit`, full `lint`, `test`, `bench run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
 
 - `--runner <id>` always wins.
 - `--force-hot` keeps the command local.
@@ -71,10 +71,10 @@ Lab offload support is intentionally command-specific:
 
 Unsupported hot commands still get resource-policy warnings, but those warnings explain why Lab offload is unavailable instead of suggesting `--runner`.
 
-Configure a preferred Lab runner with:
+Configure a preferred runner with:
 
 ```sh
-homeboy config set /lab/preferred_runner '"homeboy-lab"'
+homeboy config set /lab/preferred_runner '"<runner-id>"'
 ```
 
 ### `doctor`
@@ -137,11 +137,28 @@ The broker exposes `POST /runner/jobs`, `POST /runner/jobs/claim`,
 controllers can queue work and reverse runners can claim, stream progress, and
 return results without inbound access to the lab machine.
 
-For the controller VPS to Homeboy Lab operator path, see
-[Controller VPS to Homeboy Lab reverse runner](../operators/controller-vps-lab-reverse-runner.md).
-That guide is VPS-agnostic and intentionally explicit about what is available now
-and what remains gated by #2990, #2991, #2992, and #2947 before production broker
-exposure.
+For the generic controller-to-runner operator path, see
+[Controller to runner reverse-runner setup](../operators/controller-runner-reverse-runner.md).
+That guide is machine-agnostic and intentionally explicit about what is available
+now and what remains gated by #2990, #2991, #2992, and #2947 before production
+broker exposure.
+
+### `work`
+
+```sh
+homeboy runner work <runner-id> --broker-url <url>
+homeboy runner work <runner-id> --broker-url <url> --project <project-id> --lease-ms 30000
+```
+
+Claims one brokered reverse-runner job for the runner, executes it on the runner
+machine under the runner's local policy, streams a progress event, and finishes
+the broker job with stdout, stderr, and exit code. This is the runner-side half
+of reverse `runner exec`; it uses outbound HTTP from the lab to the controller
+broker and does not require inbound SSH or a public listening port on the lab.
+
+The command exits `0` when no job is available, with `claimed: false` in the JSON
+payload. When a job is claimed, the process exit code matches the executed
+command's exit code.
 
 ### `status`
 
@@ -193,7 +210,7 @@ Arbitrary runner updates must use `--json` or `--base64`; positional `key=value`
 
 ```sh
 homeboy runner trust <runner-id> --project <project-id> --command test --command bench --allow-raw-exec false
-homeboy runner trust <runner-id> --workspace-root /home/chubes/Developer --artifact-policy metadata
+homeboy runner trust <runner-id> --workspace-root <runner-workspace-root> --artifact-policy metadata
 homeboy runner trust <runner-id> --peer <controller-server-id> --fingerprint SHA256:...
 ```
 
@@ -212,7 +229,7 @@ Policy fields:
 ### `pair`
 
 ```sh
-homeboy runner pair <runner-id> --peer <controller-server-id> --accept-project <project-id> --workspace-root /home/chubes/Developer
+homeboy runner pair <runner-id> --peer <controller-server-id> --accept-project <project-id> --workspace-root <runner-workspace-root>
 homeboy runner pair <runner-id> --fingerprint SHA256:... --allow-raw-exec false
 ```
 
@@ -250,7 +267,7 @@ homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapsho
 homeboy runner workspace sync <runner-id> --path <local-worktree> --mode git
 ```
 
-`workspace sync` materializes a laptop worktree under the runner's configured `workspace_root` so Lab execution can run against an explicit remote path while Git operations and canonical edits stay local.
+`workspace sync` materializes a local worktree under the runner's configured `workspace_root` so runner execution can run against an explicit remote path while Git operations and canonical edits stay local.
 
 Modes:
 
@@ -267,11 +284,11 @@ Safety rules:
 ### `workspace apply`
 
 ```sh
-homeboy runner workspace apply <lab-apply.json>
-homeboy runner workspace apply <lab-apply.json> --force
+homeboy runner workspace apply <runner-apply.json>
+homeboy runner workspace apply <runner-apply.json> --force
 ```
 
-`workspace apply` brings a Lab-generated fix artifact back to the local source worktree recorded in the artifact's `source_snapshot.local_path`. It is local-only: it does not commit, push, or make the Lab runner canonical. Reviewability stays in normal local Git via `git status` and `git diff`.
+`workspace apply` brings a runner-generated fix artifact back to the local source worktree recorded in the artifact's `source_snapshot.local_path`. It is local-only: it does not commit, push, or make the runner canonical. Reviewability stays in normal local Git via `git status` and `git diff`.
 
 Safety rules:
 
@@ -282,13 +299,13 @@ Safety rules:
 - Delta paths must be relative and stay inside the source worktree.
 - Output includes `apply_status`, `modified_files`, `expected_snapshot_hash`, and `current_snapshot_hash`.
 
-Temporary Wave 4 adapter contract, until the Lab fix-capture contract settles:
+Temporary Wave 4 adapter contract, until the runner fix-capture contract settles:
 
 ```json
 {
   "source_snapshot": {
     "runner_id": "lab-a",
-    "local_path": "/Users/chubes/Developer/project@branch",
+    "local_path": "/path/to/project@branch",
     "remote_path": "/srv/homeboy/_lab_workspaces/project-abc123",
     "git_sha": "...",
     "dirty": false,
@@ -324,12 +341,12 @@ SSH runner records are stored on their server as `runner` capability config unde
 
 ```json
 {
-  "id": "homeboy-lab",
-  "host": "192.168.86.63",
-  "user": "chubes",
+  "id": "runner-a",
+  "host": "runner.example.internal",
+  "user": "runner",
   "port": 22,
   "runner": {
-    "workspace_root": "/home/chubes/Developer",
+    "workspace_root": "/srv/homeboy/workspaces",
     "homeboy_path": "/usr/local/bin/homeboy",
     "daemon": false,
     "concurrency_limit": 4,
@@ -347,7 +364,7 @@ Standalone local runner records are still stored under `~/.config/homeboy/runner
   "id": "lab-local",
   "kind": "local",
   "server_id": null,
-  "workspace_root": "/Users/chubes/Developer",
+  "workspace_root": "/srv/homeboy/workspaces",
   "homeboy_path": "/usr/local/bin/homeboy",
   "daemon": false,
   "concurrency_limit": 2,
