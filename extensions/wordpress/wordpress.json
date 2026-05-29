@@ -185,14 +185,14 @@
       {
         "path_pattern": "/wp-content/plugins/",
         "staging_path": "/tmp/homeboy-staging",
-        "install_command": "cd {{siteRoot}} && plugin_slug=$(basename {{targetDir}}) && zip_root=$(unzip -qql {{stagingArtifact}} | head -1 | awk '{print $4}' | cut -d/ -f1) && if [ -z \"$zip_root\" ]; then echo 'ERROR: Could not determine zip root directory' && exit 1; fi && tmp_dir=$(mktemp -d /tmp/homeboy-install.XXXXXX) && unzip -q {{stagingArtifact}} -d \"$tmp_dir\" && extracted=\"$tmp_dir/$zip_root\" && if [ ! -d \"$extracted\" ]; then echo \"ERROR: Expected directory $extracted not found in archive\" && rm -rf \"$tmp_dir\" && exit 1; fi && rm -rf {{targetDir}}.bak && ([ -d {{targetDir}} ] && echo 'Backing up existing plugin to {{targetDir}}.bak' && mv {{targetDir}} {{targetDir}}.bak || true) && mv \"$extracted\" {{targetDir}} && rm -rf \"$tmp_dir\" || (echo 'ERROR: Plugin install failed — restoring backup' && rm -rf \"$tmp_dir\" && rm -rf {{targetDir}} && ([ -d {{targetDir}}.bak ] && mv {{targetDir}}.bak {{targetDir}} || true) && exit 1)",
-        "cleanup_command": "rm -f {{stagingArtifact}} && rm -rf {{targetDir}}.bak"
+        "install_command": "cd {{siteRoot}} && plugin_slug=$(basename {{targetDir}}) && zip_root=$(unzip -Z1 {{stagingArtifact}} | awk -F/ 'NF && $1 != \"\" { print $1; exit }') && if [ -z \"$zip_root\" ]; then echo 'ERROR: Could not determine zip root directory' && exit 1; fi && if [ \"$zip_root\" != \"$plugin_slug\" ]; then echo \"ERROR: ZIP root $zip_root does not match plugin slug $plugin_slug\" && exit 1; fi && rm -rf {{targetDir}} && mkdir -p {{targetParentDir}} && unzip -oq {{stagingArtifact}} -d {{targetParentDir}} && test -d {{targetDir}} || (echo 'ERROR: Plugin install failed' && exit 1)",
+        "cleanup_command": "rm -f {{stagingArtifact}}"
       },
       {
         "path_pattern": "/wp-content/themes/",
         "staging_path": "/tmp/homeboy-staging",
-        "install_command": "cd {{siteRoot}} && theme_slug=$(basename {{targetDir}}) && zip_root=$(unzip -qql {{stagingArtifact}} | head -1 | awk '{print $4}' | cut -d/ -f1) && if [ -z \"$zip_root\" ]; then echo 'ERROR: Could not determine zip root directory' && exit 1; fi && tmp_dir=$(mktemp -d /tmp/homeboy-install.XXXXXX) && unzip -q {{stagingArtifact}} -d \"$tmp_dir\" && extracted=\"$tmp_dir/$zip_root\" && if [ ! -d \"$extracted\" ]; then echo \"ERROR: Expected directory $extracted not found in archive\" && rm -rf \"$tmp_dir\" && exit 1; fi && rm -rf {{targetDir}}.bak && ([ -d {{targetDir}} ] && echo 'Backing up existing theme to {{targetDir}}.bak' && mv {{targetDir}} {{targetDir}}.bak || true) && mv \"$extracted\" {{targetDir}} && rm -rf \"$tmp_dir\" || (echo 'ERROR: Theme install failed — restoring backup' && rm -rf \"$tmp_dir\" && rm -rf {{targetDir}} && ([ -d {{targetDir}}.bak ] && mv {{targetDir}}.bak {{targetDir}} || true) && exit 1)",
-        "cleanup_command": "rm -f {{stagingArtifact}} && rm -rf {{targetDir}}.bak"
+        "install_command": "cd {{siteRoot}} && theme_slug=$(basename {{targetDir}}) && zip_root=$(unzip -Z1 {{stagingArtifact}} | awk -F/ 'NF && $1 != \"\" { print $1; exit }') && if [ -z \"$zip_root\" ]; then echo 'ERROR: Could not determine zip root directory' && exit 1; fi && if [ \"$zip_root\" != \"$theme_slug\" ]; then echo \"ERROR: ZIP root $zip_root does not match theme slug $theme_slug\" && exit 1; fi && rm -rf {{targetDir}} && mkdir -p {{targetParentDir}} && unzip -oq {{stagingArtifact}} -d {{targetParentDir}} && test -d {{targetDir}} || (echo 'ERROR: Theme install failed' && exit 1)",
+        "cleanup_command": "rm -f {{stagingArtifact}}"
       }
     ],
     "version_patterns": [
