@@ -595,6 +595,14 @@ homeboy_datamachine_agent_attach_evidence_references() {
             // first_field($metadata.job_artifact_exports; "branch")
             // first_field($metadata.fallback_pull_request; "head")
             // "";
+        def eval_workflow_run_url($metadata):
+            if ($metadata.eval_artifact.run? | type) == "object" then
+                ($metadata.eval_artifact.run.workflow_run_url // "")
+            elif ($metadata.eval_artifact.run? | type) == "array" then
+                ([$metadata.eval_artifact.run[]? | objects | .workflow_run_url? | select(present(.))] | first) // ""
+            else
+                ""
+            end;
         def evidence($scenario):
             ($scenario.metadata // {}) as $metadata
             | ($scenario.artifacts // {}) as $artifacts
@@ -624,7 +632,7 @@ homeboy_datamachine_agent_attach_evidence_references() {
                     grader_result: inline_ref("json"; ($metadata.eval_artifact.grade // $metadata.grade // null); "Grader result"; "runner"),
                     pull_request: inline_ref("url"; pr_url($metadata); "Pull request URL"; "github"),
                     workspace_branch: inline_ref("git-ref"; workspace_branch($metadata); "Workspace branch"; "runner"),
-                    workflow_run: ref("url"; ($metadata.workflow_run_url // $metadata.eval_artifact.run.workflow_run_url // $workflowRunUrl); "Workflow run"; "github")
+                    workflow_run: ref("url"; ($metadata.workflow_run_url // eval_workflow_run_url($metadata) // $workflowRunUrl); "Workflow run"; "github")
                 },
                 fingerprints: {
                     prompt_sha256: ($fingerprints.prompt.sha256 // ""),
