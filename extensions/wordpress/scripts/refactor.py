@@ -881,6 +881,8 @@ def wp_codebox_task_runner_args(data, settings, script_dir):
     agents_api_path = settings.get('wp_codebox_agents_api_path') or os.environ.get('HOMEBOY_WP_CODEBOX_AGENTS_API_PATH') or component_root
     data_machine_path = settings.get('wp_codebox_data_machine_path') or os.environ.get('HOMEBOY_WP_CODEBOX_DATA_MACHINE_PATH') or default_sibling_path(component_root, 'data-machine')
     data_machine_code_path = settings.get('wp_codebox_data_machine_code_path') or os.environ.get('HOMEBOY_WP_CODEBOX_DATA_MACHINE_CODE_PATH') or default_sibling_path(component_root, 'data-machine-code')
+    homeboy_path = settings.get('wp_codebox_homeboy_path') or os.environ.get('HOMEBOY_WP_CODEBOX_HOMEBOY_PATH') or default_sibling_path(component_root, 'homeboy')
+    homeboy_extensions_path = settings.get('wp_codebox_homeboy_extensions_path') or os.environ.get('HOMEBOY_WP_CODEBOX_HOMEBOY_EXTENSIONS_PATH') or default_sibling_path(component_root, 'homeboy-extensions')
 
     args = [
         os.path.join(script_dir, 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
@@ -888,6 +890,10 @@ def wp_codebox_task_runner_args(data, settings, script_dir):
         '--data-machine', data_machine_path,
         '--data-machine-code', data_machine_code_path,
     ]
+    if os.path.isdir(homeboy_path):
+        args.extend(['--homeboy', homeboy_path])
+    if os.path.isdir(homeboy_extensions_path):
+        args.extend(['--homeboy-extensions', homeboy_extensions_path])
     if settings.get('wp_codebox_bin'):
         args.extend(['--wp-codebox-bin', settings['wp_codebox_bin']])
     if settings.get('wp_codebox_max_turns'):

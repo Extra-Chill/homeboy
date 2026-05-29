@@ -31,7 +31,7 @@ function hasFlag(name) {
 }
 
 function usage() {
-  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--max-turns <n>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--artifacts <dir>]');
+  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--homeboy <path>] [--homeboy-extensions <path>] [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--max-turns <n>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--artifacts <dir>]');
   process.exit(1);
 }
 
@@ -147,10 +147,36 @@ function pathInside(parent, candidate) {
   }
 }
 
+function workspaceSlug(source) {
+  return path.basename(source).split('@')[0].replace(/[^a-zA-Z0-9_-]/g, '-');
+}
+
+function workspaceEntry(source) {
+  const slug = workspaceSlug(source);
+  return {
+    seed: {
+      type: 'directory',
+      source,
+      slug,
+    },
+    target: `/workspace/${slug}`,
+    mode: 'readwrite',
+    sourceMode: 'repo-backed',
+  };
+}
+
+function recipeWorkspaces(options) {
+  return [
+    options.agentsApi,
+    options.homeboy,
+    options.homeboyExtensions,
+  ].filter(Boolean).map(workspaceEntry);
+}
+
 function recipeForRequest(request, options) {
   const provider = argValue('--provider') || request.provider || '';
   const model = argValue('--model') || request.model || '';
-  const workspaceSlug = path.basename(options.agentsApi).split('@')[0].replace(/[^a-zA-Z0-9_-]/g, '-');
+  const workspaceSlugs = recipeWorkspaces(options).map((workspace) => workspace.seed.slug);
   const task = JSON.stringify({
     schema: 'homeboy/wp-codebox-audit-task/v1',
     sandbox_session_id: request.sandbox_session_id,
@@ -161,7 +187,7 @@ function recipeForRequest(request, options) {
       ...(request.task || {}),
       prompt: [
         request.task?.prompt || '',
-        `Use Data Machine Code workspace repo \`${workspaceSlug}\` for all workspace_* tool calls.`,
+        `Use Data Machine Code workspace repos ${workspaceSlugs.map((slug) => `\`${slug}\``).join(', ')} for workspace_* tool calls.`,
       ].filter(Boolean).join('\n\n'),
     },
   });
@@ -187,18 +213,7 @@ function recipeForRequest(request, options) {
       blueprint: { steps: [] },
     },
     inputs: {
-      workspaces: [
-        {
-          seed: {
-            type: 'directory',
-            source: options.agentsApi,
-            slug: workspaceSlug,
-          },
-          target: `/workspace/${workspaceSlug}`,
-          mode: 'readwrite',
-          sourceMode: 'repo-backed',
-        },
-      ],
+      workspaces: recipeWorkspaces(options),
       mounts: mountEntries(),
       extraPlugins: [
         pluginEntry(options.agentsApi, 'agents-api', false),
@@ -291,6 +306,8 @@ try {
     agentsApi: requireArg('--agents-api'),
     dataMachine: requireArg('--data-machine'),
     dataMachineCode: requireArg('--data-machine-code'),
+    homeboy: argValue('--homeboy'),
+    homeboyExtensions: argValue('--homeboy-extensions'),
   };
   const recipe = recipeForRequest(request, options);
   const recipePath = writeRecipe(recipe);

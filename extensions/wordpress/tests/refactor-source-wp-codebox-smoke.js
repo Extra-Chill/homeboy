@@ -133,12 +133,16 @@ process.stdout.write(JSON.stringify({
       wp_codebox_agents_api_path: path.join(root, 'agents-api'),
       wp_codebox_data_machine_path: path.join(root, 'data-machine'),
       wp_codebox_data_machine_code_path: path.join(root, 'data-machine-code'),
+      wp_codebox_homeboy_path: path.join(root, 'homeboy'),
+      wp_codebox_homeboy_extensions_path: path.join(root, 'homeboy-extensions'),
       wp_codebox_task_timeout_seconds: 2,
     },
   };
   fs.mkdirSync(writeCommand.settings.wp_codebox_agents_api_path, { recursive: true });
   fs.mkdirSync(writeCommand.settings.wp_codebox_data_machine_path, { recursive: true });
   fs.mkdirSync(writeCommand.settings.wp_codebox_data_machine_code_path, { recursive: true });
+  fs.mkdirSync(writeCommand.settings.wp_codebox_homeboy_path, { recursive: true });
+  fs.mkdirSync(writeCommand.settings.wp_codebox_homeboy_extensions_path, { recursive: true });
   fs.mkdirSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src'), { recursive: true });
   fs.writeFileSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src', 'example.php'), 'before\n');
 
@@ -166,6 +170,8 @@ process.stdout.write(JSON.stringify({
   assert.equal(run.records[0].command.timeout_seconds, 2);
   assert.match(run.records[0].command.args[0], /homeboy-wp-codebox-task-runner\.cjs$/);
   assert.equal(run.records[0].command.args.includes('--wp-codebox-bin'), true);
+  assert.equal(run.records[0].command.args.includes('--homeboy'), true);
+  assert.equal(run.records[0].command.args.includes('--homeboy-extensions'), true);
   const artifactsIndex = run.records[0].command.args.indexOf('--artifacts');
   assert.notEqual(artifactsIndex, -1);
   assert.equal(pathInside(writeCommand.root, run.records[0].command.args[artifactsIndex + 1]), false);

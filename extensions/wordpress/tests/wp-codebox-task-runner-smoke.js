@@ -91,6 +91,10 @@ try {
     '/components/data-machine',
     '--data-machine-code',
     '/components/data-machine-code',
+    '--homeboy',
+    '/components/homeboy',
+    '--homeboy-extensions',
+    '/components/homeboy-extensions',
     '--mount',
     '/repo/plugin:/wordpress/wp-content/plugins/plugin:readwrite',
     '--max-turns',
@@ -117,6 +121,16 @@ try {
 
   const recipe = captured.recipe;
   assert.equal(recipe.schema, 'wp-codebox/workspace-recipe/v1');
+  assert.deepEqual(recipe.inputs.workspaces.map((workspace) => workspace.seed.slug), [
+    'agents-api',
+    'homeboy',
+    'homeboy-extensions',
+  ]);
+  assert.deepEqual(recipe.inputs.workspaces.map((workspace) => workspace.mode), [
+    'readwrite',
+    'readwrite',
+    'readwrite',
+  ]);
   assert.deepEqual(recipe.inputs.secretEnv, ['OPENCODE_API_KEY']);
   assert.equal(recipe.inputs.mounts[0].source, '/repo/plugin');
   assert.equal(recipe.inputs.extraPlugins[0].slug, 'agents-api');
@@ -140,6 +154,7 @@ try {
   assert.equal(task.sandbox_session_id, 'homeboy-audit-fixture-session');
   assert.equal(task.orchestrator.issue_url, 'https://github.com/Extra-Chill/homeboy-extensions/issues/775');
   assert.equal(task.audit_findings[0].id, 'finding-1');
+  assert.match(task.task.prompt, /`agents-api`, `homeboy`, `homeboy-extensions`/);
 
   const nonExecutableCapturePath = path.join(root, 'capture-non-executable.json');
   const nonExecutableFixture = createFixtureWpCodebox(root, 0o644);
