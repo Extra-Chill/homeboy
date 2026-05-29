@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.19.1] - 2026-05-29
+
+### Fixed
+- provide shared Rust target env
+
 ## [1.19.0] - 2026-05-29
 
 ### Added
