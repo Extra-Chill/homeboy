@@ -132,6 +132,25 @@ pub struct RunnerStaleDaemonWarning {
     pub recovery_commands: Vec<String>,
 }
 
+impl RunnerStaleDaemonWarning {
+    pub fn new(
+        runner_id: &str,
+        session_homeboy_version: String,
+        current_homeboy_version: String,
+    ) -> Self {
+        Self {
+            session_homeboy_version,
+            current_homeboy_version,
+            message: "connected runner daemon was started by a different Homeboy version than the configured runner executable".to_string(),
+            recovery_commands: vec![
+                format!("homeboy runner connect {}", runner_id),
+                format!("homeboy runner disconnect {}", runner_id),
+                format!("homeboy runner connect {}", runner_id),
+            ],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerDisconnectReport {
     pub runner_id: String,
