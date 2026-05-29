@@ -261,6 +261,72 @@ function replayObservationChannels(metadata, config) {
 	return Array.isArray(channels) ? channels.filter((channel) => typeof channel === 'string' && channel.length > 0) : [];
 }
 
+function objectValue(value) {
+	return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function firstObject(...values) {
+	return values.find((value) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0) || {};
+}
+
+function firstDefined(...values) {
+	return values.find((value) => value !== undefined && value !== null && value !== '');
+}
+
+function buildWpGymProjection(scenario, config, metadata, evalArtifact) {
+	const configEval = objectValue(config.wp_gym_eval);
+	const metadataEval = objectValue(metadata.wp_gym_eval);
+	if (Object.keys(configEval).length === 0 && Object.keys(metadataEval).length === 0) {
+		return undefined;
+	}
+
+	const manifest = objectValue(metadata.scenario_manifest || metadata.manifest || metadata.scenario);
+	const scenarioConfig = firstObject(metadataEval.scenario, configEval.scenario, manifest.wp_gym?.scenario, manifest.scenario);
+	const taskSetConfig = firstObject(metadataEval.task_set, configEval.task_set, manifest.wp_gym?.task_set, manifest.task_set);
+	const graderConfig = firstObject(metadataEval.grader, configEval.grader, manifest.wp_gym?.grader);
+	const statusConfig = firstObject(metadataEval.status, configEval.status, manifest.wp_gym?.status);
+	const fingerprints = objectValue(metadata.fingerprints);
+	const evalHashes = objectValue(evalArtifact.hashes);
+	const grade = firstObject(graderConfig.grade, evalArtifact.grade, metadata.grade);
+	const reward = firstDefined(graderConfig.reward, metadata.reward, metadata.score, grade.reward, grade.score);
+	const failureReasons = firstDefined(graderConfig.failure_reasons, evalArtifact.failure_reasons, metadata.failure_reasons, []);
+	const success = firstDefined(graderConfig.success, metadata.success, metadata.success_status === 'success' ? true : undefined, grade.score !== undefined && grade.max_score !== undefined ? grade.score >= grade.max_score : undefined);
+	const outcome = firstDefined(statusConfig.outcome, success === true ? 'passed' : undefined, success === false ? 'failed' : undefined, metadata.completion_outcome, metadata.job_status, evalArtifact.run?.job_status);
+	const taskFamily = firstDefined(scenarioConfig.task_family, metadataEval.task_family, configEval.task_family, metadata.task_family, config.task_family, manifest.task_family);
+
+	return compactObject({
+		scenario: compactObject({
+			id: firstDefined(scenarioConfig.id, metadataEval.scenario_id, configEval.scenario_id, metadata.task_id, config.task_id, config.workload_id, scenario.id),
+			label: firstDefined(scenarioConfig.label, metadataEval.scenario_label, configEval.scenario_label, metadata.task_label, config.task_label, config.workload_label, scenario.label),
+			task_family: taskFamily,
+			prompt_sha256: firstDefined(scenarioConfig.prompt_sha256, fingerprints.prompt?.sha256, evalHashes.prompt?.sha256, config.prompt ? sha256Buffer(Buffer.from(config.prompt, 'utf8')) : undefined),
+			rules: compactObject({
+				general: firstDefined(scenarioConfig.rules?.general, metadata.general_rules, config.general_rules),
+				task_specific: firstDefined(scenarioConfig.rules?.task_specific, metadata.task_rules, config.task_rules),
+			}),
+		}),
+		task_set: compactObject({
+			id: firstDefined(taskSetConfig.id, metadataEval.task_set_id, configEval.task_set_id),
+			version: firstDefined(taskSetConfig.version, metadataEval.task_set_version, configEval.task_set_version),
+			benchmark_status: firstDefined(taskSetConfig.benchmark_status, metadataEval.benchmark_status, configEval.benchmark_status),
+			compatibility_group: firstDefined(taskSetConfig.compatibility_group, metadataEval.compatibility_group, configEval.compatibility_group),
+			aggregate_score: firstDefined(taskSetConfig.aggregate_score, metadataEval.aggregate_score, configEval.aggregate_score),
+			headline_score_eligible: firstDefined(taskSetConfig.headline_score_eligible, metadataEval.headline_score_eligible, configEval.headline_score_eligible),
+		}),
+		grader: compactObject({
+			success,
+			reward,
+			grade,
+			failure_reasons: Array.isArray(failureReasons) ? failureReasons : [],
+			checks: firstDefined(graderConfig.checks, metadata.grader_checks, metadata.checks, []),
+		}),
+		status: compactObject({
+			outcome,
+			failure_class: firstDefined(statusConfig.failure_class, metadata.failure_class, success === false ? 'grader' : undefined, success === true ? 'none' : undefined),
+		}),
+	});
+}
+
 function buildEpisodeRows(scenario, config) {
 	const metadata = scenario.metadata && typeof scenario.metadata === 'object' ? scenario.metadata : {};
 	const evalArtifact = metadata.eval_artifact && typeof metadata.eval_artifact === 'object' ? metadata.eval_artifact : {};
@@ -340,6 +406,7 @@ function buildSealedEnvelope(results, scenario, config, bundlePath, artifactInte
 			? `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
 			: ''
 	);
+	const wpGym = buildWpGymProjection(scenario, config, metadata, evalArtifact);
 
 	return redact({
 		schema_name: 'homeboy.sealed_eval_artifact',
@@ -387,6 +454,7 @@ function buildSealedEnvelope(results, scenario, config, bundlePath, artifactInte
 			hashes: artifactIntegrity.hashes,
 			issues: artifactIntegrity.issues,
 		},
+		wp_gym: wpGym,
 		integration_seams: Array.from(new Set(missingSeams.filter(Boolean))),
 	});
 }
