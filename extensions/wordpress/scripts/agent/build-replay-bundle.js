@@ -273,6 +273,40 @@ function firstDefined(...values) {
 	return values.find((value) => value !== undefined && value !== null && value !== '');
 }
 
+function canonicalGrade(value) {
+	if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.score !== 'number') {
+		return undefined;
+	}
+	return value;
+}
+
+function canonicalStatus(statusConfig, metadata, success) {
+	const allowedOutcomes = new Set(['passed', 'failed', 'errored']);
+	const allowedFailureClasses = new Set(['none', 'runtime_failure', 'agent_failure', 'grader_failure', 'task_failure']);
+	const configuredOutcome = firstDefined(statusConfig.outcome, metadata.status?.outcome);
+	const configuredFailureClass = firstDefined(statusConfig.failure_class, metadata.failure_class, metadata.status?.failure_class);
+	let outcome;
+	let failureClass;
+
+	if (allowedOutcomes.has(configuredOutcome)) {
+		outcome = configuredOutcome;
+	} else if (success === true) {
+		outcome = 'passed';
+	} else if (success === false) {
+		outcome = 'failed';
+	}
+
+	if (allowedFailureClasses.has(configuredFailureClass)) {
+		failureClass = configuredFailureClass;
+	} else if (success === true) {
+		failureClass = 'none';
+	} else if (success === false) {
+		failureClass = 'task_failure';
+	}
+
+	return outcome && failureClass ? { outcome, failure_class: failureClass } : undefined;
+}
+
 function buildWpGymProjection(scenario, config, metadata, evalArtifact) {
 	const configEval = objectValue(config.wp_gym_eval);
 	const metadataEval = objectValue(metadata.wp_gym_eval);
@@ -287,11 +321,11 @@ function buildWpGymProjection(scenario, config, metadata, evalArtifact) {
 	const statusConfig = firstObject(metadataEval.status, configEval.status, manifest.wp_gym?.status);
 	const fingerprints = objectValue(metadata.fingerprints);
 	const evalHashes = objectValue(evalArtifact.hashes);
-	const grade = firstObject(graderConfig.grade, evalArtifact.grade, metadata.grade);
-	const reward = firstDefined(graderConfig.reward, metadata.reward, metadata.score, grade.reward, grade.score);
+	const grade = canonicalGrade(firstObject(graderConfig.grade, evalArtifact.grade, metadata.grade));
+	const reward = firstDefined(graderConfig.reward, metadata.reward, metadata.score, grade?.reward, grade?.score);
 	const failureReasons = firstDefined(graderConfig.failure_reasons, evalArtifact.failure_reasons, metadata.failure_reasons, []);
-	const success = firstDefined(graderConfig.success, metadata.success, metadata.success_status === 'success' ? true : undefined, grade.score !== undefined && grade.max_score !== undefined ? grade.score >= grade.max_score : undefined);
-	const outcome = firstDefined(statusConfig.outcome, success === true ? 'passed' : undefined, success === false ? 'failed' : undefined, metadata.completion_outcome, metadata.job_status, evalArtifact.run?.job_status);
+	const success = firstDefined(graderConfig.success, metadata.success, metadata.success_status === 'success' ? true : undefined, grade?.score !== undefined && grade?.max_score !== undefined ? grade.score >= grade.max_score : undefined);
+	const status = canonicalStatus(statusConfig, metadata, success);
 	const taskFamily = firstDefined(scenarioConfig.task_family, metadataEval.task_family, configEval.task_family, metadata.task_family, config.task_family, manifest.task_family);
 
 	return compactObject({
@@ -320,10 +354,7 @@ function buildWpGymProjection(scenario, config, metadata, evalArtifact) {
 			failure_reasons: Array.isArray(failureReasons) ? failureReasons : [],
 			checks: firstDefined(graderConfig.checks, metadata.grader_checks, metadata.checks, []),
 		}),
-		status: compactObject({
-			outcome,
-			failure_class: firstDefined(statusConfig.failure_class, metadata.failure_class, success === false ? 'grader' : undefined, success === true ? 'none' : undefined),
-		}),
+		status,
 	});
 }
 

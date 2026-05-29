@@ -231,4 +231,46 @@ if [ "$wp_gym_projection" != "navigation-menu-001 navigation wp-admin-tasks cand
 	exit 1
 fi
 
+jq -n '{
+	scenarios: [
+		{
+			id: "agent-wp-gym-partial",
+			name: "Partial wp-gym projection",
+			metadata: {
+				eval_artifact: {
+					run: { job_status: "completed", success_status: "no_changes" },
+					grade: {}
+				},
+				fingerprints: { prompt: { sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+			}
+		}
+	]
+}' > "$RESULTS_TMPFILE"
+
+jq -n '{
+	component_id: "example-plugin",
+	workload_id: "agent-wp-gym-partial",
+	provider: "openai",
+	model: "gpt-example",
+	wp_gym_eval: {
+		status: { outcome: "completed" },
+		grader: { grade: {}, checks: [] }
+	}
+}' > "$CONFIG_TMPFILE"
+
+node "$SCRIPT_DIR/build-replay-bundle.js" \
+	--results "$RESULTS_TMPFILE" \
+	--scenario agent-wp-gym-partial \
+	--config "$CONFIG_TMPFILE" \
+	--output-dir "$BUNDLE_DIR" >/dev/null
+
+PARTIAL_WPGYM_BUNDLE_PATH="$BUNDLE_DIR/agent-wp-gym-partial-replay-bundle.json"
+partial_status_has_outcome=$(jq -r '(.sealed_eval_artifact.wp_gym.status // {}) | has("outcome")' "$PARTIAL_WPGYM_BUNDLE_PATH")
+partial_grade_has_score=$(jq -r '(.sealed_eval_artifact.wp_gym.grader.grade // {}) | has("score")' "$PARTIAL_WPGYM_BUNDLE_PATH")
+if [ "$partial_status_has_outcome" != "false" ] || [ "$partial_grade_has_score" != "false" ]; then
+	echo "ERROR: partial wp-gym status or grade should not be projected" >&2
+	cat "$PARTIAL_WPGYM_BUNDLE_PATH" >&2
+	exit 1
+fi
+
 echo "✓ replay bundle smoke test PASSED"
