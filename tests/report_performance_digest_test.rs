@@ -11,8 +11,15 @@ fn tmp_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("homeboy-performance-digest-{name}-{nanos}"))
 }
 
-fn write_file(dir: &Path, name: &str, body: &str) {
-    fs::write(dir.join(name), body).expect("fixture should be written");
+fn write_fixture_file(dir: &Path, name: &str, body: &str) {
+    let path = dir.join(name);
+    fs::write(&path, body).unwrap_or_else(|err| {
+        panic!(
+            "failed to write performance digest fixture {}: {}",
+            path.display(),
+            err
+        )
+    });
 }
 
 fn args(dir: &Path) -> PerformanceDigestArgs {
@@ -30,7 +37,7 @@ fn args(dir: &Path) -> PerformanceDigestArgs {
 fn renders_resource_summary_budget_findings_and_baseline_health() {
     let dir = tmp_dir("full");
     fs::create_dir_all(&dir).expect("temp dir should exist");
-    write_file(
+    write_fixture_file(
         &dir,
         "resource-summary.json",
         r#"{
@@ -52,7 +59,7 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
             "warnings": ["load_average_unsupported"]
         }"#,
     );
-    write_file(
+    write_fixture_file(
         &dir,
         "bench.json",
         r#"{
@@ -80,7 +87,7 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
             }
         }"#,
     );
-    write_file(
+    write_fixture_file(
         &dir,
         "metadata.json",
         r#"{
