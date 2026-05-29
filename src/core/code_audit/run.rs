@@ -342,7 +342,18 @@ fn build_comparison_output(
     existing_baseline: baseline::AuditBaseline,
     args: &AuditRunWorkflowArgs,
 ) -> crate::core::Result<AuditRunWorkflowResult> {
-    let comparison = baseline::compare(&result, &existing_baseline);
+    let mut comparison = baseline::compare(&result, &existing_baseline);
+    if let Some(ref git_ref) = args.changed_since {
+        let changed =
+            git::get_files_changed_since(&args.source_path, git_ref).unwrap_or_else(|_| {
+                result
+                    .findings
+                    .iter()
+                    .map(|finding| finding.file.clone())
+                    .collect()
+            });
+        retain_new_items_for_changed_files(&mut comparison, &changed);
+    }
     let exit_code = if comparison.drift_increased { 1 } else { 0 };
     let changed_since_summary = args
         .changed_since
@@ -410,6 +421,19 @@ fn build_comparison_output(
             findings,
         })
     }
+}
+
+fn retain_new_items_for_changed_files(
+    comparison: &mut baseline::BaselineComparison,
+    changed_files: &[String],
+) {
+    let changed_files: HashSet<&str> = changed_files.iter().map(String::as_str).collect();
+
+    comparison.new_items.retain(|item| {
+        baseline::file_from_audit_fingerprint(&item.fingerprint)
+            .is_some_and(|file| changed_files.contains(file.as_str()))
+    });
+    comparison.drift_increased = !comparison.new_items.is_empty();
 }
 
 fn compute_fixability_if_requested(

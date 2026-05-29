@@ -5,8 +5,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use homeboy::core::runner::{
-    self, ReverseRunnerConnectOptions, Runner, RunnerConnectReport, RunnerDisconnectReport,
-    RunnerExecOutput, RunnerKind, RunnerStatusReport,
+    self, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput,
+    Runner, RunnerConnectReport, RunnerDisconnectReport, RunnerExecOutput, RunnerKind,
+    RunnerStatusReport,
 };
 use homeboy::core::server::{RunnerPolicy, RunnerSettings};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
@@ -43,6 +44,7 @@ pub enum RunnerCommandOutput {
     Registry(RunnerOutput),
     Doctor(doctor::RunnerDoctorOutput),
     Execution(RunnerExecOutput),
+    Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
 }
 
@@ -264,6 +266,23 @@ enum RunnerCommand {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+    /// Claim and execute one brokered reverse-runner job from this machine
+    Work {
+        /// Runner ID on this machine
+        runner_id: String,
+
+        /// Controller/broker daemon URL
+        #[arg(long)]
+        broker_url: String,
+
+        /// Optional project filter for claimed jobs
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Claim lease duration in milliseconds
+        #[arg(long, default_value_t = 30_000)]
+        lease_ms: u64,
+    },
     /// Materialize local workspaces on a configured runner
     Workspace {
         #[command(subcommand)]
@@ -404,6 +423,17 @@ pub fn run(
             capture_patch,
             command,
         } => map_execution(exec(&id, cwd, project, ssh, capture_patch, command)),
+        RunnerCommand::Work {
+            runner_id,
+            broker_url,
+            project,
+            lease_ms,
+        } => map_worker(runner::run_reverse_worker(ReverseRunnerWorkerOptions {
+            runner_id,
+            broker_url,
+            project_id: project,
+            lease_ms,
+        })),
         RunnerCommand::Workspace { command } => workspace::run(command)
             .map(|(output, exit_code)| (RunnerCommandOutput::Workspace(output), exit_code)),
     }
@@ -438,6 +468,10 @@ fn map_doctor(result: CmdResult<doctor::RunnerDoctorOutput>) -> CmdResult<Runner
 
 fn map_execution(result: CmdResult<RunnerExecOutput>) -> CmdResult<RunnerCommandOutput> {
     result.map(|(output, exit_code)| (RunnerCommandOutput::Execution(output), exit_code))
+}
+
+fn map_worker(result: CmdResult<ReverseRunnerWorkerOutput>) -> CmdResult<RunnerCommandOutput> {
+    result.map(|(output, exit_code)| (RunnerCommandOutput::Worker(output), exit_code))
 }
 
 struct RunnerAddInput {
