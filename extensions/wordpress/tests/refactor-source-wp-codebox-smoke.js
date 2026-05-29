@@ -72,6 +72,11 @@ const recipe = JSON.parse(fs.readFileSync(process.argv[recipeIndex + 1], 'utf8')
 const stepArgs = recipe.workflow.steps[0].args;
 const task = JSON.parse(stepArgs.find((arg) => arg.startsWith('task=')).slice('task='.length));
 const sessionId = task.sandbox_session_id;
+if (process.env.FIXTURE_HANG_GROUP === task.group_key) {
+  process.stderr.write('fixture task hung before producing an artifact\\n');
+  setInterval(() => {}, 1000);
+  return;
+}
 const artifactDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'fixture-wp-codebox-artifact-'));
 if (task.group_key === 'PHPCS Formatting/Auto Fix!') {
   const filesDirectory = path.join(artifactDirectory, 'files');
@@ -225,6 +230,34 @@ process.stdout.write(JSON.stringify({
   assert.match(invalidPatchResult.stderr, /fanout run evidence: .*fanout-invalid-patch\/fanout-run\.json/);
   assert.match(invalidPatchResult.stderr, /git diff header lacks filename information|patch with only garbage/);
   assert.ok(fs.existsSync(path.join(root, 'fanout-invalid-patch', 'fanout-run.json')));
+
+  fs.writeFileSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src', 'example.php'), 'before\n');
+  fs.writeFileSync(path.join(writeCommand.settings.wp_codebox_homeboy_extensions_path, 'wordpress', 'docs', 'example.md'), 'stale\n');
+  const partialFailureResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...writeCommand,
+      settings: {
+        ...writeCommand.settings,
+        wp_codebox_output_dir: path.join(root, 'fanout-partial-failure'),
+        wp_codebox_task_timeout_seconds: 1,
+      },
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_HANG_GROUP: 'docs-reference',
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(partialFailureResult.status, 0, partialFailureResult.stderr || partialFailureResult.stdout);
+  const partialFailureResponse = JSON.parse(partialFailureResult.stdout);
+  assert.deepEqual(partialFailureResponse.changed_files, ['agents-api:src/example.php']);
+  assert.equal(fs.readFileSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src', 'example.php'), 'utf8'), 'after\n');
+  assert.equal(fs.readFileSync(path.join(writeCommand.settings.wp_codebox_homeboy_extensions_path, 'wordpress', 'docs', 'example.md'), 'utf8'), 'stale\n');
+  assert.match(partialFailureResponse.warnings.join('\n'), /partial failure/);
+  assert.match(partialFailureResponse.warnings.join('\n'), /WP Codebox task timed out after 1 seconds/);
+  const partialRun = JSON.parse(fs.readFileSync(path.join(root, 'fanout-partial-failure', 'fanout-run.json'), 'utf8'));
+  assert.equal(partialRun.status, 'failed');
 
   const missingSecretResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
     encoding: 'utf8',
