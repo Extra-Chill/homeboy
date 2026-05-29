@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.18.0] - 2026-05-29
+
+### Added
+- capture rust bench phase timings
+
 ## [1.17.6] - 2026-05-27
 
 ### Changed

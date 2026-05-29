@@ -75,6 +75,71 @@ LIST_ONLY="${HOMEBOY_BENCH_LIST_ONLY:-0}"
 SELECTED_SCENARIOS="${HOMEBOY_BENCH_SCENARIOS:-}"
 CRITERION_REQUEST="${HOMEBOY_RUST_BENCH_CRITERION:-0}"
 PROFILE_REQUEST="${HOMEBOY_RUST_BENCH_PROFILES:-0}"
+ARTIFACT_DIR="${HOMEBOY_BENCH_RESULTS_ARTIFACT_DIR:-$(dirname "$RESULTS_FILE")}"
+
+now_ms() {
+    python3 - <<'PYTHON_NOW' 2>/dev/null || printf '%s000\n' "$(date +%s)"
+import time
+print(time.time_ns() // 1_000_000)
+PYTHON_NOW
+}
+
+RUNNER_START_MS="$(now_ms)"
+PHASE_RECORDS=()
+
+record_phase() {
+    local _name="$1"
+    local _start_ms="$2"
+    local _end_ms="$3"
+    local _relative_start=$(( _start_ms - RUNNER_START_MS ))
+    local _duration=$(( _end_ms - _start_ms ))
+    [ "$_relative_start" -lt 0 ] && _relative_start=0
+    [ "$_duration" -lt 0 ] && _duration=0
+    PHASE_RECORDS+=("${_name}=${_relative_start}=${_duration}")
+}
+
+rust_cargo_timings_enabled() {
+    case "${HOMEBOY_RUST_BENCH_CARGO_TIMINGS:-}" in
+        1|true|TRUE|yes|YES|on|ON)
+            return 0
+            ;;
+    esac
+
+    if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && command -v jq >/dev/null 2>&1; then
+        if printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -e '.rust_bench_cargo_timings == true or .rust.bench.cargo_timings == true' >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+copy_latest_cargo_timing_artifact() {
+    local _target_dir="${PROJECT_PATH}/target/cargo-timings"
+    local _artifact_dir="$1"
+
+    [ -d "$_target_dir" ] || return 1
+    python3 - <<'PYTHON_CARGO_TIMING' "$_target_dir" "$_artifact_dir"
+import os, shutil, sys
+
+source_dir, artifact_dir = sys.argv[1:3]
+html_files = []
+for root, _dirs, files in os.walk(source_dir):
+    for filename in files:
+        if filename.endswith('.html'):
+            path = os.path.join(root, filename)
+            html_files.append((os.path.getmtime(path), path))
+
+if not html_files:
+    sys.exit(1)
+
+_mtime, source = max(html_files)
+os.makedirs(artifact_dir, exist_ok=True)
+dest = os.path.join(artifact_dir, 'cargo-timing.html')
+shutil.copy2(source, dest)
+print(dest)
+PYTHON_CARGO_TIMING
+}
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: [bench:rust] extension=$EXTENSION_PATH" >&2
@@ -210,8 +275,11 @@ profile_changed_file() {
 
 PROFILE_IDS=(rust-clean-build rust-warm-build rust-changed-file-check rust-test)
 
+DISCOVERY_START_MS="$(now_ms)"
 mapfile -t BENCH_BINS < <(discover_bench_bins)
 mapfile -t CRITERION_BENCHES < <(discover_criterion_benches)
+DISCOVERY_END_MS="$(now_ms)"
+record_phase "bench_discovery" "$DISCOVERY_START_MS" "$DISCOVERY_END_MS"
 
 if [ "$LIST_ONLY" = "1" ]; then
     if ! command -v python3 >/dev/null 2>&1; then
@@ -286,6 +354,15 @@ EMPTY
     exit 0
 fi
 
+SCENARIOS_JSON_TMPDIR="$(mktemp -d)"
+cleanup_scenarios() {
+    rm -rf "$SCENARIOS_JSON_TMPDIR"
+    if type homeboy_print_failure_summary >/dev/null 2>&1; then
+        homeboy_print_failure_summary
+    fi
+}
+trap cleanup_scenarios EXIT
+
 echo "Running Rust benchmarks..."
 echo "  Component: ${COMPONENT_ID} (${PROJECT_PATH})"
 echo "  Iterations: ${ITERATIONS}"
@@ -307,6 +384,10 @@ for _bin in "${BENCH_BINS[@]}"; do
     scenario_selected "$_scenario_id" && SELECTED_BENCH_BINS+=("$_bin")
 done
 
+CARGO_TIMING_ENABLED=0
+CARGO_TIMING_STATUS="disabled"
+CARGO_TIMING_NOTE=""
+CARGO_TIMING_ARTIFACT=""
 if [ "${#SELECTED_BENCH_BINS[@]}" -gt 0 ]; then
     echo ""
     echo "Building bench binaries (release)..."
@@ -314,24 +395,61 @@ if [ "${#SELECTED_BENCH_BINS[@]}" -gt 0 ]; then
     for _bin in "${SELECTED_BENCH_BINS[@]}"; do
         BUILD_ARGS+=(--bin "$_bin")
     done
+    BUILD_LOG="${SCENARIOS_JSON_TMPDIR}/cargo-build.log"
+    if rust_cargo_timings_enabled; then
+        CARGO_TIMING_ENABLED=1
+        BUILD_ARGS+=(--timings)
+        CARGO_TIMING_STATUS="requested"
+    fi
+
+    BUILD_START_MS="$(now_ms)"
+    set +e
+    cargo "${BUILD_ARGS[@]}" > "$BUILD_LOG" 2>&1
+    BUILD_EXIT=$?
+    set -e
+
+    if [ "$BUILD_EXIT" -ne 0 ] && [ "$CARGO_TIMING_ENABLED" = "1" ]; then
+        if grep -E -- '--timings|unexpected argument|found argument|unstable|requires -Z' "$BUILD_LOG" >/dev/null 2>&1; then
+            echo "WARN: Cargo timing capture unsupported by this Cargo; retrying build without --timings." >&2
+            CARGO_TIMING_STATUS="unsupported"
+            CARGO_TIMING_NOTE="Cargo rejected --timings; build retried without timing capture."
+            BUILD_ARGS=()
+            BUILD_ARGS=(build --release --manifest-path="${PROJECT_PATH}/Cargo.toml")
+            for _bin in "${SELECTED_BENCH_BINS[@]}"; do
+                BUILD_ARGS+=(--bin "$_bin")
+            done
+            set +e
+            cargo "${BUILD_ARGS[@]}" > "$BUILD_LOG" 2>&1
+            BUILD_EXIT=$?
+            set -e
+        fi
+    fi
+
+    BUILD_END_MS="$(now_ms)"
+    record_phase "cargo_build" "$BUILD_START_MS" "$BUILD_END_MS"
+
+    if [ "$BUILD_EXIT" -ne 0 ]; then
+        FAILED_STEP="cargo build"
+        tail -20 "$BUILD_LOG" >&2 || true
+        exit 1
+    fi
+
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        cargo "${BUILD_ARGS[@]}"
+        cat "$BUILD_LOG" >&2
     else
-        cargo "${BUILD_ARGS[@]}" 2>&1 | tail -5 || {
-            FAILED_STEP="cargo build"
-            exit 1
-        }
+        tail -5 "$BUILD_LOG" || true
+    fi
+
+    if [ "$CARGO_TIMING_ENABLED" = "1" ] && [ "$CARGO_TIMING_STATUS" != "unsupported" ]; then
+        if CARGO_TIMING_ARTIFACT="$(copy_latest_cargo_timing_artifact "$ARTIFACT_DIR" 2>/dev/null)"; then
+            CARGO_TIMING_STATUS="captured"
+            CARGO_TIMING_NOTE="Cargo timing HTML captured from target/cargo-timings."
+        else
+            CARGO_TIMING_STATUS="missing"
+            CARGO_TIMING_NOTE="Cargo accepted --timings but no HTML timing artifact was found."
+        fi
     fi
 fi
-
-SCENARIOS_JSON_TMPDIR="$(mktemp -d)"
-cleanup_scenarios() {
-    rm -rf "$SCENARIOS_JSON_TMPDIR"
-    if type homeboy_print_failure_summary >/dev/null 2>&1; then
-        homeboy_print_failure_summary
-    fi
-}
-trap cleanup_scenarios EXIT
 
 OVERALL_OK=1
 SCENARIOS_PATHS=()
@@ -343,12 +461,15 @@ for _bin in "${SELECTED_BENCH_BINS[@]}"; do
     echo ""
     echo "WORKLOAD_BEGIN: ${_scenario_id} (${_bin})"
 
+    _workload_start_ms="$(now_ms)"
     set +e
     HOMEBOY_BENCH_ITERATIONS="$ITERATIONS" \
         cargo run --release --quiet --manifest-path="${PROJECT_PATH}/Cargo.toml" \
         --bin "$_bin" > "${_scenario_file}.raw" 2> "${_scenario_file}.err"
     _exit=$?
     set -e
+    _workload_end_ms="$(now_ms)"
+    record_phase "workload:${_scenario_id}" "$_workload_start_ms" "$_workload_end_ms"
 
     if [ "$_exit" -ne 0 ]; then
         echo "WORKLOAD_ERROR: ${_scenario_id} — cargo exit $_exit" >&2
@@ -623,13 +744,32 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-python3 - <<PYTHON_AGGREGATE "$RESULTS_FILE" "$COMPONENT_ID" "$ITERATIONS" "${SCENARIOS_PATHS[@]:-}"
+PARSE_START_MS="$(now_ms)"
+python3 - <<PYTHON_AGGREGATE "$RESULTS_FILE" "$COMPONENT_ID" "$ITERATIONS" "$CARGO_TIMING_STATUS" "$CARGO_TIMING_NOTE" "$CARGO_TIMING_ARTIFACT" --phases "${PHASE_RECORDS[@]:-}" --scenarios "${SCENARIOS_PATHS[@]:-}"
 import json, os, sys
 
 results_file = sys.argv[1]
 component_id = sys.argv[2]
 iterations   = int(sys.argv[3])
-scenario_kvs = sys.argv[4:]
+cargo_timing_status = sys.argv[4]
+cargo_timing_note = sys.argv[5]
+cargo_timing_artifact = sys.argv[6]
+
+args = sys.argv[7:]
+phase_records = []
+scenario_kvs = []
+mode = None
+for arg in args:
+    if arg == "--phases":
+        mode = "phases"
+        continue
+    if arg == "--scenarios":
+        mode = "scenarios"
+        continue
+    if mode == "phases" and arg:
+        phase_records.append(arg)
+    elif mode == "scenarios" and arg:
+        scenario_kvs.append(arg)
 
 def percentile_r7(sorted_ms, p):
     n = len(sorted_ms)
@@ -643,6 +783,30 @@ def percentile_r7(sorted_ms, p):
     return sorted_ms[lo] * (1 - frac) + sorted_ms[hi] * frac
 
 scenarios = []
+workload_phase_ms = {}
+timeline = []
+phase_metrics = {}
+for record in phase_records:
+    parts = record.split("=", 2)
+    if len(parts) != 3:
+        continue
+    name, start_ms, duration_ms = parts
+    try:
+        start_value = int(start_ms)
+        duration_value = int(duration_ms)
+    except ValueError:
+        continue
+    timeline.append({
+        "id": name.replace(":", "_"),
+        "name": name,
+        "start_ms": start_value,
+        "duration_ms": duration_value,
+    })
+    metric_key = f"{name.replace(':', '_')}_ms"
+    phase_metrics[metric_key] = duration_value
+    if name.startswith("workload:"):
+        workload_phase_ms[name.split(":", 1)[1]] = duration_value
+
 for kv in scenario_kvs:
     if not kv: continue
     sid, path = kv.split("=", 1)
@@ -673,6 +837,11 @@ for kv in scenario_kvs:
         "id": sid,
         "iterations": n,
         "metrics": metrics,
+        "metadata": {
+            "rust_runner": {
+                "workload_run_ms": workload_phase_ms.get(sid),
+            }
+        },
     }
     if "file" in payload:
         scenario["file"] = payload["file"]
@@ -687,11 +856,39 @@ for kv in scenario_kvs:
 
     scenarios.append(scenario)
 
+metadata = {
+    "rust_runner": {
+        "cargo_timing_status": cargo_timing_status,
+    }
+}
+artifacts = {}
+if cargo_timing_note:
+    metadata["rust_runner"]["cargo_timing_note"] = cargo_timing_note
+if cargo_timing_artifact:
+    artifacts["cargo_timing"] = {
+        "path": cargo_timing_artifact,
+        "kind": "html",
+        "label": "Cargo build timing report",
+    }
+
 envelope = {
     "component_id": component_id,
     "iterations":   iterations,
     "scenarios":    scenarios,
+    "metadata":     metadata,
+    "metric_groups": {
+        "rust_runner_phases_ms": phase_metrics,
+    },
+    "span_definitions": {
+        "rust_runner_phase": {
+            "description": "Rust extension runner phases measured outside workload timings.",
+            "unit": "ms",
+        }
+    },
+    "timeline": timeline,
 }
+if artifacts:
+    envelope["artifacts"] = artifacts
 
 os.makedirs(os.path.dirname(results_file) or ".", exist_ok=True)
 with open(results_file, "w") as f:
@@ -699,6 +896,34 @@ with open(results_file, "w") as f:
 
 print(f"\nResults: {len(scenarios)} scenario(s) written to {results_file}")
 PYTHON_AGGREGATE
+PARSE_END_MS="$(now_ms)"
+RESULT_PARSE_MS=$(( PARSE_END_MS - PARSE_START_MS ))
+[ "$RESULT_PARSE_MS" -lt 0 ] && RESULT_PARSE_MS=0
+RESULT_PARSE_START_REL=$(( PARSE_START_MS - RUNNER_START_MS ))
+[ "$RESULT_PARSE_START_REL" -lt 0 ] && RESULT_PARSE_START_REL=0
+
+python3 - <<'PYTHON_PARSE_PHASE' "$RESULTS_FILE" "$RESULT_PARSE_START_REL" "$RESULT_PARSE_MS"
+import json, sys
+
+results_file, start_ms, duration_ms = sys.argv[1:4]
+with open(results_file, encoding="utf-8") as fh:
+    envelope = json.load(fh)
+
+duration_value = int(duration_ms)
+timeline = envelope.setdefault("timeline", [])
+timeline.append({
+    "id": "result_parse",
+    "name": "result_parse",
+    "start_ms": int(start_ms),
+    "duration_ms": duration_value,
+})
+metric_groups = envelope.setdefault("metric_groups", {})
+phase_metrics = metric_groups.setdefault("rust_runner_phases_ms", {})
+phase_metrics["result_parse_ms"] = duration_value
+
+with open(results_file, "w", encoding="utf-8") as fh:
+    json.dump(envelope, fh, indent=2)
+PYTHON_PARSE_PHASE
 
 if [ "$OVERALL_OK" -ne 1 ]; then
     FAILED_STEP="one or more bench binaries failed"
