@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.49] - 2026-05-29
+
+### Fixed
+- pass WP Codebox task timeout into recipes
+- avoid metadata-preserving WordPress deploy installs
+
 ## [2.102.48] - 2026-05-29
 
 ### Fixed
