@@ -135,12 +135,12 @@ The runner converts the agent config into a single WP Codebox sandbox run:
   that must execute like a real shell command. The default `run_wp_cli` tool runs
   through `WP_CLI::runcommand()` when WP-CLI is available in the active
   WordPress runtime. When the runtime has WordPress loaded but no `WP_CLI`
-  class, `wp eval ...` runs directly in that runtime and `wp plugin list` is
-  projected from WordPress plugin APIs. Other WP-CLI commands fall back to a
-  `wp_cli` terminal action as `wp ...` through `bash -lc` with the runtime root
-  as the command boundary and return exit code, stdout, and stderr. Use
-  `wp_cli_tool_name` only when a consumer needs a different agent-facing tool
-  name.
+  class, supported commands (`wp eval ...`, `wp plugin list`, `wp plugin
+  activate ...`, and `&&` chains of those commands) run against runtime
+  WordPress APIs. Other WP-CLI commands fall back to a `wp_cli` terminal action
+  as `wp ...` through `bash -lc` with the runtime root as the command boundary
+  and return exit code, stdout, and stderr. Use `wp_cli_tool_name` only when a
+  consumer needs a different agent-facing tool name.
 - `pipeline_step_patches` and `flow_step_patches` can adjust imported bundle
   step configuration before execution.
 - `fallback_pull_request` can open a PR when files were written but the agent did

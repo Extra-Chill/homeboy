@@ -1980,9 +1980,33 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
             );
         }
 
-        private function can_run_runtime_plugin_list( string $command ): bool {
-            $wp_cli_command = trim( preg_replace( '/^wp\s+/', '', $this->normalize_wp_cli_command( $command ) ) );
-            return 1 === preg_match( '/^plugin\s+list(?:\s|$)/', $wp_cli_command );
+        private function runtime_wp_cli_command_parts( string $command ): array {
+            return array_values(
+                array_filter(
+                    array_map(
+                        static fn( string $part ): string => trim( preg_replace( '/^wp\s+/', '', trim( $part ) ) ),
+                        explode( '&&', $command )
+                    ),
+                    static fn( string $part ): bool => '' !== $part
+                )
+            );
+        }
+
+        private function can_run_runtime_wp_cli_compat_command( string $command ): bool {
+            $parts = $this->runtime_wp_cli_command_parts( $this->normalize_wp_cli_command( $command ) );
+            if ( empty( $parts ) ) {
+                return false;
+            }
+
+            foreach ( $parts as $part ) {
+                if ( str_starts_with( $part, 'eval ' ) || 1 === preg_match( '/^plugin\s+list(?:\s|$)/', $part ) || 1 === preg_match( '/^plugin\s+activate\s+\S+/', $part ) ) {
+                    continue;
+                }
+
+                return false;
+            }
+
+            return true;
         }
 
         private function run_runtime_plugin_list_command( string $command ): array {
@@ -2025,6 +2049,76 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
             );
         }
 
+        private function run_runtime_plugin_activate_part( string $part ): array {
+            if ( ! function_exists( 'activate_plugin' ) && defined( 'ABSPATH' ) ) {
+                require_once ABSPATH . 'wp-admin/includes/plugin.php';
+            }
+
+            if ( ! function_exists( 'activate_plugin' ) ) {
+                return array( false, '', 'WordPress plugin activation APIs are not available.' );
+            }
+
+            preg_match( '/^plugin\s+activate\s+(\S+)/', $part, $matches );
+            $plugin = (string) ( $matches[1] ?? '' );
+            if ( '' === $plugin ) {
+                return array( false, '', 'Plugin slug is required.' );
+            }
+
+            if ( ! str_ends_with( $plugin, '.php' ) ) {
+                $plugin = $plugin . '/' . $plugin . '.php';
+            }
+
+            $result = activate_plugin( $plugin, '', false, true );
+            if ( is_wp_error( $result ) ) {
+                return array( false, '', $result->get_error_message() );
+            }
+
+            return array( true, "Plugin '{$plugin}' activated.\n", '' );
+        }
+
+        private function run_runtime_wp_cli_compat_command( string $command ): array {
+            $normalized_command = $this->normalize_wp_cli_command( $command );
+            $started            = microtime( true );
+            $stdout             = '';
+            $stderr             = '';
+            $success            = true;
+
+            foreach ( $this->runtime_wp_cli_command_parts( $normalized_command ) as $part ) {
+                if ( str_starts_with( $part, 'eval ' ) ) {
+                    $result  = $this->run_runtime_wp_cli_eval_command( $part );
+                    $stdout .= (string) ( $result['stdout'] ?? '' );
+                    $stderr .= (string) ( $result['stderr'] ?? '' );
+                    $success = $success && ! empty( $result['success'] );
+                } elseif ( 1 === preg_match( '/^plugin\s+list(?:\s|$)/', $part ) ) {
+                    $result  = $this->run_runtime_plugin_list_command( $part );
+                    $stdout .= (string) ( $result['stdout'] ?? '' );
+                    $stderr .= (string) ( $result['stderr'] ?? '' );
+                    $success = $success && ! empty( $result['success'] );
+                } elseif ( 1 === preg_match( '/^plugin\s+activate\s+\S+/', $part ) ) {
+                    list( $part_success, $part_stdout, $part_stderr ) = $this->run_runtime_plugin_activate_part( $part );
+                    $stdout .= $part_stdout;
+                    $stderr .= $part_stderr;
+                    $success = $success && $part_success;
+                }
+
+                if ( ! $success ) {
+                    break;
+                }
+            }
+
+            return array(
+                'type'       => 'wp_cli',
+                'command'    => $normalized_command,
+                'exitCode'   => $success ? 0 : 1,
+                'stdout'     => $stdout,
+                'stderr'     => $stderr,
+                'success'    => $success,
+                'timedOut'   => false,
+                'durationMs' => (int) round( ( microtime( true ) - $started ) * 1000 ),
+                'error'      => $success ? '' : ( '' !== $stderr ? $stderr : 'WP-CLI compatibility command failed' ),
+            );
+        }
+
         public function handle_tool_call( array $parameters, array $tool_def = array() ): array {
             $type = (string) ( $tool_def['terminal_action_type'] ?? 'wp_cli' );
 
@@ -2044,15 +2138,8 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
                 return $result;
             }
 
-            if ( 'wp_cli' === $type && null !== $this->runtime_wp_cli_eval_code( $command ) ) {
-                $result              = $this->run_runtime_wp_cli_eval_command( $command );
-                $result['tool_name'] = (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' );
-                $result['status']    = 200;
-                return $result;
-            }
-
-            if ( 'wp_cli' === $type && $this->can_run_runtime_plugin_list( $command ) ) {
-                $result              = $this->run_runtime_plugin_list_command( $command );
+            if ( 'wp_cli' === $type && $this->can_run_runtime_wp_cli_compat_command( $command ) ) {
+                $result              = $this->run_runtime_wp_cli_compat_command( $command );
                 $result['tool_name'] = (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' );
                 $result['status']    = 200;
                 return $result;

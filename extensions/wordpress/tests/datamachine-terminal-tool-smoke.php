@@ -164,6 +164,11 @@ try {
 		return 'fixture-plugin/fixture-plugin.php' === $plugin;
 	}
 
+	function activate_plugin(string $plugin, string $redirect = '', bool $network_wide = false, bool $silent = false) {
+		$GLOBALS['homeboy_activated_plugin'] = array($plugin, $redirect, $network_wide, $silent);
+		return null;
+	}
+
 	$plugin_list_result = $tool->handle_tool_call(
 		array('command' => 'plugin list'),
 		array(
@@ -174,6 +179,19 @@ try {
 
 	if (empty($plugin_list_result['success']) || ! str_contains((string) ($plugin_list_result['stdout'] ?? ''), "fixture-plugin\tactive\tnone\t1.2.3")) {
 		fwrite(STDERR, "Unexpected runtime plugin list result:\n" . json_encode($plugin_list_result, JSON_PRETTY_PRINT) . "\n");
+		exit(1);
+	}
+
+	$chain_result = $tool->handle_tool_call(
+		array('command' => 'wp plugin activate fixture-plugin && wp eval \' $GLOBALS["homeboy_chain_eval"] = "ok"; \''),
+		array(
+			'tool_name'            => 'run_wp_cli',
+			'terminal_action_type' => 'wp_cli',
+		)
+	);
+
+	if (empty($chain_result['success']) || 'ok' !== ($GLOBALS['homeboy_chain_eval'] ?? null) || 'fixture-plugin/fixture-plugin.php' !== ($GLOBALS['homeboy_activated_plugin'][0] ?? null)) {
+		fwrite(STDERR, "Unexpected runtime WP-CLI chain result:\n" . json_encode($chain_result, JSON_PRETTY_PRINT) . "\n");
 		exit(1);
 	}
 
