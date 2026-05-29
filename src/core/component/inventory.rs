@@ -227,6 +227,32 @@ pub fn extension_provides_artifact_pattern(component: &Component) -> bool {
         .unwrap_or(false)
 }
 
+pub(super) fn build_cleanup_paths(component: &Component) -> Vec<(String, String)> {
+    let mut paths = Vec::new();
+
+    let Some(extensions) = component.extensions.as_ref() else {
+        return paths;
+    };
+
+    for extension_id in extensions.keys() {
+        let Ok(manifest) = extension::load_extension(extension_id) else {
+            continue;
+        };
+        let Some(build) = manifest.build.as_ref() else {
+            continue;
+        };
+        paths.extend(
+            build
+                .cleanup_paths
+                .iter()
+                .cloned()
+                .map(|path| (extension_id.clone(), path)),
+        );
+    }
+
+    paths
+}
+
 pub fn list() -> Result<Vec<Component>> {
     inventory()
 }

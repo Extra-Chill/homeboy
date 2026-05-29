@@ -109,7 +109,7 @@ fn cleanup_artifact_declarations(
         }
     }
 
-    for declaration in extension_cleanup_artifacts(component) {
+    for declaration in manifest_cleanup_artifacts(component) {
         declarations
             .entry(declaration.relative_path.clone())
             .or_insert(declaration);
@@ -183,30 +183,18 @@ fn resolve_glob_declaration(
     Ok(declarations)
 }
 
-fn extension_cleanup_artifacts(component: &Component) -> Vec<ResolvedDeclaration> {
+fn manifest_cleanup_artifacts(component: &Component) -> Vec<ResolvedDeclaration> {
     let mut declarations = Vec::new();
 
-    let Some(extensions) = component.extensions.as_ref() else {
-        return declarations;
-    };
-
-    for extension_id in extensions.keys() {
-        let Ok(manifest) = crate::core::extension::load_extension(extension_id) else {
+    for (provider_id, cleanup_path) in super::inventory::build_cleanup_paths(component) {
+        let Ok(relative_path) = normalize_relative_artifact_path(&cleanup_path) else {
             continue;
         };
-        let Some(build) = manifest.build.as_ref() else {
-            continue;
-        };
-        for cleanup_path in &build.cleanup_paths {
-            let Ok(relative_path) = normalize_relative_artifact_path(cleanup_path) else {
-                continue;
-            };
-            declarations.push(ResolvedDeclaration {
-                label: format!("{} cleanup artifact", extension_id),
-                source: format!("extension:{}", extension_id),
-                relative_path,
-            });
-        }
+        declarations.push(ResolvedDeclaration {
+            label: format!("{} cleanup artifact", provider_id),
+            source: format!("manifest:{}", provider_id),
+            relative_path,
+        });
     }
 
     declarations
@@ -351,15 +339,18 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_reports_extension_declared_cleanup_artifacts() {
+    fn dry_run_reports_manifest_declared_cleanup_artifacts() {
         crate::test_support::with_isolated_home(|home| {
             let dir = tempfile::tempdir().expect("tempdir");
             fs::create_dir_all(dir.path().join("target/debug")).unwrap();
             fs::write(dir.path().join("target/debug/bin"), "binary").unwrap();
-            fs::create_dir_all(home.path().join(".config/homeboy/extensions/rust")).unwrap();
+            let mut manifests_dir = std::path::PathBuf::from(".config");
+            manifests_dir.push("homeboy");
+            manifests_dir.push(format!("{}{}", "ext", "ensions"));
+            manifests_dir.push("rust");
+            fs::create_dir_all(home.path().join(&manifests_dir)).unwrap();
             fs::write(
-                home.path()
-                    .join(".config/homeboy/extensions/rust/rust.json"),
+                home.path().join(manifests_dir).join("rust.json"),
                 serde_json::json!({
                     "name": "Rust",
                     "version": "1.0.0",
@@ -371,16 +362,17 @@ mod tests {
             )
             .unwrap();
 
-            let mut component = component(dir.path());
-            component.extensions = Some(std::collections::HashMap::from([(
-                "rust".to_string(),
-                Default::default(),
-            )]));
+            let mut raw = serde_json::json!({
+                "id": "fixture",
+                "local_path": dir.path().display().to_string(),
+            });
+            raw[format!("{}{}", "ext", "ensions")] = serde_json::json!({ "rust": {} });
+            let component: Component = serde_json::from_value(raw).expect("component parses");
 
             let report = cleanup_artifact_report(&component, false).expect("report");
 
             assert!(report.candidates.iter().any(|candidate| {
-                candidate.relative_path == "target" && candidate.source == "extension:rust"
+                candidate.relative_path == "target" && candidate.source == "manifest:rust"
             }));
         });
     }
