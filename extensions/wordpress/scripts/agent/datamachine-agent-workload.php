@@ -1888,7 +1888,71 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Tool_Recorder' ) ) {
 
 if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
     class Homeboy_Datamachine_Agent_Terminal_Tool {
+        private function normalize_wp_cli_command( string $command ): string {
+            $command = trim( $command );
+            return str_starts_with( $command, 'wp ' ) ? $command : 'wp ' . $command;
+        }
+
+        private function run_runtime_wp_cli_command( string $command ): array {
+            $normalized_command = $this->normalize_wp_cli_command( $command );
+            $wp_cli_command     = trim( preg_replace( '/^wp\s+/', '', $normalized_command ) );
+
+            ob_start();
+            $started = microtime( true );
+            $result  = WP_CLI::runcommand(
+                $wp_cli_command,
+                array(
+                    'return'     => true,
+                    'parse'      => 'shell',
+                    'launch'     => false,
+                    'exit_error' => false,
+                )
+            );
+            $stdout  = (string) ob_get_clean();
+            $success = false !== $result && ! is_wp_error( $result );
+            $stderr  = '';
+
+            if ( is_wp_error( $result ) ) {
+                $stderr = $result->get_error_message();
+            } elseif ( is_string( $result ) && '' !== $result ) {
+                $stdout .= $result;
+                if ( ! str_ends_with( $stdout, "\n" ) ) {
+                    $stdout .= "\n";
+                }
+            }
+
+            return array(
+                'type'       => 'wp_cli',
+                'command'    => $normalized_command,
+                'exitCode'   => $success ? 0 : 1,
+                'stdout'     => $stdout,
+                'stderr'     => $stderr,
+                'success'    => $success,
+                'timedOut'   => false,
+                'durationMs' => (int) round( ( microtime( true ) - $started ) * 1000 ),
+                'error'      => $success ? '' : ( '' !== $stderr ? $stderr : 'WP-CLI command failed' ),
+            );
+        }
+
         public function handle_tool_call( array $parameters, array $tool_def = array() ): array {
+            $type = (string) ( $tool_def['terminal_action_type'] ?? 'wp_cli' );
+
+            $command = trim( (string) ( $parameters['command'] ?? '' ) );
+            if ( '' === $command ) {
+                return array(
+                    'success'   => false,
+                    'tool_name' => (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' ),
+                    'error'     => 'command is required.',
+                );
+            }
+
+            if ( 'wp_cli' === $type && class_exists( 'WP_CLI' ) && method_exists( 'WP_CLI', 'runcommand' ) ) {
+                $result              = $this->run_runtime_wp_cli_command( $command );
+                $result['tool_name'] = (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' );
+                $result['status']    = 200;
+                return $result;
+            }
+
             $url   = rtrim( (string) ( $tool_def['terminal_action_url'] ?? getenv( 'HOMEBOY_TERMINAL_ACTION_URL' ) ), '/' );
             $token = (string) ( $tool_def['terminal_action_token'] ?? getenv( 'HOMEBOY_TERMINAL_ACTION_TOKEN' ) );
 
@@ -1900,18 +1964,9 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
                 );
             }
 
-            $command = trim( (string) ( $parameters['command'] ?? '' ) );
-            if ( '' === $command ) {
-                return array(
-                    'success'   => false,
-                    'tool_name' => (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' ),
-                    'error'     => 'command is required.',
-                );
-            }
-
             $action = array_filter(
                 array(
-                    'type'       => (string) ( $tool_def['terminal_action_type'] ?? 'wp_cli' ),
+                    'type'       => $type,
                     'command'    => $command,
                     'timeout_ms' => isset( $parameters['timeout_ms'] ) ? (int) $parameters['timeout_ms'] : null,
                     'cwd'        => isset( $parameters['cwd'] ) ? (string) $parameters['cwd'] : null,
