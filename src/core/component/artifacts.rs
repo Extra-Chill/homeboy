@@ -109,7 +109,7 @@ fn cleanup_artifact_declarations(
         }
     }
 
-    for declaration in inferred_cleanup_artifacts(component_path) {
+    for declaration in extension_cleanup_artifacts(component) {
         declarations
             .entry(declaration.relative_path.clone())
             .or_insert(declaration);
@@ -183,30 +183,33 @@ fn resolve_glob_declaration(
     Ok(declarations)
 }
 
-fn inferred_cleanup_artifacts(component_path: &Path) -> Vec<ResolvedDeclaration> {
+fn extension_cleanup_artifacts(component: &Component) -> Vec<ResolvedDeclaration> {
     let mut declarations = Vec::new();
-    if component_path.join("Cargo.toml").is_file() {
-        declarations.push(inferred("Rust build output", "target"));
-    }
-    if component_path.join("package.json").is_file() {
-        declarations.push(inferred("Node dependencies", "node_modules"));
-        declarations.push(inferred("Generated distribution", "dist"));
-    }
-    if component_path.join("wordpress/homeboy.json").is_file() {
-        declarations.push(inferred(
-            "Homeboy Extensions WordPress runtime fixture",
-            "wordpress",
-        ));
-    }
-    declarations
-}
 
-fn inferred(label: &str, relative_path: &str) -> ResolvedDeclaration {
-    ResolvedDeclaration {
-        label: label.to_string(),
-        source: "inferred".to_string(),
-        relative_path: relative_path.to_string(),
+    let Some(extensions) = component.extensions.as_ref() else {
+        return declarations;
+    };
+
+    for extension_id in extensions.keys() {
+        let Ok(manifest) = crate::core::extension::load_extension(extension_id) else {
+            continue;
+        };
+        let Some(build) = manifest.build.as_ref() else {
+            continue;
+        };
+        for cleanup_path in &build.cleanup_paths {
+            let Ok(relative_path) = normalize_relative_artifact_path(cleanup_path) else {
+                continue;
+            };
+            declarations.push(ResolvedDeclaration {
+                label: format!("{} cleanup artifact", extension_id),
+                source: format!("extension:{}", extension_id),
+                relative_path,
+            });
+        }
     }
+
+    declarations
 }
 
 fn normalize_relative_artifact_path(path: &str) -> Result<String> {
@@ -310,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_reports_declared_and_inferred_artifacts() {
+    fn dry_run_reports_declared_artifacts_without_runtime_inference() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(
             dir.path().join("Cargo.toml"),
@@ -334,15 +337,52 @@ mod tests {
         let report = cleanup_artifact_report(&component, false).expect("report");
 
         assert_eq!(report.applied_count, 0);
-        assert!(report.candidates.iter().any(|candidate| {
-            candidate.relative_path == "target" && candidate.source == "inferred"
-        }));
-        assert!(report.candidates.iter().any(|candidate| {
-            candidate.relative_path == "wordpress" && candidate.label.contains("WordPress")
-        }));
+        assert!(!report
+            .candidates
+            .iter()
+            .any(|candidate| candidate.relative_path == "target"));
+        assert!(!report
+            .candidates
+            .iter()
+            .any(|candidate| candidate.relative_path == "wordpress"));
         assert!(report.candidates.iter().any(|candidate| {
             candidate.relative_path == "cache" && candidate.skipped_reason.is_some()
         }));
+    }
+
+    #[test]
+    fn dry_run_reports_extension_declared_cleanup_artifacts() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+            fs::write(dir.path().join("target/debug/bin"), "binary").unwrap();
+            fs::create_dir_all(home.path().join(".config/homeboy/extensions/rust")).unwrap();
+            fs::write(
+                home.path()
+                    .join(".config/homeboy/extensions/rust/rust.json"),
+                serde_json::json!({
+                    "name": "Rust",
+                    "version": "1.0.0",
+                    "build": {
+                        "cleanup_paths": ["target"]
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            let mut component = component(dir.path());
+            component.extensions = Some(std::collections::HashMap::from([(
+                "rust".to_string(),
+                Default::default(),
+            )]));
+
+            let report = cleanup_artifact_report(&component, false).expect("report");
+
+            assert!(report.candidates.iter().any(|candidate| {
+                candidate.relative_path == "target" && candidate.source == "extension:rust"
+            }));
+        });
     }
 
     #[test]
