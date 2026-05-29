@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.42] - 2026-05-29
+
+### Fixed
+- run agent WP-CLI tools inside runtime
+
 ## [2.102.41] - 2026-05-29
 
 ### Fixed
