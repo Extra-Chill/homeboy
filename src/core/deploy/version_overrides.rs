@@ -300,14 +300,14 @@ pub(super) fn deploy_with_override(
         })
         .unwrap_or("wp");
 
-    let mut vars = HashMap::new();
-    vars.insert("artifact".to_string(), artifact_filename.to_string());
-    vars.insert("stagingArtifact".to_string(), staging_artifact.clone());
-    vars.insert("targetDir".to_string(), remote_path.to_string());
-    vars.insert("siteRoot".to_string(), site_root.unwrap_or("").to_string());
-    vars.insert("cliPath".to_string(), cli_path.to_string());
-    vars.insert("domain".to_string(), domain.unwrap_or("").to_string());
-    vars.insert("allowRootFlag".to_string(), "--allow-root".to_string());
+    let vars = deploy_override_template_vars(
+        artifact_filename,
+        &staging_artifact,
+        remote_path,
+        site_root,
+        cli_path,
+        domain,
+    );
 
     let install_cmd = render_map(&override_config.install_command, &vars);
     log_status!("deploy", "Running install command: {}", install_cmd);
@@ -366,6 +366,44 @@ pub(super) fn deploy_with_override(
     }
 
     Ok(DeployResult::success(0))
+}
+
+fn deploy_override_template_vars(
+    artifact_filename: &str,
+    staging_artifact: &str,
+    target_dir: &str,
+    site_root: Option<&str>,
+    cli_path: &str,
+    domain: Option<&str>,
+) -> HashMap<String, String> {
+    let target_parent_dir = target_dir
+        .trim_end_matches('/')
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("");
+    let target_adjacent_temp_pattern = if target_parent_dir.is_empty() {
+        String::new()
+    } else {
+        format!("{}/.homeboy-install.XXXXXX", target_parent_dir)
+    };
+
+    HashMap::from([
+        ("artifact".to_string(), artifact_filename.to_string()),
+        ("stagingArtifact".to_string(), staging_artifact.to_string()),
+        (TemplateVars::TARGET_DIR.to_string(), target_dir.to_string()),
+        (
+            TemplateVars::TARGET_PARENT_DIR.to_string(),
+            target_parent_dir.to_string(),
+        ),
+        (
+            TemplateVars::TARGET_ADJACENT_TEMP_PATTERN.to_string(),
+            target_adjacent_temp_pattern,
+        ),
+        ("siteRoot".to_string(), site_root.unwrap_or("").to_string()),
+        ("cliPath".to_string(), cli_path.to_string()),
+        ("domain".to_string(), domain.unwrap_or("").to_string()),
+        ("allowRootFlag".to_string(), "--allow-root".to_string()),
+    ])
 }
 
 /// Build template variables and run `post:deploy` hooks remotely via SSH.
@@ -559,6 +597,36 @@ mod tests {
         assert_eq!(
             fs::read_to_string(target.join("installed.zip")).expect("installed artifact"),
             "artifact bytes"
+        );
+    }
+
+    #[test]
+    fn test_deploy_override_template_vars_include_target_adjacent_temp_pattern() {
+        let vars = deploy_override_template_vars(
+            "artifact.zip",
+            "/tmp/homeboy-staging/artifact.zip",
+            "/srv/htdocs/wp-content/plugins/wp-codebox",
+            Some("/srv/htdocs"),
+            "wp",
+            Some("example.com"),
+        );
+
+        assert_eq!(
+            vars.get(TemplateVars::TARGET_PARENT_DIR)
+                .map(String::as_str),
+            Some("/srv/htdocs/wp-content/plugins")
+        );
+        assert_eq!(
+            vars.get(TemplateVars::TARGET_ADJACENT_TEMP_PATTERN)
+                .map(String::as_str),
+            Some("/srv/htdocs/wp-content/plugins/.homeboy-install.XXXXXX")
+        );
+        assert_eq!(
+            render_map(
+                "mktemp -d {{targetAdjacentTempPattern}} && cp {{stagingArtifact}} {{targetDir}}/installed.zip",
+                &vars,
+            ),
+            "mktemp -d /srv/htdocs/wp-content/plugins/.homeboy-install.XXXXXX && cp /tmp/homeboy-staging/artifact.zip /srv/htdocs/wp-content/plugins/wp-codebox/installed.zip"
         );
     }
 }
