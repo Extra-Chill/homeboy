@@ -146,7 +146,7 @@ pub fn save_baseline_scoped(
 ///
 /// Audit fingerprints have the format `convention::file::kind`.
 /// The file path is the middle segment between the first `::` and the last `::`.
-fn file_from_audit_fingerprint(fingerprint: &str) -> Option<String> {
+pub fn file_from_audit_fingerprint(fingerprint: &str) -> Option<String> {
     let first = fingerprint.find("::")?;
     let rest = &fingerprint[first + 2..];
     let last = rest.rfind("::")?;

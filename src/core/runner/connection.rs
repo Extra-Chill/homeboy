@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -184,13 +185,17 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
         connected_at: Utc::now().to_rfc3339(),
     };
     write_session(&session)?;
+    let broker_registered = match session.broker_url.as_deref() {
+        Some(broker_url) => register_reverse_session_with_broker(broker_url, &session)?,
+        None => false,
+    };
 
     Ok((
         RunnerConnectReport {
             runner_id: runner.id,
             mode: Some(RunnerTunnelMode::Reverse),
             role: Some(RunnerSessionRole::Runner),
-            connected: false,
+            connected: broker_registered,
             recorded: Some(true),
             local_url: None,
             broker_url: options.broker_url,
@@ -205,6 +210,42 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
         },
         0,
     ))
+}
+
+fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSession) -> Result<bool> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| Error::internal_unexpected(format!("build broker HTTP client: {err}")))?;
+    let response = client
+        .post(format!(
+            "{}/runner/sessions",
+            broker_url.trim_end_matches('/')
+        ))
+        .json(&serde_json::json!({
+            "runner_id": session.runner_id,
+            "controller_id": session.controller_id,
+            "broker_url": session.broker_url,
+            "homeboy_version": session.homeboy_version,
+        }))
+        .send()
+        .map_err(|err| {
+            Error::internal_unexpected(format!("register reverse runner session: {err}"))
+        })?;
+    let status_code = response.status().as_u16();
+    let envelope: CliEnvelope = response.json().map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse reverse runner session registration response".to_string()),
+        )
+    })?;
+    if status_code >= 400 || !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "reverse runner session registration failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    Ok(true)
 }
 
 pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
@@ -528,6 +569,12 @@ fn session_is_live(session: &RunnerSession) -> bool {
 
 fn session_state(session: Option<&RunnerSession>) -> RunnerSessionState {
     match session {
+        Some(session)
+            if session.mode == RunnerTunnelMode::Reverse
+                && session.role == RunnerSessionRole::Controller =>
+        {
+            RunnerSessionState::Connected
+        }
         Some(session) if session.mode == RunnerTunnelMode::Reverse => RunnerSessionState::Recorded,
         Some(session) if session_is_live(session) => RunnerSessionState::Connected,
         Some(_) => RunnerSessionState::Disconnected,
@@ -743,7 +790,7 @@ mod tests {
             let (report, exit_code) = connect_reverse(ReverseRunnerConnectOptions {
                 controller_id: "extra-chill".to_string(),
                 runner_id: "homeboy-lab".to_string(),
-                broker_url: Some("https://extrachill.com/homeboy/tunnel".to_string()),
+                broker_url: None,
             })
             .expect("record reverse session");
 
@@ -761,10 +808,7 @@ mod tests {
             assert_eq!(session.mode, RunnerTunnelMode::Reverse);
             assert_eq!(session.role, RunnerSessionRole::Runner);
             assert_eq!(session.controller_id.as_deref(), Some("extra-chill"));
-            assert_eq!(
-                session.broker_url.as_deref(),
-                Some("https://extrachill.com/homeboy/tunnel")
-            );
+            assert_eq!(session.broker_url, None);
             assert_eq!(session.local_url, None);
             assert_eq!(session.local_port, None);
         });

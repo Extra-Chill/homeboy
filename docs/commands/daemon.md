@@ -14,6 +14,7 @@ homeboy daemon <COMMAND>
 - `serve` — run the daemon in the foreground
 - `stop` — stop the background daemon recorded in the state file
 - `status` — show daemon state and selected local address
+- `broker-config` — render a deployable reverse-runner broker service recipe
 
 ## Local HTTP API
 
@@ -23,6 +24,49 @@ address and PID to the daemon state file so headless clients can discover it via
 
 Always treat the API as a local UI contract. It is not a hosted or remote
 multi-user service.
+
+## VPS Reverse Runner Broker
+
+`homeboy daemon broker-config` renders the code-backed deployment shape for a
+VPS-hosted reverse runner broker. The safe default is a durable `systemd`
+service that keeps the daemon on a stable loopback port:
+
+```sh
+homeboy daemon broker-config --listen-addr 127.0.0.1:7421
+```
+
+The JSON output includes:
+
+- `systemd_unit` for a `homeboy-broker` service running `homeboy daemon serve`
+- `private_tunnel_examples` for SSH, Cloudflare, or tailnet-only access
+- optional `nginx_site` and `caddy_site` snippets when `--domain` is supplied
+- `daemon_state_path` and `daemon_jobs_path` service-owned operational state locations
+- status and log commands for day-two operations
+- restart, retention, and claim caveats
+
+The service config intentionally requires a stable loopback address. Broker
+routes are currently suitable for private loopback or private tunnel access only.
+Public Internet exposure through Nginx or Caddy is blocked until broker
+auth/pairing from [#2990](https://github.com/Extra-Chill/homeboy/issues/2990)
+lands. The rendered proxy snippets include that warning and should stay disabled
+or protected by private network controls until the auth model is available.
+
+Extra Chill-compatible private setup:
+
+1. Install Homeboy on the VPS at the binary path used in `broker-config`.
+2. Create the service user/group named in the generated output.
+3. Install the rendered `systemd_unit` as `/etc/systemd/system/homeboy-broker.service`.
+4. Run `systemctl daemon-reload && systemctl enable --now homeboy-broker`.
+5. Verify with `systemctl status homeboy-broker`, `homeboy daemon status`, and `curl -fsS http://127.0.0.1:7421/health` on the VPS.
+6. Reach the broker from the runner machine through a private SSH tunnel or private network URL, then use reverse runner connection commands against that private broker URL.
+
+Operational caveats:
+
+- The systemd service sets `HOME=/var/lib/homeboy`, so daemon state lives under `/var/lib/homeboy/.config/homeboy/daemon/` instead of the service user's login home.
+- Queued reverse-runner jobs survive daemon restart.
+- Broker-owned running jobs are marked failed as stale when the durable store is reopened after restart.
+- Active reverse-runner claims are lease-scoped; runners should retry claim after the lease expires.
+- The job store has bounded per-job event retention and is not a long-term audit archive. Persist important evidence through Homeboy observations/artifacts.
 
 ### Built-in Endpoints
 
@@ -56,6 +100,11 @@ contract and return the same JSON envelope shape as other daemon responses.
 - `GET /jobs/:id`
 - `GET /jobs/:id/events`
 - `POST /jobs/:id/cancel`
+- `POST /runner/sessions`
+- `POST /runner/jobs`
+- `POST /runner/jobs/claim`
+- `POST /runner/jobs/:id/events`
+- `POST /runner/jobs/:id/finish`
 
 The run readers expose persisted observation-store evidence from previous
 analysis runs. They do not start audit, lint, test, bench, rig, or stack work.

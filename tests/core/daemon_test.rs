@@ -254,6 +254,125 @@ fn routes_job_inspection_against_daemon_job_store() {
 }
 
 #[test]
+fn routes_remote_runner_job_broker_lifecycle() {
+    let store = JobStore::default();
+    let submit = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "project_id": "extrachill",
+            "command": ["homeboy", "test", "data-machine"],
+            "cwd": "/home/chubes/Developer/data-machine"
+        })),
+        &store,
+    );
+
+    assert_eq!(submit.status_code, 200);
+    assert_eq!(submit.body["endpoint"], "runner.jobs.submit");
+    assert_eq!(submit.body["body"]["command"], "api.runner.jobs.submit");
+    let job_id = submit.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id")
+        .to_string();
+
+    let claim = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs/claim",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "project_id": "extrachill",
+            "lease_ms": 30000
+        })),
+        &store,
+    );
+
+    assert_eq!(claim.status_code, 200);
+    assert_eq!(claim.body["endpoint"], "runner.jobs.claim");
+    assert_eq!(claim.body["body"]["claim"]["job"]["id"], job_id);
+    assert_eq!(
+        claim.body["body"]["claim"]["request"]["command"],
+        serde_json::json!(["homeboy", "test", "data-machine"])
+    );
+
+    let event = route_with_job_store_and_body(
+        "POST",
+        &format!("/runner/jobs/{job_id}/events"),
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "kind": "progress",
+            "data": { "phase": "running" }
+        })),
+        &store,
+    );
+
+    assert_eq!(event.status_code, 200);
+    assert_eq!(event.body["endpoint"], "runner.jobs.events.append");
+    assert_eq!(event.body["body"]["event"]["kind"], "progress");
+
+    let finish = route_with_job_store_and_body(
+        "POST",
+        &format!("/runner/jobs/{job_id}/finish"),
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "result": {
+                "exit_code": 0,
+                "stdout": "ok",
+                "stderr": ""
+            }
+        })),
+        &store,
+    );
+
+    assert_eq!(finish.status_code, 200);
+    assert_eq!(finish.body["endpoint"], "runner.jobs.finish");
+    assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
+}
+
+#[test]
+fn routes_remote_runner_session_registration() {
+    let _home = HomeGuard::new();
+    crate::core::runner::create(
+        r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/home/chubes/Developer"}"#,
+        false,
+    )
+    .expect("create runner");
+    let store = JobStore::default();
+
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/runner/sessions",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "controller_id": "extra-chill",
+            "broker_url": "http://127.0.0.1:49152",
+            "homeboy_version": "test-version"
+        })),
+        &store,
+    );
+
+    assert_eq!(response.status_code, 200);
+    assert_eq!(response.body["endpoint"], "runner.sessions.register");
+    assert_eq!(
+        response.body["body"]["session"]["role"],
+        serde_json::json!("controller")
+    );
+
+    let status = crate::core::runner::status("homeboy-lab").expect("runner status");
+    assert!(status.connected);
+    assert_eq!(
+        status.state,
+        crate::core::runner::RunnerSessionState::Connected
+    );
+    let session = status.session.expect("session");
+    assert_eq!(session.controller_id.as_deref(), Some("extra-chill"));
+    assert_eq!(
+        session.broker_url.as_deref(),
+        Some("http://127.0.0.1:49152")
+    );
+}
+
+#[test]
 fn routes_json_body_to_analysis_enqueue() {
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
@@ -366,6 +485,12 @@ fn exec_applies_request_env_to_daemon_command() {
         .and_then(|event| event.data.as_ref())
         .expect("result event");
     assert_eq!(result["stdout"], "ok");
+    assert!(result["metrics"]["duration_ms"].as_u64().is_some());
+    if cfg!(target_os = "linux") {
+        assert_eq!(result["metrics"]["source"], "linux_procfs_process_tree");
+        assert!(result["metrics"]["sample_count"].as_u64().unwrap_or(0) > 0);
+        assert!(result["metrics"]["peak_rss_bytes"].as_u64().unwrap_or(0) > 0);
+    }
 }
 
 #[test]
