@@ -1,13 +1,36 @@
 use crate::core::component::Component;
 use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::error::{Error, Result};
-use crate::core::extension;
+use crate::core::extension::{self, ExtensionCapability};
+use std::path::Path;
 
 /// Run release lint via the component's extension.
 ///
 /// Returns whether a lint command was available and executed. Missing lint
 /// support is not a release blocker because not every extension provides it.
 pub(super) fn validate_lint_quality(component: &Component) -> Result<bool> {
+    if component.has_script(ExtensionCapability::Lint) {
+        log_status!("release", "Running lint (scripts.lint)...");
+
+        let workflow = extension::lint::run_self_check_lint_workflow(
+            component,
+            Path::new(&component.local_path),
+            component.id.clone(),
+            false,
+        )
+        .map_err(|e| quality_error("lint", format!("Lint runner error: {}", e)))?;
+
+        if workflow.status == "passed" {
+            log_status!("release", "Lint passed");
+            return Ok(true);
+        }
+
+        return Err(quality_error(
+            "lint",
+            format!("Lint failed (exit code {})", workflow.exit_code),
+        ));
+    }
+
     let lint_context = extension::lint::resolve_lint_command(component);
 
     let Ok(lint_context) = lint_context else {
@@ -81,6 +104,28 @@ pub(super) fn validate_lint_quality(component: &Component) -> Result<bool> {
 /// Returns whether a test command was available and executed. Missing test
 /// support is not a release blocker because not every extension provides it.
 pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
+    if component.has_script(ExtensionCapability::Test) {
+        log_status!("release", "Running tests (scripts.test)...");
+
+        let workflow = extension::test::run_self_check_test_workflow(
+            component,
+            Path::new(&component.local_path),
+            component.id.clone(),
+            false,
+        )
+        .map_err(|e| quality_error("test", format!("Test runner error: {}", e)))?;
+
+        if workflow.status == "passed" {
+            log_status!("release", "Tests passed");
+            return Ok(true);
+        }
+
+        return Err(quality_error(
+            "test",
+            format!("Tests failed (exit code {})", workflow.exit_code),
+        ));
+    }
+
     let test_context = extension::test::resolve_test_command(component);
 
     let Ok(test_context) = test_context else {
@@ -166,13 +211,30 @@ mod tests {
         code_quality_failure_message, is_runner_infrastructure_failure, validate_lint_quality,
         validate_test_quality,
     };
-    use crate::core::component::Component;
+    use crate::core::component::{Component, ComponentScriptsConfig};
     use crate::core::extension::RunnerOutput;
+    use std::fs;
+    use std::path::Path;
 
     fn component_without_quality_runners() -> Component {
         Component {
             id: "fixture".to_string(),
             local_path: "/tmp/fixture".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn write_script(root: &Path, name: &str, body: &str) {
+        let script_dir = root.join("scripts");
+        fs::create_dir_all(&script_dir).expect("script dir should be created");
+        fs::write(script_dir.join(name), body).expect("script should be written");
+    }
+
+    fn script_component(root: &Path, scripts: ComponentScriptsConfig) -> Component {
+        Component {
+            id: "fixture".to_string(),
+            local_path: root.to_string_lossy().to_string(),
+            scripts: Some(scripts),
             ..Default::default()
         }
     }
@@ -217,6 +279,68 @@ mod tests {
     fn test_validate_test_quality() {
         assert!(!validate_test_quality(&component_without_quality_runners())
             .expect("missing test runner should not block release"));
+    }
+
+    #[test]
+    fn validate_lint_quality_runs_component_scripts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_script(
+            dir.path(),
+            "lint.sh",
+            "printf 'release lint script ran\\n'\n",
+        );
+
+        let component = script_component(
+            dir.path(),
+            ComponentScriptsConfig {
+                lint: vec!["sh scripts/lint.sh".to_string()],
+                ..Default::default()
+            },
+        );
+
+        assert!(validate_lint_quality(&component).expect("lint script should pass"));
+    }
+
+    #[test]
+    fn validate_test_quality_runs_component_scripts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_script(
+            dir.path(),
+            "test.sh",
+            "printf 'release test script ran\\n'\n",
+        );
+
+        let component = script_component(
+            dir.path(),
+            ComponentScriptsConfig {
+                test: vec!["sh scripts/test.sh".to_string()],
+                ..Default::default()
+            },
+        );
+
+        assert!(validate_test_quality(&component).expect("test script should pass"));
+    }
+
+    #[test]
+    fn validate_lint_quality_fails_failing_component_script() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_script(
+            dir.path(),
+            "lint.sh",
+            "printf 'lint failed\\n' >&2\nexit 7\n",
+        );
+
+        let component = script_component(
+            dir.path(),
+            ComponentScriptsConfig {
+                lint: vec!["sh scripts/lint.sh".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let err = validate_lint_quality(&component).expect_err("lint script should fail release");
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.to_string().contains("Lint failed (exit code 7)"));
     }
 
     #[test]
