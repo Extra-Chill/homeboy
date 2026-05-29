@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.19.0] - 2026-05-29
+
+### Added
+- add rust bench adapters
+
 ## [1.18.0] - 2026-05-29
 
 ### Added
