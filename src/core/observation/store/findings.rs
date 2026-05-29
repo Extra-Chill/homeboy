@@ -5,10 +5,52 @@ use super::*;
 
 impl ObservationStore {
     pub fn record_findings(&self, findings: &[NewFindingRecord]) -> Result<Vec<FindingRecord>> {
+        if findings.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let run_id = &findings[0].run_id;
+        validate_required("finding.run_id", run_id)?;
+        if self.get_run(run_id)?.is_none() {
+            return Err(Error::validation_invalid_argument(
+                "finding.run_id",
+                format!("referenced run record not found: {}", run_id),
+                Some(run_id.clone()),
+                None,
+            ));
+        }
+        for finding in findings {
+            validate_required("finding.run_id", &finding.run_id)?;
+            if finding.run_id != *run_id {
+                return Err(Error::validation_invalid_argument(
+                    "finding.run_id",
+                    "all batch findings must reference the same run record".to_string(),
+                    Some(finding.run_id.clone()),
+                    None,
+                ));
+            }
+            validate_required("finding.tool", &finding.tool)?;
+            validate_required("finding.message", &finding.message)?;
+        }
+
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+            .map_err(sqlite_error("begin finding batch"))?;
+
         let mut records = Vec::with_capacity(findings.len());
         for finding in findings {
-            records.push(self.record_finding(finding)?);
+            match self.insert_finding_unchecked(finding) {
+                Ok(record) => records.push(record),
+                Err(error) => {
+                    let _ = self.connection.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
         }
+
+        self.connection
+            .execute_batch("COMMIT")
+            .map_err(sqlite_error("commit finding batch"))?;
         Ok(records)
     }
 
@@ -25,6 +67,10 @@ impl ObservationStore {
             ));
         }
 
+        self.insert_finding_unchecked(finding)
+    }
+
+    fn insert_finding_unchecked(&self, finding: &NewFindingRecord) -> Result<FindingRecord> {
         let id = Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
         let metadata_json = serialize_metadata(&finding.metadata_json)?;
@@ -57,10 +103,19 @@ impl ObservationStore {
             )
             .map_err(sqlite_error("insert finding record"))?;
 
-        self.get_finding(&id)?.ok_or_else(|| {
-            Error::internal_unexpected(format!(
-                "Inserted finding record {id} but could not read it back"
-            ))
+        Ok(FindingRecord {
+            id,
+            run_id: finding.run_id.clone(),
+            tool: finding.tool.clone(),
+            rule: finding.rule.clone(),
+            file: finding.file.clone(),
+            line: finding.line,
+            severity: finding.severity.clone(),
+            fingerprint: finding.fingerprint.clone(),
+            message: finding.message.clone(),
+            fixable: finding.fixable,
+            metadata_json: finding.metadata_json.clone(),
+            created_at,
         })
     }
 
@@ -310,6 +365,48 @@ mod tests {
                 .expect("findings");
 
             assert_eq!(findings.len(), 2);
+            assert_eq!(findings[0].rule.as_deref(), Some("security"));
+            assert_eq!(findings[1].rule.as_deref(), Some("i18n"));
+        });
+    }
+
+    #[test]
+    fn test_record_findings_rejects_unknown_run_before_insert() {
+        with_isolated_home(|_| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+
+            let result = store.record_findings(&[
+                new_finding("missing-run", "security"),
+                new_finding("missing-run", "i18n"),
+            ]);
+
+            assert!(result.is_err());
+            let findings = store
+                .list_findings(FindingListFilter::default())
+                .expect("list");
+            assert!(findings.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_record_findings_requires_one_run_per_batch() {
+        with_isolated_home(|_| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let first = store.start_run(new_run()).expect("first run");
+            let second = store.start_run(new_run()).expect("second run");
+
+            let result = store.record_findings(&[
+                new_finding(&first.id, "security"),
+                new_finding(&second.id, "i18n"),
+            ]);
+
+            assert!(result.is_err());
+            let findings = store
+                .list_findings(FindingListFilter::default())
+                .expect("list");
+            assert!(findings.is_empty());
         });
     }
 

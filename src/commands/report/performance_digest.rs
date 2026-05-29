@@ -359,6 +359,7 @@ mod helpers {
                     .get("memory")
                     .and_then(Value::as_object)
                     .and_then(|memory| u64_value(memory, "peak_bytes"))
+                    .or_else(|| max_run_peak_bytes(obj))
                     .or_else(|| {
                         obj.get("metrics")
                             .and_then(Value::as_object)
@@ -371,6 +372,18 @@ mod helpers {
                 })
             })
             .collect()
+    }
+
+    fn max_run_peak_bytes(scenario: &Map<String, Value>) -> Option<u64> {
+        array_value(scenario, "runs")
+            .into_iter()
+            .filter_map(|run| {
+                run.as_object()?
+                    .get("memory")?
+                    .as_object()
+                    .and_then(|memory| u64_value(memory, "peak_bytes"))
+            })
+            .max()
     }
 
     pub(super) fn collect_baseline_health(

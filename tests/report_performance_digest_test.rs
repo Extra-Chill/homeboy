@@ -269,3 +269,33 @@ fn missing_optional_artifacts_degrade_gracefully() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn renders_max_peak_rss_from_multi_run_memory() {
+    let dir = tmp_dir("multi-run-memory");
+    fs::create_dir_all(&dir).expect("temp dir should exist");
+    write_fixture_file(
+        &dir,
+        "bench-results.json",
+        r#"{
+            "component_id": "homeboy",
+            "scenarios": [{
+                "id": "audit-self",
+                "runs": [
+                    { "memory": { "peak_bytes": 1048576 }, "metrics": { "p95_ms": 10 } },
+                    { "memory": { "peak_bytes": 33554432 }, "metrics": { "p95_ms": 12 } },
+                    { "memory": { "peak_bytes": 16777216 }, "metrics": { "p95_ms": 11 } }
+                ]
+            }]
+        }"#,
+    );
+
+    let report = performance_digest_from_args(&args(&dir)).expect("digest should render");
+
+    assert_eq!(report.benchmark_memory.len(), 1);
+    assert_eq!(report.benchmark_memory[0].scenario, "audit-self");
+    assert_eq!(report.benchmark_memory[0].peak_bytes, 33554432);
+    assert!(report.markdown.contains("| `audit-self` | 32.0 MiB |"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
