@@ -141,6 +141,19 @@ try {
 		exit(1);
 	}
 
+	$eval_result = $tool->handle_tool_call(
+		array('command' => 'eval \' $GLOBALS["homeboy_eval_smoke"] = "ok"; \''),
+		array(
+			'tool_name'            => 'run_wp_cli',
+			'terminal_action_type' => 'wp_cli',
+		)
+	);
+
+	if (empty($eval_result['success']) || 'ok' !== ($GLOBALS['homeboy_eval_smoke'] ?? null)) {
+		fwrite(STDERR, "Unexpected runtime WP-CLI eval result:\n" . json_encode($eval_result, JSON_PRETTY_PRINT) . "\n");
+		exit(1);
+	}
+
 	class WP_CLI {
 		public static array $commands = array();
 

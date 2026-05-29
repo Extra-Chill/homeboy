@@ -1934,6 +1934,52 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
             );
         }
 
+        private function runtime_wp_cli_eval_code( string $command ): ?string {
+            $wp_cli_command = trim( preg_replace( '/^wp\s+/', '', $this->normalize_wp_cli_command( $command ) ) );
+            if ( ! str_starts_with( $wp_cli_command, 'eval ' ) ) {
+                return null;
+            }
+
+            $code = trim( substr( $wp_cli_command, 5 ) );
+            if ( strlen( $code ) >= 2 ) {
+                $quote = $code[0];
+                if ( ( "'" === $quote || '"' === $quote ) && str_ends_with( $code, $quote ) ) {
+                    $code = substr( $code, 1, -1 );
+                }
+            }
+
+            return $code;
+        }
+
+        private function run_runtime_wp_cli_eval_command( string $command ): array {
+            $normalized_command = $this->normalize_wp_cli_command( $command );
+            $code               = $this->runtime_wp_cli_eval_code( $command );
+            $started            = microtime( true );
+            $success            = true;
+            $stderr             = '';
+
+            ob_start();
+            try {
+                eval( (string) $code );
+            } catch ( Throwable $throwable ) {
+                $success = false;
+                $stderr  = $throwable->getMessage();
+            }
+            $stdout = (string) ob_get_clean();
+
+            return array(
+                'type'       => 'wp_cli',
+                'command'    => $normalized_command,
+                'exitCode'   => $success ? 0 : 1,
+                'stdout'     => $stdout,
+                'stderr'     => $stderr,
+                'success'    => $success,
+                'timedOut'   => false,
+                'durationMs' => (int) round( ( microtime( true ) - $started ) * 1000 ),
+                'error'      => $success ? '' : ( '' !== $stderr ? $stderr : 'WP-CLI eval command failed' ),
+            );
+        }
+
         public function handle_tool_call( array $parameters, array $tool_def = array() ): array {
             $type = (string) ( $tool_def['terminal_action_type'] ?? 'wp_cli' );
 
@@ -1948,6 +1994,13 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
 
             if ( 'wp_cli' === $type && class_exists( 'WP_CLI' ) && method_exists( 'WP_CLI', 'runcommand' ) ) {
                 $result              = $this->run_runtime_wp_cli_command( $command );
+                $result['tool_name'] = (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' );
+                $result['status']    = 200;
+                return $result;
+            }
+
+            if ( 'wp_cli' === $type && null !== $this->runtime_wp_cli_eval_code( $command ) ) {
+                $result              = $this->run_runtime_wp_cli_eval_command( $command );
                 $result['tool_name'] = (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' );
                 $result['status']    = 200;
                 return $result;
