@@ -456,7 +456,7 @@ fn output_capture_detector_is_explicit_first_slice() {
     let default_plan = AuditExecutionPlan::full();
     assert_eq!(
         detector_step_status(&default_plan, "output_capture"),
-        &PlanStepStatus::Disabled
+        &PlanStepStatus::Ready
     );
 
     let filtered_plan =

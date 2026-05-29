@@ -167,6 +167,8 @@ fn json_self_check_failure_reports_bounded_large_output_metadata() {
     assert!(raw.stderr_truncated);
     assert!(raw.stdout_seen_bytes > raw.stdout_limit_bytes);
     assert!(raw.stderr_seen_bytes > raw.stderr_limit_bytes);
+    assert!(raw.stdout_retained_bytes <= raw.stdout_limit_bytes);
+    assert!(raw.stderr_retained_bytes <= raw.stderr_limit_bytes);
     assert!(raw.stdout_tail.contains("stdout-line"));
     assert!(raw.stderr_tail.contains("stderr-line"));
 }

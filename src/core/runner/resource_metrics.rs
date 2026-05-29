@@ -75,6 +75,7 @@ impl ResourceMetricsCollector {
         }
 
         let (stop, stop_rx) = mpsc::channel();
+        sample(root_pid, &state);
         let thread_state = Arc::clone(&state);
         let handle = thread::spawn(move || loop {
             sample(root_pid, &thread_state);
