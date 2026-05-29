@@ -131,6 +131,17 @@ fn connect_remote_daemon(
     runner_id: &str,
     session_path: &PathBuf,
 ) -> std::result::Result<(u16, Option<u32>, String, RemoteDaemon), (RunnerConnectReport, i32)> {
+    let failed_after_tunnel = |tunnel_pid: Option<u32>, message: String| {
+        if let Some(pid) = tunnel_pid {
+            terminate_pid(pid);
+        }
+        failed_connect(
+            runner_id,
+            session_path.clone(),
+            RunnerFailureKind::DaemonStartupFailure,
+            message,
+        )
+    };
     let (local_port, tunnel_pid, local_url) =
         open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
     match daemon_http_version(&local_url) {
@@ -165,13 +176,8 @@ fn connect_remote_daemon(
             match daemon_http_version(&local_url) {
                 Ok(running_version) if versions_match(&running_version, expected_version) => {}
                 Ok(running_version) => {
-                    if let Some(pid) = tunnel_pid {
-                        terminate_pid(pid);
-                    }
-                    return Err(failed_connect(
-                        runner_id,
-                        session_path.clone(),
-                        RunnerFailureKind::DaemonStartupFailure,
+                    return Err(failed_after_tunnel(
+                        tunnel_pid,
                         format!(
                             "remote daemon restarted but still reports stale Homeboy version {} instead of {}",
                             running_version, expected_version
@@ -179,30 +185,12 @@ fn connect_remote_daemon(
                     ));
                 }
                 Err(message) => {
-                    if let Some(pid) = tunnel_pid {
-                        terminate_pid(pid);
-                    }
-                    return Err(failed_connect(
-                        runner_id,
-                        session_path.clone(),
-                        RunnerFailureKind::DaemonStartupFailure,
-                        message,
-                    ));
+                    return Err(failed_after_tunnel(tunnel_pid, message));
                 }
             }
             Ok((local_port, tunnel_pid, local_url, daemon))
         }
-        Err(message) => {
-            if let Some(pid) = tunnel_pid {
-                terminate_pid(pid);
-            }
-            Err(failed_connect(
-                runner_id,
-                session_path.clone(),
-                RunnerFailureKind::DaemonStartupFailure,
-                message,
-            ))
-        }
+        Err(message) => Err(failed_after_tunnel(tunnel_pid, message)),
     }
 }
 
