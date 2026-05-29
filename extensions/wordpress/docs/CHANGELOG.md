@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.40] - 2026-05-29
+
+### Fixed
+- omit incomplete wp-gym replay projections
+
 ## [2.102.39] - 2026-05-29
 
 ### Fixed
