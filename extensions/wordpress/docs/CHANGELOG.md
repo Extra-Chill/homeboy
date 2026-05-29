@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.43] - 2026-05-29
+
+### Fixed
+- keep wp eval in agent runtime
+
 ## [2.102.42] - 2026-05-29
 
 ### Fixed
