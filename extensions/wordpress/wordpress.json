@@ -958,20 +958,6 @@
       "description": "Config-declared WordPress bench workloads passed to wordpress.bench through the generated WP Codebox recipe after dependency mounts and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file}, {type: 'ability', ability|name, input}, or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata. Step returns use the same {metrics, artifacts, metadata} shape as Node.js bench workloads."
     },
     {
-      "id": "agent_sandbox_workloads",
-      "label": "Agent sandbox bench workloads",
-      "type": "array",
-      "default": [],
-      "description": "Config-declared WP Codebox agent sandbox workloads emitted as first-class wp-codebox.agent-sandbox-run workflow steps. Use this for end-to-end agent tasks where the agent, model call, filesystem writes, and artifacts must all run inside Codebox rather than inside the wordpress.bench PHP harness."
-    },
-    {
-      "id": "agent_sandbox_secret_env",
-      "label": "Agent sandbox secret env",
-      "type": "array",
-      "default": [],
-      "description": "Environment variable names forwarded into WP Codebox agent sandbox bench workloads as secretEnv. Values are read from the parent process by WP Codebox and are not stored in Homeboy settings."
-    },
-    {
       "id": "playground_scenario_manifests",
       "label": "Playground scenario manifests",
       "type": "array",

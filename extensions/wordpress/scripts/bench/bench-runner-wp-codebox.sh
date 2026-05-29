@@ -296,14 +296,10 @@ DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
 WP_CONFIG_DEFINES_JSON="{}"
 BENCH_ENV_JSON="{}"
 PLAYGROUND_WORKLOADS_JSON="[]"
-AGENT_SANDBOX_WORKLOADS_JSON="[]"
-AGENT_SANDBOX_SECRET_ENV_JSON="[]"
 if [ "$settings_json" != "{}" ]; then
     WP_CONFIG_DEFINES_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     BENCH_ENV_JSON=$(printf '%s' "$settings_json" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
     PLAYGROUND_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.playground_workloads // []' 2>/dev/null || echo "[]")
-    AGENT_SANDBOX_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.agent_sandbox_workloads // []' 2>/dev/null || echo "[]")
-    AGENT_SANDBOX_SECRET_ENV_JSON=$(printf '%s' "$settings_json" | jq -c '.agent_sandbox_secret_env // []' 2>/dev/null || echo "[]")
 fi
 PLAYGROUND_WORKLOADS_JSON=$(jq -nc --argjson declared "$PLAYGROUND_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$declared + $scenarios')
 
@@ -382,9 +378,7 @@ if ! homeboy_wordpress_emit_browser_target "$settings_json" "$SHARED_STATE_HOST"
 fi
 
 BENCH_DIR="${PLUGIN_PATH}/tests/bench"
-if [ ! -d "$BENCH_DIR" ] \
-    && ! printf '%s' "$PLAYGROUND_WORKLOADS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1 \
-    && ! printf '%s' "$AGENT_SANDBOX_WORKLOADS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+if [ ! -d "$BENCH_DIR" ] && ! printf '%s' "$PLAYGROUND_WORKLOADS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
     echo "Warning: No bench workloads found for ${PLUGIN_PATH}" >&2
     if [ -n "${HOMEBOY_BENCH_RESULTS_FILE:-}" ]; then
         homeboy_write_empty_bench_results "$COMPONENT_ID" 0 "$RESULTS_FILE"
@@ -419,25 +413,7 @@ RUNTIME_BLUEPRINT_JSON=$(jq -nc \
     end
 ')
 
-if printf '%s' "$AGENT_SANDBOX_WORKLOADS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
-    WORKFLOW_STEPS_JSON=$(jq -nc \
-        --argjson workloads "$AGENT_SANDBOX_WORKLOADS_JSON" '
-        $workloads | map(
-            . as $workload |
-            [
-                "task=" + (($workload.task // $workload.goal // $workload.label // $workload.id) | tostring),
-                "agent=" + (($workload.agent // "sandbox-agent") | tostring),
-                "mode=" + (($workload.mode // "sandbox") | tostring),
-                "provider=" + (($workload.provider // "") | tostring),
-                "model=" + (($workload.model // "") | tostring),
-                "provider-plugin-slugs=" + (((($workload.provider_plugin_slugs // []) | if type == "array" then . else [.] end) | map(tostring)) | join(","))
-            ]
-            + (if ($workload.max_turns? // null) != null then ["max-turns=" + ($workload.max_turns | tostring)] else [] end)
-            | {command: "wp-codebox.agent-sandbox-run", args: .}
-        )
-    ')
-else
-    WORKFLOW_STEP_JSON=$(jq -nc \
+WORKFLOW_STEP_JSON=$(jq -nc \
     --arg component "$COMPONENT_ID" \
     --arg slug "$PLUGIN_SLUG" \
     --arg iterations "$ITERATIONS" \
@@ -458,8 +434,6 @@ else
         ]
     }
 ')
-    WORKFLOW_STEPS_JSON=$(jq -nc --argjson step "$WORKFLOW_STEP_JSON" '[$step]')
-fi
 
 RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-recipe.XXXXXX")
 jq -n \
@@ -467,13 +441,12 @@ jq -n \
     --argjson blueprint "$RUNTIME_BLUEPRINT_JSON" \
     --argjson extraPlugins "$EXTRA_PLUGINS_JSON" \
     --argjson mounts "$MOUNTS_JSON" \
-    --argjson secretEnv "$AGENT_SANDBOX_SECRET_ENV_JSON" \
-    --argjson steps "$WORKFLOW_STEPS_JSON" \
+    --argjson step "$WORKFLOW_STEP_JSON" \
     '{
         schema: "wp-codebox/workspace-recipe/v1",
         runtime: {wp: $wp, blueprint: $blueprint},
-        inputs: {extraPlugins: $extraPlugins, mounts: $mounts, secretEnv: $secretEnv},
-        workflow: {steps: $steps}
+        inputs: {extraPlugins: $extraPlugins, mounts: $mounts},
+        workflow: {steps: [$step]}
     }' > "$RECIPE_FILE"
 
 WP_CODEBOX_TMPFILE=$(mktemp)
@@ -492,59 +465,14 @@ if [ $wp_codebox_exit -ne 0 ]; then
     exit $wp_codebox_exit
 fi
 
-if printf '%s' "$AGENT_SANDBOX_WORKLOADS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
-    if ! jq -e '.success == true' "$WP_CODEBOX_TMPFILE" >/dev/null 2>&1; then
-        cat "$WP_CODEBOX_TMPFILE" >&2
-        FAILED_STEP="WP Codebox agent sandbox bench results parse"
-        exit 1
-    fi
-
-    mkdir -p "$(dirname "$RESULTS_FILE")"
-    jq -n \
-        --arg component "$COMPONENT_ID" \
-        --argjson workloads "$AGENT_SANDBOX_WORKLOADS_JSON" \
-        --slurpfile run "$WP_CODEBOX_TMPFILE" '
-        ($run[0]) as $output |
-        {
-            component_id: $component,
-            iterations: 1,
-            scenarios: (
-                $workloads | to_entries | map(
-                    .value as $workload |
-                    {
-                        id: (($workload.id // $workload.label // ("agent-sandbox-" + (.key | tostring))) | tostring),
-                        source: "agent_sandbox",
-                        iterations: 1,
-                        metrics: {
-                            success_mean: (if ($output.success == true) then 1 else 0 end),
-                            exit_code_mean: (($output.exitCode // 0) | tonumber)
-                        },
-                        metadata: (($workload.metadata // {}) + {
-                            execution: "wp-codebox.agent-sandbox-run",
-                            agent_result: ($output.agentResult // {}),
-                            run_artifacts: ($output.artifacts // {})
-                        }),
-                        artifacts: {
-                            wp_codebox: {
-                                kind: "directory",
-                                path: ($output.artifacts.directory // ""),
-                                label: "WP Codebox artifact bundle"
-                            }
-                        }
-                    }
-                    | if ($workload.label? // null) != null then . + {label: ($workload.label | tostring)} else . end
-                )
-            )
-        }
-    ' > "$RESULTS_FILE"
-elif ! jq -e '.success == true and (.benchResults | type == "object")' "$WP_CODEBOX_TMPFILE" >/dev/null 2>&1; then
+if ! jq -e '.success == true and (.benchResults | type == "object")' "$WP_CODEBOX_TMPFILE" >/dev/null 2>&1; then
     cat "$WP_CODEBOX_TMPFILE" >&2
     FAILED_STEP="WP Codebox bench results parse"
     exit 1
-else
-    mkdir -p "$(dirname "$RESULTS_FILE")"
-    jq '.benchResults | del(.warmup_iterations)' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
 fi
+
+mkdir -p "$(dirname "$RESULTS_FILE")"
+jq '.benchResults | del(.warmup_iterations)' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
 
 homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE"
 
