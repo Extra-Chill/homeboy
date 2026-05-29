@@ -219,6 +219,7 @@ process.stdout.write(JSON.stringify({
   assert.equal(run.records[0].command.timeout_seconds, 2);
   assert.match(run.records[0].command.args[0], /homeboy-wp-codebox-task-runner\.cjs$/);
   assert.equal(run.records[0].command.args.includes('--wp-codebox-bin'), true);
+  assert.equal(run.records[0].command.args.includes('--task-timeout-seconds'), true);
   assert.equal(run.records[0].command.args.includes('--homeboy'), true);
   assert.equal(run.records[0].command.args.includes('--homeboy-extensions'), true);
   const artifactsIndex = run.records[0].command.args.indexOf('--artifacts');

@@ -31,7 +31,7 @@ function hasFlag(name) {
 }
 
 function usage() {
-  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--homeboy <path>] [--homeboy-extensions <path>] [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--max-turns <n>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--artifacts <dir>]');
+  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--homeboy <path>] [--homeboy-extensions <path>] [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--max-turns <n>] [--task-timeout-seconds <n>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--artifacts <dir>]');
   process.exit(1);
 }
 
@@ -207,6 +207,7 @@ function recipeForRequest(request, options) {
 
   const providerSlugs = providerPluginEntries(request).map((plugin) => plugin.slug).join(',');
   const maxTurns = argValue('--max-turns') || request.max_turns || request.maxTurns || '';
+  const taskTimeoutSeconds = argValue('--task-timeout-seconds') || request.task_timeout_seconds || request.taskTimeoutSeconds || '';
   const stepArgs = [
     `task=${task}`,
     'agent=sandbox-agent',
@@ -217,6 +218,9 @@ function recipeForRequest(request, options) {
   ];
   if (maxTurns) {
     stepArgs.push(`max-turns=${maxTurns}`);
+  }
+  if (taskTimeoutSeconds) {
+    stepArgs.push(`timeout-seconds=${taskTimeoutSeconds}`);
   }
 
   return {
