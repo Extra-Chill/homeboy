@@ -181,7 +181,19 @@ pub fn run(input: &str) -> Result<(BuildResult, i32)> {
 /// Thin wrapper around `execute_build_component` that adapts the return type
 /// for the deploy pipeline's error handling convention.
 pub(crate) fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
-    match execute_build_component(component) {
+    let result = if component.build_artifact.is_some() {
+        component
+            .build_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(|command| execute_explicit_build_command(component, command))
+            .unwrap_or_else(|| execute_build_component(component))
+    } else {
+        execute_build_component(component)
+    };
+
+    match result {
         Ok((output, exit_code)) => {
             if output.success {
                 (Some(exit_code), None)
@@ -201,6 +213,29 @@ pub(crate) fn build_component(component: &component::Component) -> (Option<i32>,
         }
         Err(e) => (Some(1), Some(e.to_string())),
     }
+}
+
+fn execute_explicit_build_command(comp: &Component, build_cmd: &str) -> Result<(BuildOutput, i32)> {
+    let validated_path = component::validate_local_path(comp)?;
+    let local_path_str = validated_path.to_string_lossy().to_string();
+
+    permissions::fix_local_permissions(&local_path_str);
+
+    let env = [("HOMEBOY_PLUGIN_PATH", comp.local_path.as_str())];
+    let output = execute_local_command_in_dir(build_cmd, Some(&local_path_str), Some(&env));
+    let success = output.success;
+    let exit_code = output.exit_code;
+
+    Ok((
+        BuildOutput {
+            command: "build.run".to_string(),
+            component_id: comp.id.clone(),
+            build_command: build_cmd.to_string(),
+            output: CapturedOutput::new(output.stdout, output.stderr),
+            success,
+        },
+        exit_code,
+    ))
 }
 
 /// Format a build error message with context from stderr/stdout.
@@ -470,6 +505,7 @@ fn run_pre_build_scripts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::component::ComponentScriptsConfig;
 
     #[test]
     fn is_json_input_detects_json() {
@@ -498,5 +534,33 @@ mod tests {
             hint.message
                 .contains("component-level `build_command` is not supported")
         }));
+    }
+
+    #[test]
+    fn deploy_build_uses_explicit_command_when_artifact_is_required() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let component = Component {
+            id: "wp-codebox".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            build_artifact: Some("dist/wp-codebox.zip".to_string()),
+            build_command: Some(
+                "mkdir -p dist && printf explicit > dist/wp-codebox.zip".to_string(),
+            ),
+            scripts: Some(ComponentScriptsConfig {
+                build: vec!["mkdir -p dist && printf generic > dist/generic.zip".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let (exit_code, error) = build_component(&component);
+
+        assert_eq!(exit_code, Some(0));
+        assert_eq!(error, None);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("dist/wp-codebox.zip")).unwrap(),
+            "explicit"
+        );
+        assert!(!temp.path().join("dist/generic.zip").exists());
     }
 }

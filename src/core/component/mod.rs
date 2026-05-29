@@ -172,6 +172,7 @@ pub struct Component {
     pub local_path: String,
     pub remote_path: String,
     pub build_artifact: Option<String>,
+    pub build_command: Option<String>,
     pub extensions: Option<HashMap<String, ScopedExtensionConfig>>,
     pub version_targets: Option<Vec<VersionTarget>>,
     pub changelog_target: Option<String>,
@@ -243,6 +244,8 @@ struct RawComponent {
     )]
     build_artifact: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    build_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     extensions: Option<HashMap<String, ScopedExtensionConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     version_targets: Option<Vec<VersionTarget>>,
@@ -298,6 +301,7 @@ impl From<RawComponent> for Component {
             local_path: raw.local_path,
             remote_path: raw.remote_path,
             build_artifact: raw.build_artifact,
+            build_command: raw.build_command,
             extensions: raw.extensions,
             version_targets: raw.version_targets,
             changelog_target: raw.changelog_target,
@@ -333,6 +337,7 @@ impl From<Component> for RawComponent {
             local_path: c.local_path,
             remote_path: c.remote_path,
             build_artifact: c.build_artifact,
+            build_command: c.build_command,
             extensions: c.extensions,
             version_targets: c.version_targets,
             changelog_target: c.changelog_target,
@@ -408,6 +413,7 @@ impl Component {
             local_path,
             remote_path,
             build_artifact,
+            build_command: None,
             extensions: None,
             version_targets: None,
             changelog_target: None,
