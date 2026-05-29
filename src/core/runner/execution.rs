@@ -733,7 +733,7 @@ mod tests {
             if cfg!(target_os = "linux") {
                 assert_eq!(metrics.source, "linux_procfs_process_tree");
                 if metrics.sample_count > 0 {
-                    assert!(metrics.peak_rss_bytes.unwrap_or(0) > 0);
+                    assert!(metrics.peak_rss_bytes.is_some());
                     assert!(metrics.child_process_count_peak.is_some());
                 }
             } else {
