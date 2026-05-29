@@ -16,9 +16,11 @@ use crate::core::process::pid_is_running;
 use crate::core::source_snapshot::SourceSnapshot;
 
 mod artifact_download;
+mod broker_config;
 mod patch_capture;
 mod remote_runner;
 pub use artifact_download::ArtifactDownload;
+pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions};
 use patch_capture::{capture_baseline, capture_patch_report};
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
