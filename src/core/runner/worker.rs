@@ -98,6 +98,7 @@ pub fn run_reverse_worker(
                 "remote_cwd": exec_output.remote_cwd,
             })),
             artifacts: Vec::new(),
+            metrics: exec_output.metrics.clone(),
         },
     )?;
 
@@ -252,6 +253,19 @@ mod tests {
                     && event.data.as_ref().expect("result data")["stdout"]
                         == serde_json::json!("worker-ok")
             }));
+            let result = events
+                .iter()
+                .find(|event| event.kind == JobEventKind::Result)
+                .and_then(|event| event.data.as_ref())
+                .expect("result event data");
+            assert!(result["metrics"]["duration_ms"].as_u64().is_some());
+            if cfg!(target_os = "linux") {
+                assert_eq!(
+                    result["metrics"]["source"],
+                    serde_json::json!("linux_procfs_process_tree")
+                );
+                assert!(result["metrics"]["sample_count"].as_u64().unwrap_or(0) > 0);
+            }
         });
     }
 

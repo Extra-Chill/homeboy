@@ -18,6 +18,7 @@ mod execution;
 mod lab;
 mod offload_changed_since;
 mod offload_metadata;
+mod resource_metrics;
 mod session;
 mod worker;
 mod workspace;
@@ -47,6 +48,8 @@ pub use offload_changed_since::{
     prepare_git_lab_offload_changed_since,
 };
 pub use offload_metadata::{capture_lab_offload_metadata, lab_offload_metadata};
+pub(crate) use resource_metrics::measured_command_output;
+pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{
     ReverseRunnerConnectOptions, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
     RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStatusReport, RunnerTunnelMode,

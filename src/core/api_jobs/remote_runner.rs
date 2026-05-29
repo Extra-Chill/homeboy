@@ -8,6 +8,7 @@ use super::{
     job_not_found, timestamp_ms, Job, JobEvent, JobEventKind, JobStatus, JobStore, StoredJob,
 };
 use crate::core::error::{Error, Result};
+use crate::core::runner::RunnerResourceMetrics;
 use crate::core::source_snapshot::SourceSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +67,8 @@ pub struct RemoteRunnerJobResult {
     pub data: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<JobArtifactMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<RunnerResourceMetrics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

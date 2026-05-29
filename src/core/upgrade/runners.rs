@@ -338,6 +338,7 @@ mod tests {
             job_events: None,
             mirror_run_id: None,
             patch: None,
+            metrics: None,
         }
     }
 }
