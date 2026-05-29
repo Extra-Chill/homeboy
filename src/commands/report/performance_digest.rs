@@ -43,6 +43,8 @@ pub struct PerformanceDigestReport {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub budget_findings: Vec<BudgetFindingDigest>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub benchmark_memory: Vec<BenchmarkMemoryDigest>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub baseline_health: Vec<BaselineHealthDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_pressure: Option<HostPressureDigest>,
@@ -91,6 +93,12 @@ pub struct BudgetFindingDigest {
     pub unit: String,
     pub severity: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BenchmarkMemoryDigest {
+    pub scenario: String,
+    pub peak_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -165,9 +173,11 @@ pub fn performance_digest_from_args(
     });
 
     let budget_findings = collect_budget_findings(&bench_data);
+    let benchmark_memory = collect_benchmark_memory(&bench_data);
     let markdown = render_markdown(
         resource_summary.as_ref(),
         &budget_findings,
+        &benchmark_memory,
         &baseline_health,
         host_pressure.as_ref(),
         &lab_offload,
@@ -179,6 +189,7 @@ pub fn performance_digest_from_args(
         markdown,
         resource_summary,
         budget_findings,
+        benchmark_memory,
         baseline_health,
         host_pressure,
         lab_offload,
@@ -325,6 +336,38 @@ mod helpers {
                     unit: string_value(obj, "unit").unwrap_or_else(|| "-".to_string()),
                     severity: string_value(obj, "severity").unwrap_or_else(|| "error".to_string()),
                     message: string_value(obj, "message").unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    pub(super) fn collect_benchmark_memory(
+        data: &Map<String, Value>,
+    ) -> Vec<BenchmarkMemoryDigest> {
+        let results = object_value(data, "results");
+        let mut scenarios = array_value(&results, "scenarios");
+        if scenarios.is_empty() {
+            scenarios = array_value(data, "scenarios");
+        }
+
+        scenarios
+            .into_iter()
+            .filter_map(|scenario| {
+                let obj = scenario.as_object()?;
+                let scenario = string_value(obj, "id").unwrap_or_else(|| "unknown".to_string());
+                let peak_bytes = obj
+                    .get("memory")
+                    .and_then(Value::as_object)
+                    .and_then(|memory| u64_value(memory, "peak_bytes"))
+                    .or_else(|| {
+                        obj.get("metrics")
+                            .and_then(Value::as_object)
+                            .and_then(|metrics| number_value(metrics, "peak_rss_bytes"))
+                            .map(|value| value.max(0.0) as u64)
+                    })?;
+                Some(BenchmarkMemoryDigest {
+                    scenario,
+                    peak_bytes,
                 })
             })
             .collect()
@@ -505,6 +548,7 @@ mod helpers {
     pub(super) fn render_markdown(
         resource_summary: Option<&ResourceSummaryDigest>,
         budget_findings: &[BudgetFindingDigest],
+        benchmark_memory: &[BenchmarkMemoryDigest],
         baseline_health: &[BaselineHealthDiagnostic],
         host_pressure: Option<&HostPressureDigest>,
         lab_offload: &BTreeMap<String, String>,
@@ -515,6 +559,7 @@ mod helpers {
         out.push_str("## Performance Digest\n\n");
         render_resource_summary(&mut out, resource_summary);
         render_budget_findings(&mut out, budget_findings);
+        render_benchmark_memory(&mut out, benchmark_memory);
         render_baseline_health(&mut out, baseline_health);
         render_host_pressure(&mut out, host_pressure);
         render_lab_offload(&mut out, lab_offload);
@@ -619,6 +664,26 @@ mod helpers {
                 escape_markdown_table_cell(&finding.unit),
                 escape_markdown_table_cell(&finding.severity),
                 escape_markdown_table_cell(&finding.message)
+            );
+        }
+        out.push('\n');
+    }
+
+    pub(super) fn render_benchmark_memory(out: &mut String, memory: &[BenchmarkMemoryDigest]) {
+        out.push_str("### Benchmark Memory\n");
+        if memory.is_empty() {
+            out.push_str("- No scenario-level memory evidence available.\n\n");
+            return;
+        }
+
+        out.push_str("| Scenario | Peak RSS |\n");
+        out.push_str("| --- | ---: |\n");
+        for entry in memory.iter().take(10) {
+            let _ = writeln!(
+                out,
+                "| `{}` | {} |",
+                escape_markdown_table_cell(&entry.scenario),
+                format_bytes(Some(entry.peak_bytes))
             );
         }
         out.push('\n');
