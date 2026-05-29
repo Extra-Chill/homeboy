@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.48] - 2026-05-29
+
+### Fixed
+- persist runner workspace aliases
+
 ## [2.102.47] - 2026-05-29
 
 ### Fixed
