@@ -94,6 +94,7 @@ pub(super) fn deploy_components(
             &remote_versions,
             &project,
             base_path,
+            config,
         ));
     }
     if config.dry_run {
@@ -219,6 +220,7 @@ fn run_check_mode(
     remote_versions: &HashMap<String, String>,
     project: &Project,
     base_path: &str,
+    config: &DeployConfig,
 ) -> DeployOrchestrationResult {
     let results: Vec<ComponentDeployResult> = components
         .iter()
@@ -231,7 +233,8 @@ fn run_check_mode(
                     local_versions.get(&c.id).cloned(),
                     remote_versions.get(&c.id).cloned(),
                 )
-                .with_component_status(status);
+                .with_component_status(status)
+                .with_source_identity(c, config.head);
             if let Some(state) = release_state {
                 result = result.with_release_state(state);
             }
@@ -273,7 +276,8 @@ fn run_dry_run_mode(
                 .with_versions(
                     local_versions.get(&c.id).cloned(),
                     remote_versions.get(&c.id).cloned(),
-                );
+                )
+                .with_source_identity(c, config.head);
             if config.check {
                 result = result.with_component_status(status);
             }
