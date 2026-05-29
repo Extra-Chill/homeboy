@@ -186,6 +186,7 @@ jq -n \
         workload_id: "wp-codebox-runner-smoke",
         workload_label: "WP Codebox runner smoke",
         dry_run: true,
+        enable_terminal_actions: true,
         provider: "example-provider",
         model: "example-model",
         workspace_policy_check: {
