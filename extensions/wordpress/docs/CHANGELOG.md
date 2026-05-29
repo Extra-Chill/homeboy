@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.39] - 2026-05-29
+
+### Fixed
+- keep runner PR publication out of task tools
+
 ## [2.102.38] - 2026-05-29
 
 ### Fixed
