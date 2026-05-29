@@ -1586,6 +1586,25 @@ if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_capture_enab
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_persist_runner_workspace_alias' ) ) {
+    function homeboy_datamachine_agent_persist_runner_workspace_alias( string $alias, string $handle, string $root ): void {
+        if ( '' === $alias || '' === $handle || ! function_exists( 'get_option' ) || ! function_exists( 'update_option' ) ) {
+            return;
+        }
+
+        $aliases = get_option( 'datamachine_code_workspace_aliases', array() );
+        if ( ! is_array( $aliases ) ) {
+            $aliases = array();
+        }
+
+        $aliases[ $alias ] = array(
+            'target' => $handle,
+            'root'   => $root,
+        );
+        update_option( 'datamachine_code_workspace_aliases', $aliases, false );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_execute_workspace_ability' ) ) {
     function homeboy_datamachine_agent_execute_workspace_ability( string $ability_name, array $input ): array {
         $ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( $ability_name ) : null;
@@ -2285,6 +2304,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_apply_runner_workspace' ) ) {
         $agent_root   = homeboy_datamachine_agent_runner_workspace_root( $config );
         $agent_handle = '' !== $agent_alias ? $agent_alias : $handle;
         if ( '' !== $agent_alias ) {
+            homeboy_datamachine_agent_persist_runner_workspace_alias( $agent_alias, $handle, $agent_root );
             add_filter(
                 'datamachine_code_workspace_aliases',
                 static function ( array $aliases ) use ( $agent_alias, $handle, $agent_root ): array {

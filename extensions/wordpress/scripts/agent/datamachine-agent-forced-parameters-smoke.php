@@ -39,6 +39,7 @@ namespace {
     }
 
     $GLOBALS['homeboy_forced_parameters_filters'] = array();
+    $GLOBALS['homeboy_forced_parameters_options'] = array();
 
     if ( ! function_exists( 'add_filter' ) ) {
         function add_filter( string $tag, callable $callback, int $priority = 10, int $accepted_args = 1 ): void {
@@ -72,6 +73,19 @@ namespace {
                     );
                 }
             };
+        }
+    }
+
+    if ( ! function_exists( 'get_option' ) ) {
+        function get_option( string $option, $default = false ) {
+            return array_key_exists( $option, $GLOBALS['homeboy_forced_parameters_options'] ) ? $GLOBALS['homeboy_forced_parameters_options'][ $option ] : $default;
+        }
+    }
+
+    if ( ! function_exists( 'update_option' ) ) {
+        function update_option( string $option, $value, $autoload = null ): bool {
+            $GLOBALS['homeboy_forced_parameters_options'][ $option ] = $value;
+            return true;
         }
     }
 
@@ -332,6 +346,17 @@ namespace {
 
     if ( '.agent-workspace/current-project' !== ( $aliases['current-project']['root'] ?? null ) ) {
         fwrite( STDERR, "Expected alias runner workspace mode to register the scoped alias root.\n" );
+        exit( 1 );
+    }
+
+    $persisted_aliases = get_option( 'datamachine_code_workspace_aliases', array() );
+    if ( 'demo@agent-run-openai-gpt-5-5' !== ( $persisted_aliases['current-project']['target'] ?? null ) ) {
+        fwrite( STDERR, "Expected alias runner workspace mode to persist the opaque alias mapping for tool requests.\n" );
+        exit( 1 );
+    }
+
+    if ( '.agent-workspace/current-project' !== ( $persisted_aliases['current-project']['root'] ?? null ) ) {
+        fwrite( STDERR, "Expected alias runner workspace mode to persist the scoped alias root for tool requests.\n" );
         exit( 1 );
     }
 
