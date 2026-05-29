@@ -20,11 +20,17 @@
               "deploy_reason": "explicitly_selected",
               "deployed_ref": "v0.198.0",
               "error": null,
+              "git_branch": "main",
+              "git_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "id": "homeboy",
+              "is_worktree": false,
+              "local_path": "/work/homeboy",
               "local_version": "0.198.0",
               "remote_path": "/srv/homeboy",
               "remote_version": "0.197.11",
-              "status": "planned"
+              "status": "planned",
+              "upstream_branch": "origin/main",
+              "upstream_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             }
           ],
           "summary": {
@@ -60,11 +66,17 @@
                   "deploy_reason": "explicitly_selected",
                   "deployed_ref": "v0.198.0",
                   "error": null,
+                  "git_branch": "main",
+                  "git_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                   "id": "homeboy",
+                  "is_worktree": false,
+                  "local_path": "/work/homeboy",
                   "local_version": "0.198.0",
                   "remote_path": "/srv/homeboy",
                   "remote_version": "0.197.11",
-                  "status": "planned"
+                  "status": "planned",
+                  "upstream_branch": "origin/main",
+                  "upstream_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 }
               ],
               "status": "planned",

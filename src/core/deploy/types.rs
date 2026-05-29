@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::core::component::Component;
 use crate::core::config;
@@ -173,6 +174,21 @@ pub struct ComponentDeployResult {
     pub component_status: Option<ComponentStatus>,
     pub local_version: Option<String>,
     pub remote_version: Option<String>,
+    pub local_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_worktree: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind_upstream: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub error: Option<String>,
     pub artifact_path: Option<String>,
     pub remote_path: Option<String>,
@@ -194,6 +210,14 @@ impl ComponentDeployResult {
             component_status: None,
             local_version: None,
             remote_version: None,
+            local_path: Some(component.local_path.clone()),
+            git_branch: None,
+            git_head: None,
+            upstream_branch: None,
+            upstream_head: None,
+            is_worktree: None,
+            behind_upstream: None,
+            warnings: Vec::new(),
             error: None,
             artifact_path: component.build_artifact.clone(),
             remote_path: base_path::join_remote_path(Some(base_path), &component.remote_path).ok(),
@@ -273,6 +297,61 @@ impl ComponentDeployResult {
         self.deployed_ref = Some(git_ref);
         self
     }
+
+    pub(super) fn with_source_identity(mut self, component: &Component, head_deploy: bool) -> Self {
+        let path = Path::new(&component.local_path);
+        self.local_path = Some(component.local_path.clone());
+        self.git_branch = git_output(path, &["branch", "--show-current"]);
+        self.git_head = git_output(path, &["rev-parse", "HEAD"]);
+        self.upstream_branch = git_output(path, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+        self.upstream_head = git_output(path, &["rev-parse", "@{upstream}"]);
+        self.is_worktree = detect_linked_worktree(path);
+        self.behind_upstream = git_output(
+            path,
+            &["rev-list", "--left-only", "--count", "@{upstream}...HEAD"],
+        )
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|count| *count > 0);
+
+        if head_deploy && self.is_worktree == Some(true) {
+            self.warnings.push(
+                "--head deploy will use a non-primary git worktree; confirm this is the intended source checkout"
+                    .to_string(),
+            );
+        }
+
+        if let (true, Some(count)) = (head_deploy, self.behind_upstream) {
+            self.warnings.push(format!(
+                "--head deploy source is {count} commit(s) behind its upstream branch"
+            ));
+        }
+
+        self
+    }
+}
+
+fn git_output(path: &Path, args: &[&str]) -> Option<String> {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!value.is_empty()).then_some(value)
+        })
+}
+
+fn detect_linked_worktree(path: &Path) -> Option<bool> {
+    let git_dir = git_output(path, &["rev-parse", "--path-format=absolute", "--git-dir"])?;
+    let common_dir = git_output(
+        path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    Some(git_dir != common_dir)
 }
 
 #[cfg(test)]
@@ -486,6 +565,65 @@ mod tests {
         let result = deploy_result().with_deployed_ref("v1.2.3".to_string());
 
         assert_eq!(result.deployed_ref.as_deref(), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn test_with_source_identity_preserves_local_path_for_non_git_component() {
+        let component = component();
+        let result = deploy_result().with_source_identity(&component, true);
+
+        assert_eq!(result.local_path.as_deref(), Some("/tmp/fixture"));
+        assert!(result.git_head.is_none());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_with_source_identity_warns_for_head_deploy_from_linked_worktree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let linked = temp.path().join("linked");
+        std::fs::create_dir(&repo).expect("repo dir");
+        std::fs::write(repo.join("README.md"), "fixture\n").expect("fixture file");
+
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["add", "README.md"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        run_git(&repo, &["worktree", "add", linked.to_str().unwrap()]);
+
+        let mut component = component();
+        component.local_path = linked.to_string_lossy().to_string();
+        let result = deploy_result().with_source_identity(&component, true);
+
+        assert_eq!(result.is_worktree, Some(true));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("non-primary git worktree")));
+    }
+
+    fn run_git(path: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
