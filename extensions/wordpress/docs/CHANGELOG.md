@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.34] - 2026-05-29
+
+### Changed
+- Route WP Codebox artifacts by workspace root
+
 ## [2.102.33] - 2026-05-29
 
 ### Changed
