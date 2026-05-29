@@ -69,6 +69,7 @@ pub fn aggregate_runs(runs: &[BenchResults]) -> Result<BenchResults> {
             .collect(),
         scenarios,
         metric_policies,
+        metric_policy_presets: BTreeMap::new(),
     })
 }
 

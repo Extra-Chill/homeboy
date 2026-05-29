@@ -69,6 +69,8 @@ use super::artifact::BenchArtifact;
 use super::artifact_validation;
 use super::diagnostic::BenchDiagnostic;
 use super::distribution::BenchRunDistribution;
+use super::gate::{BenchGate, BenchGateResult};
+use super::metric_policy_preset::{expand_metric_policy_presets, BenchMetricPolicyPreset};
 
 fn default_true() -> bool {
     true
@@ -93,6 +95,8 @@ pub struct BenchResults {
     pub scenarios: Vec<BenchScenario>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metric_policies: BTreeMap<String, BenchMetricPolicy>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metric_policy_presets: BTreeMap<String, BenchMetricPolicyPreset>,
 }
 
 /// Homeboy-owned reproducibility metadata for a bench invocation.
@@ -238,139 +242,6 @@ pub struct BenchScenario {
     /// default `--runs 1` path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runs_summary: Option<BTreeMap<String, BenchRunDistribution>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BenchGate {
-    pub metric: String,
-    pub op: BenchGateOp,
-    pub value: f64,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum BenchGateOp {
-    Eq,
-    Gte,
-    Lte,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BenchGateResult {
-    pub metric: String,
-    pub op: BenchGateOp,
-    pub expected: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub actual: Option<f64>,
-    pub passed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-impl BenchGate {
-    fn evaluate(&self, scenario_id: &str, metrics: &BenchMetrics) -> BenchGateResult {
-        let actual = metrics.get(&self.metric);
-        let passed = actual
-            .map(|value| match self.op {
-                BenchGateOp::Eq => value == self.value,
-                BenchGateOp::Gte => value >= self.value,
-                BenchGateOp::Lte => value <= self.value,
-            })
-            .unwrap_or(false);
-        let reason = if passed {
-            None
-        } else {
-            Some(match actual {
-                Some(value) => format!(
-                    "scenario `{}` gate failed: {} {} {} (actual {})",
-                    scenario_id,
-                    self.metric,
-                    self.op.as_str(),
-                    self.value,
-                    value
-                ),
-                None => format!(
-                    "scenario `{}` gate failed: metric `{}` is missing",
-                    scenario_id, self.metric
-                ),
-            })
-        };
-
-        BenchGateResult {
-            metric: self.metric.clone(),
-            op: self.op,
-            expected: self.value,
-            actual,
-            passed,
-            reason,
-        }
-    }
-}
-
-impl BenchGateOp {
-    fn as_str(self) -> &'static str {
-        match self {
-            BenchGateOp::Eq => "eq",
-            BenchGateOp::Gte => "gte",
-            BenchGateOp::Lte => "lte",
-        }
-    }
-}
-
-/// Evaluate semantic gates in place and return every failure reason.
-pub fn evaluate_gates(results: &mut BenchResults) -> Vec<String> {
-    let mut failures = Vec::new();
-    for scenario in &mut results.scenarios {
-        scenario.gate_results = scenario
-            .gates
-            .iter()
-            .map(|gate| gate.evaluate(&scenario.id, &scenario.metrics))
-            .collect();
-        scenario.passed = scenario.gate_results.iter().all(|result| result.passed);
-        results.budget_findings.extend(
-            scenario
-                .gate_results
-                .iter()
-                .filter(|result| !result.passed)
-                .map(|result| {
-                    BudgetFinding::failure(
-                        format!("bench.gate.{}", result.metric),
-                        format!("bench:{}", scenario.id),
-                        result.reason.clone().unwrap_or_else(|| {
-                            format!(
-                                "scenario `{}` gate failed: {} {} {}",
-                                scenario.id,
-                                result.metric,
-                                result.op.as_str(),
-                                result.expected
-                            )
-                        }),
-                        result.actual,
-                        result.expected,
-                        "value",
-                        Some(result.metric.clone()),
-                    )
-                }),
-        );
-        failures.extend(
-            scenario
-                .gate_results
-                .iter()
-                .filter_map(|result| result.reason.clone()),
-        );
-    }
-    failures.extend(
-        results
-            .budget_findings
-            .iter()
-            .filter(|finding| finding.is_gate_failure())
-            .map(|finding| finding.message.clone()),
-    );
-    failures.sort();
-    failures.dedup();
-    failures
 }
 
 /// Derive scenario span results from the shared observation timeline contract.
@@ -557,6 +428,7 @@ fn parse_bench_results_str_with_artifact_context(
         )
     })?;
     validate_unique_scenario_ids(&parsed)?;
+    expand_metric_policy_presets(&mut parsed)?;
     validate_variance_policies(&parsed)?;
     evaluate_spans(&mut parsed);
     artifact_validation::validate_artifact_paths(&parsed, rig_id)?;
@@ -639,6 +511,7 @@ fn validate_variance_policies(results: &BenchResults) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::gate::{evaluate_gates, BenchGateOp};
     use super::*;
 
     const VALID_RESULTS: &str = r#"{
@@ -1462,6 +1335,85 @@ mod tests {
         }"#;
 
         assert!(parse_bench_results_str(raw).is_err());
+    }
+
+    #[test]
+    fn latency_metric_policy_preset_expands_to_metric_policy() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "metric_policy_presets": {
+                "agent_loop_ms": {
+                    "preset": "latency_regression",
+                    "regression_threshold_percent": 7.5,
+                    "phase": "warm"
+                }
+            },
+            "scenarios": [
+                {
+                    "id": "agent-loop",
+                    "iterations": 10,
+                    "metrics": { "agent_loop_ms": 1200.0 }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+        let policy = parsed.metric_policies.get("agent_loop_ms").unwrap();
+
+        assert_eq!(policy.direction, BenchMetricDirection::LowerIsBetter);
+        assert_eq!(policy.regression_threshold_percent, Some(7.5));
+        assert_eq!(policy.phase, Some(BenchMetricPhase::Warm));
+    }
+
+    #[test]
+    fn memory_metric_policy_preset_uses_memory_threshold_default() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "metric_policy_presets": {
+                "peak_rss_bytes": { "preset": "memory_regression" }
+            },
+            "scenarios": [
+                {
+                    "id": "audit-self",
+                    "iterations": 10,
+                    "metrics": { "peak_rss_bytes": 41943040.0 }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+        let policy = parsed.metric_policies.get("peak_rss_bytes").unwrap();
+
+        assert_eq!(policy.direction, BenchMetricDirection::LowerIsBetter);
+        assert_eq!(policy.regression_threshold_percent, Some(10.0));
+    }
+
+    #[test]
+    fn absolute_budget_preset_expands_to_gate_and_budget_finding() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "metric_policy_presets": {
+                "peak_rss_bytes": { "preset": "absolute_budget", "max": 1000 }
+            },
+            "scenarios": [
+                {
+                    "id": "audit-self",
+                    "iterations": 10,
+                    "metrics": { "peak_rss_bytes": 2000.0 }
+                }
+            ]
+        }"#;
+
+        let mut parsed = parse_bench_results_str(raw).unwrap();
+        let failures = evaluate_gates(&mut parsed);
+
+        assert_eq!(parsed.scenarios[0].gates.len(), 1);
+        assert_eq!(parsed.scenarios[0].gates[0].op, BenchGateOp::Lte);
+        assert!(!failures.is_empty());
+        assert_eq!(parsed.budget_findings[0].code, "bench.gate.peak_rss_bytes");
     }
 
     #[test]

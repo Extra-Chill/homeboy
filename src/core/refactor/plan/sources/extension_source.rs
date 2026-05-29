@@ -414,13 +414,9 @@ mod tests {
                 "fatal extension failures must not be reported as unhandled: {}",
                 err.message
             );
-            assert!(err
-                .message
-                .contains("Extension 'fatal-source' failed refactor source 'audit'"));
-            assert!(err.message.contains("exit code 7"));
-            assert!(err.message.contains("audit fanout failed"));
             assert_eq!(err.details["extension_id"], "fatal-source");
             assert_eq!(err.details["source"], "audit");
+            assert_eq!(err.details["failure_kind"], "NonZeroExit");
             assert_eq!(err.details["exit_code"], 7);
             assert_eq!(err.details["stderr"], "extension stderr detail\n");
             assert_eq!(

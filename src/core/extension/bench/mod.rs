@@ -26,6 +26,8 @@ pub mod baseline;
 pub mod diagnostic;
 pub mod distribution;
 pub(crate) mod failure_diagnostic;
+pub(crate) mod gate;
+pub(crate) mod metric_policy_preset;
 pub mod metrics;
 pub mod parsing;
 pub mod report;
@@ -47,10 +49,12 @@ pub use baseline::{
 };
 pub use diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 pub use distribution::BenchRunDistribution;
+pub use gate::{evaluate_gates, BenchGate, BenchGateOp, BenchGateResult};
+pub use metric_policy_preset::{BenchMetricPolicyPreset, BenchMetricPolicyPresetKind};
 pub use metrics::MetricDelta;
 pub use parsing::{
-    evaluate_gates, parse_bench_results_file, parse_bench_results_str, BenchGate, BenchGateOp,
-    BenchGateResult, BenchMemory, BenchMetrics, BenchResults, BenchRunExecution, BenchScenario,
+    parse_bench_results_file, parse_bench_results_str, BenchMemory, BenchMetrics, BenchResults,
+    BenchRunExecution, BenchScenario,
 };
 pub use report::{
     aggregate_comparison, aggregate_comparison_with_axes, from_main_workflow,

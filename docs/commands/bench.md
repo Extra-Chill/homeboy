@@ -186,6 +186,37 @@ are report-only. `code` is the stable grouping key, `subject` identifies the
 endpoint/resource/phase being measured, and `actual` / `expected` / `unit` are
 rendered by `homeboy report failure-digest`.
 
+## Metric Policy Presets
+
+Bench runners can declare generic `metric_policy_presets` when they want common
+performance policy semantics without hand-writing full `metric_policies` or
+gates. Homeboy expands presets during result parsing into the existing policy,
+gate, and `budget_findings` paths.
+
+```json
+{
+  "metric_policy_presets": {
+    "agent_loop_ms": {
+      "preset": "latency_regression",
+      "regression_threshold_percent": 7.5,
+      "phase": "warm"
+    },
+    "peak_rss_bytes": {
+      "preset": "memory_regression"
+    },
+    "rest_response_bytes": {
+      "preset": "absolute_budget",
+      "max": 250000
+    }
+  }
+}
+```
+
+Supported presets are `latency_regression`, `memory_regression`,
+`cold_warm_delta`, `flake_noise_threshold`, and `absolute_budget`. Regression
+presets expand to `metric_policies`; absolute budgets expand to normal gates so
+failures render through the existing budget finding and failure digest surfaces.
+
 Rigs can also declare gates for scenario metrics when the workload output is
 owned elsewhere. The keys under `metric_gates` are exact scenario ids:
 

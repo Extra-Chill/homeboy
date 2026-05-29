@@ -52,6 +52,7 @@ pub(crate) fn results_with_scenarios(
         budget_findings: Vec::new(),
         scenarios,
         metric_policies: BTreeMap::new(),
+        metric_policy_presets: BTreeMap::new(),
     }
 }
 

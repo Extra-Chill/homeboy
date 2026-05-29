@@ -605,7 +605,7 @@ pub fn run_main_bench_workflow(
 
     let gate_failures = parsed
         .as_mut()
-        .map(parsing::evaluate_gates)
+        .map(super::gate::evaluate_gates)
         .unwrap_or_default();
     let gates_passed = gate_failures.is_empty();
     let diagnostics = diagnostic::collect_diagnostics(parsed.as_ref());
@@ -1045,6 +1045,7 @@ fn run_concurrent_instances(
             budget_findings,
             scenarios: merged_scenarios,
             metric_policies: metric_policies_seen,
+            metric_policy_presets: std::collections::BTreeMap::new(),
         })
     };
 

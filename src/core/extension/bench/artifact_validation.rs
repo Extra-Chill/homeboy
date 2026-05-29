@@ -185,6 +185,7 @@ mod tests {
                 runs_summary: None,
             }],
             metric_policies: BTreeMap::new(),
+            metric_policy_presets: BTreeMap::new(),
         };
 
         let err = validate_artifact_paths(&results, Some("studio-bfb"))
