@@ -72,8 +72,8 @@ pub fn render_broker_config(options: BrokerConfigOptions) -> Result<BrokerConfig
         service_user: options.service_user.clone(),
         service_group: options.service_group.clone(),
         binary_path: options.binary_path.clone(),
-        daemon_state_path: "~/.config/homeboy/daemon/state.json".to_string(),
-        daemon_jobs_path: "~/.config/homeboy/daemon/jobs.json".to_string(),
+        daemon_state_path: "/var/lib/homeboy/.config/homeboy/daemon/state.json".to_string(),
+        daemon_jobs_path: "/var/lib/homeboy/.config/homeboy/daemon/jobs.json".to_string(),
         safe_exposure: BrokerExposure {
             loopback_only: true,
             private_tunnel_safe: true,
@@ -102,7 +102,7 @@ pub fn render_broker_config(options: BrokerConfigOptions) -> Result<BrokerConfig
             "homeboy runner status <runner-id>".to_string(),
         ],
         restart_caveats: vec![
-            "The durable job store is reopened from ~/.config/homeboy/daemon/jobs.json after restart.".to_string(),
+            "The durable job store is reopened from /var/lib/homeboy/.config/homeboy/daemon/jobs.json after restart.".to_string(),
             "Queued remote-runner jobs survive daemon restart; running broker-owned jobs are marked failed as stale.".to_string(),
             "Active reverse-runner claims remain claim-scoped until their lease expires; runners should reclaim after the lease window.".to_string(),
             "Use systemctl restart homeboy-broker only when runners can tolerate lease expiry or retry.".to_string(),
@@ -110,7 +110,7 @@ pub fn render_broker_config(options: BrokerConfigOptions) -> Result<BrokerConfig
         retention_expectations: vec![
             "Job events are retained in the daemon durable job store with Homeboy's bounded per-job event retention.".to_string(),
             "The store is operational state, not an audit archive; mirror important run evidence into Homeboy observations/artifacts.".to_string(),
-            "Back up ~/.config/homeboy/daemon/jobs.json before broker maintenance if in-flight jobs matter.".to_string(),
+            "Back up /var/lib/homeboy/.config/homeboy/daemon/jobs.json before broker maintenance if in-flight jobs matter.".to_string(),
         ],
     })
 }
@@ -139,6 +139,8 @@ Wants=network-online.target
 Type=simple
 User={user}
 Group={group}
+Environment=HOME=/var/lib/homeboy
+Environment=XDG_DATA_HOME=/var/lib/homeboy/.local/share
 ExecStart={binary} daemon serve --addr {listen_addr}
 Restart=on-failure
 RestartSec=5s

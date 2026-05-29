@@ -40,7 +40,7 @@ The JSON output includes:
 - `systemd_unit` for a `homeboy-broker` service running `homeboy daemon serve`
 - `private_tunnel_examples` for SSH, Cloudflare, or tailnet-only access
 - optional `nginx_site` and `caddy_site` snippets when `--domain` is supplied
-- `daemon_state_path` and `daemon_jobs_path` operational state locations
+- `daemon_state_path` and `daemon_jobs_path` service-owned operational state locations
 - status and log commands for day-two operations
 - restart, retention, and claim caveats
 
@@ -62,7 +62,7 @@ Extra Chill-compatible private setup:
 
 Operational caveats:
 
-- The daemon job store lives at `~/.config/homeboy/daemon/jobs.json` for the service user.
+- The systemd service sets `HOME=/var/lib/homeboy`, so daemon state lives under `/var/lib/homeboy/.config/homeboy/daemon/` instead of the service user's login home.
 - Queued reverse-runner jobs survive daemon restart.
 - Broker-owned running jobs are marked failed as stale when the durable store is reopened after restart.
 - Active reverse-runner claims are lease-scoped; runners should retry claim after the lease expires.

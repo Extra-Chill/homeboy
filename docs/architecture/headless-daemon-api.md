@@ -64,8 +64,8 @@ does not need inbound ports:
 VPS systemd service
   homeboy daemon serve --addr 127.0.0.1:7421
           |
-          +-- ~/.config/homeboy/daemon/state.json
-          +-- ~/.config/homeboy/daemon/jobs.json
+          +-- /var/lib/homeboy/.config/homeboy/daemon/state.json
+          +-- /var/lib/homeboy/.config/homeboy/daemon/jobs.json
           |
 private tunnel / private network only
           |
@@ -123,11 +123,11 @@ safe for runners to mirror as evidence. The final result event carries the same
 structured result shape as the corresponding CLI command, including artifacts,
 findings, summaries, and CI context when a CI profile/job selector was used.
 
-The daemon durable job store is `~/.config/homeboy/daemon/jobs.json` for the
-account running the daemon. The store keeps bounded per-job events and supports
-restart recovery for queued broker jobs. It is operational state, not a durable
-audit archive; important evidence should still be persisted as Homeboy
-observations or artifacts.
+The packaged broker service sets `HOME=/var/lib/homeboy`, so the daemon durable
+job store is `/var/lib/homeboy/.config/homeboy/daemon/jobs.json`. The store keeps
+bounded per-job events and supports restart recovery for queued broker jobs. It
+is operational state, not a durable audit archive; important evidence should
+still be persisted as Homeboy observations or artifacts.
 
 Restart behavior:
 
