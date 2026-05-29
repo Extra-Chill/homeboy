@@ -137,10 +137,11 @@ The broker exposes `POST /runner/jobs`, `POST /runner/jobs/claim`,
 controllers can queue work and reverse runners can claim, stream progress, and
 return results without inbound access to the lab machine.
 
-For the Extra Chill VPS to Homeboy Lab operator path, see
-[Extra Chill VPS to Homeboy Lab reverse runner](../operators/extra-chill-lab-reverse-runner.md).
-That guide is intentionally explicit about what is available now and what remains
-gated by #2990, #2991, #2992, and #2947 before production broker exposure.
+For the controller VPS to Homeboy Lab operator path, see
+[Controller VPS to Homeboy Lab reverse runner](../operators/controller-vps-lab-reverse-runner.md).
+That guide is VPS-agnostic and intentionally explicit about what is available now
+and what remains gated by #2990, #2991, #2992, and #2947 before production broker
+exposure.
 
 ### `status`
 
@@ -191,9 +192,9 @@ Arbitrary runner updates must use `--json` or `--base64`; positional `key=value`
 ### `trust`
 
 ```sh
-homeboy runner trust <runner-id> --project extrachill --command test --command bench --allow-raw-exec false
+homeboy runner trust <runner-id> --project <project-id> --command test --command bench --allow-raw-exec false
 homeboy runner trust <runner-id> --workspace-root /home/chubes/Developer --artifact-policy metadata
-homeboy runner trust <runner-id> --peer extra-chill --fingerprint SHA256:...
+homeboy runner trust <runner-id> --peer <controller-server-id> --fingerprint SHA256:...
 ```
 
 Persists controller-side trust policy for a runner. Policy is stored in the runner config as `policy`, not in transient CLI state. Repeated values are appended without duplicates.
@@ -211,7 +212,7 @@ Policy fields:
 ### `pair`
 
 ```sh
-homeboy runner pair <runner-id> --peer extra-chill --accept-project extrachill --workspace-root /home/chubes/Developer
+homeboy runner pair <runner-id> --peer <controller-server-id> --accept-project <project-id> --workspace-root /home/chubes/Developer
 homeboy runner pair <runner-id> --fingerprint SHA256:... --allow-raw-exec false
 ```
 
@@ -227,7 +228,7 @@ homeboy runner remove <id>
 
 ```sh
 homeboy runner exec <runner-id> -- <command...>
-homeboy runner exec <runner-id> --project extrachill --cwd /runner/workspace/project -- <command...>
+homeboy runner exec <runner-id> --project <project-id> --cwd /runner/workspace/project -- <command...>
 homeboy runner exec <runner-id> --ssh --cwd /runner/workspace/project -- <command...>
 ```
 

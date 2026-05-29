@@ -1,9 +1,10 @@
-# Extra Chill VPS to Homeboy Lab reverse runner
+# Controller VPS to Homeboy Lab reverse runner
 
-This guide is the operator runbook for using the Extra Chill VPS as a Homeboy
+This guide is the operator runbook for using any Homeboy-managed VPS as a
 controller/broker while Homeboy Lab claims work by making an outbound connection
-from the lab. It tracks the end-to-end shape from issue #2993 and the parent
-epic #2950.
+from the lab. Extra Chill is the first concrete deployment profile for this path,
+but the broker, worker, pairing, and workspace sync model is VPS-agnostic. It
+tracks the end-to-end shape from issue #2993 and the parent epic #2950.
 
 ## Status
 
@@ -25,7 +26,7 @@ path for production hot-command offload.
 ## Topology
 
 ```text
-Extra Chill VPS
+Controller VPS
   homeboy daemon / reverse broker
   runner trust policy
   job submission
@@ -41,15 +42,28 @@ Homeboy Lab
 The lab initiates all broker traffic. The VPS does not need SSH access to the lab
 for the reverse path, and the lab should not be opened to the public internet.
 
+## Example profile: Extra Chill
+
+The examples below use placeholders so the same runbook applies to any VPS. For
+the current Extra Chill deployment, use these values:
+
+| Placeholder | Extra Chill value |
+|---|---|
+| `<project-id>` | `extrachill` |
+| `<controller-server-id>` | `extra-chill` |
+| `<controller-vps-label>` | `extra-chill-vps` |
+| `<runner-id>` | `homeboy-lab` |
+| `<runner-workspace-root>` | `/home/chubes/Developer` |
+
 ## 1. VPS controller and broker setup
 
-Run this on the Extra Chill VPS.
+Run this on the controller VPS.
 
-1. Confirm Homeboy can see the Extra Chill project and controller server record:
+1. Confirm Homeboy can see the project and controller server record:
 
    ```sh
-   homeboy project show extrachill --output /tmp/homeboy-extra-chill-project.json
-   homeboy server show extra-chill --output /tmp/homeboy-extra-chill-server.json
+   homeboy project show <project-id> --output /tmp/homeboy-controller-project.json
+   homeboy server show <controller-server-id> --output /tmp/homeboy-controller-server.json
    ```
 
 2. Enable a broker-capable daemon in a private or protected network context.
@@ -65,7 +79,7 @@ Run this on the Extra Chill VPS.
    smoke tests this can be a tunnel label rather than a public URL:
 
    ```sh
-   export HOMEBOY_LAB_BROKER_LABEL=extra-chill-vps
+   export HOMEBOY_LAB_BROKER_LABEL=<controller-vps-label>
    export HOMEBOY_LAB_BROKER_URL=https://broker.example.invalid
    ```
 
@@ -75,8 +89,8 @@ Run this on the Extra Chill VPS.
 
    ```sh
    homeboy runner trust homeboy-lab \
-     --peer extra-chill \
-     --project extrachill \
+     --peer <controller-server-id> \
+     --project <project-id> \
      --command runner.exec \
      --command audit \
      --command lint \
@@ -104,14 +118,14 @@ Run this on Homeboy Lab.
    homeboy runner doctor homeboy-lab --path /home/chubes/Developer/homeboy --extension rust
    ```
 
-2. Pair the lab runner with the Extra Chill controller policy. This is the
+2. Pair the lab runner with the controller policy. This is the
    runner-side counterpart to `runner trust`; #2990 supplies the secured token
    and enforcement model:
 
    ```sh
    homeboy runner pair homeboy-lab \
-     --peer extra-chill \
-     --accept-project extrachill \
+     --peer <controller-server-id> \
+     --accept-project <project-id> \
      --workspace-root /home/chubes/Developer \
      --allow-raw-exec false
    ```
@@ -139,7 +153,7 @@ Expected systemd outline after #2991:
 
 ```ini
 [Unit]
-Description=Homeboy reverse runner worker for Extra Chill
+Description=Homeboy reverse runner worker
 After=network-online.target
 Wants=network-online.target
 
@@ -191,15 +205,15 @@ private smoke environment that provides equivalent branch builds.
 2. Start or verify the lab worker service:
 
    ```sh
-   systemctl --user status homeboy-reverse-runner-extra-chill.service
-   journalctl --user -u homeboy-reverse-runner-extra-chill.service -n 50 --no-pager
+   systemctl --user status homeboy-reverse-runner.service
+   journalctl --user -u homeboy-reverse-runner.service -n 50 --no-pager
    ```
 
 3. Submit a minimal command from the VPS:
 
    ```sh
    homeboy runner exec homeboy-lab \
-     --project extrachill \
+     --project <project-id> \
      --cwd /home/chubes/Developer \
      --output /tmp/homeboy-lab-smoke.json \
      -- /bin/sh -lc 'printf "homeboy-lab-smoke\\n"'
@@ -213,7 +227,7 @@ private smoke environment that provides equivalent branch builds.
      "runner_id": "homeboy-lab",
      "mode": "reverse_broker",
      "transport": "reverse_broker",
-     "broker_label": "extra-chill-vps",
+     "broker_label": "<controller-vps-label>",
      "job_id": "...",
      "exit_code": 0,
      "stdout_sample": "homeboy-lab-smoke"
@@ -241,7 +255,7 @@ Use the narrowest cleanup that matches the failure.
 1. Stop the lab worker:
 
    ```sh
-   systemctl --user stop homeboy-reverse-runner-extra-chill.service
+   systemctl --user stop homeboy-reverse-runner.service
    ```
 
 2. Disconnect stale local runner session metadata when direct or reverse session
@@ -260,7 +274,7 @@ Use the narrowest cleanup that matches the failure.
 4. Start the lab worker again:
 
    ```sh
-   systemctl --user start homeboy-reverse-runner-extra-chill.service
+   systemctl --user start homeboy-reverse-runner.service
    ```
 
 5. Re-run the minimal smoke and compare `job_id`, `runner_id`, `mode`,
