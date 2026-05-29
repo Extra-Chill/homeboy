@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.45] - 2026-05-29
+
+### Fixed
+- dispatch runtime WP-CLI compatibility commands
+
 ## [2.102.44] - 2026-05-29
 
 ### Fixed
