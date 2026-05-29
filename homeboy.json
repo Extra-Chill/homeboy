@@ -157,10 +157,10 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-29T05:40:33Z",
-      "item_count": 47,
+      "created_at": "2026-05-29T14:08:24Z",
+      "item_count": 48,
       "known_fingerprints": [
-        "artifact_portability::observation:91677763-ed43-43ed-9e0b-1c0fbe9c9452::NonPortableArtifactPath",
+        "artifact_portability::observation:5c28d4b5-3fc5-4c18-bb0e-bedaf5588797::NonPortableArtifactPath",
         "dead_code::src/core/engine/temp.rs::UnreferencedExport",
         "intra-method-duplication::src/core/extension/refactor_protocol.rs::IntraMethodDuplicate",
         "output_capture::src/commands/git.rs::UnboundedOutputCapture",
@@ -206,19 +206,22 @@
         "structural::src/core/project/mod.rs::HighItemCount",
         "structural::src/core/refactor/rename/mod.rs::GodFile",
         "structural::src/core/release/executor.rs::GodFile",
-        "structural::src/core/rig/pipeline.rs::HighItemCount"
+        "structural::src/core/rig/pipeline.rs::HighItemCount",
+        "structural::src/core/runner/connection.rs::HighItemCount"
       ],
       "metadata": {
-        "alignment_score": 0.9189189076423645,
+        "alignment_score": 0.8933333158493042,
         "known_outliers": [
           "src/core/observation/records/run_status.rs",
           "src/core/observation/records/triage_items.rs",
           "src/core/observation/records/run_builder.rs",
+          "src/commands/report/failure_digest.rs",
+          "src/commands/report/bench_coverage.rs",
           "src/core/engine/undo/rollback.rs",
           "src/core/engine/undo/entry.rs",
           "src/core/engine/undo/snapshot.rs"
         ],
-        "outliers_count": 6
+        "outliers_count": 8
       }
     }
   },
