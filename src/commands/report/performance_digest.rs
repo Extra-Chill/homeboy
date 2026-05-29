@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::commands::escape_markdown_table_cell;
+use homeboy::core::engine::run_dir::files;
 
 #[derive(Args, Debug, Clone)]
 pub struct PerformanceDigestArgs {
@@ -129,13 +130,13 @@ pub fn performance_digest_from_args(
     let output_dir = PathBuf::from(&args.output_dir);
     let mut gaps = Vec::new();
 
-    let resource_summary = read_json_file(&output_dir.join("resource-summary.json"))
+    let resource_summary = read_json_artifact(&output_dir, &[files::RESOURCE_SUMMARY])
         .and_then(|value| resource_summary_digest(&value));
     if resource_summary.is_none() {
         gaps.push("resource-summary.json not found or not parseable".to_string());
     }
 
-    let bench_json = read_json_file(&output_dir.join("bench.json"));
+    let bench_json = read_json_artifact(&output_dir, &["bench.json", files::BENCH_RESULTS]);
     if bench_json.is_none() {
         gaps.push("bench.json not found or not parseable".to_string());
     }
@@ -191,6 +192,38 @@ mod helpers {
     pub(super) fn read_json_file(path: &Path) -> Option<Value> {
         let raw = std::fs::read_to_string(path).ok()?;
         serde_json::from_str(&raw).ok()
+    }
+
+    pub(super) fn read_json_artifact(output_dir: &Path, filenames: &[&str]) -> Option<Value> {
+        for filename in filenames {
+            if let Some(value) = read_json_file(&output_dir.join(filename)) {
+                return Some(value);
+            }
+        }
+
+        let mut candidates = std::fs::read_dir(output_dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        candidates.sort();
+
+        for filename in filenames {
+            let suffix = format!("-{filename}");
+            for path in &candidates {
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if name.ends_with(&suffix) {
+                    if let Some(value) = read_json_file(path) {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     pub(super) fn read_json_spec_value(spec: &str, context: &str) -> homeboy::core::Result<Value> {
@@ -304,7 +337,11 @@ mod helpers {
     ) -> Vec<BaselineHealthDiagnostic> {
         let mut diagnostics = Vec::new();
         let results = object_value(data, "results");
-        for scenario in array_value(&results, "scenarios") {
+        let mut scenarios = array_value(&results, "scenarios");
+        if scenarios.is_empty() {
+            scenarios = array_value(data, "scenarios");
+        }
+        for scenario in scenarios {
             let Some(scenario_obj) = scenario.as_object() else {
                 continue;
             };

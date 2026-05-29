@@ -161,6 +161,74 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
 }
 
 #[test]
+fn reads_persisted_uuid_prefixed_artifacts() {
+    let dir = tmp_dir("persisted");
+    fs::create_dir_all(&dir).expect("temp dir should exist");
+    write_fixture_file(
+        &dir,
+        "123-resource-summary.json",
+        r#"{
+            "label": "persisted bench",
+            "duration_ms": 54321,
+            "platform": "macos",
+            "extension_children": [],
+            "warnings": []
+        }"#,
+    );
+    write_fixture_file(
+        &dir,
+        "456-bench-results.json",
+        r#"{
+            "component_id": "homeboy",
+            "iterations": 3,
+            "metadata": {
+                "warmup_iterations": 0
+            },
+            "budget_findings": [{
+                "code": "metric.max_value",
+                "severity": "error",
+                "message": "Metric exceeded budget",
+                "actual": 42,
+                "expected": 20,
+                "unit": "count",
+                "subject": "persisted-subject",
+                "passed": false
+            }],
+            "scenarios": [{
+                "id": "audit-self",
+                "runs_summary": {
+                    "p95_ms": { "n": 3, "mean": 100, "stdev": 30, "cv_pct": 30, "p50": 100, "p95": 140 }
+                }
+            }]
+        }"#,
+    );
+
+    let report = performance_digest_from_args(&args(&dir)).expect("digest should render");
+
+    assert!(report.gaps.is_empty());
+    assert_eq!(
+        report
+            .resource_summary
+            .as_ref()
+            .and_then(|summary| summary.label.as_deref()),
+        Some("persisted bench")
+    );
+    assert_eq!(report.budget_findings.len(), 1);
+    assert!(report
+        .baseline_health
+        .iter()
+        .any(|diagnostic| diagnostic.code == "baseline.high_variance"));
+    assert!(report
+        .baseline_health
+        .iter()
+        .any(|diagnostic| diagnostic.code == "baseline.missing_warmup"));
+    assert!(report.markdown.contains("- Duration: **54321 ms**"));
+    assert!(report.markdown.contains("persisted-subject"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn missing_optional_artifacts_degrade_gracefully() {
     let dir = tmp_dir("missing");
     fs::create_dir_all(&dir).expect("temp dir should exist");
