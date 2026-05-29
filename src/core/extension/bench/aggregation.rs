@@ -59,6 +59,10 @@ pub fn aggregate_runs(runs: &[BenchResults]) -> Result<BenchResults> {
         component_id: first.component_id.clone(),
         iterations: first.iterations,
         run_metadata: first.run_metadata.clone(),
+        metadata: first.metadata.clone(),
+        metric_groups: first.metric_groups.clone(),
+        timeline: first.timeline.clone(),
+        span_definitions: first.span_definitions.clone(),
         diagnostics: runs
             .iter()
             .flat_map(|result| result.diagnostics.clone())

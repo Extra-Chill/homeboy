@@ -100,6 +100,10 @@ mod tests {
             component_id: "demo".to_string(),
             iterations: 1,
             run_metadata: None,
+            metadata: BTreeMap::new(),
+            metric_groups: BTreeMap::new(),
+            timeline: Vec::new(),
+            span_definitions: BTreeMap::new(),
             diagnostics: vec![run_diagnostic],
             budget_findings: Vec::new(),
             scenarios: vec![BenchScenario {

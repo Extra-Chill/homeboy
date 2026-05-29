@@ -22,6 +22,7 @@
 //! emits {"timings_ns": [...], "peak_rss_bytes": N} on the last stdout line.
 
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -38,17 +39,12 @@ fn main() {
     // sibling binary lives at target/release/homeboy.
     let manifest_dir =
         env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set (run via cargo)");
-    let homeboy_bin: PathBuf = [&manifest_dir, "target", "release", "homeboy"]
+    let release_homeboy_bin: PathBuf = [&manifest_dir, "target", "release", "homeboy"]
         .iter()
         .collect();
 
-    if !homeboy_bin.exists() {
-        eprintln!(
-            "FATAL: homeboy binary not found at {} — run `cargo build --release` first",
-            homeboy_bin.display()
-        );
-        std::process::exit(2);
-    }
+    ensure_release_homeboy(&manifest_dir, &release_homeboy_bin);
+    let homeboy_bin = stable_homeboy_copy(&release_homeboy_bin);
 
     // Audit fixture: homeboy itself. The bench measures `homeboy audit homeboy`,
     // which scans the same source tree we're running from. Substantive enough
@@ -123,4 +119,57 @@ fn main() {
         .collect::<Vec<_>>()
         .join(",");
     println!("{{\"timings_ns\":[{}]}}", csv);
+}
+
+fn ensure_release_homeboy(manifest_dir: &str, homeboy_bin: &PathBuf) {
+    if homeboy_bin.exists() {
+        return;
+    }
+
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--manifest-path",
+            &format!("{}/Cargo.toml", manifest_dir),
+            "--bin",
+            "homeboy",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status();
+
+    match status {
+        Ok(status) if status.success() && homeboy_bin.exists() => {}
+        Ok(status) => {
+            eprintln!(
+                "FATAL: failed to build release Homeboy binary at {} (exit {})",
+                homeboy_bin.display(),
+                status.code().unwrap_or(-1)
+            );
+            std::process::exit(2);
+        }
+        Err(err) => {
+            eprintln!("FATAL: failed to spawn cargo build for Homeboy: {}", err);
+            std::process::exit(2);
+        }
+    }
+}
+
+fn stable_homeboy_copy(homeboy_bin: &PathBuf) -> PathBuf {
+    let stable_path = env::temp_dir().join(format!(
+        "homeboy-bench-audit-self-{}{}",
+        std::process::id(),
+        env::consts::EXE_SUFFIX
+    ));
+    if let Err(err) = fs::copy(homeboy_bin, &stable_path) {
+        eprintln!(
+            "FATAL: failed to copy Homeboy binary from {} to {}: {}",
+            homeboy_bin.display(),
+            stable_path.display(),
+            err
+        );
+        std::process::exit(2);
+    }
+    stable_path
 }
