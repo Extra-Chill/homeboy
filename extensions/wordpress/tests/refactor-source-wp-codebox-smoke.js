@@ -87,15 +87,26 @@ if (task.group_key === 'PHPCS Formatting/Auto Fix!') {
       }
     ]
   }, null, 2) + '\\n');
-  fs.writeFileSync(path.join(filesDirectory, 'patch.diff'), [
-    'diff --git a/workspace/agents-api/src/example.php b/workspace/agents-api/src/example.php',
-    '--- a/workspace/agents-api/src/example.php',
-    '+++ b/workspace/agents-api/src/example.php',
-    '@@ -1 +1 @@',
-    '-before',
-    '+after',
-    ''
-  ].join('\\n'));
+  if (process.env.FIXTURE_INVALID_PATCH) {
+    fs.writeFileSync(path.join(filesDirectory, 'patch.diff'), [
+      'diff --git /dev/null b/workspace/agents-api/src/example.php',
+      '--- /dev/null',
+      '+++ b/workspace/agents-api/src/example.php',
+      '@@ -0,0 +1 @@',
+      '+after',
+      ''
+    ].join('\\n'));
+  } else {
+    fs.writeFileSync(path.join(filesDirectory, 'patch.diff'), [
+      'diff --git a/workspace/agents-api/src/example.php b/workspace/agents-api/src/example.php',
+      '--- a/workspace/agents-api/src/example.php',
+      '+++ b/workspace/agents-api/src/example.php',
+      '@@ -1 +1 @@',
+      '-before',
+      '+after',
+      ''
+    ].join('\\n'));
+  }
 }
 process.stdout.write(JSON.stringify({
   session: { id: sessionId },
@@ -159,6 +170,29 @@ process.stdout.write(JSON.stringify({
   assert.notEqual(artifactsIndex, -1);
   assert.equal(pathInside(writeCommand.root, run.records[0].command.args[artifactsIndex + 1]), false);
   assert.equal(run.records[0].artifact.id.startsWith('artifact-homeboy-audit-'), true);
+
+  const invalidPatchResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...writeCommand,
+      settings: {
+        ...writeCommand.settings,
+        wp_codebox_output_dir: path.join(root, 'fanout-invalid-patch'),
+      },
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_INVALID_PATCH: '1',
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.notEqual(invalidPatchResult.status, 0);
+  assert.match(invalidPatchResult.stderr, /WP Codebox artifact apply failed for group PHPCS Formatting\/Auto Fix! artifact artifact-homeboy-audit-/);
+  assert.match(invalidPatchResult.stderr, /artifact directory: .*fixture-wp-codebox-artifact-/);
+  assert.match(invalidPatchResult.stderr, /patch path: .*files\/patch\.diff/);
+  assert.match(invalidPatchResult.stderr, /fanout run evidence: .*fanout-invalid-patch\/fanout-run\.json/);
+  assert.match(invalidPatchResult.stderr, /git diff header lacks filename information|patch with only garbage/);
+  assert.ok(fs.existsSync(path.join(root, 'fanout-invalid-patch', 'fanout-run.json')));
 
   const missingSecretResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
     encoding: 'utf8',
