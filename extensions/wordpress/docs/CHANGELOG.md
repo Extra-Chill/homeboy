@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.32] - 2026-05-29
+
+### Changed
+- Report WP Codebox artifact apply failures
+
 ## [2.102.31] - 2026-05-29
 
 ### Fixed
