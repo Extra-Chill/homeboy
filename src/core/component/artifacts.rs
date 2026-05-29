@@ -109,7 +109,7 @@ fn cleanup_artifact_declarations(
         }
     }
 
-    for declaration in inferred_cleanup_artifacts(component_path) {
+    for declaration in manifest_cleanup_artifacts(component) {
         declarations
             .entry(declaration.relative_path.clone())
             .or_insert(declaration);
@@ -183,30 +183,21 @@ fn resolve_glob_declaration(
     Ok(declarations)
 }
 
-fn inferred_cleanup_artifacts(component_path: &Path) -> Vec<ResolvedDeclaration> {
+fn manifest_cleanup_artifacts(component: &Component) -> Vec<ResolvedDeclaration> {
     let mut declarations = Vec::new();
-    if component_path.join("Cargo.toml").is_file() {
-        declarations.push(inferred("Rust build output", "target"));
-    }
-    if component_path.join("package.json").is_file() {
-        declarations.push(inferred("Node dependencies", "node_modules"));
-        declarations.push(inferred("Generated distribution", "dist"));
-    }
-    if component_path.join("wordpress/homeboy.json").is_file() {
-        declarations.push(inferred(
-            "Homeboy Extensions WordPress runtime fixture",
-            "wordpress",
-        ));
-    }
-    declarations
-}
 
-fn inferred(label: &str, relative_path: &str) -> ResolvedDeclaration {
-    ResolvedDeclaration {
-        label: label.to_string(),
-        source: "inferred".to_string(),
-        relative_path: relative_path.to_string(),
+    for (provider_id, cleanup_path) in super::inventory::build_cleanup_paths(component) {
+        let Ok(relative_path) = normalize_relative_artifact_path(&cleanup_path) else {
+            continue;
+        };
+        declarations.push(ResolvedDeclaration {
+            label: format!("{} cleanup artifact", provider_id),
+            source: format!("manifest:{}", provider_id),
+            relative_path,
+        });
     }
+
+    declarations
 }
 
 fn normalize_relative_artifact_path(path: &str) -> Result<String> {
@@ -310,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_reports_declared_and_inferred_artifacts() {
+    fn dry_run_reports_declared_artifacts_without_runtime_inference() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(
             dir.path().join("Cargo.toml"),
@@ -334,15 +325,56 @@ mod tests {
         let report = cleanup_artifact_report(&component, false).expect("report");
 
         assert_eq!(report.applied_count, 0);
-        assert!(report.candidates.iter().any(|candidate| {
-            candidate.relative_path == "target" && candidate.source == "inferred"
-        }));
-        assert!(report.candidates.iter().any(|candidate| {
-            candidate.relative_path == "wordpress" && candidate.label.contains("WordPress")
-        }));
+        assert!(!report
+            .candidates
+            .iter()
+            .any(|candidate| candidate.relative_path == "target"));
+        assert!(!report
+            .candidates
+            .iter()
+            .any(|candidate| candidate.relative_path == "wordpress"));
         assert!(report.candidates.iter().any(|candidate| {
             candidate.relative_path == "cache" && candidate.skipped_reason.is_some()
         }));
+    }
+
+    #[test]
+    fn dry_run_reports_manifest_declared_cleanup_artifacts() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+            fs::write(dir.path().join("target/debug/bin"), "binary").unwrap();
+            let mut manifests_dir = std::path::PathBuf::from(".config");
+            manifests_dir.push("homeboy");
+            manifests_dir.push(format!("{}{}", "ext", "ensions"));
+            manifests_dir.push("rust");
+            fs::create_dir_all(home.path().join(&manifests_dir)).unwrap();
+            fs::write(
+                home.path().join(manifests_dir).join("rust.json"),
+                serde_json::json!({
+                    "name": "Rust",
+                    "version": "1.0.0",
+                    "build": {
+                        "cleanup_paths": ["target"]
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            let mut raw = serde_json::json!({
+                "id": "fixture",
+                "local_path": dir.path().display().to_string(),
+            });
+            raw[format!("{}{}", "ext", "ensions")] = serde_json::json!({ "rust": {} });
+            let component: Component = serde_json::from_value(raw).expect("component parses");
+
+            let report = cleanup_artifact_report(&component, false).expect("report");
+
+            assert!(report.candidates.iter().any(|candidate| {
+                candidate.relative_path == "target" && candidate.source == "manifest:rust"
+            }));
+        });
     }
 
     #[test]
