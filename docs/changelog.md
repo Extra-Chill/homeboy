@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.204.2] - 2026-05-29
+
+### Changed
+- split runner daemon refresh helpers
+- Refresh stale runner daemons
+
+### Fixed
+- honor release script preflights
+
 ## [0.204.1] - 2026-05-29
 
 ### Fixed
