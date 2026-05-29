@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.47] - 2026-05-29
+
+### Fixed
+- prefer runtime terminal bridge env
+
 ## [2.102.46] - 2026-05-29
 
 ### Fixed
