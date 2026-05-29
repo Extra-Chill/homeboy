@@ -229,9 +229,7 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
 
 impl AuditExecutionPlan {
     pub(crate) fn full() -> Self {
-        Self::from_enabled_families("full", |family| {
-            family.id != "output_capture" && family_enabled(&[], &[], family.findings)
-        })
+        Self::from_enabled_families("full", |family| family_enabled(&[], &[], family.findings))
     }
 
     pub(crate) fn from_filters(only: &[AuditFinding], exclude: &[AuditFinding]) -> Self {

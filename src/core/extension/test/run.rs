@@ -77,9 +77,15 @@ pub struct RawTestOutput {
     /// Total stdout bytes observed before bounded capture retained its tail.
     #[serde(skip_serializing_if = "crate::is_zero", default)]
     pub stdout_seen_bytes: usize,
+    /// Stdout bytes retained in this structured raw-output excerpt.
+    #[serde(skip_serializing_if = "crate::is_zero", default)]
+    pub stdout_retained_bytes: usize,
     /// Total stderr bytes observed before bounded capture retained its tail.
     #[serde(skip_serializing_if = "crate::is_zero", default)]
     pub stderr_seen_bytes: usize,
+    /// Stderr bytes retained in this structured raw-output excerpt.
+    #[serde(skip_serializing_if = "crate::is_zero", default)]
+    pub stderr_retained_bytes: usize,
     /// Maximum stdout bytes retained by the self-check capture buffer.
     #[serde(skip_serializing_if = "crate::is_zero", default)]
     pub stdout_limit_bytes: usize,
@@ -455,7 +461,9 @@ pub fn run_main_test_workflow(
                 stdout_truncated,
                 stderr_truncated,
                 stdout_seen_bytes: output.stdout.len(),
+                stdout_retained_bytes: output.stdout.len(),
                 stderr_seen_bytes: output.stderr.len(),
+                stderr_retained_bytes: output.stderr.len(),
                 stdout_limit_bytes: 0,
                 stderr_limit_bytes: 0,
             })
@@ -527,7 +535,9 @@ pub fn run_self_check_test_workflow(
             stdout_truncated: output.capture.stdout.truncated || stdout_truncated,
             stderr_truncated: output.capture.stderr.truncated || stderr_truncated,
             stdout_seen_bytes: output.capture.stdout.seen_bytes,
+            stdout_retained_bytes: output.stdout.len(),
             stderr_seen_bytes: output.capture.stderr.seen_bytes,
+            stderr_retained_bytes: output.stderr.len(),
             stdout_limit_bytes: output.capture.stdout.limit_bytes,
             stderr_limit_bytes: output.capture.stderr.limit_bytes,
         }
