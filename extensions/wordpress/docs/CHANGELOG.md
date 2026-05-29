@@ -2,6 +2,16 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.103.0] - 2026-05-29
+
+### Added
+- support Codebox agent sandbox bench workloads
+
+### Fixed
+- resolve runner workspace tools
+- pass WP Codebox task timeout into recipes
+- avoid metadata-preserving WordPress deploy installs
+
 ## [2.102.48] - 2026-05-29
 
 ### Fixed
