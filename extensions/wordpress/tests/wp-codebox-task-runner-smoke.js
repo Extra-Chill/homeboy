@@ -126,6 +126,19 @@ try {
     'homeboy',
     'homeboy-extensions',
   ]);
+  assert.deepEqual(recipe.inputs.workspaces[0].seed.excludePaths, [
+    '.git',
+    '.homeboy',
+    '.homeboy-bin',
+    '.homeboy-build',
+    '.datamachine',
+    '.DS_Store',
+    '._*',
+    '.env*',
+    'node_modules',
+    'target',
+    'vendor',
+  ]);
   assert.deepEqual(recipe.inputs.workspaces.map((workspace) => workspace.mode), [
     'readwrite',
     'readwrite',
