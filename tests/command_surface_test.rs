@@ -31,6 +31,7 @@ fn includes_first_level_subcommands() {
     assert!(surface.contains_path(&["self", "status"]));
     assert!(surface.contains_path(&["stack", "inspect"]));
     assert!(surface.contains_path(&["report", "failure-digest"]));
+    assert!(surface.contains_path(&["report", "performance-digest"]));
     assert!(surface.contains_path(&["file", "download"]));
     assert!(surface.contains_path(&["file", "mkdir"]));
     assert!(surface.contains_path(&["file", "upload"]));
