@@ -13,6 +13,15 @@ pub struct RequirementsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvProviderConfig {
+    /// Script path relative to the extension directory.
+    ///
+    /// The script runs with the same generic Homeboy execution context as the
+    /// target command and prints a JSON object of environment variables to add.
+    pub script: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli: Option<DatabaseCliConfig>,

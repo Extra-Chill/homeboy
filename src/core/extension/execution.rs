@@ -16,6 +16,7 @@ use std::path::Path;
 mod action;
 mod readiness;
 
+use super::env_provider;
 use super::exec_context;
 use super::load_extension;
 use super::manifest::{ExtensionManifest, RuntimeConfig};
@@ -356,8 +357,8 @@ pub(crate) fn build_capability_env(
     component_path: &Path,
     settings_json: &str,
     extra_env: &[(String, String)],
-) -> Vec<(String, String)> {
-    let component_path = component_path.to_string_lossy();
+) -> Result<Vec<(String, String)>> {
+    let component_path_value = component_path.to_string_lossy();
     let mut env = build_exec_env(
         extension_name,
         None,
@@ -366,10 +367,19 @@ pub(crate) fn build_capability_env(
         Some(&extension_path.to_string_lossy()),
         None,
         None,
-        Some(&component_path),
+        Some(&component_path_value),
     );
+    let mut provider_env = env.clone();
+    provider_env.extend(extra_env.iter().cloned());
+    if let Ok(extension) = env_provider::load_manifest_from_dir(extension_path) {
+        env.extend(env_provider::env_vars(
+            &extension,
+            component_path,
+            &provider_env,
+        )?);
+    }
     env.extend(extra_env.iter().cloned());
-    env
+    Ok(env)
 }
 
 pub(crate) fn execute_capability_script(
@@ -744,15 +754,6 @@ fn build_exec_env(
                 }
             }
         };
-        if let Ok(component) =
-            component::resolve_effective(Some(cid), component_path_override, None)
-        {
-            if let Ok(cargo_env) =
-                crate::core::cargo_target::env_vars(&component, Path::new(&component_path), &env)
-            {
-                env.extend(cargo_env);
-            }
-        }
         env.push((exec_context::COMPONENT_PATH.to_string(), component_path));
     }
 
@@ -822,6 +823,51 @@ mod tests {
             .map(|(_, v)| v.clone());
 
         assert!(path.is_some(), "expected extension env to include PATH");
+    }
+
+    #[test]
+    fn build_capability_env_includes_extension_provider_output() {
+        let extension = tempfile::tempdir().expect("extension dir");
+        let component = tempfile::tempdir().expect("component dir");
+        let extension_id = extension.path().file_name().unwrap().to_string_lossy();
+        std::fs::write(
+            extension.path().join(format!("{extension_id}.json")),
+            r#"{
+                "name": "Fixture",
+                "version": "1.0.0",
+                "env_provider": { "script": "env.sh" }
+            }"#,
+        )
+        .expect("manifest");
+        std::fs::write(
+            extension.path().join("env.sh"),
+            "#!/bin/sh\nprintf '{\"FIXTURE_ENV\":\"%s\"}' \"$HOMEBOY_COMPONENT_ID\"\n",
+        )
+        .expect("env provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(extension.path().join("env.sh"))
+                .expect("env provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(extension.path().join("env.sh"), permissions)
+                .expect("env provider executable");
+        }
+
+        let env = build_capability_env(
+            &extension_id,
+            "fixture-component",
+            extension.path(),
+            component.path(),
+            "{}",
+            &[],
+        )
+        .expect("capability env");
+
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "FIXTURE_ENV" && value == "fixture-component"));
     }
 
     #[test]

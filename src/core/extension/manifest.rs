@@ -16,7 +16,7 @@ pub use super::manifest_action_config::{
 pub use super::manifest_config::{
     AutofixVerifyConfig, BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig,
     CliHelpConfig, DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployVerification,
-    DiscoveryConfig, FileContainsCondition, LintChangedFileRoute, LintConfig,
+    DiscoveryConfig, EnvProviderConfig, FileContainsCondition, LintChangedFileRoute, LintConfig,
     RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, SinceTagConfig, TestConfig,
     TraceConfig, VersionPatternConfig,
 };
@@ -423,6 +423,8 @@ pub struct ExtensionManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component_env: Option<ComponentEnvConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_provider: Option<EnvProviderConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiCapability>,
 
     /// Runtime requirements needed to execute this extension's runner scripts.
@@ -543,6 +545,12 @@ impl ExtensionManifest {
         self.trace
             .as_ref()
             .and_then(|c| c.extension_script.as_deref())
+    }
+
+    pub fn env_provider_script(&self) -> Option<&str> {
+        self.env_provider
+            .as_ref()
+            .map(|provider| provider.script.as_str())
     }
 
     /// Convenience accessor for the optional test mapping config

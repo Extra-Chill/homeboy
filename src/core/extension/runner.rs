@@ -209,7 +209,7 @@ impl ExtensionRunner {
             &prepared.settings_json,
             &prepared.execution.extension_id,
             &extra_env_vars,
-        );
+        )?;
 
         let output = self.execute_script(&prepared.execution.extension_path, &env_vars)?;
         if self.strict_validation_dependencies() {
@@ -266,7 +266,7 @@ impl ExtensionRunner {
         settings_json: &str,
         extension_name: &str,
         extra_env_vars: &[(String, String)],
-    ) -> Vec<(String, String)> {
+    ) -> Result<Vec<(String, String)>> {
         super::execution::build_capability_env(
             extension_name,
             &self.execution_context.component.id,
