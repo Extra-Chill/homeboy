@@ -157,10 +157,10 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-29T14:08:24Z",
-      "item_count": 48,
+      "created_at": "2026-05-29T17:32:46Z",
+      "item_count": 50,
       "known_fingerprints": [
-        "artifact_portability::observation:5c28d4b5-3fc5-4c18-bb0e-bedaf5588797::NonPortableArtifactPath",
+        "artifact_portability::observation:983e3a8f-c469-4b87-9ae1-e36a8224d195::NonPortableArtifactPath",
         "dead_code::src/core/engine/temp.rs::UnreferencedExport",
         "intra-method-duplication::src/core/extension/refactor_protocol.rs::IntraMethodDuplicate",
         "output_capture::src/commands/git.rs::UnboundedOutputCapture",
@@ -207,7 +207,9 @@
         "structural::src/core/refactor/rename/mod.rs::GodFile",
         "structural::src/core/release/executor.rs::GodFile",
         "structural::src/core/rig/pipeline.rs::HighItemCount",
-        "structural::src/core/runner/connection.rs::HighItemCount"
+        "structural::tests/core_agnostic_test.rs::HighItemCount",
+        "test_quality::tests/core_agnostic_test.rs::VacuousTest",
+        "test_quality::tests/core_agnostic_test.rs::VacuousTest"
       ],
       "metadata": {
         "alignment_score": 0.8933333158493042,
