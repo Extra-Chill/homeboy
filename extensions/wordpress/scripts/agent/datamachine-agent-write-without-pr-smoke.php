@@ -260,6 +260,10 @@ namespace {
         fwrite( STDERR, "Expected fallback PR handling to reuse an existing open PR.\n" );
         exit( 1 );
     }
+    if ( ! empty( $existing_fallback['engine_data']['github_tool_results'] ?? array() ) ) {
+        fwrite( STDERR, "Did not expect runner-owned fallback PR reuse to be recorded as a task-facing tool result.\n" );
+        exit( 1 );
+    }
     if ( ! homeboy_datamachine_agent_pr_opened( $existing_fallback['engine_data'] ?? array(), $config ) ) {
         fwrite( STDERR, "Expected reused fallback PR to be recorded as pr_opened.\n" );
         exit( 1 );
@@ -555,7 +559,15 @@ namespace {
         exit( 1 );
     }
     if ( ! homeboy_datamachine_agent_pr_opened( $job_artifact_export['engine_data'] ?? array(), array( 'tool_results_key' => 'github_tool_results' ) ) ) {
-        fwrite( STDERR, "Expected artifact PR export to record a generic PR tool result.\n" );
+        fwrite( STDERR, "Expected artifact PR export to record runner publication metadata.\n" );
+        exit( 1 );
+    }
+    if ( ! empty( $job_artifact_export['engine_data']['github_tool_results'] ?? array() ) ) {
+        fwrite( STDERR, "Did not expect runner-owned artifact PR export to be recorded as a task-facing tool result.\n" );
+        exit( 1 );
+    }
+    if ( 'https://github.com/owner/repo/pull/988' !== ( $job_artifact_export['engine_data']['review_agent']['runner_publications'][0]['url'] ?? '' ) ) {
+        fwrite( STDERR, "Expected artifact PR export to preserve runner publication metadata.\n" );
         exit( 1 );
     }
     if ( 'bundles/task-runner/run-artifacts/review-flow/job-42/job-artifacts.json' !== ( $artifact_export_calls[0]['input']['file_path'] ?? null ) ) {

@@ -518,6 +518,13 @@ homeboy_datamachine_agent_attach_evidence_references() {
                 names: ($events | map(.tool_name) | map(select(. != "")) | unique),
                 events: $events
             };
+        def runner_publications($metadata):
+            [
+                ($metadata.engine_data.runner_publications // [])[]?,
+                ($metadata.engine_data[]? | objects | .runner_publications? // [] | .[]?)
+            ];
+        def first_runner_publication_pr_url($metadata):
+            (runner_publications($metadata) | map(select(.tool_name == "create_github_pull_request" and .success == true and (.url // "") != "") | .url) | first) // "";
         def runner_evidence($scenario):
             ($scenario.metadata // {}) as $metadata
             | ($metadata.wp_codebox.canonical_artifacts // {}) as $wpPaths
@@ -560,6 +567,10 @@ homeboy_datamachine_agent_attach_evidence_references() {
                         diff_redacted: (if present($workspaceCapture.diff) then true else false end)
                     } | with_entries(select(.value != null and .value != "" and .value != []))
                 },
+                publication_surface: {
+                    runner_publications: (runner_publications($metadata) | redact),
+                    pr_url: (first_runner_publication_pr_url($metadata) | redact)
+                } | with_entries(select(.value != null and .value != "" and .value != [])),
                 runtime_surface: {
                     provider: ($metadata.provider // $config.provider // ""),
                     model: ($metadata.model // $config.model // ""),
@@ -587,6 +598,7 @@ homeboy_datamachine_agent_attach_evidence_references() {
             first_field($metadata.job_artifact_exports; "pr_url")
             // first_field($metadata.fallback_pull_request; "html_url")
             // first_field($metadata.fallback_pull_request; "url")
+            // first_runner_publication_pr_url($metadata)
             // first_tool_pr_url($metadata)
             // "";
         def workspace_branch($metadata):
