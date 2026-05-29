@@ -1115,6 +1115,7 @@ mod tests {
                         sha256: Some("abc123".to_string()),
                         metadata: Some(json!({ "kind": "test_report" })),
                     }],
+                    metrics: None,
                 },
             )
             .expect("runner completes job");
@@ -1157,6 +1158,7 @@ mod tests {
                     stderr: Some("nope".to_string()),
                     data: None,
                     artifacts: Vec::new(),
+                    metrics: None,
                 },
             )
             .expect("runner fails job");

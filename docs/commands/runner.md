@@ -253,6 +253,12 @@ Path rules:
 - `--project <id>` feeds the runner trust policy project allowlist check.
 - `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
 
+Runner metrics:
+
+- Local runner execution, connected daemon jobs, and reverse-runner worker results include a `metrics` object with `duration_ms`, `sample_count`, and lightweight resource fields when available.
+- On Linux runners, metrics are sampled from `/proc` for the command process tree and include `peak_rss_bytes`, `child_process_count_peak`, `cpu_user_ms`, and `cpu_system_ms`.
+- CPU accounting is sampled and can miss very short-lived child processes between samples; duration is always recorded, and non-Linux runners report `source: "duration_only"`.
+
 ### `workspace sync`
 
 ```sh

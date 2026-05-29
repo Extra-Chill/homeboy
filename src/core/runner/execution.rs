@@ -14,6 +14,7 @@ use crate::core::source_snapshot::SourceSnapshot;
 use super::broker_http;
 use super::capabilities::{runner_capability_snapshot, validate_runner_capability_preflight};
 use super::evidence::mirror_daemon_evidence;
+use super::resource_metrics::{measured_command_output, RunnerResourceMetrics};
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
 
 mod policy;
@@ -63,6 +64,8 @@ pub struct RunnerExecOutput {
     pub mirror_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patch: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<RunnerResourceMetrics>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,6 +230,9 @@ fn exec_via_reverse_broker(
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
     let stdout = string_field(&result, "stdout");
     let stderr = string_field(&result, "stderr");
+    let metrics = result
+        .get("metrics")
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
     let exit_code = result
         .get("exit_code")
         .and_then(Value::as_i64)
@@ -255,6 +261,7 @@ fn exec_via_reverse_broker(
             job_events: Some(events),
             mirror_run_id: None,
             patch: None,
+            metrics,
         },
         exit_code,
     ))
@@ -334,6 +341,9 @@ fn exec_via_daemon(
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
     let stdout = string_field(&result, "stdout");
     let stderr = string_field(&result, "stderr");
+    let metrics = result
+        .get("metrics")
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
     let exit_code = result
         .get("exit_code")
         .and_then(Value::as_i64)
@@ -365,6 +375,7 @@ fn exec_via_daemon(
             job_events: Some(events),
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
+            metrics,
         },
         exit_code,
     ))
@@ -523,6 +534,7 @@ fn exec_ssh(
             stdout: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code,
+            metrics: None,
         },
         Some(source_snapshot),
     ))
@@ -532,16 +544,17 @@ struct ProcessOutput {
     stdout: String,
     stderr: String,
     exit_code: i32,
+    metrics: Option<RunnerResourceMetrics>,
 }
 
 fn command_output(command: &mut std::process::Command) -> Result<ProcessOutput> {
-    let output = command.output().map_err(|err| {
-        Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
-    })?;
+    let measured = measured_command_output(command)?;
+    let output = measured.output;
     Ok(ProcessOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         exit_code: output.status.code().unwrap_or(1),
+        metrics: Some(measured.metrics),
     })
 }
 
@@ -570,6 +583,7 @@ fn exec_output(
             job_events: None,
             mirror_run_id: None,
             patch: None,
+            metrics: output.metrics,
         },
         exit_code,
     )
@@ -714,6 +728,17 @@ mod tests {
             assert_eq!(output.runner_id, "lab-local");
             assert_eq!(output.mode, RunnerExecMode::Local);
             assert_eq!(output.stdout, "ok");
+            let metrics = output.metrics.expect("local exec metrics");
+            assert!(metrics.duration_ms < 60_000);
+            if cfg!(target_os = "linux") {
+                assert_eq!(metrics.source, "linux_procfs_process_tree");
+                assert!(metrics.sample_count > 0);
+                assert!(metrics.peak_rss_bytes.unwrap_or(0) > 0);
+                assert!(metrics.child_process_count_peak.is_some());
+            } else {
+                assert_eq!(metrics.source, "duration_only");
+                assert_eq!(metrics.sample_count, 0);
+            }
             let source_snapshot = output.source_snapshot.expect("source snapshot");
             assert_eq!(source_snapshot.runner_id, "lab-local");
             assert_eq!(source_snapshot.sync_mode, "existing_remote");
