@@ -119,7 +119,17 @@ pub struct RunnerStatusReport {
     pub state: RunnerSessionState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<RunnerSession>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_daemon: Option<RunnerStaleDaemonWarning>,
     pub session_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerStaleDaemonWarning {
+    pub session_homeboy_version: String,
+    pub current_homeboy_version: String,
+    pub message: String,
+    pub recovery_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
