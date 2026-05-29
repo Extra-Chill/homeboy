@@ -154,6 +154,29 @@ try {
 		exit(1);
 	}
 
+	function get_plugins(): array {
+		return array(
+			'fixture-plugin/fixture-plugin.php' => array('Version' => '1.2.3'),
+		);
+	}
+
+	function is_plugin_active(string $plugin): bool {
+		return 'fixture-plugin/fixture-plugin.php' === $plugin;
+	}
+
+	$plugin_list_result = $tool->handle_tool_call(
+		array('command' => 'plugin list'),
+		array(
+			'tool_name'            => 'run_wp_cli',
+			'terminal_action_type' => 'wp_cli',
+		)
+	);
+
+	if (empty($plugin_list_result['success']) || ! str_contains((string) ($plugin_list_result['stdout'] ?? ''), "fixture-plugin\tactive\tnone\t1.2.3")) {
+		fwrite(STDERR, "Unexpected runtime plugin list result:\n" . json_encode($plugin_list_result, JSON_PRETTY_PRINT) . "\n");
+		exit(1);
+	}
+
 	class WP_CLI {
 		public static array $commands = array();
 

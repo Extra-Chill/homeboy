@@ -1980,6 +1980,51 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
             );
         }
 
+        private function can_run_runtime_plugin_list( string $command ): bool {
+            $wp_cli_command = trim( preg_replace( '/^wp\s+/', '', $this->normalize_wp_cli_command( $command ) ) );
+            return 1 === preg_match( '/^plugin\s+list(?:\s|$)/', $wp_cli_command );
+        }
+
+        private function run_runtime_plugin_list_command( string $command ): array {
+            $normalized_command = $this->normalize_wp_cli_command( $command );
+            $started            = microtime( true );
+            $stderr             = '';
+            $stdout             = '';
+            $success            = true;
+
+            if ( ! function_exists( 'get_plugins' ) && defined( 'ABSPATH' ) ) {
+                require_once ABSPATH . 'wp-admin/includes/plugin.php';
+            }
+
+            if ( function_exists( 'get_plugins' ) ) {
+                $stdout = "name\tstatus\tupdate\tversion\n";
+                foreach ( get_plugins() as $plugin_file => $plugin_data ) {
+                    $status = function_exists( 'is_plugin_active' ) && is_plugin_active( $plugin_file ) ? 'active' : 'inactive';
+                    $stdout .= sprintf(
+                        "%s\t%s\tnone\t%s\n",
+                        dirname( $plugin_file ) === '.' ? basename( $plugin_file, '.php' ) : dirname( $plugin_file ),
+                        $status,
+                        (string) ( $plugin_data['Version'] ?? '' )
+                    );
+                }
+            } else {
+                $success = false;
+                $stderr  = 'WordPress plugin APIs are not available.';
+            }
+
+            return array(
+                'type'       => 'wp_cli',
+                'command'    => $normalized_command,
+                'exitCode'   => $success ? 0 : 1,
+                'stdout'     => $stdout,
+                'stderr'     => $stderr,
+                'success'    => $success,
+                'timedOut'   => false,
+                'durationMs' => (int) round( ( microtime( true ) - $started ) * 1000 ),
+                'error'      => $success ? '' : $stderr,
+            );
+        }
+
         public function handle_tool_call( array $parameters, array $tool_def = array() ): array {
             $type = (string) ( $tool_def['terminal_action_type'] ?? 'wp_cli' );
 
@@ -2001,6 +2046,13 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
 
             if ( 'wp_cli' === $type && null !== $this->runtime_wp_cli_eval_code( $command ) ) {
                 $result              = $this->run_runtime_wp_cli_eval_command( $command );
+                $result['tool_name'] = (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' );
+                $result['status']    = 200;
+                return $result;
+            }
+
+            if ( 'wp_cli' === $type && $this->can_run_runtime_plugin_list( $command ) ) {
+                $result              = $this->run_runtime_plugin_list_command( $command );
                 $result['tool_name'] = (string) ( $tool_def['tool_name'] ?? 'run_wp_cli' );
                 $result['status']    = 200;
                 return $result;
