@@ -821,7 +821,7 @@ if [ "$ENABLE_TERMINAL_ACTIONS" = "1" ]; then
         RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-datamachine-agent-runtime.XXXXXX")
     fi
     TERMINAL_READY_FILE="$RUNTIME_DIR/terminal-action-server.json"
-    TERMINAL_TOKEN="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+    TERMINAL_TOKEN="$(node -e "process.stdout.write(require('node:crypto').randomBytes(24).toString('base64url'))")"
     node "$SCRIPT_DIR/terminal-action-server.js" \
         --runtime-root "$COMPONENT_PATH" \
         --ready-file "$TERMINAL_READY_FILE" \
