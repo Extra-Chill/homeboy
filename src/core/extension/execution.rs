@@ -744,6 +744,15 @@ fn build_exec_env(
                 }
             }
         };
+        if let Ok(component) =
+            component::resolve_effective(Some(cid), component_path_override, None)
+        {
+            if let Ok(cargo_env) =
+                crate::core::cargo_target::env_vars(&component, Path::new(&component_path), &env)
+            {
+                env.extend(cargo_env);
+            }
+        }
         env.push((exec_context::COMPONENT_PATH.to_string(), component_path));
     }
 
