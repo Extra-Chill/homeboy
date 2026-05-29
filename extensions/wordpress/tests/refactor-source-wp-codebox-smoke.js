@@ -68,11 +68,29 @@ const recipeIndex = process.argv.indexOf('--recipe');
 if (process.argv[2] !== 'recipe-run' || recipeIndex < 0) {
   process.exit(2);
 }
+const artifactsIndex = process.argv.indexOf('--artifacts');
+const artifactsRoot = artifactsIndex >= 0 ? process.argv[artifactsIndex + 1] : '';
 const recipe = JSON.parse(fs.readFileSync(process.argv[recipeIndex + 1], 'utf8'));
 const stepArgs = recipe.workflow.steps[0].args;
 const task = JSON.parse(stepArgs.find((arg) => arg.startsWith('task=')).slice('task='.length));
 const sessionId = task.sandbox_session_id;
 if (process.env.FIXTURE_HANG_GROUP === task.group_key) {
+  if (artifactsRoot) {
+    const partialDirectory = path.join(artifactsRoot, 'partial-' + sessionId);
+    const filesDirectory = path.join(partialDirectory, 'files');
+    fs.mkdirSync(filesDirectory, { recursive: true });
+    fs.writeFileSync(path.join(filesDirectory, 'changed-files.json'), JSON.stringify({
+      schema: 'wp-codebox/changed-files/v1',
+      files: [
+        {
+          path: '/workspace/homeboy-extensions/wordpress/docs/partial.md',
+          status: 'modified',
+          mountTarget: '/workspace/homeboy-extensions',
+          relativePath: 'wordpress/docs/partial.md'
+        }
+      ]
+    }, null, 2) + '\\n');
+  }
   process.stderr.write('fixture task hung before producing an artifact\\n');
   setInterval(() => {}, 1000);
   return;
@@ -258,6 +276,11 @@ process.stdout.write(JSON.stringify({
   assert.match(partialFailureResponse.warnings.join('\n'), /WP Codebox task timed out after 1 seconds/);
   const partialRun = JSON.parse(fs.readFileSync(path.join(root, 'fanout-partial-failure', 'fanout-run.json'), 'utf8'));
   assert.equal(partialRun.status, 'failed');
+  const partialFailedRecord = partialRun.records.find((record) => record.group_key === 'docs-reference');
+  assert.equal(partialFailedRecord.outcome.failure_metadata.group_key, 'docs-reference');
+  assert.equal(partialFailedRecord.outcome.failure_metadata.timed_out, true);
+  assert.equal(partialFailedRecord.partial_artifacts.length, 1);
+  assert.equal(partialFailedRecord.partial_artifacts[0].has_changed_files, true);
 
   const missingSecretResult = spawnSync('python3', [path.join(__dirname, '..', 'scripts', 'refactor.py')], {
     encoding: 'utf8',

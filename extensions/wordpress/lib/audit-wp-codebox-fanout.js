@@ -132,6 +132,100 @@ function fanoutRecordMetrics(startedAt, finishedAt, parsed, artifact) {
   };
 }
 
+function artifactsRootFromArgs(args = []) {
+  const index = args.indexOf('--artifacts');
+  if (index >= 0 && args[index + 1]) {
+    return args[index + 1];
+  }
+  return '';
+}
+
+function discoverTaskArtifacts(args, taskRequest, startedAt, finishedAt) {
+  const root = artifactsRootFromArgs(args);
+  if (!root || !fs.existsSync(root)) {
+    return [];
+  }
+
+  const startedMs = Date.parse(startedAt);
+  const finishedMs = Date.parse(finishedAt);
+  const earliestMs = Number.isFinite(startedMs) ? startedMs - 1000 : 0;
+  const latestMs = Number.isFinite(finishedMs) ? finishedMs + 1000 : Date.now() + 1000;
+
+  const artifacts = fs.readdirSync(root)
+    .map((entry) => artifactEvidence(path.join(root, entry), earliestMs, latestMs))
+    .filter(Boolean)
+    .sort((left, right) => left.directory.localeCompare(right.directory));
+  const sessionArtifacts = artifacts.filter((artifact) => artifact.directory.includes(taskRequest.sandbox_session_id));
+  return sessionArtifacts.length > 0 ? sessionArtifacts : artifacts;
+}
+
+function artifactEvidence(directory, earliestMs, latestMs) {
+  try {
+    const stat = fs.statSync(directory);
+    if (!stat.isDirectory() || stat.mtimeMs < earliestMs || stat.mtimeMs > latestMs) {
+      return null;
+    }
+    const changedFilesPath = path.join(directory, 'files', 'changed-files.json');
+    const manifestPath = path.join(directory, 'manifest.json');
+    const runtimeManifestPath = path.join(directory, 'files', 'runtime-reference-manifest.json');
+    return {
+      directory,
+      bytes: directorySizeBytes(directory),
+      mtime: stat.mtime.toISOString(),
+      has_manifest: fs.existsSync(manifestPath),
+      has_changed_files: fs.existsSync(changedFilesPath),
+      changed_files_path: fs.existsSync(changedFilesPath) ? changedFilesPath : '',
+      runtime_reference_manifest: runtimeManifestPath && fs.existsSync(runtimeManifestPath)
+        ? wpCodeboxRuntimeReferenceManifest({ artifacts: { runtimeReferenceManifestPath: runtimeManifestPath } }, {})
+        : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function failureMessageFromCommand(command) {
+  if (command.error) {
+    return command.error;
+  }
+  if (command.timed_out) {
+    return `WP Codebox task timed out after ${command.timeout_seconds} seconds`;
+  }
+  if (command.signal) {
+    return `WP Codebox task exited from signal ${command.signal}`;
+  }
+  if (command.exit_code !== 0 && command.exit_code !== null && command.exit_code !== undefined) {
+    return `WP Codebox task exited with code ${command.exit_code}`;
+  }
+  return 'WP Codebox task failed without a structured outcome';
+}
+
+function enrichFailureOutcome(outcome, taskRequest, command, startedAt, finishedAt, partialArtifacts = []) {
+  if (taskOutcomeSucceeded(outcome)) {
+    return outcome;
+  }
+  const elapsedMs = Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt));
+  const failureMetadata = {
+    group_key: taskRequest.group_key,
+    sandbox_session_id: taskRequest.sandbox_session_id,
+    finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
+    exit_code: command.exit_code ?? null,
+    signal: command.signal || null,
+    elapsed_ms: Number.isFinite(elapsedMs) ? elapsedMs : null,
+    timed_out: Boolean(command.timed_out),
+    timeout_seconds: command.timeout_seconds ?? null,
+    killed_process_group: Boolean(command.killed_process_group),
+    force_killed_process_group: Boolean(command.force_killed_process_group),
+    partial_artifact_count: partialArtifacts.length,
+  };
+  return {
+    ...outcome,
+    failure: outcome.failure || failureMessageFromCommand(command),
+    failure_metadata: failureMetadata,
+    partial_artifacts: partialArtifacts,
+  };
+}
+
 function numberOrNull(value) {
   return Number.isFinite(Number(value)) ? Number(value) : null;
 }
@@ -524,7 +618,22 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
   const metrics = fanoutRecordMetrics(startedAt, finishedAt, parsed, artifact);
   const taskFailure = parsed ? wpCodeboxTaskFailure(parsed) : null;
   const commandSuccess = result.status === 0 && result.error === undefined && null === taskFailure;
-  const outcome = taskOutcome(taskRequest, parsed, artifact, commandSuccess, taskFailure || (result.error ? result.error.message : ''));
+  const commandInfo = {
+    bin: command,
+    args,
+    exit_code: result.status,
+    signal: result.signal || null,
+    error: result.error ? result.error.message : (taskFailure || ''),
+  };
+  const partialArtifacts = commandSuccess ? [] : discoverTaskArtifacts(args, taskRequest, startedAt, finishedAt);
+  const outcome = enrichFailureOutcome(
+    taskOutcome(taskRequest, parsed, artifact, commandSuccess, taskFailure || (result.error ? result.error.message : '')),
+    taskRequest,
+    commandInfo,
+    startedAt,
+    finishedAt,
+    partialArtifacts
+  );
   const success = taskOutcomeSucceeded(outcome);
 
   return {
@@ -533,13 +642,7 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
     group_key: taskRequest.group_key,
     finding_id: taskRequest.finding_id || taskRequest.audit_findings[0]?.id || '',
     finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
-    command: {
-      bin: command,
-      args,
-      exit_code: result.status,
-      signal: result.signal || null,
-      error: result.error ? result.error.message : (taskFailure || ''),
-    },
+    command: commandInfo,
     status: success ? 'completed' : 'failed',
     started_at: startedAt,
     finished_at: finishedAt,
@@ -553,6 +656,7 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
       preview_url: artifact.preview?.url || artifact.preview_url || '',
       runtime_reference_manifest: wpCodeboxRuntimeReferenceManifest(parsed, artifact),
     } : null,
+    partial_artifacts: partialArtifacts,
     metrics,
   };
 }
@@ -631,7 +735,26 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
       const timeoutError = timedOut ? `WP Codebox task timed out after ${taskTimeoutSeconds} seconds` : '';
       const errorMessage = timeoutError || (spawnError ? spawnError.message : (taskFailure || ''));
       const commandSuccess = code === 0 && !spawnError && null === taskFailure && !timedOut;
-      const outcome = taskOutcome(taskRequest, parsed, artifact, commandSuccess, errorMessage, timedOut);
+      const commandInfo = {
+        bin: command,
+        args,
+        exit_code: code,
+        signal: signal || null,
+        error: errorMessage,
+        timed_out: timedOut,
+        timeout_seconds: taskTimeoutSeconds,
+        killed_process_group: killedProcessGroup,
+        force_killed_process_group: forceKilledProcessGroup,
+      };
+      const partialArtifacts = commandSuccess ? [] : discoverTaskArtifacts(args, taskRequest, startedAt, finishedAt);
+      const outcome = enrichFailureOutcome(
+        taskOutcome(taskRequest, parsed, artifact, commandSuccess, errorMessage, timedOut),
+        taskRequest,
+        commandInfo,
+        startedAt,
+        finishedAt,
+        partialArtifacts
+      );
       const success = taskOutcomeSucceeded(outcome);
 
       resolve({
@@ -640,17 +763,7 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
         group_key: taskRequest.group_key,
         finding_id: taskRequest.finding_id || taskRequest.audit_findings[0]?.id || '',
         finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
-        command: {
-          bin: command,
-          args,
-          exit_code: code,
-          signal: signal || null,
-          error: errorMessage,
-          timed_out: timedOut,
-          timeout_seconds: taskTimeoutSeconds,
-          killed_process_group: killedProcessGroup,
-          force_killed_process_group: forceKilledProcessGroup,
-        },
+        command: commandInfo,
         status: success ? 'completed' : 'failed',
         started_at: startedAt,
         finished_at: finishedAt,
@@ -664,6 +777,7 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
           preview_url: artifact.preview?.url || artifact.preview_url || '',
           runtime_reference_manifest: wpCodeboxRuntimeReferenceManifest(parsed, artifact),
         } : null,
+        partial_artifacts: partialArtifacts,
         metrics,
       });
     });

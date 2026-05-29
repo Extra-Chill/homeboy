@@ -135,7 +135,27 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
   const request = JSON.parse(input);
+  const artifactsIndex = process.argv.indexOf('--artifacts');
+  const artifactsRoot = artifactsIndex >= 0 ? process.argv[artifactsIndex + 1] : '';
+  function writePartialArtifact() {
+    if (!artifactsRoot) {
+      return '';
+    }
+    const artifactDirectory = path.join(artifactsRoot, 'partial-' + request.sandbox_session_id);
+    const filesDirectory = path.join(artifactDirectory, 'files');
+    fs.mkdirSync(filesDirectory, { recursive: true });
+    fs.writeFileSync(path.join(filesDirectory, 'changed-files.json'), JSON.stringify({
+      schema: 'wp-codebox/changed-files/v1',
+      files: [{ path: '/workspace/homeboy-extensions/partial.php', relativePath: 'partial.php', status: 'modified' }],
+    }, null, 2) + '\\n');
+    fs.writeFileSync(path.join(filesDirectory, 'runtime-reference-manifest.json'), JSON.stringify({
+      schema: 'wp-codebox/runtime-reference-manifest-fixture/v1',
+      cookie: 'partial-cookie-secret',
+    }, null, 2) + '\\n');
+    return artifactDirectory;
+  }
   if (process.env.FIXTURE_HANG_GROUP === request.group_key) {
+    writePartialArtifact();
     process.stdout.write('fixture partial stdout before timeout\\n');
     process.stderr.write('fixture partial stderr before timeout\\n');
     setInterval(() => {}, 1000);
@@ -631,10 +651,11 @@ try {
   assert.equal(noopRecord.metrics.artifact_bytes, null);
 
   const timeoutRunsOutputPath = path.join(root, 'fanout-timeout-run.json');
+  const timeoutArtifactsRoot = path.join(root, 'timeout-artifacts');
   const timeoutExecution = await executeAuditWpCodeboxFanout({
     report,
     wp_codebox_command: process.execPath,
-    wp_codebox_args: [fixtureCommand],
+    wp_codebox_args: [fixtureCommand, '--artifacts', timeoutArtifactsRoot],
     concurrency: 1,
     task_timeout_seconds: 1,
     runsOutputPath: timeoutRunsOutputPath,
@@ -649,6 +670,16 @@ try {
   assert.equal(timeoutRecord.command.killed_process_group, true);
   assert.match(timeoutRecord.command.error, /timed out after 1 seconds/);
   assert.equal(timeoutRecord.outcome.kind, 'timeout');
+  assert.equal(timeoutRecord.outcome.failure_metadata.group_key, 'PHPCS Formatting/Auto Fix!');
+  assert.equal(timeoutRecord.outcome.failure_metadata.sandbox_session_id, timeoutRecord.sandbox_session_id);
+  assert.equal(timeoutRecord.outcome.failure_metadata.timed_out, true);
+  assert.equal(timeoutRecord.outcome.failure_metadata.timeout_seconds, 1);
+  assert.equal(timeoutRecord.outcome.failure_metadata.partial_artifact_count, 1);
+  assert.equal(timeoutRecord.partial_artifacts.length, 1);
+  assert.equal(timeoutRecord.partial_artifacts[0].has_changed_files, true);
+  assert.equal(timeoutRecord.partial_artifacts[0].runtime_reference_manifest.available, true);
+  assert.equal(timeoutRecord.partial_artifacts[0].runtime_reference_manifest.payload.cookie, '[redacted]');
+  assert.equal(timeoutRecord.outcome.partial_artifacts[0].directory, timeoutRecord.partial_artifacts[0].directory);
   assert.match(timeoutRecord.stdout, /fixture partial stdout before timeout/);
   assert.match(timeoutRecord.stderr, /fixture partial stderr before timeout/);
   assertMetrics(timeoutRecord);
@@ -657,6 +688,9 @@ try {
   const timeoutFollowupRecord = timeoutExecution.records.find((record) => record.group_key === 'docs-reference');
   assert.equal(timeoutFollowupRecord.status, 'failed');
   assert.equal(timeoutFollowupRecord.command.exit_code, 3);
+  assert.equal(timeoutFollowupRecord.outcome.failure, 'WP Codebox task exited with code 3');
+  assert.equal(timeoutFollowupRecord.outcome.failure_metadata.exit_code, 3);
+  assert.equal(timeoutFollowupRecord.outcome.failure_metadata.group_key, 'docs-reference');
   const timeoutFinalRun = readJson(timeoutRunsOutputPath);
   assert.equal(timeoutFinalRun.status, 'failed');
   assert.equal(timeoutFinalRun.records.length, 2);
