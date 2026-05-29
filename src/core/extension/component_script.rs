@@ -145,7 +145,7 @@ fn component_script_env(
     source_path: &Path,
     extra_env: &[(String, String)],
 ) -> Vec<(String, String)> {
-    let source_path = source_path.to_string_lossy().to_string();
+    let source_path_value = source_path.to_string_lossy().to_string();
     let mut env = vec![
         (
             exec_context::VERSION.to_string(),
@@ -157,12 +157,15 @@ fn component_script_env(
         ),
         (
             exec_context::EXTENSION_PATH.to_string(),
-            source_path.clone(),
+            source_path_value.clone(),
         ),
         (exec_context::COMPONENT_ID.to_string(), component.id.clone()),
-        (exec_context::COMPONENT_PATH.to_string(), source_path),
+        (exec_context::COMPONENT_PATH.to_string(), source_path_value),
         (exec_context::SETTINGS_JSON.to_string(), "{}".to_string()),
     ];
+    if let Ok(cargo_env) = crate::core::cargo_target::env_vars(component, source_path, extra_env) {
+        env.extend(cargo_env);
+    }
     env.extend(extra_env.iter().cloned());
     env
 }
