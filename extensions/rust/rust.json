@@ -24,6 +24,9 @@
     "compiler_warnings": "scripts/compiler-warnings.py",
     "compiler_warning_fixes": "scripts/compiler-warning-fixes.py"
   },
+  "env_provider": {
+    "script": "scripts/env-provider.sh"
+  },
   "lint": {
     "extension_script": "scripts/lint-runner.sh"
   },
