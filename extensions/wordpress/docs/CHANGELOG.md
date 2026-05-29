@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.38] - 2026-05-29
+
+### Fixed
+- project wp-gym fields into sealed artifacts
+
 ## [2.102.37] - 2026-05-29
 
 ### Fixed
