@@ -69,6 +69,8 @@ use super::artifact::BenchArtifact;
 use super::artifact_validation;
 use super::diagnostic::BenchDiagnostic;
 use super::distribution::BenchRunDistribution;
+use super::gate::{BenchGate, BenchGateResult};
+use super::metric_policy_preset::{expand_metric_policy_presets, BenchMetricPolicyPreset};
 
 fn default_true() -> bool {
     true
@@ -242,139 +244,6 @@ pub struct BenchScenario {
     pub runs_summary: Option<BTreeMap<String, BenchRunDistribution>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BenchGate {
-    pub metric: String,
-    pub op: BenchGateOp,
-    pub value: f64,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum BenchGateOp {
-    Eq,
-    Gte,
-    Lte,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BenchGateResult {
-    pub metric: String,
-    pub op: BenchGateOp,
-    pub expected: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub actual: Option<f64>,
-    pub passed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-impl BenchGate {
-    fn evaluate(&self, scenario_id: &str, metrics: &BenchMetrics) -> BenchGateResult {
-        let actual = metrics.get(&self.metric);
-        let passed = actual
-            .map(|value| match self.op {
-                BenchGateOp::Eq => value == self.value,
-                BenchGateOp::Gte => value >= self.value,
-                BenchGateOp::Lte => value <= self.value,
-            })
-            .unwrap_or(false);
-        let reason = if passed {
-            None
-        } else {
-            Some(match actual {
-                Some(value) => format!(
-                    "scenario `{}` gate failed: {} {} {} (actual {})",
-                    scenario_id,
-                    self.metric,
-                    self.op.as_str(),
-                    self.value,
-                    value
-                ),
-                None => format!(
-                    "scenario `{}` gate failed: metric `{}` is missing",
-                    scenario_id, self.metric
-                ),
-            })
-        };
-
-        BenchGateResult {
-            metric: self.metric.clone(),
-            op: self.op,
-            expected: self.value,
-            actual,
-            passed,
-            reason,
-        }
-    }
-}
-
-impl BenchGateOp {
-    fn as_str(self) -> &'static str {
-        match self {
-            BenchGateOp::Eq => "eq",
-            BenchGateOp::Gte => "gte",
-            BenchGateOp::Lte => "lte",
-        }
-    }
-}
-
-/// Evaluate semantic gates in place and return every failure reason.
-pub fn evaluate_gates(results: &mut BenchResults) -> Vec<String> {
-    let mut failures = Vec::new();
-    for scenario in &mut results.scenarios {
-        scenario.gate_results = scenario
-            .gates
-            .iter()
-            .map(|gate| gate.evaluate(&scenario.id, &scenario.metrics))
-            .collect();
-        scenario.passed = scenario.gate_results.iter().all(|result| result.passed);
-        results.budget_findings.extend(
-            scenario
-                .gate_results
-                .iter()
-                .filter(|result| !result.passed)
-                .map(|result| {
-                    BudgetFinding::failure(
-                        format!("bench.gate.{}", result.metric),
-                        format!("bench:{}", scenario.id),
-                        result.reason.clone().unwrap_or_else(|| {
-                            format!(
-                                "scenario `{}` gate failed: {} {} {}",
-                                scenario.id,
-                                result.metric,
-                                result.op.as_str(),
-                                result.expected
-                            )
-                        }),
-                        result.actual,
-                        result.expected,
-                        "value",
-                        Some(result.metric.clone()),
-                    )
-                }),
-        );
-        failures.extend(
-            scenario
-                .gate_results
-                .iter()
-                .filter_map(|result| result.reason.clone()),
-        );
-    }
-    failures.extend(
-        results
-            .budget_findings
-            .iter()
-            .filter(|finding| finding.is_gate_failure())
-            .map(|finding| finding.message.clone()),
-    );
-    failures.sort();
-    failures.dedup();
-    failures
-}
-
 /// Derive scenario span results from the shared observation timeline contract.
 pub fn evaluate_spans(results: &mut BenchResults) {
     for scenario in &mut results.scenarios {
@@ -460,38 +329,6 @@ pub struct BenchMetricPolicy {
     /// deserializes as `None` and round-trips unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<BenchMetricPhase>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BenchMetricPolicyPreset {
-    pub preset: BenchMetricPolicyPresetKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub regression_threshold_percent: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub regression_threshold_absolute: Option<f64>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub variance_aware: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_iterations_for_variance: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub regression_test: Option<RegressionTest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<BenchMetricPhase>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min: Option<f64>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BenchMetricPolicyPresetKind {
-    LatencyRegression,
-    MemoryRegression,
-    ColdWarmDelta,
-    FlakeNoiseThreshold,
-    AbsoluteBudget,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -598,89 +435,6 @@ fn parse_bench_results_str_with_artifact_context(
     Ok(parsed)
 }
 
-fn expand_metric_policy_presets(results: &mut BenchResults) -> Result<()> {
-    for (metric, preset) in results.metric_policy_presets.clone() {
-        match preset.preset {
-            BenchMetricPolicyPresetKind::LatencyRegression
-            | BenchMetricPolicyPresetKind::ColdWarmDelta
-            | BenchMetricPolicyPresetKind::FlakeNoiseThreshold => {
-                results
-                    .metric_policies
-                    .entry(metric)
-                    .or_insert_with(|| preset.to_policy(BenchMetricDirection::LowerIsBetter, 5.0));
-            }
-            BenchMetricPolicyPresetKind::MemoryRegression => {
-                results
-                    .metric_policies
-                    .entry(metric)
-                    .or_insert_with(|| preset.to_policy(BenchMetricDirection::LowerIsBetter, 10.0));
-            }
-            BenchMetricPolicyPresetKind::AbsoluteBudget => {
-                let op = match (preset.max, preset.min) {
-                    (Some(_), Some(_)) => {
-                        return Err(Error::validation_invalid_argument(
-                            "metric_policy_presets",
-                            format!(
-                                "absolute budget preset for `{}` must declare either max or min, not both",
-                                metric
-                            ),
-                            None,
-                            None,
-                        ));
-                    }
-                    (Some(max), None) => Some((BenchGateOp::Lte, max)),
-                    (None, Some(min)) => Some((BenchGateOp::Gte, min)),
-                    (None, None) => None,
-                };
-                let Some((op, value)) = op else {
-                    return Err(Error::validation_invalid_argument(
-                        "metric_policy_presets",
-                        format!(
-                            "absolute budget preset for `{}` must declare max or min",
-                            metric
-                        ),
-                        None,
-                        None,
-                    ));
-                };
-                for scenario in &mut results.scenarios {
-                    if scenario.metrics.get(&metric).is_some()
-                        && !scenario.gates.iter().any(|gate| gate.metric == metric)
-                    {
-                        scenario.gates.push(BenchGate {
-                            metric: metric.clone(),
-                            op,
-                            value,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-impl BenchMetricPolicyPreset {
-    fn to_policy(
-        &self,
-        direction: BenchMetricDirection,
-        default_threshold_percent: f64,
-    ) -> BenchMetricPolicy {
-        BenchMetricPolicy {
-            direction,
-            regression_threshold_percent: Some(
-                self.regression_threshold_percent
-                    .unwrap_or(default_threshold_percent),
-            ),
-            regression_threshold_absolute: self.regression_threshold_absolute,
-            variance_aware: self.variance_aware,
-            min_iterations_for_variance: self.min_iterations_for_variance,
-            regression_test: self.regression_test,
-            phase: self.phase,
-        }
-    }
-}
-
 fn validate_unique_scenario_ids(results: &BenchResults) -> Result<()> {
     let mut seen: BTreeMap<&str, Option<&str>> = BTreeMap::new();
 
@@ -757,6 +511,7 @@ fn validate_variance_policies(results: &BenchResults) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::gate::{evaluate_gates, BenchGateOp};
     use super::*;
 
     const VALID_RESULTS: &str = r#"{

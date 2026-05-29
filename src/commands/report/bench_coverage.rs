@@ -127,11 +127,7 @@ fn component_report(
     ) {
         Ok(ctx) => ctx,
         Err(error) => {
-            return Ok(empty_component(
-                component.id.clone(),
-                true,
-                Some(error.to_string()),
-            ));
+            return Ok(empty_capability_error(component, error));
         }
     };
 
@@ -154,11 +150,7 @@ fn component_report(
     let list = match list {
         Ok(list) => list,
         Err(error) => {
-            return Ok(empty_component(
-                component.id.clone(),
-                true,
-                Some(error.to_string()),
-            ))
+            return Ok(empty_capability_error(component, error));
         }
     };
 
@@ -168,6 +160,13 @@ fn component_report(
         &list.scenarios,
         None,
     ))
+}
+
+fn empty_capability_error(
+    component: &Component,
+    error: impl std::fmt::Display,
+) -> ComponentBenchCoverage {
+    empty_component(component.id.clone(), true, Some(error.to_string()))
 }
 
 fn has_bench_capability(component: &Component, extension_overrides: &[String]) -> bool {
