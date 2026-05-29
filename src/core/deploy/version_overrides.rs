@@ -309,7 +309,7 @@ pub(super) fn deploy_with_override(
     vars.insert("domain".to_string(), domain.unwrap_or("").to_string());
     vars.insert("allowRootFlag".to_string(), "--allow-root".to_string());
 
-    let install_cmd = render_map(&override_config.install_command, &vars);
+    let install_cmd = render_install_command(&override_config.install_command, &vars);
     log_status!("deploy", "Running install command: {}", install_cmd);
 
     let install_output = ssh_client.execute(&install_cmd);
@@ -366,6 +366,39 @@ pub(super) fn deploy_with_override(
     }
 
     Ok(DeployResult::success(0))
+}
+
+fn render_install_command(template: &str, vars: &HashMap<String, String>) -> String {
+    let rendered = render_map(template, vars);
+    normalize_legacy_wordpress_plugin_install_tempdir(
+        &rendered,
+        vars.get("targetDir").map(String::as_str),
+    )
+}
+
+fn normalize_legacy_wordpress_plugin_install_tempdir(
+    command: &str,
+    target_dir: Option<&str>,
+) -> String {
+    let Some(target_dir) = target_dir else {
+        return command.to_string();
+    };
+
+    const LEGACY_TMP_PATTERN: &str = "mktemp -d /tmp/homeboy-install.XXXXXX";
+    if !command.contains(LEGACY_TMP_PATTERN) || !command.contains("mv \"$extracted\"") {
+        return command.to_string();
+    }
+
+    let Some((target_parent, _)) = target_dir.trim_end_matches('/').rsplit_once('/') else {
+        return command.to_string();
+    };
+    if target_parent.is_empty() {
+        return command.to_string();
+    }
+
+    let safe_tmp_dir = format!("{}/.homeboy-install.XXXXXX", target_parent);
+    let safe_tmp_pattern = format!("mktemp -d {}", shell::quote_path(&safe_tmp_dir));
+    command.replace(LEGACY_TMP_PATTERN, &safe_tmp_pattern)
 }
 
 /// Build template variables and run `post:deploy` hooks remotely via SSH.
@@ -559,6 +592,50 @@ mod tests {
         assert_eq!(
             fs::read_to_string(target.join("installed.zip")).expect("installed artifact"),
             "artifact bytes"
+        );
+    }
+
+    #[test]
+    fn test_render_install_command_stages_legacy_plugin_replace_next_to_target() {
+        let template = r#"cd {{siteRoot}} && tmp_dir=$(mktemp -d /tmp/homeboy-install.XXXXXX) && unzip -q {{stagingArtifact}} -d "$tmp_dir" && extracted="$tmp_dir/$zip_root" && mv "$extracted" {{targetDir}} && rm -rf "$tmp_dir""#;
+        let vars = HashMap::from([
+            ("siteRoot".to_string(), "/srv/htdocs".to_string()),
+            (
+                "stagingArtifact".to_string(),
+                "/tmp/homeboy-staging/plugin.zip".to_string(),
+            ),
+            (
+                "targetDir".to_string(),
+                "/srv/htdocs/wp-content/plugins/wp-codebox".to_string(),
+            ),
+        ]);
+
+        let command = render_install_command(template, &vars);
+
+        assert!(
+            command.contains("mktemp -d '/srv/htdocs/wp-content/plugins/.homeboy-install.XXXXXX'")
+        );
+        assert!(!command.contains("mktemp -d /tmp/homeboy-install.XXXXXX"));
+    }
+
+    #[test]
+    fn test_render_install_command_leaves_unrelated_tempdirs_unchanged() {
+        let template =
+            "tmp_dir=$(mktemp -d /tmp/other.XXXXXX) && cp {{stagingArtifact}} {{targetDir}}";
+        let vars = HashMap::from([
+            (
+                "stagingArtifact".to_string(),
+                "/tmp/homeboy-staging/plugin.zip".to_string(),
+            ),
+            (
+                "targetDir".to_string(),
+                "/srv/htdocs/wp-content/plugins/wp-codebox".to_string(),
+            ),
+        ]);
+
+        assert_eq!(
+            render_install_command(template, &vars),
+            "tmp_dir=$(mktemp -d /tmp/other.XXXXXX) && cp /tmp/homeboy-staging/plugin.zip /srv/htdocs/wp-content/plugins/wp-codebox"
         );
     }
 }
