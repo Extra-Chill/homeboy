@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.202.0] - 2026-05-29
+
+### Added
+- record runner process metrics
+- render VPS broker deployment config
+
+### Fixed
+- use service-owned broker state paths
+
 ## [0.201.4] - 2026-05-29
 
 ### Fixed
