@@ -280,6 +280,10 @@ fn merge_matrix_results(
             run_metadata: outputs
                 .iter()
                 .find_map(|output| output.results.as_ref()?.run_metadata.clone()),
+            metadata: std::collections::BTreeMap::new(),
+            metric_groups: std::collections::BTreeMap::new(),
+            timeline: Vec::new(),
+            span_definitions: std::collections::BTreeMap::new(),
             diagnostics: outputs
                 .iter()
                 .flat_map(|output| output.results.as_ref().map(|r| r.diagnostics.clone()))

@@ -88,6 +88,14 @@ pub struct BenchResults {
     pub iterations: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_metadata: Option<BenchRunMetadata>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metric_groups: BTreeMap<String, BTreeMap<String, f64>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeline: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub span_definitions: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -584,6 +592,45 @@ mod tests {
             metadata["design"]["motifs"][0].as_str(),
             Some("terminal_window")
         );
+    }
+
+    #[test]
+    fn parses_runner_level_phase_evidence() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 1,
+            "metadata": {
+                "runner": { "phase_status": "captured" }
+            },
+            "metric_groups": {
+                "runner_phases_ms": { "setup": 42.0 }
+            },
+            "timeline": [
+                { "t_ms": 0, "source": "runner", "event": "start" },
+                { "t_ms": 42, "source": "runner", "event": "setup" }
+            ],
+            "span_definitions": {
+                "setup": { "from": "runner.start", "to": "runner.setup" }
+            },
+            "scenarios": [
+                {
+                    "id": "example-scenario",
+                    "iterations": 1,
+                    "metrics": { "p95_ms": 42.0 }
+                }
+            ]
+        }"#;
+        let parsed = parse_bench_results_str(raw).unwrap();
+        assert_eq!(
+            parsed.metadata["runner"]["phase_status"].as_str(),
+            Some("captured")
+        );
+        assert_eq!(
+            parsed.metric_groups["runner_phases_ms"].get("setup"),
+            Some(&42.0)
+        );
+        assert_eq!(parsed.timeline.len(), 2);
+        assert!(parsed.span_definitions.contains_key("setup"));
     }
 
     #[test]
