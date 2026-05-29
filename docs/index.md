@@ -8,6 +8,10 @@ Homeboy is a config-driven automation engine for development and deployment auto
 
 - [Code Factory](code-factory.md) - Automated code maintenance: lint+fix → test+fix → audit+fix → release → deploy
 
+## Operator Guides
+
+- [Extra Chill VPS to Homeboy Lab reverse runner](operators/extra-chill-lab-reverse-runner.md) - Setup, smoke evidence, and troubleshooting for the gated reverse-runner path tracked by #2993 and #2950
+
 ## CLI
 
 - Root command + global flags: [Root command](cli/homeboy-root-command.md)

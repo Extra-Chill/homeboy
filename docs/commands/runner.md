@@ -137,6 +137,11 @@ The broker exposes `POST /runner/jobs`, `POST /runner/jobs/claim`,
 controllers can queue work and reverse runners can claim, stream progress, and
 return results without inbound access to the lab machine.
 
+For the Extra Chill VPS to Homeboy Lab operator path, see
+[Extra Chill VPS to Homeboy Lab reverse runner](../operators/extra-chill-lab-reverse-runner.md).
+That guide is intentionally explicit about what is available now and what remains
+gated by #2990, #2991, #2992, and #2947 before production broker exposure.
+
 ### `status`
 
 ```sh
