@@ -75,7 +75,7 @@ pub(super) fn deploy_components(
     validate_effective_remote_paths(&components, &project, base_path)?;
 
     // Gather versions
-    let local_versions: HashMap<String, String> = components
+    let mut local_versions: HashMap<String, String> = components
         .iter()
         .filter_map(|c| version::get_component_version(c).map(|v| (c.id.clone(), v)))
         .collect();
@@ -138,6 +138,11 @@ pub(super) fn deploy_components(
     if let Some(ref expected) = config.expected_version {
         verify_expected_version(&components, expected)?;
     }
+
+    local_versions = components
+        .iter()
+        .filter_map(|c| version::get_component_version(c).map(|v| (c.id.clone(), v)))
+        .collect();
 
     // Execute deployments
     let mut results: Vec<ComponentDeployResult> = vec![];
@@ -721,13 +726,16 @@ fn verify_expected_version(components: &[Component], expected: &str) -> Result<(
     let mut mismatches = Vec::new();
 
     for component in components {
-        if let Some(local_version) = version::get_component_version(component) {
-            if local_version != expected {
-                mismatches.push(format!(
-                    "'{}': local version is {} (expected {})",
-                    component.id, local_version, expected
-                ));
-            }
+        match version::get_component_version(component) {
+            Some(local_version) if local_version == expected => {}
+            Some(local_version) => mismatches.push(format!(
+                "'{}': local version is {} (expected {})",
+                component.id, local_version, expected
+            )),
+            None => mismatches.push(format!(
+                "'{}': local version could not be read (expected {})",
+                component.id, expected
+            )),
         }
     }
 
@@ -865,6 +873,29 @@ mod tests {
             .expect_err("default tag deploy should still require an explicit override");
         assert!(
             err.message.contains("HEAD has unreleased commits"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn expected_version_rejects_stale_component_worktree() {
+        let dir = TempDir::new().expect("temp dir");
+        let package_json = dir.path().join("package.json");
+        std::fs::write(&package_json, r#"{"version":"1.0.0"}"#).expect("write package.json");
+
+        let mut component = make_component("demo", &dir.path().to_string_lossy());
+        component.version_targets = Some(vec![crate::core::component::VersionTarget {
+            file: "package.json".to_string(),
+            pattern: Some(r#""version"\s*:\s*"([^"]+)""#.to_string()),
+        }]);
+
+        let err = verify_expected_version(&[component], "1.0.1")
+            .expect_err("stale registered worktree must not pass release deploy preflight");
+
+        assert!(
+            err.message
+                .contains("local version is 1.0.0 (expected 1.0.1)"),
             "unexpected error: {}",
             err.message
         );
