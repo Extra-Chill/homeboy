@@ -27,8 +27,12 @@ pub(super) fn plan_deployment(component_id: &str) -> ReleaseDeploymentResult {
     }
 }
 
-pub(super) fn run_deployment_step(component_id: &str, local_path: &str) -> ReleaseStepResult {
-    let deployment = execute_deployment(component_id, local_path);
+pub(super) fn run_deployment_step(
+    component_id: &str,
+    local_path: &str,
+    expected_version: Option<&str>,
+) -> ReleaseStepResult {
+    let deployment = execute_deployment(component_id, local_path, expected_version);
     let deploy_failed = deployment.summary.failed > 0;
 
     ReleaseStepResult {
@@ -57,7 +61,11 @@ pub(super) fn extract_deployment_from_run(run: &ReleaseRun) -> Option<ReleaseDep
         .and_then(|deployment| serde_json::from_value(deployment.clone()).ok())
 }
 
-fn execute_deployment(component_id: &str, local_path: &str) -> ReleaseDeploymentResult {
+fn execute_deployment(
+    component_id: &str,
+    local_path: &str,
+    expected_version: Option<&str>,
+) -> ReleaseDeploymentResult {
     let projects = release_deploy_targets(component_id);
 
     if projects.is_empty() {
@@ -74,21 +82,7 @@ fn execute_deployment(component_id: &str, local_path: &str) -> ReleaseDeployment
         projects.len()
     );
 
-    let config = DeployConfig {
-        component_ids: vec![component_id.to_string()],
-        all: false,
-        outdated: false,
-        behind_upstream: false,
-        dry_run: false,
-        check: false,
-        force: true,
-        skip_build: false,
-        keep_deps: false,
-        expected_version: None,
-        no_pull: true,
-        head: true,
-        tagged: true,
-    };
+    let config = release_deployment_config(component_id, expected_version);
 
     let deployment = match deploy::run_multi(&projects, &[component_id.to_string()], &config) {
         Ok(result) => ReleaseDeploymentResult {
@@ -133,6 +127,24 @@ fn execute_deployment(component_id: &str, local_path: &str) -> ReleaseDeployment
 
     cleanup_release_artifacts(local_path);
     deployment
+}
+
+fn release_deployment_config(component_id: &str, expected_version: Option<&str>) -> DeployConfig {
+    DeployConfig {
+        component_ids: vec![component_id.to_string()],
+        all: false,
+        outdated: false,
+        behind_upstream: false,
+        dry_run: false,
+        check: false,
+        force: true,
+        skip_build: false,
+        keep_deps: false,
+        expected_version: expected_version.map(str::to_string),
+        no_pull: false,
+        head: false,
+        tagged: true,
+    }
 }
 
 fn release_deploy_targets(component_id: &str) -> Vec<String> {
@@ -184,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_run_deployment_step() {
-        let result = super::run_deployment_step("definitely-not-used-by-projects", "/tmp");
+        let result = super::run_deployment_step("definitely-not-used-by-projects", "/tmp", None);
 
         assert_eq!(result.id, "deploy");
         assert_eq!(result.status, ReleaseStepStatus::Success);
@@ -217,5 +229,25 @@ mod tests {
 
         let extracted = extract_deployment_from_run(&run).expect("deployment result");
         assert_eq!(extracted.summary.total_projects, 0);
+    }
+
+    #[test]
+    fn release_deploy_config_uses_tagged_release_version() {
+        let config = super::release_deployment_config("demo", Some("1.2.3"));
+
+        assert_eq!(config.component_ids, vec!["demo".to_string()]);
+        assert_eq!(config.expected_version, Some("1.2.3".to_string()));
+        assert!(
+            config.tagged,
+            "release deploy must use tagged deploy semantics"
+        );
+        assert!(
+            !config.head,
+            "release deploy must not deploy the registered worktree HEAD"
+        );
+        assert!(
+            !config.no_pull,
+            "release deploy must fetch/pull before checking out the released tag"
+        );
     }
 }

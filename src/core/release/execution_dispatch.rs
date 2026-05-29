@@ -123,6 +123,7 @@ pub(super) fn execute_release_plan_step(
         "deploy" => Ok(Some(super::deployment::run_deployment_step(
             context.component_id,
             &context.component.local_path,
+            context.state.version.as_deref(),
         ))),
         step_kind if step_kind.starts_with("publish.") => {
             let target = step_kind.strip_prefix("publish.").unwrap_or_default();
