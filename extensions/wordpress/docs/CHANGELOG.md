@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.37] - 2026-05-29
+
+### Fixed
+- declare WP Codebox seed excludes
+
 ## [2.102.36] - 2026-05-29
 
 ### Fixed
