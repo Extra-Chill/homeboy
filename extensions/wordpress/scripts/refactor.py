@@ -1110,15 +1110,11 @@ def refactor_source(data):
         plan = json.load(f)
 
     changed_files = []
+    failure_message = ''
     if data.get('write') and os.path.exists(runs_path):
         with open(runs_path, 'r') as f:
             run = json.load(f)
         failure_message = wp_codebox_fanout_failure_message(run)
-        if failure_message:
-            return {
-                'handled': True,
-                'fatal_error': failure_message,
-            }
         try:
             component_root = data.get('root') or data.get('component_path') or os.getcwd()
             changed_files = apply_wp_codebox_fanout_artifacts(
@@ -1131,6 +1127,11 @@ def refactor_source(data):
             return {
                 'handled': True,
                 'fatal_error': str(error),
+            }
+        if failure_message and not changed_files:
+            return {
+                'handled': True,
+                'fatal_error': failure_message,
             }
 
     fix_results = []
@@ -1151,6 +1152,8 @@ def refactor_source(data):
     ]
     if data.get('write'):
         warnings.append(f"WP Codebox audit fan-out run: {runs_path}")
+        if failure_message and changed_files:
+            warnings.append(f"WP Codebox audit fan-out partial failure: {failure_message}")
 
     return {
         'handled': True,
