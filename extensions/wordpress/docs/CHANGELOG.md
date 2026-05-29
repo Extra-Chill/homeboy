@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.31] - 2026-05-29
+
+### Fixed
+- attach runner metrics to wp codebox fanout
+
 ## [2.102.30] - 2026-05-28
 
 ### Fixed
