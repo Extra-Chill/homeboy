@@ -157,10 +157,10 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-29T17:32:46Z",
+      "created_at": "2026-05-29T23:50:24Z",
       "item_count": 50,
       "known_fingerprints": [
-        "artifact_portability::observation:983e3a8f-c469-4b87-9ae1-e36a8224d195::NonPortableArtifactPath",
+        "artifact_portability::observation:9b321347-b30e-42aa-92aa-b33e64f776c9::NonPortableArtifactPath",
         "dead_code::src/core/engine/temp.rs::UnreferencedExport",
         "intra-method-duplication::src/core/extension/refactor_protocol.rs::IntraMethodDuplicate",
         "output_capture::src/commands/git.rs::UnboundedOutputCapture",
