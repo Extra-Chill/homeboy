@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.103.1] - 2026-05-29
+
+### Changed
+- Revert "feat: support Codebox agent sandbox bench workloads (#872)"
+
 ## [2.103.0] - 2026-05-29
 
 ### Added
