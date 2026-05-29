@@ -126,6 +126,12 @@ const review = {
 
 fs.writeFileSync(path.join(artifactRoot, 'manifest.json'), JSON.stringify({ files: [] }, null, 2) + '\n')
 fs.writeFileSync(path.join(artifactRoot, 'metadata.json'), JSON.stringify({ artifacts: { review: 'files/review.json', changedFiles: 'files/changed-files.json', patch: 'files/patch.diff' } }, null, 2) + '\n')
+fs.writeFileSync(path.join(filesRoot, 'runtime-reference-manifest.json'), JSON.stringify({
+  schema: 'wp-codebox/runtime-reference-manifest-fixture/v1',
+  runtime: { id: 'runtime-fixture', provider: 'wordpress-playground' },
+  references: [{ kind: 'snapshot', digest: 'sha256:runtime-fixture' }],
+  apiToken: 'fixture-secret-token',
+}, null, 2) + '\n')
 fs.writeFileSync(path.join(filesRoot, 'changed-files.json'), JSON.stringify(changedFiles, null, 2) + '\n')
 fs.writeFileSync(path.join(filesRoot, 'review.json'), JSON.stringify(review, null, 2) + '\n')
 fs.writeFileSync(path.join(filesRoot, 'patch.diff'), 'diff --git a/generated.txt b/generated.txt\n')
@@ -164,6 +170,7 @@ process.stdout.write(JSON.stringify({
     metadataPath: path.join(artifactRoot, 'metadata.json'),
     blueprintAfterPath: path.join(artifactRoot, 'blueprint.after.json'),
     capturedMountsPath: path.join(filesRoot, 'mounted-files.json'),
+    runtimeReferenceManifestPath: path.join(filesRoot, 'runtime-reference-manifest.json'),
     changedFilesPath: path.join(filesRoot, 'changed-files.json'),
     patchPath: path.join(filesRoot, 'patch.diff'),
     reviewPath: path.join(filesRoot, 'review.json'),
@@ -193,6 +200,7 @@ jq -n \
             args: ["--scope", "smoke"]
         },
         prompt: "Smoke the WP Codebox runner adapter.",
+        ability_tools: [{name: "fixture_tool", apiToken: "fixture-tool-secret"}],
         wp_codebox_components: {
             agents_api: $agentsApi,
             data_machine: $dataMachine,
@@ -228,8 +236,21 @@ review_schema=$(jq -r "$scenario | .metadata.wp_codebox.review_payload.schema //
 changed_files_schema=$(jq -r "$scenario | .metadata.wp_codebox.changed_files.schema // \"missing\"" "$RESULTS_TMPFILE")
 review_artifact=$(jq -r "$scenario | .artifacts.wp_codebox_review.kind // \"missing\"" "$RESULTS_TMPFILE")
 patch_artifact=$(jq -r "$scenario | .artifacts.wp_codebox_patch.kind // \"missing\"" "$RESULTS_TMPFILE")
-if [ "$wp_codebox_success" != "true" ] || [ -z "$artifact_dir" ] || [ "$review_schema" != "wp-codebox/artifact-review/v1" ] || [ "$changed_files_schema" != "wp-codebox/changed-files/v1" ] || [ "$review_artifact" != "review" ] || [ "$patch_artifact" != "patch" ]; then
+runtime_manifest_artifact=$(jq -r "$scenario | .artifacts.wp_codebox_runtime_reference_manifest.kind // \"missing\"" "$RESULTS_TMPFILE")
+runtime_manifest_schema=$(jq -r "$scenario | .metadata.wp_codebox.runtime_reference_manifest.schema // \"missing\"" "$RESULTS_TMPFILE")
+runtime_manifest_secret=$(jq -r "$scenario | .metadata.wp_codebox.runtime_reference_manifest.apiToken // \"missing\"" "$RESULTS_TMPFILE")
+if [ "$wp_codebox_success" != "true" ] || [ -z "$artifact_dir" ] || [ "$review_schema" != "wp-codebox/artifact-review/v1" ] || [ "$changed_files_schema" != "wp-codebox/changed-files/v1" ] || [ "$review_artifact" != "review" ] || [ "$patch_artifact" != "patch" ] || [ "$runtime_manifest_artifact" != "runtime-reference-manifest" ] || [ "$runtime_manifest_schema" != "wp-codebox/runtime-reference-manifest-fixture/v1" ] || [ "$runtime_manifest_secret" != "[redacted]" ]; then
     echo "ERROR: wp_codebox metadata missing (success=$wp_codebox_success artifact_dir=$artifact_dir)" >&2
+    cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+
+runner_evidence_schema=$(jq -r "$scenario | .metadata.runner_evidence.schema // \"missing\"" "$RESULTS_TMPFILE")
+runner_evidence_marker=$(jq -r "$scenario | .metadata.runner_evidence.redaction.marker // \"missing\"" "$RESULTS_TMPFILE")
+runner_evidence_tool_secret=$(jq -r "$scenario | .metadata.runner_evidence.tool_surface.ability_tools[0].apiToken // \"missing\"" "$RESULTS_TMPFILE")
+runner_evidence_runtime_manifest=$(jq -r "$scenario | .metadata.runner_evidence.runtime_surface.runtime_reference_manifest_available // false" "$RESULTS_TMPFILE")
+if [ "$runner_evidence_schema" != "homeboy/datamachine-agent-runner-evidence/v1" ] || [ "$runner_evidence_marker" != "[redacted]" ] || [ "$runner_evidence_tool_secret" != "[redacted]" ] || [ "$runner_evidence_runtime_manifest" != "true" ]; then
+    echo "ERROR: generic runner evidence missing or unredacted" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
 fi
@@ -241,11 +262,12 @@ runtime_trace_available=$(jq -r "$scenario | .metadata.evidence_references.refer
 replay_bundle_available=$(jq -r "$scenario | .metadata.evidence_references.references.replay_bundle_artifact.available // false" "$RESULTS_TMPFILE")
 verifier_available=$(jq -r "$scenario | .metadata.evidence_references.references.artifact_verifier_result.available // false" "$RESULTS_TMPFILE")
 policy_available=$(jq -r "$scenario | .metadata.evidence_references.references.workspace_policy_result.available // false" "$RESULTS_TMPFILE")
+runtime_manifest_available=$(jq -r "$scenario | .metadata.evidence_references.references.wp_codebox_runtime_reference_manifest.available // false" "$RESULTS_TMPFILE")
 transcript_path=$(jq -r "$scenario | .metadata.evidence_references.references.transcript_artifact.path // \"\"" "$RESULTS_TMPFILE")
 pull_request_value=$(jq -r "$scenario | .metadata.evidence_references.references.pull_request.value // \"\"" "$RESULTS_TMPFILE")
 workspace_branch_value=$(jq -r "$scenario | .metadata.evidence_references.references.workspace_branch.value // \"\"" "$RESULTS_TMPFILE")
 trace_gap=$(jq -r "$scenario | any(.metadata.evidence_references.compatibility_gaps[]?; .field == \"runtime_episode_trace\")" "$RESULTS_TMPFILE")
-if [ "$evidence_schema" != "homeboy/datamachine-agent-evidence-references/v1" ] || [ "$homeboy_result_path" != "$RESULTS_TMPFILE" ] || [ "$wp_codebox_bundle_available" != "true" ] || [ "$runtime_trace_available" != "true" ] || [ "$replay_bundle_available" != "true" ] || [ "$verifier_available" != "true" ] || [ "$policy_available" != "true" ] || [ "$transcript_path" != "/tmp/wp-codebox-smoke-transcript.json" ] || [ "$pull_request_value" != "https://github.com/example/repo/pull/123" ] || [ "$workspace_branch_value" != "agent-artifacts/example" ] || [ "$trace_gap" != "false" ]; then
+if [ "$evidence_schema" != "homeboy/datamachine-agent-evidence-references/v1" ] || [ "$homeboy_result_path" != "$RESULTS_TMPFILE" ] || [ "$wp_codebox_bundle_available" != "true" ] || [ "$runtime_trace_available" != "true" ] || [ "$replay_bundle_available" != "true" ] || [ "$verifier_available" != "true" ] || [ "$policy_available" != "true" ] || [ "$runtime_manifest_available" != "true" ] || [ "$transcript_path" != "/tmp/wp-codebox-smoke-transcript.json" ] || [ "$pull_request_value" != "https://github.com/example/repo/pull/123" ] || [ "$workspace_branch_value" != "agent-artifacts/example" ] || [ "$trace_gap" != "false" ]; then
     echo "ERROR: stable evidence references missing or incomplete" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1

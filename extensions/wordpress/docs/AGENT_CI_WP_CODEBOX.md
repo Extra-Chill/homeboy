@@ -257,6 +257,22 @@ verifier, policy, workflow, PR, or artifact evidence is reported in
 or runner config `wp_gym_eval.benchmark_mode: true` to turn those gaps into
 projection errors for benchmark-mode jobs.
 
+Every WP Codebox-backed Data Machine agent result includes generic runner
+evidence at `metadata.runner_evidence` using schema
+`homeboy/datamachine-agent-runner-evidence/v1`. This report is benchmark-neutral
+and records the effective prompt/instruction surface, tool/ability summaries,
+workspace refs and dirty state, provider/model/runtime IDs, WP Codebox artifact
+paths, and redaction policy markers. Secret-like keys and inline token/password
+markers are redacted by default using `[redacted]`.
+
+When WP Codebox emits a runtime reference manifest path, the runner preserves it
+as `metadata.wp_codebox.runtime_reference_manifest`, exposes the path as
+`artifacts.wp_codebox_runtime_reference_manifest`, and links it from
+`metadata.evidence_references.references.wp_codebox_runtime_reference_manifest`.
+The preservation path accepts compatible manifest path names without requiring a
+final WP Codebox #222 schema, and redacts secret-like manifest fields before
+embedding payload data in reports.
+
 Final-state review URLs are only emitted when the caller supplies a hosted review
 URL in runner config or scenario metadata. The default bundle records
 `playground_review.available=false` and `final_state.available=false` rather than

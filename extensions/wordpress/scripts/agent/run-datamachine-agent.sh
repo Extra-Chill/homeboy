@@ -199,28 +199,52 @@ PHP
 
     local wp_codebox_review_input="$RUNTIME_DIR/wp-codebox-review.json"
     local wp_codebox_changed_files_input="$RUNTIME_DIR/wp-codebox-changed-files.json"
+    local wp_codebox_runtime_reference_manifest_input="$RUNTIME_DIR/wp-codebox-runtime-reference-manifest.json"
     local wp_codebox_artifacts_json="$RUNTIME_DIR/wp-codebox-artifacts.json"
     printf 'null\n' >"$wp_codebox_review_input"
     printf 'null\n' >"$wp_codebox_changed_files_input"
+    printf 'null\n' >"$wp_codebox_runtime_reference_manifest_input"
 
     local wp_codebox_review_path
     local wp_codebox_changed_files_path
+    local wp_codebox_runtime_reference_manifest_path
     wp_codebox_review_path=$(jq -r '.artifacts.reviewPath // empty' "$wp_codebox_output")
     wp_codebox_changed_files_path=$(jq -r '.artifacts.changedFilesPath // empty' "$wp_codebox_output")
+    wp_codebox_runtime_reference_manifest_path=$(jq -r '
+        [
+            .artifacts.runtimeReferenceManifestPath?,
+            .artifacts.runtimeReferencesManifestPath?,
+            .artifacts.runtime_reference_manifest_path?,
+            .artifacts.referenceManifestPath?,
+            .artifacts.runtimeReferencePath?,
+            .artifacts.runtimeReferencesPath?,
+            .artifacts.runtime.referenceManifestPath?
+        ] | map(select(type == "string" and . != "")) | first // empty
+    ' "$wp_codebox_output")
     if [ -n "$wp_codebox_review_path" ] && [ -f "$wp_codebox_review_path" ]; then
         cp "$wp_codebox_review_path" "$wp_codebox_review_input"
     fi
     if [ -n "$wp_codebox_changed_files_path" ] && [ -f "$wp_codebox_changed_files_path" ]; then
         cp "$wp_codebox_changed_files_path" "$wp_codebox_changed_files_input"
     fi
+    if [ -n "$wp_codebox_runtime_reference_manifest_path" ] && [ -f "$wp_codebox_runtime_reference_manifest_path" ]; then
+        cp "$wp_codebox_runtime_reference_manifest_path" "$wp_codebox_runtime_reference_manifest_input"
+    fi
 
     jq -n \
         --slurpfile run "$wp_codebox_output" \
         --slurpfile review "$wp_codebox_review_input" \
         --slurpfile changedFiles "$wp_codebox_changed_files_input" \
+        --slurpfile runtimeReferenceManifest "$wp_codebox_runtime_reference_manifest_input" \
         --slurpfile verifier "$artifact_verifier_result" \
         --slurpfile policy "$workspace_policy_result" \
         '
+        def secret_key($key): ($key | test("secret|token|password|passwd|authorization|cookie|nonce|api[_-]?key|access[_-]?key|private[_-]?key|bearer"; "i"));
+        def redact:
+            if type == "object" then with_entries(.value = if secret_key(.key) then "[redacted]" else (.value | redact) end)
+            elif type == "array" then map(redact)
+            elif type == "string" then gsub("(?i)(bearer|token|api[_-]?key|password|cookie|authorization|private[_-]?key)(\\s*[:=]\\s*)[^\\s,;]+"; "\\1\\2[redacted]")
+            else . end;
         ($run[0].artifacts // {}) as $artifacts
         | {
             schema: "homeboy/wp-codebox-artifacts/v1",
@@ -242,10 +266,12 @@ PHP
                 diffs: ($artifacts.diffsPath // ""),
                 changed_files: ($artifacts.changedFilesPath // ""),
                 patch: ($artifacts.patchPath // ""),
-                review: ($artifacts.reviewPath // "")
+                review: ($artifacts.reviewPath // ""),
+                runtime_reference_manifest: ($artifacts.runtimeReferenceManifestPath // $artifacts.runtimeReferencesManifestPath // $artifacts.runtime_reference_manifest_path // $artifacts.referenceManifestPath // $artifacts.runtimeReferencePath // $artifacts.runtimeReferencesPath // $artifacts.runtime.referenceManifestPath // "")
             } | with_entries(select(.value != "")),
             review_payload: ($review[0] // null),
             changed_files: ($changedFiles[0] // null),
+            runtime_reference_manifest: (($runtimeReferenceManifest[0] // null) | redact),
             artifact_verifier_result: ($verifier[0] // null),
             workspace_policy_result: ($policy[0] // null)
         }
@@ -279,7 +305,8 @@ PHP
                         wp_codebox_metadata: artifact_entry(($wpPaths.metadata // ""); "metadata"; "WP Codebox metadata"),
                         wp_codebox_review: artifact_entry(($wpPaths.review // ""); "review"; "WP Codebox review payload"),
                         wp_codebox_changed_files: artifact_entry(($wpPaths.changed_files // ""); "changed-files"; "WP Codebox changed files"),
-                        wp_codebox_patch: artifact_entry(($wpPaths.patch // ""); "patch"; "WP Codebox patch")
+                        wp_codebox_patch: artifact_entry(($wpPaths.patch // ""); "patch"; "WP Codebox patch"),
+                        wp_codebox_runtime_reference_manifest: artifact_entry(($wpPaths.runtime_reference_manifest // ""); "runtime-reference-manifest"; "WP Codebox runtime reference manifest")
                     } | with_entries(select(.value.path != ""))),
                     metadata: (($workload.metadata // {}) + {
                         wp_codebox: {
@@ -291,6 +318,7 @@ PHP
                             workspace_policy_result: ($wpArtifacts.workspace_policy_result // null),
                             review_payload: ($wpArtifacts.review_payload // null),
                             changed_files: ($wpArtifacts.changed_files // null),
+                            runtime_reference_manifest: ($wpArtifacts.runtime_reference_manifest // null),
                             error: ($run[0].error // null)
                         }
                     })
@@ -454,6 +482,7 @@ homeboy_datamachine_agent_attach_evidence_references() {
         --arg scenarioId "$WORKLOAD_ID" \
         --arg resultsPath "$RESULTS_FILE" \
         --arg workflowRunUrl "$workflow_run_url" \
+        --argjson config "$CONFIG_JSON" \
         '
         def present($value): $value != null and $value != "" and $value != [] and $value != {};
         def ref($kind; $path; $label; $source):
@@ -462,6 +491,91 @@ homeboy_datamachine_agent_attach_evidence_references() {
             {kind: $kind, value: $value, label: $label, source: $source, available: present($value)};
         def gap($field; $reason):
             {field: $field, reason: $reason, compatibility_gap: true};
+        def secret_key($key): ($key | test("secret|token|password|passwd|authorization|cookie|nonce|api[_-]?key|access[_-]?key|private[_-]?key|bearer"; "i"));
+        def redact:
+            if type == "object" then with_entries(.value = if secret_key(.key) then "[redacted]" else (.value | redact) end)
+            elif type == "array" then map(redact)
+            elif type == "string" then gsub("(?i)(bearer|token|api[_-]?key|password|cookie|authorization|private[_-]?key)(\\s*[:=]\\s*)[^\\s,;]+"; "\\1\\2[redacted]")
+            else . end;
+        def tool_summary($metadata):
+            ([
+                ($metadata.tool_audit_events // [])[]?,
+                ($metadata.engine_data.tool_execution_summary // [])[]?,
+                ($metadata.engine_data.tool_results // [])[]?,
+                ($metadata.engine_data.github_tool_results // [])[]?
+            ] | map(select(type == "object")) | map({
+                tool_name: (.tool_name // .action_name // .name // ""),
+                tool_source: (.tool_source // .source // ""),
+                success: (.success // false),
+                result_status: (.result_status // (if (.success // false) then "success" else "unknown" end)),
+                parameters_redacted: (.parameters_redacted // true),
+                parameters_sha256: (.parameters_sha256 // .args_sha256 // ""),
+                result_sha256: (.result_sha256 // ""),
+                error_type: (.error_type // "")
+            } | with_entries(select(.value != "")))) as $events
+            | {
+                count: ($events | length),
+                names: ($events | map(.tool_name) | map(select(. != "")) | unique),
+                events: $events
+            };
+        def runner_evidence($scenario):
+            ($scenario.metadata // {}) as $metadata
+            | ($metadata.wp_codebox.canonical_artifacts // {}) as $wpPaths
+            | ($metadata.runner_workspace_capture // {}) as $workspaceCapture
+            | ($workspaceCapture.status // {}) as $workspaceStatus
+            | {
+                schema: "homeboy/datamachine-agent-runner-evidence/v1",
+                redaction: {
+                    applied: true,
+                    marker: "[redacted]",
+                    policy: "key-name and inline secret marker redaction for prompt/tool/workspace/runtime evidence"
+                },
+                prompt_surface: {
+                    sha256: ($metadata.fingerprints.prompt.sha256 // ""),
+                    bytes: ($metadata.fingerprints.prompt.bytes // (($metadata.prompt // "") | length)),
+                    prompt: (($metadata.prompt // "") | redact),
+                    prompt_env: (($config.prompt_env // "") | redact),
+                    instruction_sources: ([
+                        {kind: "bundle", path: ($metadata.bundle_path // $config.bundle_path // "")},
+                        {kind: "flow", slug: ($metadata.flow_slug // $config.flow_slug // "")},
+                        {kind: "agent", slug: ($metadata.agent_slug // $config.agent_slug // "")}
+                    ] | map(select(.path != "" or .slug != "")))
+                },
+                tool_surface: {
+                    required_abilities: (($config.required_abilities // []) | redact),
+                    ability_tools: (($config.ability_tools // []) | redact),
+                    tool_recorders: (($config.tool_recorders // []) | redact),
+                    audit_summary: tool_summary($metadata)
+                },
+                workspace_surface: {
+                    configured: (($config.runner_workspace // {}) | redact),
+                    provisioned: (($metadata.runner_workspace // {}) | redact),
+                    captured: {
+                        enabled: ($workspaceCapture.enabled // false),
+                        changed: ($workspaceCapture.changed // false),
+                        handle: ($workspaceStatus.handle // $workspaceStatus.name // ""),
+                        branch: ($workspaceStatus.branch // ""),
+                        dirty: ($workspaceStatus.dirty // null),
+                        files: (($workspaceStatus.files // []) | redact),
+                        diff_redacted: (if present($workspaceCapture.diff) then true else false end)
+                    } | with_entries(select(.value != null and .value != "" and .value != []))
+                },
+                runtime_surface: {
+                    provider: ($metadata.provider // $config.provider // ""),
+                    model: ($metadata.model // $config.model // ""),
+                    runtime_versions: (($metadata.runtime_versions // {}) | redact),
+                    wp_codebox_runtime: (($metadata.wp_codebox.runtime // null) | redact),
+                    wp_codebox_paths: ($wpPaths | redact),
+                    runtime_reference_manifest_available: present($metadata.wp_codebox.runtime_reference_manifest)
+                } | with_entries(select(.value != null and .value != "" and .value != {})),
+                config_surface: ({
+                    component_id: ($config.component_id // ""),
+                    workload_id: ($config.workload_id // ""),
+                    workload_label: ($config.workload_label // ""),
+                    dry_run: ($config.dry_run // false),
+                    secret_env_names: (($config.secret_env // $config.secretEnv // []) | if type == "array" then . else [] end)
+                } | redact | with_entries(select(.value != "" and .value != [])))
+            };
         def first_field($source; $name):
             ([$source | .. | objects | .[$name]? | select(present(.))] | first) // null;
         def first_tool_pr_url($metadata):
@@ -499,6 +613,7 @@ homeboy_datamachine_agent_attach_evidence_references() {
                     homeboy_result_json: ref("json"; $resultsPath; "Homeboy result JSON"; "homeboy"),
                     wp_codebox_artifact_bundle: ref("directory"; ($wpPaths.directory // ""); "WP Codebox artifact bundle"; "wp-codebox"),
                     wp_codebox_manifest: ref("json"; ($wpPaths.manifest // ""); "WP Codebox manifest"; "wp-codebox"),
+                    wp_codebox_runtime_reference_manifest: ref("json"; ($wpPaths.runtime_reference_manifest // ""); "WP Codebox runtime reference manifest"; "wp-codebox"),
                     artifact_verifier_result: inline_ref("json"; $artifactVerifier; "Artifact verifier result"; "runner"),
                     workspace_policy_result: inline_ref("json"; $policyResult; "Workspace policy result"; "data-machine-code"),
                     runtime_episode_trace: ref("jsonl"; $episodeTrace; "Runtime episode trace"; "homeboy"),
@@ -528,7 +643,7 @@ homeboy_datamachine_agent_attach_evidence_references() {
                     if present($replayBundle) then empty else gap("replay_bundle_artifact"; "No replay bundle artifact was generated for this run.") end
                 ])
             };
-        .scenarios |= map(if .id == $scenarioId then .metadata.evidence_references = evidence(.) else . end)
+        .scenarios |= map(if .id == $scenarioId then .metadata.runner_evidence = runner_evidence(.) | .metadata.evidence_references = evidence(.) else . end)
         ' "$RESULTS_FILE" >"$updated_results"
     mv "$updated_results" "$RESULTS_FILE"
 }

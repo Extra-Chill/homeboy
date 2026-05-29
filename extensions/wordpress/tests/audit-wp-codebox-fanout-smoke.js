@@ -209,8 +209,16 @@ process.stdin.on('end', () => {
     process.exit(3);
   }
   const artifactDirectory = path.join(root, 'artifact-' + request.sandbox_session_id);
+  const filesDirectory = path.join(artifactDirectory, 'files');
   fs.mkdirSync(artifactDirectory, { recursive: true });
+  fs.mkdirSync(filesDirectory, { recursive: true });
   fs.writeFileSync(path.join(artifactDirectory, 'artifact.txt'), 'fixture artifact bytes\\n');
+  fs.writeFileSync(path.join(filesDirectory, 'runtime-reference-manifest.json'), JSON.stringify({
+    schema: 'wp-codebox/runtime-reference-manifest-fixture/v1',
+    runtime: { id: request.sandbox_session_id, provider: 'wordpress-playground' },
+    references: [{ kind: 'workspace', digest: 'sha256:fixture-reference' }],
+    cookie: 'fixture-cookie-secret',
+  }, null, 2) + '\\n');
   process.stdout.write(JSON.stringify({
     success: true,
     session: {
@@ -222,6 +230,7 @@ process.stdin.on('end', () => {
       id: 'artifact-' + request.sandbox_session_id,
       directory: artifactDirectory,
       preview: { url: 'https://preview.example.test/' + request.sandbox_session_id },
+      runtimeReferenceManifestPath: path.join(filesDirectory, 'runtime-reference-manifest.json'),
     },
     metrics: {
       duration_ms: 99,
@@ -566,6 +575,9 @@ try {
   assert.equal(completedRecord.result.session.id, completedRecord.sandbox_session_id);
   assert.equal(completedRecord.result.session.orchestrator.issue_url, 'https://github.com/Extra-Chill/homeboy-extensions/issues/773');
   assert.match(completedRecord.artifact.id, /^artifact-homeboy-audit-/);
+  assert.equal(completedRecord.artifact.runtime_reference_manifest.available, true);
+  assert.equal(completedRecord.artifact.runtime_reference_manifest.payload.schema, 'wp-codebox/runtime-reference-manifest-fixture/v1');
+  assert.equal(completedRecord.artifact.runtime_reference_manifest.payload.cookie, '[redacted]');
   assert.equal(completedRecord.outcome.kind, 'fix_pr');
   assert.equal(completedRecord.outcome.pr_url, 'https://github.com/Extra-Chill/homeboy-extensions/pull/777');
   assertMetrics(completedRecord, { runnerMetrics: true, artifactBytes: true });
