@@ -36,6 +36,28 @@ function run(command, args, options = {}) {
   return (result.stdout || '').trim();
 }
 
+function assertMetrics(record, options = {}) {
+  assert.ok(record.metrics, `missing metrics for ${record.group_key}`);
+  assert.equal(typeof record.metrics.duration_ms, 'number');
+  assert.ok(record.metrics.duration_ms >= 0);
+  assert.ok(Object.hasOwn(record.metrics, 'peak_rss_bytes'));
+  assert.equal(typeof record.metrics.sample_count, 'number');
+  assert.ok(Object.hasOwn(record.metrics, 'child_process_count_peak'));
+  assert.ok(Object.hasOwn(record.metrics, 'artifact_bytes'));
+  if (options.runnerMetrics) {
+    assert.equal(record.metrics.peak_rss_bytes, 123456);
+    assert.equal(record.metrics.sample_count, 3);
+    assert.equal(record.metrics.child_process_count_peak, 2);
+    assert.equal(record.metrics.cpu_user_ms, 12);
+    assert.equal(record.metrics.cpu_system_ms, 4);
+    assert.equal(record.metrics.source, 'linux_procfs_process_tree');
+  }
+  if (options.artifactBytes) {
+    assert.equal(typeof record.metrics.artifact_bytes, 'number');
+    assert.ok(record.metrics.artifact_bytes > 0);
+  }
+}
+
 function createBundle(root, name, changedPath, relativePath) {
   const bundle = path.join(root, name);
   const files = path.join(bundle, 'files');
@@ -106,6 +128,8 @@ function createWpCodeboxFixtureCommand(root) {
   fs.writeFileSync(scriptPath, `#!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
+const path = require('node:path');
+const root = ${JSON.stringify(root)};
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
@@ -139,6 +163,25 @@ process.stdin.on('end', () => {
     }));
     process.exit(2);
   }
+  if (process.env.FIXTURE_NOOP_GROUP === request.group_key) {
+    process.stdout.write(JSON.stringify({
+      success: true,
+      outcome: {
+        kind: 'noop_artifact',
+        false_positive: true,
+      },
+      metrics: {
+        duration_ms: 99,
+        peak_rss_bytes: 123456,
+        sample_count: 3,
+        child_process_count_peak: 2,
+        cpu_user_ms: 12,
+        cpu_system_ms: 4,
+        source: 'linux_procfs_process_tree',
+      },
+    }));
+    process.exit(0);
+  }
   if (request.group_key === 'docs-reference') {
     if (process.env.FIXTURE_EXPECT_INCREMENTAL_RUN) {
       const run = JSON.parse(fs.readFileSync(process.env.FIXTURE_EXPECT_INCREMENTAL_RUN, 'utf8'));
@@ -165,6 +208,9 @@ process.stdin.on('end', () => {
     process.stderr.write('fixture docs-reference failure\\n');
     process.exit(3);
   }
+  const artifactDirectory = path.join(root, 'artifact-' + request.sandbox_session_id);
+  fs.mkdirSync(artifactDirectory, { recursive: true });
+  fs.writeFileSync(path.join(artifactDirectory, 'artifact.txt'), 'fixture artifact bytes\\n');
   process.stdout.write(JSON.stringify({
     success: true,
     session: {
@@ -174,8 +220,17 @@ process.stdin.on('end', () => {
     },
     artifacts: {
       id: 'artifact-' + request.sandbox_session_id,
-      directory: '/tmp/' + request.sandbox_session_id,
+      directory: artifactDirectory,
       preview: { url: 'https://preview.example.test/' + request.sandbox_session_id },
+    },
+    metrics: {
+      duration_ms: 99,
+      peak_rss_bytes: 123456,
+      sample_count: 3,
+      child_process_count_peak: 2,
+      cpu_user_ms: 12,
+      cpu_system_ms: 4,
+      source: 'linux_procfs_process_tree',
     },
     outcome: {
       pr_url: 'https://github.com/Extra-Chill/homeboy-extensions/pull/' + (request.group_key === 'docs-reference' ? '778' : '777')
@@ -513,6 +568,7 @@ try {
   assert.match(completedRecord.artifact.id, /^artifact-homeboy-audit-/);
   assert.equal(completedRecord.outcome.kind, 'fix_pr');
   assert.equal(completedRecord.outcome.pr_url, 'https://github.com/Extra-Chill/homeboy-extensions/pull/777');
+  assertMetrics(completedRecord, { runnerMetrics: true, artifactBytes: true });
   assert.equal(execution.outcomes.length, 2);
   assert.equal(failedRecord.status, 'failed');
   assert.equal(failedRecord.command.exit_code, 3);
@@ -549,6 +605,19 @@ try {
   const providerFinalRun = readJson(providerRunsOutputPath);
   assert.equal(providerFinalRun.outcomes.find((outcome) => outcome.kind === 'provider_error').retryable, true);
 
+  const noopExecution = await executeAuditWpCodeboxFanout({
+    report,
+    wp_codebox_command: process.execPath,
+    wp_codebox_args: [fixtureCommand],
+    concurrency: 1,
+    env: { FIXTURE_NOOP_GROUP: 'PHPCS Formatting/Auto Fix!' },
+  });
+  const noopRecord = noopExecution.records.find((record) => record.group_key === 'PHPCS Formatting/Auto Fix!');
+  assert.equal(noopRecord.status, 'completed');
+  assert.equal(noopRecord.outcome.kind, 'noop_artifact');
+  assertMetrics(noopRecord, { runnerMetrics: true });
+  assert.equal(noopRecord.metrics.artifact_bytes, null);
+
   const timeoutRunsOutputPath = path.join(root, 'fanout-timeout-run.json');
   const timeoutExecution = await executeAuditWpCodeboxFanout({
     report,
@@ -570,6 +639,9 @@ try {
   assert.equal(timeoutRecord.outcome.kind, 'timeout');
   assert.match(timeoutRecord.stdout, /fixture partial stdout before timeout/);
   assert.match(timeoutRecord.stderr, /fixture partial stderr before timeout/);
+  assertMetrics(timeoutRecord);
+  assert.equal(timeoutRecord.metrics.sample_count, 0);
+  assert.equal(timeoutRecord.metrics.artifact_bytes, null);
   const timeoutFollowupRecord = timeoutExecution.records.find((record) => record.group_key === 'docs-reference');
   assert.equal(timeoutFollowupRecord.status, 'failed');
   assert.equal(timeoutFollowupRecord.command.exit_code, 3);
@@ -617,7 +689,7 @@ try {
   assert.equal(cliExecution.records.length, 2);
   assert.equal(cliExecution.records[0].schema, 'homeboy/audit-wp-codebox-run/v1');
   assert.match(cliExecutionResult.stderr, /\[homeboy wp-codebox fanout\] started 1\/2 group=PHPCS Formatting\/Auto Fix! session=homeboy-audit-/);
-  assert.match(cliExecutionResult.stderr, /\[homeboy wp-codebox fanout\] completed 1\/2 group=PHPCS Formatting\/Auto Fix! session=homeboy-audit-.*artifact=\/tmp\/homeboy-audit-/);
+  assert.match(cliExecutionResult.stderr, /\[homeboy wp-codebox fanout\] completed 1\/2 group=PHPCS Formatting\/Auto Fix! session=homeboy-audit-.*artifact=.*artifact-homeboy-audit-/);
   assert.match(cliExecutionResult.stderr, /\[homeboy wp-codebox fanout\] failed 2\/2 group=docs-reference session=homeboy-audit-/);
   assert.doesNotMatch(cliExecutionResult.stderr, /FIXTURE_SECRET_TOKEN/);
 

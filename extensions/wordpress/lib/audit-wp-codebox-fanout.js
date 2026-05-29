@@ -61,6 +61,44 @@ function tryParseJson(value) {
   }
 }
 
+function fanoutRecordMetrics(startedAt, finishedAt, parsed, artifact) {
+  const runnerMetrics = parsed && typeof parsed === 'object' && parsed.metrics && typeof parsed.metrics === 'object'
+    ? parsed.metrics
+    : {};
+  const artifactDirectory = artifact?.directory || artifact?.path || '';
+
+  return {
+    duration_ms: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
+    peak_rss_bytes: numberOrNull(runnerMetrics.peak_rss_bytes),
+    sample_count: numberOrDefault(runnerMetrics.sample_count, 0),
+    child_process_count_peak: numberOrNull(runnerMetrics.child_process_count_peak),
+    artifact_bytes: artifactDirectory ? directorySizeBytes(artifactDirectory) : null,
+    ...(runnerMetrics.cpu_user_ms === undefined ? {} : { cpu_user_ms: numberOrNull(runnerMetrics.cpu_user_ms) }),
+    ...(runnerMetrics.cpu_system_ms === undefined ? {} : { cpu_system_ms: numberOrNull(runnerMetrics.cpu_system_ms) }),
+    ...(runnerMetrics.source ? { source: runnerMetrics.source } : {}),
+  };
+}
+
+function numberOrNull(value) {
+  return Number.isFinite(Number(value)) ? Number(value) : null;
+}
+
+function numberOrDefault(value, fallback) {
+  return Number.isFinite(Number(value)) ? Number(value) : fallback;
+}
+
+function directorySizeBytes(directory) {
+  try {
+    const stat = fs.lstatSync(directory);
+    if (!stat.isDirectory()) {
+      return stat.size;
+    }
+    return fs.readdirSync(directory).reduce((total, entry) => total + directorySizeBytes(path.join(directory, entry)), 0);
+  } catch {
+    return null;
+  }
+}
+
 function progressEvent(status, taskRequest, plan, record = null) {
   const groupIndex = Number(taskRequest.orchestrator?.group_index || 0) + 1;
   const groupCount = Number(plan.audit?.group_count || plan.task_requests.length || 0);
@@ -430,6 +468,7 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
   const stderr = result.stderr || '';
   const parsed = tryParseJson(stdout);
   const artifact = parsed && typeof parsed === 'object' && parsed.artifacts ? parsed.artifacts : null;
+  const metrics = fanoutRecordMetrics(startedAt, finishedAt, parsed, artifact);
   const taskFailure = parsed ? wpCodeboxTaskFailure(parsed) : null;
   const commandSuccess = result.status === 0 && result.error === undefined && null === taskFailure;
   const outcome = taskOutcome(taskRequest, parsed, artifact, commandSuccess, taskFailure || (result.error ? result.error.message : ''));
@@ -460,6 +499,7 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
       directory: artifact.directory || artifact.path || '',
       preview_url: artifact.preview?.url || artifact.preview_url || '',
     } : null,
+    metrics,
   };
 }
 
@@ -532,6 +572,7 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
       const finishedAt = new Date().toISOString();
       const parsed = tryParseJson(stdout);
       const artifact = parsed && typeof parsed === 'object' && parsed.artifacts ? parsed.artifacts : null;
+      const metrics = fanoutRecordMetrics(startedAt, finishedAt, parsed, artifact);
       const taskFailure = parsed ? wpCodeboxTaskFailure(parsed) : null;
       const timeoutError = timedOut ? `WP Codebox task timed out after ${taskTimeoutSeconds} seconds` : '';
       const errorMessage = timeoutError || (spawnError ? spawnError.message : (taskFailure || ''));
@@ -568,6 +609,7 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
           directory: artifact.directory || artifact.path || '',
           preview_url: artifact.preview?.url || artifact.preview_url || '',
         } : null,
+        metrics,
       });
     });
     child.stdin.end(requestJson);
