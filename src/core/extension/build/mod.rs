@@ -447,9 +447,7 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
 }
 
 fn artifact_build_command(component: &Component) -> Option<&str> {
-    if component.build_artifact.is_none() {
-        return None;
-    }
+    component.build_artifact.as_ref()?;
 
     component
         .build_command
