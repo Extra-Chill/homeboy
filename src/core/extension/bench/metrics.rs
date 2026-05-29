@@ -368,6 +368,7 @@ mod tests {
                 runs_summary: None,
             }],
             metric_policies: BTreeMap::new(),
+            metric_policy_presets: BTreeMap::new(),
         }
     }
 

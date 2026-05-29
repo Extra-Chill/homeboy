@@ -50,7 +50,8 @@ pub use distribution::BenchRunDistribution;
 pub use metrics::MetricDelta;
 pub use parsing::{
     evaluate_gates, parse_bench_results_file, parse_bench_results_str, BenchGate, BenchGateOp,
-    BenchGateResult, BenchMemory, BenchMetrics, BenchResults, BenchRunExecution, BenchScenario,
+    BenchGateResult, BenchMemory, BenchMetricPolicyPreset, BenchMetricPolicyPresetKind,
+    BenchMetrics, BenchResults, BenchRunExecution, BenchScenario,
 };
 pub use report::{
     aggregate_comparison, aggregate_comparison_with_axes, from_main_workflow,

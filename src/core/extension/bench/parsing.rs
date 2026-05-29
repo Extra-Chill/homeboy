@@ -93,6 +93,8 @@ pub struct BenchResults {
     pub scenarios: Vec<BenchScenario>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metric_policies: BTreeMap<String, BenchMetricPolicy>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metric_policy_presets: BTreeMap<String, BenchMetricPolicyPreset>,
 }
 
 /// Homeboy-owned reproducibility metadata for a bench invocation.
@@ -460,6 +462,38 @@ pub struct BenchMetricPolicy {
     pub phase: Option<BenchMetricPhase>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BenchMetricPolicyPreset {
+    pub preset: BenchMetricPolicyPresetKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regression_threshold_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regression_threshold_absolute: Option<f64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub variance_aware: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_iterations_for_variance: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regression_test: Option<RegressionTest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<BenchMetricPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchMetricPolicyPresetKind {
+    LatencyRegression,
+    MemoryRegression,
+    ColdWarmDelta,
+    FlakeNoiseThreshold,
+    AbsoluteBudget,
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -557,10 +591,94 @@ fn parse_bench_results_str_with_artifact_context(
         )
     })?;
     validate_unique_scenario_ids(&parsed)?;
+    expand_metric_policy_presets(&mut parsed)?;
     validate_variance_policies(&parsed)?;
     evaluate_spans(&mut parsed);
     artifact_validation::validate_artifact_paths(&parsed, rig_id)?;
     Ok(parsed)
+}
+
+fn expand_metric_policy_presets(results: &mut BenchResults) -> Result<()> {
+    for (metric, preset) in results.metric_policy_presets.clone() {
+        match preset.preset {
+            BenchMetricPolicyPresetKind::LatencyRegression
+            | BenchMetricPolicyPresetKind::ColdWarmDelta
+            | BenchMetricPolicyPresetKind::FlakeNoiseThreshold => {
+                results
+                    .metric_policies
+                    .entry(metric)
+                    .or_insert_with(|| preset.to_policy(BenchMetricDirection::LowerIsBetter, 5.0));
+            }
+            BenchMetricPolicyPresetKind::MemoryRegression => {
+                results
+                    .metric_policies
+                    .entry(metric)
+                    .or_insert_with(|| preset.to_policy(BenchMetricDirection::LowerIsBetter, 10.0));
+            }
+            BenchMetricPolicyPresetKind::AbsoluteBudget => {
+                let op = match (preset.max, preset.min) {
+                    (Some(_), Some(_)) => {
+                        return Err(Error::validation_invalid_argument(
+                            "metric_policy_presets",
+                            format!(
+                                "absolute budget preset for `{}` must declare either max or min, not both",
+                                metric
+                            ),
+                            None,
+                            None,
+                        ));
+                    }
+                    (Some(max), None) => Some((BenchGateOp::Lte, max)),
+                    (None, Some(min)) => Some((BenchGateOp::Gte, min)),
+                    (None, None) => None,
+                };
+                let Some((op, value)) = op else {
+                    return Err(Error::validation_invalid_argument(
+                        "metric_policy_presets",
+                        format!(
+                            "absolute budget preset for `{}` must declare max or min",
+                            metric
+                        ),
+                        None,
+                        None,
+                    ));
+                };
+                for scenario in &mut results.scenarios {
+                    if scenario.metrics.get(&metric).is_some()
+                        && !scenario.gates.iter().any(|gate| gate.metric == metric)
+                    {
+                        scenario.gates.push(BenchGate {
+                            metric: metric.clone(),
+                            op,
+                            value,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+impl BenchMetricPolicyPreset {
+    fn to_policy(
+        &self,
+        direction: BenchMetricDirection,
+        default_threshold_percent: f64,
+    ) -> BenchMetricPolicy {
+        BenchMetricPolicy {
+            direction,
+            regression_threshold_percent: Some(
+                self.regression_threshold_percent
+                    .unwrap_or(default_threshold_percent),
+            ),
+            regression_threshold_absolute: self.regression_threshold_absolute,
+            variance_aware: self.variance_aware,
+            min_iterations_for_variance: self.min_iterations_for_variance,
+            regression_test: self.regression_test,
+            phase: self.phase,
+        }
+    }
 }
 
 fn validate_unique_scenario_ids(results: &BenchResults) -> Result<()> {
@@ -1462,6 +1580,85 @@ mod tests {
         }"#;
 
         assert!(parse_bench_results_str(raw).is_err());
+    }
+
+    #[test]
+    fn latency_metric_policy_preset_expands_to_metric_policy() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "metric_policy_presets": {
+                "agent_loop_ms": {
+                    "preset": "latency_regression",
+                    "regression_threshold_percent": 7.5,
+                    "phase": "warm"
+                }
+            },
+            "scenarios": [
+                {
+                    "id": "agent-loop",
+                    "iterations": 10,
+                    "metrics": { "agent_loop_ms": 1200.0 }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+        let policy = parsed.metric_policies.get("agent_loop_ms").unwrap();
+
+        assert_eq!(policy.direction, BenchMetricDirection::LowerIsBetter);
+        assert_eq!(policy.regression_threshold_percent, Some(7.5));
+        assert_eq!(policy.phase, Some(BenchMetricPhase::Warm));
+    }
+
+    #[test]
+    fn memory_metric_policy_preset_uses_memory_threshold_default() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "metric_policy_presets": {
+                "peak_rss_bytes": { "preset": "memory_regression" }
+            },
+            "scenarios": [
+                {
+                    "id": "audit-self",
+                    "iterations": 10,
+                    "metrics": { "peak_rss_bytes": 41943040.0 }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+        let policy = parsed.metric_policies.get("peak_rss_bytes").unwrap();
+
+        assert_eq!(policy.direction, BenchMetricDirection::LowerIsBetter);
+        assert_eq!(policy.regression_threshold_percent, Some(10.0));
+    }
+
+    #[test]
+    fn absolute_budget_preset_expands_to_gate_and_budget_finding() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "metric_policy_presets": {
+                "peak_rss_bytes": { "preset": "absolute_budget", "max": 1000 }
+            },
+            "scenarios": [
+                {
+                    "id": "audit-self",
+                    "iterations": 10,
+                    "metrics": { "peak_rss_bytes": 2000.0 }
+                }
+            ]
+        }"#;
+
+        let mut parsed = parse_bench_results_str(raw).unwrap();
+        let failures = evaluate_gates(&mut parsed);
+
+        assert_eq!(parsed.scenarios[0].gates.len(), 1);
+        assert_eq!(parsed.scenarios[0].gates[0].op, BenchGateOp::Lte);
+        assert!(!failures.is_empty());
+        assert_eq!(parsed.budget_findings[0].code, "bench.gate.peak_rss_bytes");
     }
 
     #[test]

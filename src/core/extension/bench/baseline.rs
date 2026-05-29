@@ -400,6 +400,7 @@ mod tests {
             budget_findings: Vec::new(),
             scenarios,
             metric_policies: BTreeMap::new(),
+            metric_policy_presets: BTreeMap::new(),
         }
     }
 
@@ -415,6 +416,7 @@ mod tests {
             budget_findings: Vec::new(),
             scenarios,
             metric_policies,
+            metric_policy_presets: BTreeMap::new(),
         }
     }
 

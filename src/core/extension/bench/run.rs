@@ -1045,6 +1045,7 @@ fn run_concurrent_instances(
             budget_findings,
             scenarios: merged_scenarios,
             metric_policies: metric_policies_seen,
+            metric_policy_presets: std::collections::BTreeMap::new(),
         })
     };
 

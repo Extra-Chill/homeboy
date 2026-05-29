@@ -60,6 +60,7 @@ fn results_with(
         budget_findings: Vec::new(),
         scenarios,
         metric_policies: policies,
+        metric_policy_presets: BTreeMap::new(),
     }
 }
 
