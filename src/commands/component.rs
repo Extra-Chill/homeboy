@@ -155,6 +155,17 @@ enum ComponentCommand {
         #[arg(long)]
         apply: bool,
     },
+    /// Report or remove declared reconstructable artifacts for a component
+    Artifacts {
+        /// Component ID (optional when --path is provided or run from a component checkout)
+        id: Option<String>,
+        /// Discover component from a directory's homeboy.json instead of the registry
+        #[arg(long)]
+        path: Option<String>,
+        /// Remove reported artifact paths instead of dry-run reporting only
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 /// Entity-specific fields for component commands.
@@ -335,7 +346,51 @@ pub fn run(
             add_version_target(&id, &file, &pattern)
         }
         ComponentCommand::Reconcile { id, apply } => reconcile(&id, apply),
+        ComponentCommand::Artifacts { id, path, apply } => {
+            artifacts(id.as_deref(), path.as_deref(), apply)
+        }
     }
+}
+
+fn artifacts(id: Option<&str>, path: Option<&str>, apply: bool) -> CmdResult<ComponentOutput> {
+    let component =
+        component::resolve_effective(id, path, None).map_err(|e| e.with_contextual_hint())?;
+    let report = homeboy::core::component::cleanup_artifact_report(&component, apply)?;
+    let updated_fields = if apply && report.applied_count > 0 {
+        vec!["cleanup_artifacts".to_string()]
+    } else {
+        Vec::new()
+    };
+    let hint = if apply {
+        Some(format!(
+            "Removed {} reconstructable artifact path(s); source files outside declared artifacts were not touched.",
+            report.applied_count
+        ))
+    } else {
+        Some(
+            "Dry run only. Re-run with `--apply` to remove existing declared artifacts."
+                .to_string(),
+        )
+    };
+
+    Ok((
+        ComponentOutput {
+            command: "component.artifacts".to_string(),
+            id: Some(report.component_id.clone()),
+            entity: Some(serde_json::to_value(&report).map_err(|error| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "component.artifacts",
+                    "Failed to serialize artifact cleanup report",
+                    Some(error.to_string()),
+                    None,
+                )
+            })?),
+            hint,
+            updated_fields,
+            ..Default::default()
+        },
+        0,
+    ))
 }
 
 fn reconcile(id: &str, apply: bool) -> CmdResult<ComponentOutput> {

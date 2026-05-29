@@ -228,6 +228,12 @@
   "build_artifact": "target/release/homeboy",
   "build_command": "cargo build --release",
   "changelog_target": "docs/changelog.md",
+  "cleanup_artifacts": [
+    {
+      "label": "Rust build output",
+      "path": "target/"
+    }
+  ],
   "docs_dir": "docs",
   "extensions": {
     "rust": {}

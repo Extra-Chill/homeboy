@@ -1,6 +1,7 @@
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 
+pub mod artifacts;
 pub mod audit;
 pub mod drift;
 pub mod inventory;
@@ -11,6 +12,7 @@ pub mod resolution;
 pub mod scope;
 pub mod versioning;
 
+pub use artifacts::{cleanup_artifact_report, CleanupArtifactCandidate, CleanupArtifactReport};
 pub use audit::{
     ArtifactPortabilityConfig, AuditConfig, CommandStatusContractConfig,
     CommandStatusContractScenario, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
@@ -153,6 +155,15 @@ pub struct DependencyStackEdge {
     pub test: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CleanupArtifactDeclaration {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glob: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(from = "RawComponent", into = "RawComponent")]
 pub struct Component {
@@ -209,6 +220,10 @@ pub struct Component {
     /// is always drift and does not need to be listed here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_drift_files: Vec<String>,
+    /// Reconstructable repo-relative runtime, dependency, or generated outputs
+    /// that may be safely removed by cleanup/reporting surfaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleanup_artifacts: Vec<CleanupArtifactDeclaration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -271,6 +286,8 @@ struct RawComponent {
     cli_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     extra_drift_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cleanup_artifacts: Vec<CleanupArtifactDeclaration>,
 }
 
 impl From<RawComponent> for Component {
@@ -303,6 +320,7 @@ impl From<RawComponent> for Component {
             dependency_stack: raw.dependency_stack,
             cli_path: raw.cli_path,
             extra_drift_files: raw.extra_drift_files,
+            cleanup_artifacts: raw.cleanup_artifacts,
         }
     }
 }
@@ -337,6 +355,7 @@ impl From<Component> for RawComponent {
             dependency_stack: c.dependency_stack,
             cli_path: c.cli_path,
             extra_drift_files: c.extra_drift_files,
+            cleanup_artifacts: c.cleanup_artifacts,
         }
     }
 }
@@ -411,6 +430,7 @@ impl Component {
             dependency_stack: Vec::new(),
             cli_path: None,
             extra_drift_files: Vec::new(),
+            cleanup_artifacts: Vec::new(),
         }
     }
 
