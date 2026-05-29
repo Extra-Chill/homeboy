@@ -4,7 +4,9 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use homeboy::core::daemon::{self, DaemonStartResult, DaemonStatus, DaemonStopResult};
+use homeboy::core::daemon::{
+    self, BrokerConfig, BrokerConfigOptions, DaemonStartResult, DaemonStatus, DaemonStopResult,
+};
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
 
 use super::CmdResult;
@@ -33,6 +35,24 @@ enum DaemonCommand {
     Stop,
     /// Show daemon state and selected local address
     Status,
+    /// Render deployable reverse-runner broker service configuration
+    BrokerConfig {
+        /// Stable loopback address for the VPS service.
+        #[arg(long, default_value = "127.0.0.1:7421")]
+        listen_addr: String,
+        /// Homeboy binary path used by the service unit.
+        #[arg(long, default_value = "/usr/local/bin/homeboy")]
+        binary_path: String,
+        /// System user that runs the broker service.
+        #[arg(long, default_value = "homeboy")]
+        user: String,
+        /// System group that runs the broker service.
+        #[arg(long, default_value = "homeboy")]
+        group: String,
+        /// Optional public hostname to render disabled Nginx/Caddy examples.
+        #[arg(long)]
+        domain: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -42,6 +62,7 @@ pub enum DaemonOutput {
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
     Status(DaemonStatus),
+    BrokerConfig(BrokerConfig),
 }
 
 pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DaemonOutput> {
@@ -50,6 +71,22 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
         DaemonCommand::Serve { addr } => serve(&addr),
         DaemonCommand::Stop => Ok((DaemonOutput::Stop(daemon::stop()?), 0)),
         DaemonCommand::Status => Ok((DaemonOutput::Status(daemon::read_status()?), 0)),
+        DaemonCommand::BrokerConfig {
+            listen_addr,
+            binary_path,
+            user,
+            group,
+            domain,
+        } => Ok((
+            DaemonOutput::BrokerConfig(daemon::render_broker_config(BrokerConfigOptions {
+                listen_addr,
+                binary_path,
+                service_user: user,
+                service_group: group,
+                domain,
+            })?),
+            0,
+        )),
     }
 }
 
