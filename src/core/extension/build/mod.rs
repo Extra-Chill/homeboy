@@ -181,17 +181,7 @@ pub fn run(input: &str) -> Result<(BuildResult, i32)> {
 /// Thin wrapper around `execute_build_component` that adapts the return type
 /// for the deploy pipeline's error handling convention.
 pub(crate) fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
-    let result = if component.build_artifact.is_some() {
-        component
-            .build_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|command| !command.is_empty())
-            .map(|command| execute_explicit_build_command(component, command))
-            .unwrap_or_else(|| execute_build_component(component))
-    } else {
-        execute_build_component(component)
-    };
+    let result = execute_build_component(component);
 
     match result {
         Ok((output, exit_code)) => {
@@ -363,6 +353,10 @@ fn execute_build(component_id: &str, path_override: Option<&str>) -> Result<(Bui
 }
 
 fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
+    if let Some(command) = artifact_build_command(comp) {
+        return execute_explicit_build_command(comp, command);
+    }
+
     // Validate required extensions are installed before resolving build commands.
     // Without this, missing extensions cause vague "no build command" errors.
     extension::validate_required_extensions(comp)?;
@@ -452,6 +446,18 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
     ))
 }
 
+fn artifact_build_command(component: &Component) -> Option<&str> {
+    if component.build_artifact.is_none() {
+        return None;
+    }
+
+    component
+        .build_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+}
+
 /// Run pre-build scripts from all configured extensions.
 /// Returns Some((exit_code, stderr)) if any script fails, None if all pass or no scripts.
 fn run_pre_build_scripts(
@@ -531,8 +537,9 @@ mod tests {
                 .contains("homeboy component set plain-package --extension")
         }));
         assert!(err.hints.iter().any(|hint| {
-            hint.message
-                .contains("component-level `build_command` is not supported")
+            hint.message.contains(
+                "component-level `build_command` is only used for artifact-producing builds",
+            )
         }));
     }
 
@@ -560,6 +567,42 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(temp.path().join("dist/wp-codebox.zip")).unwrap(),
             "explicit"
+        );
+        assert!(!temp.path().join("dist/generic.zip").exists());
+    }
+
+    #[test]
+    fn build_run_uses_explicit_command_when_artifact_is_required() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let component = Component {
+            id: "wp-codebox".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            build_artifact: Some("packages/wordpress-plugin/dist/wp-codebox.zip".to_string()),
+            build_command: Some(
+                "mkdir -p packages/wordpress-plugin/dist && printf artifact > packages/wordpress-plugin/dist/wp-codebox.zip".to_string(),
+            ),
+            scripts: Some(ComponentScriptsConfig {
+                build: vec!["mkdir -p dist && printf generic > dist/generic.zip".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let (result, exit_code) = run_component(&component).expect("build should run");
+
+        let BuildResult::Single(output) = result else {
+            panic!("expected single build result");
+        };
+        assert_eq!(exit_code, 0);
+        assert!(output.success);
+        assert_eq!(output.build_command, component.build_command.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(
+                temp.path()
+                    .join("packages/wordpress-plugin/dist/wp-codebox.zip")
+            )
+            .unwrap(),
+            "artifact"
         );
         assert!(!temp.path().join("dist/generic.zip").exists());
     }
