@@ -23,6 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
 FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/bench-noop"
+CRITERION_FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/bench-criterion"
 
 if [ ! -d "$FIXTURE_DIR" ]; then
     echo "ERROR: fixture not found at $FIXTURE_DIR" >&2
@@ -41,11 +42,13 @@ fi
 
 RESULTS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/rust-bench-smoke-results.XXXXXX")
 LIST_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/rust-bench-list-smoke-results.XXXXXX")
+PROFILES_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/rust-bench-profiles-smoke-results.XXXXXX")
+CRITERION_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/rust-bench-criterion-smoke-results.XXXXXX")
 CARGO_TIMING_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/rust-bench-cargo-timing-results.XXXXXX")
 ARTIFACT_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/rust-bench-artifacts.XXXXXX")
 
 # shellcheck disable=SC2064
-trap "rm -f '$RESULTS_TMPFILE' '$LIST_TMPFILE' '$CARGO_TIMING_TMPFILE'; rm -rf '$ARTIFACT_TMPDIR'" EXIT
+trap "rm -f '$RESULTS_TMPFILE' '$LIST_TMPFILE' '$PROFILES_TMPFILE' '$CRITERION_TMPFILE' '$CARGO_TIMING_TMPFILE'; rm -rf '$ARTIFACT_TMPDIR'" EXIT
 
 echo "============================================"
 echo "Rust bench harness smoke test"
@@ -216,6 +219,55 @@ if [ -n "$NOOP_P95" ] && [ -n "$BUSY_P95" ]; then
         echo "  ✗ unexpected ordering: busy ($BUSY_P95 ms) <= noop ($NOOP_P95 ms)" >&2
         exit 1
     fi
+fi
+
+echo
+echo "── Validating Rust perf profiles ──"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_PATH="$FIXTURE_DIR" \
+HOMEBOY_COMPONENT_ID="bench-noop-fixture" \
+HOMEBOY_BENCH_ITERATIONS=1 \
+HOMEBOY_RUST_BENCH_PROFILES=1 \
+HOMEBOY_BENCH_SCENARIOS="rust-clean-build,rust-warm-build,rust-changed-file-check" \
+HOMEBOY_BENCH_RESULTS_FILE="$PROFILES_TMPFILE" \
+    bash "${SCRIPT_DIR}/bench-runner.sh"
+
+for _profile in rust-clean-build rust-warm-build rust-changed-file-check; do
+    PRESENT="$(jq -r --arg id "$_profile" '.scenarios[] | select(.id == $id) | .id' "$PROFILES_TMPFILE")"
+    assert "profile $_profile present" "$PRESENT" "$_profile"
+done
+
+assert "clean cache mode" "$(jq -r '.scenarios[] | select(.id == "rust-clean-build") | .metadata.cache_mode' "$PROFILES_TMPFILE")" "clean"
+assert "warm cache mode" "$(jq -r '.scenarios[] | select(.id == "rust-warm-build") | .metadata.cache_mode' "$PROFILES_TMPFILE")" "warm"
+assert "changed-file mode" "$(jq -r '.scenarios[] | select(.id == "rust-changed-file-check") | .metadata.change_mode' "$PROFILES_TMPFILE")" "changed_file"
+
+echo
+echo "── Validating Criterion adapter ──"
+
+if [ -d "$CRITERION_FIXTURE_DIR" ]; then
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+    HOMEBOY_COMPONENT_PATH="$CRITERION_FIXTURE_DIR" \
+    HOMEBOY_COMPONENT_ID="bench-criterion-fixture" \
+    HOMEBOY_BENCH_ITERATIONS=1 \
+    HOMEBOY_RUST_BENCH_CRITERION=1 \
+    HOMEBOY_BENCH_RESULTS_FILE="$CRITERION_TMPFILE" \
+        bash "${SCRIPT_DIR}/bench-runner.sh"
+
+    CRITERION_COUNT="$(jq -r '[.scenarios[] | select(.source == "criterion")] | length' "$CRITERION_TMPFILE")"
+    if [ "$CRITERION_COUNT" -lt 1 ]; then
+        echo "  ✗ expected at least one Criterion scenario" >&2
+        cat "$CRITERION_TMPFILE" >&2
+        exit 1
+    fi
+    echo "  ✓ Criterion scenarios: $CRITERION_COUNT"
+
+    MISSING_ARTIFACT="$(jq -r '.scenarios[] | select(.source == "criterion") | select(.artifacts.criterion_estimates.path == null) | .id' "$CRITERION_TMPFILE")"
+    if [ -n "$MISSING_ARTIFACT" ]; then
+        echo "  ✗ Criterion scenario missing estimates artifact: $MISSING_ARTIFACT" >&2
+        exit 1
+    fi
+    echo "  ✓ Criterion estimates artifacts preserved"
 fi
 
 echo

@@ -1,0 +1,16 @@
+[package]
+name = "bench-criterion-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "criterion_noop"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = false

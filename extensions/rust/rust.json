@@ -39,6 +39,29 @@
   "bench": {
     "extension_script": "scripts/bench/bench-runner.sh"
   },
+  "settings": [
+    {
+      "id": "bench_criterion",
+      "label": "Criterion bench adapter",
+      "type": "boolean",
+      "default": false,
+      "description": "Opt into the Rust extension's Criterion adapter. Set HOMEBOY_RUST_BENCH_CRITERION=1 to run Cargo bench targets and normalize target/criterion estimates into Homeboy BenchResults. bench-* binaries remain the default contract."
+    },
+    {
+      "id": "bench_profiles",
+      "label": "Rust perf profiles",
+      "type": "boolean",
+      "default": false,
+      "description": "Opt into Rust developer-loop perf scenarios. Set HOMEBOY_RUST_BENCH_PROFILES=1 to emit rust-clean-build, rust-warm-build, rust-changed-file-check, and rust-test scenarios with cache/change metadata."
+    },
+    {
+      "id": "bench_changed_file",
+      "label": "Rust bench changed file",
+      "type": "string",
+      "default": "",
+      "description": "Optional changed-file profile target relative to the Cargo project root. When omitted, the runner uses src/lib.rs or src/main.rs if present."
+    }
+  ],
   "audit": {
     "feature_patterns": [
       "#\\[derive\\(.*Subcommand.*\\)\\]\\s*(?:pub\\s+)?enum\\s+(\\w+)",
