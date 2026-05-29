@@ -1146,6 +1146,7 @@ mod tests {
                     connected: false,
                     state: super::super::RunnerSessionState::Disconnected,
                     session: None,
+                    stale_daemon: None,
                     session_path: "/tmp/lab.json".to_string(),
                 })
             },
@@ -1198,6 +1199,7 @@ mod tests {
                     connected: true,
                     state: super::super::RunnerSessionState::Connected,
                     session: None,
+                    stale_daemon: None,
                     session_path: "/tmp/lab.json".to_string(),
                 })
             },
@@ -1224,6 +1226,7 @@ mod tests {
                     connected: false,
                     state: super::super::RunnerSessionState::Disconnected,
                     session: None,
+                    stale_daemon: None,
                     session_path: "/tmp/lab.json".to_string(),
                 })
             },
@@ -1271,6 +1274,7 @@ mod tests {
                     connected: false,
                     state: super::super::RunnerSessionState::Disconnected,
                     session: None,
+                    stale_daemon: None,
                     session_path: "/tmp/lab.json".to_string(),
                 })
             },

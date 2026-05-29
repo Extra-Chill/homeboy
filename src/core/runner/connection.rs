@@ -15,7 +15,8 @@ use crate::core::server::{self, Server, ServerAuthMode, SshClient};
 
 use super::session::{
     ReverseRunnerConnectOptions, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStatusReport, RunnerTunnelMode,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStatusReport, RunnerTunnelMode,
 };
 use super::{load, Runner, RunnerKind};
 #[derive(Debug, Clone, Deserialize)]
@@ -69,45 +70,18 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
         ));
     };
 
-    let Ok(remote_addr) = parse_loopback_daemon_addr(&daemon.address) else {
-        return Ok(failed_connect(
-            runner_id,
-            session_path,
-            RunnerFailureKind::DaemonStartupFailure,
-            "remote daemon did not report a loopback address".to_string(),
-        ));
-    };
-
-    let local_port = reserve_loopback_port()?;
-    let tunnel = open_loopback_tunnel(
+    let (local_port, tunnel_pid, local_url, daemon) = match connect_remote_daemon(
         &server,
-        local_port,
-        &remote_addr.ip().to_string(),
-        remote_addr.port(),
-    );
-    if !tunnel.success {
-        return Ok(failed_connect(
-            runner_id,
-            session_path,
-            RunnerFailureKind::TunnelFailure,
-            format!("SSH tunnel setup failed: {}", tunnel.stderr.trim()),
-        ));
-    }
-
-    if !wait_for_tcp(local_port, Duration::from_secs(5)) {
-        if let Some(pid) = tunnel.pid {
-            terminate_pid(pid);
-        }
-        return Ok(failed_connect(
-            runner_id,
-            session_path,
-            RunnerFailureKind::TunnelFailure,
-            format!(
-                "local tunnel 127.0.0.1:{} did not become reachable",
-                local_port
-            ),
-        ));
-    }
+        &client,
+        homeboy,
+        daemon,
+        &version,
+        runner_id,
+        &session_path,
+    ) {
+        Ok(connection) => connection,
+        Err(report) => return Ok(report),
+    };
 
     let session = RunnerSession {
         runner_id: runner.id.clone(),
@@ -118,8 +92,8 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
         broker_url: None,
         remote_daemon_address: Some(daemon.address),
         local_port: Some(local_port),
-        local_url: Some(format!("http://127.0.0.1:{}", local_port)),
-        tunnel_pid: tunnel.pid,
+        local_url: Some(local_url),
+        tunnel_pid,
         remote_daemon_pid: daemon.pid,
         homeboy_version: version,
         connected_at: Utc::now().to_rfc3339(),
@@ -145,6 +119,137 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
             failure_message: None,
         },
         0,
+    ))
+}
+
+fn connect_remote_daemon(
+    server: &Server,
+    client: &SshClient,
+    homeboy: &str,
+    daemon: RemoteDaemon,
+    expected_version: &str,
+    runner_id: &str,
+    session_path: &PathBuf,
+) -> std::result::Result<(u16, Option<u32>, String, RemoteDaemon), (RunnerConnectReport, i32)> {
+    let failed_after_tunnel = |tunnel_pid: Option<u32>, message: String| {
+        if let Some(pid) = tunnel_pid {
+            terminate_pid(pid);
+        }
+        failed_connect(
+            runner_id,
+            session_path.clone(),
+            RunnerFailureKind::DaemonStartupFailure,
+            message,
+        )
+    };
+    let (local_port, tunnel_pid, local_url) =
+        open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
+    match daemon_http_version(&local_url) {
+        Ok(running_version) if versions_match(&running_version, expected_version) => {
+            Ok((local_port, tunnel_pid, local_url, daemon))
+        }
+        Ok(_) => {
+            if let Some(pid) = tunnel_pid {
+                terminate_pid(pid);
+            }
+            if let Err(message) = remote_daemon_stop(client, homeboy) {
+                return Err(failed_connect(
+                    runner_id,
+                    session_path.clone(),
+                    RunnerFailureKind::DaemonStartupFailure,
+                    message,
+                ));
+            }
+            let daemon = match remote_daemon_start(client, homeboy) {
+                Ok(daemon) => daemon,
+                Err(message) => {
+                    return Err(failed_connect(
+                        runner_id,
+                        session_path.clone(),
+                        RunnerFailureKind::DaemonStartupFailure,
+                        message,
+                    ));
+                }
+            };
+            let (local_port, tunnel_pid, local_url) =
+                open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
+            match daemon_http_version(&local_url) {
+                Ok(running_version) if versions_match(&running_version, expected_version) => {}
+                Ok(running_version) => {
+                    return Err(failed_after_tunnel(
+                        tunnel_pid,
+                        format!(
+                            "remote daemon restarted but still reports stale Homeboy version {} instead of {}",
+                            running_version, expected_version
+                        ),
+                    ));
+                }
+                Err(message) => {
+                    return Err(failed_after_tunnel(tunnel_pid, message));
+                }
+            }
+            Ok((local_port, tunnel_pid, local_url, daemon))
+        }
+        Err(message) => Err(failed_after_tunnel(tunnel_pid, message)),
+    }
+}
+
+fn open_daemon_tunnel(
+    server: &Server,
+    daemon: &RemoteDaemon,
+    runner_id: &str,
+    session_path: &PathBuf,
+) -> std::result::Result<(u16, Option<u32>, String), (RunnerConnectReport, i32)> {
+    let Ok(remote_addr) = parse_loopback_daemon_addr(&daemon.address) else {
+        return Err(failed_connect(
+            runner_id,
+            session_path.clone(),
+            RunnerFailureKind::DaemonStartupFailure,
+            "remote daemon did not report a loopback address".to_string(),
+        ));
+    };
+
+    let local_port = reserve_loopback_port().map_err(|err| {
+        failed_connect(
+            runner_id,
+            session_path.clone(),
+            RunnerFailureKind::TunnelFailure,
+            err.to_string(),
+        )
+    })?;
+    let tunnel = open_loopback_tunnel(
+        &server,
+        local_port,
+        &remote_addr.ip().to_string(),
+        remote_addr.port(),
+    );
+    if !tunnel.success {
+        return Err(failed_connect(
+            runner_id,
+            session_path.clone(),
+            RunnerFailureKind::TunnelFailure,
+            format!("SSH tunnel setup failed: {}", tunnel.stderr.trim()),
+        ));
+    }
+
+    if !wait_for_tcp(local_port, Duration::from_secs(5)) {
+        if let Some(pid) = tunnel.pid {
+            terminate_pid(pid);
+        }
+        return Err(failed_connect(
+            runner_id,
+            session_path.clone(),
+            RunnerFailureKind::TunnelFailure,
+            format!(
+                "local tunnel 127.0.0.1:{} did not become reachable",
+                local_port
+            ),
+        ));
+    }
+    Ok((
+        local_port,
+        tunnel.pid,
+        format!("http://127.0.0.1:{}", local_port),
     ))
 }
 
@@ -249,18 +354,69 @@ fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSessio
 }
 
 pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
-    load(runner_id)?;
+    let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
     let session = read_session(runner_id)?;
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
+    let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected);
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected,
         state,
         session,
+        stale_daemon,
         session_path: session_path.display().to_string(),
     })
+}
+
+fn stale_daemon_warning(
+    runner: &Runner,
+    session: Option<&RunnerSession>,
+    connected: bool,
+) -> Option<RunnerStaleDaemonWarning> {
+    if !connected || runner.kind != RunnerKind::Ssh {
+        return None;
+    }
+    let session = session?;
+    if session.mode != RunnerTunnelMode::DirectSsh {
+        return None;
+    }
+    let homeboy = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let (_server_id, _server, client) = resolve_ssh_runner(runner).ok()??;
+    let current_version = remote_homeboy_version(&client, homeboy).ok()?;
+    let observed_session_version = session
+        .local_url
+        .as_deref()
+        .and_then(|local_url| daemon_http_version(local_url).ok())
+        .unwrap_or_else(|| session.homeboy_version.clone());
+    if versions_match(&observed_session_version, &current_version)
+        && versions_match(&session.homeboy_version, &current_version)
+    {
+        return None;
+    }
+    Some(build_stale_daemon_warning(
+        &runner.id,
+        observed_session_version,
+        current_version,
+    ))
+}
+
+fn build_stale_daemon_warning(
+    runner_id: &str,
+    session_homeboy_version: String,
+    current_homeboy_version: String,
+) -> RunnerStaleDaemonWarning {
+    RunnerStaleDaemonWarning {
+        session_homeboy_version,
+        current_homeboy_version,
+        message: "connected runner daemon was started by a different Homeboy version than the configured runner executable".to_string(),
+        recovery_commands: vec![
+            format!("homeboy runner connect {}", runner_id),
+            format!("homeboy runner disconnect {}", runner_id),
+            format!("homeboy runner connect {}", runner_id),
+        ],
+    }
 }
 
 pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
@@ -331,6 +487,50 @@ fn remote_homeboy_version(
         return Err("remote Homeboy version check returned empty output".to_string());
     }
     Ok(version)
+}
+
+fn versions_match(left: &str, right: &str) -> bool {
+    normalize_homeboy_version(left) == normalize_homeboy_version(right)
+}
+
+fn normalize_homeboy_version(version: &str) -> &str {
+    version
+        .trim()
+        .strip_prefix("homeboy ")
+        .unwrap_or(version.trim())
+}
+
+fn daemon_http_version(local_url: &str) -> std::result::Result<String, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|err| format!("build daemon HTTP client: {err}"))?;
+    let response = client
+        .get(format!("{}/version", local_url.trim_end_matches('/')))
+        .send()
+        .map_err(|err| format!("query remote daemon version: {err}"))?;
+    let status_code = response.status().as_u16();
+    let body: Value = response
+        .json()
+        .map_err(|err| format!("parse remote daemon version response: {err}"))?;
+    if status_code >= 400 {
+        return Err(format!(
+            "remote daemon version request failed with HTTP {}: {}",
+            status_code, body
+        ));
+    }
+    daemon_version_from_body(&body)
+        .filter(|version| !version.trim().is_empty())
+        .map(|version| version.trim().to_string())
+        .ok_or_else(|| "remote daemon version response did not include a version".to_string())
+}
+
+fn daemon_version_from_body(body: &Value) -> Option<&str> {
+    body.get("version").and_then(Value::as_str).or_else(|| {
+        body.get("data")
+            .and_then(|data| data.get("version"))
+            .and_then(Value::as_str)
+    })
 }
 
 struct SshTunnelOutput {
@@ -510,6 +710,18 @@ fn remote_daemon_start(
             .and_then(Value::as_u64)
             .and_then(|pid| u32::try_from(pid).ok()),
     })
+}
+
+fn remote_daemon_stop(client: &SshClient, homeboy: &str) -> std::result::Result<(), String> {
+    let command = format!("{} daemon stop", shell::quote_arg(homeboy));
+    let output = client.execute(&command);
+    if !output.success {
+        return Err(command_failure_message(
+            "remote daemon stop failed while refreshing stale daemon",
+            &output,
+        ));
+    }
+    Ok(())
 }
 
 fn parse_envelope(stdout: &str) -> serde_json::Result<CliEnvelope> {
@@ -702,6 +914,48 @@ mod tests {
                 .get("address")
                 .unwrap(),
             "127.0.0.1:49152"
+        );
+    }
+
+    #[test]
+    fn compares_cli_and_daemon_version_shapes() {
+        assert!(versions_match("homeboy 0.204.0", "0.204.0"));
+        assert!(versions_match("0.204.0", "homeboy 0.204.0"));
+        assert!(!versions_match("homeboy 0.201.3", "homeboy 0.204.0"));
+    }
+
+    #[test]
+    fn extracts_current_and_legacy_daemon_version_shapes() {
+        assert_eq!(
+            daemon_version_from_body(&serde_json::json!({"version":"0.204.0"})),
+            Some("0.204.0")
+        );
+        assert_eq!(
+            daemon_version_from_body(
+                &serde_json::json!({"success":true,"data":{"version":"0.199.4"}})
+            ),
+            Some("0.199.4")
+        );
+    }
+
+    #[test]
+    fn stale_daemon_warning_includes_recovery_commands() {
+        let warning = build_stale_daemon_warning(
+            "homeboy-lab",
+            "homeboy 0.201.3".to_string(),
+            "homeboy 0.204.0".to_string(),
+        );
+
+        assert_eq!(warning.session_homeboy_version, "homeboy 0.201.3");
+        assert_eq!(warning.current_homeboy_version, "homeboy 0.204.0");
+        assert!(warning.message.contains("different Homeboy version"));
+        assert_eq!(
+            warning.recovery_commands,
+            vec![
+                "homeboy runner connect homeboy-lab".to_string(),
+                "homeboy runner disconnect homeboy-lab".to_string(),
+                "homeboy runner connect homeboy-lab".to_string(),
+            ]
         );
     }
 
