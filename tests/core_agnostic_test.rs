@@ -31,6 +31,8 @@ const CORE_OWNED_SOURCE_ROOTS: &[&str] = &[
     "src/commands/test.rs",
 ];
 
+const CORE_OWNED_TEST_CONTENT_ROOTS: &[&str] = &["tests/core", "tests/fixtures"];
+
 const TERMS: &[Term] = &[
     Term {
         name: "wordpress",
@@ -491,6 +493,169 @@ const BASELINE: &[ViolationKey] = &[
 
 const BASELINE_OCCURRENCES: usize = 157;
 
+// Known core-owned test/fixture literal debt tracked by #3034. Keep this list
+// explicit so stale rows and occurrence-count changes force cleanup or review.
+const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
+    ViolationKey {
+        path: "src/core/budget.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/core_fingerprint.rs",
+        term: "rust",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/detectors/repeated_literal_shape.rs",
+        term: "php",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/detectors/test_coverage.rs",
+        term: "php",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/detectors/test_coverage.rs",
+        term: "rust",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/requirements.rs",
+        term: "composer",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/test_quality.rs",
+        term: "cargo",
+    },
+    ViolationKey {
+        path: "src/core/context/mod.rs",
+        term: "rust",
+    },
+    ViolationKey {
+        path: "src/core/context/mod.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "src/core/engine/symbol_graph.rs",
+        term: "php",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/parsing.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/run_metadata.rs",
+        term: "cargo",
+    },
+    ViolationKey {
+        path: "src/core/extension/registry.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "src/core/extension/summary.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "src/core/extension/test/parsing.rs",
+        term: "cargo",
+    },
+    ViolationKey {
+        path: "src/core/extension/test/report.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "src/core/git/commits.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "src/core/observation/budget_findings.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "src/core/observation/records/run_builder.rs",
+        term: "cargo",
+    },
+    ViolationKey {
+        path: "src/core/refactor/decompose.rs",
+        term: "php",
+    },
+    ViolationKey {
+        path: "src/core/refactor/decompose.rs",
+        term: "rust",
+    },
+    ViolationKey {
+        path: "src/core/rig/spec.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "src/core/runner/mod.rs",
+        term: "rust",
+    },
+    ViolationKey {
+        path: "src/core/server/health.rs",
+        term: "php",
+    },
+    ViolationKey {
+        path: "src/core/source_snapshot.rs",
+        term: "cargo",
+    },
+    ViolationKey {
+        path: "src/core/triage/tests.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "tests/core/daemon_test.rs",
+        term: "cargo",
+    },
+    ViolationKey {
+        path: "tests/core/extension/component_script_test.rs",
+        term: "php",
+    },
+    ViolationKey {
+        path: "tests/core/rig/bench_default_baseline_dispatch_test.rs",
+        term: "rust",
+    },
+    ViolationKey {
+        path: "tests/core/rig/bench_resource_lease_test.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "tests/core/rig/expand_test.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "tests/core/rig/lease_test.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "tests/core/rig/service_test.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "tests/core/rig/spec_test.rs",
+        term: "php",
+    },
+    ViolationKey {
+        path: "tests/core/rig/spec_test.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "tests/core/rig/state_test.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "tests/core/rig/workloads_test.rs",
+        term: "nodejs",
+    },
+    ViolationKey {
+        path: "tests/fixtures/failure_digest/lint.json",
+        term: "phpcs",
+    },
+    ViolationKey {
+        path: "tests/fixtures/failure_digest/lint.json",
+        term: "phpstan",
+    },
+];
+
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 109;
+
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -550,6 +715,56 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
     );
 }
 
+#[test]
+fn core_owned_test_content_stays_language_and_framework_agnostic() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut found = BTreeMap::<(String, String), Vec<usize>>::new();
+
+    for source_root in CORE_OWNED_SOURCE_ROOTS {
+        let path = root.join(source_root);
+        if path.is_dir() {
+            scan_source_dir_test_content(root, &path, &mut found);
+        } else {
+            scan_source_file_test_content(root, &path, &mut found);
+        }
+    }
+
+    for test_root in CORE_OWNED_TEST_CONTENT_ROOTS {
+        let path = root.join(test_root);
+        if path.exists() {
+            scan_test_content_path(root, &path, &mut found);
+        }
+    }
+
+    assert_test_content_baseline(&found);
+}
+
+#[test]
+fn test_content_scan_reports_separator_variants() {
+    let mut found = BTreeMap::<(String, String), Vec<usize>>::new();
+
+    scan_test_content_lines(
+        "src/core/example.rs",
+        [
+            "#[cfg(test)]",
+            r#"let runner = "rust_runner";"#,
+            r#"let build = "cargo_build";"#,
+            r#"let fixture = "wordpress_fixture";"#,
+            r#"let handler = "php-handler";"#,
+            r#"let script = "npm_script";"#,
+        ],
+        true,
+        &mut found,
+    );
+
+    for term in ["rust", "cargo", "wordpress", "php", "npm"] {
+        assert!(
+            found.contains_key(&("src/core/example.rs".to_string(), term.to_string())),
+            "test-content scanner should report separator variant for `{term}`"
+        );
+    }
+}
+
 fn scan_dir(root: &Path, dir: &Path, found: &mut BTreeMap<(String, String), Vec<usize>>) {
     for entry in fs::read_dir(dir).expect("source dir should be readable") {
         let entry = entry.expect("source entry should be readable");
@@ -589,6 +804,190 @@ fn scan_file(root: &Path, path: &Path, found: &mut BTreeMap<(String, String), Ve
             }
         }
     }
+}
+
+fn scan_source_dir_test_content(
+    root: &Path,
+    dir: &Path,
+    found: &mut BTreeMap<(String, String), Vec<usize>>,
+) {
+    for entry in fs::read_dir(dir).expect("source dir should be readable") {
+        let entry = entry.expect("source entry should be readable");
+        let path = entry.path();
+        if path.is_dir() {
+            scan_source_dir_test_content(root, &path, found);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            scan_source_file_test_content(root, &path, found);
+        }
+    }
+}
+
+fn scan_source_file_test_content(
+    root: &Path,
+    path: &Path,
+    found: &mut BTreeMap<(String, String), Vec<usize>>,
+) {
+    if is_extension_owned_path(root, path) {
+        return;
+    }
+
+    let content = fs::read_to_string(path).expect("source file should be readable");
+    let relative = relative_path(root, path);
+    let is_helper = is_test_helper(path);
+    let mut in_test_content = is_helper;
+
+    for (index, line) in content.lines().enumerate() {
+        if line.trim() == "#[cfg(test)]" {
+            in_test_content = true;
+            continue;
+        }
+        if !in_test_content {
+            continue;
+        }
+
+        scan_test_content_line(&relative, index + 1, line, true, found);
+    }
+}
+
+fn scan_test_content_path(
+    root: &Path,
+    path: &Path,
+    found: &mut BTreeMap<(String, String), Vec<usize>>,
+) {
+    if is_extension_owned_path(root, path) {
+        return;
+    }
+
+    if path.is_dir() {
+        for entry in fs::read_dir(path).expect("test content dir should be readable") {
+            let entry = entry.expect("test content entry should be readable");
+            scan_test_content_path(root, &entry.path(), found);
+        }
+        return;
+    }
+
+    if !is_scannable_test_content_file(path) {
+        return;
+    }
+
+    let content = fs::read_to_string(path).expect("test content file should be readable");
+    scan_test_content_lines(
+        relative_path(root, path),
+        content.lines(),
+        path.extension().is_some_and(|ext| ext == "rs"),
+        found,
+    );
+}
+
+fn scan_test_content_lines<'a>(
+    relative: impl Into<String>,
+    lines: impl IntoIterator<Item = &'a str>,
+    rust_string_literals_only: bool,
+    found: &mut BTreeMap<(String, String), Vec<usize>>,
+) {
+    let relative = relative.into();
+    for (index, line) in lines.into_iter().enumerate() {
+        scan_test_content_line(&relative, index + 1, line, rust_string_literals_only, found);
+    }
+}
+
+fn scan_test_content_line(
+    relative: &str,
+    line_number: usize,
+    line: &str,
+    rust_string_literals_only: bool,
+    found: &mut BTreeMap<(String, String), Vec<usize>>,
+) {
+    let segments = if rust_string_literals_only {
+        rust_string_literal_segments(line)
+    } else {
+        vec![line.to_string()]
+    };
+
+    for term in TERMS {
+        if segments
+            .iter()
+            .any(|segment| term.matches_test_content(segment))
+        {
+            found
+                .entry((relative.to_string(), term.name.to_string()))
+                .or_default()
+                .push(line_number);
+        }
+    }
+}
+
+fn rust_string_literal_segments(line: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut remaining = line;
+
+    while let Some(start) = remaining.find('"') {
+        remaining = &remaining[start + 1..];
+        let Some(end) = remaining.find('"') else {
+            break;
+        };
+        segments.push(remaining[..end].to_string());
+        remaining = &remaining[end + 1..];
+    }
+
+    segments
+}
+
+fn assert_test_content_baseline(found: &BTreeMap<(String, String), Vec<usize>>) {
+    let baseline = TEST_CONTENT_BASELINE
+        .iter()
+        .map(|entry| (entry.path.to_string(), entry.term.to_string()))
+        .collect::<BTreeSet<_>>();
+
+    let unexpected = found
+        .iter()
+        .filter(|(key, _)| !baseline.contains(*key))
+        .map(|((path, term), lines)| format!("{path}: {term} on lines {lines:?}"))
+        .collect::<Vec<_>>();
+    let debt_report = format_test_content_debt_report(found);
+
+    assert!(
+        unexpected.is_empty(),
+        "core-owned test content contains non-baselined ecosystem fixture language:\n{}\n\nUse generic fixtures/examples in core-owned tests, move ecosystem-specific cases into extension-owned tests, or add a narrow issue-linked TEST_CONTENT_BASELINE entry for unavoidable current debt.\n\n{}",
+        unexpected.join("\n"),
+        debt_report
+    );
+
+    let stale_baseline = TEST_CONTENT_BASELINE
+        .iter()
+        .filter(|entry| !found.contains_key(&(entry.path.to_string(), entry.term.to_string())))
+        .map(|entry| format!("- {}: {}", entry.path, entry.term))
+        .collect::<Vec<_>>();
+    assert!(
+        stale_baseline.is_empty(),
+        "core-owned test content ecosystem baseline contains stale entries. Remove stale TEST_CONTENT_BASELINE entries:\n{}\n\n{}",
+        stale_baseline.join("\n"),
+        debt_report
+    );
+
+    let occurrence_count = found.values().map(Vec::len).sum::<usize>();
+    assert_eq!(
+        occurrence_count, TEST_CONTENT_BASELINE_OCCURRENCES,
+        "core-owned test content ecosystem baseline occurrence count changed. If this went down, lower TEST_CONTENT_BASELINE_OCCURRENCES and remove stale rows. If it went up, move the fixture language into extension-owned tests.\n\n{}",
+        debt_report
+    );
+}
+
+fn is_scannable_test_content_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext,
+                "rs" | "json" | "jsonl" | "toml" | "yaml" | "yml" | "md" | "txt"
+            )
+        })
+}
+
+fn is_extension_owned_path(root: &Path, path: &Path) -> bool {
+    relative_path(root, path)
+        .split('/')
+        .any(|component| component == "extensions")
 }
 
 fn is_test_helper(path: &Path) -> bool {
@@ -667,6 +1066,29 @@ fn format_baseline_debt_report(found: &BTreeMap<(String, String), Vec<usize>>) -
     )
 }
 
+fn format_test_content_debt_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
+    let occurrence_count = found.values().map(Vec::len).sum::<usize>();
+    let paths = found
+        .keys()
+        .map(|(path, _)| path.as_str())
+        .collect::<BTreeSet<_>>();
+
+    format!(
+        "Core-owned test content ecosystem debt (#3034): {occurrence_count} occurrences across {} path/term pairs and {} files. Current rows:\n{}",
+        found.len(),
+        paths.len(),
+        first_counted_rows(
+            found
+                .iter()
+                .map(|((path, term), lines)| (
+                    lines.len(),
+                    format!("- {path}: {term} on lines {lines:?}")
+                ))
+                .collect::<Vec<_>>()
+        )
+    )
+}
+
 fn stale_baseline_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
     let stale_rows = stale_baseline_rows(found);
 
@@ -712,6 +1134,10 @@ impl Term {
             MatchKind::Token => contains_token(line, self.name),
         }
     }
+
+    fn matches_test_content(self, line: &str) -> bool {
+        matches!(self.kind, MatchKind::Token) && contains_test_content_variant(line, self.name)
+    }
 }
 
 fn contains_token(haystack: &str, needle: &str) -> bool {
@@ -734,4 +1160,29 @@ fn contains_token(haystack: &str, needle: &str) -> bool {
 
 fn is_word_char(ch: Option<char>) -> bool {
     ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn contains_test_content_variant(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    let mut search_from = 0;
+
+    while let Some(offset) = haystack[search_from..].find(&needle) {
+        let start = search_from + offset;
+        let end = start + needle.len();
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[end..].chars().next();
+
+        if is_test_content_separator(before) || is_test_content_separator(after) {
+            return true;
+        }
+
+        search_from = end;
+    }
+
+    false
+}
+
+fn is_test_content_separator(ch: Option<char>) -> bool {
+    ch.is_some_and(|ch| ch == '_' || ch == '-')
 }
