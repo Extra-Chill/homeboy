@@ -35,6 +35,7 @@ const WP_CODEBOX_STRUCTURED_OUTCOME_KINDS = new Set([
   'unable_to_remediate',
   'max_turns_exceeded',
 ]);
+const SECRET_KEY_PATTERN = /(secret|token|password|passwd|authorization|cookie|nonce|api[_-]?key|access[_-]?key|private[_-]?key|bearer)/i;
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -59,6 +60,58 @@ function tryParseJson(value) {
   } catch {
     return null;
   }
+}
+
+function redact(value, key = '') {
+  if (SECRET_KEY_PATTERN.test(key)) {
+    return '[redacted]';
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redact(entry));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([entryKey, entryValue]) => [entryKey, redact(entryValue, entryKey)]));
+  }
+  if (typeof value === 'string') {
+    return value.replace(/(bearer|token|api[_-]?key|password|cookie|authorization|private[_-]?key)(\s*[:=]\s*)[^\s,;]+/gi, '$1$2[redacted]');
+  }
+  return value;
+}
+
+function wpCodeboxRuntimeReferenceManifestPath(parsed, artifact) {
+  const artifacts = parsed && typeof parsed === 'object' && parsed.artifacts && typeof parsed.artifacts === 'object'
+    ? parsed.artifacts
+    : {};
+  const candidates = [
+    artifacts.runtimeReferenceManifestPath,
+    artifacts.runtimeReferencesManifestPath,
+    artifacts.runtime_reference_manifest_path,
+    artifacts.referenceManifestPath,
+    artifacts.runtimeReferencePath,
+    artifacts.runtimeReferencesPath,
+    artifacts.runtime?.referenceManifestPath,
+    artifact?.runtimeReferenceManifestPath,
+    artifact?.runtime_reference_manifest_path,
+  ];
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate.trim()) || '';
+}
+
+function wpCodeboxRuntimeReferenceManifest(parsed, artifact) {
+  const manifestPath = wpCodeboxRuntimeReferenceManifestPath(parsed, artifact);
+  if (!manifestPath) {
+    return null;
+  }
+
+  const manifest = { path: manifestPath, available: false };
+  if (fs.existsSync(manifestPath) && fs.statSync(manifestPath).isFile()) {
+    manifest.available = true;
+    try {
+      manifest.payload = redact(readJson(manifestPath));
+    } catch (error) {
+      manifest.error = error && error.message ? error.message : String(error);
+    }
+  }
+  return manifest;
 }
 
 function fanoutRecordMetrics(startedAt, finishedAt, parsed, artifact) {
@@ -498,6 +551,7 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
       id: artifact.id || '',
       directory: artifact.directory || artifact.path || '',
       preview_url: artifact.preview?.url || artifact.preview_url || '',
+      runtime_reference_manifest: wpCodeboxRuntimeReferenceManifest(parsed, artifact),
     } : null,
     metrics,
   };
@@ -608,6 +662,7 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
           id: artifact.id || '',
           directory: artifact.directory || artifact.path || '',
           preview_url: artifact.preview?.url || artifact.preview_url || '',
+          runtime_reference_manifest: wpCodeboxRuntimeReferenceManifest(parsed, artifact),
         } : null,
         metrics,
       });
