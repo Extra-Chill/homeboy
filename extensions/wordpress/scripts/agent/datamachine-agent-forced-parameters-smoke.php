@@ -153,6 +153,43 @@ namespace {
         exit( 1 );
     }
 
+    $GLOBALS['homeboy_forced_parameters_filters'] = array();
+    homeboy_datamachine_agent_register_tool_recorders( array() );
+    $default_tools = apply_filters(
+        'datamachine_resolved_tools',
+        array(
+            'create_github_pull_request'  => array( 'class' => 'Default_PR_Tool' ),
+            'create_or_update_github_file' => array( 'class' => 'Default_File_Tool' ),
+        )
+    );
+    if ( isset( $default_tools['create_github_pull_request'] ) ) {
+        fwrite( STDERR, "Expected default tool recorders to remove PR publication from the task-facing tool surface.\n" );
+        exit( 1 );
+    }
+    if ( empty( $default_tools['create_or_update_github_file']['homeboy_record'] ) ) {
+        fwrite( STDERR, "Expected default file publication recorder to remain available.\n" );
+        exit( 1 );
+    }
+
+    $GLOBALS['homeboy_forced_parameters_filters'] = array();
+    homeboy_datamachine_agent_register_tool_recorders(
+        array(
+            'tool_recorders' => array(
+                array( 'tool' => 'create_github_pull_request' ),
+            ),
+        )
+    );
+    $explicit_tools = apply_filters(
+        'datamachine_resolved_tools',
+        array(
+            'create_github_pull_request' => array( 'class' => 'Explicit_PR_Tool' ),
+        )
+    );
+    if ( empty( $explicit_tools['create_github_pull_request']['homeboy_original_tool'] ) ) {
+        fwrite( STDERR, "Expected explicit PR tool recorder to preserve the task-facing PR tool.\n" );
+        exit( 1 );
+    }
+
     $recorder = new Homeboy_Datamachine_Agent_Tool_Recorder();
     $result   = $recorder->handle_tool_call(
         array(
