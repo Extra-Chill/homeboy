@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.46] - 2026-05-29
+
+### Fixed
+- use WP Codebox bridge for agent WP-CLI
+
 ## [2.102.45] - 2026-05-29
 
 ### Fixed
