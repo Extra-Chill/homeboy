@@ -5,6 +5,7 @@
 
 use crate::core::code_audit::{self, baseline, AuditWithAnalysis, CodeAuditResult};
 use crate::core::git;
+use crate::core::observation::PhaseTimingRecorder;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -40,8 +41,22 @@ pub struct AuditRunWorkflowResult {
 pub fn run_main_audit_workflow(
     args: AuditRunWorkflowArgs,
 ) -> crate::core::Result<AuditRunWorkflowResult> {
+    run_main_audit_workflow_inner(args, None)
+}
+
+pub fn run_main_audit_workflow_with_phase_timing(
+    args: AuditRunWorkflowArgs,
+    phase_timing: &mut PhaseTimingRecorder,
+) -> crate::core::Result<AuditRunWorkflowResult> {
+    run_main_audit_workflow_inner(args, Some(phase_timing))
+}
+
+fn run_main_audit_workflow_inner(
+    args: AuditRunWorkflowArgs,
+    mut phase_timing: Option<&mut PhaseTimingRecorder>,
+) -> crate::core::Result<AuditRunWorkflowResult> {
     // Run audit — scoped or full
-    let result = run_audit(&args)?;
+    let result = run_audit(&args, phase_timing.as_deref_mut())?;
 
     // Early return: no-change shortcut already handled by run_audit returning None
     let audit = match result {
@@ -94,7 +109,7 @@ pub fn run_main_audit_workflow(
     // set so they remain a complete reference; --only / --exclude intentionally
     // do not narrow what gets persisted.
     if args.baseline_flags.baseline {
-        return run_baseline_save(result, &args);
+        return run_baseline_save(result, &args, phase_timing.as_deref_mut());
     }
 
     // --only / --exclude: scope this run's findings before comparison and
@@ -109,7 +124,7 @@ pub fn run_main_audit_workflow(
     }
 
     // Default: compare against baseline or return full result
-    run_comparison_workflow(result, &analysis, &args)
+    run_comparison_workflow(result, &analysis, &args, phase_timing.as_deref_mut())
 }
 
 fn audit_run_workflow_result(
@@ -189,7 +204,10 @@ fn scope_convention_outliers_to_findings(result: &mut CodeAuditResult) {
 }
 
 /// Run the audit scan (scoped or full). Returns None if changed-since found no files.
-fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWithAnalysis>> {
+fn run_audit(
+    args: &AuditRunWorkflowArgs,
+    phase_timing: Option<&mut PhaseTimingRecorder>,
+) -> crate::core::Result<Option<AuditWithAnalysis>> {
     let plan = if args.baseline_flags.baseline {
         code_audit::AuditExecutionPlan::full()
     } else {
@@ -202,19 +220,25 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWit
             crate::log_status!("audit", "No files changed since {}", git_ref);
             return Ok(None);
         }
-        Ok(Some(code_audit::audit_path_scoped_with_plan_and_analysis(
-            &args.component_id,
-            &args.source_path,
-            &changed,
-            Some(git_ref),
-            &plan,
-        )?))
+        Ok(Some(
+            code_audit::audit_path_scoped_with_plan_and_analysis_with_phase_timing(
+                &args.component_id,
+                &args.source_path,
+                &changed,
+                Some(git_ref),
+                &plan,
+                phase_timing,
+            )?,
+        ))
     } else {
-        Ok(Some(code_audit::audit_path_with_id_with_plan_and_analysis(
-            &args.component_id,
-            &args.source_path,
-            &plan,
-        )?))
+        Ok(Some(
+            code_audit::audit_path_with_id_with_plan_and_analysis_with_phase_timing(
+                &args.component_id,
+                &args.source_path,
+                &plan,
+                phase_timing,
+            )?,
+        ))
     }
 }
 
@@ -222,8 +246,13 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWit
 fn run_baseline_save(
     result: CodeAuditResult,
     args: &AuditRunWorkflowArgs,
+    phase_timing: Option<&mut PhaseTimingRecorder>,
 ) -> crate::core::Result<AuditRunWorkflowResult> {
     let findings = result.findings.clone();
+    let mut phase_timing = phase_timing;
+    let baseline_span = phase_timing
+        .as_mut()
+        .map(|recorder| recorder.begin("baseline_comparison"));
     let saved = if let Some(ref git_ref) = args.changed_since {
         let changed = git::get_files_changed_since(&args.source_path, git_ref)?;
         if changed.is_empty() {
@@ -246,9 +275,22 @@ fn run_baseline_save(
     };
 
     let baseline_data =
-        baseline::load_baseline(Path::new(&result.source_path)).ok_or_else(|| {
+        match baseline::load_baseline(Path::new(&result.source_path)).ok_or_else(|| {
             crate::core::Error::internal_unexpected("Failed to read back saved baseline")
-        })?;
+        }) {
+            Ok(baseline) => {
+                if let (Some(recorder), Some(span)) = (phase_timing.as_mut(), baseline_span) {
+                    recorder.finish_span(span);
+                }
+                baseline
+            }
+            Err(error) => {
+                if let (Some(recorder), Some(span)) = (phase_timing.as_mut(), baseline_span) {
+                    recorder.fail_span(span);
+                }
+                return Err(error);
+            }
+        };
 
     if let Some(score) = baseline_data.metadata.alignment_score {
         eprintln!(
@@ -283,22 +325,47 @@ fn run_comparison_workflow(
     result: CodeAuditResult,
     analysis: &code_audit::AuditAnalysisContext,
     args: &AuditRunWorkflowArgs,
+    phase_timing: Option<&mut PhaseTimingRecorder>,
 ) -> crate::core::Result<AuditRunWorkflowResult> {
+    let mut phase_timing = phase_timing;
+    let baseline_span = phase_timing
+        .as_mut()
+        .map(|recorder| recorder.begin("baseline_comparison"));
     // Try file-based baseline
     if !args.baseline_flags.ignore_baseline {
         if let Some(existing_baseline) = baseline::load_baseline(Path::new(&result.source_path)) {
-            return build_comparison_output(result, analysis, existing_baseline, args);
+            let output = build_comparison_output(result, analysis, existing_baseline, args);
+            if let (Some(recorder), Some(span)) = (phase_timing.as_mut(), baseline_span) {
+                match &output {
+                    Ok(_) => recorder.finish_span(span),
+                    Err(_) => recorder.fail_span(span),
+                }
+            }
+            return output;
         }
     }
 
     // Try git-ref differential
     if let Some(ref git_ref) = args.changed_since {
         if let Some(ref_baseline) = baseline::load_baseline_from_ref(&result.source_path, git_ref) {
-            return build_comparison_output(result, analysis, ref_baseline, args);
+            let output = build_comparison_output(result, analysis, ref_baseline, args);
+            if let (Some(recorder), Some(span)) = (phase_timing.as_mut(), baseline_span) {
+                match &output {
+                    Ok(_) => recorder.finish_span(span),
+                    Err(_) => recorder.fail_span(span),
+                }
+            }
+            return output;
         }
+    }
+    if let (Some(recorder), Some(span)) = (phase_timing.as_mut(), baseline_span) {
+        recorder.finish_span(span);
     }
 
     // No baseline at all
+    let report_span = phase_timing
+        .as_mut()
+        .map(|recorder| recorder.begin("report"));
     let exit_code = if args.changed_since.is_some() {
         if !result.findings.is_empty() {
             eprintln!(
@@ -315,15 +382,19 @@ fn run_comparison_workflow(
         let findings = result.findings.clone();
         let mut summary = report::build_audit_summary(&result, exit_code);
         summary.fixability = compute_fixability_if_requested(&result, analysis, args);
-        Ok(AuditRunWorkflowResult {
+        let output = Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Summary(summary),
             exit_code,
             findings,
-        })
+        });
+        if let (Some(recorder), Some(span)) = (phase_timing.as_mut(), report_span) {
+            recorder.finish_span(span);
+        }
+        output
     } else {
         let fixability = compute_fixability_if_requested(&result, analysis, args);
         let findings = result.findings.clone();
-        Ok(AuditRunWorkflowResult {
+        let output = Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Full {
                 passed: exit_code == 0,
                 result,
@@ -331,7 +402,11 @@ fn run_comparison_workflow(
             },
             exit_code,
             findings,
-        })
+        });
+        if let (Some(recorder), Some(span)) = (phase_timing.as_mut(), report_span) {
+            recorder.finish_span(span);
+        }
+        output
     }
 }
 

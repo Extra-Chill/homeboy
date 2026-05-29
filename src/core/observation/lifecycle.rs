@@ -13,8 +13,8 @@ pub struct ActiveObservation {
 impl ActiveObservation {
     pub fn start(record: NewRunRecord) -> crate::core::Result<Self> {
         let store = ObservationStore::open_initialized()?;
-        let initial_metadata = record.metadata_json.clone();
         let run = store.start_run(record)?;
+        let initial_metadata = run.metadata_json.clone();
 
         Ok(Self {
             store,

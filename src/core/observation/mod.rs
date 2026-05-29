@@ -6,11 +6,16 @@
 
 mod budget_findings;
 mod lifecycle;
+mod phase_timing;
 pub mod records;
 pub mod store;
 pub mod timeline;
 
 pub use lifecycle::{merge_metadata, run_owner_pid, running_status_note, ActiveObservation};
+pub use phase_timing::{
+    merge_phase_timing, ActivePhaseTimingSpan, PhaseTimingRecorder, PhaseTimingReport,
+    PhaseTimingSpan, PhaseTimingSpanStatus, PHASE_TIMING_SCHEMA,
+};
 
 pub use budget_findings::finding_records_from_budget;
 pub use records::{

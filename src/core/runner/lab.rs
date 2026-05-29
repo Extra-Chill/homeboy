@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::core::observation::PhaseTimingRecorder;
 use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
@@ -102,6 +103,7 @@ pub fn execute_lab_offload(
             Some(vec!["Current Lab offload support: audit, bench run, full lint, full test, trace, and refactor source runs.".to_string()]),
         )
     };
+    let mut phase_timing = PhaseTimingRecorder::start();
     let mut plan = base_lab_plan(request.command.as_ref());
     let Some(contract) = request.command.clone() else {
         if let Some(runner_id) = request.explicit_runner {
@@ -132,8 +134,18 @@ pub fn execute_lab_offload(
         });
     }
 
+    let select_span = phase_timing.begin("select");
     let selection =
-        resolve_lab_runner_selection(&contract, request.explicit_runner, request.force_hot)?;
+        match resolve_lab_runner_selection(&contract, request.explicit_runner, request.force_hot) {
+            Ok(selection) => {
+                phase_timing.finish_span(select_span);
+                selection
+            }
+            Err(error) => {
+                phase_timing.fail_span(select_span);
+                return Err(error);
+            }
+        };
     let Some(selection) = selection else {
         let reason = if request.force_hot {
             "force_hot"
@@ -150,6 +162,7 @@ pub fn execute_lab_offload(
             .skip_reason(reason)
             .build(),
         );
+        let timing = phase_timing.finish();
         return Ok(LabOffloadOutcome::RunLocal {
             metadata: Some(lab_offload_metadata(
                 &plan,
@@ -159,6 +172,7 @@ pub fn execute_lab_offload(
                 "skipped",
                 None,
                 Some(reason),
+                Some(&timing),
             )),
             plan,
             messages: Vec::new(),
@@ -186,14 +200,24 @@ pub fn execute_lab_offload(
             .build(),
     );
 
-    match prepare_lab_runner_for_offload(&selection)? {
+    let connect_span = phase_timing.begin("connect");
+    let preparation = match prepare_lab_runner_for_offload(&selection) {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            phase_timing.fail_span(connect_span);
+            return Err(error);
+        }
+    };
+    match preparation {
         LabRunnerPreparation::Ready => {
+            phase_timing.finish_span(connect_span);
             plan = with_step(
                 plan,
                 PlanStep::ready("lab.connect_runner", "lab.connect_runner").build(),
             );
         }
         LabRunnerPreparation::FallBackLocal { reason } => {
+            phase_timing.fail_span(connect_span);
             plan = with_step(
                 plan,
                 PlanStep::builder(
@@ -204,6 +228,7 @@ pub fn execute_lab_offload(
                 .skip_reason(reason.clone())
                 .build(),
             );
+            let timing = phase_timing.finish();
             return Ok(LabOffloadOutcome::RunLocal {
                 metadata: Some(lab_offload_metadata(
                     &plan,
@@ -213,6 +238,7 @@ pub fn execute_lab_offload(
                     "fallback",
                     None,
                     Some(&reason),
+                    Some(&timing),
                 )),
                 plan,
                 messages: vec![format!("Lab offload: {reason}; running locally.")],
@@ -227,6 +253,7 @@ pub fn execute_lab_offload(
         plan,
         messages,
         &mut extension_parity_preflight,
+        phase_timing,
     )
 }
 
@@ -237,6 +264,7 @@ fn run_lab_offload_inner(
     mut plan: HomeboyPlan,
     messages: Vec<String>,
     extension_parity_preflight: &mut impl FnMut(&str, &str, &str) -> Result<()>,
+    mut phase_timing: PhaseTimingRecorder,
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner = load(runner_id)?;
@@ -281,6 +309,7 @@ fn run_lab_offload_inner(
     let source_path = lab_offload_source_path(request.normalized_args)?;
     let capability_contract = lab_runner_capability_contract(&contract, &source_path);
     let capability_plan = capability_contract.clone().map(lab_runner_capability_plan);
+    let preflight_span = phase_timing.begin("preflight");
     if let Some(capability_plan) = &capability_plan {
         let decision = match evaluate_lab_runner_capabilities_for_runner(
             &runner,
@@ -300,14 +329,19 @@ fn run_lab_offload_inner(
                     .skip_reason(reason.clone())
                     .build(),
                 );
+                phase_timing.fail_span(preflight_span);
                 return Ok(automatic_capability_fallback(
                     plan,
                     runner_id,
                     &runner_status,
                     reason,
+                    &phase_timing.finish(),
                 ));
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                phase_timing.fail_span(preflight_span);
+                return Err(err);
+            }
         };
 
         match decision {
@@ -335,14 +369,17 @@ fn run_lab_offload_inner(
                         .skip_reason(reason.clone())
                         .build(),
                     );
+                    phase_timing.fail_span(preflight_span);
                     return Ok(automatic_capability_fallback(
                         plan,
                         runner_id,
                         &runner_status,
                         reason,
+                        &phase_timing.finish(),
                     ));
                 }
                 LabRunnerSelectionSource::Explicit => {
+                    phase_timing.fail_span(preflight_span);
                     return Err(Error::validation_invalid_argument(
                         "runner_capabilities",
                         reason,
@@ -364,10 +401,25 @@ fn run_lab_offload_inner(
         }
     };
     let changed_since_preflight = if sync_mode == RunnerWorkspaceSyncMode::Git {
-        prepare_git_lab_offload_changed_since(request.normalized_args, &source_path)?
+        match prepare_git_lab_offload_changed_since(request.normalized_args, &source_path) {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                phase_timing.fail_span(preflight_span);
+                return Err(error);
+            }
+        }
     } else {
-        preflight_lab_offload_changed_since(request.normalized_args, sync_mode)?
+        match preflight_lab_offload_changed_since(request.normalized_args, sync_mode) {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                phase_timing.fail_span(preflight_span);
+                return Err(error);
+            }
+        }
     };
+    phase_timing.finish_span(preflight_span);
+
+    let sync_span = phase_timing.begin("sync");
     let synced = sync_workspace(
         runner_id,
         RunnerWorkspaceSyncOptions {
@@ -375,8 +427,17 @@ fn run_lab_offload_inner(
             mode: sync_mode,
             changed_since_base: changed_since_preflight.resolved_base.clone(),
         },
-    )?
-    .0;
+    );
+    let synced = match synced {
+        Ok(synced) => {
+            phase_timing.finish_span(sync_span);
+            synced.0
+        }
+        Err(error) => {
+            phase_timing.fail_span(sync_span);
+            return Err(error);
+        }
+    };
     let remote_cwd = synced.remote_path;
     plan = with_step(
         plan,
@@ -404,7 +465,14 @@ fn run_lab_offload_inner(
     );
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     if contract.requires_extension_parity {
-        extension_parity_preflight(runner_id, homeboy_path, &remote_cwd)?;
+        let artifact_span = phase_timing.begin("artifact");
+        match extension_parity_preflight(runner_id, homeboy_path, &remote_cwd) {
+            Ok(()) => phase_timing.finish_span(artifact_span),
+            Err(error) => {
+                phase_timing.fail_span(artifact_span);
+                return Err(error);
+            }
+        }
         plan = with_step(
             plan,
             PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
@@ -438,13 +506,15 @@ fn run_lab_offload_inner(
         "offloaded",
         Some(&remote_cwd),
         None,
+        Some(&phase_timing.snapshot()),
     );
     let mut env = HashMap::new();
     env.insert(
         LAB_OFFLOAD_METADATA_ENV.to_string(),
         serde_json::to_string(&lab_metadata).unwrap_or_default(),
     );
-    let (exec_output, exit_code) = exec(
+    let remote_exec_span = phase_timing.begin("remote_exec");
+    let exec_result = exec(
         runner_id,
         RunnerExecOptions {
             cwd: Some(remote_cwd),
@@ -457,7 +527,17 @@ fn run_lab_offload_inner(
             source_snapshot: Some(source_snapshot),
             capability_preflight,
         },
-    )?;
+    );
+    let (exec_output, exit_code) = match exec_result {
+        Ok(output) => {
+            phase_timing.finish_span(remote_exec_span);
+            output
+        }
+        Err(error) => {
+            phase_timing.fail_span(remote_exec_span);
+            return Err(error);
+        }
+    };
 
     let add_success_step = |plan, id| {
         with_step(
@@ -514,6 +594,7 @@ fn automatic_capability_fallback(
     runner_id: &str,
     runner_status: &RunnerStatusReport,
     reason: String,
+    phase_timing: &crate::core::observation::PhaseTimingReport,
 ) -> LabOffloadOutcome {
     LabOffloadOutcome::RunLocal {
         metadata: Some(lab_offload_metadata(
@@ -524,6 +605,7 @@ fn automatic_capability_fallback(
             "fallback",
             None,
             Some(&reason),
+            Some(phase_timing),
         )),
         plan,
         messages: vec![format!("Lab offload: {reason}; running locally.")],

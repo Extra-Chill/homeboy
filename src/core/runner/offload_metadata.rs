@@ -1,3 +1,4 @@
+use crate::core::observation::PhaseTimingReport;
 use crate::core::plan::{HomeboyPlan, PlanStepStatus};
 
 pub const LAB_OFFLOAD_METADATA_SCHEMA: &str = "homeboy/lab-offload/v1";
@@ -10,9 +11,10 @@ pub fn lab_offload_metadata(
     status: &str,
     remote_workspace: Option<&str>,
     fallback_reason: Option<&str>,
+    phase_timing: Option<&PhaseTimingReport>,
 ) -> serde_json::Value {
     let sync_mode = plan_step_input_string(plan, "lab.sync_workspace", "mode");
-    serde_json::json!({
+    let mut metadata = serde_json::json!({
         "schema": LAB_OFFLOAD_METADATA_SCHEMA,
         "plan_id": plan.id,
         "source": source,
@@ -25,7 +27,12 @@ pub fn lab_offload_metadata(
         "capability_preflight": plan_step_status(plan, "lab.capability_preflight"),
         "extension_parity": plan_step_status(plan, "lab.extension_parity"),
         "patch_captured": plan_has_step(plan, "lab.apply_patch"),
-    })
+    });
+    if let Some(phase_timing) = phase_timing {
+        metadata["lab_overhead_ms"] = serde_json::json!(phase_timing.duration_ms);
+        metadata["phase_timing"] = serde_json::json!(phase_timing);
+    }
+    metadata
 }
 
 fn plan_step_status(plan: &HomeboyPlan, step_id: &str) -> Option<&'static str> {
@@ -109,6 +116,7 @@ mod tests {
             "offloaded",
             Some("/srv/homeboy/project"),
             None,
+            None,
         );
         assert_eq!(explicit["schema"], LAB_OFFLOAD_METADATA_SCHEMA);
         assert_eq!(explicit["plan_id"], "lab_offload.test");
@@ -131,6 +139,7 @@ mod tests {
             "fallback",
             None,
             Some("runner connect timed out after 3s"),
+            None,
         );
         assert_eq!(fallback["source"], "automatic");
         assert_eq!(fallback["status"], "fallback");
@@ -148,10 +157,33 @@ mod tests {
             "skipped",
             None,
             Some("no_default_runner"),
+            None,
         );
         assert_eq!(skipped["source"], "automatic");
         assert_eq!(skipped["status"], "skipped");
         assert!(skipped["runner_id"].is_null());
         assert_eq!(skipped["fallback_reason"], "no_default_runner");
+    }
+
+    #[test]
+    fn lab_offload_metadata_can_include_phase_timing() {
+        let plan = lab_plan();
+        let recorder = crate::core::observation::PhaseTimingRecorder::start();
+        let metadata = lab_offload_metadata(
+            &plan,
+            "automatic",
+            Some("lab"),
+            Some("direct_ssh"),
+            "fallback",
+            None,
+            Some("connect failed"),
+            Some(&recorder.finish()),
+        );
+
+        assert_eq!(
+            metadata["phase_timing"]["schema"],
+            crate::core::observation::PHASE_TIMING_SCHEMA
+        );
+        assert!(metadata["lab_overhead_ms"].is_number());
     }
 }
