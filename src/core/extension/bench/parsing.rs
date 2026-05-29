@@ -600,21 +600,21 @@ mod tests {
             "component_id": "example",
             "iterations": 1,
             "metadata": {
-                "rust_runner": { "cargo_timing_status": "captured" }
+                "runner": { "phase_status": "captured" }
             },
             "metric_groups": {
-                "rust_runner_phases_ms": { "cargo_build": 42.0 }
+                "runner_phases_ms": { "setup": 42.0 }
             },
             "timeline": [
                 { "t_ms": 0, "source": "runner", "event": "start" },
-                { "t_ms": 42, "source": "runner", "event": "cargo_build" }
+                { "t_ms": 42, "source": "runner", "event": "setup" }
             ],
             "span_definitions": {
-                "cargo_build": { "from": "runner.start", "to": "runner.cargo_build" }
+                "setup": { "from": "runner.start", "to": "runner.setup" }
             },
             "scenarios": [
                 {
-                    "id": "audit-self",
+                    "id": "example-scenario",
                     "iterations": 1,
                     "metrics": { "p95_ms": 42.0 }
                 }
@@ -624,15 +624,15 @@ mod tests {
         let parsed = parse_bench_results_str(raw).unwrap();
 
         assert_eq!(
-            parsed.metadata["rust_runner"]["cargo_timing_status"].as_str(),
+            parsed.metadata["runner"]["phase_status"].as_str(),
             Some("captured")
         );
         assert_eq!(
-            parsed.metric_groups["rust_runner_phases_ms"].get("cargo_build"),
+            parsed.metric_groups["runner_phases_ms"].get("setup"),
             Some(&42.0)
         );
         assert_eq!(parsed.timeline.len(), 2);
-        assert!(parsed.span_definitions.contains_key("cargo_build"));
+        assert!(parsed.span_definitions.contains_key("setup"));
     }
 
     #[test]
