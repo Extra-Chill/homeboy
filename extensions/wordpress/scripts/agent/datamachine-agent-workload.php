@@ -1900,8 +1900,10 @@ if ( ! class_exists( 'Homeboy_Datamachine_Agent_Terminal_Tool' ) ) {
                 );
             }
 
-            $url   = rtrim( (string) ( $tool_def['terminal_action_url'] ?? getenv( 'HOMEBOY_TERMINAL_ACTION_URL' ) ), '/' );
-            $token = (string) ( $tool_def['terminal_action_token'] ?? getenv( 'HOMEBOY_TERMINAL_ACTION_TOKEN' ) );
+            $env_url   = getenv( 'HOMEBOY_TERMINAL_ACTION_URL' );
+            $env_token = getenv( 'HOMEBOY_TERMINAL_ACTION_TOKEN' );
+            $url       = rtrim( (string) ( false !== $env_url && '' !== $env_url ? $env_url : ( $tool_def['terminal_action_url'] ?? '' ) ), '/' );
+            $token     = (string) ( false !== $env_token && '' !== $env_token ? $env_token : ( $tool_def['terminal_action_token'] ?? '' ) );
 
             if ( '' === $url || '' === $token ) {
                 return array(

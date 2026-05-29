@@ -141,6 +141,25 @@ try {
 		exit(1);
 	}
 
+	putenv('HOMEBOY_TERMINAL_ACTION_URL=' . $ready['url']);
+	putenv('HOMEBOY_TERMINAL_ACTION_TOKEN=' . $token);
+	$env_result = $tool->handle_tool_call(
+		array('command' => 'option get siteurl'),
+		array(
+			'tool_name'             => 'run_wp_cli',
+			'terminal_action_url'   => 'http://127.0.0.1:1',
+			'terminal_action_token' => 'wrong-token',
+			'terminal_action_type'  => 'wp_cli',
+		)
+	);
+
+	if (empty($env_result['success']) || 'wp option get siteurl' !== ($env_result['command'] ?? '') || ! str_contains((string) ($env_result['stdout'] ?? ''), 'php-tool-wp:option get siteurl')) {
+		fwrite(STDERR, "Unexpected env bridge precedence result:\n" . json_encode($env_result, JSON_PRETTY_PRINT) . "\n");
+		exit(1);
+	}
+	putenv('HOMEBOY_TERMINAL_ACTION_URL');
+	putenv('HOMEBOY_TERMINAL_ACTION_TOKEN');
+
 	$missing_bridge_result = $tool->handle_tool_call(
 		array('command' => 'wp plugin list --format=table'),
 		array(
