@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.204.3] - 2026-05-29
+
+### Changed
+- Accept runner-level bench evidence
+- Expose target-adjacent deploy temp vars
+
+### Fixed
+- guard core-owned test fixture literals
+- source cleanup artifacts from extensions
+- move cargo target env into extensions
+- share cargo targets across worktrees
+- declare component cleanup artifacts
+
 ## [0.204.2] - 2026-05-29
 
 ### Changed
