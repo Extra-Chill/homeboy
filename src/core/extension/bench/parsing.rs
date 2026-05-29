@@ -623,14 +623,8 @@ mod tests {
 
         let parsed = parse_bench_results_str(raw).unwrap();
 
-        assert_eq!(
-            parsed.metadata["runner"]["phase_status"].as_str(),
-            Some("captured")
-        );
-        assert_eq!(
-            parsed.metric_groups["runner_phases_ms"].get("setup"),
-            Some(&42.0)
-        );
+        assert_eq!(parsed.metadata["runner"]["phase_status"].as_str(), Some("captured"));
+        assert_eq!(parsed.metric_groups["runner_phases_ms"].get("setup"), Some(&42.0));
         assert_eq!(parsed.timeline.len(), 2);
         assert!(parsed.span_definitions.contains_key("setup"));
     }
