@@ -2,6 +2,15 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.102.35] - 2026-05-29
+
+### Changed
+- Allow partial WP Codebox fanout apply
+- Add agent runner evidence artifacts
+
+### Fixed
+- avoid pipefail-sensitive terminal tokens
+
 ## [2.102.34] - 2026-05-29
 
 ### Changed
