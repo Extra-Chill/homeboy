@@ -28,25 +28,16 @@ set -euo pipefail
 #   HOMEBOY_DEBUG                — verbose
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${SCRIPT_DIR}/../lib/bash-preflight.sh}"
-# shellcheck source=/dev/null
-source "$BASH_PREFLIGHT_HELPER"
-homeboy_require_bash_version 4
-
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../../scripts/lib/runner-prelude.sh}"
 COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/../lib/command-capture.sh}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../lib/settings.sh}"
 # shellcheck source=/dev/null
-source "$RESOLVE_CONTEXT_HELPER"
-homeboy_resolve_context
+source "$RUNNER_PRELUDE"
+homeboy_runner_init --bash 4 --sidecar-writer --failure-trap
 # shellcheck source=/dev/null
 source "$SETTINGS_HELPER"
-source "$COMMAND_CAPTURE_HELPER"
 # shellcheck source=/dev/null
-if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
-    source "$SIDECAR_WRITER_HELPER"
-fi
+source "$COMMAND_CAPTURE_HELPER"
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
@@ -110,16 +101,6 @@ WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
 if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; then
     # shellcheck source=/dev/null
     source "$WRITE_TEST_RESULTS_HELPER"
-fi
-
-FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
-# shellcheck source=/dev/null
-if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
-    source "$FAILURE_TRAP_HELPER"
-    homeboy_init_failure_trap
-else
-    FAILED_STEP=""
-    FAILURE_OUTPUT=""
 fi
 
 # Resolve the test command.

@@ -8,21 +8,16 @@ set -euo pipefail
 # runner. Pure host-PHP smoke suites can explicitly use the host-smoke backend.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${SCRIPT_DIR}/../lib/bash-preflight.sh}"
-# shellcheck source=/dev/null
-source "$BASH_PREFLIGHT_HELPER"
-homeboy_require_bash_version 4
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../../scripts/lib/runner-prelude.sh}"
 
 HOST_SMOKE_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE:-${SCRIPT_DIR}/test-runner-host-smoke.sh}"
 WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-wp-codebox.sh}"
 CORE_WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_CORE_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-core-dev-wp-codebox.sh}"
 
-# Resolve execution context and export env vars that the WordPress test runners expect.
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../lib/settings.sh}"
 # shellcheck source=/dev/null
-source "$RESOLVE_CONTEXT_HELPER"
-homeboy_resolve_context --component-alias PLUGIN_PATH
+source "$RUNNER_PRELUDE"
+homeboy_runner_init --bash 4 --component-alias PLUGIN_PATH
 # shellcheck source=/dev/null
 source "$SETTINGS_HELPER"
 

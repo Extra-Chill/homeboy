@@ -11,25 +11,10 @@ set -euo pipefail
 # flows go through `homeboy refactor --from lint --write` (#1145).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${SCRIPT_DIR}/../lib/bash-preflight.sh}"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../../scripts/lib/runner-prelude.sh}"
 # shellcheck source=/dev/null
-source "$BASH_PREFLIGHT_HELPER"
-homeboy_require_bash_version 4
-
-RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
-# shellcheck source=../lib/runner-steps.sh
-source "${RUNNER_STEPS_HELPER}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
-# shellcheck source=/dev/null
-if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
-    source "$SIDECAR_WRITER_HELPER"
-fi
-
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
-# shellcheck source=/dev/null
-if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
-    source "$SIDECAR_WRITER_HELPER"
-fi
+source "$RUNNER_PRELUDE"
+homeboy_runner_init --bash 4 --steps --sidecar-writer --component-alias PLUGIN_PATH
 
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
@@ -84,13 +69,6 @@ if [ -n "${HOMEBOY_CATEGORY:-}" ]; then
         echo "Warning: Unknown category '${HOMEBOY_CATEGORY}'. Available: security, i18n, yoda, whitespace"
     fi
 fi
-
-# Resolve execution context (shared helper)
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
-# shellcheck source=../lib/resolve-context.sh
-source "${RESOLVE_CONTEXT_HELPER}"
-homeboy_resolve_context --component-alias PLUGIN_PATH
-export EXTENSION_PATH COMPONENT_PATH PLUGIN_PATH COMPONENT_ID
 
 COMPONENT_SHAPE="${HOMEBOY_COMPONENT_SHAPE:-}"
 if [ -z "$COMPONENT_SHAPE" ]; then

@@ -22,34 +22,14 @@ set -euo pipefail
 # empty unless we recognize the format."
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${SCRIPT_DIR}/../lib/bash-preflight.sh}"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../../scripts/lib/runner-prelude.sh}"
 # shellcheck source=/dev/null
-source "$BASH_PREFLIGHT_HELPER"
-homeboy_require_bash_version 4
-
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
-# shellcheck source=/dev/null
-source "$RESOLVE_CONTEXT_HELPER"
-homeboy_resolve_context
-# shellcheck source=/dev/null
-if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
-    source "$SIDECAR_WRITER_HELPER"
-fi
+source "$RUNNER_PRELUDE"
+homeboy_runner_init --bash 4 --sidecar-writer --failure-trap
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
 homeboy_detect_package_manager
-
-FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
-# shellcheck source=/dev/null
-if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
-    source "$FAILURE_TRAP_HELPER"
-    homeboy_init_failure_trap
-else
-    FAILED_STEP=""
-    FAILURE_OUTPUT=""
-fi
 
 FIX_MODE="${HOMEBOY_FIX_ONLY:-0}"
 FINDINGS_FILE="${HOMEBOY_LINT_FINDINGS_FILE:-${PROJECT_PATH}/.node-lint-findings.json}"
