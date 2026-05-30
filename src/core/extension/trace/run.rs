@@ -976,24 +976,26 @@ mod tests {
 
     #[test]
     fn test_run_trace_list_workflow() {
-        let temp = tempfile::tempdir().unwrap();
-        let component = test_component(temp.path());
-        let run_dir = RunDir::create().unwrap();
-        let list = run_trace_list_workflow(
-            &component,
-            TraceListWorkflowArgs {
-                component_label: "example".to_string(),
-                component_id: "example".to_string(),
-                path_override: Some(temp.path().to_string_lossy().to_string()),
-                settings: Vec::new(),
-                runner_inputs: TraceRunnerInputs::default(),
-                rig_id: None,
-            },
-            &run_dir,
-        )
-        .unwrap();
-        assert!(list.scenarios.is_empty());
-        run_dir.cleanup();
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            let component = test_component(temp.path());
+            let run_dir = RunDir::create().unwrap();
+            let list = run_trace_list_workflow(
+                &component,
+                TraceListWorkflowArgs {
+                    component_label: "example".to_string(),
+                    component_id: "example".to_string(),
+                    path_override: Some(temp.path().to_string_lossy().to_string()),
+                    settings: Vec::new(),
+                    runner_inputs: TraceRunnerInputs::default(),
+                    rig_id: None,
+                },
+                &run_dir,
+            )
+            .unwrap();
+            assert!(list.scenarios.is_empty());
+            run_dir.cleanup();
+        });
     }
 
     #[test]

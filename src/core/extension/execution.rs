@@ -793,15 +793,17 @@ mod tests {
 
     #[test]
     fn build_exec_env_includes_runtime_runner_helper_path() {
-        let env = build_exec_env("rust", None, None, "{}", Some("/tmp/ext"), None, None, None);
+        crate::test_support::with_isolated_home(|_| {
+            let env = build_exec_env("rust", None, None, "{}", Some("/tmp/ext"), None, None, None);
 
-        let helper = env
-            .iter()
-            .find(|(k, _)| k == runtime_helper::RUNNER_STEPS_ENV)
-            .map(|(_, v)| v.clone());
+            let helper = env
+                .iter()
+                .find(|(k, _)| k == runtime_helper::RUNNER_STEPS_ENV)
+                .map(|(_, v)| v.clone());
 
-        assert!(helper.is_some());
-        assert!(helper.unwrap().ends_with("runner-steps.sh"));
+            assert!(helper.is_some());
+            assert!(helper.unwrap().ends_with("runner-steps.sh"));
+        });
     }
 
     #[test]
