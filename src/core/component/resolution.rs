@@ -172,13 +172,39 @@ fn prefer_cwd_for_component(component_id: &str) -> Option<Component> {
     let mut registered = load(component_id).ok()?;
     let registered_path = PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
     let cwd_git_root = detect_git_root(&cwd)?;
-    if same_git_common_dir(&registered_path, &cwd_git_root) {
+    if same_git_common_dir(&registered_path, &cwd_git_root)
+        || is_named_component_worktree(component_id, &registered_path, &cwd_git_root)
+    {
         registered.local_path = cwd_git_root.to_string_lossy().to_string();
         registered.resolve_remote_path();
         return Some(registered);
     }
 
     None
+}
+
+fn is_named_component_worktree(
+    component_id: &str,
+    registered_path: &Path,
+    cwd_git_root: &Path,
+) -> bool {
+    let Some(worktree_name) = cwd_git_root.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !worktree_name.starts_with(&format!("{component_id}@")) {
+        return false;
+    }
+    if registered_path.file_name().and_then(|name| name.to_str()) != Some(component_id) {
+        return false;
+    }
+
+    match (registered_path.parent(), cwd_git_root.parent()) {
+        (Some(registered_parent), Some(worktree_parent)) => {
+            registered_parent == worktree_parent
+                || registered_parent.canonicalize().ok() == worktree_parent.canonicalize().ok()
+        }
+        _ => false,
+    }
 }
 
 fn same_git_common_dir(a: &Path, b: &Path) -> bool {
@@ -719,6 +745,34 @@ mod tests {
             with_cwd(&worktree, || {
                 let target = resolve_target(TargetSpec::new(Some("registered"), None))
                     .expect("registered worktree target");
+                let canonical_worktree = worktree.canonicalize().expect("canonical worktree");
+
+                assert_eq!(target.component_id, "registered");
+                assert_eq!(target.source_path, canonical_worktree);
+                assert_eq!(
+                    target.component.local_path,
+                    target.source_path.to_string_lossy()
+                );
+                assert!(!target.synthetic);
+            });
+        });
+    }
+
+    #[test]
+    fn target_spec_prefers_named_sibling_worktree_for_registered_component() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("registered");
+            let worktree = dir.path().join("registered@feature-branch");
+            std::fs::create_dir_all(&primary).expect("primary dir");
+            std::fs::create_dir_all(&worktree).expect("worktree dir");
+            git(&primary, &["init"]);
+            git(&worktree, &["init"]);
+            write_standalone_registration(home.path(), "registered", &primary);
+
+            with_cwd(&worktree, || {
+                let target = resolve_target(TargetSpec::new(Some("registered"), None))
+                    .expect("named worktree target");
                 let canonical_worktree = worktree.canonicalize().expect("canonical worktree");
 
                 assert_eq!(target.component_id, "registered");
