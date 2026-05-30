@@ -8,9 +8,9 @@ mod stack;
 
 use crate::extensions::deps_provider as provider;
 pub use stack::{
-    stack_apply, stack_plan, stack_plan_from_components, stack_status, DependencyStackApplyResult,
-    DependencyStackApplyStep, DependencyStackCommandResult, DependencyStackEdgeStatus,
-    DependencyStackPlan, DependencyStackPlanStep, DependencyStackStatus,
+    stack_apply, stack_apply_plan, stack_plan, stack_plan_from_components, stack_status,
+    DependencyStackApplyResult, DependencyStackApplyStep, DependencyStackCommandResult,
+    DependencyStackEdgeStatus, DependencyStackPlan, DependencyStackPlanStep, DependencyStackStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

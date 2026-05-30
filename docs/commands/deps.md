@@ -11,10 +11,10 @@ homeboy deps <COMMAND>
 ## Subcommands
 
 - `status` — inspect dependency constraints and locked package versions
-- `update` — update one Composer package explicitly
+- `update` — update one package through its dependency provider
 - `stack status` — list declared dependency stack edges
 - `stack plan <upstream>` — plan downstream updates for a merged upstream component or repo
-- `stack apply <upstream> [--dry-run]` — run declared update, post-update, and test commands in dependency order
+- `stack apply <upstream> [--to <constraint>] [--dry-run]` — run declared update, post-update, and test commands in dependency order
 
 ## Dependency Stacks
 
@@ -46,6 +46,14 @@ When `update` is omitted, Homeboy uses:
 ```sh
 homeboy deps update <package> --path <downstream path>
 ```
+
+Pass `--to <constraint>` to `stack apply` when the default provider-backed update should set a new manifest constraint:
+
+```sh
+homeboy deps stack apply extrachill-components --to ^0.5.2
+```
+
+Custom `dependency_stack[].update` commands are executed as declared; include any constraint handling directly in the custom command when overriding the default provider-backed update.
 
 ## Related
 
