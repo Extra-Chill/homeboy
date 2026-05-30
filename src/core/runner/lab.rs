@@ -471,6 +471,7 @@ fn run_lab_offload_inner(
             raw_exec: false,
             source_snapshot: Some(source_snapshot),
             capability_preflight,
+            required_extensions: Vec::new(),
         },
     )?;
 

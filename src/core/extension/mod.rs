@@ -15,6 +15,7 @@ mod maintenance;
 mod manifest;
 mod manifest_action_config;
 mod manifest_config;
+mod manifest_deploy_config;
 mod refactor_protocol;
 mod registry;
 mod repair;
@@ -64,16 +65,17 @@ pub use manifest::{
     ActionConfig, ActionType, AuditCapability, AutofixVerifyConfig, BenchConfig, BuildConfig,
     CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
     CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig, ComponentEnvConfig,
-    DatabaseCliConfig, DatabaseConfig, DeployArchiveInstallPolicy, DeployCapability,
-    DeployOverride, DeployRequiredHeader, DeployVerification, DepsConfig, DiscoveryConfig,
-    DiscoveryMarkerConfig, DocTarget, ExecutableCapability, ExtensionManifest, FeatureContextRule,
-    FileContainsCondition, HttpMethod, InputConfig, LintChangedFileRoute, LintConfig, OutputConfig,
-    OutputSchema, PlatformCapability, ProvidesConfig, RemotePathInferenceRule, RemotePathRootRule,
-    RequirementsConfig, RuntimeConfig, RuntimeRequirementsConfig, ScriptsConfig, SelectOption,
-    SettingConfig, SinceTagConfig, StructuredSidecarDeclaration, TestChangedFileExclusiveEnv,
-    TestChangedFileRouting, TestChangedFileRoutingStrategy, TestConfig, TestDriftConfig,
-    TestMappingConfig, TraceConfig, VersionPatternConfig,
+    DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride, DeployVerification,
+    DepsConfig, DiscoveryConfig, DiscoveryMarkerConfig, DocTarget, ExecutableCapability,
+    ExtensionManifest, FeatureContextRule, FileContainsCondition, HttpMethod, InputConfig,
+    LintChangedFileRoute, LintConfig, OutputConfig, OutputSchema, PlatformCapability,
+    ProvidesConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, RuntimeConfig,
+    RuntimeRequirementsConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig,
+    StructuredSidecarDeclaration, TestChangedFileExclusiveEnv, TestChangedFileRouting,
+    TestChangedFileRoutingStrategy, TestConfig, TestDriftConfig, TestMappingConfig, TraceConfig,
+    VersionPatternConfig,
 };
+pub use manifest_deploy_config::{DeployArchiveInstallPolicy, DeployRequiredHeader};
 pub use refactor_protocol::{
     run_refactor_script, run_refactor_script_result, AdjustedItem, ParsedItem,
     RefactorScriptFailure, RefactorScriptFailureKind, RelatedTests, ResolvedImports,
