@@ -259,8 +259,24 @@ impl InvocationGuard {
             "invocation.artifacts.preserve",
             crate::core::io::EntryPolicy::CopyRegularFilesOnly,
         )?;
+        preserve_artifact_manifest(&self.env.artifact_dir, &target)?;
         Ok(Some(target))
     }
+}
+
+fn preserve_artifact_manifest(source: &Path, target: &Path) -> Result<()> {
+    let manifest = if crate::core::artifact_manifest::manifest_exists(source) {
+        let manifest = crate::core::artifact_manifest::read_manifest_from_root(source)?;
+        // Validate against the copied target so the manifest describes the
+        // preserved artifact tree, not only the pre-copy invocation directory.
+        let entries = manifest.validate_under(target)?;
+        crate::core::artifact_manifest::ArtifactManifest::new(
+            entries.into_iter().map(|entry| entry.entry).collect(),
+        )
+    } else {
+        crate::core::artifact_manifest::manifest_for_existing_files(target)?
+    };
+    crate::core::artifact_manifest::write_manifest_to_root(target, &manifest)
 }
 
 impl Drop for InvocationGuard {

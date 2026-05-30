@@ -413,6 +413,82 @@ fn invocation_drop_cleans_up_root_directory() {
     });
 }
 
+#[test]
+fn preserve_artifacts_emits_manifest_for_invocation_files() {
+    with_isolated_home(|_| {
+        let run_dir = RunDir::create().expect("run dir");
+        let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
+            .expect("invocation guard");
+        let artifact = std::path::PathBuf::from(value_for(
+            &guard.env_vars(),
+            "HOMEBOY_INVOCATION_ARTIFACT_DIR",
+        ));
+        std::fs::create_dir_all(artifact.join("nested")).expect("mkdir artifact nested");
+        std::fs::write(artifact.join("nested/result.json"), r#"{"ok":true}"#)
+            .expect("write artifact");
+
+        let preserved = guard
+            .preserve_artifacts(&run_dir)
+            .expect("preserve artifacts")
+            .expect("artifact path");
+        let manifest = homeboy::core::artifact_manifest::read_manifest_from_root(&preserved)
+            .expect("read manifest");
+
+        assert_eq!(manifest.artifacts.len(), 1);
+        assert_eq!(manifest.artifacts[0].path, "nested/result.json");
+        assert_eq!(manifest.artifacts[0].kind, "file");
+        assert_eq!(
+            manifest.artifacts[0].content_type.as_deref(),
+            Some("application/json")
+        );
+
+        run_dir.cleanup();
+    });
+}
+
+#[test]
+fn preserve_artifacts_normalizes_existing_manifest() {
+    with_isolated_home(|_| {
+        let run_dir = RunDir::create().expect("run dir");
+        let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
+            .expect("invocation guard");
+        let artifact = std::path::PathBuf::from(value_for(
+            &guard.env_vars(),
+            "HOMEBOY_INVOCATION_ARTIFACT_DIR",
+        ));
+        std::fs::write(artifact.join("declared.log"), "hello").expect("write artifact");
+        let manifest = homeboy::core::artifact_manifest::ArtifactManifest::new(vec![
+            homeboy::core::artifact_manifest::ArtifactManifestEntry {
+                path: "declared.log".to_string(),
+                kind: "runner-log".to_string(),
+                label: Some("Runner log".to_string()),
+                content_type: None,
+                size_bytes: None,
+                sha256: None,
+                redaction: Some(homeboy::core::artifact_manifest::ArtifactRedactionState::Raw),
+                metadata: serde_json::json!({ "source": "test" }),
+            },
+        ]);
+        homeboy::core::artifact_manifest::write_manifest_to_root(&artifact, &manifest)
+            .expect("write source manifest");
+
+        let preserved = guard
+            .preserve_artifacts(&run_dir)
+            .expect("preserve artifacts")
+            .expect("artifact path");
+        let manifest = homeboy::core::artifact_manifest::read_manifest_from_root(&preserved)
+            .expect("read manifest");
+
+        assert_eq!(manifest.artifacts.len(), 1);
+        assert_eq!(manifest.artifacts[0].path, "declared.log");
+        assert_eq!(manifest.artifacts[0].kind, "runner-log");
+        assert_eq!(manifest.artifacts[0].size_bytes, Some(5));
+        assert!(manifest.artifacts[0].sha256.is_some());
+
+        run_dir.cleanup();
+    });
+}
+
 // --- followup: STATE_DIR is the leaf the workload owns ---------------------
 
 #[test]
