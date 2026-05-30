@@ -169,7 +169,7 @@ Options:
 Notes:
 
 - `set` no longer supports individual field flags; use `--json` and provide the fields you want to update.
-- Use `null` in JSON to clear a field (for example, `{"component_ids": null}`).
+- Use `null` in JSON to clear a field (for example, `{"server_id": null}`).
 
 JSON output:
 
@@ -457,12 +457,13 @@ Options:
 - `--json <JSON>`: JSON object to remove from config (supports `@file` and `-` for stdin)
 
 Note: Use this to remove specific fields or array items from project configuration.
+Use `project components remove` for component attachments.
 
 Example:
 
 ```sh
-# Remove a component
-homeboy project remove my-project --json '{"component_ids": ["component-id"]}'
+# Remove a shared table entry
+homeboy project remove my-project --json '{"shared_tables": ["wp_users"]}'
 ```
 
 JSON output:
@@ -471,7 +472,7 @@ JSON output:
 {
   "command": "project.remove",
   "project_id": "<project_id>",
-  "removed": ["component_ids"],
+  "removed": ["shared_tables"],
   "project": {}
 }
 ```

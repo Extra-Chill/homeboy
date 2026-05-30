@@ -90,10 +90,12 @@ Each project is a separate JSON file named after the project ID.
 ```json
 {
   "id": "extrachill",
-  "name": "Extra Chill",
   "domain": "extrachill.com",
   "server_id": "production",
-  "component_ids": ["theme", "api"]
+  "components": [
+    { "id": "theme", "local_path": "/repo/theme", "remote_path": "wp-content/themes/theme" },
+    { "id": "api", "local_path": "/repo/api", "remote_path": "wp-content/plugins/api" }
+  ]
 }
 ```
 

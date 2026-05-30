@@ -2,6 +2,9 @@
 
 Design for deriving rig variants from one base rig plus explicit axis overlays.
 
+Status: design proposal. `homeboy rig matrix` and `--matrix` selectors are not
+part of the current CLI surface.
+
 Tracked by Extra-Chill/homeboy#1844.
 
 ## Problem
@@ -139,7 +142,7 @@ needs many changes.
 Use two surfaces: one for single derived variants and one for cartesian
 expansion.
 
-```bash
+```text
 # Single derived rig for normal rig verbs.
 homeboy rig check studio-agent --variant agent_runtime=pi --variant conversion=bfb
 homeboy rig up studio-agent --variant agent_runtime=pi --variant conversion=bfb
@@ -150,7 +153,7 @@ homeboy bench studio --rig studio-agent \
   --matrix agent_runtime=sdk,pi \
   --matrix conversion=none,bfb
 
-# Inspect the generated plan without running anything.
+# Proposed plan inspection without running anything.
 homeboy rig matrix studio-agent --matrix agent_runtime=sdk,pi --matrix conversion=none,bfb
 homeboy rig matrix studio-agent --variant agent_runtime=pi --variant conversion=bfb --json
 ```

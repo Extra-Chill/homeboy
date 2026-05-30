@@ -11,22 +11,17 @@ matter when the workflow needs environment context.
 ```json
 {
   "id": "string",
-  "name": "string",
+  "aliases": [],
   "domain": "string",
   "server_id": "string",
   "base_path": "string",
-  "project_type": "string",
-  "component_ids": [],
+  "path_roots": {},
   "api": {},
   "database": {},
-  "local_environment": {},
   "remote_files": {},
   "remote_logs": {},
   "table_prefix": "string",
-  "protected_table_patterns": [],
-  "unlocked_table_patterns": [],
   "shared_tables": [],
-  "table_groupings": [],
   "sub_targets": [],
   "components": [
     {
@@ -35,8 +30,10 @@ matter when the workflow needs environment context.
       "remote_path": "string"
     }
   ],
-  "component_groupings": [],
   "component_overrides": {},
+  "services": [],
+  "changelog_next_section_label": "string",
+  "changelog_next_section_aliases": [],
   "cli_path": "string",
   "tools": {},
   "extensions": {}
@@ -47,16 +44,15 @@ matter when the workflow needs environment context.
 
 ### Required Fields
 
-- **`id`** (string): Unique project identifier
-- **`name`** (string): Human-readable project name
-- **`domain`** (string): Project domain name
-- **`server_id`** (string): ID of linked server configuration
-- **`base_path`** (string): Remote server base path for project files
+- **`id`** (string): Unique project identifier. The ID is the filename key and is not serialized inside the stored project object.
 
 ### Optional Fields
 
-- **`project_type`** (string): Project type identifier (e.g., `"wordpress"`)
-- **`component_ids`** (array): List of component IDs linked to this project
+- **`aliases`** (array): Alternate IDs accepted for project lookup
+- **`domain`** (string): Project domain name
+- **`server_id`** (string): ID of linked server configuration
+- **`base_path`** (string): Local or remote base path for project files
+- **`path_roots`** (object): Named path roots used by deploy/path resolution
 - **`api`** (object): API client configuration
   - **`base_url`** (string): API base URL
   - **`enabled`** (boolean): Whether API client is enabled
@@ -70,9 +66,6 @@ matter when the workflow needs environment context.
   - **`user`** (string): Database user
   - **`password`** (string): Database password (stored in keychain)
   - **`use_ssh_tunnel`** (boolean): Connect via SSH tunnel
-- **`local_environment`** (object): Local development environment
-  - **`domain`** (string): Local domain
-  - **`site_path`** (string): Local site path
 - **`remote_files`** (object): Remote file management
   - **`pinned_files`** (array): List of frequently accessed files
     - **`id`** (string): Unique identifier
@@ -83,22 +76,13 @@ matter when the workflow needs environment context.
     - **`path`** (string): Log path relative to base_path
     - **`tail_lines`** (number): Default line count for tail
 - **`table_prefix`** (string): Database table prefix (e.g., `"wp_"`)
-- **`protected_table_patterns`** (array): Patterns for protected tables (cannot be deleted)
-- **`unlocked_table_patterns`** (array): Patterns for unlocked tables (allow dangerous operations)
 - **`shared_tables`** (array): List of shared table names across multi-site installations
-- **`table_groupings`** (array): Groupings for organizing tables
-  - **`id`** (string): Unique grouping identifier
-  - **`name`** (string): Grouping name
-  - **`patterns`** (array): Glob patterns matching tables in this group
-  - **`member_ids`** (array): Explicit table IDs in this group
-  - **`sort_order`** (number): Display sort order
 - **`sub_targets`** (array): Sub-target paths for multi-component sites
 - **`components`** (array): Project-attached component checkouts. Each entry requires `id` and `local_path`; optional `remote_path` overrides the repo-owned component `remote_path` for this project so the same component can deploy to projects with different filesystem layouts.
-- **`component_groupings`** (array): Groupings for organizing components
-  - **`id`** (string): Unique grouping identifier
-  - **`name`** (string): Grouping name
-  - **`member_ids`** (array): Component IDs in this group
 - **`component_overrides`** (object): Per-component project overrides keyed by component ID. These remain the most-specific deploy overrides and take precedence over `components[].remote_path`.
+- **`services`** (array): Service names checked by project/fleet health status
+- **`changelog_next_section_label`** (string): Project-level changelog next-section label override
+- **`changelog_next_section_aliases`** (array): Additional labels accepted for the next changelog section
 - **`cli_path`** (string): Project-scoped CLI path used by extension deploy install steps. On any given site the WP-CLI entrypoint is fixed (`wp`, `studio wp`, a Lando wrapper, etc.) and shared by every component deployed there, so this lives at the project layer instead of being repeated per component. Component-level `component_overrides[id].cli_path` still wins as the most-specific escape hatch. If unset, the deploy resolver auto-detects Studio sites (projects whose `base_path` is under `~/Studio/`) and defaults them to `"studio wp"`.
 - **`tools`** (object): Project-specific tool configurations
   - Keys are tool identifiers (e.g., `"newsletter"`, `"bandcamp_scraper"`)
@@ -112,14 +96,20 @@ matter when the workflow needs environment context.
 ```json
 {
   "id": "extrachill",
-  "name": "Extra Chill",
   "domain": "extrachill.com",
   "server_id": "production",
   "base_path": "/var/www/extrachill",
-  "project_type": "wordpress",
-  "component_ids": [
-    "extrachill-theme",
-    "extrachill-api"
+  "components": [
+    {
+      "id": "extrachill-theme",
+      "local_path": "/Users/dev/Developer/extrachill-theme",
+      "remote_path": "wp-content/themes/extrachill-theme"
+    },
+    {
+      "id": "extrachill-api",
+      "local_path": "/Users/dev/Developer/extrachill-api",
+      "remote_path": "wp-content/plugins/extrachill-api"
+    }
   ],
   "api": {
     "base_url": "https://extrachill.com/wp-json",
@@ -141,10 +131,6 @@ matter when the workflow needs environment context.
     "user": "extrachill_user",
     "use_ssh_tunnel": true
   },
-  "local_environment": {
-    "domain": "extrachill.local",
-    "site_path": "/Users/dev/Sites/extrachill"
-  },
   "remote_files": {
     "pinned_files": [
       {
@@ -163,15 +149,7 @@ matter when the workflow needs environment context.
     ]
   },
   "table_prefix": "wp_",
-  "table_groupings": [
-    {
-      "id": "wordpress-core",
-      "name": "WordPress Core",
-      "patterns": ["wp_*"],
-      "member_ids": [],
-      "sort_order": 0
-    }
-  ],
+  "services": ["nginx", "php8.4-fpm"],
   "extensions": {
     "wordpress": {
       "wp_cli_path": "/usr/local/bin/wp"
