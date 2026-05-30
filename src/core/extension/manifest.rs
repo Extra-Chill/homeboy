@@ -20,6 +20,7 @@ pub use super::manifest_config::{
     TestChangedFileExclusiveEnv, TestChangedFileRouting, TestChangedFileRoutingStrategy,
     TestConfig, TraceConfig, VersionPatternConfig,
 };
+pub use super::manifest_deploy_config::{DeployArchiveInstallPolicy, DeployRequiredHeader};
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
 
 /// Type of action that can be executed by a extension.
@@ -64,6 +65,8 @@ pub struct DeployCapability {
     pub verifications: Vec<DeployVerification>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<DeployOverride>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archive_install: Vec<DeployArchiveInstallPolicy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_path_inference: Vec<RemotePathInferenceRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -616,6 +619,14 @@ impl ExtensionManifest {
         self.deploy
             .as_ref()
             .map(|d| d.overrides.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Convenience: get archive-install deploy policies (empty if no deploy capability).
+    pub fn deploy_archive_installs(&self) -> &[DeployArchiveInstallPolicy] {
+        self.deploy
+            .as_ref()
+            .map(|d| d.archive_install.as_slice())
             .unwrap_or(&[])
     }
 
