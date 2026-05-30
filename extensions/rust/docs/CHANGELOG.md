@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.19.2] - 2026-05-30
+
+### Changed
+- Use core sidecar helpers in non-WP runners
+
 ## [1.19.1] - 2026-05-29
 
 ### Fixed
