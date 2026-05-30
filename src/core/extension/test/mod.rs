@@ -8,11 +8,14 @@ pub mod workflow;
 
 use crate::core::component::Component;
 use crate::core::extension::test::drift::DriftOptions;
-use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
+use crate::core::extension::{
+    ExtensionCapability, ExtensionExecutionContext, ExtensionRunner, TestChangedFileExclusiveEnv,
+    TestChangedFileRouting, TestChangedFileRoutingStrategy,
+};
 use crate::core::git;
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TestScopeOutput {
@@ -62,6 +65,7 @@ pub fn build_test_runner(
     run_dir: &crate::core::engine::run_dir::RunDir,
 ) -> crate::core::Result<ExtensionRunner> {
     let resolved = resolve_test_command(component)?;
+    let extension_id = resolved.extension_id.clone();
 
     let mut runner = ExtensionRunner::for_context(resolved)
         .component(component.clone())
@@ -77,9 +81,231 @@ pub fn build_test_runner(
 
     if let Some(files) = changed_test_files {
         runner = runner.env("HOMEBOY_CHANGED_TEST_FILES", &files.join("\n"));
+
+        if let Some(routing) = test_changed_file_routing(&extension_id)? {
+            for (name, value) in build_changed_test_routing_env(component, files, &routing) {
+                runner = runner.env(&name, &value);
+            }
+        }
     }
 
     Ok(runner)
+}
+
+fn test_changed_file_routing(
+    extension_id: &str,
+) -> crate::core::error::Result<Option<TestChangedFileRouting>> {
+    let manifest = crate::core::extension::load_extension(extension_id)?;
+    Ok(manifest
+        .test
+        .and_then(|test| test.changed_file_routing.clone()))
+}
+
+fn build_changed_test_routing_env(
+    component: &Component,
+    files: &[String],
+    routing: &TestChangedFileRouting,
+) -> Vec<(String, String)> {
+    let mut env = vec![(
+        "HOMEBOY_TEST_SCOPE_STRATEGY".to_string(),
+        changed_test_strategy_name(&routing.strategy).to_string(),
+    )];
+
+    match routing.strategy {
+        TestChangedFileRoutingStrategy::FileArgs => {
+            env.push(("HOMEBOY_TEST_SCOPE_KIND".to_string(), "args".to_string()));
+            env.push(("HOMEBOY_TEST_RUNNER_ARGS".to_string(), files.join("\n")));
+        }
+        TestChangedFileRoutingStrategy::RustCargo => {
+            env.extend(rust_cargo_changed_test_env(component, files));
+        }
+        TestChangedFileRoutingStrategy::ExclusiveEnv => {
+            if let Some(exclusive_env) = routing.exclusive_env.as_ref() {
+                env.extend(exclusive_changed_test_env(files, exclusive_env));
+            }
+        }
+    }
+
+    env
+}
+
+fn changed_test_strategy_name(strategy: &TestChangedFileRoutingStrategy) -> &'static str {
+    match strategy {
+        TestChangedFileRoutingStrategy::FileArgs => "file_args",
+        TestChangedFileRoutingStrategy::RustCargo => "rust_cargo",
+        TestChangedFileRoutingStrategy::ExclusiveEnv => "exclusive_env",
+    }
+}
+
+fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(String, String)> {
+    let mut filter_args = Vec::new();
+    let mut integration_args = Vec::new();
+    let mut fallback_message = None;
+
+    for test_file in files {
+        if test_file.starts_with("tests/") && test_file.ends_with(".rs") {
+            let rest = test_file.trim_start_matches("tests/");
+            if !rest.contains('/') {
+                integration_args.push(rest.trim_end_matches(".rs").to_string());
+                continue;
+            }
+        }
+
+        let mut module_path = test_file
+            .strip_prefix("src/")
+            .unwrap_or(test_file)
+            .strip_prefix("tests/")
+            .unwrap_or_else(|| test_file.strip_prefix("src/").unwrap_or(test_file))
+            .trim_end_matches(".rs")
+            .trim_end_matches("/mod")
+            .to_string();
+
+        if test_file.starts_with("tests/") && test_file.ends_with("_test.rs") {
+            let test_module = module_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&module_path)
+                .to_string();
+            let source_module = module_path.trim_end_matches("_test");
+            let source_file =
+                component_source_path(component).join(format!("src/{source_module}.rs"));
+            let source_mod =
+                component_source_path(component).join(format!("src/{source_module}/mod.rs"));
+
+            if source_file.is_file() || source_mod.is_file() {
+                module_path = format!("{source_module}::{test_module}");
+            } else if test_file.starts_with("tests/") && test_file["tests/".len()..].contains('/') {
+                fallback_message = Some(
+                    "Changed files include nested tests without a direct Cargo target; running full cargo test."
+                        .to_string(),
+                );
+                continue;
+            }
+        } else if test_file.starts_with("tests/") && test_file["tests/".len()..].contains('/') {
+            fallback_message = Some(
+                "Changed files include nested tests without a direct Cargo target; running full cargo test."
+                    .to_string(),
+            );
+            continue;
+        }
+
+        module_path = module_path.replace('/', "::");
+        if !module_path.is_empty() {
+            filter_args.push(module_path);
+        }
+    }
+
+    if let Some(message) = fallback_message {
+        return vec![
+            ("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string()),
+            ("HOMEBOY_TEST_SCOPE_MESSAGE".to_string(), message),
+        ];
+    }
+
+    if !integration_args.is_empty() && !filter_args.is_empty() {
+        return vec![
+            ("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string()),
+            (
+                "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
+                "Changed files include integration and inline tests; running full cargo test."
+                    .to_string(),
+            ),
+        ];
+    }
+
+    if !integration_args.is_empty() {
+        let args = integration_args
+            .iter()
+            .flat_map(|target| ["--test".to_string(), target.clone()])
+            .collect::<Vec<_>>();
+        return vec![
+            (
+                "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+                "rust_integration".to_string(),
+            ),
+            ("HOMEBOY_TEST_RUNNER_ARGS".to_string(), args.join("\n")),
+            (
+                "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
+                format!(
+                    "Scoped to changed integration tests: {}",
+                    integration_args.join(" ")
+                ),
+            ),
+        ];
+    }
+
+    if filter_args.len() == 1 {
+        return vec![
+            (
+                "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+                "rust_filter".to_string(),
+            ),
+            (
+                "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
+                format!("--\n{}", filter_args[0]),
+            ),
+            (
+                "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
+                format!("Scoped to changed files: {}", filter_args[0]),
+            ),
+        ];
+    }
+
+    if filter_args.len() > 1 {
+        return vec![
+            ("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string()),
+            (
+                "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
+                "Changed files include multiple inline test modules; running full cargo test."
+                    .to_string(),
+            ),
+        ];
+    }
+
+    Vec::new()
+}
+
+fn exclusive_changed_test_env(
+    files: &[String],
+    config: &TestChangedFileExclusiveEnv,
+) -> Vec<(String, String)> {
+    if files.is_empty()
+        || files
+            .iter()
+            .any(|file| !exclusive_route_matches(config, file))
+    {
+        return Vec::new();
+    }
+
+    vec![
+        (
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "exclusive_env".to_string(),
+        ),
+        (
+            "HOMEBOY_TEST_SCOPE_ENV_NAME".to_string(),
+            config.name.clone(),
+        ),
+        ("HOMEBOY_TEST_SCOPE_ENV_VALUE".to_string(), files.join("\n")),
+    ]
+}
+
+fn exclusive_route_matches(config: &TestChangedFileExclusiveEnv, file: &str) -> bool {
+    if !config.extensions.is_empty() && has_extension(file, &config.extensions) {
+        return true;
+    }
+
+    config
+        .globs
+        .iter()
+        .any(|pattern| glob_match::glob_match(pattern, file))
+}
+
+fn has_extension(file: &str, extensions: &[String]) -> bool {
+    Path::new(file)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extensions.iter().any(|expected| expected == extension))
 }
 
 fn component_source_path(component: &Component) -> PathBuf {
@@ -253,6 +479,92 @@ mod tests {
             changed_test_file_for_path("tests/fixtures/other.json"),
             None
         );
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_emits_integration_args() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let component = Component::new(
+            "rust-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &[
+                "tests/integration_scope.rs".to_string(),
+                "tests/another_scope.rs".to_string(),
+            ],
+        );
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "rust_integration".to_string()
+        )));
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
+            "--test\nintegration_scope\n--test\nanother_scope".to_string()
+        )));
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_emits_inline_filter() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let component = Component::new(
+            "rust-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &["src/core/daemon.rs".to_string()]);
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "rust_filter".to_string()
+        )));
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
+            "--\ncore::daemon".to_string()
+        )));
+    }
+
+    #[test]
+    fn exclusive_changed_routing_only_sets_env_when_all_files_match() {
+        let config = TestChangedFileExclusiveEnv {
+            name: "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES".to_string(),
+            globs: vec!["tests/**/*-smoke.php".to_string()],
+            extensions: Vec::new(),
+        };
+
+        let env = exclusive_changed_test_env(
+            &[
+                "tests/import-agent-ability-smoke.php".to_string(),
+                "tests/nested/queue-routing-smoke.php".to_string(),
+            ],
+            &config,
+        );
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "exclusive_env".to_string()
+        )));
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_ENV_VALUE".to_string(),
+            "tests/import-agent-ability-smoke.php\ntests/nested/queue-routing-smoke.php"
+                .to_string()
+        )));
+
+        assert!(exclusive_changed_test_env(
+            &[
+                "tests/import-agent-ability-smoke.php".to_string(),
+                "tests/Unit/FooTest.php".to_string(),
+            ],
+            &config,
+        )
+        .is_empty());
     }
 
     #[test]

@@ -240,6 +240,41 @@ pub struct TestConfig {
     /// Source/test selection contract used by changed-test and drift workflows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drift: Option<TestDriftConfig>,
+
+    /// Manifest-driven routing for changed-test selections before invoking the
+    /// extension test runner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_file_routing: Option<TestChangedFileRouting>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestChangedFileRouting {
+    pub strategy: TestChangedFileRoutingStrategy,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive_env: Option<TestChangedFileExclusiveEnv>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TestChangedFileRoutingStrategy {
+    FileArgs,
+    RustCargo,
+    ExclusiveEnv,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestChangedFileExclusiveEnv {
+    /// Environment variable to set when all selected tests match this route.
+    pub name: String,
+
+    /// Glob patterns matched against component-relative test paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub globs: Vec<String>,
+
+    /// File extensions matched without leading dots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
