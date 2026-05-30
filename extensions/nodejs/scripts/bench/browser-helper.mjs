@@ -569,6 +569,59 @@ export async function runBrowserBench(options) {
     return { metrics, artifacts };
 }
 
+export async function runBrowserPageScenario(options) {
+    const config = normalizePageScenarioOptions(options);
+    let response = null;
+
+    const result = await config.browserBench({
+        ...config.browserOptions,
+        id: config.id,
+        artifactsDir: config.artifactsDir,
+        action: async (context) => {
+            const { page, mark } = context;
+            if (config.target) {
+                response = await page.goto(config.target, config.gotoOptions);
+                await mark('page_loaded');
+            }
+            if (config.action) {
+                await config.action({ ...context, response, target: config.target });
+            }
+            await runPageScenarioAssertions({ assertions: config.pageAssertions, page, response, target: config.target });
+        },
+    });
+
+    const metrics = stableJson(result.metrics || {});
+    let artifacts = stableJson({ ...(result.artifacts || {}), ...config.artifacts });
+    await runPageScenarioAssertions({ assertions: config.artifactAssertions, artifacts, metrics, target: config.target });
+
+    const rawResult = stableJson({
+        artifacts,
+        id: config.id,
+        metadata: config.metadata,
+        metrics,
+        target: config.target,
+    });
+    const rawResultPath = join(config.artifactsDir, `${config.id}-raw-result.json`);
+    await writeJson(rawResultPath, config.sanitizeRawResult ? await config.sanitizeRawResult(rawResult) : rawResult);
+    artifacts = stableJson({
+        ...artifacts,
+        rawResult: {
+            path: rawResultPath,
+            kind: 'browser-page-scenario-result',
+            label: 'Browser page scenario raw result',
+        },
+    });
+
+    if (config.sanitizeArtifacts) {
+        const sanitized = await config.sanitizeArtifacts({ artifacts, metrics, id: config.id, target: config.target });
+        if (sanitized !== undefined) artifacts = stableJson(sanitized);
+    }
+
+    await runPageScenarioAssertions({ assertions: config.postSanitizeArtifactAssertions, artifacts, metrics, target: config.target });
+
+    return { metrics, artifacts };
+}
+
 function normalizeOptions(options) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
         throw new Error('runBrowserBench requires an options object.');
@@ -600,6 +653,153 @@ function normalizeOptions(options) {
         launchOptions: options.launchOptions || {},
         contextOptions: options.contextOptions || {},
     };
+}
+
+function normalizePageScenarioOptions(options) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+        throw new Error('runBrowserPageScenario requires an options object.');
+    }
+
+    const id = sanitizeFilePart(options.id || 'browser-page-scenario');
+    const componentPath = process.env.HOMEBOY_COMPONENT_PATH || process.cwd();
+    const artifactsDir = resolve(
+        options.artifactsDir ||
+        options.artifactDir ||
+        process.env.HOMEBOY_BENCH_ARTIFACTS_DIR ||
+        join(componentPath, '.homeboy-bench-artifacts', id)
+    );
+    const assertions = Array.isArray(options.assertions) ? options.assertions : [];
+    const pageAssertions = assertions.filter((assertion) => !isArtifactAssertion(assertion));
+    const artifactAssertions = assertions.filter(isArtifactAssertion);
+    const postSanitizeArtifactAssertions = Array.isArray(options.postSanitizeAssertions) ? options.postSanitizeAssertions.filter(isArtifactAssertion) : [];
+    const browserBench = options.browserBench || runBrowserBench;
+
+    if (typeof browserBench !== 'function') {
+        throw new Error('runBrowserPageScenario requires browserBench to be a function when provided.');
+    }
+
+    return {
+        id,
+        artifactsDir,
+        target: typeof options.target === 'string' && options.target.trim() !== '' ? options.target : '',
+        gotoOptions: options.gotoOptions || {},
+        action: typeof options.action === 'function' ? options.action : null,
+        artifacts: normalizeStaticArtifacts(options.artifacts),
+        metadata: normalizeJsonObject(options.metadata, 'metadata'),
+        sanitizeArtifacts: normalizeOptionalFunction(options.sanitizeArtifacts, 'sanitizeArtifacts'),
+        sanitizeRawResult: normalizeOptionalFunction(options.sanitizeRawResult, 'sanitizeRawResult'),
+        browserBench,
+        pageAssertions,
+        artifactAssertions,
+        postSanitizeArtifactAssertions,
+        browserOptions: {
+            actions: Array.isArray(options.actions) ? options.actions : [],
+            actionOptions: options.actionOptions || {},
+            browserName: options.browserName,
+            contextOptions: options.contextOptions,
+            headless: options.headless,
+            launchOptions: options.launchOptions,
+            networkIdleTimeoutMs: options.networkIdleTimeoutMs,
+            screenshot: options.screenshot,
+            trace: options.trace,
+            waitForNetworkIdle: options.waitForNetworkIdle,
+        },
+    };
+}
+
+async function runPageScenarioAssertions(context) {
+    const assertions = Array.isArray(context.assertions) ? context.assertions : [];
+    for (let index = 0; index < assertions.length; index += 1) {
+        const assertion = assertions[index];
+        if (typeof assertion === 'function') {
+            await assertion({ ...context, assert: pageScenarioAssert });
+            continue;
+        }
+        await runPageScenarioAssertion(assertion, index, context);
+    }
+}
+
+async function runPageScenarioAssertion(assertion, index, context) {
+    if (!assertion || typeof assertion !== 'object' || Array.isArray(assertion)) {
+        throw new Error(`Browser page scenario assertion ${index} must be an object or function.`);
+    }
+
+    const type = assertion.type || inferPageScenarioAssertionType(assertion);
+    if (type === 'status') {
+        const status = typeof context.response?.status === 'function' ? context.response.status() : context.response?.status;
+        const expected = assertion.expected ?? assertion.expectedStatus ?? assertion.status ?? 200;
+        pageScenarioAssert(Number(status) === Number(expected), assertion.message || `Expected page status ${expected}, got ${status ?? 'none'}.`);
+        return;
+    }
+    if (type === 'selector') {
+        pageScenarioAssert(context.page && typeof context.page.waitForSelector === 'function', 'Selector assertion requires page.waitForSelector().');
+        await context.page.waitForSelector(assertion.selector, { state: assertion.state || 'visible', timeout: assertion.timeout || 30000 });
+        return;
+    }
+    if (type === 'text') {
+        pageScenarioAssert(context.page && typeof context.page.getByText === 'function', 'Text assertion requires page.getByText().');
+        await context.page.getByText(assertion.text, { exact: assertion.exact }).waitFor({ timeout: assertion.timeout || 30000 });
+        return;
+    }
+    if (type === 'title') {
+        pageScenarioAssert(context.page && typeof context.page.title === 'function', 'Title assertion requires page.title().');
+        const title = await context.page.title();
+        const expected = assertion.includes ?? assertion.title;
+        pageScenarioAssert(String(title).includes(String(expected)), assertion.message || `Expected page title to include "${expected}", got "${title}".`);
+        return;
+    }
+    if (type === 'artifact') {
+        const artifactKey = assertion.key || assertion.artifact;
+        const artifact = context.artifacts?.[artifactKey];
+        pageScenarioAssert(Boolean(artifact), assertion.message || `Expected artifact "${artifactKey}" to be present.`);
+        if (assertion.kind !== undefined) {
+            pageScenarioAssert(artifact.kind === assertion.kind, assertion.message || `Expected artifact "${artifactKey}" kind "${assertion.kind}", got "${artifact.kind}".`);
+        }
+        return;
+    }
+
+    throw new Error(`Unsupported browser page scenario assertion type: ${type}`);
+}
+
+function inferPageScenarioAssertionType(assertion) {
+    if (assertion.status !== undefined || assertion.expectedStatus !== undefined) return 'status';
+    if (assertion.selector !== undefined) return 'selector';
+    if (assertion.text !== undefined) return 'text';
+    if (assertion.title !== undefined || assertion.includes !== undefined) return 'title';
+    if (assertion.key !== undefined || assertion.artifact !== undefined) return 'artifact';
+    return assertion.type;
+}
+
+function isArtifactAssertion(assertion) {
+    if (typeof assertion === 'function') return false;
+    if (!assertion || typeof assertion !== 'object' || Array.isArray(assertion)) return false;
+    return inferPageScenarioAssertionType(assertion) === 'artifact';
+}
+
+function pageScenarioAssert(condition, message) {
+    if (!condition) throw new Error(`Browser page scenario assertion failed: ${message}`);
+}
+
+function normalizeStaticArtifacts(artifacts) {
+    if (artifacts === undefined) return {};
+    if (!artifacts || typeof artifacts !== 'object' || Array.isArray(artifacts)) {
+        throw new Error('runBrowserPageScenario artifacts must be an object when provided.');
+    }
+    return stableJson(artifacts);
+}
+
+function normalizeJsonObject(value, label) {
+    if (value === undefined) return {};
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error(`runBrowserPageScenario ${label} must be an object when provided.`);
+    }
+    return stableJson(JSON.parse(JSON.stringify(value)));
+}
+
+function normalizeOptionalFunction(value, label) {
+    if (value === undefined) return null;
+    if (typeof value !== 'function') throw new Error(`runBrowserPageScenario ${label} must be a function when provided.`);
+    return value;
 }
 
 function normalizeBrowserAction(action, index, options = {}) {
