@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.207.0] - 2026-05-30
+
+### Added
+- expose lint producer evidence
+
+### Changed
+- refresh core agnostic baseline
+
+### Fixed
+- align dependency update rebase defaults
+- refresh dependencies after deps updates
+
 ## [0.206.0] - 2026-05-30
 
 ### Added
