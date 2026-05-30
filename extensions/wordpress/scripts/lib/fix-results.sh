@@ -90,7 +90,7 @@ homeboy_fix_results_write() {
         return 0
     fi
 
-    if ! type homeboy_write_fix_results >/dev/null 2>&1; then
+    if ! type homeboy_sidecar_emit >/dev/null 2>&1; then
         echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write fix results" >&2
         return 1
     fi
@@ -102,6 +102,6 @@ import os
 for item in json.loads(os.environ.get("HOMEBOY_FIX_RESULTS_JSON", "[]")):
     print(json.dumps(item, separators=(",", ":")))
 PY
-        homeboy_append_fix_result "$result"
+        homeboy_sidecar_emit fix.result "$result"
     done
 }
