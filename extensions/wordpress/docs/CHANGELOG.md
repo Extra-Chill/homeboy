@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.104.1] - 2026-05-30
+
+### Fixed
+- Fix Rust runner step fallback
+
 ## [2.104.0] - 2026-05-30
 
 ### Added
