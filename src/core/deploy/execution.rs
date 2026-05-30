@@ -123,15 +123,13 @@ pub(super) fn prepare_component_deploy(
     let artifact_path = if is_git_deploy {
         None
     } else if is_file_deploy {
-        if let Err(result) = validate_preflight_file_artifact(
+        validate_preflight_file_artifact(
             component,
             base_path,
             build_exit_code,
             local_version.clone(),
             remote_version.clone(),
-        ) {
-            return Err(result);
-        }
+        )?;
         None
     } else {
         match resolve_preflight_artifact_path(

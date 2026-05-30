@@ -421,7 +421,7 @@ fn run_lab_offload_inner(
         plan = with_step(
             plan,
             PlanStep::ready("lab.sync_rigs", "lab.sync_rigs")
-                .inputs(PlanValues::new().json("count", &synced_rigs))
+                .inputs(PlanValues::new().json("count", synced_rigs))
                 .build(),
         );
     }
