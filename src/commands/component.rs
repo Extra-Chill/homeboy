@@ -20,12 +20,12 @@ pub struct ComponentArgs {
 enum ComponentCommand {
     /// Initialize portable component config for a repo
     Create {
-        /// JSON input spec for create/update (supports single or bulk)
-        #[arg(long)]
+        /// Legacy JSON input spec. Hidden because create now writes repo-owned homeboy.json from flags.
+        #[arg(long, hide = true)]
         json: Option<String>,
 
-        /// Skip items that already exist (JSON mode only)
-        #[arg(long)]
+        /// Legacy JSON-mode flag. Hidden because JSON bulk create is no longer supported.
+        #[arg(long, hide = true)]
         skip_existing: bool,
 
         /// Absolute path to local source directory (writes homeboy.json there)
