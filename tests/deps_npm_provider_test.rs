@@ -1,4 +1,4 @@
-use homeboy::core::deps;
+use homeboy::core::deps::{self, DependencyUpdateOptions};
 use homeboy::extensions::deps_provider;
 use std::fs;
 use tempfile::tempdir;
@@ -212,6 +212,10 @@ fn npm_update_with_constraint_changes_manifest_and_lock_for_local_path_package()
         Some(&root_path),
         "fixture-package",
         Some("file:../package-v2"),
+        DependencyUpdateOptions {
+            install: false,
+            rebuild: false,
+        },
     )
     .unwrap();
 

@@ -1,5 +1,5 @@
 use crate::core::component::Component;
-use crate::core::deps::{DependencyPackage, DependencyUpdateResult};
+use crate::core::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
 use crate::core::{Error, Result};
 use crate::extensions::deps_provider::ProviderDependencyStatus;
 use serde_json::Value;
@@ -90,7 +90,17 @@ impl NpmDependencyProvider {
             after,
             stdout,
             stderr,
+            install: None,
+            rebuild: None,
         })
+    }
+
+    pub(crate) fn install(
+        &self,
+        _component: &Component,
+        _path: &Path,
+    ) -> Result<Option<DependencyCommandResult>> {
+        Ok(None)
     }
 }
 

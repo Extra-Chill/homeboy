@@ -96,6 +96,7 @@ impl DependencyProvider {
     ) -> Result<Option<DependencyCommandResult>> {
         match self {
             DependencyProvider::Composer(provider) => provider.install(component, path),
+            DependencyProvider::Npm(provider) => provider.install(component, path),
             DependencyProvider::ComponentScript(provider) => provider.install(component, path),
             DependencyProvider::Extension(provider) => provider.install(component, path),
         }

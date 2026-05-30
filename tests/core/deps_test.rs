@@ -180,6 +180,7 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
                 downstream: "block-format-bridge".to_string(),
                 package: "chubes4/html-to-blocks-converter".to_string(),
                 update: None,
+                rebuild: false,
                 post_update: vec!["composer build".to_string()],
                 test: vec!["homeboy test --path . --extension wordpress".to_string()],
             }],
@@ -192,6 +193,7 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
                 downstream: "static-site-importer".to_string(),
                 package: "chubes4/block-format-bridge".to_string(),
                 update: Some("composer update chubes4/block-format-bridge".to_string()),
+                rebuild: false,
                 post_update: Vec::new(),
                 test: vec!["homeboy test --path . --extension wordpress".to_string()],
             }],
@@ -282,6 +284,7 @@ fn stack_plan_keeps_explicit_edge_config_when_provider_edge_matches() {
         downstream: "downstream".to_string(),
         package: "fixture/upstream".to_string(),
         update: Some("fixture-provider update fixture/upstream".to_string()),
+        rebuild: false,
         post_update: vec!["fixture-provider build".to_string()],
         test: vec!["fixture-provider test".to_string()],
     };
