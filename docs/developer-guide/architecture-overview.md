@@ -298,7 +298,7 @@ Embedded documentation:
 
 ### Release Pipeline Flow
 
-1. CLI parses `homeboy release run <component>`
+1. CLI parses `homeboy release <component>`
 2. Load component configuration
 3. Parse release pipeline steps
 4. Validate step dependencies

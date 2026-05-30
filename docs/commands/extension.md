@@ -204,7 +204,7 @@ Extension entry (`extensions[]`):
 - `id`, `name`, `version`, `description`
 - `runtime`: `executable` (has runtime config) or `platform` (no runtime config)
 - `compatible` (with optional `--project`)
-- `ready` (runtime readiness based on `readyCheck`)
+- `ready` (runtime readiness based on `ready_check`)
 - `configured`: currently always `true` for discovered extensions (reserved for future richer config state)
 - `linked`: whether the extension is symlinked
 - `path`: extension directory path (may be empty if unknown)
@@ -215,8 +215,8 @@ Extension detail (`extension.show`):
 
 ## Exit code
 
-- `extension.run`: exit code of the executed extension's `runCommand`.
-- `extension.setup`: `0` on success; if no `setupCommand` defined, returns `0` without action.
+- `extension.run`: exit code of the executed extension's `run_command`.
+- `extension.setup`: `0` on success; if no `setup_command` is defined, returns `0` without action.
 
 ## Extension-provided commands and docs
 

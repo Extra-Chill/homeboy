@@ -23,19 +23,19 @@ homeboy api <project_id> get <endpoint>
 ### `post`
 
 ```sh
-homeboy api <project_id> post <endpoint> [--body <json>]
+homeboy api <project_id> post <endpoint> [--body <json>] [--form <key=value>]...
 ```
 
 ### `put`
 
 ```sh
-homeboy api <project_id> put <endpoint> [--body <json>]
+homeboy api <project_id> put <endpoint> [--body <json>] [--form <key=value>]...
 ```
 
 ### `patch`
 
 ```sh
-homeboy api <project_id> patch <endpoint> [--body <json>]
+homeboy api <project_id> patch <endpoint> [--body <json>] [--form <key=value>]...
 ```
 
 ### `delete`
@@ -48,7 +48,8 @@ homeboy api <project_id> delete <endpoint>
 
 - `<endpoint>` is passed through as provided (example: `/wp/v2/posts`).
 - `--body` is parsed as JSON. If parsing fails, the request is sent with `body: null`.
-- If `--body` is omitted, `body` is `null`.
+- `--form key=value` may be repeated for `post`, `put`, and `patch`; form fields take precedence over `--body`.
+- If `--body` and `--form` are omitted, `body` is `null`.
 
 ## Output
 
