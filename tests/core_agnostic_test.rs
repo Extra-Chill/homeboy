@@ -314,22 +314,6 @@ const BASELINE: &[ViolationKey] = &[
         term: "wp-content",
     },
     ViolationKey {
-        path: "src/core/deps.rs",
-        term: "composer",
-    },
-    ViolationKey {
-        path: "src/core/deps.rs",
-        term: "composer.json",
-    },
-    ViolationKey {
-        path: "src/core/deps.rs",
-        term: "npm",
-    },
-    ViolationKey {
-        path: "src/core/deps.rs",
-        term: "php",
-    },
-    ViolationKey {
         path: "src/core/engine/codebase_scan.rs",
         term: "php",
     },
@@ -491,7 +475,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 157;
+const BASELINE_OCCURRENCES: usize = 141;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.

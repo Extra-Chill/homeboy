@@ -22,6 +22,7 @@ pub enum ExtensionCapability {
     Build,
     Bench,
     Trace,
+    Deps,
 }
 
 /// Static metadata for an [`ExtensionCapability`] variant.
@@ -63,6 +64,11 @@ impl ExtensionCapability {
                 label: "trace",
                 has_manifest_support: ExtensionManifest::has_trace,
                 script_path: ExtensionManifest::trace_script,
+            },
+            ExtensionCapability::Deps => ExtensionCapabilityDescriptor {
+                label: "deps",
+                has_manifest_support: ExtensionManifest::has_deps,
+                script_path: ExtensionManifest::deps_script,
             },
         }
     }

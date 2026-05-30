@@ -21,7 +21,8 @@ fn extension_capability_owns_labels_and_scripts() {
         },
         "build": { "extension_script": "build.sh" },
         "bench": { "extension_script": "bench.sh" },
-        "trace": { "extension_script": "trace.sh" }
+        "trace": { "extension_script": "trace.sh" },
+        "deps": { "extension_script": "deps.sh" }
     }))
     .unwrap();
 
@@ -56,6 +57,7 @@ fn extension_capability_owns_labels_and_scripts() {
         (ExtensionCapability::Build, "build", "build.sh", false),
         (ExtensionCapability::Bench, "bench", "bench.sh", true),
         (ExtensionCapability::Trace, "trace", "trace.sh", true),
+        (ExtensionCapability::Deps, "deps", "deps.sh", true),
     ] {
         assert_eq!(capability.label(), label);
         assert!(capability.has_manifest_support(&manifest));
@@ -146,6 +148,43 @@ fn structured_sidecar_declarations_reject_unknown_fields() {
     .expect_err("sidecar declarations should have one explicit shape");
 
     assert!(err.to_string().contains("data did not match"));
+}
+
+#[test]
+fn manifest_parses_changed_test_routing_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "test": {
+            "extension_script": "test.sh",
+            "changed_file_routing": {
+                "strategy": "exclusive_env",
+                "exclusive_env": {
+                    "name": "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES",
+                    "globs": ["tests/**/*-smoke.php"]
+                }
+            }
+        }
+    }))
+    .unwrap();
+
+    let routing = manifest
+        .test
+        .as_ref()
+        .and_then(|test| test.changed_file_routing.as_ref())
+        .expect("test routing should parse");
+
+    assert_eq!(
+        routing.strategy,
+        TestChangedFileRoutingStrategy::ExclusiveEnv
+    );
+    assert_eq!(
+        routing
+            .exclusive_env
+            .as_ref()
+            .map(|exclusive_env| exclusive_env.name.as_str()),
+        Some("HOMEBOY_WORDPRESS_HOST_SMOKE_FILES")
+    );
 }
 
 #[test]

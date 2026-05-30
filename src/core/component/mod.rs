@@ -141,6 +141,8 @@ pub struct ComponentScriptsConfig {
     pub bench: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trace: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -532,6 +534,7 @@ impl Component {
                 crate::core::extension::ExtensionCapability::Build => &scripts.build,
                 crate::core::extension::ExtensionCapability::Bench => &scripts.bench,
                 crate::core::extension::ExtensionCapability::Trace => &scripts.trace,
+                crate::core::extension::ExtensionCapability::Deps => &scripts.deps,
             };
             if !commands.is_empty() {
                 return commands;

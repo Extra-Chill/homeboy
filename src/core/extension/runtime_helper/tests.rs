@@ -18,6 +18,10 @@ fn ensure_all_helpers_writes_all_files() {
             "failure trap helper should be in pairs"
         );
         assert!(
+            pairs.iter().any(|(k, _)| k == RUNNER_PRELUDE_ENV),
+            "runner prelude helper should be in pairs"
+        );
+        assert!(
             pairs.iter().any(|(k, _)| k == WRITE_TEST_RESULTS_ENV),
             "write test results helper should be in pairs"
         );
@@ -38,6 +42,45 @@ fn ensure_all_helpers_writes_all_files() {
             "bench PHP helper should be in pairs"
         );
     });
+}
+
+#[test]
+fn runner_prelude_initializes_context_steps_trap_and_sidecar() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime_dir = dir.path().join("runtime");
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+    std::fs::write(runtime_dir.join("runner-prelude.sh"), assets::RUNNER_PRELUDE_SH)
+        .expect("write prelude");
+    std::fs::write(runtime_dir.join("resolve-context.sh"), assets::RESOLVE_CONTEXT_SH)
+        .expect("write resolve context");
+    std::fs::write(runtime_dir.join("runner-steps.sh"), assets::RUNNER_STEPS_SH)
+        .expect("write runner steps");
+    std::fs::write(runtime_dir.join("failure-trap.sh"), assets::FAILURE_TRAP_SH)
+        .expect("write failure trap");
+    std::fs::write(runtime_dir.join("sidecar-writer.sh"), assets::SIDECAR_WRITER_SH)
+        .expect("write sidecar writer");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_runner_init --bash 4 --component-alias PLUGIN_PATH --steps --failure-trap --sidecar-writer; should_run_step test; type homeboy_append_lint_finding >/dev/null; printf '%s|%s|%s|%s' \"$EXTENSION_PATH\" \"$COMPONENT_PATH\" \"$PLUGIN_PATH\" \"$FAILED_STEP\"",
+            runtime_dir.join("runner-prelude.sh").display()
+        ))
+        .env("HOMEBOY_EXTENSION_PATH", "/tmp/ext")
+        .env("HOMEBOY_COMPONENT_PATH", "/tmp/project")
+        .env("HOMEBOY_COMPONENT_ID", "demo")
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "/tmp/ext|/tmp/project|/tmp/project|"
+    );
 }
 
 #[test]
@@ -103,6 +146,40 @@ fn sidecar_writer_supports_test_failure_and_fix_result_wrappers() {
         String::from_utf8_lossy(&output.stdout),
         r#"[{"test_id":"suite::case","message":"failed"}]
 [{"file":"src/lib.rs","message":"formatted"}]"#
+    );
+}
+
+#[test]
+fn sidecar_writer_supports_annotation_source_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("sidecar-writer.sh");
+    let annotations_dir = dir.path().join("annotations");
+    let source_path = dir.path().join("phpstan-extra.json");
+    std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
+    std::fs::write(&source_path, r#"[{"file":"b.php","line":2}]"#).expect("source");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; HOMEBOY_ANNOTATIONS_DIR={}; homeboy_write_annotations phpcs '{{\"file\":\"a.php\",\"line\":1}}'; homeboy_merge_annotations phpstan {}; printf '%s\n%s' \"$(cat {}/phpcs.json)\" \"$(cat {}/phpstan.json)\"",
+            helper_path.display(),
+            annotations_dir.display(),
+            source_path.display(),
+            annotations_dir.display(),
+            annotations_dir.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        r#"[{"file":"a.php","line":1}]
+[{"file":"b.php","line":2}]"#
     );
 }
 
@@ -233,6 +310,104 @@ fn bench_shell_helper_writes_empty_envelope() {
 }
 
 #[test]
+fn bench_shell_helper_writes_scenarios_from_payload_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("bench-helper.sh");
+    let results_path = dir.path().join("bench-results.json");
+    let payload_path = dir.path().join("payload.json");
+    let extras_path = dir.path().join("extras.json");
+    std::fs::write(&helper_path, assets::BENCH_HELPER_SH).expect("write helper");
+    std::fs::write(
+        &payload_path,
+        r#"{
+  "timings_ns": [1000000, 3000000, 5000000],
+  "peak_rss_bytes": 4096,
+  "source": "custom",
+  "metadata": {"fixture": true},
+  "artifacts": {"stdout": {"path": "bench.log", "kind": "text"}},
+  "metrics": {"custom_ms": 9.5}
+}"#,
+    )
+    .expect("write payload");
+    std::fs::write(
+        &extras_path,
+        r#"{
+  "metadata": {"runner": {"status": "ok"}},
+  "metric_groups": {"phases": {"setup_ms": 12}},
+  "timeline": [{"id": "setup", "duration_ms": 12}]
+}"#,
+    )
+    .expect("write extras");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_write_bench_results_from_payload_files --results-file {} --component demo --iterations 3 --extras-file {} 'bench-fast={}'; cat {}",
+            helper_path.display(),
+            results_path.display(),
+            extras_path.display(),
+            payload_path.display(),
+            results_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(value["component_id"], "demo");
+    assert_eq!(value["iterations"], 3);
+    assert_eq!(value["metadata"]["runner"]["status"], "ok");
+    assert_eq!(value["metric_groups"]["phases"]["setup_ms"], 12);
+    assert_eq!(value["timeline"][0]["id"], "setup");
+    assert_eq!(value["scenarios"][0]["id"], "bench-fast");
+    assert_eq!(value["scenarios"][0]["iterations"], 3);
+    assert_eq!(value["scenarios"][0]["metrics"]["mean_ms"], 3.0);
+    assert_eq!(value["scenarios"][0]["metrics"]["p50_ms"], 3.0);
+    assert_eq!(value["scenarios"][0]["metrics"]["custom_ms"], 9.5);
+    assert_eq!(value["scenarios"][0]["memory"]["peak_bytes"], 4096);
+    assert_eq!(value["scenarios"][0]["source"], "custom");
+    assert_eq!(value["scenarios"][0]["metadata"]["fixture"], true);
+    assert_eq!(value["scenarios"][0]["artifacts"]["stdout"]["path"], "bench.log");
+}
+
+#[test]
+fn bench_shell_helper_writes_scenario_inventory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("bench-helper.sh");
+    let results_path = dir.path().join("bench-results.json");
+    std::fs::write(&helper_path, assets::BENCH_HELPER_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_write_bench_scenario_inventory --results-file {} --component demo --iterations 11 'bench-http=src/bin/bench-http.rs=rust-bin'; cat {}",
+            helper_path.display(),
+            results_path.display(),
+            results_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(value["component_id"], "demo");
+    assert_eq!(value["iterations"], 0);
+    assert_eq!(value["scenarios"][0]["id"], "bench-http");
+    assert_eq!(value["scenarios"][0]["iterations"], 0);
+    assert_eq!(value["scenarios"][0]["default_iterations"], 11);
+    assert_eq!(value["scenarios"][0]["file"], "src/bin/bench-http.rs");
+    assert_eq!(value["scenarios"][0]["source"], "rust-bin");
+}
+
+#[test]
 fn bench_js_helper_emits_compact_progress_to_stderr() {
     let dir = tempfile::tempdir().expect("tempdir");
     let helper_path = dir.path().join("bench-helper.mjs");
@@ -292,7 +467,11 @@ homeboyBenchProgress({ scenario: 'studio-agent-site-build', phase: 'setup' });
 
 #[test]
 fn bench_runtime_helpers_document_shared_contract() {
-    for content in [assets::BENCH_HELPER_JS, assets::BENCH_HELPER_PHP] {
+    for content in [
+        assets::BENCH_HELPER_JS,
+        assets::BENCH_HELPER_PHP,
+        assets::BENCH_HELPER_SH,
+    ] {
         assert!(
             content.contains("R-7 percentile"),
             "helper should document percentile method"

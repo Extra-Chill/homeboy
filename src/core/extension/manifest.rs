@@ -15,9 +15,10 @@ pub use super::manifest_action_config::{
 pub use super::manifest_config::{
     AutofixVerifyConfig, BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig,
     CliHelpConfig, DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployVerification,
-    DiscoveryConfig, EnvProviderConfig, FileContainsCondition, LintChangedFileRoute, LintConfig,
-    RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, SinceTagConfig, TestConfig,
-    TraceConfig, VersionPatternConfig,
+    DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition, LintChangedFileRoute,
+    LintConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, SinceTagConfig,
+    TestChangedFileExclusiveEnv, TestChangedFileRouting, TestChangedFileRoutingStrategy,
+    TestConfig, TraceConfig, VersionPatternConfig,
 };
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
 
@@ -439,6 +440,8 @@ pub struct ExtensionManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub deps: Option<DepsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lint: Option<LintConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test: Option<TestConfig>,
@@ -496,6 +499,13 @@ impl ExtensionManifest {
             .is_some()
     }
 
+    pub fn has_deps(&self) -> bool {
+        self.deps
+            .as_ref()
+            .and_then(|c| c.extension_script.as_ref())
+            .is_some()
+    }
+
     pub fn has_test(&self) -> bool {
         self.test
             .as_ref()
@@ -525,6 +535,12 @@ impl ExtensionManifest {
 
     pub fn build_script(&self) -> Option<&str> {
         self.build
+            .as_ref()
+            .and_then(|c| c.extension_script.as_deref())
+    }
+
+    pub fn deps_script(&self) -> Option<&str> {
+        self.deps
             .as_ref()
             .and_then(|c| c.extension_script.as_deref())
     }

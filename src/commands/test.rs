@@ -6,13 +6,11 @@ use homeboy::core::extension::test as extension_test;
 use homeboy::core::extension::test::{
     detect_test_drift, report, run_self_check_test_workflow, TestCommandOutput, TestRunWorkflowArgs,
 };
-use homeboy::core::extension::test::{
-    FailureCategory, FailureCluster, TestAnalysisInput, TestFailure,
-};
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
-    merge_metadata, ActiveObservation, NewFindingRecord, NewRunRecord, RunStatus,
+    finding_records_from_failure_clusters, finding_records_from_test_analysis_input,
+    merge_metadata, ActiveObservation, NewRunRecord, RunStatus,
 };
 use std::path::Path;
 
@@ -280,114 +278,18 @@ fn persist_test_findings(
 ) {
     let mut records = Vec::new();
     if let Some(input) = &workflow.failure_analysis_input {
-        records.extend(test_failure_finding_records(observation.0.run_id(), input));
+        records.extend(finding_records_from_test_analysis_input(
+            observation.0.run_id(),
+            input,
+        ));
     }
     if let Some(analysis) = &workflow.analysis {
-        records.extend(
-            analysis
-                .clusters
-                .iter()
-                .map(|cluster| test_cluster_finding_record(observation.0.run_id(), cluster)),
-        );
+        records.extend(finding_records_from_failure_clusters(
+            observation.0.run_id(),
+            &analysis.clusters,
+        ));
     }
     observation.0.record_findings(&records);
-}
-
-fn test_failure_finding_records(run_id: &str, input: &TestAnalysisInput) -> Vec<NewFindingRecord> {
-    input
-        .failures
-        .iter()
-        .map(|failure| test_failure_finding_record(run_id, failure))
-        .collect()
-}
-
-fn test_failure_finding_record(run_id: &str, failure: &TestFailure) -> NewFindingRecord {
-    let file =
-        non_empty_string(&failure.test_file).or_else(|| non_empty_string(&failure.source_file));
-    let line = (failure.source_line > 0).then_some(i64::from(failure.source_line));
-    NewFindingRecord {
-        run_id: run_id.to_string(),
-        tool: "test".to_string(),
-        rule: non_empty_string(&failure.error_type),
-        file,
-        line,
-        severity: Some("error".to_string()),
-        fingerprint: Some(test_failure_fingerprint(failure)),
-        message: test_failure_message(failure),
-        fixable: None,
-        metadata_json: serde_json::json!({
-            "record_kind": "failure",
-            "source_sidecar": "test-failures",
-            "test_name": failure.test_name,
-            "test_file": failure.test_file,
-            "source_file": failure.source_file,
-            "source_line": failure.source_line,
-            "raw": failure,
-        }),
-    }
-}
-
-fn test_cluster_finding_record(run_id: &str, cluster: &FailureCluster) -> NewFindingRecord {
-    NewFindingRecord {
-        run_id: run_id.to_string(),
-        tool: "test".to_string(),
-        rule: Some(format!(
-            "cluster:{}",
-            failure_category_slug(&cluster.category)
-        )),
-        file: None,
-        line: None,
-        severity: Some("error".to_string()),
-        fingerprint: Some(format!("test-cluster::{}", cluster.id)),
-        message: cluster.pattern.clone(),
-        fixable: cluster.suggested_fix.is_some().then_some(true),
-        metadata_json: serde_json::json!({
-            "record_kind": "analysis_cluster",
-            "cluster_id": cluster.id,
-            "category": failure_category_slug(&cluster.category),
-            "count": cluster.count,
-            "affected_files": cluster.affected_files,
-            "example_tests": cluster.example_tests,
-            "suggested_fix": cluster.suggested_fix,
-            "raw": cluster,
-        }),
-    }
-}
-
-fn test_failure_message(failure: &TestFailure) -> String {
-    if failure.error_type.is_empty() {
-        failure.message.clone()
-    } else if failure.message.is_empty() {
-        failure.error_type.clone()
-    } else {
-        format!("{}: {}", failure.error_type, failure.message)
-    }
-}
-
-fn test_failure_fingerprint(failure: &TestFailure) -> String {
-    format!(
-        "test::{}::{}::{}::{}",
-        failure.test_file, failure.test_name, failure.error_type, failure.message
-    )
-}
-
-fn failure_category_slug(category: &FailureCategory) -> &'static str {
-    match category {
-        FailureCategory::MissingMethod => "missing_method",
-        FailureCategory::MissingClass => "missing_class",
-        FailureCategory::ReturnTypeChange => "return_type_change",
-        FailureCategory::ErrorCodeChange => "error_code_change",
-        FailureCategory::AssertionMismatch => "assertion_mismatch",
-        FailureCategory::MockError => "mock_error",
-        FailureCategory::FatalError => "fatal_error",
-        FailureCategory::SignatureChange => "signature_change",
-        FailureCategory::EnvironmentError => "environment_error",
-        FailureCategory::Other => "other",
-    }
-}
-
-fn non_empty_string(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn finish_test_drift_observation(
@@ -500,6 +402,7 @@ mod tests {
     use crate::test_support::with_isolated_home;
     use clap::Parser;
     use homeboy::core::component::Component;
+    use homeboy::core::extension::test::{TestAnalysisInput, TestFailure};
     use homeboy::core::observation::{FindingListFilter, ObservationStore};
     use homeboy::core::refactor::plan::{build_test_refactor_request, TestSourceOptions};
     use std::fs;

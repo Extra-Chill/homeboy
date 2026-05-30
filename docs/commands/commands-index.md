@@ -31,6 +31,7 @@
 - [report](report.md) — render reports from structured output artifacts
 - [refactor](refactor.md)
 - [release](release.md) — local release pipeline
+- [refs](refs.md)
 - [review](review.md) — scoped audit + lint + test umbrella for PR-style changes
 - [rig](rig.md) — reproducible local dev environments ([spec](rig-spec.md))
 - [runner](runner.md) — local and SSH execution runner registry
