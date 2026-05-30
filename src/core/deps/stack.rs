@@ -1,8 +1,10 @@
 use crate::core::component::{self, Component, DependencyStackEdge};
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
 use crate::core::{Error, Result};
+use crate::extensions::deps_provider;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -72,10 +74,8 @@ pub struct DependencyStackCommandResult {
 
 pub fn stack_status() -> Result<DependencyStackStatus> {
     let mut edges = Vec::new();
-    for component in component::list()? {
-        for edge in &component.dependency_stack {
-            edges.push(edge_status(&component, edge));
-        }
+    for (component, edge) in stack_edges_from_components(&component::list()?)? {
+        edges.push(edge_status(&component, &edge));
     }
 
     edges.sort_by(|a, b| {
@@ -146,6 +146,7 @@ pub fn stack_plan_from_components(
     let mut steps = Vec::new();
     let mut queue = vec![upstream.to_string()];
     let mut visited_edges = BTreeSet::new();
+    let stack_edges = stack_edges_from_components(components)?;
     let component_paths: BTreeMap<String, String> = components
         .iter()
         .map(|component| (component.id.clone(), component.local_path.clone()))
@@ -153,11 +154,9 @@ pub fn stack_plan_from_components(
 
     while let Some(current_upstream) = queue.pop() {
         let mut matching_edges = Vec::new();
-        for component in components {
-            for edge in &component.dependency_stack {
-                if edge.upstream == current_upstream {
-                    matching_edges.push((component, edge));
-                }
+        for (component, edge) in &stack_edges {
+            if edge.upstream == current_upstream {
+                matching_edges.push((component, edge));
             }
         }
         matching_edges.sort_by(|(a_component, a_edge), (b_component, b_edge)| {
@@ -203,6 +202,70 @@ pub fn stack_plan_from_components(
     }
 
     Ok(DependencyStackPlan::new(upstream, steps))
+}
+
+fn stack_edges_from_components(
+    components: &[Component],
+) -> Result<Vec<(Component, DependencyStackEdge)>> {
+    let mut edges = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut snapshots = BTreeMap::new();
+    let mut identity_to_component = BTreeMap::new();
+
+    for component in components {
+        let path = PathBuf::from(shellexpand::tilde(&component.local_path).as_ref());
+        let snapshot = deps_provider::dependency_provider_snapshot(component, &path)?;
+        for identity in &snapshot.identities {
+            identity_to_component
+                .entry(identity.clone())
+                .or_insert_with(|| component.id.clone());
+        }
+        snapshots.insert(component.id.clone(), snapshot);
+    }
+
+    for component in components {
+        for edge in &component.dependency_stack {
+            let key = edge_key(edge);
+            if seen.insert(key) {
+                edges.push((component.clone(), edge.clone()));
+            }
+        }
+    }
+
+    for component in components {
+        let Some(snapshot) = snapshots.get(&component.id) else {
+            continue;
+        };
+        for package in &snapshot.packages {
+            if package.constraint.is_none() {
+                continue;
+            }
+            let Some(upstream) = identity_to_component.get(&package.name) else {
+                continue;
+            };
+            if upstream == &component.id {
+                continue;
+            }
+            let edge = DependencyStackEdge {
+                upstream: upstream.clone(),
+                downstream: component.id.clone(),
+                package: package.name.clone(),
+                update: None,
+                post_update: Vec::new(),
+                test: Vec::new(),
+            };
+            let key = edge_key(&edge);
+            if seen.insert(key) {
+                edges.push((component.clone(), edge));
+            }
+        }
+    }
+
+    Ok(edges)
+}
+
+fn edge_key(edge: &DependencyStackEdge) -> String {
+    format!("{}>{}:{}", edge.upstream, edge.downstream, edge.package)
 }
 
 impl DependencyStackPlan {

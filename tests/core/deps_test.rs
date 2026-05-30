@@ -1,4 +1,4 @@
-use homeboy::core::component::{Component, DependencyStackEdge};
+use homeboy::core::component::{Component, ComponentScriptsConfig, DependencyStackEdge};
 use homeboy::core::deps::{self, ComposerAction};
 use std::fs;
 use tempfile::tempdir;
@@ -14,6 +14,25 @@ fn fixture_component(path: &std::path::Path) -> (&'static str, String) {
 fn stack_component(id: &str, path: &str, edges: Vec<DependencyStackEdge>) -> Component {
     let mut component = Component::new(id.to_string(), path.to_string(), String::new(), None);
     component.dependency_stack = edges;
+    component
+}
+
+fn script_stack_component(
+    id: &str,
+    path: &std::path::Path,
+    status_json: &str,
+    edges: Vec<DependencyStackEdge>,
+) -> Component {
+    let script = path.join("deps.sh");
+    write_file(
+        &script,
+        &format!("#!/bin/sh\nif [ \"$1\" = status ]; then\ncat <<'JSON'\n{status_json}\nJSON\nfi\n"),
+    );
+    let mut component = stack_component(id, &path.display().to_string(), edges);
+    component.scripts = Some(ComponentScriptsConfig {
+        deps: vec![format!("sh {}", script.display())],
+        ..Default::default()
+    });
     component
 }
 
@@ -195,6 +214,110 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
         plan.steps[1].update_command,
         "composer update chubes4/block-format-bridge"
     );
+}
+
+#[test]
+fn stack_plan_derives_edges_from_provider_reported_dependency_identities() {
+    let dir = tempdir().unwrap();
+    let upstream_path = dir.path().join("upstream");
+    let downstream_path = dir.path().join("downstream");
+    fs::create_dir_all(&upstream_path).unwrap();
+    fs::create_dir_all(&downstream_path).unwrap();
+
+    let components = vec![
+        script_stack_component(
+            "upstream",
+            &upstream_path,
+            r#"{
+                "package_manager": "fixture",
+                "dependency_identities": ["fixture/upstream"],
+                "packages": []
+            }"#,
+            Vec::new(),
+        ),
+        script_stack_component(
+            "downstream",
+            &downstream_path,
+            r#"{
+                "package_manager": "fixture",
+                "packages": [
+                    {
+                        "name": "fixture/upstream",
+                        "manifest_section": "dependencies",
+                        "constraint": "^1.0"
+                    }
+                ]
+            }"#,
+            Vec::new(),
+        ),
+    ];
+
+    let plan = deps::stack_plan_from_components("upstream", &components).unwrap();
+
+    assert_eq!(plan.step_count, 1);
+    assert_eq!(plan.steps[0].declaring_component_id, "downstream");
+    assert_eq!(plan.steps[0].upstream, "upstream");
+    assert_eq!(plan.steps[0].downstream, "downstream");
+    assert_eq!(plan.steps[0].package, "fixture/upstream");
+    assert_eq!(
+        plan.steps[0].update_command,
+        format!(
+            "homeboy deps update fixture/upstream --path {}",
+            downstream_path.display()
+        )
+    );
+}
+
+#[test]
+fn stack_plan_keeps_explicit_edge_config_when_provider_edge_matches() {
+    let dir = tempdir().unwrap();
+    let upstream_path = dir.path().join("upstream");
+    let downstream_path = dir.path().join("downstream");
+    fs::create_dir_all(&upstream_path).unwrap();
+    fs::create_dir_all(&downstream_path).unwrap();
+
+    let explicit_edge = DependencyStackEdge {
+        upstream: "upstream".to_string(),
+        downstream: "downstream".to_string(),
+        package: "fixture/upstream".to_string(),
+        update: Some("fixture-provider update fixture/upstream".to_string()),
+        post_update: vec!["fixture-provider build".to_string()],
+        test: vec!["fixture-provider test".to_string()],
+    };
+    let components = vec![
+        script_stack_component(
+            "upstream",
+            &upstream_path,
+            r#"{
+                "package_manager": "fixture",
+                "dependency_identities": ["fixture/upstream"],
+                "packages": []
+            }"#,
+            Vec::new(),
+        ),
+        script_stack_component(
+            "downstream",
+            &downstream_path,
+            r#"{
+                "package_manager": "fixture",
+                "packages": [
+                    {
+                        "name": "fixture/upstream",
+                        "manifest_section": "dependencies",
+                        "constraint": "^1.0"
+                    }
+                ]
+            }"#,
+            vec![explicit_edge],
+        ),
+    ];
+
+    let plan = deps::stack_plan_from_components("upstream", &components).unwrap();
+
+    assert_eq!(plan.step_count, 1);
+    assert_eq!(plan.steps[0].update_command, "fixture-provider update fixture/upstream");
+    assert_eq!(plan.steps[0].post_update, vec!["fixture-provider build"]);
+    assert_eq!(plan.steps[0].test, vec!["fixture-provider test"]);
 }
 
 #[test]
