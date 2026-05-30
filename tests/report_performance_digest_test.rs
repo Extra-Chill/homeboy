@@ -66,15 +66,34 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
             "success": true,
             "data": {
                 "budget_findings": [{
-                    "code": "metric.max_value",
+                    "tool": "budget",
+                    "rule": "metric.max_value",
+                    "category": "budget",
                     "severity": "error",
-                    "context_label": "profile:generic",
                     "message": "Metric exceeded budget",
-                    "actual": 42,
-                    "expected": 20,
-                    "unit": "count",
-                    "subject": "fixture-subject",
-                    "passed": false
+                    "fingerprint": "metric.max_value:fixture-subject",
+                    "source": { "kind": "budget", "label": "profile:generic" },
+                    "metadata": {
+                        "code": "metric.max_value",
+                        "context_label": "profile:generic",
+                        "actual": 42,
+                        "expected": 20,
+                        "unit": "count",
+                        "subject": "fixture-subject",
+                        "passed": false
+                    },
+                    "raw": {
+                        "category": "budget",
+                        "code": "metric.max_value",
+                        "severity": "error",
+                        "context_label": "profile:generic",
+                        "message": "Metric exceeded budget",
+                        "actual": 42,
+                        "expected": 20,
+                        "unit": "count",
+                        "subject": "fixture-subject",
+                        "passed": false
+                    }
                 }],
                 "results": {
                     "scenarios": [{

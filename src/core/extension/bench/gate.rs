@@ -116,6 +116,7 @@ pub fn evaluate_gates(results: &mut BenchResults) -> Vec<String> {
                         "value",
                         Some(result.metric.clone()),
                     )
+                    .to_homeboy_finding()
                 }),
         );
         failures.extend(
@@ -129,10 +130,19 @@ pub fn evaluate_gates(results: &mut BenchResults) -> Vec<String> {
         results
             .budget_findings
             .iter()
-            .filter(|finding| finding.is_gate_failure())
+            .filter(|finding| is_budget_gate_failure(finding))
             .map(|finding| finding.message.clone()),
     );
     failures.sort();
     failures.dedup();
     failures
+}
+
+fn is_budget_gate_failure(finding: &crate::core::finding::HomeboyFinding) -> bool {
+    finding.severity.as_deref() == Some("error")
+        || finding
+            .metadata
+            .get("passed")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
 }

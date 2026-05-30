@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::finding::{FindingSource, HomeboyFinding};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BudgetFinding {
     #[serde(default = "budget_category")]
@@ -61,6 +63,27 @@ impl BudgetFinding {
             Some(subject) if !subject.is_empty() => format!("{}:{}", self.code, subject),
             _ => self.code.clone(),
         }
+    }
+
+    pub fn to_homeboy_finding(&self) -> HomeboyFinding {
+        let mut normalized = HomeboyFinding::builder("budget", self.message.clone())
+            .rule(self.code.clone())
+            .category(self.category.clone())
+            .severity(self.severity.clone())
+            .fingerprint(self.fingerprint())
+            .source(FindingSource::new("budget").label(self.context_label.clone()))
+            .metadata("code", self.code.clone())
+            .metadata("category", self.category.clone())
+            .metadata("context_label", self.context_label.clone())
+            .metadata("actual", self.actual)
+            .metadata("expected", self.expected)
+            .metadata("unit", self.unit.clone())
+            .metadata("subject", self.subject.clone())
+            .metadata("passed", self.passed)
+            .raw(self)
+            .build();
+        normalized.location.file = self.file.clone();
+        normalized
     }
 }
 

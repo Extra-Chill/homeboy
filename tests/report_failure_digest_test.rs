@@ -78,16 +78,34 @@ fn bench_json() -> &'static str {
             "iterations": 5,
             "budget_findings": [
                 {
+                    "tool": "budget",
+                    "rule": "rest.max_response_bytes",
                     "category": "budget",
-                    "code": "rest.max_response_bytes",
                     "severity": "error",
-                    "context_label": "profile:wordpress-rest",
                     "message": "REST response exceeded 250 KB budget",
-                    "actual": 4378195,
-                    "expected": 250000,
-                    "unit": "bytes",
-                    "subject": "/wp-json/datamachine/v1/pipelines?per_page=100",
-                    "passed": false
+                    "fingerprint": "rest.max_response_bytes:/wp-json/datamachine/v1/pipelines?per_page=100",
+                    "source": { "kind": "budget", "label": "profile:wordpress-rest" },
+                    "metadata": {
+                        "code": "rest.max_response_bytes",
+                        "context_label": "profile:wordpress-rest",
+                        "actual": 4378195,
+                        "expected": 250000,
+                        "unit": "bytes",
+                        "subject": "/wp-json/datamachine/v1/pipelines?per_page=100",
+                        "passed": false
+                    },
+                    "raw": {
+                        "category": "budget",
+                        "code": "rest.max_response_bytes",
+                        "severity": "error",
+                        "context_label": "profile:wordpress-rest",
+                        "message": "REST response exceeded 250 KB budget",
+                        "actual": 4378195,
+                        "expected": 250000,
+                        "unit": "bytes",
+                        "subject": "/wp-json/datamachine/v1/pipelines?per_page=100",
+                        "passed": false
+                    }
                 }
             ],
             "artifacts": [
