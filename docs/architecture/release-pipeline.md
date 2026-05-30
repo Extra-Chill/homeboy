@@ -1,385 +1,115 @@
 # Release Pipeline System
 
-The release pipeline provides configurable, local orchestration for managing component releases without CI/CD systems.
+Homeboy release automation is a local-first planner/executor for component
+releases. It turns component metadata, conventional commits, extension release
+actions, and git state into a reviewable release plan.
 
-## Overview
+## Current Model
 
-Homeboy's release pipeline is a local-first alternative to CI/CD, allowing developers to:
-- Define release workflows as configuration
-- Plan and review releases before execution
-- Integrate custom extension actions
-- Run releases from local development environment
+The release command is intentionally not a generic shell workflow runner. Core
+owns the release graph and safety checks; extensions contribute domain-specific
+prepare, package, and publish behavior through release actions declared in their
+manifests.
 
-## Pipeline Configuration
-
-Release pipelines are defined in component configuration:
-
-```json
-{
-  "release": {
-    "enabled": true,
-    "steps": [],
-    "settings": {}
-  }
-}
+```text
+component config + git history
+        |
+        v
+release planner
+        |
+        +-- core steps: preflight, changelog, version, git, deploy, cleanup
+        |
+        +-- extension actions: prepare, package, publish.<target>
+        v
+structured release plan + execution results
 ```
 
-### Release Fields
+## Core Step Kinds
 
-- **`enabled`** (boolean): Whether release pipeline is active
-- **`steps`** (array): Ordered list of release steps
-- **`settings`** (object): Pipeline-level settings
+Common executable step kinds include:
 
-## Step Types
+- `preflight.default_branch`
+- `preflight.git_identity`
+- `preflight.working_tree`
+- `preflight.remote_sync`
+- `preflight.bump_policy`
+- `preflight.lint`
+- `preflight.test`
+- `preflight.changelog_bootstrap`
+- `changelog.finalize`
+- `version`
+- `git.commit`
+- `package`
+- `artifacts.inventory`
+- `git.tag`
+- `git.push`
+- `github.release`
+- `deploy`
+- `cleanup`
+- `post_release`
+- `publish.<target>`
 
-### Built-in Step Types
+Some preflight and changelog planning steps are plan-only. They appear in the
+release plan for visibility but are not executed as mutating steps.
 
-#### `build`
+## Extension Boundary
 
-Build the component using its linked extension's build support.
+Extensions should own ecosystem-specific release semantics:
 
-```json
-{
-  "id": "build",
-  "type": "build",
-  "label": "Build",
-  "needs": [],
-  "config": {}
-}
-```
+- how to package a Rust crate, WordPress plugin, Node project, or Swift artifact
+- how to publish to GitHub, Homebrew, crates.io, npm, or another registry
+- how to run platform-specific prepare checks before packaging
+- how to report skipped or auth-blocked publish attempts in a structured way
 
-**Config options:** None (uses linked extension build configuration)
+Core should own generic sequencing, state, git operations, output contracts, and
+failure handling.
 
-#### `version_bump`
+## Commands
 
-Increment component version.
-
-```json
-{
-  "id": "bump",
-  "type": "version_bump",
-  "label": "Bump Version",
-  "needs": [],
-  "config": {
-    "bump_type": "patch|minor|major"
-  }
-}
-```
-
-**Config options:**
-- **`bump_type`** (string): Version increment type (`patch`, `minor`, `major`)
-
-#### `git_commit`
-
-Create a git commit.
-
-```json
-{
-  "id": "commit",
-  "type": "git_commit",
-  "label": "Commit Changes",
-  "needs": ["build"],
-  "config": {
-    "message": "Release {version}",
-    "add_all": false,
-    "add_staged": true
-  }
-}
-```
-
-**Config options:**
-- **`message`** (string): Commit message (supports `{{version}}` variable)
-- **`add_all`** (boolean): Stage all changes before committing
-- **`add_staged`** (boolean): Commit only staged changes
-
-#### `git_tag`
-
-Create a git tag for the version.
-
-```json
-{
-  "id": "tag",
-  "type": "git_tag",
-  "label": "Create Tag",
-  "needs": ["bump"],
-  "config": {
-    "tag_format": "v{version}",
-    "push": true
-  }
-}
-```
-
-**Config options:**
-- **`tag_format`** (string): Tag format string (supports `{{version}}`)
-- **`push`** (boolean): Push tags to remote
-
-#### `git_push`
-
-Push commits and tags to remote.
-
-```json
-{
-  "id": "push",
-  "type": "git_push",
-  "label": "Push to Remote",
-  "needs": ["tag"],
-  "config": {
-    "push_tags": true
-  }
-}
-```
-
-**Config options:**
-- **`push_tags`** (boolean): Push tags along with commits
-
-#### `extension_run`
-
-Execute a extension runtime command.
-
-```json
-{
-  "id": "test",
-  "type": "extension_run",
-  "label": "Run Tests",
-  "needs": ["build"],
-  "config": {
-    "extension": "rust",
-    "command": "test",
-    "inputs": [
-      {"id": "release", "value": "true"}
-    ]
-  }
-}
-```
-
-**Config options:**
-- **`extension`** (string): Extension ID to execute
-- **`command`** (string): Command to pass to extension
-- **`inputs`** (array): Input arguments for extension
-
-#### `extension_action`
-
-Execute a extension action.
-
-```json
-{
-  "id": "publish",
-  "type": "extension_action",
-  "label": "Publish Release",
-  "needs": ["push"],
-  "config": {
-    "extension": "github",
-    "action": "create_release",
-    "data": {}
-  }
-}
-```
-
-**Config options:**
-- **`extension`** (string): Extension ID providing the action
-- **`action`** (string): Action ID to execute
-- **`data`** (object): Data to pass to action
-
-## Step Dependencies
-
-The `needs` field defines step execution order:
-
-```json
-{
-  "steps": [
-    {"id": "test", "type": "extension_run", "needs": []},
-    {"id": "build", "type": "build", "needs": []},
-    {"id": "bump", "type": "version_bump", "needs": ["test", "build"]},
-    {"id": "commit", "type": "git_commit", "needs": ["bump"]},
-    {"id": "push", "type": "git_push", "needs": ["commit"]}
-  ]
-}
-```
-
-Steps with empty `needs` arrays run first. Steps wait for all dependencies to complete successfully before executing.
-
-## Extension Actions in Pipelines
-
-Extensions can define `release_actions` in their manifest for pipeline integration:
-
-```json
-{
-  "release_actions": {
-    "publish": {
-      "type": "extension_run",
-      "config": {
-        "extension": "github",
-        "inputs": [
-          {"id": "create_release", "value": "true"}
-        ]
-      }
-    }
-  }
-}
-```
-
-These can be referenced in pipeline steps:
-
-```json
-{
-  "id": "publish",
-  "type": "extension.run",
-  "label": "Publish",
-  "needs": ["push"],
-  "config": {}
-}
-```
-
-## Pipeline Commands
-
-### Plan Release
-
-Review what a release pipeline will do without executing:
+Preview a release without executing mutating steps:
 
 ```bash
-homeboy release plan <component_id>
+homeboy release --dry-run <component_id>
 ```
 
-Shows:
-- Pipeline steps in execution order
-- Dependency graph
-- Current version
-- Next version after bump
-- Configuration validation
-
-### Run Release
-
-Execute the release pipeline:
+Execute the release plan:
 
 ```bash
-homeboy release run <component_id>
+homeboy release <component_id>
 ```
 
-Execution:
-1. Validates pipeline configuration
-2. Executes steps in dependency order
-3. Stops on first failure
-4. Reports status for each step
+Useful companion commands:
 
-## Complete Example
-
-```json
-{
-  "release": {
-    "enabled": true,
-    "steps": [
-      {
-        "id": "lint",
-        "type": "extension_run",
-        "label": "Lint Code",
-        "needs": [],
-        "config": {
-          "extension": "rust",
-          "command": "clippy"
-        }
-      },
-      {
-        "id": "test",
-        "type": "extension_run",
-        "label": "Run Tests",
-        "needs": [],
-        "config": {
-          "extension": "rust",
-          "command": "test"
-        }
-      },
-      {
-        "id": "build",
-        "type": "build",
-        "label": "Build Artifact",
-        "needs": ["lint", "test"],
-        "config": {}
-      },
-      {
-        "id": "bump",
-        "type": "version_bump",
-        "label": "Bump Version",
-        "needs": ["build"],
-        "config": {
-          "bump_type": "patch"
-        }
-      },
-      {
-        "id": "commit",
-        "type": "git_commit",
-        "label": "Commit Release",
-        "needs": ["bump"],
-        "config": {
-          "message": "Release {{version}}",
-          "add_staged": true
-        }
-      },
-      {
-        "id": "tag",
-        "type": "git_tag",
-        "label": "Create Tag",
-        "needs": ["bump"],
-        "config": {
-          "tag_format": "v{{version}}",
-          "push": true
-        }
-      },
-      {
-        "id": "push",
-        "type": "git_push",
-        "label": "Push to Remote",
-        "needs": ["commit", "tag"],
-        "config": {
-          "push_tags": true
-        }
-      },
-      {
-        "id": "publish",
-        "type": "extension_action",
-        "label": "Create GitHub Release",
-        "needs": ["push"],
-        "config": {
-          "extension": "github",
-          "action": "create_release"
-        }
-      }
-    ]
-  }
-}
+```bash
+homeboy changes <component_id>
+homeboy version show <component_id>
+homeboy changelog show <component_id>
 ```
 
-## Pipeline Settings
+## Execution Behavior
 
-Release pipeline supports global settings:
+Release execution:
 
-```json
-{
-  "release": {
-    "enabled": true,
-    "steps": [],
-    "settings": {
-      "distTarget": "homeboy",
-      "dryRun": false
-    }
-  }
-}
-```
+1. Resolves the component and extension context.
+2. Builds a release plan from git history, component metadata, and extension
+   capabilities.
+3. Runs executable steps in dependency order.
+4. Stops on failure and returns structured step results.
+5. Leaves plan-only steps visible for review without executing them.
 
-**Available settings:**
-- **`distTarget`** (string): Distribution target identifier
-- **`dryRun`** (boolean): Preview pipeline execution without making changes
+Release requires a clean working tree except for files the release process owns,
+such as version targets and changelog targets.
 
-## Error Handling
+## Historical Terminology
 
-Pipeline execution stops on first failure. Failed steps are reported with:
-- Step ID and label
-- Error message
-- Exit code (for extension steps)
-
-Resume from a specific step is not supported. Rerun the entire pipeline after fixing issues.
+Older docs and changelog entries may mention `extension_run`,
+`extension_action`, or generic `extension.run` release steps. Treat those as
+historical terminology unless the current release planner emits those step kinds.
+Current release execution is built around known core step kinds and declared
+extension release actions.
 
 ## Related
 
-- [Release command](../commands/release.md) - Plan and run releases
-- [Component schema](../schemas/component-schema.md) - Release configuration structure
-- [Extension manifest schema](../schemas/extension-manifest-schema.md) - Extension action definitions
+- [Release command](../commands/release.md)
+- [Component schema](../schemas/component-schema.md)
+- [Extension manifest schema](../schemas/extension-manifest-schema.md)

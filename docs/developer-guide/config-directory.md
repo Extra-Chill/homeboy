@@ -1,6 +1,10 @@
 # Config Directory Structure
 
-> **Important:** Homeboy uses centralized configuration only. There is no repo-local config file (no .homeboy.toml or .homeboy directory). All configuration lives in `~/.config/homeboy/`.
+> **Important:** Portable component configuration can live in a repo-level
+> `homeboy.json`. Reusable machine-local configuration, state, installed
+> extensions, projects, servers, fleets, rigs, and stacks live in
+> `~/.config/homeboy/`. There is no repo-local dotfile or hidden Homeboy config
+> directory.
 
 Homeboy stores all configuration in a universal directory location across operating systems.
 
@@ -32,8 +36,7 @@ Typically: `C:\Users\<username>\AppData\Roaming\homeboy\`
 
 ```
 ~/.config/homeboy/
-├── homeboy/
-│   └── homeboy.json           # Global app configuration
+├── homeboy.json               # Global app configuration
 ├── projects/
 │   ├── <project_id>.json       # Project configurations
 │   └── ...
@@ -69,10 +72,12 @@ Contains global Homeboy settings. Created automatically on first run with defaul
 
 ```json
 {
-  "storage": "builtin-filesystem",
-  "installedModules": []
+  "storage": "builtin-filesystem"
 }
 ```
+
+Installed extensions are discovered from `~/.config/homeboy/extensions/`, not a
+global `installedModules` list.
 
 ### Project Configurations
 
@@ -114,6 +119,8 @@ Each server is a separate JSON file named after the server ID.
 **Directory:** `~/.config/homeboy/components/`
 
 Each component is a separate JSON file named after the component ID.
+Components can also be declared portably in a repository's `homeboy.json`; the
+standalone config directory is for reusable registrations outside the checkout.
 
 **Example:** `~/.config/homeboy/components/theme.json`
 
@@ -172,15 +179,15 @@ Configuration backups created by Homeboy (optional). Created before destructive 
 
 ## File Operations
 
-Homeboy does not write to directories outside the config directory:
-- **No repo-local config files**: Configuration is centralized
-- **No .homeboy directories**: Avoids repo contamination
-- **Cross-repo compatibility**: Multiple repos can reference the same configurations
+Homeboy keeps machine-local state under the config directory:
+- **Portable repo config**: A repository can opt into `homeboy.json` for local and CI loops
+- **No hidden repo state directory**: Homeboy avoids creating hidden state directories in source checkouts
+- **Cross-repo compatibility**: Multiple repos can reference the same reusable configurations
 
 ## Auto-creation
 
 Directories are created automatically when needed:
-- homeboy/ — First run
+- homeboy.json — First run or first global config update
 - projects/ — First project created
 - servers/ — First server created
 - components/ — First component created

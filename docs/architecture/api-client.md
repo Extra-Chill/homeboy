@@ -157,17 +157,16 @@ Extensions can define API actions in their manifest for automated API interactio
 
 ```json
 {
-  "actions": {
-    "sync_posts": {
+  "actions": [
+    {
+      "id": "sync_posts",
+      "label": "Sync posts from API",
       "type": "api",
-      "description": "Sync posts from API",
-      "config": {
-        "method": "GET",
-        "endpoint": "/posts",
-        "params": {"per_page": 100}
-      }
+      "method": "GET",
+      "endpoint": "/posts",
+      "payload": {"per_page": 100}
     }
-  }
+  ]
 }
 ```
 
@@ -177,12 +176,10 @@ Extension API actions can use template variables:
 
 ```json
 {
-  "config": {
-    "method": "POST",
-    "endpoint": "/posts/{{postId}}/comments",
-    "template": {
-      "content": "{{payload.comment}}"
-    }
+  "method": "POST",
+  "endpoint": "/posts/{{postId}}/comments",
+  "payload": {
+    "content": "{{payload.comment}}"
   }
 }
 ```
