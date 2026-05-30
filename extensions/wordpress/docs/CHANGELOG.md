@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.105.2] - 2026-05-30
+
+### Changed
+- Use shared runner prelude in extension runners
+
 ## [2.105.1] - 2026-05-30
 
 ### Changed
