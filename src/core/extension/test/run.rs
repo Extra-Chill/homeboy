@@ -688,6 +688,7 @@ mod tests {
             build: Vec::new(),
             bench: Vec::new(),
             trace: Vec::new(),
+            deps: Vec::new(),
         });
 
         let result =

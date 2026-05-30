@@ -381,6 +381,7 @@ JSON
             runtime: None,
             cli: None,
             build: None,
+            deps: None,
             lint: None,
             test: None,
             bench: None,
