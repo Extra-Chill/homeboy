@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 /// Well-known filenames for step outputs within a run directory.
 pub mod files {
     pub const LINT_FINDINGS: &str = "lint-findings.json";
+    pub const LINT_PRODUCERS: &str = "lint-producers.json";
     pub const TEST_RESULTS: &str = "test-results.json";
     pub const TEST_FAILURES: &str = "test-failures.json";
     pub const COVERAGE: &str = "coverage.json";
@@ -110,6 +111,12 @@ impl RunDir {
             (
                 "HOMEBOY_LINT_FINDINGS_FILE".to_string(),
                 self.step_file(files::LINT_FINDINGS)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            (
+                "HOMEBOY_LINT_PRODUCERS_FILE".to_string(),
+                self.step_file(files::LINT_PRODUCERS)
                     .to_string_lossy()
                     .to_string(),
             ),

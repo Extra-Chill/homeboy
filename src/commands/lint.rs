@@ -226,7 +226,7 @@ impl LintObservation {
     }
 
     fn finish_workflow(self, workflow: &homeboy::core::extension::lint::LintRunWorkflowResult) {
-        if let Some(findings) = &workflow.lint_findings {
+        if let Some(findings) = &workflow.findings {
             let records = finding_records_from_lint(self.0.run_id(), findings);
             self.0.record_findings(&records);
         }
@@ -240,7 +240,8 @@ impl LintObservation {
             status,
             Some(serde_json::json!({
                 "exit_code": workflow.exit_code,
-                "finding_count": workflow.lint_findings.as_ref().map(Vec::len).unwrap_or(0),
+                "finding_count": workflow.findings.as_ref().map(Vec::len).unwrap_or(0),
+                "producer_summaries": workflow.producer_summaries,
             })),
         );
     }
@@ -339,8 +340,9 @@ mod tests {
     use clap::Parser;
     use homeboy::core::component::Component;
     use homeboy::core::extension::lint as extension_lint;
-    use homeboy::core::extension::lint::baseline::{self as lint_baseline, LintFinding};
+    use homeboy::core::extension::lint::baseline as lint_baseline;
     use homeboy::core::extension::lint::report;
+    use homeboy::core::finding::HomeboyFinding;
     use homeboy::core::refactor::plan::{
         lint_refactor_request, LintSourceOptions, RefactorSourceRun, SourceTotals,
     };
@@ -389,18 +391,14 @@ mod tests {
     fn lint_baseline_roundtrip_and_compare() {
         let dir = tempfile::tempdir().expect("temp dir");
         let findings = vec![
-            LintFinding {
-                id: "src/foo.php::WordPress.Security.EscapeOutput".to_string(),
-                message: "Missing esc_html()".to_string(),
-                category: "security".to_string(),
-                ..LintFinding::default()
-            },
-            LintFinding {
-                id: "src/bar.php::WordPress.WP.I18n".to_string(),
-                message: "Untranslated string".to_string(),
-                category: "i18n".to_string(),
-                ..LintFinding::default()
-            },
+            HomeboyFinding::builder("lint", "Missing esc_html()")
+                .category("security")
+                .fingerprint("src/foo.php::WordPress.Security.EscapeOutput")
+                .build(),
+            HomeboyFinding::builder("lint", "Untranslated string")
+                .category("i18n")
+                .fingerprint("src/bar.php::WordPress.WP.I18n")
+                .build(),
         ];
 
         let saved = lint_baseline::save_baseline(dir.path(), "homeboy", &findings)

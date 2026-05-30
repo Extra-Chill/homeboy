@@ -5,7 +5,7 @@ use crate::core::code_audit::FindingConfidence;
 
 #[test]
 fn test_build_findings_from_native_output() {
-    let output = json!({"data": {"passed": true, "lint_findings": []}});
+    let output = json!({"data": {"passed": true, "findings": []}});
     let rendered =
         build_findings_from_native_output("lint", output, &IssueRenderContext::default()).unwrap();
 
@@ -17,16 +17,16 @@ fn test_build_findings_from_native_output() {
 fn test_merge() {
     let mut first = build_findings_from_native_output(
         "lint",
-        json!({"data": {"passed": false, "lint_findings": [
-            {"id": "lint-1", "category": "A", "message": "one"}
+        json!({"data": {"passed": false, "findings": [
+            {"fingerprint": "lint-1", "category": "A", "message": "one"}
         ]}}),
         &IssueRenderContext::default(),
     )
     .unwrap();
     let second = build_findings_from_native_output(
         "lint",
-        json!({"data": {"passed": false, "lint_findings": [
-            {"id": "lint-2", "category": "B", "message": "two"}
+        json!({"data": {"passed": false, "findings": [
+            {"fingerprint": "lint-2", "category": "B", "message": "two"}
         ]}}),
         &IssueRenderContext::default(),
     )
@@ -110,10 +110,10 @@ fn renders_lint_output_grouped_by_category() {
             "passed": false,
             "status": "failed",
             "exit_code": 1,
-            "lint_findings": [
-                {"id": "lint-1", "category": "Squiz.Commenting.FunctionComment.Missing", "message": "missing docblock"},
-                {"id": "lint-2", "category": "Squiz.Commenting.FunctionComment.Missing", "message": "missing docblock"},
-                {"id": "lint-3", "category": "Generic.Files.LineLength.TooLong", "message": "line too long"}
+            "findings": [
+                {"fingerprint": "lint-1", "category": "Squiz.Commenting.FunctionComment.Missing", "message": "missing docblock"},
+                {"fingerprint": "lint-2", "category": "Squiz.Commenting.FunctionComment.Missing", "message": "missing docblock"},
+                {"fingerprint": "lint-3", "category": "Generic.Files.LineLength.TooLong", "message": "line too long"}
             ]
         }
     });
@@ -315,7 +315,7 @@ fn renders_test_status_failed_without_passed_flag() {
 
 #[test]
 fn passing_outputs_produce_no_groups() {
-    let lint = json!({"data": {"passed": true, "lint_findings": []}});
+    let lint = json!({"data": {"passed": true, "findings": []}});
     let test = json!({"data": {"passed": true, "test_counts": {"total": 1, "passed": 1, "failed": 0, "skipped": 0}}});
 
     assert!(

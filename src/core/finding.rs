@@ -77,6 +77,55 @@ pub struct FindingProducer {
     pub invocation: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FindingProducerSummary {
+    pub tool: String,
+    pub status: String,
+    pub finding_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<FindingSource>,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub metadata: Map<String, Value>,
+}
+
+impl FindingProducerSummary {
+    pub fn new(tool: impl Into<String>, status: impl Into<String>) -> Self {
+        Self {
+            tool: tool.into(),
+            status: status.into(),
+            finding_count: 0,
+            step: None,
+            source: None,
+            metadata: Map::new(),
+        }
+    }
+
+    pub fn finding_count(mut self, finding_count: usize) -> Self {
+        self.finding_count = finding_count;
+        self
+    }
+
+    pub fn step(mut self, step: impl Into<String>) -> Self {
+        self.step = Some(step.into());
+        self
+    }
+
+    pub fn source(mut self, source: FindingSource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    pub fn metadata<T: Serialize>(mut self, key: impl Into<String>, value: T) -> Self {
+        self.metadata.insert(
+            key.into(),
+            serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
+        );
+        self
+    }
+}
+
 impl FindingProducer {
     pub fn new(name: impl Into<String>) -> Self {
         Self {

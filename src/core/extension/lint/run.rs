@@ -8,10 +8,11 @@ use crate::core::component::Component;
 use crate::core::engine::baseline::BaselineFlags;
 use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::engine::shell;
-use crate::core::extension::lint::baseline::{self as lint_baseline, LintFinding};
+use crate::core::extension::lint::baseline as lint_baseline;
 use crate::core::extension::lint::build_lint_runner;
 use crate::core::extension::self_check::SelfCheckCaptureMetadata;
 use crate::core::extension::{self, ExtensionCapability, LintChangedFileRoute};
+use crate::core::finding::{FindingProducerSummary, FindingSource, HomeboyFinding};
 use crate::core::git;
 use crate::core::refactor::AppliedRefactor;
 use serde::Serialize;
@@ -48,7 +49,9 @@ pub struct LintRunWorkflowResult {
     pub autofix: Option<AppliedRefactor>,
     pub hints: Option<Vec<String>>,
     pub baseline_comparison: Option<lint_baseline::BaselineComparison>,
-    pub lint_findings: Option<Vec<LintFinding>>,
+    pub findings: Option<Vec<HomeboyFinding>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub producer_summaries: Vec<FindingProducerSummary>,
     pub summary: Option<LintSummaryOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub self_check_capture: Option<SelfCheckCaptureMetadata>,
@@ -61,7 +64,9 @@ pub struct LintSummaryOutput {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub categories: BTreeMap<String, usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub top_findings: Vec<LintFinding>,
+    pub top_findings: Vec<HomeboyFinding>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub producer_summaries: Vec<FindingProducerSummary>,
     pub exit_code: i32,
 }
 
@@ -77,7 +82,7 @@ struct ScopedLintRun {
 /// baseline lifecycle, hint assembly, and result construction.
 pub fn run_main_lint_workflow(
     component: &Component,
-    source_path: &PathBuf,
+    source_path: &Path,
     args: LintRunWorkflowArgs,
     run_dir: &RunDir,
 ) -> crate::core::Result<LintRunWorkflowResult> {
@@ -93,9 +98,10 @@ pub fn run_main_lint_workflow(
                 autofix: None,
                 hints: None,
                 baseline_comparison: None,
-                lint_findings: None,
+                findings: None,
+                producer_summaries: Vec::new(),
                 summary: if args.json_summary {
-                    Some(build_lint_summary(&[], 0))
+                    Some(build_lint_summary(&[], &[], 0))
                 } else {
                     None
                 },
@@ -137,8 +143,19 @@ pub fn run_main_lint_workflow(
     };
 
     let lint_findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
+    let lint_producers_file = run_dir.step_file(run_dir::files::LINT_PRODUCERS);
     let raw_lint_findings = lint_baseline::parse_findings_file(&lint_findings_file)?;
     let lint_findings = filter_lint_findings(raw_lint_findings, &args);
+    let declared_producers = parse_lint_producer_summaries_file(&lint_producers_file)?;
+    let producer_summaries = build_lint_producer_summaries(
+        &lint_findings,
+        &lint_findings_file,
+        &lint_producers_file,
+        declared_producers,
+        output.success,
+        output.exit_code,
+        None,
+    );
 
     let mut hints = Vec::new();
 
@@ -193,6 +210,7 @@ pub fn run_main_lint_workflow(
     }
 
     let hints = if hints.is_empty() { None } else { Some(hints) };
+
     Ok(LintRunWorkflowResult {
         status,
         component: args.component_label,
@@ -201,19 +219,24 @@ pub fn run_main_lint_workflow(
         hints,
         baseline_comparison,
         summary: if args.json_summary {
-            Some(build_lint_summary(&lint_findings, exit_code))
+            Some(build_lint_summary(
+                &lint_findings,
+                &producer_summaries,
+                exit_code,
+            ))
         } else {
             None
         },
-        lint_findings: Some(lint_findings),
+        findings: Some(lint_findings),
+        producer_summaries,
         self_check_capture: None,
     })
 }
 
 fn filter_lint_findings(
-    findings: Vec<LintFinding>,
+    findings: Vec<HomeboyFinding>,
     args: &LintRunWorkflowArgs,
-) -> Vec<LintFinding> {
+) -> Vec<HomeboyFinding> {
     let included_sniffs = parse_csv_filter(args.sniffs.as_deref());
     let excluded_sniffs = parse_csv_filter(args.exclude_sniffs.as_deref());
     let category = args
@@ -225,7 +248,7 @@ fn filter_lint_findings(
     findings
         .into_iter()
         .filter(|finding| {
-            category.is_none_or(|expected| finding.category == expected)
+            category.is_none_or(|expected| finding.category.as_deref() == Some(expected))
                 && (included_sniffs.is_empty()
                     || included_sniffs
                         .iter()
@@ -247,22 +270,144 @@ fn parse_csv_filter(value: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-fn finding_matches_sniff(finding: &LintFinding, sniff: &str) -> bool {
-    finding.category == sniff
-        || finding_rule(finding).is_some_and(|rule| rule == sniff)
-        || finding.id == sniff
-        || finding.id.split("::").any(|part| part == sniff)
-        || finding.id.ends_with(sniff)
+fn finding_matches_sniff(finding: &HomeboyFinding, sniff: &str) -> bool {
+    finding.category.as_deref() == Some(sniff)
+        || finding.rule.as_deref().is_some_and(|rule| rule == sniff)
+        || finding.fingerprint.as_deref() == Some(sniff)
+        || finding
+            .fingerprint
+            .as_deref()
+            .is_some_and(|id| id.split("::").any(|part| part == sniff) || id.ends_with(sniff))
 }
 
-fn finding_rule(finding: &LintFinding) -> Option<&str> {
-    finding.extra.get("rule").and_then(|value| value.as_str())
+fn build_lint_producer_summaries(
+    findings: &[HomeboyFinding],
+    findings_source_path: &Path,
+    producers_source_path: &Path,
+    declared_producers: Vec<FindingProducerSummary>,
+    runner_success: bool,
+    runner_exit_code: i32,
+    step: Option<&str>,
+) -> Vec<FindingProducerSummary> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for finding in findings {
+        *counts.entry(finding.tool.clone()).or_insert(0) += 1;
+    }
+
+    if !declared_producers.is_empty() {
+        return declared_producers
+            .into_iter()
+            .map(|mut summary| {
+                summary.finding_count = counts
+                    .get(&summary.tool)
+                    .copied()
+                    .unwrap_or(summary.finding_count);
+                if summary.source.is_none() {
+                    summary.source = Some(
+                        FindingSource::new("sidecar")
+                            .label("lint-producers")
+                            .path(producers_source_path.display().to_string()),
+                    );
+                }
+                if summary.step.is_none() {
+                    summary.step = step.map(str::to_string);
+                }
+                summary
+                    .metadata
+                    .entry("source_sidecar".to_string())
+                    .or_insert_with(|| serde_json::json!("lint-producers"));
+                summary
+                    .metadata
+                    .entry("source_sidecar_path".to_string())
+                    .or_insert_with(|| {
+                        serde_json::json!(producers_source_path.display().to_string())
+                    });
+                summary
+                    .metadata
+                    .entry("exit_code".to_string())
+                    .or_insert_with(|| serde_json::json!(runner_exit_code));
+                summary
+            })
+            .collect();
+    }
+
+    if counts.is_empty() {
+        counts.insert("lint".to_string(), 0);
+    }
+
+    counts
+        .into_iter()
+        .map(|(tool, finding_count)| {
+            let status = if runner_exit_code >= 2 || (!runner_success && finding_count == 0) {
+                "error"
+            } else if finding_count > 0 {
+                "failed"
+            } else {
+                "passed"
+            };
+            let mut summary = FindingProducerSummary::new(tool, status)
+                .finding_count(finding_count)
+                .source(
+                    FindingSource::new("sidecar")
+                        .label("lint-findings")
+                        .path(findings_source_path.display().to_string()),
+                )
+                .metadata("source_sidecar", "lint-findings")
+                .metadata(
+                    "source_sidecar_path",
+                    findings_source_path.display().to_string(),
+                )
+                .metadata("exit_code", runner_exit_code);
+            if let Some(step) = step {
+                summary = summary.step(step.to_string());
+            }
+            summary
+        })
+        .collect()
+}
+
+fn parse_lint_producer_summaries_file(
+    path: &Path,
+) -> crate::core::Result<Vec<FindingProducerSummary>> {
+    fn parse_error(path: &Path, error: std::io::Error) -> crate::core::Error {
+        crate::core::Error::internal_io(
+            format!(
+                "Failed to read lint producer summaries file {}: {}",
+                path.display(),
+                error
+            ),
+            Some("lint.producers.parse".to_string()),
+        )
+    }
+
+    fn json_error(path: &Path, error: serde_json::Error) -> crate::core::Error {
+        crate::core::Error::internal_io(
+            format!(
+                "Malformed lint producer summaries JSON in {}: {}",
+                path.display(),
+                error
+            ),
+            Some("lint.producers.parse".to_string()),
+        )
+    }
+
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = std::fs::read_to_string(path).map_err(|e| parse_error(path, e))?;
+
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    serde_json::from_str(&content).map_err(|e| json_error(path, e))
 }
 
 fn normalize_empty_finding_exit_code(
     exit_code: i32,
     success: bool,
-    lint_findings: &[LintFinding],
+    lint_findings: &[HomeboyFinding],
 ) -> i32 {
     if lint_findings.is_empty() && !success && exit_code == 1 {
         0
@@ -271,7 +416,7 @@ fn normalize_empty_finding_exit_code(
     }
 }
 
-fn normalize_finding_exit_code(exit_code: i32, lint_findings: &[LintFinding]) -> i32 {
+fn normalize_finding_exit_code(exit_code: i32, lint_findings: &[HomeboyFinding]) -> i32 {
     if !lint_findings.is_empty() && exit_code == 0 {
         1
     } else {
@@ -287,16 +432,25 @@ fn effective_lint_exit_code(exit_code: i32, baseline_exit_override: Option<i32>)
     }
 }
 
-fn build_lint_summary(findings: &[LintFinding], exit_code: i32) -> LintSummaryOutput {
+fn build_lint_summary(
+    findings: &[HomeboyFinding],
+    producer_summaries: &[FindingProducerSummary],
+    exit_code: i32,
+) -> LintSummaryOutput {
     let mut categories = BTreeMap::new();
     for finding in findings {
-        *categories.entry(finding.category.clone()).or_insert(0) += 1;
+        let category = finding
+            .category
+            .clone()
+            .unwrap_or_else(|| "uncategorized".to_string());
+        *categories.entry(category).or_insert(0) += 1;
     }
 
     LintSummaryOutput {
         total_findings: findings.len(),
         categories,
         top_findings: findings.iter().take(20).cloned().collect(),
+        producer_summaries: producer_summaries.to_vec(),
         exit_code,
     }
 }
@@ -453,6 +607,16 @@ pub fn run_self_check_lint_workflow(
         )]
     });
 
+    let producer_summaries = build_lint_producer_summaries(
+        &[],
+        &PathBuf::from(run_dir::files::LINT_FINDINGS),
+        &PathBuf::from(run_dir::files::LINT_PRODUCERS),
+        Vec::new(),
+        output.success,
+        output.exit_code,
+        Some("self-check"),
+    );
+
     Ok(LintRunWorkflowResult {
         status,
         component: component_label,
@@ -460,9 +624,14 @@ pub fn run_self_check_lint_workflow(
         autofix: None,
         hints,
         baseline_comparison: None,
-        lint_findings: Some(Vec::new()),
+        findings: Some(Vec::new()),
+        producer_summaries: producer_summaries.clone(),
         summary: if json_summary {
-            Some(build_lint_summary(&[], output.exit_code))
+            Some(build_lint_summary(
+                &[],
+                &producer_summaries,
+                output.exit_code,
+            ))
         } else {
             None
         },
@@ -592,9 +761,9 @@ fn glob_for_files(root: &str, files: &[String]) -> String {
 
 /// Process baseline lifecycle — save, load, compare.
 fn process_baseline(
-    source_path: &PathBuf,
+    source_path: &Path,
     args: &LintRunWorkflowArgs,
-    lint_findings: &[LintFinding],
+    lint_findings: &[HomeboyFinding],
 ) -> crate::core::Result<(Option<lint_baseline::BaselineComparison>, Option<i32>)> {
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
@@ -764,7 +933,7 @@ mod tests {
 
         let result = run_main_lint_workflow(
             &component(&dir.path().to_string_lossy()),
-            &dir.path().to_path_buf(),
+            dir.path(),
             args,
             &run_dir,
         )
@@ -772,31 +941,78 @@ mod tests {
 
         assert_eq!(result.status, "passed");
         assert_eq!(result.exit_code, 0);
-        assert!(result.lint_findings.is_none());
+        assert!(result.findings.is_none());
     }
 
     #[test]
     fn lint_summary_counts_categories_and_caps_top_findings() {
         let findings = (0..25)
-            .map(|index| LintFinding {
-                id: format!("src/file-{index}.rs::rule"),
-                message: "message".to_string(),
-                category: if index % 2 == 0 {
-                    "style".to_string()
+            .map(|index| {
+                let category = if index % 2 == 0 {
+                    "style"
                 } else {
-                    "correctness".to_string()
-                },
-                ..LintFinding::default()
+                    "correctness"
+                };
+                HomeboyFinding::builder("lint", "message")
+                    .category(category)
+                    .fingerprint(format!("src/file-{index}.rs::rule"))
+                    .build()
             })
             .collect::<Vec<_>>();
 
-        let summary = build_lint_summary(&findings, 1);
+        let producers = build_lint_producer_summaries(
+            &findings,
+            Path::new("lint-findings.json"),
+            Path::new("lint-producers.json"),
+            Vec::new(),
+            false,
+            1,
+            None,
+        );
+        let summary = build_lint_summary(&findings, &producers, 1);
 
         assert_eq!(summary.total_findings, 25);
         assert_eq!(summary.categories.get("style"), Some(&13));
         assert_eq!(summary.categories.get("correctness"), Some(&12));
         assert_eq!(summary.top_findings.len(), 20);
+        assert_eq!(summary.producer_summaries[0].finding_count, 25);
         assert_eq!(summary.exit_code, 1);
+    }
+
+    #[test]
+    fn producer_summary_sidecar_represents_zero_finding_tools() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let producers_file = dir.path().join(run_dir::files::LINT_PRODUCERS);
+        std::fs::write(
+            &producers_file,
+            r#"[
+                {"tool":"phpcs","status":"passed","finding_count":0,"step":"phpcs"},
+                {"tool":"phpstan","status":"passed","finding_count":0,"step":"phpstan"}
+            ]"#,
+        )
+        .expect("producer summaries should be written");
+
+        let declared =
+            parse_lint_producer_summaries_file(&producers_file).expect("producers parse");
+        let summaries = build_lint_producer_summaries(
+            &[],
+            &dir.path().join(run_dir::files::LINT_FINDINGS),
+            &producers_file,
+            declared,
+            true,
+            0,
+            None,
+        );
+
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].tool, "phpcs");
+        assert_eq!(summaries[0].finding_count, 0);
+        assert_eq!(summaries[0].status, "passed");
+        let producers_path = producers_file.to_string_lossy().to_string();
+        assert_eq!(
+            summaries[0].source.as_ref().unwrap().path.as_deref(),
+            Some(producers_path.as_str())
+        );
     }
 
     #[test]
@@ -816,7 +1032,7 @@ mod tests {
         let filtered = filter_lint_findings(findings, &args);
 
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].id, "a");
+        assert_eq!(filtered[0].fingerprint.as_deref(), Some("a"));
     }
 
     #[test]
@@ -848,8 +1064,8 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(
-            filtered[0].id,
-            "inc/a.php::WordPress.Security.ValidatedSanitizedInput"
+            filtered[0].fingerprint.as_deref(),
+            Some("inc/a.php::WordPress.Security.ValidatedSanitizedInput")
         );
     }
 
@@ -1007,15 +1223,11 @@ mod tests {
         );
     }
 
-    fn lint_finding(id: &str, category: &str, rule: &str) -> LintFinding {
-        LintFinding {
-            id: id.to_string(),
-            message: "message".to_string(),
-            category: category.to_string(),
-            extra: [("rule".to_string(), serde_json::json!(rule))]
-                .into_iter()
-                .collect(),
-            ..LintFinding::default()
-        }
+    fn lint_finding(id: &str, category: &str, rule: &str) -> HomeboyFinding {
+        HomeboyFinding::builder("lint", "message")
+            .category(category)
+            .rule(rule)
+            .fingerprint(id)
+            .build()
     }
 }

@@ -353,8 +353,9 @@ mod tests {
                 &test_component(&root),
                 &root,
                 &serde_json::json!({
-                    "lint_findings": [{
-                        "id": "lint-1",
+                    "findings": [{
+                        "tool": "lint",
+                        "fingerprint": "lint-1",
                         "message": "demo",
                         "category": "style"
                     }]
@@ -379,7 +380,10 @@ mod tests {
             assert_eq!(command["source"], "lint");
             assert_eq!(command["write"], true);
             assert_eq!(command["settings"]["extension.setting"], "value");
-            assert_eq!(command["source_result"]["lint_findings"][0]["id"], "lint-1");
+            assert_eq!(
+                command["source_result"]["findings"][0]["fingerprint"],
+                "lint-1"
+            );
             assert!(command.get("audit_result").is_none());
 
             let _ = fs::remove_dir_all(root);

@@ -288,12 +288,16 @@ fn audit_kind_label(kind: &AuditFinding) -> String {
 
 /// Render the lint stage body — top sniff codes (by `category`) with counts.
 fn render_lint_body(out: &mut String, output: &LintCommandOutput) {
-    let findings = match output.lint_findings.as_ref() {
+    let findings = match output.findings.as_ref() {
         Some(f) if !f.is_empty() => f,
         _ => return,
     };
 
-    let buckets = top_n_by(findings, |f| f.category.clone(), TOP_N);
+    let buckets = top_n_by(
+        findings,
+        |f| f.category.clone().unwrap_or_else(|| f.tool.clone()),
+        TOP_N,
+    );
     for (code, count) in &buckets.items {
         let _ = writeln!(out, "- `{}` — {} finding(s)", code, count);
     }
@@ -370,10 +374,11 @@ mod tests {
     use homeboy::core::code_audit::{
         AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity,
     };
-    use homeboy::core::extension::lint::{LintCommandOutput, LintFinding};
+    use homeboy::core::extension::lint::LintCommandOutput;
     use homeboy::core::extension::test::{FailedTest, TestCommandOutput, TestCounts};
     use homeboy::core::extension::CiJobMapping;
     use homeboy::core::extension::{PhaseReport, PhaseStatus, VerificationPhase};
+    use homeboy::core::finding::HomeboyFinding;
     use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
 
     // ── Builders for fixture envelopes ──────────────────────────────────
@@ -529,14 +534,14 @@ mod tests {
     }
 
     fn lint_with_findings(items: Vec<(&str, &str)>) -> LintCommandOutput {
-        let findings: Vec<LintFinding> = items
+        let findings: Vec<HomeboyFinding> = items
             .into_iter()
             .enumerate()
-            .map(|(idx, (category, msg))| LintFinding {
-                id: format!("lint-{}", idx),
-                message: msg.to_string(),
-                category: category.to_string(),
-                ..LintFinding::default()
+            .map(|(idx, (category, msg))| {
+                HomeboyFinding::builder("lint", msg)
+                    .category(category)
+                    .fingerprint(format!("lint-{}", idx))
+                    .build()
             })
             .collect();
 
@@ -561,7 +566,8 @@ mod tests {
             autofix: None,
             hints: None,
             baseline_comparison: None,
-            lint_findings: Some(findings),
+            findings: Some(findings),
+            producer_summaries: Vec::new(),
             summary: None,
             self_check_capture: None,
             ci_context: None,

@@ -64,7 +64,7 @@ pub(super) fn try_load_cached_lint() -> Option<CachedLintResult> {
     let data = json.get("data")?;
     let passed = data.get("passed")?.as_bool()?;
     let finding_count = data
-        .get("lint_findings")
+        .get("findings")
         .and_then(|f| f.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
