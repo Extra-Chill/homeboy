@@ -880,10 +880,10 @@ mod tests {
     #[test]
     fn deploy_validation_rejects_legacy_build_command_before_artifact_checks() {
         let dir = TempDir::new().expect("temp dir");
-        let mut component = make_component("wp-codebox", &dir.path().to_string_lossy());
+        let mut component = make_component("sample-codebox", &dir.path().to_string_lossy());
         component.build_artifact =
-            Some("packages/wordpress-plugin/dist/wp-codebox.zip".to_string());
-        component.build_command = Some("npm run package:wordpress-plugin".to_string());
+            Some("packages/browser-extension/dist/sample-codebox.zip".to_string());
+        component.build_command = Some("npm run package:browser-extension".to_string());
 
         let err = validate_supported_build_configs(&[component])
             .expect_err("legacy build_command should fail deploy preflight");

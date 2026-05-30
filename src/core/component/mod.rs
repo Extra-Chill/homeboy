@@ -763,8 +763,8 @@ mod tests {
     #[test]
     fn validate_supported_build_config_rejects_legacy_build_command() {
         let component = Component {
-            id: "wp-codebox".to_string(),
-            build_command: Some("npm run package:wordpress-plugin".to_string()),
+            id: "sample-codebox".to_string(),
+            build_command: Some("npm run package:browser-extension".to_string()),
             ..Default::default()
         };
 
