@@ -9,10 +9,10 @@ use homeboy::commands::rig::RigCommandOutput;
 use homeboy::commands::runs::RunsOutput;
 use homeboy::commands::utils::response::cli_response_for_json_result;
 use homeboy::core::code_audit::report::{
-    AuditChangedSinceSummary, AuditCommandOutput, AuditFixability, AuditSummaryFinding,
-    AuditSummaryGroup, AuditSummaryOutput, FixabilityKindBreakdown,
+    AuditChangedSinceSummary, AuditCommandOutput, AuditFixability, AuditSummaryGroup,
+    AuditSummaryOutput, FixabilityKindBreakdown,
 };
-use homeboy::core::code_audit::{AuditFinding, FindingConfidence, Severity};
+use homeboy::core::code_audit::FindingConfidence;
 use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::{
     RawTestOutput, TestCommandOutput, TestCounts, TestSummaryOutput,
@@ -463,15 +463,18 @@ fn audit_summary_output() -> AuditCommandOutput {
             sample_files: vec!["src/large.rs".to_string(), "src/also-large.rs".to_string()],
             drilldown_command: "homeboy audit fixture --only god_file".to_string(),
         }],
-        top_findings: vec![AuditSummaryFinding {
-            file: "src/large.rs".to_string(),
-            convention: "structural".to_string(),
-            kind: AuditFinding::GodFile,
-            confidence: FindingConfidence::Heuristic,
-            severity: Severity::Warning,
-            description: "File exceeds the size threshold".to_string(),
-            suggestion: "Split the module into focused pieces".to_string(),
-        }],
+        top_findings: vec![
+            HomeboyFinding::builder("audit", "File exceeds the size threshold")
+                .rule("god_file")
+                .category("structural")
+                .file("src/large.rs")
+                .severity("warning")
+                .metadata("convention", "structural")
+                .metadata("suggestion", "Split the module into focused pieces")
+                .metadata("confidence", FindingConfidence::Heuristic)
+                .metadata("kind", "god_file")
+                .build(),
+        ],
         fixability: Some(AuditFixability {
             fixable_count: 2,
             automated_count: 1,

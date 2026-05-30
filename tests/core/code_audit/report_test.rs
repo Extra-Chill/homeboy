@@ -66,10 +66,10 @@ fn test_build_audit_summary_prioritizes_warnings_in_top_findings() {
 
     let summary = crate::core::code_audit::report::build_audit_summary(&result, 1);
 
-    assert_eq!(summary.top_findings[0].severity, Severity::Warning);
+    assert_eq!(summary.top_findings[0].severity.as_deref(), Some("warning"));
     assert_eq!(
-        summary.top_findings[0].kind,
-        AuditFinding::DuplicateFunction
+        summary.top_findings[0].rule.as_deref(),
+        Some("duplicate_function")
     );
 }
 
@@ -140,8 +140,8 @@ fn test_build_audit_summary_includes_finding_confidence() {
 
     assert_eq!(summary.top_findings.len(), 1);
     assert_eq!(
-        summary.top_findings[0].confidence,
-        FindingConfidence::Heuristic
+        summary.top_findings[0].metadata["confidence"],
+        serde_json::json!(FindingConfidence::Heuristic)
     );
 }
 

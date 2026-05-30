@@ -65,7 +65,7 @@ pub use compare::{
 pub use conventions::{AuditFinding, Convention, Deviation, Language, Outlier};
 pub use duplication::DuplicateGroup;
 pub(crate) use execution_plan::AuditExecutionPlan;
-pub use findings::{Finding, FindingConfidence, Severity};
+pub use findings::{homeboy_finding_from_audit, Finding, FindingConfidence, Severity};
 pub use fingerprint::FileFingerprint;
 pub use report::AuditCommandOutput;
 pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs, AuditRunWorkflowResult};

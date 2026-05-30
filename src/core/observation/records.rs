@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
-use crate::core::code_audit::{self, report::finding_kind_key};
+use crate::core::code_audit::{self, homeboy_finding_from_audit as audit_homeboy_finding};
 use crate::core::finding::{FindingProducer, FindingSource, HomeboyFinding};
 
 mod run_builder;
@@ -281,21 +281,7 @@ pub fn finding_records_from_lint(
 }
 
 pub fn homeboy_finding_from_audit(finding: &code_audit::Finding) -> HomeboyFinding {
-    let kind = finding_kind_key(&finding.kind);
-    HomeboyFinding::builder("audit", finding.description.clone())
-        .rule(kind.clone())
-        .category(finding.convention.clone())
-        .file(finding.file.clone())
-        .severity(audit_severity_key(&finding.severity))
-        .fingerprint(audit_finding_fingerprint(finding))
-        .source(FindingSource::new("sidecar").label("audit-findings"))
-        .metadata("source_sidecar", "audit-findings")
-        .metadata("convention", finding.convention.clone())
-        .metadata("suggestion", finding.suggestion.clone())
-        .metadata("confidence", finding.kind.confidence())
-        .metadata("kind", kind)
-        .raw(finding)
-        .build()
+    audit_homeboy_finding(finding)
 }
 
 pub fn finding_record_from_audit(run_id: &str, finding: &code_audit::Finding) -> NewFindingRecord {
@@ -310,23 +296,6 @@ pub fn finding_records_from_audit(
         .iter()
         .map(|finding| finding_record_from_audit(run_id, finding))
         .collect()
-}
-
-fn audit_finding_fingerprint(finding: &code_audit::Finding) -> String {
-    format!(
-        "{}:{}:{}:{}",
-        finding.file,
-        finding_kind_key(&finding.kind),
-        finding.convention,
-        finding.description
-    )
-}
-
-fn audit_severity_key(severity: &code_audit::Severity) -> String {
-    serde_json::to_value(severity)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_string))
-        .unwrap_or_else(|| format!("{severity:?}").to_lowercase())
 }
 
 pub fn finding_records_from_annotations_dir(

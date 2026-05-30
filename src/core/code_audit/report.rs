@@ -8,9 +8,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::core::code_audit::{
-    baseline, AuditFinding, CodeAuditResult, ConventionReport, DirectoryConvention,
-    FindingConfidence, Severity,
+    baseline, homeboy_finding_from_audit, AuditFinding, CodeAuditResult, ConventionReport,
+    DirectoryConvention, FindingConfidence, Severity,
 };
+use crate::core::finding::HomeboyFinding;
 use serde::Serialize;
 
 use super::run::AuditRunWorkflowResult;
@@ -26,7 +27,7 @@ pub struct AuditSummaryOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub finding_groups: Vec<AuditSummaryGroup>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub top_findings: Vec<AuditSummaryFinding>,
+    pub top_findings: Vec<HomeboyFinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixability: Option<AuditFixability>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,18 +89,6 @@ pub struct AuditBaselineFilteringSummary {
     pub resolved_findings: usize,
     pub drift_delta: i64,
     pub drift_increased: bool,
-}
-
-/// Individual finding in the summary.
-#[derive(Serialize)]
-pub struct AuditSummaryFinding {
-    pub file: String,
-    pub convention: String,
-    pub kind: AuditFinding,
-    pub confidence: FindingConfidence,
-    pub severity: Severity,
-    pub description: String,
-    pub suggestion: String,
 }
 
 /// Unified output envelope for the audit command.
@@ -204,15 +193,7 @@ pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSum
     let top_findings = top_finding_refs
         .into_iter()
         .take(20)
-        .map(|f| AuditSummaryFinding {
-            file: f.file.clone(),
-            convention: f.convention.clone(),
-            kind: f.kind.clone(),
-            confidence: f.kind.confidence(),
-            severity: f.severity.clone(),
-            description: f.description.clone(),
-            suggestion: f.suggestion.clone(),
-        })
+        .map(homeboy_finding_from_audit)
         .collect();
     let finding_groups = build_finding_groups(result);
 
@@ -317,10 +298,7 @@ pub fn build_changed_since_summary(
 /// Using `format!("{:?}", ...)` would produce Debug PascalCase (e.g. `compilerwarning`)
 /// which doesn't match the serde output (`compiler_warning`).
 pub(crate) fn finding_kind_key(finding: &AuditFinding) -> String {
-    serde_json::to_value(finding)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_else(|| format!("{:?}", finding).to_lowercase())
+    crate::core::code_audit::findings::finding_kind_key(finding)
 }
 
 /// Compute fixability metadata from an audit result without applying fixes.

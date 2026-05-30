@@ -22,13 +22,18 @@
     ],
     "top_findings": [
       {
-        "file": "src/large.rs",
-        "convention": "structural",
-        "kind": "god_file",
-        "confidence": "heuristic",
+        "tool": "audit",
+        "rule": "god_file",
+        "category": "structural",
         "severity": "warning",
-        "description": "File exceeds the size threshold",
-        "suggestion": "Split the module into focused pieces"
+        "file": "src/large.rs",
+        "message": "File exceeds the size threshold",
+        "metadata": {
+          "confidence": "heuristic",
+          "convention": "structural",
+          "kind": "god_file",
+          "suggestion": "Split the module into focused pieces"
+        }
       }
     ],
     "fixability": {
