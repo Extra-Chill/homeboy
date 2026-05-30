@@ -18,6 +18,17 @@ assert_contains() {
     fi
 }
 
+assert_not_contains() {
+    local file="$1"
+    local unexpected="$2"
+    if grep -Fq "$unexpected" "$file"; then
+        echo "Expected $file not to contain: $unexpected" >&2
+        echo "Actual contents:" >&2
+        sed 's/^/  /' "$file" >&2
+        exit 1
+    fi
+}
+
 assert_equals() {
     local actual="$1"
     local expected="$2"
@@ -90,12 +101,15 @@ HOMEBOY_COMPONENT_PATH="$FIXTURE" \
 HOMEBOY_COMPONENT_SHAPE="core-dev" \
 HOMEBOY_WORDPRESS_TEST_BACKEND="core-native" \
 HOMEBOY_CORE_DEV_DRY_RUN=1 \
-    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/test-native.out"
-assert_contains "${TMPDIR}/test-native.out" "core-dev test runner selected"
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/test-native.out" 2>&1 && {
+        echo "Expected core-native backend to be rejected" >&2
+        exit 1
+    }
+assert_contains "${TMPDIR}/test-native.out" "Supported core-dev backend: wp-codebox"
 
 CORE_WP_CODEBOX_FIXTURE="${TMPDIR}/core-wp-codebox-fixture"
 cp -R "$FIXTURE" "$CORE_WP_CODEBOX_FIXTURE"
-mkdir -p "${CORE_WP_CODEBOX_FIXTURE}/vendor" "${CORE_WP_CODEBOX_FIXTURE}/tests/phpunit/tests"
+mkdir -p "${CORE_WP_CODEBOX_FIXTURE}/tests/phpunit/tests"
 cat > "${CORE_WP_CODEBOX_FIXTURE}/tests/phpunit/tests/basic.php" <<'PHP'
 <?php
 final class Basic_Core_Smoke_Test extends WP_UnitTestCase {
@@ -140,6 +154,7 @@ assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" '"target": "/wordpress"'
 assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" '"target": "/wordpress/tests/phpunit"'
 assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" 'test-file=tests/phpunit/tests/basic.php'
 assert_contains "${TMPDIR}/core-wp-codebox-recipe.json" 'multisite=1'
+assert_not_contains "${TMPDIR}/core-wp-codebox-recipe.json" '"target": "/wordpress/vendor"'
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="wordpress-develop" \

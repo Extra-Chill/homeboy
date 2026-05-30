@@ -2,8 +2,10 @@
 set -euo pipefail
 
 # WP Codebox-backed test runner for wordpress-develop / WordPress core source
-# checkouts. Unlike plugin/theme tests, core tests mount the checkout's src,
-# tests/phpunit, and vendor directories into a core-shaped Playground runtime.
+# checkouts. Unlike plugin/theme tests, core tests mount the checkout's src and
+# tests/phpunit directories into a core-shaped Playground runtime. If the core
+# vendor autoload is absent, WP Codebox reports that as a structured runtime
+# failure instead of this wrapper provisioning host dependencies.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
@@ -32,16 +34,6 @@ ensure_core_dev_checkout() {
     if ! is_core_dev_checkout; then
         fail "core-dev WP Codebox runner expected wordpress-develop markers: wp-config-sample.php, src/wp-includes/version.php, tests/phpunit/"
     fi
-}
-
-ensure_core_vendor() {
-    if [ -d "${CORE_PATH}/vendor" ]; then
-        return 0
-    fi
-
-    command -v composer >/dev/null 2>&1 || fail "composer is required to install wordpress-develop PHP dependencies"
-    echo "Installing Composer dependencies for wordpress-develop..."
-    (cd "$CORE_PATH" && composer install --no-interaction)
 }
 
 WP_CODEBOX_BIN="${HOMEBOY_WP_CODEBOX_BIN:-}"
@@ -78,11 +70,12 @@ if [ "${HOMEBOY_CORE_DEV_DRY_RUN:-}" = "1" ]; then
     exit 0
 fi
 
-ensure_core_vendor
-
 CORE_SRC_PATH="$(homeboy_wp_codebox_resolve_mount_path "${CORE_PATH}/src")"
 CORE_TESTS_PATH="$(homeboy_wp_codebox_resolve_mount_path "${CORE_PATH}/tests/phpunit")"
-CORE_VENDOR_PATH="$(homeboy_wp_codebox_resolve_mount_path "${CORE_PATH}/vendor")"
+CORE_VENDOR_PATH=""
+if [ -d "${CORE_PATH}/vendor" ]; then
+    CORE_VENDOR_PATH="$(homeboy_wp_codebox_resolve_mount_path "${CORE_PATH}/vendor")"
+fi
 RESULT_FILE="${CORE_PATH}/src/.pg-test-result.txt"
 rm -f "$RESULT_FILE"
 
@@ -93,6 +86,14 @@ if [ -n "$SELECTED_TEST_FILE" ]; then
         selected_abs="${CORE_PATH}/${SELECTED_TEST_FILE}"
     fi
     [ -f "$selected_abs" ] || fail "requested core PHPUnit test file not found: ${SELECTED_TEST_FILE}"
+    case "$selected_abs" in
+        "${CORE_PATH}"/*)
+            SELECTED_TEST_FILE="${selected_abs#"${CORE_PATH}/"}"
+            ;;
+        *)
+            fail "requested core PHPUnit test file is outside the component: ${SELECTED_TEST_FILE}"
+            ;;
+    esac
 fi
 
 CHANGED_TEST_FILES_JSON="[]"
@@ -128,9 +129,8 @@ MOUNTS_JSON=$(jq -nc \
     --arg vendor "$CORE_VENDOR_PATH" \
     '[
         {source: $src, target: "/wordpress", mode: "readwrite"},
-        {source: $tests, target: "/wordpress/tests/phpunit", mode: "readonly"},
-        {source: $vendor, target: "/wordpress/vendor", mode: "readonly"}
-    ]')
+        {source: $tests, target: "/wordpress/tests/phpunit", mode: "readonly"}
+    ] + (if $vendor == "" then [] else [{source: $vendor, target: "/wordpress/vendor", mode: "readonly"}] end)')
 
 ARTIFACTS_DIR="${HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR:-}"
 if [ -z "$ARTIFACTS_DIR" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
