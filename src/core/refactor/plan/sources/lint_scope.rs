@@ -4,6 +4,7 @@ use crate::core::Error;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 pub(super) struct ReleaseOwnedFileSnapshot {
     relative: String,
@@ -131,6 +132,130 @@ pub(super) fn constrain_lint_fix_changes(
     Ok(LintFixScopeOutcome {
         changed_files: allowed,
         warnings,
+    })
+}
+
+pub(super) fn reject_unsafe_lint_autofix_changes(
+    root: &Path,
+    changed_files: &[String],
+) -> crate::core::Result<()> {
+    if changed_files.is_empty() {
+        return Ok(());
+    }
+
+    let diff = lint_autofix_diff(root, changed_files)?;
+    let violations = unsafe_signature_changes(&diff);
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    git::discard_worktree_changes(&root.to_string_lossy(), changed_files)?;
+
+    Err(Error::validation_invalid_argument(
+        "fix",
+        format!(
+            "Unsafe lint autofix reverted: changed function or method signature(s): {}",
+            violations.join("; ")
+        ),
+        None,
+        Some(vec![
+            "Run lint without --fix and apply behavior-affecting changes manually".to_string(),
+            "Autofix is limited to edits that preserve callable signatures".to_string(),
+        ]),
+    ))
+}
+
+fn lint_autofix_diff(root: &Path, changed_files: &[String]) -> crate::core::Result<String> {
+    let output = Command::new("git")
+        .arg("diff")
+        .arg("--unified=0")
+        .arg("--")
+        .args(changed_files)
+        .current_dir(root)
+        .output()
+        .map_err(|error| Error::internal_io(error.to_string(), Some("run git diff".to_string())))?;
+
+    if !output.status.success() {
+        return Err(Error::git_command_failed(format!(
+            "git diff failed while checking lint autofix safety: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn unsafe_signature_changes(diff: &str) -> Vec<String> {
+    let mut removed = Vec::new();
+    let mut added = BTreeSet::new();
+
+    for line in diff.lines() {
+        if line.starts_with("---") || line.starts_with("+++") {
+            continue;
+        }
+
+        if line.is_empty() {
+            continue;
+        }
+        let (prefix, body) = line.split_at(1);
+        if prefix != "+" && prefix != "-" {
+            continue;
+        }
+
+        let body = body.trim();
+        let Some(signature) = normalized_signature_line(body) else {
+            continue;
+        };
+
+        if prefix == "+" {
+            added.insert(signature);
+        } else {
+            removed.push((body.to_string(), signature));
+        }
+    }
+
+    removed
+        .into_iter()
+        .filter_map(|(line, signature)| (!added.contains(&signature)).then_some(line))
+        .collect()
+}
+
+fn normalized_signature_line(line: &str) -> Option<String> {
+    if !looks_like_signature_line(line) {
+        return None;
+    }
+
+    let without_body = line
+        .split_once('{')
+        .map_or(line, |(head, _)| head)
+        .trim_end_matches(';')
+        .trim();
+
+    Some(
+        without_body
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect(),
+    )
+}
+
+fn looks_like_signature_line(line: &str) -> bool {
+    if !line.contains('(') || !line.contains(')') {
+        return false;
+    }
+
+    let trimmed = line.trim_start();
+    let lowered = trimmed.to_ascii_lowercase();
+    let tokens: Vec<&str> = lowered
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    tokens.iter().any(|token| {
+        matches!(
+            *token,
+            "fn" | "function" | "def" | "sub" | "func" | "method"
+        )
     })
 }
 
@@ -332,6 +457,67 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("outside selected scope")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unsafe_signature_changes_ignores_signature_formatting_only() {
+        let diff = r#"
+diff --git a/src/lib.php b/src/lib.php
+@@ -1 +1 @@
+-public function warm( $args){
++public function warm( $args ) {
+"#;
+
+        assert!(unsafe_signature_changes(diff).is_empty());
+    }
+
+    #[test]
+    fn unsafe_signature_changes_detects_removed_parameter() {
+        let diff = r#"
+diff --git a/src/lib.php b/src/lib.php
+@@ -1 +1 @@
+-public function warm( $args, $assoc_args ) {
++public function warm( $args) {
+"#;
+
+        let violations = unsafe_signature_changes(diff);
+
+        assert_eq!(
+            violations,
+            vec!["public function warm( $args, $assoc_args ) {"]
+        );
+    }
+
+    #[test]
+    fn unsafe_lint_autofix_reverts_signature_changes() {
+        let root = tmp_dir("lint-autofix-signature-safety");
+        fs::create_dir_all(root.join("src")).unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.email", "test@example.com"]);
+        run_git(&root, &["config", "user.name", "test"]);
+
+        let original = "<?php\npublic function warm( $args, $assoc_args ) {\n}\n";
+        fs::write(root.join("src/command.php"), original).unwrap();
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-q", "-m", "init"]);
+
+        fs::write(
+            root.join("src/command.php"),
+            "<?php\npublic function warm( $args) {\n}\n",
+        )
+        .unwrap();
+
+        let changed_files = vec!["src/command.php".to_string()];
+        let error = reject_unsafe_lint_autofix_changes(&root, &changed_files)
+            .expect_err("signature edits should be rejected");
+
+        assert!(error.message.contains("Unsafe lint autofix reverted"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/command.php")).unwrap(),
+            original
+        );
 
         let _ = fs::remove_dir_all(root);
     }

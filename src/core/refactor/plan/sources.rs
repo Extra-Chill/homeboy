@@ -25,7 +25,7 @@ use cache::{
 use extension_source::{read_optional_json, try_extension_refactor_source_stage};
 use lint_scope::{
     capture_release_owned_files, constrain_lint_fix_changes, lint_finding_scope_files,
-    lint_scope_glob, restore_release_owned_files,
+    lint_scope_glob, reject_unsafe_lint_autofix_changes, restore_release_owned_files,
 };
 use planning::{
     analyze_stage_overlaps, collect_collected_edits, collect_stage_changed_files,
@@ -768,6 +768,7 @@ fn run_lint_stage(
             after_dirty,
             &release_owned,
         )?;
+        reject_unsafe_lint_autofix_changes(root, &scope_outcome.changed_files)?;
 
         let fix_results = fix_sidecars.consume_fix_results();
         (
