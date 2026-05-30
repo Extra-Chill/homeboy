@@ -82,7 +82,7 @@ struct ScopedLintRun {
 /// baseline lifecycle, hint assembly, and result construction.
 pub fn run_main_lint_workflow(
     component: &Component,
-    source_path: &PathBuf,
+    source_path: &Path,
     args: LintRunWorkflowArgs,
     run_dir: &RunDir,
 ) -> crate::core::Result<LintRunWorkflowResult> {
@@ -272,7 +272,7 @@ fn parse_csv_filter(value: Option<&str>) -> Vec<String> {
 
 fn finding_matches_sniff(finding: &HomeboyFinding, sniff: &str) -> bool {
     finding.category.as_deref() == Some(sniff)
-        || finding_rule(finding).is_some_and(|rule| rule == sniff)
+        || finding.rule.as_deref().is_some_and(|rule| rule == sniff)
         || finding.fingerprint.as_deref() == Some(sniff)
         || finding
             .fingerprint
@@ -338,9 +338,7 @@ fn build_lint_producer_summaries(
     counts
         .into_iter()
         .map(|(tool, finding_count)| {
-            let status = if runner_exit_code >= 2 {
-                "error"
-            } else if !runner_success && finding_count == 0 {
+            let status = if runner_exit_code >= 2 || (!runner_success && finding_count == 0) {
                 "error"
             } else if finding_count > 0 {
                 "failed"
@@ -371,39 +369,39 @@ fn build_lint_producer_summaries(
 fn parse_lint_producer_summaries_file(
     path: &Path,
 ) -> crate::core::Result<Vec<FindingProducerSummary>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let content = std::fs::read_to_string(path).map_err(|e| {
+    fn parse_error(path: &Path, error: std::io::Error) -> crate::core::Error {
         crate::core::Error::internal_io(
             format!(
                 "Failed to read lint producer summaries file {}: {}",
                 path.display(),
-                e
+                error
             ),
             Some("lint.producers.parse".to_string()),
         )
-    })?;
+    }
+
+    fn json_error(path: &Path, error: serde_json::Error) -> crate::core::Error {
+        crate::core::Error::internal_io(
+            format!(
+                "Malformed lint producer summaries JSON in {}: {}",
+                path.display(),
+                error
+            ),
+            Some("lint.producers.parse".to_string()),
+        )
+    }
+
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = std::fs::read_to_string(path).map_err(|e| parse_error(path, e))?;
 
     if content.trim().is_empty() {
         return Ok(Vec::new());
     }
 
-    serde_json::from_str(&content).map_err(|e| {
-        crate::core::Error::internal_io(
-            format!(
-                "Malformed lint producer summaries JSON in {}: {}",
-                path.display(),
-                e
-            ),
-            Some("lint.producers.parse".to_string()),
-        )
-    })
-}
-
-fn finding_rule(finding: &HomeboyFinding) -> Option<&str> {
-    finding.rule.as_deref()
+    serde_json::from_str(&content).map_err(|e| json_error(path, e))
 }
 
 fn normalize_empty_finding_exit_code(
@@ -763,7 +761,7 @@ fn glob_for_files(root: &str, files: &[String]) -> String {
 
 /// Process baseline lifecycle — save, load, compare.
 fn process_baseline(
-    source_path: &PathBuf,
+    source_path: &Path,
     args: &LintRunWorkflowArgs,
     lint_findings: &[HomeboyFinding],
 ) -> crate::core::Result<(Option<lint_baseline::BaselineComparison>, Option<i32>)> {
@@ -934,7 +932,7 @@ mod tests {
 
         let result = run_main_lint_workflow(
             &component(&dir.path().to_string_lossy()),
-            &dir.path().to_path_buf(),
+            dir.path(),
             args,
             &run_dir,
         )
