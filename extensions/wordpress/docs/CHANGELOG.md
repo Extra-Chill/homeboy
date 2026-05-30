@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.104.3] - 2026-05-30
+
+### Changed
+- Add shared command capture helper
+
 ## [2.104.2] - 2026-05-30
 
 ### Changed
