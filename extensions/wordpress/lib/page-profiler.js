@@ -1,10 +1,17 @@
 'use strict';
 
 /**
+ * External dependencies
+ */
+const fs = require('node:fs');
+const nodePath = require('node:path');
+
+/**
  * Internal dependencies
  */
 const { correlateBrowserAndWordPressTimings, normalizeUrl } = require('./timing-correlator');
 const { runWordPressFixtureSetup } = require('./fixture-setup');
+const { parseWpCodeboxBrowserArtifacts } = require('./wp-codebox-browser-metrics');
 const {
 	WORDPRESS_RESOURCE_INCLUDE,
 	isPlainObject,
@@ -241,11 +248,11 @@ function quotePhpString(value) {
 }
 
 function phpPreloadDeclaration(method, url) {
-	const normalizedMethod = normalizeRestMethod(method);
 	const normalizedUrl = normalizeRestUrl(url);
 	if (!normalizedUrl) {
 		return '';
 	}
+	const normalizedMethod = normalizeRestMethod(method);
 	if (normalizedMethod === 'GET') {
 		return quotePhpString(normalizedUrl);
 	}
@@ -2010,6 +2017,189 @@ function summarizeResourceTimings(entries) {
 	};
 }
 
+function readJsonFileIfPresent(filePath) {
+	if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
+		return null;
+	}
+	return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function readJsonlFileIfPresent(filePath) {
+	if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
+		return [];
+	}
+	return fs.readFileSync(filePath, 'utf8')
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.map((line) => JSON.parse(line));
+}
+
+function resolveWpCodeboxBrowserDirectory(artifactsDirectory) {
+	if (typeof artifactsDirectory !== 'string' || artifactsDirectory.trim() === '') {
+		return null;
+	}
+	const root = nodePath.resolve(artifactsDirectory);
+	const candidates = [
+		nodePath.join(root, 'files', 'browser'),
+		nodePath.basename(root) === 'browser' ? root : undefined,
+		nodePath.join(root, 'browser'),
+	].filter(Boolean);
+	return candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) || null;
+}
+
+function timestampOffsetMs(timestamp, startedAt) {
+	const value = Date.parse(timestamp || '');
+	const start = Date.parse(startedAt || '');
+	if (!Number.isFinite(value) || !Number.isFinite(start)) {
+		return 0;
+	}
+	return Math.max(0, value - start);
+}
+
+function elapsedMs(startedAt, finishedAt) {
+	const start = Date.parse(startedAt || '');
+	const finish = Date.parse(finishedAt || '');
+	if (!Number.isFinite(start) || !Number.isFinite(finish) || finish < start) {
+		return 0;
+	}
+	return finish - start;
+}
+
+function normalizeWpCodeboxNetworkRecord(row, summary = {}) {
+	const startMs = timestampOffsetMs(row?.timestamp, summary.startedAt);
+	return {
+		name: row?.url,
+		url: row?.url,
+		normalizedUrl: normalizeUrl(row?.url || ''),
+		method: normalizeRestMethod(row?.method),
+		status: row?.status || 0,
+		failed: row?.type === 'requestfailed' || Boolean(row?.failure) || (typeof row?.status === 'number' && row.status >= 400),
+		failure: row?.failure,
+		initiatorType: row?.resourceType,
+		resourceType: row?.resourceType,
+		responseContentType: row?.contentType,
+		startTime: startMs,
+		responseEnd: startMs,
+		duration: 0,
+		kind: classifyResourceUrl(row?.url),
+	};
+}
+
+function normalizeWpCodeboxActionRecord(row) {
+	return {
+		index: row?.index,
+		name: row?.action?.name || row?.name || `action_${Number(row?.index || 0) + 1}`,
+		type: row?.action?.type || row?.type,
+		target: row?.action?.selector || row?.action?.text || row?.action?.url || row?.target,
+		status: row?.status === 'ok' ? 'passed' : (row?.status || 'unknown'),
+		error: row?.error?.message || row?.error,
+	};
+}
+
+function resolveWpCodeboxArtifactDirectoryForSpec(input, spec) {
+	const byPageId = input.wpCodeboxArtifactsByPageId || input.artifactsByPageId;
+	if (byPageId && typeof byPageId === 'object' && spec?.id && byPageId[spec.id]) {
+		return byPageId[spec.id];
+	}
+	return input.wpCodeboxArtifactsDirectory || input.wpCodeboxArtifactDirectory || input.artifactsDirectory || input.artifactDirectory;
+}
+
+function readWpCodeboxBrowserProfileArtifacts(artifactsDirectory) {
+	const browserDirectory = resolveWpCodeboxBrowserDirectory(artifactsDirectory);
+	if (!browserDirectory) {
+		throw new Error(`WP Codebox browser artifacts not found under ${artifactsDirectory}`);
+	}
+	const summary = readJsonFileIfPresent(nodePath.join(browserDirectory, 'summary.json')) || readJsonFileIfPresent(nodePath.join(browserDirectory, 'action-summary.json')) || {};
+	const actionSummary = readJsonFileIfPresent(nodePath.join(browserDirectory, 'action-summary.json')) || {};
+	const network = readJsonlFileIfPresent(nodePath.join(browserDirectory, 'network.jsonl'));
+	const actions = readJsonlFileIfPresent(nodePath.join(browserDirectory, 'actions.jsonl'));
+	return {
+		browserDirectory,
+		summary,
+		actionSummary,
+		network,
+		actions,
+		parsed: parseWpCodeboxBrowserArtifacts(artifactsDirectory),
+	};
+}
+
+function createWordPressPageProfileFromWpCodeboxArtifacts(input, spec) {
+	const artifactsDirectory = resolveWpCodeboxArtifactDirectoryForSpec(input, spec);
+	const artifactData = readWpCodeboxBrowserProfileArtifacts(artifactsDirectory);
+	const summary = artifactData.summary;
+	const actionSummary = artifactData.actionSummary;
+	const url = summary.finalUrl || summary.requestedUrl || actionSummary.finalUrl || actionSummary.requestedUrl || resolveWordPressUrl(input.baseUrl || summary.requestedUrl || 'http://example.test/', spec.url);
+	const readyMs = round(summary.durationMs || elapsedMs(summary.startedAt, summary.finishedAt));
+	const networkRows = artifactData.network.map((row) => normalizeWpCodeboxNetworkRecord(row, summary));
+	const resourceSummary = summarizeResourceTimings(networkRows);
+	const restPreloads = [
+		...normalizeRestPreloadList(input.preloadedRestPaths),
+		...normalizeRestPreloadList(input.restPreloads),
+		...normalizeRestPreloadList(input.preloadMetadata),
+		...normalizeRestPreloadList(spec.preloadedRestPaths),
+		...normalizeRestPreloadList(spec.restPreloads),
+		...normalizeRestPreloadList(spec.preloadMetadata),
+	];
+	const restWaterfall = summarizeWordPressRestWaterfall({
+		readyMs,
+		restPreloads,
+		resourceTimings: networkRows,
+		networkRequests: [],
+	});
+	const interactions = {
+		actions: artifactData.actions.map(normalizeWpCodeboxActionRecord),
+		durationMs: elapsedMs(actionSummary.startedAt, actionSummary.finishedAt),
+		failed: artifactData.actions.some((action) => action.status && action.status !== 'ok'),
+	};
+	const correlation = correlateBrowserAndWordPressTimings({
+		browserTimings: networkRows,
+		wordpressProfilerRows: input.wordpressProfilerRows || [],
+	});
+	const profile = {
+		id: spec.id,
+		label: spec.label,
+		url,
+		path: new URL(url).pathname + new URL(url).search,
+		status: networkRows.find((row) => row.url === normalizeUrl(summary.finalUrl || summary.requestedUrl))?.status || networkRows.find((row) => row.resourceType === 'document')?.status || 0,
+		readyMs,
+		readiness: {
+			readyMs,
+			source: 'wp-codebox-browser-artifacts',
+			waitFor: summary.waitFor,
+		},
+		resources: resourceSummary,
+		initialResources: resourceSummary,
+		interactions,
+		interactionResources: summarizeResourceTimings([]),
+		restWaterfall,
+		interactionRestWaterfall: summarizeWordPressRestWaterfall({ readyMs, restPreloads, resourceTimings: [], networkRequests: [] }),
+		budgets: {
+			...(input.budgets || {}),
+			...(spec.budgets || {}),
+		},
+		correlation,
+		browserMetrics: artifactData.parsed.metrics,
+		browserArtifacts: artifactData.parsed.artifacts,
+		wpCodebox: {
+			artifactBacked: true,
+			browserDirectory: artifactData.browserDirectory,
+			upstreamGaps: [
+				'wordpress.browser-probe network.jsonl does not include request timing or transfer/body size fields, so Homeboy REST waterfall timing/byte gates are partial for WP Codebox artifact-backed runs.',
+			],
+		},
+	};
+
+	return {
+		...profile,
+		diagnosis: diagnoseWordPressPageProfile(profile, {
+			budgets: profile.budgets,
+			browserMetrics: profile.browserMetrics,
+			networkRequests: networkRows,
+		}),
+	};
+}
+
 function addFinding(findings, severity, code, message, data = {}) {
 	findings.push({ severity, code, message, ...data });
 }
@@ -2798,6 +2988,10 @@ async function profileWordPressPage(input) {
 	}
 	const { page, baseUrl, wordpressProfilerRows = [], mark } = input;
 	const spec = normalizePageSpec(input.spec || input.pageSpec || input.page || {});
+	const wpCodeboxArtifactsDirectory = resolveWpCodeboxArtifactDirectoryForSpec(input, spec);
+	if (wpCodeboxArtifactsDirectory && (!page || input.useWpCodeboxBrowserArtifacts === true)) {
+		return createWordPressPageProfileFromWpCodeboxArtifacts(input, spec);
+	}
 	const url = resolveWordPressUrl(baseUrl, spec.url);
 	const started = Date.now();
 
@@ -2953,6 +3147,7 @@ module.exports = {
 	collectWordPressRestPreloads,
 	collectWordPressRestPreloadChecks,
 	compareWordPressRestWaterfalls,
+	createWordPressPageProfileFromWpCodeboxArtifacts,
 	diagnoseWordPressPageProfile,
 	diagnoseWordPressRestPreloadMisses,
 	evaluateWordPressRestPayloadBudgets,
