@@ -4,7 +4,9 @@ use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{merge_metadata, ActiveObservation, NewRunRecord, RunStatus};
 use homeboy::core::ObservationOutputMetadata;
 
-use super::{artifact_command, ReviewArgs, ReviewCommandOutput, ReviewStage};
+use super::{
+    artifact_command, ReviewArgs, ReviewArtifactFindings, ReviewCommandOutput, ReviewStage,
+};
 
 pub(super) struct ReviewObservation(ActiveObservation);
 
@@ -156,7 +158,9 @@ pub(super) fn review_observation_finish_metadata(
     )
 }
 
-fn stage_observation<T: serde::Serialize>(stage: &ReviewStage<T>) -> serde_json::Value {
+fn stage_observation<T: serde::Serialize + ReviewArtifactFindings>(
+    stage: &ReviewStage<T>,
+) -> serde_json::Value {
     let command = artifact_command(stage);
     serde_json::json!({
         "name": command.name,

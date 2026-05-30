@@ -25,6 +25,7 @@ use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::execution;
 use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::TestCommandOutput;
+use homeboy::core::finding::HomeboyFinding;
 use homeboy::core::git;
 use homeboy::core::plan::{HomeboyPlan, PlanStep};
 use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
@@ -172,11 +173,35 @@ pub struct ReviewArtifactCommand {
     pub status: String,
     pub exit_code: i32,
     pub summary: String,
-    pub findings: Vec<Value>,
+    pub findings: Vec<HomeboyFinding>,
     pub artifacts: Vec<Value>,
 }
 
-struct ReviewStageDescriptor<Args, Output: Serialize> {
+pub(super) trait ReviewArtifactFindings {
+    fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
+        Vec::new()
+    }
+}
+
+impl ReviewArtifactFindings for AuditCommandOutput {}
+
+impl ReviewArtifactFindings for LintCommandOutput {
+    fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
+        self.findings.clone().unwrap_or_default()
+    }
+}
+
+impl ReviewArtifactFindings for TestCommandOutput {
+    fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
+        self.findings.clone().unwrap_or_default()
+    }
+}
+
+impl ReviewArtifactFindings for CiRunOutput {}
+
+impl ReviewArtifactFindings for Value {}
+
+struct ReviewStageDescriptor<Args, Output: Serialize + ReviewArtifactFindings> {
     name: &'static str,
     include_changed_only_scope: bool,
     build_args: fn(&ReviewArgs) -> Args,
@@ -190,7 +215,7 @@ enum ReviewStageRun {
     Test(ReviewStage<TestCommandOutput>, i32),
 }
 
-impl<Args, Output: Serialize> ReviewStageDescriptor<Args, Output> {
+impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Args, Output> {
     fn execute(
         &self,
         review_args: &ReviewArgs,
@@ -646,7 +671,9 @@ fn build_artifact(
     }
 }
 
-fn artifact_command<T: Serialize>(stage: &ReviewStage<T>) -> ReviewArtifactCommand {
+fn artifact_command<T: Serialize + ReviewArtifactFindings>(
+    stage: &ReviewStage<T>,
+) -> ReviewArtifactCommand {
     ReviewArtifactCommand {
         name: stage.stage.clone(),
         status: if !stage.ran {
@@ -670,7 +697,11 @@ fn artifact_command<T: Serialize>(stage: &ReviewStage<T>) -> ReviewArtifactComma
                 if stage.passed { "passed" } else { "failed" }
             )
         },
-        findings: Vec::new(),
+        findings: stage
+            .output
+            .as_ref()
+            .map(ReviewArtifactFindings::review_artifact_findings)
+            .unwrap_or_default(),
         artifacts: Vec::new(),
     }
 }
