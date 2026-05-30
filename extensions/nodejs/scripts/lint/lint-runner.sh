@@ -23,9 +23,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../../scripts/lib/runner-prelude.sh}"
+FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../lib/fix-results.sh}"
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"
 homeboy_runner_init --bash 4 --sidecar-writer --failure-trap
+# shellcheck source=../lib/fix-results.sh
+source "$FIX_RESULTS_HELPER"
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
@@ -116,6 +119,11 @@ echo ""
 cd "$PROJECT_PATH"
 
 OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-node-lint.XXXXXX")
+FIX_BEFORE=""
+if [ "$FIX_MODE" = "1" ]; then
+    FIX_BEFORE=$(mktemp "${TMPDIR:-/tmp}/homeboy-node-lint-before.XXXXXX")
+    homeboy_fix_results_capture "$FIX_BEFORE" "$PROJECT_PATH"
+fi
 set +e
 if [ $USE_ESLINT_JSON -eq 1 ]; then
     # Capture JSON-only stream; let stderr surface to the user.
@@ -128,6 +136,12 @@ else
     LINT_EXIT=${PIPESTATUS[0]}
 fi
 set -e
+
+if [ "$FIX_MODE" = "1" ] && [ -n "$FIX_BEFORE" ]; then
+    homeboy_fix_results_append_changed "nodejs_lint" "rewrite" "$FIX_BEFORE" "" "$PROJECT_PATH"
+    rm -f "$FIX_BEFORE"
+    homeboy_fix_results_write
+fi
 
 # ── Parse findings ──
 # When we ran eslint with --format=json we have machine-readable output.

@@ -24,11 +24,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/lib/command-capture.sh}"
 RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../scripts/lib/runner-prelude.sh}"
+FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/lib/fix-results.sh}"
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"
 homeboy_runner_init --steps --failure-trap --sidecar-writer
 # shellcheck source=./lib/command-capture.sh
 source "${COMMAND_CAPTURE_HELPER}"
+# shellcheck source=./lib/fix-results.sh
+source "$FIX_RESULTS_HELPER"
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Rust Lint Environment:"
@@ -40,70 +43,9 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "PROJECT_PATH=${PROJECT_PATH}"
 fi
 
-FIX_RESULTS_JSON="[]"
-
-capture_rust_file_hashes() {
-    if ! git -C "${PROJECT_PATH}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        return 0
-    fi
-
-    git -C "${PROJECT_PATH}" ls-files '*.rs' | while IFS= read -r file; do
-        [ -n "$file" ] || continue
-        if [ -f "${PROJECT_PATH}/${file}" ]; then
-            printf '%s\t%s\n' "$file" "$(shasum -a 256 "${PROJECT_PATH}/${file}" | cut -d ' ' -f 1)"
-        fi
-    done | sort
-}
-
-append_fix_results_for_changes() {
-    local rule="$1"
-    local action="$2"
-    local before_file="$3"
-    local after_file
-    after_file="$(mktemp)"
-    capture_rust_file_hashes > "$after_file"
-
-    local changed_files
-    changed_files="$(awk -F '\t' '
-        NR == FNR { before[$1] = $2; next }
-        !($1 in before) || before[$1] != $2 { print $1 }
-    ' "$before_file" "$after_file")"
-    rm -f "$after_file"
-
-    if [ -z "$changed_files" ]; then
-        return 0
-    fi
-
-    FIX_RESULTS_JSON="$(CHANGED_FILES="$changed_files" python3 -c '
-import json
-import os
-import sys
-
-results = json.loads(sys.argv[1])
-rule = sys.argv[2]
-action = sys.argv[3]
-for file in os.environ.get("CHANGED_FILES", "").splitlines():
-    if file:
-        results.append({"file": file, "rule": rule, "action": action})
-print(json.dumps(results))
-' "$FIX_RESULTS_JSON" "$rule" "$action" 2>/dev/null || printf '%s' "$FIX_RESULTS_JSON")"
-}
-
 write_fix_results_sidecar() {
     if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ] && [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ]; then
-        if ! type homeboy_write_fix_results >/dev/null 2>&1; then
-            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write fix results" >&2
-            return 1
-        fi
-        HOMEBOY_FIX_RESULTS_JSON="$FIX_RESULTS_JSON" python3 - <<'PY' | while IFS= read -r result; do
-import json
-import os
-
-for item in json.loads(os.environ.get("HOMEBOY_FIX_RESULTS_JSON", "[]")):
-    print(json.dumps(item, separators=(",", ":")))
-PY
-            homeboy_append_fix_result "$result"
-        done
+        homeboy_fix_results_write
     fi
 }
 
@@ -237,14 +179,14 @@ if should_run_step "fmt"; then
         echo ""
         echo "Running cargo fmt (fix mode)..."
         FMT_BEFORE="$(mktemp)"
-        capture_rust_file_hashes > "$FMT_BEFORE"
+        homeboy_fix_results_capture "$FMT_BEFORE" "$PROJECT_PATH" '*.rs'
         set +e
         FMT_OUTPUT=$(cargo fmt --manifest-path "${PROJECT_PATH}/Cargo.toml" 2>&1)
         FMT_EXIT=$?
         set -e
 
         if [ $FMT_EXIT -eq 0 ]; then
-            append_fix_results_for_changes "rustfmt" "format" "$FMT_BEFORE"
+            homeboy_fix_results_append_changed "rustfmt" "format" "$FMT_BEFORE" "" "$PROJECT_PATH" '*.rs'
             echo "cargo fmt: applied formatting fixes"
         else
             rm -f "$FMT_BEFORE"
@@ -385,7 +327,7 @@ if should_run_step "clippy"; then
     CLIPPY_BEFORE=""
     if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         CLIPPY_BEFORE="$(mktemp)"
-        capture_rust_file_hashes > "$CLIPPY_BEFORE"
+        homeboy_fix_results_capture "$CLIPPY_BEFORE" "$PROJECT_PATH" '*.rs'
     fi
 
     homeboy_run_step_capture CLIPPY_TMPFILE CLIPPY_EXIT "cargo clippy" -- cargo "${CLIPPY_ARGS[@]}" || true
@@ -442,7 +384,7 @@ if should_run_step "clippy"; then
 
     if [ $CLIPPY_EXIT -eq 0 ]; then
         if [ -n "$CLIPPY_BEFORE" ]; then
-            append_fix_results_for_changes "clippy" "rewrite" "$CLIPPY_BEFORE"
+            homeboy_fix_results_append_changed "clippy" "rewrite" "$CLIPPY_BEFORE" "" "$PROJECT_PATH" '*.rs'
             rm -f "$CLIPPY_BEFORE"
         fi
         echo "cargo clippy: passed"
@@ -481,7 +423,7 @@ if should_run_step "fix"; then
         echo ""
         echo "Running cargo fix (compiler warnings)..."
         FIX_BEFORE="$(mktemp)"
-        capture_rust_file_hashes > "$FIX_BEFORE"
+        homeboy_fix_results_capture "$FIX_BEFORE" "$PROJECT_PATH" '*.rs'
 
         set +e
         FIX_OUTPUT=$(cargo fix \
@@ -492,10 +434,10 @@ if should_run_step "fix"; then
         set -e
 
         if [ $FIX_EXIT -eq 0 ]; then
-            append_fix_results_for_changes "cargo_fix" "rewrite" "$FIX_BEFORE"
+            homeboy_fix_results_append_changed "cargo_fix" "rewrite" "$FIX_BEFORE" "" "$PROJECT_PATH" '*.rs'
             echo "cargo fix: applied compiler warning fixes"
         else
-            append_fix_results_for_changes "cargo_fix" "rewrite" "$FIX_BEFORE"
+            homeboy_fix_results_append_changed "cargo_fix" "rewrite" "$FIX_BEFORE" "" "$PROJECT_PATH" '*.rs'
             # cargo fix failure is non-fatal in fix-only mode — some warnings
             # can't be auto-fixed (e.g., dead_code on pub items).
             echo "cargo fix: exited non-zero (${FIX_EXIT}), continuing"
