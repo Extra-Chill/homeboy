@@ -1,5 +1,6 @@
 use crate::core::error::{Error, Result};
 use crate::core::project::Project;
+use std::path::Path;
 
 use super::discovery::discover_attached_component;
 use super::overrides::apply_component_overrides;
@@ -14,19 +15,17 @@ pub fn resolve_project_component(
         .find(|component| component.id == component_id)
     {
         (
-            discover_attached_component(std::path::Path::new(&attachment.local_path)).ok_or_else(
-                || {
-                    Error::validation_invalid_argument(
-                        "components.local_path",
-                        format!(
-                            "Project component '{}' points to '{}' but no homeboy.json was found",
-                            component_id, attachment.local_path
-                        ),
-                        Some(project.id.clone()),
-                        None,
-                    )
-                },
-            )?,
+            discover_attached_component(Path::new(&attachment.local_path)).ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "components.local_path",
+                    format!(
+                        "Project component '{}' points to '{}' but no homeboy.json was found",
+                        component_id, attachment.local_path
+                    ),
+                    Some(project.id.clone()),
+                    None,
+                )
+            })?,
             attachment.remote_path.clone(),
         )
     } else {
@@ -46,6 +45,8 @@ pub fn resolve_project_component(
             component.remote_path = remote_path;
         }
     }
+
+    apply_standalone_component_fallbacks(&mut component);
 
     let mut resolved = apply_component_overrides(&component, project);
 
@@ -68,6 +69,42 @@ pub fn resolve_project_component(
     Ok(resolved)
 }
 
+fn apply_standalone_component_fallbacks(component: &mut crate::core::component::Component) {
+    let Some(standalone) = load_standalone_component_config(&component.id) else {
+        return;
+    };
+
+    if component.remote_path.trim().is_empty() && !standalone.remote_path.trim().is_empty() {
+        component.remote_path = standalone.remote_path;
+    }
+
+    if component.extract_command.is_none() {
+        component.extract_command = standalone.extract_command;
+    }
+
+    if component.remote_url.is_none() {
+        component.remote_url = standalone.remote_url;
+    }
+}
+
+fn load_standalone_component_config(
+    component_id: &str,
+) -> Option<crate::core::component::Component> {
+    let dir = crate::core::paths::components().ok()?;
+    let path = dir.join(format!("{component_id}.json"));
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "id".to_string(),
+            serde_json::Value::String(component_id.to_string()),
+        );
+    }
+
+    serde_json::from_value::<crate::core::component::Component>(json).ok()
+}
+
 pub fn resolve_project_components(
     project: &Project,
 ) -> Result<Vec<crate::core::component::Component>> {
@@ -82,6 +119,7 @@ pub fn resolve_project_components(
 mod tests {
     use super::*;
     use crate::core::project::{ProjectComponentAttachment, ProjectComponentOverrides};
+    use crate::test_support::with_isolated_home;
     use tempfile::TempDir;
 
     fn repo_with_portable_remote_path(remote_path: &str) -> TempDir {
@@ -142,5 +180,80 @@ mod tests {
         let component = resolve_project_component(&project, "fixture").expect("component");
 
         assert_eq!(component.remote_path, "override/plugins/fixture");
+    }
+
+    #[test]
+    fn project_resolution_uses_standalone_extract_command_as_fallback() {
+        with_isolated_home(|home| {
+            let repo = repo_with_portable_remote_path("wp-content/plugins/fixture");
+            let components_dir = home
+                .path()
+                .join(".config")
+                .join("homeboy")
+                .join("components");
+            std::fs::create_dir_all(&components_dir).expect("components dir");
+            std::fs::write(
+                components_dir.join("fixture.json"),
+                serde_json::json!({
+                    "local_path": repo.path(),
+                    "extract_command": "unzip -o {{artifact}} && rm {{artifact}}",
+                    "remote_url": "https://github.com/example/fixture.git"
+                })
+                .to_string(),
+            )
+            .expect("standalone component config");
+
+            let project = project_with_attachment(None, repo.path().to_string_lossy().to_string());
+
+            let component = resolve_project_component(&project, "fixture").expect("component");
+
+            assert_eq!(
+                component.extract_command.as_deref(),
+                Some("unzip -o {{artifact}} && rm {{artifact}}")
+            );
+            assert_eq!(
+                component.remote_url.as_deref(),
+                Some("https://github.com/example/fixture.git")
+            );
+        });
+    }
+
+    #[test]
+    fn project_overrides_win_over_standalone_extract_command() {
+        with_isolated_home(|home| {
+            let repo = repo_with_portable_remote_path("wp-content/plugins/fixture");
+            let components_dir = home
+                .path()
+                .join(".config")
+                .join("homeboy")
+                .join("components");
+            std::fs::create_dir_all(&components_dir).expect("components dir");
+            std::fs::write(
+                components_dir.join("fixture.json"),
+                serde_json::json!({
+                    "local_path": repo.path(),
+                    "extract_command": "unzip -o {{artifact}} && rm {{artifact}}"
+                })
+                .to_string(),
+            )
+            .expect("standalone component config");
+
+            let mut project =
+                project_with_attachment(None, repo.path().to_string_lossy().to_string());
+            project.component_overrides.insert(
+                "fixture".to_string(),
+                ProjectComponentOverrides {
+                    extract_command: Some("custom-extract {{artifact}}".to_string()),
+                    ..Default::default()
+                },
+            );
+
+            let component = resolve_project_component(&project, "fixture").expect("component");
+
+            assert_eq!(
+                component.extract_command.as_deref(),
+                Some("custom-extract {{artifact}}")
+            );
+        });
     }
 }
