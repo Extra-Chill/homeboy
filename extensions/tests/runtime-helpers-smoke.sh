@@ -12,6 +12,12 @@ BASH_PREFLIGHT_HELPERS=(
     "${ROOT_DIR}/rust/scripts/lib/bash-preflight.sh"
     "${ROOT_DIR}/wordpress/scripts/lib/bash-preflight.sh"
 )
+SETTINGS_HELPERS=(
+    "${ROOT_DIR}/scripts/lib/settings.sh"
+    "${ROOT_DIR}/nodejs/scripts/lib/settings.sh"
+    "${ROOT_DIR}/rust/scripts/lib/settings.sh"
+    "${ROOT_DIR}/wordpress/scripts/lib/settings.sh"
+)
 
 assert_file() {
     local path="$1"
@@ -53,10 +59,21 @@ for bash_preflight_helper in "${BASH_PREFLIGHT_HELPERS[@]}"; do
     assert_file "$bash_preflight_helper"
     bash -c 'source "$1"; homeboy_require_bash_version 4' _ "$bash_preflight_helper"
 done
+for settings_helper in "${SETTINGS_HELPERS[@]}"; do
+    assert_file "$settings_helper"
+    bash -c 'source "$1"; type homeboy_setting >/dev/null; type homeboy_setting_bool >/dev/null; type homeboy_setting_array >/dev/null' _ "$settings_helper"
+done
 
 if ! cmp -s "${BASH_PREFLIGHT_HELPERS[0]}" "${BASH_PREFLIGHT_HELPERS[1]}" \
     || ! cmp -s "${BASH_PREFLIGHT_HELPERS[0]}" "${BASH_PREFLIGHT_HELPERS[2]}"; then
     echo "Bash preflight helpers should stay identical across installed extension trees" >&2
+    exit 1
+fi
+
+if ! cmp -s "${SETTINGS_HELPERS[0]}" "${SETTINGS_HELPERS[1]}" \
+    || ! cmp -s "${SETTINGS_HELPERS[0]}" "${SETTINGS_HELPERS[2]}" \
+    || ! cmp -s "${SETTINGS_HELPERS[0]}" "${SETTINGS_HELPERS[3]}"; then
+    echo "Settings helpers should stay identical across installed extension trees" >&2
     exit 1
 fi
 

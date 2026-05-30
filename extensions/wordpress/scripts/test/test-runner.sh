@@ -19,9 +19,12 @@ CORE_WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_CORE_WP_CODEBOX:-${SCRIPT_
 
 # Resolve execution context and export env vars that the WordPress test runners expect.
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../lib/settings.sh}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context --component-alias PLUGIN_PATH
+# shellcheck source=/dev/null
+source "$SETTINGS_HELPER"
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Extension path: $EXTENSION_PATH"
@@ -29,10 +32,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Component path: ${COMPONENT_PATH:-$(pwd)}"
 fi
 
-TEST_BACKEND=""
-if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
-    TEST_BACKEND=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.test_backend // .testing.backend // empty' 2>/dev/null || true)
-fi
+TEST_BACKEND="$(homeboy_setting test_backend '.test_backend // .testing.backend // empty')"
 TEST_BACKEND="${HOMEBOY_WORDPRESS_TEST_BACKEND:-${TEST_BACKEND:-wp-codebox}}"
 
 TARGET_FILE=""

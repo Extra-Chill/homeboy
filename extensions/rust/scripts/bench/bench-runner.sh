@@ -57,9 +57,12 @@ homeboy_require_bash_version 4
 
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../lib/settings.sh}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
+# shellcheck source=/dev/null
+source "$SETTINGS_HELPER"
 # shellcheck source=/dev/null
 if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
     source "$FAILURE_TRAP_HELPER"
@@ -105,10 +108,8 @@ rust_cargo_timings_enabled() {
             ;;
     esac
 
-    if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && command -v jq >/dev/null 2>&1; then
-        if printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -e '.rust_bench_cargo_timings == true or .rust.bench.cargo_timings == true' >/dev/null 2>&1; then
-            return 0
-        fi
+    if [ "$(homeboy_setting_bool rust_bench_cargo_timings false '.rust_bench_cargo_timings // .rust.bench.cargo_timings // false')" = "true" ]; then
+        return 0
     fi
 
     return 1

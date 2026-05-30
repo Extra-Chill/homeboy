@@ -35,9 +35,12 @@ homeboy_require_bash_version 4
 
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../lib/settings.sh}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
+# shellcheck source=/dev/null
+source "$SETTINGS_HELPER"
 # shellcheck source=/dev/null
 if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
     source "$SIDECAR_WRITER_HELPER"
@@ -55,17 +58,6 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
         RUNNER_ARGS+=("$selected_test_file")
     done <<< "$HOMEBOY_CHANGED_TEST_FILES"
 fi
-
-homeboy_node_json_value() {
-    local expression="$1"
-    node -e "
-        const raw = process.env.HOMEBOY_SETTINGS_JSON || '{}';
-        let settings = {};
-        try { settings = JSON.parse(raw); } catch {}
-        const value = (${expression});
-        if (typeof value === 'string' && value) console.log(value);
-    " 2>/dev/null || true
-}
 
 homeboy_node_package_value() {
     local expression="$1"
@@ -85,7 +77,7 @@ homeboy_node_script_command() {
 homeboy_node_targeted_test_script() {
     local configured_script="${HOMEBOY_NODE_TARGETED_TEST_SCRIPT:-}"
     if [ -z "$configured_script" ]; then
-        configured_script="$(homeboy_node_json_value "settings.node_targeted_test_script || settings.targeted_test_script || settings.test_script || settings.testing?.targeted_test_script || ''")"
+        configured_script="$(homeboy_setting node_targeted_test_script '.node_targeted_test_script // .targeted_test_script // .test_script // .testing.targeted_test_script // empty')"
     fi
 
     if [ -n "$configured_script" ]; then

@@ -19,13 +19,13 @@ set -euo pipefail
 # Header deps are resolved through the same chain by slug.
 
 homeboy_get_validation_dependencies_raw() {
-    local settings_json="${HOMEBOY_SETTINGS_JSON:-}"
-
-    if [ -z "$settings_json" ] || [ "$settings_json" = "{}" ]; then
-        return 0
+    if ! type homeboy_setting_json >/dev/null 2>&1; then
+        local settings_helper="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-$(dirname "${BASH_SOURCE[0]}")/settings.sh}"
+        # shellcheck source=/dev/null
+        source "$settings_helper"
     fi
 
-    printf '%s' "$settings_json" | jq -r '.validation_dependencies // .depends_on // empty' 2>/dev/null || true
+    homeboy_setting_json validation_dependencies 'null' '.validation_dependencies // .depends_on // null'
 }
 
 homeboy_normalize_validation_dependencies() {
