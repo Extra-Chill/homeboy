@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.205.0] - 2026-05-30
+
+### Added
+- add shared Homeboy finding contract
+
+### Fixed
+- fail unverified registry publishes
+- resolve finding contract audit drift
+
 ## [0.204.10] - 2026-05-30
 
 ### Changed
