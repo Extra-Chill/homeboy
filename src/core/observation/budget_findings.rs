@@ -3,7 +3,7 @@ use crate::core::finding::{FindingSource, HomeboyFinding};
 
 use super::records::NewFindingRecord;
 
-fn homeboy_finding_from_budget(finding: &BudgetFinding) -> HomeboyFinding {
+pub fn homeboy_finding_from_budget(finding: &BudgetFinding) -> HomeboyFinding {
     let mut normalized = HomeboyFinding::builder("budget", finding.message.clone())
         .rule(finding.code.clone())
         .category(finding.category.clone())
@@ -22,7 +22,7 @@ fn homeboy_finding_from_budget(finding: &BudgetFinding) -> HomeboyFinding {
     normalized
 }
 
-fn finding_record_from_budget(run_id: &str, finding: &BudgetFinding) -> NewFindingRecord {
+pub fn finding_record_from_budget(run_id: &str, finding: &BudgetFinding) -> NewFindingRecord {
     NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_budget(finding))
 }
 
