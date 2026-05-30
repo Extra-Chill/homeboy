@@ -74,6 +74,71 @@ print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
+npm_install_uses_legacy_peer_deps() {
+    case "${HOMEBOY_NPM_LEGACY_PEER_DEPS:-auto}" in
+        1|true|TRUE|yes|YES)
+            return 0
+            ;;
+        0|false|FALSE|no|NO)
+            return 1
+            ;;
+    esac
+
+    [ -f "package.json" ] || return 1
+    command -v node >/dev/null 2>&1 || return 1
+
+    node <<'NODE'
+const fs = require('fs');
+
+let pkg;
+try {
+  pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+} catch {
+  process.exit(1);
+}
+
+const deps = {
+  ...(pkg.dependencies || {}),
+  ...(pkg.devDependencies || {}),
+  ...(pkg.peerDependencies || {}),
+};
+
+function major(name) {
+  const value = deps[name];
+  if (!value) return null;
+  const match = String(value).match(/\d+/);
+  return match ? Number(match[0]) : null;
+}
+
+const needsLegacyPeerDeps =
+  major('react') >= 19 ||
+  major('@wordpress/scripts') >= 32 ||
+  major('@wordpress/components') >= 34;
+
+process.exit(needsLegacyPeerDeps ? 0 : 1);
+NODE
+}
+
+npm_install_flags() {
+    local flags=("--no-audit" "--no-fund")
+    if npm_install_uses_legacy_peer_deps; then
+        flags+=("--legacy-peer-deps")
+    fi
+    printf '%s\n' "${flags[@]}"
+}
+
+run_npm_install() {
+    local command_name="$1"
+    shift
+
+    local flags=()
+    while IFS= read -r flag; do
+        flags+=("$flag")
+    done < <(npm_install_flags)
+
+    npm "$command_name" "$@" "${flags[@]}"
+}
+
 is_core_dev_project() {
     [ "${HOMEBOY_COMPONENT_SHAPE:-}" = "core-dev" ] && return 0
     [ -f "wp-config-sample.php" ] && [ -f "src/wp-includes/version.php" ] && [ -d "tests/phpunit" ]
@@ -90,7 +155,7 @@ build_core_dev_project() {
     if [ ! -d node_modules ]; then
         command -v npm >/dev/null 2>&1 || { print_error "npm is required to build wordpress-develop"; exit 1; }
         print_status "Installing npm dependencies..."
-        npm install
+        run_npm_install install
     fi
 
     print_status "Running WordPress core build..."
@@ -303,9 +368,9 @@ install_frontend_dependencies() {
 
     if [ "$need_install" -eq 1 ]; then
         if [ -f "package-lock.json" ]; then
-            npm ci --silent --no-audit --no-fund 2>&1
+            run_npm_install ci --silent 2>&1
         else
-            npm install --silent --no-audit --no-fund 2>&1
+            run_npm_install install --silent 2>&1
         fi
         print_success "${scope_label}npm dependencies ready"
     fi
