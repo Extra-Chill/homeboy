@@ -16,7 +16,8 @@ pub use budget_findings::finding_records_from_budget;
 pub use records::{
     finding_record_from_annotation, finding_record_from_audit, finding_record_from_lint,
     finding_records_from_annotation_file, finding_records_from_annotations_dir,
-    finding_records_from_audit, finding_records_from_lint, AnnotationFindingRecord,
+    finding_records_from_audit, finding_records_from_lint, homeboy_finding_from_annotation,
+    homeboy_finding_from_audit, homeboy_finding_from_lint, AnnotationFindingRecord,
     ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, FindingListFilter,
     FindingRecord, NewFindingRecord, NewRunRecord, NewRunRecordBuilder, NewTraceRunRecord,
     NewTraceRunRecordBuilder, NewTraceSpanRecord, NewTraceSpanRecordBuilder, NewTriageItemRecord,
