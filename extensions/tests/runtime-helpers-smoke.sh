@@ -7,6 +7,11 @@ FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-${HOMEBOY_CORE_DIR}/src/cor
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/write-test-results.sh}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 PROJECT_SCRIPTS_HELPER="${ROOT_DIR}/scripts/lib/project-scripts.sh"
+FIX_RESULTS_HELPERS=(
+    "${ROOT_DIR}/nodejs/scripts/lib/fix-results.sh"
+    "${ROOT_DIR}/rust/scripts/lib/fix-results.sh"
+    "${ROOT_DIR}/wordpress/scripts/lib/fix-results.sh"
+)
 BASH_PREFLIGHT_HELPERS=(
     "${ROOT_DIR}/nodejs/scripts/lib/bash-preflight.sh"
     "${ROOT_DIR}/rust/scripts/lib/bash-preflight.sh"
@@ -60,6 +65,10 @@ assert_file "$SIDECAR_WRITER_HELPER"
 assert_file "$PROJECT_SCRIPTS_HELPER"
 bash -c 'source "$1"; type homeboy_merge_lint_findings >/dev/null; type homeboy_merge_test_failures >/dev/null; type homeboy_write_fix_results >/dev/null; type homeboy_merge_annotations >/dev/null' _ "$SIDECAR_WRITER_HELPER"
 bash -c 'source "$1"; type homeboy_project_init >/dev/null; type homeboy_project_has_script >/dev/null; type homeboy_project_run_script_command >/dev/null' _ "$PROJECT_SCRIPTS_HELPER"
+for fix_results_helper in "${FIX_RESULTS_HELPERS[@]}"; do
+    assert_file "$fix_results_helper"
+    bash -c 'source "$1"; type homeboy_fix_results_capture >/dev/null; type homeboy_fix_results_append_changed >/dev/null; type homeboy_fix_results_write >/dev/null' _ "$fix_results_helper"
+done
 for bash_preflight_helper in "${BASH_PREFLIGHT_HELPERS[@]}"; do
     assert_file "$bash_preflight_helper"
     bash -c 'source "$1"; homeboy_require_bash_version 4' _ "$bash_preflight_helper"
@@ -89,6 +98,12 @@ fi
 if ! cmp -s "${COMMAND_CAPTURE_HELPERS[0]}" "${COMMAND_CAPTURE_HELPERS[1]}" \
     || ! cmp -s "${COMMAND_CAPTURE_HELPERS[0]}" "${COMMAND_CAPTURE_HELPERS[2]}"; then
     echo "Command capture helpers should stay identical across installed extension trees" >&2
+    exit 1
+fi
+
+if ! cmp -s "${FIX_RESULTS_HELPERS[0]}" "${FIX_RESULTS_HELPERS[1]}" \
+    || ! cmp -s "${FIX_RESULTS_HELPERS[0]}" "${FIX_RESULTS_HELPERS[2]}"; then
+    echo "Fix-result helpers should stay identical across installed extension trees" >&2
     exit 1
 fi
 

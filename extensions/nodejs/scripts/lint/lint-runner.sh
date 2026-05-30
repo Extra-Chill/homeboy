@@ -29,6 +29,7 @@ homeboy_require_bash_version 4
 
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../lib/fix-results.sh}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
@@ -36,6 +37,8 @@ homeboy_resolve_context
 if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
     source "$SIDECAR_WRITER_HELPER"
 fi
+# shellcheck source=../lib/fix-results.sh
+source "$FIX_RESULTS_HELPER"
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
@@ -136,6 +139,11 @@ echo ""
 cd "$PROJECT_PATH"
 
 OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-node-lint.XXXXXX")
+FIX_BEFORE=""
+if [ "$FIX_MODE" = "1" ]; then
+    FIX_BEFORE=$(mktemp "${TMPDIR:-/tmp}/homeboy-node-lint-before.XXXXXX")
+    homeboy_fix_results_capture "$FIX_BEFORE" "$PROJECT_PATH"
+fi
 set +e
 if [ $USE_ESLINT_JSON -eq 1 ]; then
     # Capture JSON-only stream; let stderr surface to the user.
@@ -148,6 +156,12 @@ else
     LINT_EXIT=${PIPESTATUS[0]}
 fi
 set -e
+
+if [ "$FIX_MODE" = "1" ] && [ -n "$FIX_BEFORE" ]; then
+    homeboy_fix_results_append_changed "nodejs_lint" "rewrite" "$FIX_BEFORE" "" "$PROJECT_PATH"
+    rm -f "$FIX_BEFORE"
+    homeboy_fix_results_write
+fi
 
 # ── Parse findings ──
 # When we ran eslint with --format=json we have machine-readable output.

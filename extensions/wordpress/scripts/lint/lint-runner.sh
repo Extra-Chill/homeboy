@@ -31,6 +31,10 @@ if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
     source "$SIDECAR_WRITER_HELPER"
 fi
 
+FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../lib/fix-results.sh}"
+# shellcheck source=../lib/fix-results.sh
+source "$FIX_RESULTS_HELPER"
+
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -404,12 +408,6 @@ fi
 # Fix-only mode: run custom fixers, then phpcbf, then exit before validation.
 # Sent by `homeboy refactor --from lint --write` — the engine validates separately.
 if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
-    # --- Fix results sidecar ---
-    # Track what each fixer does so homeboy can report structured fix output.
-    # Each fixer prints "NAME fixer: Fixed N thing(s) in N file(s)" on success.
-    # We capture that and build a JSON array for HOMEBOY_FIX_RESULTS_FILE.
-    FIX_RESULTS_JSON="[]"
-
     # Fixer confidence tiers:
     #   safe       — Mechanical token rewrite, no semantic ambiguity. Always correct.
     #   guarded    — Safe with guardrails (cross-file lookup, contract detection, syntax validation).
@@ -448,30 +446,18 @@ if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
         fi
 
         local fixer_output
+        local fixer_before
+        fixer_before="$(homeboy_mktemp 'homeboy-wp-fixer-before.XXXXXX')"
+        homeboy_fix_results_capture "$fixer_before" "$PLUGIN_PATH"
+
         set +e
         fixer_output=$(php "$fixer_bin" "$@" 2>&1)
         local fixer_exit=$?
         set -e
         echo "$fixer_output"
 
-        # Parse "Fixed N thing(s) in N file(s)" from output
-        local fix_count
-        fix_count=$(echo "$fixer_output" | grep -oE 'Fixed [0-9]+' | head -1 | grep -oE '[0-9]+' || echo "0")
-        local file_count
-        file_count=$(echo "$fixer_output" | grep -oE 'in [0-9]+ file' | head -1 | grep -oE '[0-9]+' || echo "0")
-
-        if [ "$fix_count" != "0" ] && [ "$fix_count" -gt 0 ] 2>/dev/null; then
-            # Look up confidence tier for this fixer (default: advisory)
-            local confidence="${FIXER_CONFIDENCE[$rule]:-advisory}"
-
-            # Append one entry per fix (rule-level granularity, not per-file)
-            FIX_RESULTS_JSON=$(python3 -c "
-import json, sys
-results = json.loads(sys.argv[1])
-results.append({'file': '(multiple)' if int(sys.argv[3]) > 1 else '(single)', 'rule': sys.argv[2], 'action': 'rewrite', 'confidence': sys.argv[4]})
-print(json.dumps(results))
-" "$FIX_RESULTS_JSON" "$rule" "$file_count" "$confidence" 2>/dev/null || echo "$FIX_RESULTS_JSON")
-        fi
+        homeboy_fix_results_append_changed "$rule" "rewrite" "$fixer_before" "${FIXER_CONFIDENCE[$rule]:-advisory}" "$PLUGIN_PATH"
+        rm -f "$fixer_before"
 
         return $fixer_exit
     }
@@ -543,6 +529,9 @@ print(json.dumps(results))
         fi
         phpcbf_args+=("${LINT_FILES[@]}")
 
+        phpcbf_before="$(homeboy_mktemp 'homeboy-phpcbf-before.XXXXXX')"
+        homeboy_fix_results_capture "$phpcbf_before" "$PLUGIN_PATH"
+
         # phpcbf exit codes: 0=no changes, 1=changes made, 2=some errors unfixable
         set +e
         phpcbf_output=$("$PHPCBF_BIN" "${phpcbf_args[@]}" 2>&1)
@@ -558,14 +547,9 @@ print(json.dumps(results))
         echo ""
         if [ "$fixed_count" != "0" ]; then
             echo "PHPCBF fixed $fixed_count errors"
-            # Record phpcbf fixes in sidecar
-            FIX_RESULTS_JSON=$(python3 -c "
-import json, sys
-results = json.loads(sys.argv[1])
-results.append({'file': '(multiple)', 'rule': 'phpcbf', 'action': 'format', 'confidence': 'safe'})
-print(json.dumps(results))
-" "$FIX_RESULTS_JSON" 2>/dev/null || echo "$FIX_RESULTS_JSON")
         fi
+        homeboy_fix_results_append_changed "phpcbf" "format" "$phpcbf_before" "safe" "$PLUGIN_PATH"
+        rm -f "$phpcbf_before"
 
         if [ "$PHPCBF_EXIT" -eq 2 ]; then
             echo "WARNING: Some errors could not be auto-fixed."
@@ -593,17 +577,18 @@ print(json.dumps(results))
     # Write fix plan sidecar for planning flows (same shape as fix results)
     if [ -n "${HOMEBOY_FIX_PLAN_FILE:-}" ]; then
         FIX_RESULTS_TMPFILE=$(homeboy_mktemp 'wordpress-fix-results.XXXXXX')
-        printf '%s\n' "$FIX_RESULTS_JSON" > "$FIX_RESULTS_TMPFILE"
+        printf '%s\n' "$HOMEBOY_FIX_RESULTS_JSON" > "$FIX_RESULTS_TMPFILE"
         write_json_array_sidecar_file "${HOMEBOY_FIX_PLAN_FILE}" "$FIX_RESULTS_TMPFILE"
         rm -f "$FIX_RESULTS_TMPFILE"
     fi
 
     # Write fix results sidecar for homeboy to consume
     if [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ]; then
-        FIX_RESULTS_TMPFILE=$(homeboy_mktemp 'wordpress-fix-results.XXXXXX')
-        printf '%s\n' "$FIX_RESULTS_JSON" > "$FIX_RESULTS_TMPFILE"
-        write_json_array_sidecar_file "${HOMEBOY_FIX_RESULTS_FILE}" "$FIX_RESULTS_TMPFILE"
-        rm -f "$FIX_RESULTS_TMPFILE"
+        if type homeboy_write_fix_results >/dev/null 2>&1; then
+            homeboy_fix_results_write
+        else
+            echo "$HOMEBOY_FIX_RESULTS_JSON" > "${HOMEBOY_FIX_RESULTS_FILE}"
+        fi
     fi
 
     # Post-fix syntax validation — catch any fixer that produced broken PHP
