@@ -253,6 +253,22 @@ Runs via the platform shell. `cwd`, `command`, and `env` values support variable
 
 Prefer typed `build`, `git`, `stack`, `check`, and `service` steps when they fit; generic commands are the escape hatch.
 
+### `command-if-missing`
+
+```jsonc
+{
+  "kind": "command-if-missing",
+  "missing": "node_modules/.bin/wp-env",
+  "command": "npm install",
+  "cwd": "${components.gutenberg.path}",
+  "label": "install dependencies when wp-env is missing"
+}
+```
+
+Runs the shell command only when `missing` does not exist. Relative `missing` paths resolve against `cwd` when set, otherwise against the current process directory. `cwd`, `missing`, `command`, and `env` values support variable expansion.
+
+Use this for generic idempotent bootstrap guards such as “install dependencies when the expected tool binary is missing” without embedding shell conditionals in rig JSON.
+
 ### `symlink`
 
 ```jsonc
@@ -306,6 +322,19 @@ Issues a `GET` with a 5s timeout. `expect_status` defaults to `200`.
 ```
 
 Checks that the file exists and optionally contains a substring.
+
+### Any File Exists Probe
+
+```jsonc
+{
+  "any_file_exists": [
+    "${components.gutenberg.path}/lib/compat/wordpress-7.1/class-wp-http-polling-sync-server.php",
+    "${components.gutenberg.path}/lib/compat/wordpress-7.0/class-wp-http-polling-sync-server.php"
+  ]
+}
+```
+
+Passes when at least one candidate path exists. This covers versioned compatibility-file checks without shelling out to `test -f A || test -f B`.
 
 ### Command Probe
 

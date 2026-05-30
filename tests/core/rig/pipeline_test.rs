@@ -4,7 +4,9 @@
 //! and are covered by the manual smoke documented in #1468. Scope here is
 //! the public outcome types — shape, serialization, `is_success` contract.
 
-use crate::core::rig::pipeline::{run_pipeline_check_groups, PipelineOutcome, PipelineStepOutcome};
+use crate::core::rig::pipeline::{
+    run_pipeline, run_pipeline_check_groups, PipelineOutcome, PipelineStepOutcome,
+};
 use crate::core::rig::spec::RigSpec;
 
 fn step(status: &str) -> PipelineStepOutcome {
@@ -88,6 +90,66 @@ fn test_run_pipeline_check_groups() {
     assert!(outcome.is_success());
     assert_eq!(outcome.steps.len(), 1);
     assert_eq!(outcome.steps[0].label, "selected");
+}
+
+#[test]
+fn test_command_if_missing_runs_when_path_is_missing() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let marker = tmp.path().join("installed.txt");
+    let marker_arg = marker.to_string_lossy();
+    let cwd_arg = tmp.path().to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "command-if-missing-run",
+            "pipeline": {{
+                "bench_prepare": [{{
+                    "kind": "command-if-missing",
+                    "cwd": "{}",
+                    "missing": "node_modules/.bin/wp-env",
+                    "command": "printf installed > {}"
+                }}]
+            }}
+        }}"#,
+        cwd_arg, marker_arg
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+    assert_eq!(
+        std::fs::read_to_string(marker).expect("marker"),
+        "installed"
+    );
+}
+
+#[test]
+fn test_command_if_missing_skips_when_path_exists() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let wp_env = tmp.path().join("node_modules/.bin/wp-env");
+    std::fs::create_dir_all(wp_env.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&wp_env, "#!/bin/sh\n").expect("write");
+    let marker = tmp.path().join("installed.txt");
+    let marker_arg = marker.to_string_lossy();
+    let cwd_arg = tmp.path().to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "command-if-missing-skip",
+            "pipeline": {{
+                "bench_prepare": [{{
+                    "kind": "command-if-missing",
+                    "cwd": "{}",
+                    "missing": "node_modules/.bin/wp-env",
+                    "command": "printf installed > {}"
+                }}]
+            }}
+        }}"#,
+        cwd_arg, marker_arg
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+    assert!(!marker.exists(), "guarded command should not run");
 }
 
 // ---- Dependency-aware ordering ---------------------------------------------

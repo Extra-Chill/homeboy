@@ -101,6 +101,55 @@ fn test_spec_pipeline_steps_discriminate_correctly() {
 }
 
 #[test]
+fn test_spec_parses_declarative_rig_primitives() {
+    let spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "declarative-primitives",
+            "pipeline": {
+                "check": [
+                    {
+                        "kind": "check",
+                        "label": "compat server exists",
+                        "any_file_exists": ["lib/compat/wordpress-7.1/server.php", "lib/compat/wordpress-7.0/server.php"]
+                    }
+                ],
+                "bench_prepare": [
+                    {
+                        "kind": "command-if-missing",
+                        "label": "Install npm dependencies when wp-env is missing",
+                        "cwd": "/tmp/project",
+                        "missing": "node_modules/.bin/wp-env",
+                        "command": "npm install"
+                    }
+                ]
+            }
+        }"#,
+    )
+    .expect("parse declarative primitives");
+
+    let check = spec.pipeline.get("check").expect("check pipeline");
+    match &check[0] {
+        PipelineStep::Check { spec, .. } => assert_eq!(spec.any_file_exists.len(), 2),
+        other => panic!("expected check step, got {other:?}"),
+    }
+
+    let prepare = spec
+        .pipeline
+        .get("bench_prepare")
+        .expect("prepare pipeline");
+    match &prepare[0] {
+        PipelineStep::CommandIfMissing {
+            missing, cmd, cwd, ..
+        } => {
+            assert_eq!(missing, "node_modules/.bin/wp-env");
+            assert_eq!(cmd, "npm install");
+            assert_eq!(cwd.as_deref(), Some("/tmp/project"));
+        }
+        other => panic!("expected command-if-missing step, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_spec_symlink_fields_parse() {
     let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
     let link: &SymlinkSpec = &spec.symlinks[0];

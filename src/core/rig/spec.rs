@@ -1080,6 +1080,34 @@ pub enum PipelineStep {
         label: Option<String>,
     },
 
+    /// Run a shell command only when a filesystem path is missing.
+    ///
+    /// This keeps common bootstrap guards declarative without teaching Homeboy
+    /// package-manager-specific install semantics.
+    CommandIfMissing {
+        /// Optional stable node ID for dependency-aware pipeline ordering.
+        #[serde(default, rename = "id", skip_serializing_if = "Option::is_none")]
+        step_id: Option<String>,
+        /// Step IDs that must run before this step.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        depends_on: Vec<String>,
+        /// Path whose absence triggers the command. Relative paths resolve
+        /// against `cwd` when set, otherwise against the process cwd.
+        missing: String,
+        /// Shell command to execute when `missing` does not exist.
+        #[serde(rename = "command")]
+        cmd: String,
+        /// Working directory. Supports variable expansion.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        /// Env vars (merged over inherited environment).
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        env: HashMap<String, String>,
+        /// Human-readable label shown during execution. If absent, `cmd` is used.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Ensure a declared symlink exists (or verify it in `check` pipelines).
     Symlink {
         /// Optional stable node ID for dependency-aware pipeline ordering.
@@ -1259,7 +1287,8 @@ pub enum PatchOp {
 }
 
 /// A single declarative check. One-of semantics — exactly one of the
-/// probe fields (`http`, `file`, `command`, `newer_than`) should be set.
+/// probe fields (`http`, `file`, `any_file_exists`, `command`, `newer_than`)
+/// should be set.
 /// Validated at check-time, not parse-time, because serde flattening
 /// across tagged enums is awkward and explicit-field checks keep the
 /// spec readable.
@@ -1281,6 +1310,10 @@ pub struct CheckSpec {
     /// this substring. Cheap probe for verifying drop-ins / generated files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contains: Option<String>,
+
+    /// File paths — passes when at least one path exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub any_file_exists: Vec<String>,
 
     /// Shell command — passes if exit code matches `expect_exit` (default 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]

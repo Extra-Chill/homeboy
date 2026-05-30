@@ -41,11 +41,46 @@ fn test_evaluate_rejects_multiple_probes() {
     let rig = minimal_rig();
     let spec = CheckSpec {
         http: Some("http://example.com".to_string()),
-        file: Some("/tmp/x".to_string()),
+        any_file_exists: vec!["/tmp/x".to_string()],
         ..Default::default()
     };
     let err = evaluate(&rig, &spec).expect_err("multiple probes rejected");
     assert!(err.message.contains("must specify exactly one of"));
+}
+
+#[test]
+fn test_evaluate_any_file_exists_passes_when_one_candidate_exists() {
+    let tmp_dir = tempfile::tempdir().expect("tmpdir");
+    let missing = tmp_dir.path().join("missing.php");
+    let existing = tmp_dir.path().join("existing.php");
+    std::fs::write(&existing, "<?php\n").expect("write");
+
+    let rig = minimal_rig();
+    let spec = CheckSpec {
+        any_file_exists: vec![
+            missing.to_string_lossy().into_owned(),
+            existing.to_string_lossy().into_owned(),
+        ],
+        ..Default::default()
+    };
+
+    evaluate(&rig, &spec).expect("one existing candidate passes");
+}
+
+#[test]
+fn test_evaluate_any_file_exists_fails_when_all_candidates_are_missing() {
+    let tmp_dir = tempfile::tempdir().expect("tmpdir");
+    let rig = minimal_rig();
+    let spec = CheckSpec {
+        any_file_exists: vec![
+            tmp_dir.path().join("a.php").to_string_lossy().into_owned(),
+            tmp_dir.path().join("b.php").to_string_lossy().into_owned(),
+        ],
+        ..Default::default()
+    };
+
+    let err = evaluate(&rig, &spec).expect_err("all missing candidates fail");
+    assert!(err.message.contains("None of the candidate files exist"));
 }
 
 #[test]
