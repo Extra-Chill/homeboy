@@ -1,29 +1,29 @@
 use crate::core::budget::BudgetFinding;
+use crate::core::finding::HomeboyFinding;
 
 use super::records::NewFindingRecord;
 
 fn finding_record_from_budget(run_id: &str, finding: &BudgetFinding) -> NewFindingRecord {
-    NewFindingRecord {
-        run_id: run_id.to_string(),
-        tool: "budget".to_string(),
-        rule: Some(finding.code.clone()),
-        file: finding.file.clone(),
-        line: None,
-        severity: Some(finding.severity.clone()),
-        fingerprint: Some(finding.fingerprint()),
-        message: finding.message.clone(),
-        fixable: None,
-        metadata_json: serde_json::json!({
-            "category": finding.category,
+    let mut builder = HomeboyFinding::builder("budget", finding.message.clone())
+        .rule(finding.code.clone())
+        .category(finding.category.clone())
+        .severity(finding.severity.clone())
+        .fingerprint(finding.fingerprint())
+        .metadata(serde_json::json!({
             "context_label": finding.context_label,
             "actual": finding.actual,
             "expected": finding.expected,
             "unit": finding.unit,
             "subject": finding.subject,
             "passed": finding.passed,
-            "raw": finding,
-        }),
+        }))
+        .raw(finding);
+
+    if let Some(file) = &finding.file {
+        builder = builder.file(file.clone());
     }
+
+    NewFindingRecord::from_homeboy_finding(run_id, &builder.build())
 }
 
 pub fn finding_records_from_budget(

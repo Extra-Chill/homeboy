@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, path::Path};
 
 use crate::core::code_audit::{self, report::finding_kind_key};
 use crate::core::extension::lint::LintFinding;
+use crate::core::finding::HomeboyFinding;
 
 mod run_builder;
 mod run_status;
@@ -114,6 +115,65 @@ pub struct NewFindingRecord {
     pub metadata_json: serde_json::Value,
 }
 
+impl NewFindingRecord {
+    /// Project the shared finding contract into the observation-store schema.
+    ///
+    /// Storage keeps a stable queryable subset as columns. Producer provenance,
+    /// source category, raw payloads, and source-specific metadata stay in the
+    /// JSON column so the persisted record remains lossless for consumers that
+    /// need the original evidence.
+    pub fn from_homeboy_finding(run_id: impl Into<String>, finding: &HomeboyFinding) -> Self {
+        let mut metadata = serde_json::Map::new();
+        if let Some(category) = &finding.category {
+            metadata.insert("category".to_string(), serde_json::json!(category));
+        }
+        if !finding.producer.is_empty() {
+            metadata.insert("producer".to_string(), serde_json::json!(finding.producer));
+            if let Some(source_sidecar) = &finding.producer.source_sidecar {
+                metadata.insert(
+                    "source_sidecar".to_string(),
+                    serde_json::json!(source_sidecar),
+                );
+            }
+            if let Some(source_artifact) = &finding.producer.source_artifact {
+                metadata.insert(
+                    "source_artifact".to_string(),
+                    serde_json::json!(source_artifact),
+                );
+            }
+        }
+        if !finding
+            .metadata
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            if let Some(object) = finding.metadata.as_object() {
+                for (key, value) in object {
+                    metadata.insert(key.clone(), value.clone());
+                }
+            } else {
+                metadata.insert("metadata".to_string(), finding.metadata.clone());
+            }
+        }
+        if let Some(raw) = &finding.raw {
+            metadata.insert("raw".to_string(), raw.clone());
+        }
+
+        Self {
+            run_id: run_id.into(),
+            tool: finding.tool.clone(),
+            rule: finding.rule.clone(),
+            file: finding.file.clone(),
+            line: finding.line,
+            severity: finding.severity.clone(),
+            fingerprint: finding.fingerprint.clone().or_else(|| finding.id.clone()),
+            message: finding.message.clone(),
+            fixable: finding.fixable,
+            metadata_json: serde_json::Value::Object(metadata),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FindingRecord {
     pub id: String,
@@ -153,22 +213,34 @@ pub struct AnnotationFindingRecord {
 }
 
 pub fn finding_record_from_lint(run_id: &str, finding: &LintFinding) -> NewFindingRecord {
-    NewFindingRecord {
-        run_id: run_id.to_string(),
-        tool: finding.tool.clone().unwrap_or_else(|| "lint".to_string()),
-        rule: lint_extra_string(finding, "rule").or_else(|| Some(finding.category.clone())),
-        file: finding.file.clone(),
-        line: lint_extra_i64(finding, "line"),
-        severity: finding.severity.clone(),
-        fingerprint: Some(finding.id.clone()),
-        message: finding.message.clone(),
-        fixable: lint_extra_bool(finding, "fixable"),
-        metadata_json: serde_json::json!({
-            "category": finding.category,
-            "source_sidecar": "lint-findings",
-            "raw": finding,
-        }),
+    let mut builder = HomeboyFinding::builder(
+        finding.tool.clone().unwrap_or_else(|| "lint".to_string()),
+        finding.message.clone(),
+    )
+    .category(finding.category.clone())
+    .fingerprint(finding.id.clone())
+    .source_sidecar("lint-findings")
+    .raw(finding);
+
+    if let Some(rule) =
+        lint_extra_string(finding, "rule").or_else(|| Some(finding.category.clone()))
+    {
+        builder = builder.rule(rule);
     }
+    if let Some(file) = &finding.file {
+        builder = builder.file(file.clone());
+    }
+    if let Some(line) = lint_extra_i64(finding, "line") {
+        builder = builder.line(line);
+    }
+    if let Some(severity) = &finding.severity {
+        builder = builder.severity(severity.clone());
+    }
+    if let Some(fixable) = lint_extra_bool(finding, "fixable") {
+        builder = builder.fixable(fixable);
+    }
+
+    NewFindingRecord::from_homeboy_finding(run_id, &builder.build())
 }
 
 pub fn finding_records_from_lint(run_id: &str, findings: &[LintFinding]) -> Vec<NewFindingRecord> {
@@ -180,25 +252,23 @@ pub fn finding_records_from_lint(run_id: &str, findings: &[LintFinding]) -> Vec<
 
 pub fn finding_record_from_audit(run_id: &str, finding: &code_audit::Finding) -> NewFindingRecord {
     let kind = finding_kind_key(&finding.kind);
-    NewFindingRecord {
-        run_id: run_id.to_string(),
-        tool: "audit".to_string(),
-        rule: Some(kind.clone()),
-        file: Some(finding.file.clone()),
-        line: None,
-        severity: Some(audit_severity_key(&finding.severity)),
-        fingerprint: Some(audit_finding_fingerprint(finding)),
-        message: finding.description.clone(),
-        fixable: None,
-        metadata_json: serde_json::json!({
-            "source_sidecar": "audit-findings",
+    let normalized = HomeboyFinding::builder("audit", finding.description.clone())
+        .rule(kind.clone())
+        .category("code_audit")
+        .file(finding.file.clone())
+        .severity(audit_severity_key(&finding.severity))
+        .fingerprint(audit_finding_fingerprint(finding))
+        .source_sidecar("audit-findings")
+        .metadata(serde_json::json!({
             "convention": finding.convention,
             "suggestion": finding.suggestion,
             "confidence": finding.kind.confidence(),
             "kind": kind,
-            "raw": finding,
-        }),
-    }
+        }))
+        .raw(finding)
+        .build();
+
+    NewFindingRecord::from_homeboy_finding(run_id, &normalized)
 }
 
 pub fn finding_records_from_audit(
@@ -310,22 +380,33 @@ pub fn finding_record_from_annotation(
         .source
         .clone()
         .unwrap_or_else(|| annotation_file_stem(source_file));
-    NewFindingRecord {
-        run_id: run_id.to_string(),
-        tool,
-        rule: annotation.code.clone(),
-        file: annotation.file.clone(),
-        line: annotation.line,
-        severity: annotation.severity.clone(),
-        fingerprint: annotation_fingerprint(annotation),
-        message: annotation.message.clone(),
-        fixable: annotation.fixable,
-        metadata_json: serde_json::json!({
-            "source_sidecar": "annotations",
-            "annotation_file": source_file,
-            "raw": annotation,
-        }),
+    let mut builder = HomeboyFinding::builder(tool, annotation.message.clone())
+        .category("annotation")
+        .source_sidecar("annotations")
+        .source_artifact(source_file)
+        .metadata(serde_json::json!({ "annotation_file": source_file }))
+        .raw(annotation);
+
+    if let Some(rule) = &annotation.code {
+        builder = builder.rule(rule.clone());
     }
+    if let Some(file) = &annotation.file {
+        builder = builder.file(file.clone());
+    }
+    if let Some(line) = annotation.line {
+        builder = builder.line(line);
+    }
+    if let Some(severity) = &annotation.severity {
+        builder = builder.severity(severity.clone());
+    }
+    if let Some(fingerprint) = annotation_fingerprint(annotation) {
+        builder = builder.fingerprint(fingerprint);
+    }
+    if let Some(fixable) = annotation.fixable {
+        builder = builder.fixable(fixable);
+    }
+
+    NewFindingRecord::from_homeboy_finding(run_id, &builder.build())
 }
 
 fn annotation_file_stem(source_file: &str) -> String {
@@ -432,6 +513,44 @@ mod tests {
 
         assert_eq!(record.kind, "lint");
         assert_eq!(record.metadata_json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_new_finding_record_projects_homeboy_finding() {
+        let finding = HomeboyFinding::builder("test", "ExampleTest failed")
+            .rule("assertion_mismatch")
+            .category("test_failure")
+            .severity("error")
+            .fingerprint("tests/example.rs:ExampleTest::test_save")
+            .file("tests/example.rs")
+            .line(42)
+            .column(7)
+            .fixable(false)
+            .command("homeboy test")
+            .extension("rust")
+            .step("unit")
+            .source_artifact("junit.json")
+            .metadata(serde_json::json!({
+                "test_name": "ExampleTest::test_save",
+                "error_type": "AssertionFailed"
+            }))
+            .raw(serde_json::json!({ "runner": "cargo test" }))
+            .build();
+
+        let record = NewFindingRecord::from_homeboy_finding("run-1", &finding);
+
+        assert_eq!(record.run_id, "run-1");
+        assert_eq!(record.tool, "test");
+        assert_eq!(record.rule.as_deref(), Some("assertion_mismatch"));
+        assert_eq!(record.file.as_deref(), Some("tests/example.rs"));
+        assert_eq!(record.line, Some(42));
+        assert_eq!(record.severity.as_deref(), Some("error"));
+        assert_eq!(record.fixable, Some(false));
+        assert_eq!(record.metadata_json["category"], "test_failure");
+        assert_eq!(record.metadata_json["producer"]["command"], "homeboy test");
+        assert_eq!(record.metadata_json["source_artifact"], "junit.json");
+        assert_eq!(record.metadata_json["test_name"], "ExampleTest::test_save");
+        assert_eq!(record.metadata_json["raw"]["runner"], "cargo test");
     }
 
     #[test]
