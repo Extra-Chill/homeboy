@@ -101,17 +101,30 @@ pub fn stack_plan(upstream: &str) -> Result<DependencyStackPlan> {
 
 pub fn stack_apply(
     upstream: &str,
+    constraint: Option<&str>,
     dry_run: bool,
     install: bool,
     rebuild: bool,
 ) -> Result<DependencyStackApplyResult> {
     let plan = stack_plan(upstream)?;
+    stack_apply_plan(plan, constraint, dry_run, install, rebuild)
+}
+
+pub fn stack_apply_plan(
+    plan: DependencyStackPlan,
+    constraint: Option<&str>,
+    dry_run: bool,
+    install: bool,
+    rebuild: bool,
+) -> Result<DependencyStackApplyResult> {
     let mut steps = Vec::new();
 
     for step in plan.planned_steps() {
         let mut command_results = Vec::new();
         if step.uses_default_update_command() {
-            command_results.push(run_default_update_step(&step, dry_run, install)?);
+            command_results.push(run_default_update_step(
+                &step, constraint, dry_run, install,
+            )?);
         } else {
             command_results.push(run_stack_command(
                 "update",
@@ -379,15 +392,24 @@ fn update_command(edge: &DependencyStackEdge, downstream_path: &str) -> String {
 }
 
 fn update_command_for(package: &str, downstream_path: &str) -> String {
-    update_command_for_options(package, downstream_path, true)
+    update_command_for_options(package, downstream_path, None, true)
 }
 
-fn update_command_for_options(package: &str, downstream_path: &str, install: bool) -> String {
+fn update_command_for_options(
+    package: &str,
+    downstream_path: &str,
+    constraint: Option<&str>,
+    install: bool,
+) -> String {
     let mut command = format!(
         "homeboy deps update {} --path {}",
         shell_word(package),
         shell_word(downstream_path)
     );
+    if let Some(constraint) = constraint {
+        command.push_str(" --to ");
+        command.push_str(&shell_word(constraint));
+    }
     if !install {
         command.push_str(" --no-install");
     }
@@ -404,10 +426,12 @@ fn rebuild_command(step: &DependencyStackPlanStep) -> String {
 
 fn run_default_update_step(
     step: &DependencyStackPlanStep,
+    constraint: Option<&str>,
     dry_run: bool,
     install: bool,
 ) -> Result<DependencyStackCommandResult> {
-    let command = update_command_for_options(&step.package, &step.downstream_path, install);
+    let command =
+        update_command_for_options(&step.package, &step.downstream_path, constraint, install);
     if dry_run {
         return Ok(DependencyStackCommandResult {
             phase: "update".to_string(),
@@ -423,7 +447,7 @@ fn run_default_update_step(
         Some(&step.downstream),
         Some(&step.downstream_path),
         &step.package,
-        None,
+        constraint,
         DependencyUpdateOptions {
             install,
             rebuild: false,

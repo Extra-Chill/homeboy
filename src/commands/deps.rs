@@ -73,6 +73,10 @@ enum DepsStackCommand {
         /// Upstream component or repository identifier from dependency_stack[].upstream.
         upstream: String,
 
+        /// New manifest constraint to pass to provider-backed default update steps.
+        #[arg(long, value_name = "CONSTRAINT")]
+        to: Option<String>,
+
         /// Print the command plan without running commands.
         #[arg(long)]
         dry_run: bool,
@@ -161,12 +165,13 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
             }
             DepsStackCommand::Apply {
                 upstream,
+                to,
                 dry_run,
                 no_install,
                 rebuild,
             } => {
                 let output: DependencyStackApplyResult =
-                    deps::stack_apply(&upstream, dry_run, !no_install, rebuild)?;
+                    deps::stack_apply(&upstream, to.as_deref(), dry_run, !no_install, rebuild)?;
                 Ok((
                     serde_json::to_value(output).map_err(|e| {
                         homeboy::core::Error::internal_json(
