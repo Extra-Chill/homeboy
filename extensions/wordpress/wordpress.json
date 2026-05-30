@@ -835,6 +835,13 @@
     ]
   },
   "test": {
+    "changed_file_routing": {
+      "strategy": "exclusive_env",
+      "exclusive_env": {
+        "name": "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES",
+        "globs": ["tests/**/*-smoke.php"]
+      }
+    },
     "drift": {
       "source_dirs": ["src", "inc", "lib"],
       "test_dirs": ["tests"],

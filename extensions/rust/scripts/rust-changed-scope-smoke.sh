@@ -92,6 +92,8 @@ OUTPUT=$(
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
     HOMEBOY_CHANGED_TEST_FILES='tests/integration_scope.rs' \
+    HOMEBOY_TEST_SCOPE_MESSAGE='Scoped to changed integration tests: integration_scope' \
+    HOMEBOY_TEST_RUNNER_ARGS=$'--test\nintegration_scope' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
     bash "$SCRIPT_DIR/test-runner.sh"
@@ -112,6 +114,8 @@ OUTPUT=$(
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
     HOMEBOY_CHANGED_TEST_FILES='tests/core/daemon_test.rs' \
+    HOMEBOY_TEST_SCOPE_MESSAGE='Scoped to changed files: core::daemon::daemon_test' \
+    HOMEBOY_TEST_RUNNER_ARGS=$'--\ncore::daemon::daemon_test' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
     bash "$SCRIPT_DIR/test-runner.sh"
@@ -132,6 +136,7 @@ OUTPUT=$(
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
     HOMEBOY_CHANGED_TEST_FILES=$'tests/core/daemon_test.rs\ntests/core/service_test.rs' \
+    HOMEBOY_TEST_SCOPE_MESSAGE='Changed files include multiple inline test modules; running full cargo test.' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
     bash "$SCRIPT_DIR/test-runner.sh"
@@ -152,6 +157,7 @@ OUTPUT=$(
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
     HOMEBOY_CHANGED_TEST_FILES='tests/core/unknown_nested_test.rs' \
+    HOMEBOY_TEST_SCOPE_MESSAGE='Changed files include nested tests without a direct Cargo target; running full cargo test.' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
     bash "$SCRIPT_DIR/test-runner.sh"

@@ -224,7 +224,10 @@
     "extension_script": "scripts/lint/lint-runner.sh"
   },
   "test": {
-    "extension_script": "scripts/test/test-runner.sh"
+    "extension_script": "scripts/test/test-runner.sh",
+    "changed_file_routing": {
+      "strategy": "file_args"
+    }
   },
   "bench": {
     "extension_script": "scripts/bench/bench-runner.sh"

@@ -203,63 +203,15 @@ TEST_ARGS=(
     --manifest-path "${PROJECT_PATH}/Cargo.toml"
 )
 
-# Scoped test selection: if HOMEBOY_CHANGED_TEST_FILES is set, derive
-# cargo test filter from the changed test file paths.
-# Cargo test accepts positional test name patterns after --.
-# We extract module paths from file paths (e.g., src/commands/audit.rs → commands::audit).
-SCOPE_FILTER_ARGS=()
-SCOPE_INTEGRATION_ARGS=()
-SCOPE_FALLBACK_FULL=false
-if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
-    while IFS= read -r test_file; do
-        [ -z "$test_file" ] && continue
-        if [[ "$test_file" == tests/*.rs && "$test_file" != tests/*/* ]]; then
-            test_target="${test_file#tests/}"
-            test_target="${test_target%.rs}"
-            if [ -n "$test_target" ]; then
-                SCOPE_INTEGRATION_ARGS+=("$test_target")
-            fi
-            continue
-        fi
+if [ -n "${HOMEBOY_TEST_SCOPE_MESSAGE:-}" ]; then
+    echo "$HOMEBOY_TEST_SCOPE_MESSAGE"
+fi
 
-        # Convert file path to Rust module path for cargo test filtering
-        # e.g., src/commands/audit.rs → commands::audit
-        #        src/utils/baseline.rs → utils::baseline
-        #        tests/core/foo_test.rs with src/core/foo.rs → core::foo::foo_test
-        module_path="${test_file#src/}"          # strip leading src/
-        module_path="${module_path#tests/}"      # strip leading tests/
-        module_path="${module_path%.rs}"          # strip .rs extension
-        module_path="${module_path%/mod}"         # strip /mod suffix
-        test_module="${module_path##*/}"
-        source_module="${module_path%_test}"
-        if [[ "$test_file" == tests/*_test.rs ]] && { [ -f "${PROJECT_PATH}/src/${source_module}.rs" ] || [ -f "${PROJECT_PATH}/src/${source_module}/mod.rs" ]; }; then
-            module_path="${source_module}::${test_module}"
-        elif [[ "$test_file" == tests/*/*.rs ]]; then
-            SCOPE_FALLBACK_FULL=true
-            continue
-        fi
-        module_path="${module_path//\//::}"       # replace / with ::
-        if [ -n "$module_path" ]; then
-            SCOPE_FILTER_ARGS+=("$module_path")
-        fi
-    done <<< "${HOMEBOY_CHANGED_TEST_FILES}"
-
-    if [ "$SCOPE_FALLBACK_FULL" = true ]; then
-        echo "Changed files include nested tests without a direct Cargo target; running full cargo test."
-    elif [ ${#SCOPE_INTEGRATION_ARGS[@]} -gt 0 ] && [ ${#SCOPE_FILTER_ARGS[@]} -gt 0 ]; then
-        echo "Changed files include integration and inline tests; running full cargo test."
-    elif [ ${#SCOPE_INTEGRATION_ARGS[@]} -gt 0 ]; then
-        for test_target in "${SCOPE_INTEGRATION_ARGS[@]}"; do
-            TEST_ARGS+=(--test "$test_target")
-        done
-        echo "Scoped to changed integration tests: ${SCOPE_INTEGRATION_ARGS[*]}"
-    elif [ ${#SCOPE_FILTER_ARGS[@]} -eq 1 ]; then
-        FILTER="${SCOPE_FILTER_ARGS[0]}"
-        TEST_ARGS+=(-- "$FILTER")
-        echo "Scoped to changed files: ${FILTER}"
-    elif [ ${#SCOPE_FILTER_ARGS[@]} -gt 1 ]; then
-        echo "Changed files include multiple inline test modules; running full cargo test."
-    fi
+if [ -n "${HOMEBOY_TEST_RUNNER_ARGS:-}" ]; then
+    while IFS= read -r scope_arg; do
+        [ -n "$scope_arg" ] || continue
+        TEST_ARGS+=("$scope_arg")
+    done <<< "$HOMEBOY_TEST_RUNNER_ARGS"
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then

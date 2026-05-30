@@ -54,7 +54,12 @@ homeboy_detect_package_manager
 homeboy_ensure_node_dependencies
 
 RUNNER_ARGS=("$@")
-if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
+if [ -n "${HOMEBOY_TEST_RUNNER_ARGS:-}" ]; then
+    while IFS= read -r selected_test_arg; do
+        [ -n "$selected_test_arg" ] || continue
+        RUNNER_ARGS+=("$selected_test_arg")
+    done <<< "$HOMEBOY_TEST_RUNNER_ARGS"
+elif [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     while IFS= read -r selected_test_file; do
         [ -n "$selected_test_file" ] || continue
         RUNNER_ARGS+=("$selected_test_file")

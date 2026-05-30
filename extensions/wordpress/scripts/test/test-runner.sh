@@ -114,39 +114,9 @@ homeboy_wordpress_rel_test_file() {
     esac
 }
 
-homeboy_wordpress_is_standalone_smoke() {
-    local rel_path="$1"
-    case "$rel_path" in
-        tests/*-smoke.php|tests/*/*-smoke.php|tests/*/*/*-smoke.php|tests/*/*/*/*-smoke.php)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
-    changed_smoke_files=()
-    changed_non_smoke_count=0
-
-    while IFS= read -r changed_file; do
-        [ -z "$changed_file" ] && continue
-
-        if ! changed_rel="$(homeboy_wordpress_rel_test_file "$changed_file")"; then
-            changed_non_smoke_count=$((changed_non_smoke_count + 1))
-            continue
-        fi
-
-        if homeboy_wordpress_is_standalone_smoke "$changed_rel"; then
-            changed_smoke_files+=("$changed_rel")
-        else
-            changed_non_smoke_count=$((changed_non_smoke_count + 1))
-        fi
-    done <<< "$HOMEBOY_CHANGED_TEST_FILES"
-
-    if [ "${#changed_smoke_files[@]}" -gt 0 ] && [ "$changed_non_smoke_count" -eq 0 ]; then
-        HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$(printf '%s\n' "${changed_smoke_files[@]}")" exec bash "$HOST_SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+if [ -z "$TARGET_FILE" ] && [ "${HOMEBOY_TEST_SCOPE_KIND:-}" = "exclusive_env" ]; then
+    if [ "${HOMEBOY_TEST_SCOPE_ENV_NAME:-}" = "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES" ] && [ -n "${HOMEBOY_TEST_SCOPE_ENV_VALUE:-}" ]; then
+        HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$HOMEBOY_TEST_SCOPE_ENV_VALUE" exec bash "$HOST_SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
     fi
 fi
 
