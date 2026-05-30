@@ -13,7 +13,75 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::core::plan::{HomeboyPlan, PlanSubject};
+use crate::core::error::Result;
+use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanSubject};
+
+/// Result of walking executable plan steps through a workflow dispatcher.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanExecutionRun<R> {
+    pub results: Vec<R>,
+    pub stopped: bool,
+}
+
+/// Execute plan steps with workflow-specific dispatch and stop semantics.
+///
+/// The shared loop owns generic plan behavior: disabled/skipped steps are not
+/// dispatched, caller-filtered steps are skipped, dispatcher `None` means the
+/// step was plan-only/non-executable, and `should_stop` decides whether a
+/// produced result blocks the rest of the plan.
+pub fn execute_plan_steps_filtered<R, Skip, Dispatch, Stop>(
+    steps: &[PlanStep],
+    should_skip_step: Skip,
+    mut dispatch: Dispatch,
+    should_stop: Stop,
+) -> Result<PlanExecutionRun<R>>
+where
+    Skip: Fn(&PlanStep) -> bool,
+    Dispatch: FnMut(&PlanStep) -> Result<Option<R>>,
+    Stop: Fn(&R) -> bool,
+{
+    let mut results = Vec::new();
+
+    for step in steps {
+        if should_skip_step(step)
+            || matches!(
+                step.status,
+                PlanStepStatus::Disabled | PlanStepStatus::Skipped
+            )
+        {
+            continue;
+        }
+
+        if let Some(result) = dispatch(step)? {
+            let stopped = should_stop(&result);
+            results.push(result);
+            if stopped {
+                return Ok(PlanExecutionRun {
+                    results,
+                    stopped: true,
+                });
+            }
+        }
+    }
+
+    Ok(PlanExecutionRun {
+        results,
+        stopped: false,
+    })
+}
+
+/// Execute all non-disabled plan steps through a workflow dispatcher.
+pub fn execute_plan_steps<R, Dispatch, Stop>(
+    steps: &[PlanStep],
+    dispatch: Dispatch,
+    should_stop: Stop,
+) -> Result<PlanExecutionRun<R>>
+where
+    Dispatch: FnMut(&PlanStep) -> Result<Option<R>>,
+    Stop: Fn(&R) -> bool,
+{
+    execute_plan_steps_filtered(steps, |_| false, dispatch, should_stop)
+}
 
 /// Normalized execution intent shared by CLI flags and extension adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,7 +427,7 @@ const fn publish_phase() -> ExecutionPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::plan::{HomeboyPlan, PlanKind};
+    use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
     use crate::core::release::{
         ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
     };
@@ -628,6 +696,65 @@ mod tests {
         );
         assert_eq!(execution.artifacts[0].provenance.source, "release");
         assert_eq!(execution.warnings, vec!["signed artifact missing"]);
+    }
+
+    #[test]
+    fn shared_plan_executor_skips_disabled_steps() {
+        let steps = vec![
+            PlanStep::disabled_with_reason("skip", "demo.skip", "off").build(),
+            PlanStep::ready("run", "demo.run").build(),
+        ];
+        let mut dispatched = Vec::new();
+
+        let run = execute_plan_steps(
+            &steps,
+            |step| {
+                dispatched.push(step.id.clone());
+                Ok(Some(step.kind.clone()))
+            },
+            |_| false,
+        )
+        .expect("execute plan");
+
+        assert_eq!(dispatched, vec!["run"]);
+        assert_eq!(run.results, vec!["demo.run"]);
+        assert!(!run.stopped);
+    }
+
+    #[test]
+    fn shared_plan_executor_stops_after_blocking_result() {
+        let steps = vec![
+            PlanStep::ready("first", "demo.first").build(),
+            PlanStep::ready("second", "demo.second").build(),
+        ];
+
+        let run = execute_plan_steps(
+            &steps,
+            |step| Ok(Some(step.kind.clone())),
+            |result| result == "demo.first",
+        )
+        .expect("execute plan");
+
+        assert_eq!(run.results, vec!["demo.first"]);
+        assert!(run.stopped);
+    }
+
+    #[test]
+    fn shared_plan_executor_reports_dispatch_errors() {
+        let steps = vec![PlanStep::ready("bad", "demo.bad").build()];
+
+        let err = execute_plan_steps::<String, _, _>(
+            &steps,
+            |_| {
+                Err(crate::core::Error::internal_unexpected(
+                    "unsupported demo.bad",
+                ))
+            },
+            |_| false,
+        )
+        .expect_err("unsupported executable step should fail");
+
+        assert!(err.to_string().contains("unsupported demo.bad"));
     }
 
     fn patch_artifact() -> ChangeArtifact {

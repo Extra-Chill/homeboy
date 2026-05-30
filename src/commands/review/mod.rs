@@ -22,10 +22,11 @@ use std::process::Command;
 use homeboy::core::ci_profile::{self, CiRunOutput, CiRunSelection};
 use homeboy::core::code_audit::AuditCommandOutput;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::execution;
 use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::TestCommandOutput;
 use homeboy::core::git;
-use homeboy::core::plan::HomeboyPlan;
+use homeboy::core::plan::{HomeboyPlan, PlanStep};
 use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
 use homeboy::core::ObservationOutputMetadata;
 
@@ -220,22 +221,14 @@ impl<Args, Output: Serialize> ReviewStageDescriptor<Args, Output> {
     }
 }
 
-fn review_stage_order(plan: &HomeboyPlan) -> Vec<String> {
-    plan.steps
-        .iter()
-        .filter(|step| step.status == homeboy::core::plan::PlanStepStatus::Ready)
-        .filter_map(|step| step.kind.strip_prefix("review.").map(str::to_string))
-        .collect()
-}
-
-fn execute_review_stage(
-    stage_name: &str,
+fn execute_review_plan_step(
+    step: &PlanStep,
     args: &ReviewArgs,
     global: &GlobalArgs,
     component_label: &str,
-) -> CmdResult<ReviewStageRun> {
-    match stage_name {
-        "audit" => {
+) -> homeboy::core::Result<Option<ReviewStageRun>> {
+    match step.kind.as_str() {
+        "review.audit" => {
             let descriptor = ReviewStageDescriptor {
                 name: "audit",
                 include_changed_only_scope: false,
@@ -243,11 +236,10 @@ fn execute_review_stage(
                 run: audit::run,
                 finding_count: audit_finding_count,
             };
-            descriptor
-                .execute(args, global, component_label)
-                .map(|(stage, exit_code)| (ReviewStageRun::Audit(stage, exit_code), exit_code))
+            let (stage, exit_code) = descriptor.execute(args, global, component_label)?;
+            Ok(Some(ReviewStageRun::Audit(stage, exit_code)))
         }
-        "lint" => {
+        "review.lint" => {
             let descriptor = ReviewStageDescriptor {
                 name: "lint",
                 include_changed_only_scope: true,
@@ -255,11 +247,10 @@ fn execute_review_stage(
                 run: lint::run,
                 finding_count: lint_finding_count,
             };
-            descriptor
-                .execute(args, global, component_label)
-                .map(|(stage, exit_code)| (ReviewStageRun::Lint(stage, exit_code), exit_code))
+            let (stage, exit_code) = descriptor.execute(args, global, component_label)?;
+            Ok(Some(ReviewStageRun::Lint(stage, exit_code)))
         }
-        "test" => {
+        "review.test" => {
             let descriptor = ReviewStageDescriptor {
                 name: "test",
                 include_changed_only_scope: false,
@@ -267,12 +258,11 @@ fn execute_review_stage(
                 run: test::run,
                 finding_count: test_finding_count,
             };
-            descriptor
-                .execute(args, global, component_label)
-                .map(|(stage, exit_code)| (ReviewStageRun::Test(stage, exit_code), exit_code))
+            let (stage, exit_code) = descriptor.execute(args, global, component_label)?;
+            Ok(Some(ReviewStageRun::Test(stage, exit_code)))
         }
         other => Err(homeboy::core::Error::internal_unexpected(format!(
-            "review quality plan contains unsupported stage '{other}'"
+            "review quality plan contains unsupported executable step '{other}'"
         ))),
     }
 }
@@ -396,16 +386,19 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     let mut test_stage = None;
     let mut test_exit = 0;
 
-    for stage_name in review_stage_order(&quality_plan) {
-        let (stage_run, _stage_exit) =
-            match execute_review_stage(&stage_name, &args, global, &component_label) {
-                Ok(result) => result,
-                Err(error) => {
-                    observation::finish_error(review_observation, &error);
-                    return Err(error);
-                }
-            };
+    let stage_run = match execution::execute_plan_steps(
+        &quality_plan.steps,
+        |step| execute_review_plan_step(step, &args, global, &component_label),
+        |_| false,
+    ) {
+        Ok(run) => run,
+        Err(error) => {
+            observation::finish_error(review_observation, &error);
+            return Err(error);
+        }
+    };
 
+    for stage_run in stage_run.results {
         match stage_run {
             ReviewStageRun::Audit(stage, exit_code) => {
                 audit_stage = Some(stage);
@@ -1045,6 +1038,22 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_review_plan_step_returns_consistent_error() {
+        let args = review_args_fixture();
+        let global = GlobalArgs {};
+        let step = PlanStep::ready("review.unknown", "review.unknown").build();
+
+        let err = match execute_review_plan_step(&step, &args, &global, "fixture") {
+            Ok(_) => panic!("unsupported executable review step should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err
+            .to_string()
+            .contains("unsupported executable step 'review.unknown'"));
+    }
+
+    #[test]
     fn build_artifact_uses_review_schema_and_refs() {
         let command = ReviewArtifactCommand {
             name: "lint".to_string(),
@@ -1215,5 +1224,22 @@ mod tests {
         };
         assert_eq!(scope_flag_suffix(&args, true), "");
         assert_eq!(scope_flag_suffix(&args, false), "");
+    }
+
+    fn review_args_fixture() -> ReviewArgs {
+        ReviewArgs {
+            comp: PositionalComponentArgs {
+                component: Some("fixture".to_string()),
+                path: None,
+            },
+            extension_override: ExtensionOverrideArgs::default(),
+            changed_since: None,
+            changed_only: false,
+            summary: false,
+            ci_profile: None,
+            report: None,
+            banner: Vec::new(),
+            baseline_args: BaselineArgs::default(),
+        }
     }
 }
