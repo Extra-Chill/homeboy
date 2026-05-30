@@ -337,7 +337,7 @@ fn stack_step(step: &DependencyStackPlanStep) -> PlanStep {
             .string("downstream_path", step.downstream_path.clone())
             .string("package", step.package.clone())
             .string("update_command", step.update_command.clone())
-            .json("rebuild", &step.rebuild)
+            .json("rebuild", step.rebuild)
             .json("post_update", &step.post_update)
             .json("test", &step.test)
             .json("stack_step", step),
