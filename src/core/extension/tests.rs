@@ -21,7 +21,8 @@ fn extension_capability_owns_labels_and_scripts() {
         },
         "build": { "extension_script": "build.sh" },
         "bench": { "extension_script": "bench.sh" },
-        "trace": { "extension_script": "trace.sh" }
+        "trace": { "extension_script": "trace.sh" },
+        "deps": { "extension_script": "deps.sh" }
     }))
     .unwrap();
 
@@ -56,6 +57,7 @@ fn extension_capability_owns_labels_and_scripts() {
         (ExtensionCapability::Build, "build", "build.sh", false),
         (ExtensionCapability::Bench, "bench", "bench.sh", true),
         (ExtensionCapability::Trace, "trace", "trace.sh", true),
+        (ExtensionCapability::Deps, "deps", "deps.sh", true),
     ] {
         assert_eq!(capability.label(), label);
         assert!(capability.has_manifest_support(&manifest));

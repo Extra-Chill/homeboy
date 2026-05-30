@@ -241,8 +241,20 @@ fn non_composer_component_returns_clear_unsupported_error() {
     let err = deps::status(Some("fixture"), Some(&root_path), None).unwrap_err();
 
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err.message.contains("package_manager"));
-    assert!(err.message.contains("No supported dependency manifest"));
+    assert!(err.message.contains("dependency provider"));
+    assert!(err.message.contains("No dependency provider found"));
+}
+
+#[test]
+fn deps_orchestration_stays_package_manager_agnostic() {
+    let source = fs::read_to_string("src/core/deps.rs").unwrap();
+
+    for forbidden in ["composer.json", "composer.lock", "Command::new", "npm", "Cargo"] {
+        assert!(
+            !source.contains(forbidden),
+            "core deps orchestration must not contain package-manager literal {forbidden:?}"
+        );
+    }
 }
 
 #[test]

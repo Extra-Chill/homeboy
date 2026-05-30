@@ -183,6 +183,12 @@ pub struct BuildConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_script: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LintConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension_script: Option<String>,

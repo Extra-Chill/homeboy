@@ -309,6 +309,7 @@ mod tests {
             build: Vec::new(),
             bench: Vec::new(),
             trace: Vec::new(),
+            deps: Vec::new(),
         });
 
         let output = run_self_checks_with_passthrough(
@@ -347,6 +348,7 @@ mod tests {
             build: Vec::new(),
             bench: Vec::new(),
             trace: Vec::new(),
+            deps: Vec::new(),
         });
 
         let output = run_self_checks_with_passthrough(
@@ -383,6 +385,7 @@ mod tests {
             build: Vec::new(),
             bench: Vec::new(),
             trace: Vec::new(),
+            deps: Vec::new(),
         });
 
         let output = run_self_checks_with_passthrough(
