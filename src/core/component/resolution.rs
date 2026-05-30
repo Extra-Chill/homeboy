@@ -169,7 +169,48 @@ fn prefer_cwd_for_component(component_id: &str) -> Option<Component> {
         }
     }
 
+    let mut registered = load(component_id).ok()?;
+    let registered_path = PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
+    let cwd_git_root = detect_git_root(&cwd)?;
+    if same_git_common_dir(&registered_path, &cwd_git_root) {
+        registered.local_path = cwd_git_root.to_string_lossy().to_string();
+        registered.resolve_remote_path();
+        return Some(registered);
+    }
+
     None
+}
+
+fn same_git_common_dir(a: &Path, b: &Path) -> bool {
+    match (git_common_dir(a), git_common_dir(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(raw);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
+    };
+    absolute.canonicalize().ok()
 }
 
 fn synthetic_component_for_path(path: &str) -> Component {
@@ -474,6 +515,20 @@ mod tests {
         .expect("standalone registration");
     }
 
+    fn git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn test_resolve_artifact() {
         let explicit = Component {
@@ -642,6 +697,38 @@ mod tests {
             assert_eq!(target.component_id, "registered");
             assert_eq!(target.source_path, repo);
             assert!(!target.synthetic);
+        });
+    }
+
+    #[test]
+    fn target_spec_prefers_cwd_worktree_for_registered_component() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("primary");
+            let worktree = dir.path().join("component-worktree");
+            std::fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            std::fs::write(primary.join("README.md"), "fixture\n").expect("readme");
+            git(&primary, &["add", "README.md"]);
+            git(&primary, &["commit", "-m", "Initial commit"]);
+            git(&primary, &["worktree", "add", worktree.to_str().unwrap()]);
+            write_standalone_registration(home.path(), "registered", &primary);
+
+            with_cwd(&worktree, || {
+                let target = resolve_target(TargetSpec::new(Some("registered"), None))
+                    .expect("registered worktree target");
+                let canonical_worktree = worktree.canonicalize().expect("canonical worktree");
+
+                assert_eq!(target.component_id, "registered");
+                assert_eq!(target.source_path, canonical_worktree);
+                assert_eq!(
+                    target.component.local_path,
+                    target.source_path.to_string_lossy()
+                );
+                assert!(!target.synthetic);
+            });
         });
     }
 
