@@ -1,6 +1,14 @@
 'use strict';
 
 /**
+ * Internal dependencies
+ */
+const {
+	normalizeBrowserProfileTimings: normalizeSharedBrowserProfileTimings,
+	normalizeBrowserTiming: normalizeSharedBrowserTiming,
+} = require('../../scripts/lib/browser-result-shapes.cjs');
+
+/**
  * Correlate browser resource timing entries with WordPress request profiler
  * rows so callers can compare per-request browser TTFB / duration against the
  * WordPress app duration captured by `lib/request-profiler.js`.
@@ -39,11 +47,11 @@ const REQUEST_END_EVENTS = new Set(['shutdown', 'request.end']);
  *
  * Returns the normalized string. For non-string / empty input returns `''`.
  *
- * @param {string} url
- * @param {object} [options]
- * @param {boolean} [options.lowercasePath=true]
+ * @param {string}   url
+ * @param {Object}   [options]
+ * @param {boolean}  [options.lowercasePath=true]
  * @param {string[]} [options.dropQueryParams]
- * @returns {string}
+ * @return {string} Normalized URL key.
  */
 function normalizeUrl(url, options = {}) {
 	if (typeof url !== 'string' || url.trim() === '') {
@@ -99,206 +107,21 @@ function normalizeUrl(url, options = {}) {
 	return path + search;
 }
 
-function pickFirstNumber(source, keys) {
-	if (!source || typeof source !== 'object') {
-		return undefined;
-	}
-	for (const key of keys) {
-		const value = source[key];
-		if (typeof value === 'number' && Number.isFinite(value)) {
-			return value;
-		}
-	}
-	return undefined;
-}
-
-function pickFirstString(source, keys) {
-	if (!source || typeof source !== 'object') {
-		return undefined;
-	}
-	for (const key of keys) {
-		const value = source[key];
-		if (typeof value === 'string' && value.trim() !== '') {
-			return value.trim();
-		}
-	}
-	return undefined;
-}
-
-function pickFirstBoolean(source, keys) {
-	if (!source || typeof source !== 'object') {
-		return undefined;
-	}
-	for (const key of keys) {
-		const value = source[key];
-		if (typeof value === 'boolean') {
-			return value;
-		}
-	}
-	return undefined;
-}
-
 /**
  * Convert a single browser resource timing entry into a normalized record.
  * Accepts native `PerformanceResourceTiming`-shaped objects as well as
  * looser `{ url, startTime, ttfbMs, durationMs }` shapes.
  *
- * @param {object} entry
- * @param {object} [options]
- * @returns {object|null}
+ * @param {Object} entry
+ * @param {Object} [options]
+ * @return {Object|null} Normalized browser timing row, or null for invalid input.
  */
 function normalizeBrowserTiming(entry, options = {}) {
-	if (!entry || typeof entry !== 'object') {
-		return null;
-	}
-
-	const rawUrl = pickFirstString(entry, ['name', 'url', 'request_url', 'requestUrl']);
-	if (!rawUrl) {
-		return null;
-	}
-
-	const startTime = pickFirstNumber(entry, ['startTime', 'fetchStart', 'requestStart', 'start_time_ms', 'start_ms', 'startMs']);
-	const responseStart = pickFirstNumber(entry, ['responseStart', 'ttfb_ms', 'ttfbMs', 'response_start']);
-	const responseEnd = pickFirstNumber(entry, ['responseEnd', 'response_end', 'endMs', 'end_ms', 'response_end_ms']);
-	const duration = pickFirstNumber(entry, ['duration', 'duration_ms', 'durationMs']);
-
-	let computedDuration = duration;
-	if (computedDuration === undefined && startTime !== undefined && responseEnd !== undefined) {
-		computedDuration = Math.max(0, responseEnd - startTime);
-	}
-
-	let computedTtfb;
-	if (responseStart !== undefined && startTime !== undefined) {
-		computedTtfb = Math.max(0, responseStart - startTime);
-	} else {
-		computedTtfb = pickFirstNumber(entry, ['ttfb', 'ttfb_ms', 'ttfbMs']);
-	}
-
-	const initiator = pickFirstString(entry, ['initiatorType', 'initiator_type', 'initiator', 'resourceType']);
-	const phase = pickFirstString(entry, ['phase', 'phase_label', 'phaseLabel']);
-	const method = pickFirstString(entry, ['method', 'request_method', 'requestMethod']);
-	const status = pickFirstNumber(entry, ['status', 'statusCode', 'status_code', 'http_status']);
-	const failed = pickFirstBoolean(entry, ['failed', 'error']);
-
-	return {
-		url: rawUrl,
-		normalizedUrl: normalizeUrl(rawUrl, options),
-		method: method ? method.toUpperCase() : undefined,
-		status: typeof status === 'number' ? status : undefined,
-		failed,
-		startTime: typeof startTime === 'number' ? startTime : undefined,
-		ttfbMs: typeof computedTtfb === 'number' ? computedTtfb : undefined,
-		durationMs: typeof computedDuration === 'number' ? computedDuration : undefined,
-		initiatorType: initiator,
-		phase,
-		raw: entry,
-	};
+	return normalizeSharedBrowserTiming(entry, { ...options, normalizeUrl });
 }
 
 function normalizeBrowserProfileTimings(profile, options = {}) {
-	if (!profile || typeof profile !== 'object') {
-		return [];
-	}
-
-	const phases = normalizeProfilePhases(profile);
-	const resources = Array.isArray(profile.resources) ? profile.resources : [];
-	const network = Array.isArray(profile.network) ? profile.network : [];
-	const resourcesByUrl = new Map();
-
-	for (const resource of resources) {
-		const rawUrl = pickFirstString(resource, ['name', 'url']);
-		const normalizedUrl = normalizeUrl(rawUrl, options);
-		if (!normalizedUrl) {
-			continue;
-		}
-		if (!resourcesByUrl.has(normalizedUrl)) {
-			resourcesByUrl.set(normalizedUrl, []);
-		}
-		resourcesByUrl.get(normalizedUrl).push(resource);
-	}
-
-	const rows = [];
-	for (const entry of network) {
-		const rawUrl = pickFirstString(entry, ['url', 'name']);
-		const normalizedUrl = normalizeUrl(rawUrl, options);
-		const resource = normalizedUrl ? (resourcesByUrl.get(normalizedUrl) || []).shift() : undefined;
-		const startTime = pickFirstNumber(entry, ['start_time_ms', 'startTime', 'start_ms', 'startMs'])
-			?? pickFirstNumber(resource, ['startTime', 'fetchStart', 'requestStart']);
-		const phase = pickFirstString(entry, ['phase', 'phase_label', 'phaseLabel'])
-			|| pickFirstString(resource, ['phase', 'phase_label', 'phaseLabel'])
-			|| phaseForStartTime(phases, startTime);
-
-		rows.push({
-			...resource,
-			...entry,
-			name: rawUrl,
-			url: rawUrl,
-			startTime,
-			responseStart: pickFirstNumber(resource, ['responseStart']) ?? pickFirstNumber(entry, ['responseStart', 'ttfb_ms', 'ttfbMs']),
-			responseEnd: pickFirstNumber(resource, ['responseEnd']) ?? pickFirstNumber(entry, ['response_end_ms', 'responseEnd']),
-			durationMs: pickFirstNumber(entry, ['duration_ms', 'durationMs']) ?? pickFirstNumber(resource, ['duration', 'duration_ms', 'durationMs']),
-			phase,
-		});
-	}
-
-	for (const entries of resourcesByUrl.values()) {
-		for (const resource of entries) {
-			const startTime = pickFirstNumber(resource, ['startTime', 'fetchStart', 'requestStart']);
-			rows.push({
-				...resource,
-				phase: pickFirstString(resource, ['phase', 'phase_label', 'phaseLabel']) || phaseForStartTime(phases, startTime),
-			});
-		}
-	}
-
-	return rows;
-}
-
-function normalizeProfilePhases(profile) {
-	const phases = [];
-	if (profile.phases && typeof profile.phases === 'object' && !Array.isArray(profile.phases)) {
-		for (const [name, phase] of Object.entries(profile.phases)) {
-			if (!phase || typeof phase !== 'object') {
-				continue;
-			}
-			const startMs = pickFirstNumber(phase, ['start_time_ms', 'startTime', 'start_ms', 'startMs']);
-			const endMs = pickFirstNumber(phase, ['end_time_ms', 'endTime', 'end_ms', 'endMs']);
-			if (startMs !== undefined) {
-				phases.push({ name, startMs, endMs });
-			}
-		}
-	} else if (Array.isArray(profile.phase_marks)) {
-		const marks = profile.phase_marks
-			.map((mark) => ({
-				name: pickFirstString(mark, ['name', 'phase', 'label']),
-				startMs: pickFirstNumber(mark, ['start_time_ms', 'startTime', 'start_ms', 'startMs']),
-			}))
-			.filter((mark) => mark.name && mark.startMs !== undefined)
-			.sort((a, b) => a.startMs - b.startMs);
-		for (let i = 0; i < marks.length; i++) {
-			phases.push({
-				name: marks[i].name,
-				startMs: marks[i].startMs,
-				endMs: marks[i + 1]?.startMs,
-			});
-		}
-	}
-
-	return phases.sort((a, b) => a.startMs - b.startMs);
-}
-
-function phaseForStartTime(phases, startTime) {
-	if (!Array.isArray(phases) || typeof startTime !== 'number') {
-		return undefined;
-	}
-	let matched;
-	for (const phase of phases) {
-		const endMs = typeof phase.endMs === 'number' ? phase.endMs : Infinity;
-		if (startTime >= phase.startMs && startTime < endMs) {
-			matched = phase.name;
-		}
-	}
-	return matched;
+	return normalizeSharedBrowserProfileTimings(profile, { ...options, normalizeUrl });
 }
 
 /**
@@ -308,9 +131,9 @@ function phaseForStartTime(phases, startTime) {
  * delta between the explicit `request.start` and `shutdown` events when
  * present).
  *
- * @param {object[]} rows
- * @param {object} [options]
- * @returns {object[]}
+ * @param {Object[]} rows
+ * @param {Object}   [options]
+ * @return {Object[]} Per-request WordPress profiler summaries.
  */
 function summarizeWordPressProfilerRows(rows, options = {}) {
 	if (!Array.isArray(rows)) {
@@ -411,11 +234,11 @@ function summarizeWordPressProfilerRows(rows, options = {}) {
  * the canonical "transport / bootstrap overhead" signal called out in
  * Extra-Chill/homeboy-extensions#451.
  *
- * @param {object} input
- * @param {object[]} input.browserTimings
- * @param {object[]} input.wordpressProfilerRows
- * @param {object} [options]
- * @returns {object}
+ * @param {Object}   input
+ * @param {Object[]} input.browserTimings
+ * @param {Object[]} input.wordpressProfilerRows
+ * @param {Object}   [options]
+ * @return {Object} Browser and WordPress timing correlation result.
  */
 function correlateBrowserAndWordPressTimings(input, options = {}) {
 	if (!input || typeof input !== 'object') {

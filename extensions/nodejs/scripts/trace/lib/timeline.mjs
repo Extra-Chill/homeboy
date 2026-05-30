@@ -2,9 +2,12 @@ import { mkdir, appendFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { artifactPath, artifactRelativePath, writeArtifact as writeArtifactFile } from './artifacts.mjs';
-
-const VALID_ASSERTION_STATUSES = new Set(['pass', 'fail', 'skip', 'unknown']);
-const VALID_ENVELOPE_STATUSES = new Set(['pass', 'fail', 'error', 'skip', 'unknown']);
+import {
+    normalizeBrowserArtifact,
+    normalizeTraceAssertion,
+    normalizeTraceEnvelope,
+    normalizeTraceEvent,
+} from '../../../../scripts/lib/browser-result-shapes.mjs';
 
 export class TraceRecorder {
     constructor(options = {}) {
@@ -23,12 +26,7 @@ export class TraceRecorder {
     }
 
     async recordEvent(source, event, data = {}) {
-        const entry = {
-            t_ms: this.timestampMs(),
-            source: source || 'scenario',
-            event,
-            data: data && typeof data === 'object' && !Array.isArray(data) ? data : { value: data },
-        };
+        const entry = normalizeTraceEvent(source || 'scenario', event, data, this.timestampMs());
 
         this.timeline.push(entry);
         await mkdir(dirname(this.timelinePath), { recursive: true });
@@ -38,9 +36,7 @@ export class TraceRecorder {
     }
 
     recordAssertion(id, status, message, data = undefined) {
-        const normalizedStatus = VALID_ASSERTION_STATUSES.has(status) ? status : 'unknown';
-        const assertion = { id, status: normalizedStatus, message };
-        if (data !== undefined) assertion.data = data;
+        const assertion = normalizeTraceAssertion(id, status, message, data);
         this.assertions.push(assertion);
         return assertion;
     }
@@ -50,8 +46,7 @@ export class TraceRecorder {
     }
 
     addArtifact(label, path, kind = undefined) {
-        const artifact = { label, path: artifactRelativePath(path) };
-        if (kind) artifact.kind = kind;
+        const artifact = normalizeBrowserArtifact({ label, path: artifactRelativePath(path), kind });
 
         if (!this.artifacts.some((existing) => existing.label === artifact.label && existing.path === artifact.path)) {
             this.artifacts.push(artifact);
@@ -70,8 +65,8 @@ export class TraceRecorder {
             throw new Error('HOMEBOY_TRACE_RESULTS_FILE is required to write trace results');
         }
 
-        const status = VALID_ENVELOPE_STATUSES.has(options.status) ? options.status : deriveStatus(this.assertions);
-        const envelope = {
+        const status = options.status || deriveStatus(this.assertions);
+        const envelope = normalizeTraceEnvelope({
             component_id: this.componentId,
             scenario_id: this.scenarioId,
             status,
@@ -79,9 +74,8 @@ export class TraceRecorder {
             timeline: this.timeline,
             assertions: this.assertions,
             artifacts: this.artifacts,
-        };
-
-        if (options.failure) envelope.failure = options.failure;
+            failure: options.failure,
+        });
 
         await mkdir(dirname(this.resultsFile), { recursive: true });
         await writeFile(this.resultsFile, JSON.stringify(envelope, null, 2));
