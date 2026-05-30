@@ -6,11 +6,11 @@ Remove or inspect reconstructable artifacts that Homeboy can safely recreate.
 
 Scans the current repository and its managed Git worktrees for declared artifact paths. The command defaults to dry-run JSON output and only removes files when `--apply` is passed.
 
-Built-in artifact paths:
+Built-in artifact names:
 
-- `target/` for Rust build output
-- `node_modules/` for Node dependencies
-- `dist/` for generated distribution output
+- `target` for Rust build output
+- `node_modules` for Node dependencies
+- `dist` for generated distribution output
 
 Projects can add repo-relative paths with `artifact_cleanup_paths` in `homeboy.json`.
 
