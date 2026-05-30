@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.208.0] - 2026-05-30
+
+### Added
+- add npm dependency provider
+
+### Changed
+- keep npm dependency provider isolated
+
+### Fixed
+- align npm provider with dependency update options
+- keep npm provider tests on current stack edge shape
+
 ## [0.207.0] - 2026-05-30
 
 ### Added
