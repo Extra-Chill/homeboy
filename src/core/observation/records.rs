@@ -122,12 +122,12 @@ impl NewFindingRecord {
             run_id: run_id.into(),
             tool: finding.tool,
             rule: finding.rule,
-            file: finding.file,
-            line: finding.line,
+            file: finding.location.file,
+            line: finding.location.line,
             severity: finding.severity,
             fingerprint: finding.fingerprint,
             message: finding.message,
-            fixable: finding.fixable,
+            fixable: finding.fix.fixable,
             metadata_json,
         }
     }
@@ -183,11 +183,11 @@ pub fn homeboy_finding_from_lint(finding: &LintFinding) -> HomeboyFinding {
     .raw(finding)
     .build();
     normalized.rule = lint_extra_string(finding, "rule").or_else(|| Some(finding.category.clone()));
-    normalized.file = finding.file.clone();
-    normalized.line = lint_extra_i64(finding, "line");
-    normalized.column = lint_extra_i64(finding, "column");
+    normalized.location.file = finding.file.clone();
+    normalized.location.line = lint_extra_i64(finding, "line");
+    normalized.location.column = lint_extra_i64(finding, "column");
     normalized.severity = finding.severity.clone();
-    normalized.fixable = lint_extra_bool(finding, "fixable");
+    normalized.fix.fixable = lint_extra_bool(finding, "fixable");
     normalized
 }
 
@@ -350,11 +350,11 @@ pub fn homeboy_finding_from_annotation(
         .raw(annotation)
         .build();
     normalized.rule = annotation.code.clone();
-    normalized.file = annotation.file.clone();
-    normalized.line = annotation.line;
+    normalized.location.file = annotation.file.clone();
+    normalized.location.line = annotation.line;
     normalized.severity = annotation.severity.clone();
     normalized.fingerprint = annotation_fingerprint(annotation);
-    normalized.fixable = annotation.fixable;
+    normalized.fix.fixable = annotation.fixable;
     normalized
 }
 

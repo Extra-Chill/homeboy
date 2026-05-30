@@ -17,17 +17,13 @@ pub struct HomeboyFinding {
     pub category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub column: Option<i64>,
+    #[serde(flatten)]
+    pub location: FindingLocation,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fixable: Option<bool>,
+    #[serde(flatten)]
+    pub fix: FindingFix,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer: Option<FindingProducer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,7 +42,7 @@ impl HomeboyFinding {
     pub fn metadata_json(&self) -> Value {
         let mut metadata = self.metadata.clone();
         insert_option(&mut metadata, "category", self.category.clone());
-        insert_option(&mut metadata, "column", self.column);
+        insert_option(&mut metadata, "column", self.location.column);
         insert_option_value(&mut metadata, "producer", &self.producer);
         insert_option_value(&mut metadata, "source", &self.source);
         if let Some(raw) = &self.raw {
@@ -54,6 +50,22 @@ impl HomeboyFinding {
         }
         Value::Object(metadata)
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FindingLocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FindingFix {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,12 +139,10 @@ impl HomeboyFindingBuilder {
                 rule: None,
                 category: None,
                 severity: None,
-                file: None,
-                line: None,
-                column: None,
+                location: FindingLocation::default(),
                 message: message.into(),
                 fingerprint: None,
-                fixable: None,
+                fix: FindingFix::default(),
                 producer: None,
                 source: None,
                 metadata: Map::new(),
@@ -157,17 +167,17 @@ impl HomeboyFindingBuilder {
     }
 
     pub fn file(mut self, file: impl Into<String>) -> Self {
-        self.finding.file = Some(file.into());
+        self.finding.location.file = Some(file.into());
         self
     }
 
     pub fn line(mut self, line: impl Into<i64>) -> Self {
-        self.finding.line = Some(line.into());
+        self.finding.location.line = Some(line.into());
         self
     }
 
     pub fn column(mut self, column: impl Into<i64>) -> Self {
-        self.finding.column = Some(column.into());
+        self.finding.location.column = Some(column.into());
         self
     }
 
@@ -177,7 +187,7 @@ impl HomeboyFindingBuilder {
     }
 
     pub fn fixable(mut self, fixable: bool) -> Self {
-        self.finding.fixable = Some(fixable);
+        self.finding.fix.fixable = Some(fixable);
         self
     }
 
@@ -250,7 +260,7 @@ mod tests {
             .build();
 
         assert_eq!(finding.category.as_deref(), Some("security"));
-        assert_eq!(finding.column, Some(8));
+        assert_eq!(finding.location.column, Some(8));
         assert_eq!(
             finding.metadata_json()["source"]["path"],
             "lint-findings.json"
