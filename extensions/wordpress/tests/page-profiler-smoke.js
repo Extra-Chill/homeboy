@@ -6,6 +6,9 @@
  * External dependencies
  */
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 /**
  * Internal dependencies
@@ -537,6 +540,16 @@ const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, k
 	assert.equal(skippedGateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.late_rest_count').status, 'skipped');
 	assert.match(formatWordPressPerformanceGateReport(skippedGateRecommendations), /Skipped gates/);
 
+function writeJson(filePath, value) {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function writeJsonl(filePath, rows) {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`);
+}
+
 async function main() {
 	const actionPage = new FakePage(resources);
 	const actionEvidence = await runBrowserActions(actionPage, [
@@ -620,6 +633,66 @@ async function main() {
 	assert.equal(sweepSummary.pages[0].id, 'failed-admin-page');
 	assert.match(formatWordPressAdminPageSweepMarkdownReport(sweepSummary), /WordPress admin page sweep/);
 	assert.match(formatWordPressAdminPageSweepMarkdownReport(sweepSummary), /Slowest REST requests/);
+
+	const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-browser-profile-'));
+	try {
+		const browserDirectory = path.join(artifactRoot, 'files', 'browser');
+		writeJson(path.join(browserDirectory, 'summary.json'), {
+			schema: 'wp-codebox/browser-probe/v1',
+			requestedUrl: 'https://example.test/wp-admin/site-editor.php',
+			finalUrl: 'https://example.test/wp-admin/site-editor.php',
+			waitFor: 'selector:.edit-site',
+			startedAt: '2026-01-01T00:00:00.000Z',
+			finishedAt: '2026-01-01T00:00:01.250Z',
+			summary: {
+				networkEvents: 3,
+				performance: { resources: 3, longTasks: 1 },
+			},
+		});
+		writeJson(path.join(browserDirectory, 'performance.json'), {
+			schema: 'wp-codebox/browser-performance/v1',
+			final: {
+				resources: { count: 3, transferSizeBytes: 4096 },
+				longTasks: { count: 1, totalDurationMs: 55 },
+				dom: { nodes: 99, iframes: 1 },
+			},
+			peak: { resources: 3, transferSizeBytes: 4096, longTasks: 1, longTaskDurationMs: 55 },
+		});
+		writeJsonl(path.join(browserDirectory, 'network.jsonl'), [
+			{ type: 'response', url: 'https://example.test/wp-admin/site-editor.php', method: 'GET', resourceType: 'document', status: 200, timestamp: '2026-01-01T00:00:00.100Z' },
+			{ type: 'response', url: 'https://example.test/wp-json/wp/v2/templates?context=edit', method: 'GET', resourceType: 'fetch', status: 200, contentType: 'application/json', timestamp: '2026-01-01T00:00:00.650Z' },
+			{ type: 'response', url: 'https://example.test/wp-content/themes/theme/style.css', method: 'GET', resourceType: 'stylesheet', status: 200, timestamp: '2026-01-01T00:00:00.300Z' },
+		]);
+		writeJson(path.join(browserDirectory, 'action-summary.json'), {
+			schema: 'wp-codebox/browser-actions/v1',
+			startedAt: '2026-01-01T00:00:01.250Z',
+			finishedAt: '2026-01-01T00:00:01.500Z',
+			finalUrl: 'https://example.test/wp-admin/site-editor.php',
+		});
+		writeJsonl(path.join(browserDirectory, 'actions.jsonl'), [
+			{ index: 0, action: { type: 'click', selector: '.edit-site-sidebar__panel-tab' }, status: 'ok' },
+		]);
+
+		const artifactProfile = await profileWordPressPage({
+			baseUrl: 'https://example.test',
+			spec: { id: 'site-editor-root', path: '/wp-admin/site-editor.php', ready: '.edit-site' },
+			wpCodeboxArtifactsDirectory: artifactRoot,
+			wordpressProfilerRows: [
+				{ event: 'request.start', request_id: 'r2', method: 'GET', uri: '/wp-json/wp/v2/templates?context=edit', t_ms: 0 },
+				{ event: 'shutdown', request_id: 'r2', method: 'GET', uri: '/wp-json/wp/v2/templates?context=edit', t_ms: 45 },
+			],
+		});
+		assert.equal(artifactProfile.wpCodebox.artifactBacked, true);
+		assert.equal(artifactProfile.status, 200);
+		assert.equal(artifactProfile.readyMs, 1250);
+		assert.equal(artifactProfile.resources.restCount, 1);
+		assert.equal(artifactProfile.restWaterfall.counts.network, 1);
+		assert.equal(artifactProfile.interactions.actions[0].status, 'passed');
+		assert.equal(artifactProfile.browserMetrics.browser_resource_count, 3);
+		assert.match(artifactProfile.wpCodebox.upstreamGaps[0], /network\.jsonl/);
+	} finally {
+		fs.rmSync(artifactRoot, { recursive: true, force: true });
+	}
 
 	const multiPage = new FakePage(resources);
 	const multi = await profileWordPressPages({
