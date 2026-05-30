@@ -1,24 +1,48 @@
 # Architecture Overview
 
-Homeboy is a development and deployment automation tool built in Rust with a config-driven architecture.
+Homeboy is headless automation for agentic software engineering workflows. It is
+built in Rust with a config-driven, extension-oriented architecture that keeps
+core generic while letting extensions provide platform-specific behavior.
 
 ## Design Principles
 
+### Core Agnostic, Extensions Specific
+
+Homeboy core owns the reusable automation substrate: command routing,
+configuration, scope resolution, structured output, persisted runs, baselines,
+release/evidence workflows, runner offload, daemon/API surfaces, and generic
+audit primitives. It should not encode ecosystem-specific assumptions such as
+Cargo behavior, WP-CLI flows, package-manager semantics, or framework-specific
+audit rules.
+
+Those semantics belong in extensions. The shared implementation lives in
+[Extra-Chill/homeboy-extensions](https://github.com/Extra-Chill/homeboy-extensions),
+and private teams can provide the same contracts through custom extension
+manifests, scripts, hooks, docs, and CLI verbs.
+
 ### Single Source of Truth
 
-Configuration is the authoritative source for all system behavior. No hard-coded project-specific logic. Everything is driven by JSON configuration files in the config directory.
+Configuration is the authoritative source for system behavior. Project- and
+platform-specific logic should be represented as component config, project
+config, or extension contracts rather than hard-coded into core.
 
 ### Local-First
 
-Homeboy runs on your local machine and orchestrates remote operations. It does not run as a remote server service. All state is stored locally in your OS config directory.
+Homeboy is local-first: the normal developer loop runs from a checkout and
+stores configuration under the Homeboy config directory. Remote operations,
+runner offload, and the local daemon/API are optional headless surfaces for CI,
+scheduled automation, and agent workflows; they do not replace the portable
+repo-level `homeboy.json` loop.
 
 ### Extension System
 
-Extensibility through a extension system that allows:
-- Platform-specific behaviors (WordPress, Node.js, Rust)
-- Custom CLI commands
-- Release pipeline actions
-- Documentation topics
+Extensibility through an extension system that allows:
+- Platform-specific behaviors such as Rust, WordPress, Node.js, GitHub,
+  Homebrew, and Swift
+- Custom CLI commands exposed as top-level verbs such as `homeboy wp` and `homeboy cargo`
+- Release pipeline actions, deploy hooks, audit rules, lint/test/build runners,
+  benchmark runners, and trace support
+- Documentation topics embedded alongside extension behavior
 
 ### Configuration-Driven
 
@@ -41,10 +65,14 @@ Centralized configuration system that:
 - Provides helpers for set/merge/remove operations
 
 Config entities:
-- **Projects**: Deployable environments
+- **Components**: Buildable, testable, reviewable units; often declared portably
+  in repo-level `homeboy.json`
+- **Projects**: Deployable environments and server bindings
 - **Servers**: SSH connection settings
-- **Components**: Buildable/deployable units
-- **Extensions**: Extensible behaviors and tools
+- **Fleets**: Named groups of projects for batch inspection and operations
+- **Rigs**: Reproducible local multi-component environments
+- **Stacks**: Combined-fixes branch specifications
+- **Extensions**: Domain-specific behaviors and tools
 
 ### Storage Layer
 
@@ -70,17 +98,18 @@ Variable substitution in templates:
 
 **Location:** `src/core/engine/executor.rs` and `src/core/engine/`
 
-Executes shell commands with:
+Executes local, remote, and extension commands with:
 - Environment variable injection
 - Working directory management
 - Output capture
 - Exit code handling
 
 Supports:
-- Local commands (builds, tests)
-- Remote commands via SSH
+- Local commands such as builds, tests, benchmarks, and review gates
+- Remote commands via SSH for configured projects and fleets
 - Extension runtime execution
-- Extension actions (CLI or API)
+- Extension actions, release hooks, and CLI routing
+- Runner offload for supported hot commands
 
 ### SSH Operations
 
@@ -149,10 +178,11 @@ Changelog operations:
 
 Extension management:
 - Install from git or local path
-- Load manifests
-- Resolve settings
-- Execute runtime and actions
-- Provide CLI commands and docs
+- Load manifests and declared capabilities
+- Resolve settings across component/project scopes and CLI overrides
+- Execute runtime scripts, actions, hooks, and extension-backed pipeline steps
+- Provide CLI commands and docs without changing Homeboy core
+- Declare structured sidecars that downstream agents can inspect as stable contracts
 
 ### Release Pipeline
 

@@ -1,14 +1,20 @@
 # Homeboy
 
-Component-aware automation for developers, CI, and coding agents.
+Headless automation for agentic software engineering workflows.
 
 Homeboy gives every repo and multi-component project the same operational
 surface: check it, review it, test it, benchmark it, trace it, release it, and
-produce structured evidence that humans and AI agents can act on without
-scraping terminal logs.
+produce structured evidence that humans, CI systems, scheduled jobs, and coding
+agents can act on without scraping terminal logs.
 
 It is built for the way modern software work actually happens: many branches,
 many worktrees, many agents, and many projects moving at once.
+
+Homeboy core is intentionally domain-agnostic. The CLI owns orchestration,
+configuration, structured output, persisted runs, baselines, remote execution,
+and release/evidence workflows. Domain-specific behavior lives in extensions:
+Rust, WordPress, Node.js, GitHub, Homebrew, Swift, and future ecosystems plug in
+without teaching core what those platforms mean.
 
 ## What It Is For
 
@@ -18,7 +24,8 @@ development, CI, and agent-driven work:
 - **Local and CI quality gates** — Run `audit`, `lint`, `test`, `build`, and
   `review` through the same component-aware interface.
 - **AI-ready evidence** — Write stable JSON artifacts with `--output` so coding
-  agents can inspect results without parsing human logs.
+  agents can inspect results, make decisions, and hand findings back to humans
+  without parsing terminal logs.
 - **Parallel development loops** — Keep worktrees, changed-file checks,
   baselines, ratchets, PR comments, and review artifacts consistent while many
   fixes are cooking at once.
@@ -28,6 +35,8 @@ development, CI, and agent-driven work:
   local environments and combined-fixes branches.
 - **Release and deploy workflows** — Plan versions, changelogs, tags, publish
   steps, and deploys from component metadata and commit history.
+- **Headless orchestration** — Run the same workflows from a terminal, GitHub
+  Actions, scheduled automation, a local daemon/API, or a connected runner.
 - **Remote and fleet operations** — For configured environments, operate
   projects and server fleets over SSH. This supports server updates and remote
   inspection, but it is an advanced workflow rather than the core local loop.
@@ -35,7 +44,8 @@ development, CI, and agent-driven work:
 ## Mental Model
 
 Homeboy starts with a component and keeps the command model consistent across
-where that component runs.
+where that component runs. Core supplies the generic automation substrate;
+extensions supply ecosystem knowledge.
 
 ```text
                           ┌─────────────────────────────┐
@@ -61,6 +71,19 @@ where that component runs.
 The portable repo-level `homeboy.json` is enough for local checks and CI.
 Global config in `~/.config/homeboy/` adds reusable components, projects,
 servers, fleets, rigs, stacks, and extensions.
+
+```text
+┌────────────────────────────────────────────────────────────────────┐
+│ Homeboy core                                                       │
+│ commands, config, scope resolution, JSON output, runs, runners     │
+└───────────────────────────────┬────────────────────────────────────┘
+                                │ extension contracts
+                                v
+┌────────────────────────────────────────────────────────────────────┐
+│ homeboy-extensions and custom extensions                           │
+│ Rust/Cargo, WordPress/WP-CLI, Node.js, GitHub, Homebrew, Swift      │
+└────────────────────────────────────────────────────────────────────┘
+```
 
 ## Command Families
 
@@ -351,7 +374,10 @@ not required for the local/CI/agent quality loop.
 ## Extensions
 
 Extensions add platform-specific behavior while keeping the Homeboy command
-model consistent.
+model consistent. The shared extension set lives in
+[Extra-Chill/homeboy-extensions](https://github.com/Extra-Chill/homeboy-extensions),
+and private teams can ship their own manifests, scripts, hooks, docs, and CLI
+verbs using the same contracts.
 
 | Extension | What it provides |
 |-----------|------------------|
@@ -369,6 +395,11 @@ homeboy extension list
 
 Installed extensions can expose their own top-level verbs, such as `homeboy wp`
 and `homeboy cargo`.
+
+The important boundary is ownership: Homeboy core should stay generic, while
+extension repositories own domain semantics such as Cargo flags, WP-CLI flows,
+PHPUnit behavior, GitHub release steps, package managers, or framework-specific
+audit rules.
 
 ## Configuration
 

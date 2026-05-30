@@ -2,7 +2,16 @@
 
 This directory contains the markdown docs embedded into the `homeboy` binary and displayed via `homeboy docs`.
 
-Homeboy is a config-driven automation engine for development and deployment automation, with standardized patterns and a stable JSON output envelope for most commands.
+Homeboy is headless automation for agentic software engineering workflows. It
+provides a component-aware CLI, stable JSON output, persisted evidence, and
+runner/daemon surfaces for local developers, CI, scheduled jobs, and coding
+agents.
+
+Core is domain-agnostic. Homeboy owns orchestration, configuration, scope
+resolution, output contracts, persisted runs, runners, and generic workflow
+primitives. Domain-specific behavior belongs in extensions such as the shared
+[homeboy-extensions](https://github.com/Extra-Chill/homeboy-extensions)
+repository.
 
 ## Code Factory
 
