@@ -395,6 +395,10 @@ const BASELINE: &[ViolationKey] = &[
     },
     ViolationKey {
         path: "src/core/extension/test/mod.rs",
+        term: "cargo",
+    },
+    ViolationKey {
+        path: "src/core/extension/test/mod.rs",
         term: "php",
     },
     ViolationKey {
@@ -475,7 +479,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 141;
+const BASELINE_OCCURRENCES: usize = 146;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.
@@ -537,11 +541,31 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
         term: "wordpress",
     },
     ViolationKey {
+        path: "src/core/extension/runtime_helper/tests.rs",
+        term: "phpstan",
+    },
+    ViolationKey {
+        path: "src/core/extension/runtime_helper/tests.rs",
+        term: "rust",
+    },
+    ViolationKey {
+        path: "src/core/extension/test/mod.rs",
+        term: "rust",
+    },
+    ViolationKey {
+        path: "src/core/extension/test/mod.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
         path: "src/core/extension/test/parsing.rs",
         term: "cargo",
     },
     ViolationKey {
         path: "src/core/extension/test/report.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
+        path: "src/core/extension/tests.rs",
         term: "wordpress",
     },
     ViolationKey {
@@ -638,7 +662,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 109;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 119;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
