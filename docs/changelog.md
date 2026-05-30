@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.210.1] - 2026-05-30
+
+### Fixed
+- clarify lint changed-since help
+- resolve registered worktrees from cwd
+- reject unsafe lint autofix signature changes
+
 ## [0.210.0] - 2026-05-30
 
 ### Added
