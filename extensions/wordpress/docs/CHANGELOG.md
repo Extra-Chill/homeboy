@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.105.3] - 2026-05-30
+
+### Changed
+- route fix results through typed sidecars
+- use typed sidecar writer APIs
+
 ## [2.105.2] - 2026-05-30
 
 ### Changed
