@@ -170,7 +170,7 @@ extract_vitest_failure_line() {
 write_node_failure_json() {
     [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] || return 0
     [ -n "$FAILED_TEST_NAME" ] || return 0
-    if ! type homeboy_append_test_failure >/dev/null 2>&1; then
+    if ! type homeboy_sidecar_emit >/dev/null 2>&1; then
         echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
         return 1
     fi
@@ -202,7 +202,7 @@ console.log(JSON.stringify({
 }));
 JS
 )"
-    homeboy_append_test_failure "$FAILURE_JSON"
+    homeboy_sidecar_emit test.failure "$FAILURE_JSON"
 }
 
 # Vitest summary lines look like:

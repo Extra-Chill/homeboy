@@ -892,11 +892,11 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
 
     # Write annotations sidecar JSON for CI inline comments
     if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ] && [ -n "$json_output" ]; then
-        if ! type homeboy_merge_annotations >/dev/null 2>&1; then
+        if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
             echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write annotations" >&2
             exit 1
         fi
-        annotations_tmpfile="$(homeboy_mktemp 'phpstan-annotations.XXXXXX.json')"
+        _PHPSTAN_ANNOTATIONS_TMPFILE=$(homeboy_mktemp 'phpstan-annotations.XXXXXX')
         echo "$json_output" | php -r '
             $json = json_decode(file_get_contents("php://stdin"), true);
             if (!$json || empty($json["files"])) exit;
@@ -919,12 +919,13 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                     ];
                 }
             }
-            if (!empty($annotations)) {
-                file_put_contents($argv[3], json_encode($annotations, JSON_PRETTY_PRINT) . "\n");
+            $outputFile = $argv[3] ?? "";
+            if ($outputFile && !empty($annotations)) {
+                file_put_contents($outputFile, json_encode($annotations, JSON_UNESCAPED_SLASHES) . "\n");
             }
-        ' "$PLUGIN_PATH" "$PHPSTAN_LEVEL" "$annotations_tmpfile" 2>/dev/null || true
-        homeboy_merge_annotations phpstan "$annotations_tmpfile"
-        rm -f "$annotations_tmpfile"
+        ' "$PLUGIN_PATH" "$PHPSTAN_LEVEL" "$_PHPSTAN_ANNOTATIONS_TMPFILE" 2>/dev/null || true
+        homeboy_sidecar_merge annotation.phpstan "$_PHPSTAN_ANNOTATIONS_TMPFILE"
+        rm -f "$_PHPSTAN_ANNOTATIONS_TMPFILE"
     fi
 
     # Write PHPStan lint findings sidecar for homeboy baseline ratchet.

@@ -57,7 +57,7 @@ write_lint_findings_from_output() {
         return 0
     fi
 
-    if ! type homeboy_merge_lint_findings >/dev/null 2>&1; then
+    if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
         echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
         return 1
     fi
@@ -158,7 +158,7 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(findings, handle, indent=2)
     handle.write("\n")
 PY
-    homeboy_merge_lint_findings "$findings_file"
+    homeboy_sidecar_merge lint.findings "$findings_file"
     rm -f "$findings_file"
 }
 
@@ -261,7 +261,7 @@ if should_run_step "fmt"; then
             # Write annotations sidecar for fmt issues
             # Parse "Diff in /path/to/file.rs at line N:" format
             if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
-                if ! type homeboy_merge_annotations >/dev/null 2>&1; then
+                if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
                     echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write annotations" >&2
                     exit 1
                 fi
@@ -283,7 +283,7 @@ if should_run_step "fmt"; then
                         }
                     }
                 ' > "$FMT_ANNOTATIONS_TMP" 2>/dev/null || true
-                homeboy_merge_annotations rustfmt "$FMT_ANNOTATIONS_TMP"
+                homeboy_sidecar_merge annotation.rustfmt "$FMT_ANNOTATIONS_TMP"
                 rm -f "$FMT_ANNOTATIONS_TMP"
             fi
 
@@ -338,7 +338,7 @@ if should_run_step "clippy"; then
     # Write annotations sidecar JSON for CI inline comments
     # Parse clippy's "warning: message\n  --> file:line:col" format
     if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
-        if ! type homeboy_merge_annotations >/dev/null 2>&1; then
+        if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
             echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write annotations" >&2
             exit 1
         fi
@@ -378,7 +378,7 @@ if should_run_step "clippy"; then
                 }
             }
         ' > "$CLIPPY_ANNOTATIONS_TMP" 2>/dev/null || true
-        homeboy_merge_annotations clippy "$CLIPPY_ANNOTATIONS_TMP"
+        homeboy_sidecar_merge annotation.clippy "$CLIPPY_ANNOTATIONS_TMP"
         rm -f "$CLIPPY_ANNOTATIONS_TMP"
     fi
 

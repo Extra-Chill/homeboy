@@ -63,7 +63,7 @@ assert_file "$FAILURE_TRAP_HELPER"
 assert_file "$WRITE_TEST_RESULTS_HELPER"
 assert_file "$SIDECAR_WRITER_HELPER"
 assert_file "$PROJECT_SCRIPTS_HELPER"
-bash -c 'source "$1"; type homeboy_merge_lint_findings >/dev/null; type homeboy_merge_test_failures >/dev/null; type homeboy_write_fix_results >/dev/null; type homeboy_merge_annotations >/dev/null' _ "$SIDECAR_WRITER_HELPER"
+bash -c 'source "$1"; type homeboy_sidecar_emit >/dev/null; type homeboy_sidecar_write >/dev/null; type homeboy_sidecar_merge >/dev/null; type homeboy_merge_lint_findings >/dev/null; type homeboy_merge_test_failures >/dev/null; type homeboy_write_fix_results >/dev/null; type homeboy_merge_annotations >/dev/null' _ "$SIDECAR_WRITER_HELPER"
 bash -c 'source "$1"; type homeboy_project_init >/dev/null; type homeboy_project_has_script >/dev/null; type homeboy_project_run_script_command >/dev/null' _ "$PROJECT_SCRIPTS_HELPER"
 for fix_results_helper in "${FIX_RESULTS_HELPERS[@]}"; do
     assert_file "$fix_results_helper"
@@ -113,7 +113,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 ANNOTATIONS_DIR="$TMP_DIR/annotations"
 ANNOTATIONS_SOURCE="$TMP_DIR/extra-annotations.json"
 printf '[{"file":"b.php","line":2}]\n' > "$ANNOTATIONS_SOURCE"
-HOMEBOY_ANNOTATIONS_DIR="$ANNOTATIONS_DIR" bash -c 'source "$1"; homeboy_write_annotations phpcs "{\"file\":\"a.php\",\"line\":1}"; homeboy_merge_annotations phpstan "$2"' _ "$SIDECAR_WRITER_HELPER" "$ANNOTATIONS_SOURCE"
+HOMEBOY_ANNOTATIONS_DIR="$ANNOTATIONS_DIR" bash -c 'source "$1"; homeboy_sidecar_emit annotation.phpcs "{\"file\":\"a.php\",\"line\":1}"; homeboy_merge_annotations phpstan "$2"' _ "$SIDECAR_WRITER_HELPER" "$ANNOTATIONS_SOURCE"
 assert_contains "$ANNOTATIONS_DIR/phpcs.json" '"file":"a.php"'
 assert_contains "$ANNOTATIONS_DIR/phpstan.json" '"file":"b.php"'
 
@@ -165,6 +165,19 @@ if [ "$FAILED_STEP" != "wrapped command" ]; then
     echo "Expected wrapped command capture to set FAILED_STEP" >&2
     exit 1
 fi
+
+SIDECAR_TMP_DIR="$TMP_DIR/sidecars"
+mkdir -p "$SIDECAR_TMP_DIR/annotations"
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
+HOMEBOY_LINT_FINDINGS_FILE="$SIDECAR_TMP_DIR/lint.json" \
+HOMEBOY_TEST_FAILURES_FILE="$SIDECAR_TMP_DIR/test.json" \
+HOMEBOY_FIX_RESULTS_FILE="$SIDECAR_TMP_DIR/fix.json" \
+HOMEBOY_ANNOTATIONS_DIR="$SIDECAR_TMP_DIR/annotations" \
+    bash -c 'source "$HOMEBOY_RUNTIME_SIDECAR_WRITER"; homeboy_sidecar_emit lint.finding "{\"id\":\"lint\"}"; homeboy_sidecar_write test.failures "{\"test_id\":\"test\"}"; homeboy_sidecar_merge fix.results <(printf "[{\"file\":\"fixed.php\"}]\n"); homeboy_sidecar_emit annotation.phpcs "{\"file\":\"plugin.php\",\"line\":1}"'
+assert_contains "$SIDECAR_TMP_DIR/lint.json" '"id":"lint"'
+assert_contains "$SIDECAR_TMP_DIR/test.json" '"test_id":"test"'
+assert_contains "$SIDECAR_TMP_DIR/fix.json" '"file":"fixed.php"'
+assert_contains "$SIDECAR_TMP_DIR/annotations/phpcs.json" '"file":"plugin.php"'
 
 WORDPRESS_OUTPUT="$TMP_DIR/phpunit.txt"
 WORDPRESS_RESULTS="$TMP_DIR/wordpress-results.json"
