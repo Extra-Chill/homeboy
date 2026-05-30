@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.212.0] - 2026-05-30
+
+### Added
+- split apply and publish contracts
+
+### Changed
+- use HomeboyFinding for test failures
+
+### Fixed
+- honor standalone deploy config fallbacks
+- prefer named component worktrees
+- isolate runtime env tests
+
 ## [0.211.0] - 2026-05-30
 
 ### Added
