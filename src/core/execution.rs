@@ -6,9 +6,9 @@
 //! Domain commands and extensions should project their existing output into
 //! these ecosystem-agnostic shapes when they need a shared execution boundary.
 //!
-//! Publishing is intentionally left as a follow-up seam. The first shared layer
-//! models request/run/artifact/apply because those are the common contracts that
-//! runner, refactor, release, and extension workflows already overlap on.
+//! Apply and publish are intentionally separate phases. Apply adapters verify an
+//! approved artifact and mutate a local worktree; publish requests cover durable
+//! externalization such as commit, push, pull request, release, or deploy steps.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,6 +29,24 @@ pub enum ExecutionMode {
     Apply,
     /// Execute the requested workflow directly.
     Execute,
+}
+
+/// Canonical lifecycle phase vocabulary shared by commands and extensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPhase {
+    /// Produce proposed results or change artifacts.
+    Execute,
+    /// Preserve proposed changes with provenance and digest metadata.
+    Artifact,
+    /// Record the exact artifact, run, step, or file scope approved by a human
+    /// or policy gate.
+    Approve,
+    /// Materialize an approved artifact in a local worktree.
+    Apply,
+    /// Commit, push, open a pull request, release, deploy, or otherwise expose
+    /// an applied change outside the local worktree.
+    Publish,
 }
 
 impl ExecutionMode {
@@ -182,6 +200,10 @@ pub enum ApprovalScope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApplyRequest {
     pub id: String,
+    #[serde(default = "apply_phase")]
+    pub phase: ExecutionPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
     pub artifact: ChangeArtifact,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_scope: Option<ApprovalScope>,
@@ -195,10 +217,14 @@ pub struct ApplyResult {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(default = "apply_phase")]
+    pub phase: ExecutionPhase,
     pub status: ExecutionStatus,
     pub applied: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files_changed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preflight_failures: Vec<ApplyPreflightFailure>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ChangeArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -207,6 +233,127 @@ pub struct ApplyResult {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, serde_json::Value>,
+}
+
+/// Contract advertised by an apply adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyAdapterContract {
+    /// Stable adapter id, for example `homeboy/lab-apply-adapter/v1` or
+    /// `homeboy/wp-codebox-apply-adapter/v1`.
+    pub id: String,
+    #[serde(default = "apply_phase")]
+    pub phase: ExecutionPhase,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_types: Vec<String>,
+    pub preflight_policy: ApplyPreflightPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publish_boundaries: Vec<PublishOperation>,
+}
+
+/// Shared safety policy an apply adapter enforces before mutating a worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyPreflightPolicy {
+    pub require_clean_worktree: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_branches: Vec<String>,
+    pub require_approval_coverage: bool,
+    pub require_snapshot_match: bool,
+    pub require_path_confinement: bool,
+    pub require_staged_file_match: bool,
+}
+
+impl Default for ApplyPreflightPolicy {
+    fn default() -> Self {
+        Self {
+            require_clean_worktree: true,
+            protected_branches: vec![
+                "main".to_string(),
+                "master".to_string(),
+                "trunk".to_string(),
+            ],
+            require_approval_coverage: true,
+            require_snapshot_match: true,
+            require_path_confinement: true,
+            require_staged_file_match: true,
+        }
+    }
+}
+
+/// Machine-readable preflight checks shared by Lab and WP Codebox-style apply
+/// adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPreflightCheck {
+    CleanWorktree,
+    ProtectedBranch,
+    ApprovalCoverage,
+    SnapshotDrift,
+    PathConfinement,
+    StagedFileExpectation,
+}
+
+/// Reason an apply request cannot safely mutate the local worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyPreflightFailure {
+    pub check: ApplyPreflightCheck,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<String>,
+}
+
+/// Durable externalization step that happens after apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishOperation {
+    Commit,
+    Push,
+    PullRequest,
+    Release,
+    Deploy,
+}
+
+/// Request to publish an already-applied change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishRequest {
+    pub id: String,
+    #[serde(default = "publish_phase")]
+    pub phase: ExecutionPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_result_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<PublishOperation>,
+    #[serde(flatten)]
+    pub controls: ExecutionControls,
+}
+
+/// Result of publishing an already-applied change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishResult {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default = "publish_phase")]
+    pub phase: ExecutionPhase,
+    pub status: ExecutionStatus,
+    pub published: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<PublishOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+const fn apply_phase() -> ExecutionPhase {
+    ExecutionPhase::Apply
+}
+
+const fn publish_phase() -> ExecutionPhase {
+    ExecutionPhase::Publish
 }
 
 #[cfg(test)]
@@ -296,9 +443,11 @@ mod tests {
         let result = ApplyResult {
             id: "apply-1".to_string(),
             request_id: Some("request-1".to_string()),
+            phase: ExecutionPhase::Apply,
             status: ExecutionStatus::Applied,
             applied: true,
             files_changed: vec!["src/lib.rs".to_string()],
+            preflight_failures: Vec::new(),
             artifacts: Vec::new(),
             warnings: Vec::new(),
             error: None,
@@ -311,6 +460,129 @@ mod tests {
         assert!(parsed.applied);
         assert_eq!(parsed.status, ExecutionStatus::Applied);
         assert_eq!(parsed.files_changed, vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn apply_request_defaults_to_apply_phase_and_names_adapter() {
+        let artifact = patch_artifact();
+        let request = ApplyRequest {
+            id: "apply-request-1".to_string(),
+            phase: ExecutionPhase::Apply,
+            adapter: Some("homeboy/lab-apply-adapter/v1".to_string()),
+            artifact,
+            approval_scope: Some(ApprovalScope::Artifact {
+                artifact_id: "patch-1".to_string(),
+            }),
+            controls: ExecutionControls::default(),
+        };
+
+        let value = serde_json::to_value(&request).expect("serialize request");
+
+        assert_eq!(value["phase"], "apply");
+        assert_eq!(value["adapter"], "homeboy/lab-apply-adapter/v1");
+        assert!(value.get("operations").is_none());
+    }
+
+    #[test]
+    fn publish_request_is_separate_from_apply_request() {
+        let request = PublishRequest {
+            id: "publish-request-1".to_string(),
+            phase: ExecutionPhase::Publish,
+            apply_result_id: Some("apply-1".to_string()),
+            operations: vec![PublishOperation::Commit, PublishOperation::PullRequest],
+            controls: ExecutionControls::default(),
+        };
+
+        let value = serde_json::to_value(&request).expect("serialize publish request");
+
+        assert_eq!(value["phase"], "publish");
+        assert_eq!(value["apply_result_id"], "apply-1");
+        assert_eq!(
+            value["operations"],
+            serde_json::json!(["commit", "pull_request"])
+        );
+        assert!(value.get("artifact").is_none());
+    }
+
+    #[test]
+    fn apply_adapter_contract_documents_wp_codebox_boundaries() {
+        let contract = ApplyAdapterContract {
+            id: "homeboy/wp-codebox-apply-adapter/v1".to_string(),
+            phase: ExecutionPhase::Apply,
+            artifact_types: vec![
+                "wp_codebox.bundle".to_string(),
+                "wp_codebox.file".to_string(),
+            ],
+            preflight_policy: ApplyPreflightPolicy::default(),
+            publish_boundaries: vec![
+                PublishOperation::Commit,
+                PublishOperation::Push,
+                PublishOperation::PullRequest,
+            ],
+        };
+
+        assert_eq!(contract.phase, ExecutionPhase::Apply);
+        assert!(contract.preflight_policy.require_clean_worktree);
+        assert!(contract.preflight_policy.require_approval_coverage);
+        assert!(contract.preflight_policy.require_snapshot_match);
+        assert_eq!(contract.publish_boundaries[0], PublishOperation::Commit);
+    }
+
+    #[test]
+    fn apply_result_reports_core_preflight_failures() {
+        let result = ApplyResult {
+            id: "apply-1".to_string(),
+            request_id: Some("request-1".to_string()),
+            phase: ExecutionPhase::Apply,
+            status: ExecutionStatus::Failed,
+            applied: false,
+            files_changed: Vec::new(),
+            preflight_failures: vec![
+                ApplyPreflightFailure {
+                    check: ApplyPreflightCheck::CleanWorktree,
+                    reason: "worktree has uncommitted changes".to_string(),
+                    subject: Some("/repo".to_string()),
+                    details: vec!["M src/lib.rs".to_string()],
+                },
+                ApplyPreflightFailure {
+                    check: ApplyPreflightCheck::ProtectedBranch,
+                    reason: "refusing to apply directly on protected branch".to_string(),
+                    subject: Some("main".to_string()),
+                    details: Vec::new(),
+                },
+                ApplyPreflightFailure {
+                    check: ApplyPreflightCheck::ApprovalCoverage,
+                    reason: "approval does not cover every artifact file".to_string(),
+                    subject: Some("patch-1".to_string()),
+                    details: vec!["missing src/other.rs".to_string()],
+                },
+                ApplyPreflightFailure {
+                    check: ApplyPreflightCheck::SnapshotDrift,
+                    reason: "source snapshot hash changed".to_string(),
+                    subject: Some("snapshot".to_string()),
+                    details: vec!["expected abc, current def".to_string()],
+                },
+            ],
+            artifacts: Vec::new(),
+            warnings: Vec::new(),
+            error: Some("apply preflight failed".to_string()),
+            metadata: HashMap::new(),
+        };
+
+        let parsed: ApplyResult =
+            serde_json::from_value(serde_json::to_value(&result).expect("serialize apply result"))
+                .expect("parse apply result");
+
+        assert!(!parsed.applied);
+        assert_eq!(parsed.preflight_failures.len(), 4);
+        assert_eq!(
+            parsed.preflight_failures[0].check,
+            ApplyPreflightCheck::CleanWorktree
+        );
+        assert_eq!(
+            parsed.preflight_failures[3].check,
+            ApplyPreflightCheck::SnapshotDrift
+        );
     }
 
     #[test]
@@ -356,5 +628,28 @@ mod tests {
         );
         assert_eq!(execution.artifacts[0].provenance.source, "release");
         assert_eq!(execution.warnings, vec!["signed artifact missing"]);
+    }
+
+    fn patch_artifact() -> ChangeArtifact {
+        ChangeArtifact {
+            id: "patch-1".to_string(),
+            artifact_type: "lab.patch.unified_diff".to_string(),
+            provenance: ChangeArtifactProvenance {
+                source: "runner.workspace.apply".to_string(),
+                run_id: Some("run-1".to_string()),
+                step_id: Some("capture".to_string()),
+                command: Some("homeboy runner workspace apply".to_string()),
+                captured_at: Some("2026-05-30T00:00:00Z".to_string()),
+            },
+            title: Some("Lab patch".to_string()),
+            summary: Some("One file would change".to_string()),
+            path: Some("artifacts/lab.patch".to_string()),
+            files: vec!["src/lib.rs".to_string()],
+            diff: None,
+            approval_scope: Some(ApprovalScope::Artifact {
+                artifact_id: "patch-1".to_string(),
+            }),
+            metadata: HashMap::new(),
+        }
     }
 }
