@@ -761,6 +761,7 @@ fn exec(
             raw_exec: true,
             source_snapshot: None,
             capability_preflight: None,
+            required_extensions: Vec::new(),
         },
     )
 }

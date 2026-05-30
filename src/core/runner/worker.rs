@@ -82,6 +82,7 @@ pub fn run_reverse_worker(
             raw_exec: false,
             source_snapshot: claim.request.source_snapshot.clone(),
             capability_preflight: None,
+            required_extensions: Vec::new(),
         },
     )?;
     let job = finish_job(

@@ -27,6 +27,7 @@ pub fn preflight(
                 raw_exec: false,
                 source_snapshot: None,
                 capability_preflight: None,
+                required_extensions: Vec::new(),
             },
         )?;
 
