@@ -123,15 +123,13 @@ pub(super) fn prepare_component_deploy(
     let artifact_path = if is_git_deploy {
         None
     } else if is_file_deploy {
-        if let Err(result) = validate_preflight_file_artifact(
+        validate_preflight_file_artifact(
             component,
             base_path,
             build_exit_code,
             local_version.clone(),
             remote_version.clone(),
-        ) {
-            return Err(result);
-        }
+        )?;
         None
     } else {
         match resolve_preflight_artifact_path(
@@ -154,7 +152,7 @@ pub(super) fn prepare_component_deploy(
 
     Ok(PreparedComponentDeploy {
         component: component.clone(),
-        config: clone_config(config),
+        config: config.clone(),
         install_dir,
         local_version,
         remote_version,
@@ -199,24 +197,6 @@ pub(super) fn execute_preflighted_component_deploy(
     }
 
     execute_artifact_deploy(prepared, ctx, base_path, project)
-}
-
-fn clone_config(config: &DeployConfig) -> DeployConfig {
-    DeployConfig {
-        component_ids: config.component_ids.clone(),
-        all: config.all,
-        outdated: config.outdated,
-        behind_upstream: config.behind_upstream,
-        dry_run: config.dry_run,
-        check: config.check,
-        force: config.force,
-        skip_build: config.skip_build,
-        keep_deps: config.keep_deps,
-        expected_version: config.expected_version.clone(),
-        no_pull: config.no_pull,
-        head: config.head,
-        tagged: config.tagged,
-    }
 }
 
 fn should_try_download_release_artifact(
@@ -453,6 +433,18 @@ fn failed_file_deploy_result(
     )
 }
 
+fn failed_preflight_file_artifact_result(
+    component: &Component,
+    base_path: &str,
+    build_exit_code: Option<i32>,
+    local_version: Option<String>,
+    remote_version: Option<String>,
+    error: String,
+) -> ComponentDeployResult {
+    ComponentDeployResult::failed(component, base_path, local_version, remote_version, error)
+        .with_build_exit_code(build_exit_code)
+}
+
 fn validate_preflight_file_artifact(
     component: &Component,
     base_path: &str,
@@ -463,28 +455,28 @@ fn validate_preflight_file_artifact(
     let local_path = Path::new(&component.local_path);
 
     if !local_path.exists() {
-        return Err(ComponentDeployResult::failed(
+        return Err(failed_preflight_file_artifact_result(
             component,
             base_path,
+            build_exit_code,
             local_version,
             remote_version,
             format!("Source file does not exist: {}", component.local_path),
-        )
-        .with_build_exit_code(build_exit_code));
+        ));
     }
 
     if !local_path.is_file() {
-        return Err(ComponentDeployResult::failed(
+        return Err(failed_preflight_file_artifact_result(
             component,
             base_path,
+            build_exit_code,
             local_version,
             remote_version,
             format!(
                 "Component '{}' has deploy_strategy 'file' but local_path is not a file: {}",
                 component.id, component.local_path
             ),
-        )
-        .with_build_exit_code(build_exit_code));
+        ));
     }
 
     Ok(())

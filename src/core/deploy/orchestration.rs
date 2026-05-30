@@ -246,7 +246,7 @@ fn prepare_component_deployments(
 
     for component in components {
         let component = crate::core::project::apply_component_overrides(component, project);
-        let effective_config = clone_config(config);
+        let effective_config = config.clone();
 
         match prepare_component_deploy(
             &component,
@@ -758,25 +758,6 @@ fn check_unreleased_commits(
             "Use `deploy --force` to deploy the stale tag anyway".to_string(),
         ]),
     ))
-}
-
-/// Create a value copy of DeployConfig for per-component overrides.
-fn clone_config(config: &DeployConfig) -> DeployConfig {
-    DeployConfig {
-        component_ids: config.component_ids.clone(),
-        all: config.all,
-        outdated: config.outdated,
-        behind_upstream: config.behind_upstream,
-        dry_run: config.dry_run,
-        check: config.check,
-        force: config.force,
-        skip_build: config.skip_build,
-        keep_deps: config.keep_deps,
-        expected_version: config.expected_version.clone(),
-        no_pull: config.no_pull,
-        head: config.head,
-        tagged: config.tagged,
-    }
 }
 
 /// Verify that component versions match the expected version.

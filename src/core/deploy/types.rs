@@ -40,6 +40,7 @@ impl DeployResult {
     }
 }
 
+#[derive(Clone)]
 pub struct DeployConfig {
     pub component_ids: Vec<String>,
     pub all: bool,
