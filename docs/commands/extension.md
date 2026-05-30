@@ -205,9 +205,9 @@ Extension entry (`extensions[]`):
 - `runtime`: `executable` (has runtime config) or `platform` (no runtime config)
 - `compatible` (with optional `--project`)
 - `ready` (runtime readiness based on `ready_check`)
-- `configured`: currently always `true` for discovered extensions (reserved for future richer config state)
 - `linked`: whether the extension is symlinked
 - `path`: extension directory path (may be empty if unknown)
+- Optional fields include `ready_reason`, `ready_detail`, `error`, `symlink_target`, `source_revision`, `cli_tool`, `cli_display_name`, `actions`, `has_setup`, and `has_ready_check`.
 
 Extension detail (`extension.show`):
 

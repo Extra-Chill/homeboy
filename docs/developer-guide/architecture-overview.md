@@ -83,8 +83,6 @@ File-based storage for configurations:
 - Handles atomic operations for safety
 - Cross-platform paths (macOS, Linux, Windows)
 
-**Future:** Storage abstraction trait for database backends (see `storage-system-decoupling-plan.md`)
-
 ### Template System
 
 **Location:** `src/core/engine/template.rs`

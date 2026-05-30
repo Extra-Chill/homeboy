@@ -96,8 +96,12 @@ homeboy fleet remove production --project old-site
 ### Check Fleet Status
 
 ```bash
-# Local version info
+# Live version and health info via SSH
 homeboy fleet status production
+homeboy fleet status production --health-only
+
+# Cached version info
+homeboy fleet status production --cached
 
 # Drift detection (compares local vs remote via SSH)
 homeboy fleet check production
