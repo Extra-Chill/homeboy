@@ -59,21 +59,15 @@ pub(super) fn execute_plan_steps(
         publish_failed: false,
     };
 
-    for step in steps {
-        if skip_step_ids.contains(step.id.as_str()) {
-            continue;
-        }
+    let run = crate::core::execution::execute_plan_steps_filtered(
+        steps,
+        |step| skip_step_ids.contains(step.id.as_str()),
+        |step| execute_release_plan_step(step, &mut context),
+        release_step_is_show_stopper,
+    )?;
+    results.extend(run.results);
 
-        if let Some(result) = execute_release_plan_step(step, &mut context)? {
-            let should_stop = release_step_is_show_stopper(&result);
-            results.push(result);
-            if should_stop {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
+    Ok(run.stopped)
 }
 
 fn initial_release_state(
