@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.19.3] - 2026-05-30
+
+### Fixed
+- Fix Rust runner step fallback
+
 ## [1.19.2] - 2026-05-30
 
 ### Changed
