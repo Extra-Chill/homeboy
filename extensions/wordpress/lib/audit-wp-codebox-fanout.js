@@ -17,6 +17,8 @@ const {
   ADAPTER_ID,
   loadWpCodeboxArtifactBundle,
   verifyWpCodeboxPayload,
+  wpCodeboxApplyRequestFromBundle,
+  wpCodeboxChangeArtifactFromBundle,
 } = require('./wp-codebox-apply-adapter');
 
 const PLAN_SCHEMA = 'homeboy/audit-wp-codebox-fanout/v1';
@@ -429,6 +431,27 @@ function createApplyBackMetadata(taskRequest, artifactEntry, options) {
   const branch = artifactEntry.branch || `${options.branch_prefix || 'fix/homeboy-audit'}/${safeBranchSlug(taskRequest.group_key)}`;
   const title = artifactEntry.pr_title || `Fix Homeboy audit finding ${taskRequest.group_key}`;
   const issueUrl = options.issue_url || taskRequest.orchestrator.issue_url || '';
+  const changeArtifact = wpCodeboxChangeArtifactFromBundle(bundle, {
+    runId: taskRequest.orchestrator?.run_id,
+    stepId: taskRequest.sandbox_session_id,
+    title,
+    summary: `WP Codebox patch for Homeboy audit finding ${taskRequest.group_key}.`,
+  });
+  const applyRequest = wpCodeboxApplyRequestFromBundle({
+    id: `apply-request-${verified.artifactId}`,
+    bundle,
+    approvedFiles,
+    branch,
+    commitMessage: artifactEntry.commit_message || title,
+    patchStrip: artifactEntry.patch_strip,
+    push: false,
+    openPullRequest: false,
+    prBase: artifactEntry.base || options.base || 'main',
+    runId: taskRequest.orchestrator?.run_id,
+    stepId: taskRequest.sandbox_session_id,
+    title,
+    summary: `WP Codebox patch for Homeboy audit finding ${taskRequest.group_key}.`,
+  });
 
   return {
     schema: 'homeboy/wp-codebox-apply-back/v1',
@@ -444,6 +467,8 @@ function createApplyBackMetadata(taskRequest, artifactEntry, options) {
       review: bundle.review,
       changed_files: bundle.changed_files,
     },
+    change_artifact: changeArtifact,
+    apply_request: applyRequest,
     review: {
       approved: artifactEntry.approved !== false,
       approved_files: approvedFiles,

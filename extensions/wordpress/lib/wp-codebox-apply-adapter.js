@@ -1,5 +1,8 @@
 'use strict';
 
+/**
+ * External dependencies
+ */
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -7,6 +10,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ADAPTER_ID = 'homeboy/wp-codebox-apply-adapter/v1';
+const APPLY_RESULT_SCHEMA = 'homeboy/apply-result/v1';
 const CONTENT_DIGEST_PREFIX = 'wp-codebox/artifact-content/v1\nfiles/changed-files.json\n';
 const CONTENT_DIGEST_SEPARATOR = '\nfiles/patch.diff\n';
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'trunk', 'develop']);
@@ -80,7 +84,114 @@ function loadWpCodeboxArtifactBundle(bundlePath) {
   };
 }
 
+function wpCodeboxChangeArtifactFromBundle(bundle, options = {}) {
+  const contentDigest = artifactContentDigest(bundle.changedFilesJson, bundle.patch);
+  const patchSha256 = sha256(bundle.patch);
+  const artifactId = bundle.id || `artifact-bundle-sha256-${contentDigest}`;
+
+  return {
+    id: artifactId,
+    type: 'wp_codebox_patch',
+    provenance: {
+      source: 'wp-codebox',
+      ...(options.runId ? { run_id: options.runId } : {}),
+      ...(options.stepId ? { step_id: options.stepId } : {}),
+      ...(options.command ? { command: options.command } : {}),
+      ...(bundle.manifest?.createdAt ? { captured_at: bundle.manifest.createdAt } : {}),
+    },
+    title: options.title || `WP Codebox artifact ${artifactId}`,
+    summary: options.summary || 'Approved WP Codebox patch artifact.',
+    path: bundle.directory,
+    files: changedFilePaths(bundle.changed_files),
+    approval_scope: {
+      scope: 'artifact',
+      artifact_id: artifactId,
+    },
+    metadata: {
+      wp_codebox: {
+        bundle_path: bundle.directory,
+        content_digest: contentDigest,
+        patch_sha256: patchSha256,
+        review: bundle.review,
+        changed_files: bundle.changed_files,
+      },
+    },
+  };
+}
+
+function wpCodeboxApplyRequestFromBundle(options) {
+  const bundle = options.bundle || loadWpCodeboxArtifactBundle(options.bundlePath);
+  const artifact = wpCodeboxChangeArtifactFromBundle(bundle, options);
+  const wpCodeboxMetadata = artifact.metadata.wp_codebox;
+  const approvedFiles = options.approvedFiles || options.approved_files || [];
+
+  return {
+    id: options.id || `apply-request-${artifact.id}`,
+    artifact,
+    approval_scope: artifact.approval_scope,
+    inputs: {
+      bundlePath: bundle.directory,
+      ...(options.worktreePath ? { worktreePath: options.worktreePath } : {}),
+      ...(options.branch ? { branch: options.branch } : {}),
+      ...(options.commitMessage ? { commitMessage: options.commitMessage } : {}),
+      ...(Number.isInteger(options.patchStrip) ? { patchStrip: options.patchStrip } : {}),
+    },
+    policy: {
+      approved_files: approvedFiles,
+      content_digest: wpCodeboxMetadata.content_digest,
+      patch_sha256: wpCodeboxMetadata.patch_sha256,
+      publish: {
+        push: Boolean(options.push),
+        open_pull_request: Boolean(options.openPullRequest),
+        ...(options.prBase ? { base: options.prBase } : {}),
+        ...(options.remote ? { remote: options.remote } : {}),
+      },
+    },
+  };
+}
+
+function normalizeApplyRequest(input) {
+  if (input.applyRequest && typeof input.applyRequest === 'object') {
+    return input.applyRequest;
+  }
+  if (input.artifact && input.id) {
+    return input;
+  }
+  return null;
+}
+
 function normalizePayload(input) {
+  const applyRequest = normalizeApplyRequest(input);
+  if (applyRequest) {
+    const artifact = applyRequest.artifact || {};
+    const controls = {
+      inputs: applyRequest.inputs || {},
+      policy: applyRequest.policy || {},
+    };
+    const wpCodeboxMetadata = artifact.metadata?.wp_codebox || {};
+    const bundlePath = controls.inputs.bundlePath || controls.inputs.bundle_path || wpCodeboxMetadata.bundle_path || artifact.path;
+    const bundle = bundlePath ? loadWpCodeboxArtifactBundle(bundlePath) : null;
+    const changedFilesJson = bundle?.changedFilesJson || JSON.stringify(wpCodeboxMetadata.changed_files || {}, null, 2) + '\n';
+    const patch = artifact.diff || bundle?.patch;
+
+    return {
+      artifact_id: artifact.id,
+      artifact: bundle || {
+        id: artifact.id,
+        changed_files: wpCodeboxMetadata.changed_files || {},
+        changedFilesJson,
+        review: wpCodeboxMetadata.review || {},
+      },
+      approved_files: controls.policy.approved_files || controls.inputs.approvedFiles || controls.inputs.approved_files || [],
+      patch,
+      patch_sha256: controls.policy.patch_sha256 || wpCodeboxMetadata.patch_sha256,
+      artifact_content_digest: controls.policy.content_digest || wpCodeboxMetadata.content_digest,
+      applyRequest,
+      applyInputs: controls.inputs,
+      applyPolicy: controls.policy,
+    };
+  }
+
   if (input.bundlePath) {
     const bundle = loadWpCodeboxArtifactBundle(input.bundlePath);
     return {
@@ -90,6 +201,9 @@ function normalizePayload(input) {
       patch: bundle.patch,
       patch_sha256: sha256(bundle.patch),
       artifact_content_digest: artifactContentDigest(bundle.changedFilesJson, bundle.patch),
+      applyRequest: wpCodeboxApplyRequestFromBundle(input),
+      applyInputs: input,
+      applyPolicy: {},
     };
   }
 
@@ -179,8 +293,10 @@ function ensureSafeWorktree(worktreePath, options = {}) {
 function applyApprovedWpCodeboxArtifact(input) {
   const payload = normalizePayload(input);
   const verified = verifyWpCodeboxPayload(payload);
-  const worktreePath = ensureSafeWorktree(input.worktreePath, input);
-  const requestedBranch = input.branch || '';
+  const applyInputs = payload.applyInputs || {};
+  const applyPolicy = payload.applyPolicy || {};
+  const worktreePath = ensureSafeWorktree(input.worktreePath || applyInputs.worktreePath, input);
+  const requestedBranch = input.branch || applyInputs.branch || '';
 
   if (requestedBranch) {
     if (!input.allowProtectedBranch && PROTECTED_BRANCHES.has(requestedBranch)) {
@@ -192,7 +308,8 @@ function applyApprovedWpCodeboxArtifact(input) {
   const patchPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'wp-codebox-patch-')), 'patch.diff');
   fs.writeFileSync(patchPath, verified.patch);
 
-  const stripComponents = Number.isInteger(input.patchStrip) ? input.patchStrip : 1;
+  const patchStrip = input.patchStrip ?? applyInputs.patchStrip ?? applyPolicy.patch_strip;
+  const stripComponents = Number.isInteger(patchStrip) ? patchStrip : 1;
   run('git', ['apply', '--index', '--binary', `-p${stripComponents}`, patchPath], { cwd: worktreePath });
 
   const appliedFiles = run('git', ['diff', '--cached', '--name-only'], { cwd: worktreePath })
@@ -202,25 +319,32 @@ function applyApprovedWpCodeboxArtifact(input) {
     throw new Error('approved patch did not stage any files');
   }
 
-  const commitMessage = input.commitMessage || `Apply wp-codebox artifact ${verified.artifactId}`;
+  const commitMessage = input.commitMessage || applyInputs.commitMessage || `Apply wp-codebox artifact ${verified.artifactId}`;
   run('git', ['commit', '-m', commitMessage], { cwd: worktreePath });
   const commit = run('git', ['rev-parse', 'HEAD'], { cwd: worktreePath });
   const branch = currentBranch(worktreePath);
   let prUrl = input.prUrl || '';
+  const publishPolicy = applyPolicy.publish || {};
+  const shouldPush = input.push ?? publishPolicy.push;
+  const shouldOpenPullRequest = input.openPullRequest ?? publishPolicy.open_pull_request;
 
-  if (input.push) {
-    run('git', ['push', '-u', input.remote || 'origin', branch], { cwd: worktreePath });
+  if (shouldPush) {
+    run('git', ['push', '-u', input.remote || publishPolicy.remote || 'origin', branch], { cwd: worktreePath });
   }
 
-  if (input.openPullRequest) {
+  if (shouldOpenPullRequest) {
     const args = ['pr', 'create', '--fill'];
-    if (input.prBase) {
-      args.push('--base', input.prBase);
+    if (input.prBase || publishPolicy.base) {
+      args.push('--base', input.prBase || publishPolicy.base);
     }
     prUrl = run('gh', args, { cwd: worktreePath });
   }
 
-  return {
+  const resultArtifact = payload.applyRequest?.artifact || wpCodeboxChangeArtifactFromBundle(payload.artifact, {
+    title: `Applied WP Codebox artifact ${verified.artifactId}`,
+  });
+
+  const legacy = {
     success: true,
     adapter_id: ADAPTER_ID,
     artifact_id: verified.artifactId,
@@ -234,12 +358,51 @@ function applyApprovedWpCodeboxArtifact(input) {
     pr_url: prUrl,
     pr_command: prUrl ? '' : 'gh pr create --fill',
   };
+
+  return {
+    schema: APPLY_RESULT_SCHEMA,
+    id: `apply-${verified.artifactId}`,
+    request_id: payload.applyRequest?.id,
+    status: 'applied',
+    applied: true,
+    files_changed: appliedFiles,
+    artifacts: [resultArtifact],
+    warnings: [],
+    error: null,
+    metadata: {
+      adapter_id: ADAPTER_ID,
+      wp_codebox: {
+        artifact_id: verified.artifactId,
+        patch_sha256: verified.patchSha256,
+        content_digest: verified.contentDigest,
+        approved_files: verified.approvedFiles,
+      },
+      apply_phase: {
+        committed: true,
+        commit,
+        branch,
+        worktree: worktreePath,
+      },
+      publish_phase: {
+        compatibility_behavior: true,
+        pushed: Boolean(shouldPush),
+        pull_request_opened: Boolean(prUrl),
+        pr_url: prUrl,
+        pr_command: prUrl ? '' : 'gh pr create --fill',
+      },
+      legacy,
+    },
+    ...legacy,
+  };
 }
 
 module.exports = {
   ADAPTER_ID,
+  APPLY_RESULT_SCHEMA,
   artifactContentDigest,
   applyApprovedWpCodeboxArtifact,
   loadWpCodeboxArtifactBundle,
   verifyWpCodeboxPayload,
+  wpCodeboxApplyRequestFromBundle,
+  wpCodeboxChangeArtifactFromBundle,
 };

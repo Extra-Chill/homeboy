@@ -10,6 +10,7 @@ const {
   applyApprovedWpCodeboxArtifact,
   artifactContentDigest,
   verifyWpCodeboxPayload,
+  wpCodeboxApplyRequestFromBundle,
 } = require('../lib/wp-codebox-apply-adapter');
 
 function run(command, args, options = {}) {
@@ -121,6 +122,15 @@ try {
   });
 
   assert.equal(result.success, true);
+  assert.equal(result.schema, 'homeboy/apply-result/v1');
+  assert.equal(result.status, 'applied');
+  assert.equal(result.applied, true);
+  assert.deepEqual(result.files_changed, ['readme.txt']);
+  assert.equal(result.metadata.adapter_id, 'homeboy/wp-codebox-apply-adapter/v1');
+  assert.equal(result.metadata.apply_phase.committed, true);
+  assert.equal(result.metadata.publish_phase.compatibility_behavior, true);
+  assert.equal(result.artifacts[0].type, 'wp_codebox_patch');
+  assert.equal(result.artifacts[0].approval_scope.scope, 'artifact');
   assert.equal(result.artifact_id, fixture.artifactId);
   assert.equal(result.patch_sha256, sha256(fixture.patch));
   assert.equal(result.content_digest, fixture.contentDigest);
@@ -180,6 +190,43 @@ try {
   assert.equal(cliResult.branch, 'feature/wp-codebox-apply-cli-smoke');
   assert.deepEqual(cliResult.applied_files, ['readme.txt']);
   assert.equal(fs.readFileSync(path.join(cliRepo, 'readme.txt'), 'utf8'), 'after\n');
+
+  const requestRepo = createRepo(root, 'feature/apply-request-smoke');
+  const request = wpCodeboxApplyRequestFromBundle({
+    bundlePath: fixture.bundle,
+    worktreePath: requestRepo,
+    branch: 'feature/wp-codebox-apply-request-smoke',
+    commitMessage: 'Apply fixture wp-codebox artifact through ApplyRequest',
+    approvedFiles: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
+    patchStrip: 5,
+  });
+  const requestResult = applyApprovedWpCodeboxArtifact({ applyRequest: request });
+  assert.equal(requestResult.request_id, request.id);
+  assert.equal(requestResult.status, 'applied');
+  assert.deepEqual(requestResult.files_changed, ['readme.txt']);
+  assert.equal(fs.readFileSync(path.join(requestRepo, 'readme.txt'), 'utf8'), 'after\n');
+
+  const requestPath = path.join(root, 'apply-request.json');
+  writeJson(requestPath, wpCodeboxApplyRequestFromBundle({
+    bundlePath: fixture.bundle,
+    branch: 'feature/wp-codebox-apply-request-cli-smoke',
+    commitMessage: 'Apply fixture wp-codebox artifact through ApplyRequest CLI',
+    approvedFiles: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
+    patchStrip: 5,
+  }));
+  const requestCliRepo = createRepo(root, 'feature/apply-request-cli-smoke');
+  const requestCliOutput = run(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'wp-codebox-apply-adapter.cjs'),
+    '--request',
+    requestPath,
+    '--worktree',
+    requestCliRepo,
+  ]);
+  const requestCliResult = JSON.parse(requestCliOutput);
+  assert.equal(requestCliResult.status, 'applied');
+  assert.equal(requestCliResult.request_id, `apply-request-${fixture.artifactId}`);
+  assert.deepEqual(requestCliResult.files_changed, ['readme.txt']);
+  assert.equal(fs.readFileSync(path.join(requestCliRepo, 'readme.txt'), 'utf8'), 'after\n');
 
   console.log('WP Codebox apply adapter smoke passed');
 } finally {
