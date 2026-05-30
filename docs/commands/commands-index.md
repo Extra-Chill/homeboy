@@ -9,6 +9,7 @@
 - [changelog](changelog.md)
 - [changes](changes.md)
 - [ci](ci.md) — CI reproduction profiles and shallow CI surface discovery
+- [cleanup](cleanup.md) — declared reconstructable artifact cleanup across managed worktrees
 - [component](component.md)
 - [config](config.md)
 - [daemon](daemon.md) — local-only HTTP API daemon

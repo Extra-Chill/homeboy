@@ -173,6 +173,7 @@ pub mod build;
 pub mod changelog;
 pub mod changes;
 pub mod ci;
+pub mod cleanup;
 pub mod cli;
 pub mod component;
 pub mod config;

@@ -2,8 +2,8 @@ use clap::{Command, CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::commands::{
-    api, audit, auth, bench, build, changelog, changes, ci, component, config, daemon, db, deploy,
-    deps, doctor, extension, file, fleet, git, http, issues, lint, logs, observe, project,
+    api, audit, auth, bench, build, changelog, changes, ci, cleanup, component, config, daemon, db,
+    deploy, deps, doctor, extension, file, fleet, git, http, issues, lint, logs, observe, project,
     refactor, refs, release, report, review, rig, runner, runs, self_cmd, server, ssh, stack,
     status, test, trace, triage, tunnel, undo, upgrade, version,
 };
@@ -99,6 +99,8 @@ pub enum Commands {
     Docs(crate::commands::docs::DocsArgs),
     /// Changelog operations
     Changelog(changelog::ChangelogArgs),
+    /// Remove declared reconstructable artifacts from managed worktrees
+    Cleanup(cleanup::CleanupArgs),
     /// Git operations for components
     Git(git::GitArgs),
     /// Reconcile findings against an issue tracker
@@ -343,6 +345,7 @@ impl Commands {
             | Commands::Config(_)
             | Commands::Extension(_)
             | Commands::Changelog(_)
+            | Commands::Cleanup(_)
             | Commands::Version(_)
             | Commands::Build(_)
             | Commands::Changes(_)
