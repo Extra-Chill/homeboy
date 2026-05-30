@@ -2,10 +2,13 @@
 
 use super::checks::{CheckResult, CheckStatus};
 use super::conventions::AuditFinding;
-use serde::ser::{SerializeStruct, Serializer};
+use crate::core::finding::{FindingSource, HomeboyFinding};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
+use std::str::FromStr;
 
 /// An actionable finding from the code audit.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Finding {
     /// The convention this finding relates to.
     pub convention: String,
@@ -26,15 +29,141 @@ impl serde::Serialize for Finding {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("Finding", 7)?;
-        state.serialize_field("convention", &self.convention)?;
-        state.serialize_field("severity", &self.severity)?;
-        state.serialize_field("file", &self.file)?;
-        state.serialize_field("description", &self.description)?;
-        state.serialize_field("suggestion", &self.suggestion)?;
-        state.serialize_field("kind", &self.kind)?;
-        state.serialize_field("confidence", &self.kind.confidence())?;
-        state.end()
+        homeboy_finding_from_audit(self).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Finding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+
+        if let Ok(finding) = serde_json::from_value::<AuditFindingPayload>(value.clone()) {
+            return Ok(finding.into());
+        }
+
+        let normalized: HomeboyFinding =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        if let Some(raw) = normalized.raw.clone() {
+            if let Ok(finding) = serde_json::from_value::<AuditFindingPayload>(raw) {
+                return Ok(finding.into());
+            }
+        }
+
+        let kind = normalized
+            .rule
+            .as_deref()
+            .or_else(|| normalized.metadata.get("kind").and_then(Value::as_str))
+            .ok_or_else(|| serde::de::Error::custom("missing audit finding kind"))?;
+        let severity = normalized
+            .severity
+            .as_deref()
+            .map(severity_from_key)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or(Severity::Warning);
+
+        Ok(Finding {
+            convention: normalized
+                .metadata
+                .get("convention")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or(normalized.category)
+                .unwrap_or_default(),
+            severity,
+            file: normalized.location.file.unwrap_or_default(),
+            description: normalized.message,
+            suggestion: normalized
+                .metadata
+                .get("suggestion")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            kind: AuditFinding::from_str(kind).map_err(serde::de::Error::custom)?,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct AuditFindingPayload {
+    convention: String,
+    severity: Severity,
+    file: String,
+    description: String,
+    suggestion: String,
+    kind: AuditFinding,
+}
+
+impl From<AuditFindingPayload> for Finding {
+    fn from(payload: AuditFindingPayload) -> Self {
+        Self {
+            convention: payload.convention,
+            severity: payload.severity,
+            file: payload.file,
+            description: payload.description,
+            suggestion: payload.suggestion,
+            kind: payload.kind,
+        }
+    }
+}
+
+pub fn homeboy_finding_from_audit(finding: &Finding) -> HomeboyFinding {
+    let kind = finding_kind_key(&finding.kind);
+    HomeboyFinding::builder("audit", finding.description.clone())
+        .rule(kind.clone())
+        .category(finding.convention.clone())
+        .file(finding.file.clone())
+        .severity(audit_severity_key(&finding.severity))
+        .fingerprint(audit_finding_fingerprint(finding))
+        .source(FindingSource::new("sidecar").label("audit-findings"))
+        .metadata("source_sidecar", "audit-findings")
+        .metadata("convention", finding.convention.clone())
+        .metadata("suggestion", finding.suggestion.clone())
+        .metadata("confidence", finding.kind.confidence())
+        .metadata("kind", kind)
+        .raw(AuditFindingPayload {
+            convention: finding.convention.clone(),
+            severity: finding.severity.clone(),
+            file: finding.file.clone(),
+            description: finding.description.clone(),
+            suggestion: finding.suggestion.clone(),
+            kind: finding.kind.clone(),
+        })
+        .build()
+}
+
+pub(crate) fn finding_kind_key(finding: &AuditFinding) -> String {
+    serde_json::to_value(finding)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| format!("{:?}", finding).to_lowercase())
+}
+
+fn audit_finding_fingerprint(finding: &Finding) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        finding.file,
+        finding_kind_key(&finding.kind),
+        finding.convention,
+        finding.description
+    )
+}
+
+fn audit_severity_key(severity: &Severity) -> String {
+    serde_json::to_value(severity)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{severity:?}").to_lowercase())
+}
+
+fn severity_from_key(value: &str) -> Result<Severity, String> {
+    match value {
+        "warning" => Ok(Severity::Warning),
+        "info" => Ok(Severity::Info),
+        other => Err(format!("unknown audit severity: {other}")),
     }
 }
 
@@ -287,7 +416,9 @@ mod tests {
 
         let json = serde_json::to_value(&finding).expect("serialize finding");
 
-        assert_eq!(json["confidence"], "structural");
+        assert_eq!(json["metadata"]["confidence"], "structural");
+        assert_eq!(json["rule"], "compiler_warning");
+        assert_eq!(json["message"], "unused import");
     }
 
     #[test]

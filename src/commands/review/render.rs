@@ -18,7 +18,6 @@
 use std::fmt::Write as _;
 
 use homeboy::core::ci_profile::CiRunOutput;
-use homeboy::core::code_audit::report::AuditSummaryFinding;
 use homeboy::core::code_audit::{AuditCommandOutput, AuditFinding, Finding, Severity};
 use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::TestCommandOutput;
@@ -214,14 +213,12 @@ fn render_audit_finding(out: &mut String, finding: &AuditFindingLine) {
     let _ = write!(
         out,
         "- `{}` — **{}**: {}",
-        finding.file,
-        audit_kind_label(&finding.kind),
-        finding.description
+        finding.file, finding.kind_label, finding.description
     );
     if !finding.suggestion.is_empty() {
         let _ = write!(out, "; {}", finding.suggestion);
     }
-    if matches!(finding.severity, Severity::Info) {
+    if finding.severity.as_deref() == Some("info") {
         let _ = write!(out, " _(info)_");
     }
     out.push('\n');
@@ -230,8 +227,8 @@ fn render_audit_finding(out: &mut String, finding: &AuditFindingLine) {
 #[derive(Clone)]
 struct AuditFindingLine {
     file: String,
-    kind: AuditFinding,
-    severity: Severity,
+    kind_label: String,
+    severity: Option<String>,
     description: String,
     suggestion: String,
 }
@@ -240,22 +237,37 @@ impl From<&Finding> for AuditFindingLine {
     fn from(finding: &Finding) -> Self {
         Self {
             file: finding.file.clone(),
-            kind: finding.kind.clone(),
-            severity: finding.severity.clone(),
+            kind_label: audit_kind_label(&finding.kind),
+            severity: Some(audit_severity_label(&finding.severity)),
             description: finding.description.clone(),
             suggestion: finding.suggestion.clone(),
         }
     }
 }
 
-impl From<&AuditSummaryFinding> for AuditFindingLine {
-    fn from(finding: &AuditSummaryFinding) -> Self {
+impl From<&HomeboyFinding> for AuditFindingLine {
+    fn from(finding: &HomeboyFinding) -> Self {
         Self {
-            file: finding.file.clone(),
-            kind: finding.kind.clone(),
+            file: finding.location.file.clone().unwrap_or_default(),
+            kind_label: finding
+                .rule
+                .as_deref()
+                .or_else(|| {
+                    finding
+                        .metadata
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .unwrap_or("audit")
+                .to_string(),
             severity: finding.severity.clone(),
-            description: finding.description.clone(),
-            suggestion: finding.suggestion.clone(),
+            description: finding.message.clone(),
+            suggestion: finding
+                .metadata
+                .get("suggestion")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         }
     }
 }
@@ -285,6 +297,13 @@ fn audit_kind_label(kind: &AuditFinding) -> String {
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_else(|| format!("{:?}", kind).to_lowercase())
+}
+
+fn audit_severity_label(severity: &Severity) -> String {
+    serde_json::to_value(severity)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{severity:?}").to_lowercase())
 }
 
 /// Render the lint stage body — top sniff codes (by `category`) with counts.
