@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # shellcheck source=/dev/null
-source "$ROOT/wordpress/scripts/lib/runner-steps.sh"
+source "$ROOT/scripts/lib/runner-steps.sh"
 
 assert_runs() {
     local label="$1"
@@ -46,5 +46,7 @@ unset HOMEBOY_STEP
 HOMEBOY_SKIP="eslint,phpstan"
 assert_runs "step not in skiplist" "phpcs"
 assert_skips "skiplisted step without allowlist" "phpstan"
+
+bash -c 'source "$1"; type should_run_step >/dev/null' _ "$ROOT/wordpress/scripts/lib/runner-steps.sh"
 
 echo "runner-steps smoke ok"
