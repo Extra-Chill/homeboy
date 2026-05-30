@@ -9,10 +9,9 @@
 #
 # Usage:
 #   source "${HOMEBOY_RUNTIME_SIDECAR_WRITER}"
-#   homeboy_sidecar_append_json "$HOMEBOY_LINT_FINDINGS_FILE" '{"message":"..."}'
-#   homeboy_sidecar_write_json_array "$HOMEBOY_TEST_FAILURES_FILE" "$failure_json"
-#   homeboy_sidecar_merge_json_array "$HOMEBOY_FIX_RESULTS_FILE" "$tmp_results"
-#   homeboy_write_annotations "phpcs" "$annotation_json"
+#   homeboy_sidecar_emit lint.finding '{"message":"..."}'
+#   homeboy_sidecar_write test.failures "$failure_json"
+#   homeboy_sidecar_merge annotation.phpcs "$tmp_annotations"
 
 homeboy_sidecar_python() {
     if command -v python3 >/dev/null 2>&1; then
@@ -157,77 +156,121 @@ except Exception:
 PYEOF
 }
 
+homeboy_sidecar_target_for_type() {
+    local type="${1:-}"
+
+    case "$type" in
+        lint.finding|lint.findings)
+            printf '%s\n' "${HOMEBOY_LINT_FINDINGS_FILE:-}"
+            ;;
+        test.failure|test.failures)
+            printf '%s\n' "${HOMEBOY_TEST_FAILURES_FILE:-}"
+            ;;
+        fix.result|fix.results)
+            printf '%s\n' "${HOMEBOY_FIX_RESULTS_FILE:-}"
+            ;;
+        annotation.*|annotations.*)
+            local name="${type#annotation.}"
+            name="${name#annotations.}"
+            if [ -z "${HOMEBOY_ANNOTATIONS_DIR:-}" ] || [ -z "$name" ]; then
+                printf '\n'
+                return 0
+            fi
+            name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9_.-' '-')"
+            printf '%s/%s.json\n' "${HOMEBOY_ANNOTATIONS_DIR%/}" "$name"
+            ;;
+        *)
+            echo "[sidecar-writer] unknown sidecar type: $type" >&2
+            return 1
+            ;;
+    esac
+}
+
+homeboy_sidecar_write() {
+    local type="${1:-}"
+    shift || true
+
+    local target
+    target="$(homeboy_sidecar_target_for_type "$type")" || return 1
+    homeboy_sidecar_write_json_array "$target" "$@"
+}
+
+homeboy_sidecar_emit() {
+    local type="${1:-}"
+    local item="${2:-}"
+
+    local target
+    target="$(homeboy_sidecar_target_for_type "$type")" || return 1
+    homeboy_sidecar_append_json "$target" "$item"
+}
+
+homeboy_sidecar_merge() {
+    local type="${1:-}"
+    local source="${2:-}"
+
+    local target
+    target="$(homeboy_sidecar_target_for_type "$type")" || return 1
+    homeboy_sidecar_merge_json_array "$target" "$source"
+}
+
 homeboy_annotation_file() {
     local source="${1:-}"
-    local dir="${HOMEBOY_ANNOTATIONS_DIR:-}"
-
-    if [ -z "$dir" ] || [ -z "$source" ]; then
-        return 0
-    fi
-
-    source="$(printf '%s' "$source" | tr -c 'A-Za-z0-9_.-' '-')"
-    printf '%s/%s.json\n' "$dir" "$source"
+    homeboy_sidecar_target_for_type "annotation.$source"
 }
 
 homeboy_write_lint_findings() {
-    homeboy_sidecar_write_json_array "${HOMEBOY_LINT_FINDINGS_FILE:-}" "$@"
+    homeboy_sidecar_write lint.findings "$@"
 }
 
 homeboy_append_lint_finding() {
-    homeboy_sidecar_append_json "${HOMEBOY_LINT_FINDINGS_FILE:-}" "$1"
+    homeboy_sidecar_emit lint.finding "$1"
 }
 
 homeboy_merge_lint_findings() {
-    homeboy_sidecar_merge_json_array "${HOMEBOY_LINT_FINDINGS_FILE:-}" "$1"
+    homeboy_sidecar_merge lint.findings "$1"
 }
 
 homeboy_write_test_failures() {
-    homeboy_sidecar_write_json_array "${HOMEBOY_TEST_FAILURES_FILE:-}" "$@"
+    homeboy_sidecar_write test.failures "$@"
 }
 
 homeboy_append_test_failure() {
-    homeboy_sidecar_append_json "${HOMEBOY_TEST_FAILURES_FILE:-}" "$1"
+    homeboy_sidecar_emit test.failure "$1"
 }
 
 homeboy_merge_test_failures() {
-    homeboy_sidecar_merge_json_array "${HOMEBOY_TEST_FAILURES_FILE:-}" "$1"
+    homeboy_sidecar_merge test.failures "$1"
 }
 
 homeboy_write_fix_results() {
-    homeboy_sidecar_write_json_array "${HOMEBOY_FIX_RESULTS_FILE:-}" "$@"
+    homeboy_sidecar_write fix.results "$@"
 }
 
 homeboy_append_fix_result() {
-    homeboy_sidecar_append_json "${HOMEBOY_FIX_RESULTS_FILE:-}" "$1"
+    homeboy_sidecar_emit fix.result "$1"
 }
 
 homeboy_merge_fix_results() {
-    homeboy_sidecar_merge_json_array "${HOMEBOY_FIX_RESULTS_FILE:-}" "$1"
+    homeboy_sidecar_merge fix.results "$1"
 }
 
 homeboy_write_annotations() {
     local source="${1:-}"
     shift || true
 
-    local target
-    target="$(homeboy_annotation_file "$source")"
-    homeboy_sidecar_write_json_array "$target" "$@"
+    homeboy_sidecar_write "annotation.$source" "$@"
 }
 
 homeboy_append_annotation() {
     local source="${1:-}"
     local item="${2:-}"
 
-    local target
-    target="$(homeboy_annotation_file "$source")"
-    homeboy_sidecar_append_json "$target" "$item"
+    homeboy_sidecar_emit "annotation.$source" "$item"
 }
 
 homeboy_merge_annotations() {
     local source="${1:-}"
     local file="${2:-}"
 
-    local target
-    target="$(homeboy_annotation_file "$source")"
-    homeboy_sidecar_merge_json_array "$target" "$file"
+    homeboy_sidecar_merge "annotation.$source" "$file"
 }
