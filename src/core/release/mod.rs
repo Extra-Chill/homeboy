@@ -3,6 +3,7 @@ mod context;
 mod deployment;
 mod execution_dispatch;
 mod execution_plan;
+mod execution_projection;
 mod executor;
 mod orchestrator;
 mod pipeline;
