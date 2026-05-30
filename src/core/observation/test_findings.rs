@@ -5,7 +5,7 @@ use crate::core::finding::{FindingSource, HomeboyFinding};
 
 use super::records::NewFindingRecord;
 
-fn homeboy_finding_from_test_failure(failure: &TestFailure) -> HomeboyFinding {
+pub(crate) fn homeboy_finding_from_test_failure(failure: &TestFailure) -> HomeboyFinding {
     let mut normalized = HomeboyFinding::builder("test", test_failure_message(failure))
         .severity("error")
         .fingerprint(test_failure_fingerprint(failure))
@@ -23,6 +23,22 @@ fn homeboy_finding_from_test_failure(failure: &TestFailure) -> HomeboyFinding {
         non_empty_string(&failure.test_file).or_else(|| non_empty_string(&failure.source_file));
     normalized.location.line = (failure.source_line > 0).then_some(i64::from(failure.source_line));
     normalized
+}
+
+pub(crate) fn homeboy_findings_from_test_analysis_input(
+    input: &TestAnalysisInput,
+) -> Option<Vec<HomeboyFinding>> {
+    if input.failures.is_empty() {
+        return None;
+    }
+
+    Some(
+        input
+            .failures
+            .iter()
+            .map(homeboy_finding_from_test_failure)
+            .collect(),
+    )
 }
 
 fn finding_record_from_test_failure(run_id: &str, failure: &TestFailure) -> NewFindingRecord {

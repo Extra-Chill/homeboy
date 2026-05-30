@@ -21,7 +21,8 @@ use homeboy::core::ci_profile::CiRunOutput;
 use homeboy::core::code_audit::report::AuditSummaryFinding;
 use homeboy::core::code_audit::{AuditCommandOutput, AuditFinding, Finding, Severity};
 use homeboy::core::extension::lint::LintCommandOutput;
-use homeboy::core::extension::test::{FailedTest, TestCommandOutput};
+use homeboy::core::extension::test::TestCommandOutput;
+use homeboy::core::finding::HomeboyFinding;
 use homeboy::core::top_n::top_n_by;
 
 use super::{ReviewCommandOutput, ReviewStage};
@@ -321,8 +322,8 @@ fn render_test_body(out: &mut String, output: &TestCommandOutput) {
             "- **{} failed** out of {} total",
             counts.failed, counts.total
         );
-        if let Some(failed_tests) = output.failed_tests.as_ref() {
-            render_failed_tests(out, failed_tests);
+        if let Some(findings) = output.findings.as_ref() {
+            render_test_findings(out, findings);
         }
         if counts.passed > 0 {
             let _ = writeln!(out, "- {} passed", counts.passed);
@@ -338,24 +339,29 @@ fn render_test_body(out: &mut String, output: &TestCommandOutput) {
     }
 }
 
-fn render_failed_tests(out: &mut String, failed_tests: &[FailedTest]) {
-    for failed_test in failed_tests.iter().take(TOP_N) {
-        let _ = write!(out, "- `{}`", failed_test.name);
-        if let Some(detail) = failed_test.detail.as_deref() {
-            let _ = write!(out, " — {}", detail);
+fn render_test_findings(out: &mut String, findings: &[HomeboyFinding]) {
+    for finding in findings.iter().take(TOP_N) {
+        let name = finding
+            .metadata
+            .get("test_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&finding.message);
+        let _ = write!(out, "- `{}`", name);
+        if name != finding.message {
+            let _ = write!(out, " — {}", finding.message);
         }
-        if let Some(location) = failed_test.location.as_deref() {
-            let _ = write!(out, " (`{}`)", location);
+        if let Some(file) = finding.location.file.as_deref() {
+            let _ = write!(out, " (`{}", file);
+            if let Some(line) = finding.location.line {
+                let _ = write!(out, ":{}", line);
+            }
+            let _ = write!(out, "`)");
         }
         out.push('\n');
     }
 
-    if failed_tests.len() > TOP_N {
-        let _ = writeln!(
-            out,
-            "- _… {} more failed test(s)_",
-            failed_tests.len() - TOP_N
-        );
+    if findings.len() > TOP_N {
+        let _ = writeln!(out, "- _… {} more failed test(s)_", findings.len() - TOP_N);
     }
 }
 
@@ -375,7 +381,7 @@ mod tests {
         AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity,
     };
     use homeboy::core::extension::lint::LintCommandOutput;
-    use homeboy::core::extension::test::{FailedTest, TestCommandOutput, TestCounts};
+    use homeboy::core::extension::test::{TestCommandOutput, TestCounts};
     use homeboy::core::extension::CiJobMapping;
     use homeboy::core::extension::{PhaseReport, PhaseStatus, VerificationPhase};
     use homeboy::core::finding::HomeboyFinding;
@@ -590,7 +596,7 @@ mod tests {
                 failed,
                 skipped,
             }),
-            failed_tests: None,
+            findings: None,
             coverage: None,
             baseline_comparison: None,
             analysis: None,
@@ -605,17 +611,18 @@ mod tests {
         }
     }
 
-    fn failed_test(idx: usize) -> FailedTest {
-        FailedTest {
-            name: format!("tests::suite::case_{:02}", idx),
-            detail: Some(format!("assertion {} failed", idx)),
-            location: Some(format!("tests/suite.rs:{}", idx + 10)),
-        }
+    fn test_finding(idx: usize) -> HomeboyFinding {
+        HomeboyFinding::builder("test", format!("assertion {} failed", idx))
+            .severity("error")
+            .file("tests/suite.rs")
+            .line((idx + 10) as i64)
+            .metadata("test_name", format!("tests::suite::case_{:02}", idx))
+            .build()
     }
 
-    fn test_with_failed_tests(total: usize) -> TestCommandOutput {
+    fn test_with_findings(total: usize) -> TestCommandOutput {
         let mut output = test_with_counts(20, total as u64, 1);
-        output.failed_tests = Some((0..total).map(failed_test).collect());
+        output.findings = Some((0..total).map(test_finding).collect());
         output
     }
 
@@ -843,12 +850,12 @@ mod tests {
     }
 
     #[test]
-    fn renders_top_failed_tests_when_present() {
+    fn renders_top_test_findings_when_present() {
         let mut env = passing_envelope();
         env.test.passed = false;
         env.test.exit_code = 1;
         env.test.finding_count = 3;
-        env.test.output = Some(test_with_failed_tests(3));
+        env.test.output = Some(test_with_findings(3));
 
         let md = render_pr_comment(&env);
         assert!(
@@ -869,12 +876,12 @@ mod tests {
     }
 
     #[test]
-    fn caps_failed_tests_at_top_10() {
+    fn caps_test_findings_at_top_10() {
         let mut env = passing_envelope();
         env.test.passed = false;
         env.test.exit_code = 1;
         env.test.finding_count = 12;
-        env.test.output = Some(test_with_failed_tests(12));
+        env.test.output = Some(test_with_findings(12));
 
         let md = render_pr_comment(&env);
         let bullet_count = md.matches("- `tests::suite::case_").count();

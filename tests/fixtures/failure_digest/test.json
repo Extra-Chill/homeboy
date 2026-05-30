@@ -8,16 +8,23 @@
       "failed": 2,
       "skipped": 0
     },
-    "failed_tests": [
+    "findings": [
       {
-        "name": "test_widget_renders",
-        "detail": "expected widget output",
-        "location": "tests/widget_test.rs:42"
+        "tool": "test",
+        "message": "expected widget output",
+        "file": "tests/widget_test.rs",
+        "line": 42,
+        "metadata": {
+          "test_name": "test_widget_renders"
+        }
       },
       {
-        "name": "test_widget_handles_empty_state",
+        "tool": "test",
         "message": "empty state missing",
-        "file": "tests/widget_test.rs"
+        "file": "tests/widget_test.rs",
+        "metadata": {
+          "test_name": "test_widget_handles_empty_state"
+        }
       }
     ]
   }

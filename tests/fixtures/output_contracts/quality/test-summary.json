@@ -22,11 +22,16 @@
       "failed": 1,
       "skipped": 0
     },
-    "failed_tests": [
+    "findings": [
       {
-        "name": "fixture::fails_contract",
-        "detail": "expected stable JSON envelope",
-        "location": "tests/output_contract.rs:24"
+        "tool": "test",
+        "severity": "error",
+        "file": "tests/output_contract.rs",
+        "line": 24,
+        "message": "expected stable JSON envelope",
+        "metadata": {
+          "test_name": "fixture::fails_contract"
+        }
       }
     ],
     "hints": [

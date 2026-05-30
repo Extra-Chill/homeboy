@@ -30,6 +30,7 @@ pub use store::{
 };
 pub(crate) use test_findings::{
     finding_records_from_failure_clusters, finding_records_from_test_analysis_input,
+    homeboy_findings_from_test_analysis_input,
 };
 pub use timeline::{
     ObservationEvent, ObservationPhaseMilestone, ObservationSpanDefinition, ObservationSpanResult,

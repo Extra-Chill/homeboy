@@ -13,21 +13,12 @@ use crate::core::extension::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
 };
+use crate::core::finding::HomeboyFinding;
 use crate::core::refactor::AppliedRefactor;
 use serde::Serialize;
 
 use super::run::{RawTestOutput, TestRunWorkflowResult};
 use super::workflow::{AutoFixDriftOutput, AutoFixDriftWorkflowResult, DriftWorkflowResult};
-
-/// A single structured test failure surfaced for renderer consumption.
-#[derive(Debug, Clone, Serialize)]
-pub struct FailedTest {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub location: Option<String>,
-}
 
 /// Unified output envelope for all test command modes.
 ///
@@ -46,7 +37,7 @@ pub struct TestCommandOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_counts: Option<TestCounts>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub failed_tests: Option<Vec<FailedTest>>,
+    pub findings: Option<Vec<HomeboyFinding>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<CoverageOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,7 +94,7 @@ pub fn from_main_workflow_with_ci_context(
             phase,
             failure,
             test_counts: result.test_counts,
-            failed_tests: result.failed_tests,
+            findings: result.findings,
             coverage: result.coverage,
             baseline_comparison: result.baseline_comparison,
             analysis: result.analysis,
@@ -132,7 +123,7 @@ pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i
             phase: None,
             failure: None,
             test_counts: None,
-            failed_tests: None,
+            findings: None,
             coverage: None,
             baseline_comparison: None,
             analysis: None,
@@ -173,7 +164,7 @@ pub fn from_auto_fix_drift_workflow(
             phase: None,
             failure: None,
             test_counts: None,
-            failed_tests: None,
+            findings: None,
             coverage: None,
             baseline_comparison: None,
             analysis: None,
@@ -275,13 +266,13 @@ fn test_phase_failure(exit_code: i32, counts: Option<&TestCounts>) -> PhaseFailu
 mod tests {
     use super::*;
 
-    fn workflow_result(failed_tests: Option<Vec<FailedTest>>) -> TestRunWorkflowResult {
+    fn workflow_result(findings: Option<Vec<HomeboyFinding>>) -> TestRunWorkflowResult {
         TestRunWorkflowResult {
             status: "failed".to_string(),
             component: "homeboy".to_string(),
             exit_code: 1,
             test_counts: Some(TestCounts::new(3, 1, 2, 0)),
-            failed_tests,
+            findings,
             failure_analysis_input: None,
             coverage: None,
             baseline_comparison: None,
@@ -300,7 +291,7 @@ mod tests {
             component: "homeboy".to_string(),
             exit_code,
             test_counts: Some(counts),
-            failed_tests: None,
+            findings: None,
             failure_analysis_input: None,
             coverage: None,
             baseline_comparison: None,
@@ -319,7 +310,7 @@ mod tests {
             component: "wordpress-plugin".to_string(),
             exit_code: 0,
             test_counts: Some(TestCounts::new(0, 0, 0, 0)),
-            failed_tests: None,
+            findings: None,
             failure_analysis_input: None,
             coverage: None,
             baseline_comparison: None,
@@ -333,44 +324,37 @@ mod tests {
     }
 
     #[test]
-    fn serializes_failed_tests_when_present() {
-        let (output, exit_code) = from_main_workflow(workflow_result(Some(vec![FailedTest {
-            name: "tests::fails".to_string(),
-            detail: Some("assertion failed".to_string()),
-            location: Some("tests/fails.rs:42".to_string()),
-        }])));
+    fn serializes_findings_when_present() {
+        let (output, exit_code) =
+            from_main_workflow(workflow_result(Some(vec![HomeboyFinding::builder(
+                "test",
+                "assertion failed",
+            )
+            .rule("AssertionFailed")
+            .severity("error")
+            .file("tests/fails.rs")
+            .line(42)
+            .metadata("test_name", "tests::fails")
+            .build()])));
 
         let json = serde_json::to_value(output).expect("serialize test command output");
         assert_eq!(exit_code, 1);
-        assert_eq!(json["failed_tests"][0]["name"], "tests::fails");
-        assert_eq!(json["failed_tests"][0]["detail"], "assertion failed");
-        assert_eq!(json["failed_tests"][0]["location"], "tests/fails.rs:42");
+        assert_eq!(json["findings"][0]["tool"], "test");
+        assert_eq!(json["findings"][0]["metadata"]["test_name"], "tests::fails");
+        assert_eq!(json["findings"][0]["message"], "assertion failed");
+        assert_eq!(json["findings"][0]["file"], "tests/fails.rs");
+        assert_eq!(json["findings"][0]["line"], 42);
     }
 
     #[test]
-    fn omits_failed_tests_when_absent() {
+    fn omits_findings_when_absent() {
         let (output, _) = from_main_workflow(workflow_result(None));
         let json = serde_json::to_value(output).expect("serialize test command output");
         assert!(
-            json.get("failed_tests").is_none(),
-            "failed_tests should be omitted when unavailable: {}",
+            json.get("findings").is_none(),
+            "findings should be omitted when unavailable: {}",
             json
         );
-    }
-
-    #[test]
-    fn omits_empty_failed_test_optional_fields() {
-        let (output, _) = from_main_workflow(workflow_result(Some(vec![FailedTest {
-            name: "tests::fails".to_string(),
-            detail: None,
-            location: None,
-        }])));
-
-        let json = serde_json::to_value(output).expect("serialize test command output");
-        let failed = &json["failed_tests"][0];
-        assert_eq!(failed["name"], "tests::fails");
-        assert!(failed.get("detail").is_none());
-        assert!(failed.get("location").is_none());
     }
 
     #[test]
