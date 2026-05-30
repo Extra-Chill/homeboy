@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.204.10] - 2026-05-30
+
+### Changed
+- keep build command fixtures core agnostic
+- split lab rig materialization
+
+### Fixed
+- clear homeboy release blockers
+- preserve rig declared path in bench snapshots
+- reject unsupported component build_command
+- preflight deploy artifacts before remote writes
+- keep component set writes out of source config
+- materialize rig benches for lab offload
+
 ## [0.204.9] - 2026-05-30
 
 ### Changed
