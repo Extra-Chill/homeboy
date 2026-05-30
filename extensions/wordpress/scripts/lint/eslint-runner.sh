@@ -234,12 +234,14 @@ if [ -n "$ESLINT_FINDINGS_FILE" ] && [ -n "$json_output" ] && command -v node &>
                 const message = `${msg.message || "Unknown"} (${code})`;
                 findings.push({
                     id,
+                    tool: "eslint",
                     file: fileRelPath,
                     line,
                     column,
                     severity: msg.severity === 1 ? "warning" : "error",
                     source: "eslint",
                     code,
+                    rule: code,
                     category: "eslint",
                     message,
                     fixable: Boolean(msg.fix),

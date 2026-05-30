@@ -110,6 +110,72 @@ merge_findings_into_sidecar() {
     homeboy_sidecar_merge lint.findings "$extra_file"
 }
 
+write_lint_producers_sidecar() {
+    local phpcs_passed="$1"
+    local eslint_passed="$2"
+    local phpstan_passed="$3"
+    local python_bin=""
+
+    [ -z "${HOMEBOY_LINT_PRODUCERS_FILE:-}" ] && return 0
+
+    if command -v python3 >/dev/null 2>&1; then
+        python_bin="python3"
+    elif command -v python >/dev/null 2>&1; then
+        python_bin="python"
+    else
+        echo "Error: python3 or python is required to write lint producer summaries" >&2
+        return 1
+    fi
+
+    "$python_bin" - "$HOMEBOY_LINT_PRODUCERS_FILE" "${HOMEBOY_LINT_FINDINGS_FILE:-}" "$phpcs_passed" "$eslint_passed" "$phpstan_passed" <<'PYEOF'
+import json
+import os
+import sys
+import tempfile
+
+target, findings_path, phpcs_passed, eslint_passed, phpstan_passed = sys.argv[1:6]
+counts = {"phpcs": 0, "eslint": 0, "phpstan": 0}
+if findings_path and os.path.exists(findings_path) and os.path.getsize(findings_path) > 0:
+    with open(findings_path, "r", encoding="utf-8") as handle:
+        findings = json.load(handle)
+    for finding in findings if isinstance(findings, list) else []:
+        tool = finding.get("tool") if isinstance(finding, dict) else None
+        if tool in counts:
+            counts[tool] += 1
+
+statuses = {
+    "phpcs": "passed" if phpcs_passed == "1" else "failed",
+    "eslint": "passed" if eslint_passed == "1" else "failed",
+    "phpstan": "passed" if phpstan_passed == "1" else "failed",
+}
+producers = [
+    {
+        "tool": tool,
+        "status": statuses[tool],
+        "finding_count": counts[tool],
+        "step": tool,
+        "metadata": {"source_sidecar": "lint-producers"},
+    }
+    for tool in ("phpcs", "eslint", "phpstan")
+]
+
+directory = os.path.dirname(target) or "."
+os.makedirs(directory, exist_ok=True)
+fd, tmp = tempfile.mkstemp(prefix=".homeboy-lint-producers-", suffix=".json", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(producers, handle, separators=(",", ":"))
+        handle.write("\n")
+    os.replace(tmp, target)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PYEOF
+}
+
 # Determine lint target (file, glob, or full component)
 # Use array to properly handle paths with spaces
 LINT_FILES=("$PLUGIN_PATH")
@@ -820,12 +886,14 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
                     }
                     $findings[] = [
                         "id" => $id,
+                        "tool" => "phpcs",
                         "file" => $relPath,
                         "line" => $line,
                         "column" => $column,
                         "severity" => strtolower($msg["type"] ?? "error"),
                         "source" => "phpcs",
                         "code" => $code,
+                        "rule" => $code,
                         "category" => $category,
                         "message" => $message,
                         "fixable" => (bool) ($msg["fixable"] ?? false),
@@ -965,6 +1033,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         merge_findings_into_sidecar "$_PHPSTAN_FINDINGS_TMPFILE"
         rm -f "$_PHPSTAN_FINDINGS_TMPFILE"
     fi
+    write_lint_producers_sidecar "$PHPCS_PASSED" "$ESLINT_PASSED" "$PHPSTAN_PASSED"
 
     if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ] && [ "$PHPSTAN_PASSED" -eq 1 ]; then
         echo "Linting passed"
@@ -1057,6 +1126,7 @@ if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ] && [ -n "$_PHPSTAN_FINDINGS_TMPFILE"
     merge_findings_into_sidecar "$_PHPSTAN_FINDINGS_TMPFILE"
     rm -f "$_PHPSTAN_FINDINGS_TMPFILE"
 fi
+write_lint_producers_sidecar "$PHPCS_PASSED" "$ESLINT_PASSED" "$PHPSTAN_PASSED"
 
 if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ] && [ "$PHPSTAN_PASSED" -eq 1 ]; then
     echo ""

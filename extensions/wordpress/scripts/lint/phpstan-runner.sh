@@ -963,12 +963,14 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                     $message = ($msg["message"] ?? "Unknown") . " (" . $code . ")";
                     $findings[] = [
                         "id" => $id,
+                        "tool" => "phpstan",
                         "file" => $relPath,
                         "line" => $line,
                         "column" => null,
                         "severity" => "error",
                         "source" => "phpstan",
                         "code" => $code,
+                        "rule" => $code,
                         "category" => "phpstan",
                         "message" => $message,
                         "fixable" => false,
