@@ -406,11 +406,39 @@ fn changed_test_file_for_path(file: &str) -> Option<String> {
         return Some("src/commands/golden_contract_tests.rs".to_string());
     }
 
-    if crate::core::code_audit::is_test_path(file) && !file.starts_with("tests/fixtures/") {
+    if is_direct_changed_test_path(file) && !file.starts_with("tests/fixtures/") {
         return Some(file.to_string());
     }
 
     None
+}
+
+fn is_direct_changed_test_path(file: &str) -> bool {
+    let path_lower = file.to_lowercase();
+    if path_lower.starts_with("tests/")
+        || path_lower.starts_with("test/")
+        || path_lower.starts_with("__tests__/")
+        || path_lower.contains("/tests/")
+        || path_lower.contains("/__tests__/")
+    {
+        return true;
+    }
+
+    let file_name = file.rsplit('/').next().unwrap_or(file);
+    file_name.ends_with("_test.rs")
+        || file_name.ends_with("_tests.rs")
+        || file_name.ends_with("Test.php")
+        || file_name.ends_with(".test.js")
+        || file_name.ends_with(".test.jsx")
+        || file_name.ends_with(".test.ts")
+        || file_name.ends_with(".test.tsx")
+        || file_name.ends_with(".test.mjs")
+        || file_name.ends_with(".spec.js")
+        || file_name.ends_with(".spec.jsx")
+        || file_name.ends_with(".spec.ts")
+        || file_name.ends_with(".spec.tsx")
+        || file_name.ends_with(".spec.mjs")
+        || (file_name.starts_with("test_") && file_name.ends_with(".py"))
 }
 
 #[cfg(test)]
@@ -478,6 +506,14 @@ mod tests {
         assert_eq!(
             changed_test_file_for_path("tests/fixtures/other.json"),
             None
+        );
+        assert_eq!(
+            changed_test_file_for_path("src/core/extension/test/mod.rs"),
+            None
+        );
+        assert_eq!(
+            changed_test_file_for_path("src/core/audit_test.rs"),
+            Some("src/core/audit_test.rs".to_string())
         );
     }
 
