@@ -1,5 +1,5 @@
 use crate::core::component::Component;
-use crate::core::deps::{DependencyPackage, DependencyUpdateResult};
+use crate::core::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
 use crate::core::extension::{self, ExtensionCapability, ExtensionExecutionContext};
 use crate::core::{Error, Result};
 use serde::Deserialize;
@@ -77,6 +77,18 @@ impl DependencyProvider {
             DependencyProvider::ComponentScript(provider) => {
                 provider.update(component, path, package, constraint)
             }
+        }
+    }
+
+    pub(crate) fn install(
+        &self,
+        component: &Component,
+        path: &Path,
+    ) -> Result<Option<DependencyCommandResult>> {
+        match self {
+            DependencyProvider::Composer(provider) => provider.install(component, path),
+            DependencyProvider::ComponentScript(provider) => provider.install(component, path),
+            DependencyProvider::Extension(provider) => provider.install(component, path),
         }
     }
 }
@@ -253,7 +265,82 @@ impl ComposerDependencyProvider {
             after,
             stdout,
             stderr,
+            install: None,
+            rebuild: None,
         })
+    }
+
+    fn install(
+        &self,
+        _component: &Component,
+        _path: &Path,
+    ) -> Result<Option<DependencyCommandResult>> {
+        Ok(None)
+    }
+}
+
+pub(crate) struct ComponentScriptDependencyProvider;
+
+impl ComponentScriptDependencyProvider {
+    fn status(
+        &self,
+        component: &Component,
+        path: &Path,
+        package_filter: Option<&str>,
+    ) -> Result<ProviderDependencyStatus> {
+        let mut args = vec!["status".to_string()];
+        if let Some(package_filter) = package_filter {
+            args.push(package_filter.to_string());
+        }
+        let output = run_component_deps_script(component, path, &args)?;
+        let status: ExtensionStatusOutput = parse_extension_output(&output.stdout, "deps status")?;
+
+        Ok(ProviderDependencyStatus {
+            package_manager: status.package_manager,
+            dependency_identities: status.dependency_identities,
+            packages: status.packages,
+        })
+    }
+
+    fn update(
+        &self,
+        component: &Component,
+        path: &Path,
+        package: &str,
+        constraint: Option<&str>,
+    ) -> Result<DependencyUpdateResult> {
+        let mut args = vec!["update".to_string(), package.to_string()];
+        if let Some(constraint) = constraint {
+            args.push(constraint.to_string());
+        }
+        let output = run_component_deps_script(component, path, &args)?;
+        let mut result: DependencyUpdateResult =
+            parse_extension_output(&output.stdout, "deps update")?;
+        result.component_id = component.id.clone();
+        result.component_path = path.display().to_string();
+        result.package = package.to_string();
+        result.requested_constraint = constraint.map(str::to_string);
+        result.stdout = output.stdout;
+        result.stderr = output.stderr;
+        result.install = None;
+        result.rebuild = None;
+        Ok(result)
+    }
+
+    fn install(
+        &self,
+        component: &Component,
+        path: &Path,
+    ) -> Result<Option<DependencyCommandResult>> {
+        let args = vec!["install".to_string()];
+        let output = run_component_deps_script(component, path, &args)?;
+        Ok(Some(DependencyCommandResult {
+            command: component_deps_script_command(component, &args),
+            skipped: false,
+            status: Some(output.exit_code),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }))
     }
 }
 
@@ -302,7 +389,25 @@ impl ExtensionDependencyProvider {
         result.requested_constraint = constraint.map(str::to_string);
         result.stdout = output.stdout;
         result.stderr = output.stderr;
+        result.install = None;
+        result.rebuild = None;
         Ok(result)
+    }
+
+    fn install(
+        &self,
+        component: &Component,
+        path: &Path,
+    ) -> Result<Option<DependencyCommandResult>> {
+        let args = vec!["install".to_string()];
+        let output = self.run(component, path, &args)?;
+        Ok(Some(DependencyCommandResult {
+            command: extension_deps_command(&args),
+            skipped: false,
+            status: Some(output.exit_code),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }))
     }
 
     fn run(
@@ -321,68 +426,55 @@ impl ExtensionDependencyProvider {
     }
 }
 
-pub(crate) struct ComponentScriptDependencyProvider;
-
-impl ComponentScriptDependencyProvider {
-    fn status(
-        &self,
-        component: &Component,
-        path: &Path,
-        package_filter: Option<&str>,
-    ) -> Result<ProviderDependencyStatus> {
-        let mut args = vec!["status".to_string()];
-        if let Some(package_filter) = package_filter {
-            args.push(package_filter.to_string());
-        }
-        let output = self.run(component, path, &args)?;
-        let status: ExtensionStatusOutput = parse_extension_output(&output.stdout, "deps status")?;
-
-        Ok(ProviderDependencyStatus {
-            package_manager: status.package_manager,
-            dependency_identities: status.dependency_identities,
-            packages: status.packages,
-        })
+fn run_component_deps_script(
+    component: &Component,
+    path: &Path,
+    args: &[String],
+) -> Result<crate::core::extension::component_script::ComponentScriptOutput> {
+    let output = crate::core::extension::component_script::run_component_scripts_with_env(
+        component,
+        ExtensionCapability::Deps,
+        path,
+        false,
+        &[],
+        args,
+    )?;
+    if !output.success {
+        return Err(Error::validation_invalid_argument(
+            "dependency_provider",
+            format!(
+                "Dependency provider command failed with status {}: {}",
+                output.exit_code,
+                first_non_empty_line(&output.stderr)
+                    .or_else(|| first_non_empty_line(&output.stdout))
+                    .unwrap_or("no output")
+            ),
+            None,
+            Some(vec![format!(
+                "Run the component deps script manually in {}",
+                path.display()
+            )]),
+        ));
     }
+    Ok(output)
+}
 
-    fn update(
-        &self,
-        component: &Component,
-        path: &Path,
-        package: &str,
-        constraint: Option<&str>,
-    ) -> Result<DependencyUpdateResult> {
-        let mut args = vec!["update".to_string(), package.to_string()];
-        if let Some(constraint) = constraint {
-            args.push(constraint.to_string());
-        }
-        let output = self.run(component, path, &args)?;
-        let mut result: DependencyUpdateResult =
-            parse_extension_output(&output.stdout, "deps update")?;
-        result.component_id = component.id.clone();
-        result.component_path = path.display().to_string();
-        result.package = package.to_string();
-        result.requested_constraint = constraint.map(str::to_string);
-        result.stdout = output.stdout;
-        result.stderr = output.stderr;
-        Ok(result)
-    }
+fn component_deps_script_command(component: &Component, args: &[String]) -> Vec<String> {
+    let mut command = vec!["scripts.deps".to_string()];
+    command.extend(
+        component
+            .script_commands(ExtensionCapability::Deps)
+            .iter()
+            .cloned(),
+    );
+    command.extend(args.iter().cloned());
+    command
+}
 
-    fn run(
-        &self,
-        component: &Component,
-        path: &Path,
-        args: &[String],
-    ) -> Result<crate::core::extension::RunnerOutput> {
-        let output = crate::core::extension::component_script::run_component_scripts_with_env(
-            component,
-            ExtensionCapability::Deps,
-            path,
-            false,
-            &[],
-            args,
-        )?;
-        Ok(output.into())
-    }
+fn extension_deps_command(args: &[String]) -> Vec<String> {
+    let mut command = vec!["extension.deps".to_string()];
+    command.extend(args.iter().cloned());
+    command
 }
 
 #[derive(Debug, Deserialize)]

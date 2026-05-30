@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 
 use homeboy::core::deps::{
     self, DependencyStackApplyResult, DependencyStackPlan, DependencyStackStatus, DependencyStatus,
-    DependencyUpdateResult,
+    DependencyUpdateOptions, DependencyUpdateResult,
 };
 
 use super::CmdResult;
@@ -28,9 +28,9 @@ enum DepsCommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
-    /// Update one Composer package explicitly
+    /// Update one package through its dependency provider
     Update {
-        /// Composer package name, e.g. chubes4/block-format-bridge.
+        /// Package name, e.g. chubes4/block-format-bridge.
         package: String,
 
         /// Component ID. When omitted, auto-detected from CWD.
@@ -43,6 +43,14 @@ enum DepsCommand {
         /// Workspace path to operate on directly.
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
+
+        /// Skip provider-owned install/lockfile refresh after the manifest update.
+        #[arg(long)]
+        no_install: bool,
+
+        /// Rebuild the component through its generic build capability after updating.
+        #[arg(long)]
+        rebuild: bool,
     },
     /// Work with declared downstream dependency stacks
     Stack {
@@ -68,6 +76,14 @@ enum DepsStackCommand {
         /// Print the command plan without running commands.
         #[arg(long)]
         dry_run: bool,
+
+        /// Skip provider-owned install/lockfile refresh after each manifest update.
+        #[arg(long)]
+        no_install: bool,
+
+        /// Rebuild each downstream component through its generic build capability.
+        #[arg(long)]
+        rebuild: bool,
     },
 }
 
@@ -95,12 +111,18 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
             component,
             to,
             path,
+            no_install,
+            rebuild,
         } => {
             let output: DependencyUpdateResult = deps::update(
                 component.as_deref(),
                 path.as_deref(),
                 &package,
                 to.as_deref(),
+                DependencyUpdateOptions {
+                    install: !no_install,
+                    rebuild,
+                },
             )?;
             Ok((
                 serde_json::to_value(output).map_err(|e| {
@@ -137,8 +159,14 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
                     0,
                 ))
             }
-            DepsStackCommand::Apply { upstream, dry_run } => {
-                let output: DependencyStackApplyResult = deps::stack_apply(&upstream, dry_run)?;
+            DepsStackCommand::Apply {
+                upstream,
+                dry_run,
+                no_install,
+                rebuild,
+            } => {
+                let output: DependencyStackApplyResult =
+                    deps::stack_apply(&upstream, dry_run, !no_install, rebuild)?;
                 Ok((
                     serde_json::to_value(output).map_err(|e| {
                         homeboy::core::Error::internal_json(

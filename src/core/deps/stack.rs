@@ -1,4 +1,5 @@
 use crate::core::component::{self, Component, DependencyStackEdge};
+use crate::core::deps::{update, DependencyUpdateOptions};
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
 use crate::core::{Error, Result};
 use crate::extensions::deps_provider;
@@ -20,6 +21,7 @@ pub struct DependencyStackEdgeStatus {
     pub downstream: String,
     pub package: String,
     pub update_command: String,
+    pub rebuild: bool,
     pub post_update: Vec<String>,
     pub test: Vec<String>,
 }
@@ -42,6 +44,7 @@ pub struct DependencyStackPlanStep {
     pub downstream_path: String,
     pub package: String,
     pub update_command: String,
+    pub rebuild: bool,
     pub post_update: Vec<String>,
     pub test: Vec<String>,
 }
@@ -96,18 +99,35 @@ pub fn stack_plan(upstream: &str) -> Result<DependencyStackPlan> {
     stack_plan_from_components(upstream, &components)
 }
 
-pub fn stack_apply(upstream: &str, dry_run: bool) -> Result<DependencyStackApplyResult> {
+pub fn stack_apply(
+    upstream: &str,
+    dry_run: bool,
+    install: bool,
+    rebuild: bool,
+) -> Result<DependencyStackApplyResult> {
     let plan = stack_plan(upstream)?;
     let mut steps = Vec::new();
 
     for step in plan.planned_steps() {
         let mut command_results = Vec::new();
-        command_results.push(run_stack_command(
-            "update",
-            &step.update_command,
-            &step.downstream_path,
-            dry_run,
-        )?);
+        if step.uses_default_update_command() {
+            command_results.push(run_default_update_step(&step, dry_run, install)?);
+        } else {
+            command_results.push(run_stack_command(
+                "update",
+                &step.update_command,
+                &step.downstream_path,
+                dry_run,
+            )?);
+        }
+        if rebuild || step.rebuild {
+            command_results.push(run_stack_command(
+                "rebuild",
+                &rebuild_command(&step),
+                &step.downstream_path,
+                dry_run,
+            )?);
+        }
         for command in &step.post_update {
             command_results.push(run_stack_command(
                 "post_update",
@@ -194,6 +214,7 @@ pub fn stack_plan_from_components(
                 downstream_path: downstream_path.clone(),
                 package: edge.package.clone(),
                 update_command: update_command(edge, downstream_path),
+                rebuild: edge.rebuild,
                 post_update: edge.post_update.clone(),
                 test: edge.test.clone(),
             });
@@ -315,6 +336,7 @@ fn stack_step(step: &DependencyStackPlanStep) -> PlanStep {
             .string("downstream_path", step.downstream_path.clone())
             .string("package", step.package.clone())
             .string("update_command", step.update_command.clone())
+            .json("rebuild", &step.rebuild)
             .json("post_update", &step.post_update)
             .json("test", &step.test)
             .json("stack_step", step),
@@ -337,18 +359,89 @@ fn edge_status(component: &Component, edge: &DependencyStackEdge) -> DependencyS
         downstream: edge.downstream.clone(),
         package: edge.package.clone(),
         update_command: update_command(edge, &component.local_path),
+        rebuild: edge.rebuild,
         post_update: edge.post_update.clone(),
         test: edge.test.clone(),
     }
 }
 
+impl DependencyStackPlanStep {
+    fn uses_default_update_command(&self) -> bool {
+        self.update_command == update_command_for(&self.package, &self.downstream_path)
+    }
+}
+
 fn update_command(edge: &DependencyStackEdge, downstream_path: &str) -> String {
-    edge.update.clone().unwrap_or_else(|| {
-        format!(
-            "homeboy deps update {} --path {}",
-            shell_word(&edge.package),
-            shell_word(downstream_path)
+    edge.update
+        .clone()
+        .unwrap_or_else(|| update_command_for(&edge.package, downstream_path))
+}
+
+fn update_command_for(package: &str, downstream_path: &str) -> String {
+    update_command_for_options(package, downstream_path, true)
+}
+
+fn update_command_for_options(package: &str, downstream_path: &str, install: bool) -> String {
+    let mut command = format!(
+        "homeboy deps update {} --path {}",
+        shell_word(package),
+        shell_word(downstream_path)
+    );
+    if !install {
+        command.push_str(" --no-install");
+    }
+    command
+}
+
+fn rebuild_command(step: &DependencyStackPlanStep) -> String {
+    format!(
+        "homeboy build {} --path {}",
+        shell_word(&step.downstream),
+        shell_word(&step.downstream_path)
+    )
+}
+
+fn run_default_update_step(
+    step: &DependencyStackPlanStep,
+    dry_run: bool,
+    install: bool,
+) -> Result<DependencyStackCommandResult> {
+    let command = update_command_for_options(&step.package, &step.downstream_path, install);
+    if dry_run {
+        return Ok(DependencyStackCommandResult {
+            phase: "update".to_string(),
+            command,
+            skipped: true,
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+    }
+
+    let result = update(
+        Some(&step.downstream),
+        Some(&step.downstream_path),
+        &step.package,
+        None,
+        DependencyUpdateOptions {
+            install,
+            rebuild: false,
+        },
+    )?;
+    let stdout = serde_json::to_string(&result).map_err(|e| {
+        Error::internal_json(
+            e.to_string(),
+            Some("serialize deps stack update".to_string()),
         )
+    })?;
+
+    Ok(DependencyStackCommandResult {
+        phase: "update".to_string(),
+        command,
+        skipped: false,
+        status: Some(0),
+        stdout,
+        stderr: String::new(),
     })
 }
 
