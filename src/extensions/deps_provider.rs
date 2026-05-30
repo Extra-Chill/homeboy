@@ -1,5 +1,5 @@
-use super::{DependencyPackage, DependencyUpdateResult};
 use crate::core::component::Component;
+use crate::core::deps::{DependencyPackage, DependencyUpdateResult};
 use crate::core::extension::{self, ExtensionCapability, ExtensionExecutionContext};
 use crate::core::{Error, Result};
 use serde::Deserialize;

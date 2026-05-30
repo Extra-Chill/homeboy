@@ -3,10 +3,10 @@ use crate::core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-mod provider;
 mod stack;
 
-pub use provider::{composer_command_args, ComposerAction};
+use crate::extensions::deps_provider as provider;
+pub use crate::extensions::deps_provider::{composer_command_args, ComposerAction};
 pub use stack::{
     stack_apply, stack_plan, stack_plan_from_components, stack_status, DependencyStackApplyResult,
     DependencyStackApplyStep, DependencyStackCommandResult, DependencyStackEdgeStatus,

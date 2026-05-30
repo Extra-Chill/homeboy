@@ -20,6 +20,7 @@ pub mod cli_surface;
 #[doc(hidden)]
 pub mod commands;
 pub mod core;
+pub mod extensions;
 pub mod help_topics;
 
 #[cfg(test)]
