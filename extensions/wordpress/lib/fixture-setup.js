@@ -147,9 +147,6 @@ function normalizeExecutionRoute(options) {
 	if (options.runRecipeStep || options.runWpCodeboxStep) {
 		return 'wp-codebox';
 	}
-	if (options.runCli) {
-		return 'host';
-	}
 	return '';
 }
 

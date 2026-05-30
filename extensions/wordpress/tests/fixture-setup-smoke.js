@@ -92,6 +92,7 @@ async function main() {
 
 		await assert.rejects(
 			() => runWordPressFixtureSetup({
+				runCli: async () => ({ exitCode: 0, stdout: 'implicit host', stderr: '' }),
 				fixtures: [{ id: 'implicit-host', type: 'wp-cli', command: 'option get blogname' }],
 			}),
 			/explicit execution route/
