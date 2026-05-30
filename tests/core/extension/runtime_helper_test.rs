@@ -20,4 +20,8 @@ fn test_ensure_all_helpers() {
         RUNTIME_HELPER_RS.contains("HOMEBOY_RUNTIME_SIDECAR_WRITER"),
         "extension env should expose the shared sidecar writer helper"
     );
+    assert!(
+        RUNTIME_HELPER_RS.contains("HOMEBOY_RUNTIME_RUNNER_PRELUDE"),
+        "extension env should expose the shared runner prelude helper"
+    );
 }
