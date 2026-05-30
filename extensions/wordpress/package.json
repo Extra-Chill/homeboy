@@ -11,6 +11,7 @@
     "./agent-terminal-actions": "./lib/agent-terminal-actions.js",
     "./timing-correlator": "./lib/timing-correlator.js",
     "./wp-codebox-apply-adapter": "./lib/wp-codebox-apply-adapter.js",
+    "./wp-codebox-browser-metrics": "./lib/wp-codebox-browser-metrics.js",
     "./audit-wp-codebox-fanout": "./lib/audit-wp-codebox-fanout.js"
   },
   "scripts": {
@@ -25,6 +26,7 @@
     "test:request-profiler": "node tests/request-profiler-smoke.js",
     "test:timing-correlator": "node tests/timing-correlator-smoke.js",
     "test:wp-codebox-apply-adapter": "node tests/wp-codebox-apply-adapter-smoke.js",
+    "test:wp-codebox-browser-metrics": "node tests/wp-codebox-browser-metrics-smoke.js",
     "test:audit-wp-codebox-fanout": "node tests/audit-wp-codebox-fanout-smoke.js",
     "test:audit-wp-codebox-execute": "node tests/audit-wp-codebox-fanout-smoke.js",
     "test:wp-codebox-task-runner": "node tests/wp-codebox-task-runner-smoke.js",

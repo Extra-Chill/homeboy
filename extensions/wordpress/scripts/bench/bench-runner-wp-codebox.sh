@@ -4,10 +4,12 @@ set -euo pipefail
 # WP Codebox-backed WordPress bench runner.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 BENCH_HELPER_SH="${HOMEBOY_RUNTIME_BENCH_HELPER_SH:-${HOME}/.homeboy/runtime/bench-helper.sh}"
 BENCH_RESULTS_ARTIFACTS_HELPER="${SCRIPT_DIR}/bench-results-artifacts.sh"
+BENCH_BROWSER_METRICS_HELPER="${EXTENSION_DIR}/lib/wp-codebox-browser-metrics.js"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 BENCH_BROWSER_TARGET_HELPER="${SCRIPT_DIR}/browser-target.sh"
 
@@ -473,6 +475,16 @@ fi
 
 mkdir -p "$(dirname "$RESULTS_FILE")"
 jq '.benchResults | del(.warmup_iterations)' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
+
+if [ -f "$BENCH_BROWSER_METRICS_HELPER" ]; then
+    ENRICHED_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-browser-metrics.XXXXXX")
+    if node "$BENCH_BROWSER_METRICS_HELPER" "$RESULTS_FILE" "$ARTIFACTS_DIR" > "$ENRICHED_RESULTS_FILE"; then
+        mv "$ENRICHED_RESULTS_FILE" "$RESULTS_FILE"
+    else
+        rm -f "$ENRICHED_RESULTS_FILE"
+        echo "Warning: failed to parse WP Codebox browser artifacts; continuing with raw bench results." >&2
+    fi
+fi
 
 homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE"
 
