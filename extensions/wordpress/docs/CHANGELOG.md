@@ -2,6 +2,19 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.106.0] - 2026-05-30
+
+### Added
+- adapt page profiler to Codebox browser artifacts
+
+### Changed
+- cover Codebox admin page artifacts
+
+### Fixed
+- route PHP traces through WP Codebox
+- require explicit fixture host route
+- route fixtures through wp-codebox
+
 ## [2.105.9] - 2026-05-30
 
 ### Fixed
