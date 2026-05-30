@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.20.2] - 2026-05-30
+
+### Changed
+- Normalize extension fix result capture
+
 ## [1.20.1] - 2026-05-30
 
 ### Changed
