@@ -15,6 +15,10 @@ RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context --component-alias PLUGIN_PATH
 
+WP_CODEBOX_PATHS_HELPER="${SCRIPT_DIR}/../lib/wp-codebox-paths.sh"
+# shellcheck source=../lib/wp-codebox-paths.sh
+source "$WP_CODEBOX_PATHS_HELPER"
+
 export HOMEBOY_COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-$COMPONENT_PATH}"
 export HOMEBOY_TRACE_COMPONENT_PATH="${HOMEBOY_TRACE_COMPONENT_PATH:-$HOMEBOY_COMPONENT_PATH}"
 export HOMEBOY_COMPONENT_ID="${HOMEBOY_COMPONENT_ID:-$COMPONENT_ID}"
@@ -56,6 +60,146 @@ homeboy_wordpress_export_context() {
             export HOMEBOY_WP_CLI="wp"
         fi
     fi
+}
+
+homeboy_wordpress_resolve_wp_codebox_bin() {
+    local bin="${HOMEBOY_WP_CODEBOX_BIN:-}"
+
+    if [ -z "$bin" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+        bin=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
+    fi
+
+    bin="${bin:-wp-codebox}"
+    if [ "$bin" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>&1; then
+        echo "Error: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN, settings wp_codebox_bin, or install wp-codebox." >&2
+        return 1
+    fi
+
+    printf '%s\n' "$bin"
+}
+
+homeboy_wordpress_trace_wp_version() {
+    local version="6.9"
+    local extracted=""
+
+    if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
+        extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground_wordpress_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
+        [ -n "$extracted" ] && [ "$extracted" != "null" ] && version="$extracted"
+    fi
+
+    printf '%s\n' "$version"
+}
+
+homeboy_wordpress_trace_php_wrapper() {
+    local runtime_scenario="$1"
+    local runtime_results="$2"
+    local runtime_artifacts="$3"
+    local runtime_run_dir="$4"
+
+    php -r '
+        $env = array(
+            "HOMEBOY_COMPONENT_PATH" => "/wordpress/wp-content/plugins/" . getenv("PLUGIN_SLUG"),
+            "HOMEBOY_TRACE_COMPONENT_PATH" => "/wordpress/wp-content/plugins/" . getenv("PLUGIN_SLUG"),
+            "HOMEBOY_PLUGIN_PATH" => "/wordpress/wp-content/plugins/" . getenv("PLUGIN_SLUG"),
+            "HOMEBOY_COMPONENT_ID" => getenv("HOMEBOY_COMPONENT_ID") ?: basename(getenv("HOMEBOY_COMPONENT_PATH") ?: getcwd()),
+            "HOMEBOY_PROJECT_PATH" => getenv("HOMEBOY_PROJECT_PATH") ?: getenv("HOMEBOY_COMPONENT_PATH"),
+            "HOMEBOY_TRACE_SCENARIO" => getenv("HOMEBOY_TRACE_SCENARIO"),
+            "HOMEBOY_TRACE_RESULTS_FILE" => $argv[2],
+            "HOMEBOY_TRACE_ARTIFACT_DIR" => $argv[3],
+            "HOMEBOY_RUN_DIR" => $argv[4],
+            "HOMEBOY_WP_CLI" => "wp",
+        );
+
+        foreach ($env as $name => $value) {
+            echo "putenv(" . var_export($name . "=" . $value, true) . ");\n";
+        }
+
+        echo "require " . var_export($argv[1], true) . ";\n";
+    ' "$runtime_scenario" "$runtime_results" "$runtime_artifacts" "$runtime_run_dir"
+}
+
+homeboy_trace_run_php_scenario_wp_codebox() {
+    local scenario_rel="$1"
+    local stdout_file="$2"
+    local stderr_file="$3"
+    local codebox_bin wp_version plugin_slug run_mount_host runtime_run_dir runtime_results runtime_artifacts runtime_scenario wrapper_file recipe_file output_file codebox_artifacts_dir status
+
+    codebox_bin="$(homeboy_wordpress_resolve_wp_codebox_bin)" || return 1
+    wp_version="$(homeboy_wordpress_trace_wp_version)"
+    plugin_slug="$(basename "$HOMEBOY_COMPONENT_PATH")"
+    run_mount_host="$(homeboy_wp_codebox_resolve_mount_path "$HOMEBOY_RUN_DIR")"
+    runtime_run_dir="/homeboy-trace-run"
+    case "$HOMEBOY_TRACE_RESULTS_FILE" in
+        "${HOMEBOY_RUN_DIR}"/*)
+            runtime_results="${runtime_run_dir}/${HOMEBOY_TRACE_RESULTS_FILE#"${HOMEBOY_RUN_DIR}/"}"
+            ;;
+        *)
+            echo "Error: HOMEBOY_TRACE_RESULTS_FILE must live under HOMEBOY_RUN_DIR for WP Codebox trace execution: ${HOMEBOY_TRACE_RESULTS_FILE}" >&2
+            return 1
+            ;;
+    esac
+    case "$HOMEBOY_TRACE_ARTIFACT_DIR" in
+        "${HOMEBOY_RUN_DIR}"/*)
+            runtime_artifacts="${runtime_run_dir}/${HOMEBOY_TRACE_ARTIFACT_DIR#"${HOMEBOY_RUN_DIR}/"}"
+            ;;
+        *)
+            echo "Error: HOMEBOY_TRACE_ARTIFACT_DIR must live under HOMEBOY_RUN_DIR for WP Codebox trace execution: ${HOMEBOY_TRACE_ARTIFACT_DIR}" >&2
+            return 1
+            ;;
+    esac
+    runtime_scenario="/wordpress/wp-content/plugins/${plugin_slug}/${scenario_rel}"
+
+    wrapper_file="$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-trace-wrapper.XXXXXX")"
+    recipe_file="$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-trace-recipe.XXXXXX")"
+    output_file="$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-trace-output.XXXXXX")"
+    codebox_artifacts_dir="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-trace-artifacts.XXXXXX")"
+    PLUGIN_SLUG="$plugin_slug" homeboy_wordpress_trace_php_wrapper "$runtime_scenario" "$runtime_results" "$runtime_artifacts" "$runtime_run_dir" > "$wrapper_file"
+
+    jq -n \
+        --arg wp "$wp_version" \
+        --arg componentSource "$(homeboy_wp_codebox_resolve_mount_path "$HOMEBOY_COMPONENT_PATH")" \
+        --arg componentTarget "/wordpress/wp-content/plugins/${plugin_slug}" \
+        --arg runSource "$run_mount_host" \
+        --arg runTarget "$runtime_run_dir" \
+        --arg codeFile "$wrapper_file" \
+        '{
+            schema: "wp-codebox/workspace-recipe/v1",
+            runtime: {wp: $wp, blueprint: {steps: []}},
+            inputs: {mounts: [
+                {source: $componentSource, target: $componentTarget, mode: "readwrite"},
+                {source: $runSource, target: $runTarget, mode: "readwrite"}
+            ]},
+            workflow: {steps: [{command: "wordpress.run-php", args: ["code-file=" + $codeFile]}]}
+        }' > "$recipe_file"
+
+    wp_codebox_command=("$codebox_bin")
+    case "$codebox_bin" in
+        *.js|*.cjs)
+            wp_codebox_command=(node "$codebox_bin")
+            ;;
+    esac
+
+    set +e
+    "${wp_codebox_command[@]}" recipe-run --recipe "$recipe_file" --artifacts "$codebox_artifacts_dir" --json > "$output_file" 2>"$stderr_file"
+    status=$?
+    set -e
+
+    jq -r '(.executions // [])[-1].stdout // empty' "$output_file" > "$stdout_file" 2>/dev/null || true
+    if [ ! -s "$stderr_file" ]; then
+        jq -r '(.executions // [])[-1].stderr // empty' "$output_file" > "$stderr_file" 2>/dev/null || true
+    fi
+
+    if [ "$status" -eq 0 ] && ! jq -e '.success == true' "$output_file" >/dev/null 2>&1; then
+        status=1
+    fi
+
+    if [ "$status" -ne 0 ]; then
+        cat "$output_file" >> "$stderr_file"
+    fi
+
+    rm -f "$wrapper_file" "$recipe_file" "$output_file"
+    rm -rf "$codebox_artifacts_dir"
+    return "$status"
 }
 
 homeboy_trace_emit_scenario() {
@@ -206,7 +350,7 @@ scenario_abs="${HOMEBOY_COMPONENT_PATH}/${scenario_rel}"
 set +e
 case "$scenario_rel" in
     *.php)
-        php "$scenario_abs" >"$stdout_file" 2>"$stderr_file"
+        homeboy_trace_run_php_scenario_wp_codebox "$scenario_rel" "$stdout_file" "$stderr_file"
         status=$?
         ;;
     *.sh)

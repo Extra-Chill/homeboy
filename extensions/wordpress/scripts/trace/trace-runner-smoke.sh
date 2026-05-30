@@ -57,6 +57,47 @@ trap 'rm -rf "$fixture"' EXIT
 
 mkdir -p "$fixture/traces" "$fixture/tests/traces" "$fixture/scripts/trace"
 
+fake_wp_codebox="$fixture/wp-codebox.cjs"
+fake_wp_codebox_capture="$fixture/wp-codebox-capture.json"
+cat >"$fake_wp_codebox" <<'NODE'
+#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+
+const recipePath = process.argv[process.argv.indexOf('--recipe') + 1];
+const recipe = JSON.parse(fs.readFileSync(recipePath, 'utf8'));
+const step = recipe.workflow.steps[0];
+if (process.argv[2] !== 'recipe-run' || step.command !== 'wordpress.run-php') {
+  process.exit(2);
+}
+
+const codeFile = step.args.find((arg) => arg.startsWith('code-file=')).slice('code-file='.length);
+const wrapper = fs.readFileSync(codeFile, 'utf8');
+const runMount = recipe.inputs.mounts.find((mount) => mount.target === '/homeboy-trace-run');
+const componentMount = recipe.inputs.mounts.find((mount) => mount.target.startsWith('/wordpress/wp-content/plugins/'));
+const resultPath = wrapper.match(/HOMEBOY_TRACE_RESULTS_FILE=([^']+)/)[1].replace('/homeboy-trace-run', runMount.source);
+const artifactDir = wrapper.match(/HOMEBOY_TRACE_ARTIFACT_DIR=([^']+)/)[1].replace('/homeboy-trace-run', runMount.source);
+
+fs.mkdirSync(artifactDir, { recursive: true });
+fs.writeFileSync(path.join(artifactDir, 'php-artifact.txt'), 'php artifact\n');
+fs.writeFileSync(resultPath, JSON.stringify({
+  component_id: 'trace-fixture',
+  scenario_id: 'php-scenario',
+  status: 'pass',
+  summary: 'PHP trace scenario passed via WP Codebox',
+  timeline: [{ t_ms: 0, source: 'php', event: 'scenario.start', data: { runtime: 'wp-codebox' } }],
+  assertions: [{ id: 'runtime', status: 'pass', message: 'ran through wordpress.run-php' }],
+  artifacts: [{ label: 'php artifact', path: path.join(artifactDir, 'php-artifact.txt') }]
+}, null, 2) + '\n');
+fs.writeFileSync(process.env.FAKE_WP_CODEBOX_CAPTURE, JSON.stringify({ argv: process.argv.slice(2), recipe, componentMount, runMount }, null, 2));
+process.stdout.write(JSON.stringify({
+  success: true,
+  schema: 'wp-codebox/recipe-run/v1',
+  executions: [{ command: 'wordpress.run-php', exitCode: 0, stdout: 'php stdout from wp-codebox\n', stderr: '' }]
+}, null, 2));
+NODE
+chmod +x "$fake_wp_codebox"
+
 cat >"$fixture/traces/php-scenario.trace.php" <<'PHP'
 <?php
 $artifact_dir = getenv( 'HOMEBOY_TRACE_ARTIFACT_DIR' );
@@ -153,6 +194,8 @@ HOMEBOY_TRACE_SCENARIO="php-scenario" \
 HOMEBOY_TRACE_RESULTS_FILE="$php_results" \
 HOMEBOY_TRACE_ARTIFACT_DIR="$run_dir/artifacts/php" \
 HOMEBOY_RUN_DIR="$run_dir" \
+HOMEBOY_WP_CODEBOX_BIN="$fake_wp_codebox" \
+FAKE_WP_CODEBOX_CAPTURE="$fake_wp_codebox_capture" \
 bash "$RUNNER"
 
 assert_file "$php_results" "PHP scenario results"
@@ -163,6 +206,9 @@ assert_file "$run_dir/artifacts/php/php-scenario.exit-code.txt" "PHP exit artifa
 assert_json_field "$php_results" "status-pass" "PHP scenario status"
 assert_json_field "$php_results" "has-artifacts" "PHP scenario artifacts"
 assert_json_field "$php_results" "has-timeline" "PHP scenario timeline"
+assert_file "$fake_wp_codebox_capture" "WP Codebox recipe capture"
+assert_contains "$(php -r '$json = json_decode(file_get_contents($argv[1]), true); echo $json["recipe"]["workflow"]["steps"][0]["command"] ?? "";' "$fake_wp_codebox_capture")" "wordpress.run-php" "WP Codebox PHP trace command"
+assert_contains "$(php -r '$json = json_decode(file_get_contents($argv[1]), true); echo $json["runMount"]["target"] ?? "";' "$fake_wp_codebox_capture")" "/homeboy-trace-run" "WP Codebox run mount"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_PATH="$fixture" \
