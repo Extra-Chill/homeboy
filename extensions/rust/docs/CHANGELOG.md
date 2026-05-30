@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.20.3] - 2026-05-30
+
+### Changed
+- Use shared runner prelude in extension runners
+
 ## [1.20.2] - 2026-05-30
 
 ### Changed
