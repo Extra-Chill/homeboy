@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use crate::commands::{
     api, audit, auth, bench, build, changelog, changes, ci, component, config, daemon, db, deploy,
     deps, doctor, extension, file, fleet, git, http, issues, lint, logs, observe, project,
-    refactor, release, report, review, rig, runner, runs, self_cmd, server, ssh, stack, status,
-    test, trace, triage, tunnel, undo, upgrade, version,
+    refactor, refs, release, report, review, rig, runner, runs, self_cmd, server, ssh, stack,
+    status, test, trace, triage, tunnel, undo, upgrade, version,
 };
 
 mod lab_contract;
@@ -119,6 +119,8 @@ pub enum Commands {
     Audit(audit::AuditArgs),
     /// Structural refactoring (rename terms across codebase)
     Refactor(refactor::RefactorArgs),
+    /// Read-only reference discovery for a symbol or term
+    Refs(refs::RefsArgs),
     /// Manage local dev rigs (reproducible multi-component environments)
     #[command(visible_alias = "rigs")]
     Rig(rig::RigArgs),
@@ -331,6 +333,11 @@ impl Commands {
                     .then_some("--write/--commit"),
                 output_contract: CommandOutputContractKind::JsonEnvelope,
             },
+            Commands::Refs(_) => workspace_descriptor(
+                CommandResponseMode::Json,
+                output_file_mode,
+                CommandOutputContractKind::JsonEnvelope,
+            ),
             Commands::Project(_)
             | Commands::Component(_)
             | Commands::Config(_)
