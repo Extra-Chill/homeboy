@@ -19,7 +19,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Parser)]
 #[command(name = "homeboy")]
 #[command(version = VERSION)]
-#[command(about = "CLI tool for development and deployment automation")]
+#[command(about = "Headless automation for agentic software engineering workflows")]
 pub struct Cli {
     /// Write structured JSON output to a file (in addition to stdout).
     /// The file contains command-specific JSON — no log text.
