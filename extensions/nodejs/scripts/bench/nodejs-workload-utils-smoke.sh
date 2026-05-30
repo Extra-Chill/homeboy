@@ -7,8 +7,12 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 mkdir -p "$TMP_DIR/component-under-test"
 
 HOMEBOY_COMPONENT_PATH="$TMP_DIR/component-under-test" \
-HOMEBOY_SETTINGS_JSON='{"alpha":"json-value","number":42,"namespace":"json namespace","ignored_null":null}' \
+HOMEBOY_SETTINGS_JSON='{"alpha":"json-value","number":42,"namespace":"json namespace","ignored_null":null,"enabled":true,"list":["json","items"],"object":{"source":"json"},"json_text":"{\"source\":\"json-string\"}","relative_path":"reports/out.json"}' \
 HOMEBOY_SETTINGS_BETA='env-value' \
+HOMEBOY_SETTINGS_ENV_INT='17' \
+HOMEBOY_SETTINGS_ENV_BOOL='off' \
+HOMEBOY_SETTINGS_ENV_LIST='one, two,,three' \
+HOMEBOY_SETTINGS_ENV_JSON='{"source":"env"}' \
 WORKLOAD_UTILS_UNDER_TEST="$SCRIPT_DIR/lib/workload-utils.mjs" \
 node --input-type=module - <<'EOF'
 import { readFile } from 'node:fs/promises';
@@ -21,6 +25,28 @@ if (utils.setting('number') !== '42') throw new Error('numeric JSON setting was 
 if (utils.setting('beta') !== 'env-value') throw new Error('env setting fallback was not resolved');
 if (utils.setting('ignored_null', 'fallback') !== 'fallback') throw new Error('null JSON setting should use fallback');
 if (utils.setting('missing', 'fallback') !== 'fallback') throw new Error('missing setting fallback failed');
+
+if (utils.settingInt('number') !== 42) throw new Error('JSON integer setting was not parsed');
+if (utils.settingInt('env_int') !== 17) throw new Error('env integer setting was not parsed');
+if (utils.settingInt('env_int', 0, { max: 10 }) !== 0) throw new Error('integer max bound was not enforced');
+if (utils.settingInt('alpha', 9) !== 9) throw new Error('invalid integer did not use fallback');
+
+if (utils.settingBool('enabled') !== true) throw new Error('JSON boolean setting was not parsed');
+if (utils.settingBool('env_bool', true) !== false) throw new Error('env boolean setting was not parsed');
+if (utils.settingBool('alpha', true) !== true) throw new Error('invalid boolean did not use fallback');
+
+if (utils.settingList('list').join('|') !== 'json|items') throw new Error('JSON list setting was not parsed');
+if (utils.settingList('env_list').join('|') !== 'one|two|three') throw new Error('env list setting was not split/trimmed');
+if (utils.settingList('missing_list', ['fallback']).join('|') !== 'fallback') throw new Error('missing list did not use fallback');
+
+if (utils.settingJson('object').source !== 'json') throw new Error('JSON object setting was not preserved');
+if (utils.settingJson('json_text').source !== 'json-string') throw new Error('JSON string setting was not parsed');
+if (utils.settingJson('env_json').source !== 'env') throw new Error('env JSON setting was not parsed');
+if (utils.settingJson('alpha', { fallback: true }).fallback !== true) throw new Error('invalid JSON did not use fallback');
+
+if (utils.expandHome('~/project', { homeDir: '/home/test' }) !== '/home/test/project') throw new Error('home path was not expanded');
+if (utils.resolvePath('relative_path', { baseDir: '/tmp/base' }) !== '/tmp/base/relative_path') throw new Error('relative path was not resolved from baseDir');
+if (utils.resolvePath(utils.setting('relative_path'), { baseDir: process.env.HOMEBOY_COMPONENT_PATH }) !== join(process.env.HOMEBOY_COMPONENT_PATH, 'reports/out.json')) throw new Error('setting path was not resolved from component path');
 
 if (utils.metric('12.5') !== 12.5) throw new Error('metric did not coerce numeric string');
 if (utils.metric('nan', 3) !== 3) throw new Error('metric did not use fallback for NaN');
