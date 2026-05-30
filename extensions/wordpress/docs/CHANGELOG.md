@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.106.1] - 2026-05-30
+
+### Fixed
+- remove legacy Playground runtime aliases
+
 ## [2.106.0] - 2026-05-30
 
 ### Added
