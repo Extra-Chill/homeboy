@@ -19,6 +19,11 @@ homeboy_require_bash_version 4
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner-steps.sh}"
 # shellcheck source=../lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
 
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
@@ -750,6 +755,11 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
 
     # Write annotations sidecar JSON for CI inline comments
     if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
+        if ! type homeboy_merge_annotations >/dev/null 2>&1; then
+            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write annotations" >&2
+            exit 1
+        fi
+        annotations_tmpfile="$(homeboy_mktemp 'phpcs-annotations.XXXXXX.json')"
         echo "$json_output" | php -r '
             ini_set("memory_limit", "-1");
             $json = json_decode(file_get_contents("php://stdin"), true);
@@ -773,11 +783,12 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
                     ];
                 }
             }
-            $outDir = $argv[2] ?? "";
-            if ($outDir && !empty($annotations)) {
-                file_put_contents($outDir . "/phpcs.json", json_encode($annotations, JSON_PRETTY_PRINT) . "\n");
+            if (!empty($annotations)) {
+                file_put_contents($argv[2], json_encode($annotations, JSON_PRETTY_PRINT) . "\n");
             }
-        ' "$PLUGIN_PATH" "${HOMEBOY_ANNOTATIONS_DIR}" 2>/dev/null || true
+        ' "$PLUGIN_PATH" "$annotations_tmpfile" 2>/dev/null || true
+        homeboy_merge_annotations phpcs "$annotations_tmpfile"
+        rm -f "$annotations_tmpfile"
     fi
 
     # Write lint findings sidecar for homeboy baseline and categorized issues.

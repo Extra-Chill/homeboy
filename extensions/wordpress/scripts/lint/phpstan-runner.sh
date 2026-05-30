@@ -5,6 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 # shellcheck source=../lib/validation-dependencies.sh
 source "${DEPENDENCY_HELPER}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
 
 # Standalone PHP static analysis script using PHPStan
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
@@ -866,6 +871,11 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
 
     # Write annotations sidecar JSON for CI inline comments
     if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ] && [ -n "$json_output" ]; then
+        if ! type homeboy_merge_annotations >/dev/null 2>&1; then
+            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write annotations" >&2
+            exit 1
+        fi
+        annotations_tmpfile="$(homeboy_mktemp 'phpstan-annotations.XXXXXX.json')"
         echo "$json_output" | php -r '
             $json = json_decode(file_get_contents("php://stdin"), true);
             if (!$json || empty($json["files"])) exit;
@@ -888,11 +898,12 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                     ];
                 }
             }
-            $outDir = $argv[3] ?? "";
-            if ($outDir && !empty($annotations)) {
-                file_put_contents($outDir . "/phpstan.json", json_encode($annotations, JSON_PRETTY_PRINT) . "\n");
+            if (!empty($annotations)) {
+                file_put_contents($argv[3], json_encode($annotations, JSON_PRETTY_PRINT) . "\n");
             }
-        ' "$PLUGIN_PATH" "$PHPSTAN_LEVEL" "${HOMEBOY_ANNOTATIONS_DIR}" 2>/dev/null || true
+        ' "$PLUGIN_PATH" "$PHPSTAN_LEVEL" "$annotations_tmpfile" 2>/dev/null || true
+        homeboy_merge_annotations phpstan "$annotations_tmpfile"
+        rm -f "$annotations_tmpfile"
     fi
 
     # Write PHPStan lint findings sidecar for homeboy baseline ratchet.

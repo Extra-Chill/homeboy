@@ -333,6 +333,11 @@ if should_run_step "fmt"; then
             # Write annotations sidecar for fmt issues
             # Parse "Diff in /path/to/file.rs at line N:" format
             if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
+                if ! type homeboy_merge_annotations >/dev/null 2>&1; then
+                    echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write annotations" >&2
+                    exit 1
+                fi
+                FMT_ANNOTATIONS_TMP="$(mktemp)"
                 echo "$FMT_OUTPUT" | awk -v comp_path="${PROJECT_PATH}/" '
                     /^Diff in .+ at line [0-9]+:/ {
                         file = $3
@@ -349,8 +354,9 @@ if should_run_step "fmt"; then
                             print "[\n" annotations "\n]"
                         }
                     }
-                ' > "${HOMEBOY_ANNOTATIONS_DIR}/rustfmt.json" 2>/dev/null || true
-                [ -s "${HOMEBOY_ANNOTATIONS_DIR}/rustfmt.json" ] || rm -f "${HOMEBOY_ANNOTATIONS_DIR}/rustfmt.json"
+                ' > "$FMT_ANNOTATIONS_TMP" 2>/dev/null || true
+                homeboy_merge_annotations rustfmt "$FMT_ANNOTATIONS_TMP"
+                rm -f "$FMT_ANNOTATIONS_TMP"
             fi
 
             FAILED_STEP="cargo fmt --check"
@@ -408,6 +414,11 @@ if should_run_step "clippy"; then
     # Write annotations sidecar JSON for CI inline comments
     # Parse clippy's "warning: message\n  --> file:line:col" format
     if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
+        if ! type homeboy_merge_annotations >/dev/null 2>&1; then
+            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write annotations" >&2
+            exit 1
+        fi
+        CLIPPY_ANNOTATIONS_TMP="$(mktemp)"
         # Use awk to pair "warning/error" lines with their "--> file:line:col" location
         echo "$CLIPPY_OUTPUT" | awk '
             /^(warning|error)(\[.+\])?: / {
@@ -442,9 +453,9 @@ if should_run_step "clippy"; then
                     print "[\n" annotations "\n]"
                 }
             }
-        ' > "${HOMEBOY_ANNOTATIONS_DIR}/clippy.json" 2>/dev/null || true
-        # Remove empty file if no annotations were written
-        [ -s "${HOMEBOY_ANNOTATIONS_DIR}/clippy.json" ] || rm -f "${HOMEBOY_ANNOTATIONS_DIR}/clippy.json"
+        ' > "$CLIPPY_ANNOTATIONS_TMP" 2>/dev/null || true
+        homeboy_merge_annotations clippy "$CLIPPY_ANNOTATIONS_TMP"
+        rm -f "$CLIPPY_ANNOTATIONS_TMP"
     fi
 
     if [ $CLIPPY_EXIT -eq 0 ]; then
