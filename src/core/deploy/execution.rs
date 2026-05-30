@@ -19,15 +19,25 @@ use super::version_overrides::{
     prefer_installed_binary, run_post_deploy_hooks,
 };
 
-pub(super) fn execute_component_deploy(
+pub(super) struct PreparedComponentDeploy {
+    pub component: Component,
+    pub config: DeployConfig,
+    pub install_dir: String,
+    pub local_version: Option<String>,
+    pub remote_version: Option<String>,
+    pub build_exit_code: Option<i32>,
+    pub artifact_path: Option<PathBuf>,
+    pub cleanup_local_artifact: bool,
+}
+
+pub(super) fn prepare_component_deploy(
     component: &Component,
     config: &DeployConfig,
-    ctx: &RemoteProjectContext,
     base_path: &str,
     project: &Project,
     local_version: Option<String>,
     remote_version: Option<String>,
-) -> ComponentDeployResult {
+) -> std::result::Result<PreparedComponentDeploy, ComponentDeployResult> {
     let is_git_deploy = component.deploy_strategy.as_deref() == Some("git");
     let is_file_deploy = component.deploy_strategy.as_deref() == Some("file");
 
@@ -49,14 +59,14 @@ pub(super) fn execute_component_deploy(
         };
 
     if let Some(ref error) = build_error {
-        return ComponentDeployResult::failed(
+        return Err(ComponentDeployResult::failed(
             component,
             base_path,
             local_version,
             remote_version,
             error.clone(),
         )
-        .with_build_exit_code(build_exit_code);
+        .with_build_exit_code(build_exit_code));
     }
 
     // Auto-resolve remote_path from linked extension deploy policy when not explicitly set.
@@ -99,30 +109,81 @@ pub(super) fn execute_component_deploy(
         }) {
             Ok(install_dir) => install_dir,
             Err(err) => {
-                return failed_component_deploy_result(
+                return Err(failed_component_deploy_result(
                     component,
                     base_path,
                     local_version,
                     remote_version,
                     build_exit_code,
                     err.to_string(),
-                );
+                ));
             }
         };
 
+    let artifact_path = if is_git_deploy {
+        None
+    } else if is_file_deploy {
+        if let Err(result) = validate_preflight_file_artifact(
+            component,
+            base_path,
+            build_exit_code,
+            local_version.clone(),
+            remote_version.clone(),
+        ) {
+            return Err(result);
+        }
+        None
+    } else {
+        match resolve_preflight_artifact_path(
+            component,
+            config,
+            base_path,
+            local_version.clone(),
+            remote_version.clone(),
+            build_exit_code,
+            release_artifact.as_ref(),
+        ) {
+            Ok(path) => Some(path),
+            Err(result) => return Err(result),
+        }
+    };
+
+    let cleanup_local_artifact = artifact_path.as_ref().is_some_and(|_| {
+        release_artifact.is_none() && !config.skip_build && !is_self_deploy(component)
+    });
+
+    Ok(PreparedComponentDeploy {
+        component: component.clone(),
+        config: clone_config(config),
+        install_dir,
+        local_version,
+        remote_version,
+        build_exit_code,
+        artifact_path,
+        cleanup_local_artifact,
+    })
+}
+
+pub(super) fn execute_preflighted_component_deploy(
+    prepared: &PreparedComponentDeploy,
+    ctx: &RemoteProjectContext,
+    base_path: &str,
+    project: &Project,
+) -> ComponentDeployResult {
+    let component = &prepared.component;
+
     // Dispatch by deploy strategy
     let strategy = component.deploy_strategy.as_deref().unwrap_or("rsync");
-    let versions = (local_version, remote_version);
 
     if strategy == "git" {
         return execute_git_deploy(
             component,
-            config,
+            &prepared.config,
             ctx,
             base_path,
-            &install_dir,
-            versions.0,
-            versions.1,
+            &prepared.install_dir,
+            prepared.local_version.clone(),
+            prepared.remote_version.clone(),
         );
     }
 
@@ -131,24 +192,31 @@ pub(super) fn execute_component_deploy(
             component,
             ctx,
             base_path,
-            &install_dir,
-            versions.0,
-            versions.1,
+            &prepared.install_dir,
+            prepared.local_version.clone(),
+            prepared.remote_version.clone(),
         );
     }
 
-    execute_artifact_deploy(
-        component,
-        config,
-        ctx,
-        base_path,
-        project,
-        &install_dir,
-        versions.0,
-        versions.1,
-        build_exit_code,
-        release_artifact.as_ref(),
-    )
+    execute_artifact_deploy(prepared, ctx, base_path, project)
+}
+
+fn clone_config(config: &DeployConfig) -> DeployConfig {
+    DeployConfig {
+        component_ids: config.component_ids.clone(),
+        all: config.all,
+        outdated: config.outdated,
+        behind_upstream: config.behind_upstream,
+        dry_run: config.dry_run,
+        check: config.check,
+        force: config.force,
+        skip_build: config.skip_build,
+        keep_deps: config.keep_deps,
+        expected_version: config.expected_version.clone(),
+        no_pull: config.no_pull,
+        head: config.head,
+        tagged: config.tagged,
+    }
 }
 
 fn should_try_download_release_artifact(
@@ -385,23 +453,52 @@ fn failed_file_deploy_result(
     )
 }
 
-/// Deploy a component via artifact upload (rsync / extension override).
-///
-/// When `downloaded_artifact` is Some, it takes precedence over the local build artifact.
-/// This is used when the artifact was downloaded from a GitHub release.
-#[allow(clippy::too_many_arguments)]
-fn execute_artifact_deploy(
+fn validate_preflight_file_artifact(
+    component: &Component,
+    base_path: &str,
+    build_exit_code: Option<i32>,
+    local_version: Option<String>,
+    remote_version: Option<String>,
+) -> std::result::Result<(), ComponentDeployResult> {
+    let local_path = Path::new(&component.local_path);
+
+    if !local_path.exists() {
+        return Err(ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            format!("Source file does not exist: {}", component.local_path),
+        )
+        .with_build_exit_code(build_exit_code));
+    }
+
+    if !local_path.is_file() {
+        return Err(ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            format!(
+                "Component '{}' has deploy_strategy 'file' but local_path is not a file: {}",
+                component.id, component.local_path
+            ),
+        )
+        .with_build_exit_code(build_exit_code));
+    }
+
+    Ok(())
+}
+
+fn resolve_preflight_artifact_path(
     component: &Component,
     config: &DeployConfig,
-    ctx: &RemoteProjectContext,
     base_path: &str,
-    project: &Project,
-    install_dir: &str,
     local_version: Option<String>,
     remote_version: Option<String>,
     build_exit_code: Option<i32>,
     downloaded_artifact: Option<&PathBuf>,
-) -> ComponentDeployResult {
+) -> std::result::Result<PathBuf, ComponentDeployResult> {
     // Resolve artifact path — prefer downloaded release artifact over local build
     let artifact_path = if let Some(downloaded) = downloaded_artifact {
         log_status!(
@@ -414,7 +511,7 @@ fn execute_artifact_deploy(
         let artifact_pattern = match component.build_artifact.as_ref() {
             Some(pattern) => pattern,
             None => {
-                return ComponentDeployResult::failed(
+                return Err(ComponentDeployResult::failed(
                     component,
                     base_path,
                     local_version,
@@ -424,7 +521,7 @@ fn execute_artifact_deploy(
                         component.id
                     ),
                 )
-                .with_build_exit_code(build_exit_code);
+                .with_build_exit_code(build_exit_code));
             }
         };
 
@@ -439,14 +536,14 @@ fn execute_artifact_deploy(
                 } else {
                     format!("{}. Run build first: homeboy build {}", e, component.id)
                 };
-                return ComponentDeployResult::failed(
+                return Err(ComponentDeployResult::failed(
                     component,
                     base_path,
                     local_version,
                     remote_version,
                     error_msg,
                 )
-                .with_build_exit_code(build_exit_code);
+                .with_build_exit_code(build_exit_code));
             }
         }
     };
@@ -455,9 +552,6 @@ fn execute_artifact_deploy(
     // installed binary over a stale build artifact. This handles the case where
     // `homeboy upgrade` installed a new binary but the build artifact is from a
     // previous version — without this, `deploy --shared` would push the old binary.
-    let cleanup_local_artifact =
-        downloaded_artifact.is_none() && !config.skip_build && !is_self_deploy(component);
-
     let artifact_path = if is_self_deploy(component) {
         match prefer_installed_binary(&artifact_path) {
             Some(installed) => installed,
@@ -465,6 +559,55 @@ fn execute_artifact_deploy(
         }
     } else {
         artifact_path
+    };
+
+    if artifact_requires_extract_command(&artifact_path) && component.extract_command.is_none() {
+        return Err(ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version,
+            remote_version,
+            format!(
+                "Archive artifact '{}' requires an extractCommand. \
+                 Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{{{artifact}}}} && rm {{{{artifact}}}}\"}}'",
+                artifact_path.display()
+            ),
+        )
+        .with_build_exit_code(build_exit_code));
+    }
+
+    Ok(artifact_path)
+}
+
+fn artifact_requires_extract_command(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext, "zip" | "tar" | "gz" | "tgz"))
+        .unwrap_or(false)
+}
+
+/// Deploy a component via artifact upload (rsync / extension override).
+fn execute_artifact_deploy(
+    prepared: &PreparedComponentDeploy,
+    ctx: &RemoteProjectContext,
+    base_path: &str,
+    project: &Project,
+) -> ComponentDeployResult {
+    let component = &prepared.component;
+    let config = &prepared.config;
+    let install_dir = prepared.install_dir.as_str();
+    let Some(artifact_path) = prepared.artifact_path.as_ref() else {
+        return ComponentDeployResult::failed(
+            component,
+            base_path,
+            prepared.local_version.clone(),
+            prepared.remote_version.clone(),
+            format!(
+                "Component '{}' has no resolved build artifact",
+                component.id
+            ),
+        )
+        .with_build_exit_code(prepared.build_exit_code);
     };
 
     // Look up verification from extensions
@@ -475,7 +618,7 @@ fn execute_artifact_deploy(
         if let Some((override_config, extension)) = find_deploy_override(install_dir) {
             deploy_with_override(
                 &ctx.client,
-                &artifact_path,
+                artifact_path,
                 install_dir,
                 &override_config,
                 &extension,
@@ -488,7 +631,7 @@ fn execute_artifact_deploy(
         } else {
             deploy_artifact(
                 &ctx.client,
-                &artifact_path,
+                artifact_path,
                 install_dir,
                 component.extract_command.as_deref(),
                 verification.as_ref(),
@@ -502,8 +645,8 @@ fn execute_artifact_deploy(
             exit_code,
             ..
         }) => {
-            if cleanup_local_artifact {
-                cleanup_deploy_build_artifact(component, &artifact_path);
+            if prepared.cleanup_local_artifact {
+                cleanup_deploy_build_artifact(component, artifact_path);
             }
 
             if let Ok(Some(summary)) = cleanup_build_dependencies(component, config) {
@@ -520,9 +663,12 @@ fn execute_artifact_deploy(
 
             ComponentDeployResult::new(component, base_path)
                 .with_status("deployed")
-                .with_versions(local_version.clone(), local_version)
+                .with_versions(
+                    prepared.local_version.clone(),
+                    prepared.local_version.clone(),
+                )
                 .with_remote_path(install_dir.to_string())
-                .with_build_exit_code(build_exit_code)
+                .with_build_exit_code(prepared.build_exit_code)
                 .with_deploy_exit_code(Some(exit_code))
         }
         Ok(DeployResult {
@@ -532,22 +678,22 @@ fn execute_artifact_deploy(
         }) => ComponentDeployResult::failed(
             component,
             base_path,
-            local_version,
-            remote_version,
+            prepared.local_version.clone(),
+            prepared.remote_version.clone(),
             error.unwrap_or_default(),
         )
         .with_remote_path(install_dir.to_string())
-        .with_build_exit_code(build_exit_code)
+        .with_build_exit_code(prepared.build_exit_code)
         .with_deploy_exit_code(Some(exit_code)),
         Err(err) => ComponentDeployResult::failed(
             component,
             base_path,
-            local_version,
-            remote_version,
+            prepared.local_version.clone(),
+            prepared.remote_version.clone(),
             err.to_string(),
         )
         .with_remote_path(install_dir.to_string())
-        .with_build_exit_code(build_exit_code),
+        .with_build_exit_code(prepared.build_exit_code),
     }
 }
 
