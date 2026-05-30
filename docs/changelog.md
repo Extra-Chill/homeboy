@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.209.0] - 2026-05-30
+
+### Added
+- normalize runs finding outputs
+
 ## [0.208.0] - 2026-05-30
 
 ### Added
