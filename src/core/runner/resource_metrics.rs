@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::engine::command::{
+    wait_with_bounded_output, CommandCaptureMetadata, DEFAULT_CAPTURE_LIMIT_BYTES,
+};
 use crate::core::error::{Error, Result};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
@@ -27,6 +30,7 @@ pub struct RunnerResourceMetrics {
 #[derive(Debug)]
 pub(crate) struct MeasuredOutput {
     pub output: Output,
+    pub capture: CommandCaptureMetadata,
     pub metrics: RunnerResourceMetrics,
 }
 
@@ -47,11 +51,18 @@ pub(crate) fn measured_command_output(command: &mut Command) -> Result<MeasuredO
     })?;
     let pid = child.id();
     let collector = ResourceMetricsCollector::start(pid);
-    let output = child.wait_with_output().map_err(|err| {
-        Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
-    })?;
+    let bounded_output =
+        wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).map_err(|err| {
+            Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
+        })?;
+    let capture = bounded_output.capture.clone();
+    let output = bounded_output.into_output();
     let metrics = collector.finish(started.elapsed());
-    Ok(MeasuredOutput { output, metrics })
+    Ok(MeasuredOutput {
+        output,
+        capture,
+        metrics,
+    })
 }
 
 struct ResourceMetricsCollector {

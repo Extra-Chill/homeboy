@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::core::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
+
 use super::ExtensionManifest;
 
 #[derive(Debug, Clone, Copy)]
@@ -79,7 +81,7 @@ pub(crate) fn run_compiler_warning_contract_script(
             if let Some(ref mut stdin) = child.stdin {
                 let _ = stdin.write_all(input.to_string().as_bytes());
             }
-            child.wait_with_output().ok()
+            wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).ok()
         })
     else {
         return Err(format!(

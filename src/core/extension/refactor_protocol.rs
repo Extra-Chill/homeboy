@@ -1,4 +1,5 @@
 use super::manifest::ExtensionManifest;
+use crate::core::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
 
 #[derive(Debug, Clone)]
 pub struct RefactorScriptFailure {
@@ -95,15 +96,15 @@ pub fn run_refactor_script_result(
             if let Some(ref mut stdin) = child.stdin {
                 let _ = stdin.write_all(command.to_string().as_bytes());
             }
-            child
-                .wait_with_output()
-                .map_err(|err| RefactorScriptFailure {
+            wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).map_err(|err| {
+                RefactorScriptFailure {
                     kind: RefactorScriptFailureKind::SpawnFailed,
                     exit_code: None,
                     stdout: String::new(),
                     stderr: err.to_string(),
                     parsed_stdout: None,
-                })
+                }
+            })
         })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

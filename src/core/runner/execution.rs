@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::core::api_jobs::{Job, JobEvent, JobStatus, RemoteRunnerJobRequest};
+use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::server::{self, SshClient};
@@ -67,6 +68,8 @@ pub struct RunnerExecOutput {
     pub patch: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<RunnerResourceMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CommandCaptureMetadata>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,6 +395,7 @@ fn exec_via_reverse_broker(
             mirror_run_id: None,
             patch: None,
             metrics,
+            capture: None,
         },
         exit_code,
     ))
@@ -506,6 +510,7 @@ fn exec_via_daemon(
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
             metrics,
+            capture: None,
         },
         exit_code,
     ))
@@ -665,6 +670,7 @@ fn exec_ssh(
             stderr: output.stderr,
             exit_code: output.exit_code,
             metrics: None,
+            capture: None,
         },
         Some(source_snapshot),
     ))
@@ -675,6 +681,7 @@ struct ProcessOutput {
     stderr: String,
     exit_code: i32,
     metrics: Option<RunnerResourceMetrics>,
+    capture: Option<CommandCaptureMetadata>,
 }
 
 fn command_output(command: &mut std::process::Command) -> Result<ProcessOutput> {
@@ -685,6 +692,7 @@ fn command_output(command: &mut std::process::Command) -> Result<ProcessOutput> 
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         exit_code: output.status.code().unwrap_or(1),
         metrics: Some(measured.metrics),
+        capture: Some(measured.capture),
     })
 }
 
@@ -714,6 +722,7 @@ fn exec_output(
             mirror_run_id: None,
             patch: None,
             metrics: output.metrics,
+            capture: output.capture,
         },
         exit_code,
     )

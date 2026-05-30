@@ -20,6 +20,8 @@ use std::process::Command;
 
 mod edit;
 
+const STDIN_CONTENT_LIMIT_BYTES: u64 = 1024 * 1024;
+
 pub use edit::{
     edit_append, edit_delete_line, edit_delete_lines, edit_delete_pattern, edit_insert_after_line,
     edit_insert_before_line, edit_prepend, edit_replace_line, edit_replace_pattern, EditResult,
@@ -130,10 +132,27 @@ fn parse_ls_line(line: &str, base_path: &str) -> Option<FileEntry> {
 
 /// Read content from stdin, stripping trailing newline.
 pub fn read_stdin() -> Result<String> {
-    let mut content = String::new();
-    io::stdin().read_to_string(&mut content).map_err(|e| {
+    let mut bytes = Vec::new();
+    io::stdin()
+        .take(STDIN_CONTENT_LIMIT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            Error::internal_io(
+                format!("Failed to read stdin: {}", e),
+                Some("read stdin".to_string()),
+            )
+        })?;
+    if bytes.len() > STDIN_CONTENT_LIMIT_BYTES as usize {
+        return Err(Error::validation_invalid_argument(
+            "stdin",
+            "stdin content exceeds the retained byte limit",
+            Some(format!("limit_bytes={STDIN_CONTENT_LIMIT_BYTES}")),
+            None,
+        ));
+    }
+    let mut content = String::from_utf8(bytes).map_err(|e| {
         Error::internal_io(
-            format!("Failed to read stdin: {}", e),
+            format!("Failed to decode stdin as UTF-8: {}", e),
             Some("read stdin".to_string()),
         )
     })?;

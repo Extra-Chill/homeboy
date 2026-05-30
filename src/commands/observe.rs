@@ -25,6 +25,7 @@ use super::{CmdResult, GlobalArgs};
 const DEFAULT_DURATION: &str = "30s";
 const DEFAULT_PROCESS_WATCH_INTERVAL: &str = "1s";
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const TAIL_LOG_POLL_LIMIT_BYTES: u64 = 256 * 1024;
 
 #[derive(Args, Clone)]
 pub struct ObserveArgs {
@@ -349,13 +350,21 @@ fn poll_tail_log(state: &mut TailLogState, t_ms: u64) -> homeboy::core::Result<V
     file.seek(SeekFrom::Start(state.offset)).map_err(|e| {
         Error::internal_io(e.to_string(), Some("observe.tail_log.seek".to_string()))
     })?;
-    let mut content = String::new();
-    file.read_to_string(&mut content).map_err(|e| {
-        Error::internal_io(e.to_string(), Some("observe.tail_log.read".to_string()))
-    })?;
+    let mut bytes = Vec::new();
+    file.take(TAIL_LOG_POLL_LIMIT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            Error::internal_io(e.to_string(), Some("observe.tail_log.read".to_string()))
+        })?;
+    let truncated = bytes.len() > TAIL_LOG_POLL_LIMIT_BYTES as usize;
+    if truncated {
+        let overflow = bytes.len() - TAIL_LOG_POLL_LIMIT_BYTES as usize;
+        bytes.drain(..overflow);
+    }
     state.offset = len;
+    let content = String::from_utf8_lossy(&bytes);
 
-    Ok(content
+    let mut events = content
         .lines()
         .filter(|line| {
             state
@@ -375,7 +384,22 @@ fn poll_tail_log(state: &mut TailLogState, t_ms: u64) -> homeboy::core::Result<V
                 ],
             )
         })
-        .collect())
+        .collect::<Vec<_>>();
+    if truncated {
+        events.insert(
+            0,
+            event(
+                t_ms,
+                "log",
+                "truncated",
+                [
+                    ("path", state.path.to_string_lossy().to_string()),
+                    ("byte_limit", TAIL_LOG_POLL_LIMIT_BYTES.to_string()),
+                ],
+            ),
+        );
+    }
+    Ok(events)
 }
 
 fn poll_process_watch(

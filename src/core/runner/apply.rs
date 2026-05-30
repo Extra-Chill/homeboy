@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use crate::core::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
 use crate::core::error::{Error, Result};
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -200,8 +201,7 @@ fn run_git_with_stdin(local_path: &Path, args: &[&str], stdin: &str) -> Result<S
         .ok_or_else(|| Error::internal_unexpected("git stdin unavailable"))?
         .write_all(stdin.as_bytes())
         .map_err(|err| Error::internal_io(err.to_string(), Some("write git stdin".to_string())))?;
-    let output = child
-        .wait_with_output()
+    let output = wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES)
         .map_err(|err| Error::internal_io(err.to_string(), Some("wait for git".to_string())))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());

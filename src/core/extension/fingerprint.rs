@@ -1,4 +1,5 @@
 use super::manifest::ExtensionManifest;
+use crate::core::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
 
 /// Run a extension's fingerprint script on file content.
 ///
@@ -50,7 +51,7 @@ pub fn run_fingerprint_script(
             if let Some(ref mut stdin) = child.stdin {
                 let _ = stdin.write_all(input.to_string().as_bytes());
             }
-            child.wait_with_output().ok()
+            wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).ok()
         })?;
 
     if !output.status.success() {
