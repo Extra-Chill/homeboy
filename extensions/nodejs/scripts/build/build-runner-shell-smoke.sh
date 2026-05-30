@@ -30,7 +30,7 @@ assert(runner.startsWith('#!/usr/bin/env bash'), 'build runner declares bash she
 assert(runner.includes('exec bash "$0" "$@"'), 'build runner re-execs bash when invoked by sh');
 assert(runner.includes('set -euo pipefail'), 'build runner uses bash pipefail mode');
 assert(runner.includes('BASH_SOURCE[0]'), 'build runner uses bash BASH_SOURCE');
-assert(runner.includes('PIPESTATUS[0]'), 'build runner uses bash PIPESTATUS');
+assert(runner.includes('homeboy_run_step_capture'), 'build runner uses shared command capture');
 
 if (process.exitCode) {
   process.exit();

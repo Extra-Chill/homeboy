@@ -18,6 +18,11 @@ SETTINGS_HELPERS=(
     "${ROOT_DIR}/rust/scripts/lib/settings.sh"
     "${ROOT_DIR}/wordpress/scripts/lib/settings.sh"
 )
+COMMAND_CAPTURE_HELPERS=(
+    "${ROOT_DIR}/nodejs/scripts/lib/command-capture.sh"
+    "${ROOT_DIR}/rust/scripts/lib/command-capture.sh"
+    "${ROOT_DIR}/wordpress/scripts/lib/command-capture.sh"
+)
 
 assert_file() {
     local path="$1"
@@ -63,6 +68,10 @@ for settings_helper in "${SETTINGS_HELPERS[@]}"; do
     assert_file "$settings_helper"
     bash -c 'source "$1"; type homeboy_setting >/dev/null; type homeboy_setting_bool >/dev/null; type homeboy_setting_array >/dev/null' _ "$settings_helper"
 done
+for command_capture_helper in "${COMMAND_CAPTURE_HELPERS[@]}"; do
+    assert_file "$command_capture_helper"
+    bash -c 'source "$1"; type homeboy_run_step >/dev/null; type homeboy_run_step_capture >/dev/null; type homeboy_cleanup_step_capture >/dev/null' _ "$command_capture_helper"
+done
 
 if ! cmp -s "${BASH_PREFLIGHT_HELPERS[0]}" "${BASH_PREFLIGHT_HELPERS[1]}" \
     || ! cmp -s "${BASH_PREFLIGHT_HELPERS[0]}" "${BASH_PREFLIGHT_HELPERS[2]}"; then
@@ -77,6 +86,12 @@ if ! cmp -s "${SETTINGS_HELPERS[0]}" "${SETTINGS_HELPERS[1]}" \
     exit 1
 fi
 
+if ! cmp -s "${COMMAND_CAPTURE_HELPERS[0]}" "${COMMAND_CAPTURE_HELPERS[1]}" \
+    || ! cmp -s "${COMMAND_CAPTURE_HELPERS[0]}" "${COMMAND_CAPTURE_HELPERS[2]}"; then
+    echo "Command capture helpers should stay identical across installed extension trees" >&2
+    exit 1
+fi
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -86,6 +101,55 @@ printf '[{"file":"b.php","line":2}]\n' > "$ANNOTATIONS_SOURCE"
 HOMEBOY_ANNOTATIONS_DIR="$ANNOTATIONS_DIR" bash -c 'source "$1"; homeboy_write_annotations phpcs "{\"file\":\"a.php\",\"line\":1}"; homeboy_merge_annotations phpstan "$2"' _ "$SIDECAR_WRITER_HELPER" "$ANNOTATIONS_SOURCE"
 assert_contains "$ANNOTATIONS_DIR/phpcs.json" '"file":"a.php"'
 assert_contains "$ANNOTATIONS_DIR/phpstan.json" '"file":"b.php"'
+
+# shellcheck source=/dev/null
+source "${COMMAND_CAPTURE_HELPERS[0]}"
+FAILED_STEP=""
+FAILURE_OUTPUT=""
+SUCCESS_OUTPUT_FILE=""
+SUCCESS_EXIT=""
+homeboy_run_step_capture SUCCESS_OUTPUT_FILE SUCCESS_EXIT "successful command" -- bash -c 'printf "ok\n"' || true
+if [ "$SUCCESS_EXIT" -ne 0 ]; then
+    echo "Expected successful command capture to preserve exit 0" >&2
+    exit 1
+fi
+assert_contains "$SUCCESS_OUTPUT_FILE" "ok"
+homeboy_cleanup_step_capture "$SUCCESS_OUTPUT_FILE"
+if [ -e "$SUCCESS_OUTPUT_FILE" ]; then
+    echo "Expected command capture cleanup to remove output file" >&2
+    exit 1
+fi
+
+FAILED_OUTPUT_FILE=""
+FAILED_EXIT=""
+homeboy_run_step_capture FAILED_OUTPUT_FILE FAILED_EXIT "failing command" -- bash -c 'printf "first\n"; printf "last\n"; exit 42' || true
+if [ "$FAILED_EXIT" -ne 42 ]; then
+    echo "Expected failing command capture to preserve exit 42, got ${FAILED_EXIT}" >&2
+    exit 1
+fi
+if [ "$FAILED_STEP" != "failing command" ]; then
+    echo "Expected failing command capture to set FAILED_STEP" >&2
+    exit 1
+fi
+case "$FAILURE_OUTPUT" in
+    *last*) ;;
+    *)
+        echo "Expected failing command capture to set FAILURE_OUTPUT tail" >&2
+        exit 1
+        ;;
+esac
+homeboy_cleanup_step_capture "$FAILED_OUTPUT_FILE"
+
+FAILED_STEP=""
+FAILURE_OUTPUT=""
+if homeboy_run_step "wrapped command" -- bash -c 'printf "wrapped\n"; exit 7'; then
+    echo "Expected wrapped command capture to preserve failure" >&2
+    exit 1
+fi
+if [ "$FAILED_STEP" != "wrapped command" ]; then
+    echo "Expected wrapped command capture to set FAILED_STEP" >&2
+    exit 1
+fi
 
 WORDPRESS_OUTPUT="$TMP_DIR/phpunit.txt"
 WORDPRESS_RESULTS="$TMP_DIR/wordpress-results.json"

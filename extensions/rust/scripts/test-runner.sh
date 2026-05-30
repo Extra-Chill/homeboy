@@ -19,6 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/lib/resolve-context.sh}"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../../scripts/lib/runner-steps.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/lib/command-capture.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
@@ -26,6 +27,8 @@ source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
 # shellcheck source=./lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
+# shellcheck source=./lib/command-capture.sh
+source "${COMMAND_CAPTURE_HELPER}"
 # shellcheck source=/dev/null
 if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
     source "$FAILURE_TRAP_HELPER"
@@ -97,12 +100,7 @@ if [ "${HOMEBOY_COVERAGE:-}" = "1" ]; then
             echo "DEBUG: cargo ${TARPAULIN_ARGS[*]} $*"
         fi
 
-        TEST_TMPFILE=$(mktemp)
-
-        set +e
-        cargo "${TARPAULIN_ARGS[@]}" "$@" 2>&1 | tee "$TEST_TMPFILE"
-        TEST_EXIT=${PIPESTATUS[0]}
-        set -e
+        homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "cargo tarpaulin" -- cargo "${TARPAULIN_ARGS[@]}" "$@" || true
 
         # Parse test results for homeboy core (best-effort, non-blocking)
         PARSE_RESULTS="${EXTENSION_PATH}/scripts/parse-test-results.sh"
@@ -111,7 +109,7 @@ if [ "${HOMEBOY_COVERAGE:-}" = "1" ]; then
         fi
 
         TEST_OUTPUT=$(cat "$TEST_TMPFILE")
-        rm -f "$TEST_TMPFILE"
+        homeboy_cleanup_step_capture "$TEST_TMPFILE"
 
 
         if [ $TEST_EXIT -ne 0 ]; then
@@ -268,12 +266,7 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: cargo ${TEST_ARGS[*]} $*"
 fi
 
-TEST_TMPFILE=$(mktemp)
-
-set +e
-cargo "${TEST_ARGS[@]}" "$@" 2>&1 | tee "$TEST_TMPFILE"
-TEST_EXIT=${PIPESTATUS[0]}
-set -e
+homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "cargo test" -- cargo "${TEST_ARGS[@]}" "$@" || true
 
 # Parse test results for homeboy core (best-effort, non-blocking)
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/parse-test-results.sh"

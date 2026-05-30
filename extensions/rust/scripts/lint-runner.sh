@@ -24,6 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/lib/resolve-context.sh}"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../../scripts/lib/runner-steps.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/lib/command-capture.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
@@ -31,6 +32,8 @@ source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
 # shellcheck source=./lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
+# shellcheck source=./lib/command-capture.sh
+source "${COMMAND_CAPTURE_HELPER}"
 # shellcheck source=/dev/null
 if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
     source "$FAILURE_TRAP_HELPER"
@@ -396,20 +399,16 @@ if should_run_step "clippy"; then
         echo "DEBUG: cargo ${CLIPPY_ARGS[*]}"
     fi
 
-    CLIPPY_TMPFILE=$(mktemp)
     CLIPPY_BEFORE=""
     if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ]; then
         CLIPPY_BEFORE="$(mktemp)"
         capture_rust_file_hashes > "$CLIPPY_BEFORE"
     fi
 
-    set +e
-    cargo "${CLIPPY_ARGS[@]}" 2>&1 | tee "$CLIPPY_TMPFILE"
-    CLIPPY_EXIT=${PIPESTATUS[0]}
-    set -e
+    homeboy_run_step_capture CLIPPY_TMPFILE CLIPPY_EXIT "cargo clippy" -- cargo "${CLIPPY_ARGS[@]}" || true
 
     CLIPPY_OUTPUT=$(cat "$CLIPPY_TMPFILE")
-    rm -f "$CLIPPY_TMPFILE"
+    homeboy_cleanup_step_capture "$CLIPPY_TMPFILE"
 
     # Write annotations sidecar JSON for CI inline comments
     # Parse clippy's "warning: message\n  --> file:line:col" format

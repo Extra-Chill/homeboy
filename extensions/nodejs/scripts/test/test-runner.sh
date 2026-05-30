@@ -34,6 +34,7 @@ source "$BASH_PREFLIGHT_HELPER"
 homeboy_require_bash_version 4
 
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/../lib/command-capture.sh}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../lib/settings.sh}"
 # shellcheck source=/dev/null
@@ -41,6 +42,7 @@ source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
 # shellcheck source=/dev/null
 source "$SETTINGS_HELPER"
+source "$COMMAND_CAPTURE_HELPER"
 # shellcheck source=/dev/null
 if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
     source "$SIDECAR_WRITER_HELPER"
@@ -142,12 +144,7 @@ echo ""
 
 cd "$PROJECT_PATH"
 
-OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-node-test.XXXXXX")
-set +e
-# shellcheck disable=SC2086 # word-splitting is intentional here
-$TEST_CMD "${RUNNER_ARGS[@]}" 2>&1 | tee "$OUTPUT_FILE"
-TEST_EXIT=${PIPESTATUS[0]}
-set -e
+homeboy_run_step_capture OUTPUT_FILE TEST_EXIT "Tests failed" -- bash -c "$TEST_CMD \"\$@\"" _ "${RUNNER_ARGS[@]}" || true
 
 OUTPUT="$(cat "$OUTPUT_FILE")"
 
@@ -314,12 +311,10 @@ if type homeboy_write_test_results >/dev/null 2>&1; then
 fi
 
 write_node_failure_json
-rm -f "$OUTPUT_FILE"
 
 if [ $TEST_EXIT -ne 0 ]; then
     FAILED_STEP="Tests failed (exit $TEST_EXIT)"
-    # Show the last 20 lines as failure context — full output already streamed above.
-    FAILURE_OUTPUT="$(echo "$OUTPUT" | tail -20)"
 fi
 
+homeboy_cleanup_step_capture "$OUTPUT_FILE"
 exit $TEST_EXIT

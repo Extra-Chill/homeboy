@@ -29,9 +29,12 @@ source "$BASH_PREFLIGHT_HELPER"
 homeboy_require_bash_version 4
 
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/../lib/command-capture.sh}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
+# shellcheck source=/dev/null
+source "$COMMAND_CAPTURE_HELPER"
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
@@ -87,17 +90,11 @@ echo ""
 
 cd "$PROJECT_PATH"
 
-OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-node-build.XXXXXX")
-set +e
-# shellcheck disable=SC2086
-$BUILD_CMD "$@" 2>&1 | tee "$OUTPUT_FILE"
-BUILD_EXIT=${PIPESTATUS[0]}
-set -e
+homeboy_run_step_capture OUTPUT_FILE BUILD_EXIT "Build failed" -- bash -c "$BUILD_CMD \"\$@\"" _ "$@" || true
 
 if [ $BUILD_EXIT -ne 0 ]; then
     FAILED_STEP="Build failed (exit $BUILD_EXIT)"
-    FAILURE_OUTPUT="$(tail -20 "$OUTPUT_FILE")"
 fi
 
-rm -f "$OUTPUT_FILE"
+homeboy_cleanup_step_capture "$OUTPUT_FILE"
 exit $BUILD_EXIT

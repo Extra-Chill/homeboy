@@ -7,9 +7,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/../lib/command-capture.sh}"
+FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 # shellcheck source=../lib/resolve-context.sh
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH
+# shellcheck source=../lib/command-capture.sh
+source "${COMMAND_CAPTURE_HELPER}"
+# shellcheck source=/dev/null
+if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
+    source "$FAILURE_TRAP_HELPER"
+    homeboy_init_failure_trap
+else
+    FAILED_STEP=""
+    FAILURE_OUTPUT=""
+fi
 
 CORE_PATH="$PLUGIN_PATH"
 
@@ -129,16 +141,7 @@ fi
 PHPUNIT_ARGS+=("$@")
 
 echo "Running WordPress core PHPUnit tests..."
-set +e
-PHPUNIT_OUTPUT=$("$PHPUNIT_BIN" "${PHPUNIT_ARGS[@]}" 2>&1)
-PHPUNIT_EXIT=$?
-set -e
-
-printf '%s\n' "$PHPUNIT_OUTPUT"
-
-PHPUNIT_OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wordpress-core-phpunit.XXXXXX")
-printf '%s\n' "$PHPUNIT_OUTPUT" > "$PHPUNIT_OUTPUT_FILE"
-trap 'rm -f "$PHPUNIT_OUTPUT_FILE"' EXIT
+homeboy_run_step_capture PHPUNIT_OUTPUT_FILE PHPUNIT_EXIT "WordPress core PHPUnit" -- "$PHPUNIT_BIN" "${PHPUNIT_ARGS[@]}" || true
 
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/test/parse-test-results.sh"
 PARSE_FAILURES="${EXTENSION_PATH}/scripts/test/parse-test-failures.sh"
@@ -149,4 +152,5 @@ if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] && [ -f "$PARSE_FAILURES" ]; then
     bash "$PARSE_FAILURES" "$PHPUNIT_OUTPUT_FILE" "$CORE_PATH" || true
 fi
 
+homeboy_cleanup_step_capture "$PHPUNIT_OUTPUT_FILE"
 exit "$PHPUNIT_EXIT"
