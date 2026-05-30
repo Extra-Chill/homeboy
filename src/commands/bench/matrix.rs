@@ -32,6 +32,7 @@ fn prepare_rig_bench_context(
     args: &BenchRunArgs,
 ) -> homeboy::core::Result<RigBenchContext> {
     let mut spec = rig::load(rig_id)?;
+    let declared_spec = spec.clone();
     apply_bench_path_override(&mut spec, args);
     let lease = rig::lease::acquire_active_run_lease(&spec, "bench")?;
     if let Some(prepare) = rig::run_bench_prepare(&spec)? {
@@ -43,7 +44,7 @@ fn prepare_rig_bench_context(
             ));
         }
     }
-    let snapshot = rig::snapshot_state(&spec);
+    let snapshot = rig::snapshot_state(&declared_spec);
     let package_root =
         rig::read_source_metadata(&spec.id).map(|metadata| PathBuf::from(metadata.package_path));
     Ok(RigBenchContext {
