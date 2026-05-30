@@ -341,6 +341,40 @@ WP-specific browser readiness, REST route classification, request profiling,
 and URL manifests. If the same page-profiling primitive appears in another
 extension later, then the shared seam can be promoted into core.
 
+### Bootstrap timeline primitives
+
+The extension also exports reusable helpers for temporary WordPress bootstrap
+timeline probes. Rigs own workload orchestration and benchmark thresholds; the
+WordPress extension owns the generic probe install, JSONL collection, summary,
+and cleanup behavior for `index.php` and `wp-settings.php`.
+
+```js
+const {
+	installWordPressBootstrapTimeline,
+	collectWordPressBootstrapTimeline,
+	summarizeWordPressBootstrapTimeline,
+	uninstallWordPressBootstrapTimeline,
+} = require('homeboy-extension-wordpress/wordpress-bootstrap-timeline');
+
+installWordPressBootstrapTimeline(sitePath, { clearArtifact: true });
+
+try {
+	// Run the rig-owned workload that requests the WordPress site.
+	const rows = collectWordPressBootstrapTimeline(sitePath);
+	const summary = summarizeWordPressBootstrapTimeline(rows, { limit: 20 });
+	console.log(summary);
+} finally {
+	uninstallWordPressBootstrapTimeline(sitePath);
+}
+```
+
+Install creates backups under
+`wp-content/homeboy-bootstrap-timeline-backups/`, writes timing rows to
+`wp-content/homeboy-bootstrap-timeline.jsonl`, and restores the original core
+entry files on uninstall. Uninstall preserves the artifact by default so callers
+can collect it after cleanup; pass `{ removeArtifact: true }` when the caller
+owns artifact retention elsewhere.
+
 ## Trace runner
 
 Project-owned scenarios live under one of:
