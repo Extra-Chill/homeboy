@@ -136,6 +136,7 @@ pub(super) fn prepare_component_deploy(
             component,
             config,
             base_path,
+            &install_dir,
             local_version.clone(),
             remote_version.clone(),
             build_exit_code,
@@ -486,6 +487,7 @@ fn resolve_preflight_artifact_path(
     component: &Component,
     config: &DeployConfig,
     base_path: &str,
+    install_dir: &str,
     local_version: Option<String>,
     remote_version: Option<String>,
     build_exit_code: Option<i32>,
@@ -553,7 +555,12 @@ fn resolve_preflight_artifact_path(
         artifact_path
     };
 
-    if artifact_requires_extract_command(&artifact_path) && component.extract_command.is_none() {
+    let has_deploy_override = find_deploy_override(install_dir).is_some();
+    if artifact_requires_component_extract_command(
+        &artifact_path,
+        component.extract_command.is_some(),
+        has_deploy_override,
+    ) {
         return Err(ComponentDeployResult::failed(
             component,
             base_path,
@@ -576,6 +583,16 @@ fn artifact_requires_extract_command(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| matches!(ext, "zip" | "tar" | "gz" | "tgz"))
         .unwrap_or(false)
+}
+
+fn artifact_requires_component_extract_command(
+    path: &Path,
+    has_component_extract_command: bool,
+    has_deploy_override: bool,
+) -> bool {
+    artifact_requires_extract_command(path)
+        && !has_component_extract_command
+        && !has_deploy_override
 }
 
 /// Deploy a component via artifact upload (rsync / extension override).
@@ -878,8 +895,8 @@ fn cleanup_build_dependencies(
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_deploy_build_artifact, failed_component_deploy_result,
-        should_try_download_release_artifact,
+        artifact_requires_component_extract_command, cleanup_deploy_build_artifact,
+        failed_component_deploy_result, should_try_download_release_artifact,
     };
     use crate::core::component::Component;
     use crate::core::deploy::types::DeployConfig;
@@ -906,6 +923,33 @@ mod tests {
         assert_eq!(result.remote_version.as_deref(), Some("0.9.0"));
         assert_eq!(result.build_exit_code, Some(7));
         assert_eq!(result.error.as_deref(), Some("deploy failed"));
+    }
+
+    #[test]
+    fn archive_artifact_without_component_extract_is_allowed_by_deploy_override() {
+        assert!(!artifact_requires_component_extract_command(
+            std::path::Path::new("build/example.zip"),
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn archive_artifact_without_component_extract_or_override_requires_extract_command() {
+        assert!(artifact_requires_component_extract_command(
+            std::path::Path::new("build/example.zip"),
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn archive_artifact_with_component_extract_does_not_require_another_command() {
+        assert!(!artifact_requires_component_extract_command(
+            std::path::Path::new("build/example.zip"),
+            true,
+            false,
+        ));
     }
 
     #[test]
