@@ -307,6 +307,36 @@ const result = await profileWordPressPages({
 });
 ```
 
+For common wp-admin and Site Editor profiling, use the documented admin page
+scenario catalog instead of copying selectors or iframe readiness checks into a
+rig. Built-in profiling scenarios include `dashboard`, `add-themes`, and
+`site-editor-root`; custom scenario objects use the same shape as page profiler
+manifest entries.
+
+```js
+const {
+	collectWordPressRequestProfiles,
+	profileWordPressAdminPageScenario,
+} = require('homeboy-extension-wordpress');
+
+// Or import only the scenario helpers:
+// const { profileWordPressAdminPageScenario } = require('homeboy-extension-wordpress/admin-page-scenarios');
+
+await profileWordPressAdminPageScenario({
+	page,
+	siteUrl: status.siteUrl,
+	autoLoginUrl: status.autoLoginUrl,
+	scenario: 'site-editor-root',
+	mark,
+	wordpressProfilerRows: collectWordPressRequestProfiles(sitePath),
+});
+```
+
+`profileWordPressAdminPageScenarios()` accepts `scenarios` with built-in IDs or
+custom objects, returns page profiles plus stable `metrics` and `metadata.summary`,
+and composes with the Node.js browser benchmark helper by using its provided
+`page` and `mark` arguments inside the benchmark action.
+
 This is intentionally extension-level infrastructure, not Homeboy core. Core
 keeps orchestration, run persistence, baselines, and reports; WordPress owns
 WP-specific browser readiness, REST route classification, request profiling,

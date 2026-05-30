@@ -3,7 +3,11 @@
 /**
  * Internal dependencies
  */
-const { profileWordPressPages } = require('./page-profiler');
+const {
+	buildWordPressAdminPageSweepSummary,
+	profileWordPressPages,
+	summarizeWordPressAdminPageProfile,
+} = require('./page-profiler');
 const {
 	WORDPRESS_RESOURCE_INCLUDE,
 	assertPlainObject,
@@ -121,6 +125,12 @@ const WORDPRESS_ADMIN_PAGE_SCENARIOS = [
 		ready: { selector: '.theme-browser, .themes' },
 	},
 	{
+		id: 'add-themes',
+		label: 'Add Themes',
+		path: '/wp-admin/theme-install.php',
+		ready: { selector: 'body.theme-install-php, .theme-browser, .wp-filter' },
+	},
+	{
 		id: 'plugins',
 		label: 'Plugins',
 		path: '/wp-admin/plugins.php',
@@ -137,6 +147,11 @@ const WORDPRESS_ADMIN_PAGE_SCENARIOS = [
 }));
 
 const WORDPRESS_ADMIN_PAGE_SCENARIO_IDS = WORDPRESS_ADMIN_PAGE_SCENARIOS.map((scenario) => scenario.id);
+const WORDPRESS_ADMIN_PAGE_PROFILE_SCENARIO_IDS = [
+	'dashboard',
+	'add-themes',
+	'site-editor-root',
+];
 
 function clone(value) {
 	return JSON.parse(JSON.stringify(value));
@@ -204,9 +219,10 @@ function normalizeWordPressAdminPageScenarioInput(scenario, options = {}) {
 
 function listWordPressAdminPageScenarios(options = {}) {
 	assertPlainObject(options, 'options');
-	const scenarios = options.scenarios === undefined
-		? (options.ids === undefined ? WORDPRESS_ADMIN_PAGE_SCENARIO_IDS : options.ids)
-		: options.scenarios;
+	let scenarios = options.scenarios;
+	if (scenarios === undefined) {
+		scenarios = options.ids === undefined ? WORDPRESS_ADMIN_PAGE_SCENARIO_IDS : options.ids;
+	}
 	if (!Array.isArray(scenarios)) {
 		throw new TypeError('options.scenarios or options.ids must be an array when provided');
 	}
@@ -229,26 +245,105 @@ function createWordPressAdminPageScenarioManifest(options = {}) {
 	};
 }
 
+function metricName(value) {
+	return String(value || 'page').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'page';
+}
+
+function createWordPressAdminPageScenarioMetrics(profile) {
+	const summary = summarizeWordPressAdminPageProfile(profile);
+	const prefix = `wordpress_admin_${metricName(summary.id)}`;
+	return {
+		[`${prefix}_ready_ms`]: summary.readyMs,
+		[`${prefix}_resource_count`]: summary.resourceCount,
+		[`${prefix}_rest_count`]: summary.restCount,
+		[`${prefix}_failed_request_count`]: summary.failedRequestCount,
+		[`${prefix}_failure_count`]: summary.failureCount,
+	};
+}
+
+async function navigateWordPressAdminAutoLogin(input) {
+	const { autoLoginUrl, page, mark } = input;
+	if (typeof autoLoginUrl !== 'string' || autoLoginUrl.trim() === '') {
+		return undefined;
+	}
+	if (!page || typeof page.goto !== 'function') {
+		throw new TypeError('page must provide goto()');
+	}
+	const response = await page.goto(autoLoginUrl, {
+		waitUntil: input.autoLoginWaitUntil || 'commit',
+		timeout: input.autoLoginTimeout || input.timeout || 120000,
+	});
+	if (typeof mark === 'function') {
+		await mark('wordpress_admin_auto_login');
+	}
+	return {
+		url: autoLoginUrl,
+		status: response && typeof response.status === 'function' ? response.status() : 0,
+	};
+}
+
+async function profileWordPressAdminPageScenario(input = {}) {
+	assertPlainObject(input, 'input');
+	const baseUrl = input.baseUrl || input.siteUrl;
+	const scenarioInput = input.scenario || input.scenarioId || input.id;
+	const scenario = normalizeWordPressAdminPageScenarioInput(scenarioInput, input);
+	const autoLogin = await navigateWordPressAdminAutoLogin(input);
+	const result = await profileWordPressPages({
+		...input,
+		baseUrl,
+		manifest: {
+			pages: [scenario],
+		},
+	});
+	const profile = result.pages[0];
+	const summary = summarizeWordPressAdminPageProfile(profile);
+
+	return {
+		...profile,
+		autoLogin,
+		metrics: createWordPressAdminPageScenarioMetrics(profile),
+		metadata: {
+			scenario,
+			summary,
+		},
+	};
+}
+
 async function profileWordPressAdminPageScenarios(input = {}) {
 	assertPlainObject(input, 'input');
+	const baseUrl = input.baseUrl || input.siteUrl;
 	const manifest = input.manifest || createWordPressAdminPageScenarioManifest(input);
-	return profileWordPressPages({
+	const autoLogin = await navigateWordPressAdminAutoLogin(input);
+	const result = await profileWordPressPages({
 		...input,
+		baseUrl,
 		manifest,
 	});
+	const summary = buildWordPressAdminPageSweepSummary(result);
+	return {
+		...result,
+		autoLogin,
+		metrics: Object.fromEntries(result.pages.flatMap((profile) => Object.entries(createWordPressAdminPageScenarioMetrics(profile)))),
+		metadata: {
+			summary,
+		},
+	};
 }
 
 module.exports = {
 	WORDPRESS_ADMIN_BROWSER_GATE,
 	WORDPRESS_ADMIN_PAGE_SCENARIO_IDS,
+	WORDPRESS_ADMIN_PAGE_PROFILE_SCENARIO_IDS,
 	WORDPRESS_ADMIN_PAGE_SCENARIOS,
 	WORDPRESS_ADMIN_RESOURCE_EXCLUDE,
 	WORDPRESS_RESOURCE_INCLUDE,
 	WORDPRESS_ADMIN_REST_GATE,
+	createWordPressAdminPageScenarioMetrics,
 	createWordPressAdminPageScenarioManifest,
 	getWordPressAdminPageScenario,
 	listWordPressAdminPageScenarios,
 	normalizeWordPressAdminPageScenarioInput,
+	profileWordPressAdminPageScenario,
 	profileWordPressAdminPageScenarios,
 	resolveWordPressAdminPageScenario,
 };

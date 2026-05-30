@@ -5,6 +5,7 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./admin-page-scenarios": "./lib/admin-page-scenarios.js",
     "./page-profiler": "./lib/page-profiler.js",
     "./playground-readiness": "./lib/playground-readiness.js",
     "./request-profiler": "./lib/request-profiler.js",
@@ -17,6 +18,7 @@
   },
   "scripts": {
     "lint:js": "eslint --ext .js,.jsx,.ts,.tsx",
+    "test:admin-page-scenarios": "node tests/admin-page-scenarios-smoke.js",
     "test:page-profiler": "node tests/page-profiler-smoke.js",
     "test:datamachine-agent-wp-codebox-runner": "bash scripts/agent/datamachine-agent-wp-codebox-runner-smoke.sh",
     "test:project-wpgym-eval-row": "bash scripts/agent/project-wpgym-eval-row-smoke.sh",
