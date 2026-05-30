@@ -6,7 +6,7 @@ configuration. PHPUnit and benchmark workloads run through [WP Codebox][wp-codeb
 by default, so there is no host PHP, MySQL, or local WordPress install to manage.
 
 [wp-codebox]: https://github.com/chubes4/wp-codebox
-[playground]: https://www.npmjs.com/package/@wp-playground/cli
+[playground]: https://playground.wordpress.net/
 
 ## What this extension provides
 
@@ -394,9 +394,10 @@ wordpress/scripts/validation/validate-playground-blueprint.sh \
   https://raw.githubusercontent.com/example/repo/main/blueprint.json
 ```
 
-The script runs `wp-playground-cli run-blueprint` with debug verbosity and
-prints captured stdout/stderr on failure, including step-level Blueprint errors
-and PHP fatals surfaced by Playground.
+The script runs `wp-codebox validate-blueprint` and prints captured stdout/stderr
+on failure, including step-level Blueprint errors and PHP fatals surfaced by the
+WP Codebox Playground runtime. Set `HOMEBOY_WP_CODEBOX_BIN` to validate with a
+specific wp-codebox binary.
 
 ## Environment variables
 
@@ -454,7 +455,7 @@ wordpress/
 │   └── wordpress-api-overrides.stub.php
 ├── tests/                    # Extension's own smoke tests (NOT plugin tests)
 ├── composer.json             # PHP toolchain (PHPUnit 9, PHPCS, PHPStan 2, wp-phpunit, etc.)
-├── package.json              # Node toolchain (@wp-playground/cli, @wordpress/eslint-plugin, eslint)
+├── package.json              # Node toolchain (@wordpress/eslint-plugin, eslint)
 ├── homeboy.json              # Self-checks (lint + smoke matrix)
 ├── phpcs.xml.dist
 ├── phpstan.neon.dist
@@ -466,7 +467,7 @@ wordpress/
 
 - **bash 4.0+** (macOS users: `brew install bash`; system bash 3.2 is rejected at runtime)
 - **PHP** — host PHP only required for the `host-smoke` backend, lint, build, and audit verbs. PHPUnit itself runs through WP Codebox.
-- **Node.js 18.12+** (WP Codebox tooling, Playground blueprint validation, and ESLint)
+- **Node.js 18.12+** (WP Codebox tooling and ESLint)
 - **Composer** (PHP toolchain install)
 
 PHP toolchain pins (from `composer.json`): PHPUnit `^9.0`,

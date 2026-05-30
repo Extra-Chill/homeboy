@@ -35,7 +35,6 @@
     "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js"
   },
   "devDependencies": {
-    "@wp-playground/cli": "^3.1.29",
     "@wordpress/eslint-plugin": "^24.2.0",
     "eslint": "^8.57.0"
   },

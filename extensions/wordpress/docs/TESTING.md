@@ -408,7 +408,7 @@ or publish it with benchmark results without redacting the fields listed in
 ## Playground HTTP readiness
 
 `lib/playground-readiness.js` exports a Node helper for callers that boot a
-`wp-playground-cli` HTTP server (or any WordPress origin) and need to wait
+WP Codebox/Playground HTTP server (or any WordPress origin) and need to wait
 until it is actually serving traffic before driving Playwright, REST calls,
 or load tests.
 
@@ -428,9 +428,9 @@ Options:
 
 | Option | Default | Purpose |
 |---|---|---|
-| `path` | `/wp-json/` | Path to poll. Defaults to `/wp-json/` because `wp-playground-cli` returns `302 Location: /` on `/`, which hangs Node's `fetch()` in a self-redirect loop. The helper uses `http.request()` directly and never follows redirects. |
+| `path` | `/wp-json/` | Path to poll. Defaults to `/wp-json/` because Playground can return `302 Location: /` on `/`, which hangs Node's `fetch()` in a self-redirect loop. The helper uses `http.request()` directly and never follows redirects. |
 | `readyStatus` | `200` | Single status or array of statuses considered ready. Strict by default; 3xx is not treated as ready. |
-| `readyOnSelfRedirect` | `false` | Treat a same-origin, same-path redirect as ready. Use this only for browser-driving flows such as `wp-playground-cli server --login`, where the CLI wrapper may return `302 Location: <same-path>` for every raw HTTP probe while Playwright browser navigation can still load the site. Keep this off for REST/load-test callers that require a real `200`. |
+| `readyOnSelfRedirect` | `false` | Treat a same-origin, same-path redirect as ready. Use this only for browser-driving flows where the Playground login wrapper may return `302 Location: <same-path>` for every raw HTTP probe while Playwright browser navigation can still load the site. Keep this off for REST/load-test callers that require a real `200`. |
 | `intervalMs` | `1000` | Delay between poll attempts. |
 | `requestTimeoutMs` | `5000` | Per-request abort. |
 | `timeoutMs` | `120000` | Total budget before throwing. |
@@ -450,8 +450,7 @@ handling — never follows `Location`.
 
 ### Why the default path is `/wp-json/`, not `/`
 
-The `wp-playground-cli` HTTP server responds to `/` with `302 Location:
-/`, a self-redirect. Node's built-in `fetch()` treats `Location` as
+Playground may respond to `/` with `302 Location: /`, a self-redirect. Node's built-in `fetch()` treats `Location` as
 follow-by-default, so a naive `fetch(baseUrl)` against a Playground
 server hangs until the abort signal fires. Polling `/wp-json/` instead
 returns a clean `200 application/json` once WordPress has finished
@@ -459,8 +458,8 @@ booting, with no redirect involved. The helper also uses
 `http.request()` rather than `fetch()` so even the `/` poll path stays
 single-attempt.
 
-When `wp-playground-cli server --login` is used, the CLI login wrapper may
-also return a same-path redirect for `/wp-json/` and other raw HTTP probes.
+When the Playground login wrapper is used, it may also return a same-path
+redirect for `/wp-json/` and other raw HTTP probes.
 Browser-based flows can pass `readyOnSelfRedirect: true` to treat that shape
 as server readiness before driving Playwright. The option is explicit so REST
 and load-test flows do not mistake a login wrapper redirect for a usable API

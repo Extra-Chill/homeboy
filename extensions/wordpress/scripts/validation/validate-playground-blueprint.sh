@@ -2,15 +2,34 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PLAYGROUND_CLI="${EXTENSION_PATH}/node_modules/.bin/wp-playground-cli"
+
+resolve_wp_codebox_bin() {
+    if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ]; then
+        if [ ! -x "${HOMEBOY_WP_CODEBOX_BIN}" ]; then
+            echo "Error: HOMEBOY_WP_CODEBOX_BIN is not executable: ${HOMEBOY_WP_CODEBOX_BIN}" >&2
+            exit 2
+        fi
+        printf '%s\n' "${HOMEBOY_WP_CODEBOX_BIN}"
+        return 0
+    fi
+
+    if command -v wp-codebox >/dev/null 2>&1; then
+        command -v wp-codebox
+        return 0
+    fi
+
+    echo "Error: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN or run scripts/build/setup.sh" >&2
+    exit 2
+}
 
 usage() {
     cat >&2 <<'USAGE'
 Usage: validate-playground-blueprint.sh <blueprint-file-or-url> [--wp VERSION] [--php VERSION] [--artifact-dir DIR]
 
-Runs the supplied Blueprint through wp-playground-cli run-blueprint and prints
+Runs the supplied Blueprint through wp-codebox validate-blueprint and prints
 captured stdout/stderr on failure so CI catches public Blueprint boot errors.
+
+Set HOMEBOY_WP_CODEBOX_BIN to use a specific wp-codebox binary.
 USAGE
 }
 
@@ -28,7 +47,7 @@ BLUEPRINT="$1"
 shift
 
 WP_VERSION="latest"
-PHP_VERSION="8.3"
+PHP_VERSION=""
 ARTIFACT_DIR="${HOMEBOY_ARTIFACT_DIR:-}"
 
 while [ $# -gt 0 ]; do
@@ -73,11 +92,7 @@ if [ -z "$BLUEPRINT" ]; then
     echo "Error: blueprint path or URL is required" >&2
     exit 2
 fi
-if [ ! -f "$PLAYGROUND_CLI" ]; then
-    echo "Error: @wp-playground/cli not found at $PLAYGROUND_CLI" >&2
-    echo "Install it with: cd ${EXTENSION_PATH} && npm ci" >&2
-    exit 2
-fi
+WP_CODEBOX_BIN="$(resolve_wp_codebox_bin)"
 if [ -n "$ARTIFACT_DIR" ]; then
     mkdir -p "$ARTIFACT_DIR"
 fi
@@ -91,18 +106,20 @@ trap cleanup EXIT
 echo "Validating WordPress Playground Blueprint..."
 echo "  Blueprint: $BLUEPRINT"
 echo "  WordPress: $WP_VERSION"
-echo "  PHP: $PHP_VERSION"
+if [ -n "$PHP_VERSION" ]; then
+    echo "  PHP: $PHP_VERSION (wp-codebox default runtime; --php is accepted for CLI compatibility)"
+fi
 if [ -n "$ARTIFACT_DIR" ]; then
     echo "  Artifacts: $ARTIFACT_DIR"
 fi
 
+WP_CODEBOX_ARGS=(validate-blueprint --blueprint "$BLUEPRINT" --wp "$WP_VERSION")
+if [ -n "$ARTIFACT_DIR" ]; then
+    WP_CODEBOX_ARGS+=(--artifacts "$ARTIFACT_DIR")
+fi
+
 set +e
-"$PLAYGROUND_CLI" run-blueprint \
-    --blueprint "$BLUEPRINT" \
-    --wp "$WP_VERSION" \
-    --php "$PHP_VERSION" \
-    --verbosity=debug \
-    >"$OUTPUT_FILE" 2>&1
+"$WP_CODEBOX_BIN" "${WP_CODEBOX_ARGS[@]}" >"$OUTPUT_FILE" 2>&1
 status=$?
 set -e
 
@@ -112,7 +129,10 @@ if [ $status -ne 0 ]; then
         {
             echo "Blueprint: $BLUEPRINT"
             echo "WordPress: $WP_VERSION"
-            echo "PHP: $PHP_VERSION"
+            if [ -n "$PHP_VERSION" ]; then
+                echo "PHP: $PHP_VERSION (requested; wp-codebox owns the runtime PHP version)"
+            fi
+            echo "Runtime: wp-codebox"
             echo "Exit code: $status"
             echo "Generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         } >"$ARTIFACT_DIR/playground-blueprint-summary.txt"
@@ -125,11 +145,8 @@ if [ $status -ne 0 ]; then
     echo "Blueprint: $BLUEPRINT" >&2
     echo "Exit code: $status" >&2
     echo "" >&2
-    echo "--- wp-playground-cli output ---" >&2
+    echo "--- wp-codebox validate-blueprint output ---" >&2
     cat "$OUTPUT_FILE" >&2
-    echo "" >&2
-    echo "--- recent Playground temp sites ---" >&2
-    ls -td "${TMPDIR:-/tmp}"/node-playground-cli-site-* 2>/dev/null | head -5 >&2 || true
     if [ -n "$ARTIFACT_DIR" ]; then
         echo "" >&2
         echo "Artifacts written to: $ARTIFACT_DIR" >&2

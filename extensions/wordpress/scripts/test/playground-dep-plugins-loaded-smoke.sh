@@ -36,12 +36,6 @@ if [ ! -d "$DEP_FIXTURE_DIR" ]; then
     exit 1
 fi
 
-if [ ! -f "${EXTENSION_PATH}/node_modules/.bin/wp-playground-cli" ]; then
-    echo "ERROR: @wp-playground/cli not installed." >&2
-    echo "Run: cd ${EXTENSION_PATH} && npm ci" >&2
-    exit 1
-fi
-
 if [ ! -d "${EXTENSION_PATH}/vendor/wp-phpunit" ]; then
     echo "ERROR: wp-phpunit not installed." >&2
     echo "Run: cd ${EXTENSION_PATH} && composer install" >&2
