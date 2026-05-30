@@ -30,6 +30,7 @@ pub(crate) struct DependencyProviderSnapshot {
 
 pub(crate) enum DependencyProvider {
     Composer(ComposerDependencyProvider),
+    Npm(NpmDependencyProvider),
     Extension(ExtensionDependencyProvider),
     ComponentScript(ComponentScriptDependencyProvider),
 }
@@ -43,6 +44,7 @@ impl DependencyProvider {
     ) -> Result<ProviderDependencyStatus> {
         match self {
             DependencyProvider::Composer(provider) => provider.status(path, package_filter),
+            DependencyProvider::Npm(provider) => provider.status(path, package_filter),
             DependencyProvider::Extension(provider) => {
                 provider.status(component, path, package_filter)
             }
@@ -55,6 +57,7 @@ impl DependencyProvider {
     pub(crate) fn handles_package(&self, path: &Path, package: &str) -> Result<bool> {
         match self {
             DependencyProvider::Composer(provider) => provider.handles_package(path, package),
+            DependencyProvider::Npm(provider) => provider.handles_package(path, package),
             DependencyProvider::Extension(_) => Ok(true),
             DependencyProvider::ComponentScript(_) => Ok(true),
         }
@@ -69,6 +72,9 @@ impl DependencyProvider {
     ) -> Result<DependencyUpdateResult> {
         match self {
             DependencyProvider::Composer(provider) => {
+                provider.update(component, path, package, constraint)
+            }
+            DependencyProvider::Npm(provider) => {
                 provider.update(component, path, package, constraint)
             }
             DependencyProvider::Extension(provider) => {
@@ -107,6 +113,10 @@ pub(crate) fn resolve_dependency_providers(
         providers.push(DependencyProvider::ComponentScript(
             ComponentScriptDependencyProvider,
         ));
+    }
+
+    if NpmDependencyProvider::supports(path) {
+        providers.push(DependencyProvider::Npm(NpmDependencyProvider));
     }
 
     if component
@@ -165,6 +175,13 @@ pub(crate) fn dependency_provider_snapshot(
     Ok(snapshot)
 }
 
+pub fn npm_command_args(package: &str, constraint: Option<&str>) -> Vec<String> {
+    match constraint {
+        Some(constraint) => vec!["install".to_string(), format!("{package}@{constraint}")],
+        None => vec!["update".to_string(), package.to_string()],
+    }
+}
+
 pub fn composer_command_args(package: &str, action: &ComposerAction) -> Vec<String> {
     match action {
         ComposerAction::Require { constraint } => vec![
@@ -179,6 +196,85 @@ pub fn composer_command_args(package: &str, action: &ComposerAction) -> Vec<Stri
             "--with-dependencies".to_string(),
             "--no-interaction".to_string(),
         ],
+    }
+}
+
+pub(crate) struct NpmDependencyProvider;
+
+impl NpmDependencyProvider {
+    fn supports(path: &Path) -> bool {
+        path.join("package.json").is_file()
+    }
+
+    fn status(
+        &self,
+        path: &Path,
+        package_filter: Option<&str>,
+    ) -> Result<ProviderDependencyStatus> {
+        Ok(ProviderDependencyStatus {
+            package_manager: "npm".to_string(),
+            dependency_identities: Vec::new(),
+            packages: read_npm_packages(path, package_filter)?,
+        })
+    }
+
+    fn handles_package(&self, path: &Path, package: &str) -> Result<bool> {
+        Ok(npm_package_snapshot(path, package)?.is_some())
+    }
+
+    fn update(
+        &self,
+        component: &Component,
+        path: &Path,
+        package: &str,
+        constraint: Option<&str>,
+    ) -> Result<DependencyUpdateResult> {
+        let before = npm_package_snapshot(path, package)?;
+        let args = npm_command_args(package, constraint);
+        let output = Command::new("npm")
+            .args(&args)
+            .current_dir(path)
+            .output()
+            .map_err(|e| {
+                Error::internal_io(e.to_string(), Some("run dependency provider".to_string()))
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            return Err(Error::validation_invalid_argument(
+                "dependency_provider",
+                format!(
+                    "Dependency provider command failed with status {}: {}",
+                    output.status,
+                    first_non_empty_line(&stderr)
+                        .or_else(|| first_non_empty_line(&stdout))
+                        .unwrap_or("no output")
+                ),
+                None,
+                Some(vec![format!(
+                    "Run manually in {}: npm {}",
+                    path.display(),
+                    args.join(" ")
+                )]),
+            ));
+        }
+
+        let after = npm_package_snapshot(path, package)?;
+
+        Ok(DependencyUpdateResult {
+            component_id: component.id.clone(),
+            component_path: path.display().to_string(),
+            package_manager: "npm".to_string(),
+            package: package.to_string(),
+            requested_constraint: constraint.map(str::to_string),
+            command: std::iter::once("npm".to_string()).chain(args).collect(),
+            before,
+            after,
+            stdout,
+            stderr,
+        })
     }
 }
 
@@ -507,6 +603,55 @@ fn composer_identities(path: &Path) -> Result<Vec<String>> {
         .unwrap_or_default())
 }
 
+fn npm_package_snapshot(path: &Path, package: &str) -> Result<Option<DependencyPackage>> {
+    Ok(read_npm_packages(path, Some(package))?.into_iter().next())
+}
+
+fn read_npm_packages(path: &Path, package_filter: Option<&str>) -> Result<Vec<DependencyPackage>> {
+    let manifest = read_json_file(&path.join("package.json"))?;
+    let lock = read_optional_json_file(&path.join("package-lock.json"))?;
+    let mut direct = BTreeMap::new();
+
+    for section in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
+        collect_manifest_section(&manifest, section, &mut direct);
+    }
+
+    let locked = lock
+        .as_ref()
+        .map(collect_npm_locked_packages)
+        .unwrap_or_default();
+
+    let mut names: BTreeSet<String> = direct.keys().cloned().collect();
+    names.extend(locked.keys().cloned());
+
+    let packages = names
+        .into_iter()
+        .filter(|name| package_filter.map(|filter| filter == name).unwrap_or(true))
+        .map(|name| {
+            let (manifest_section, constraint) = direct
+                .get(&name)
+                .cloned()
+                .map(|(section, constraint)| (Some(section), Some(constraint)))
+                .unwrap_or((None, None));
+            let locked = locked.get(&name);
+            DependencyPackage {
+                name,
+                manifest_section,
+                constraint,
+                locked_version: locked.and_then(|p| p.version.clone()),
+                locked_reference: locked.and_then(|p| p.reference.clone()),
+            }
+        })
+        .collect();
+
+    Ok(packages)
+}
+
 fn read_composer_packages(
     path: &Path,
     package_filter: Option<&str>,
@@ -515,8 +660,8 @@ fn read_composer_packages(
     let lock = read_optional_json_file(&path.join("composer.lock"))?;
     let mut direct = BTreeMap::new();
 
-    collect_manifest_section(&manifest, "require", &mut direct);
-    collect_manifest_section(&manifest, "require-dev", &mut direct);
+    collect_composer_manifest_section(&manifest, "require", &mut direct);
+    collect_composer_manifest_section(&manifest, "require-dev", &mut direct);
 
     let locked = lock
         .as_ref()
@@ -549,7 +694,7 @@ fn read_composer_packages(
     Ok(packages)
 }
 
-fn collect_manifest_section(
+fn collect_composer_manifest_section(
     manifest: &Value,
     section: &str,
     direct: &mut BTreeMap<String, (String, String)>,
@@ -562,6 +707,22 @@ fn collect_manifest_section(
         if name == "php" || name.starts_with("ext-") {
             continue;
         }
+        if let Some(constraint) = constraint.as_str() {
+            direct.insert(name.clone(), (section.to_string(), constraint.to_string()));
+        }
+    }
+}
+
+fn collect_manifest_section(
+    manifest: &Value,
+    section: &str,
+    direct: &mut BTreeMap<String, (String, String)>,
+) {
+    let Some(entries) = manifest.get(section).and_then(Value::as_object) else {
+        return;
+    };
+
+    for (name, constraint) in entries {
         if let Some(constraint) = constraint.as_str() {
             direct.insert(name.clone(), (section.to_string(), constraint.to_string()));
         }
@@ -602,6 +763,67 @@ fn collect_locked_packages(lock: &Value) -> BTreeMap<String, LockedPackage> {
     }
 
     packages
+}
+
+fn collect_npm_locked_packages(lock: &Value) -> BTreeMap<String, LockedPackage> {
+    let mut packages = BTreeMap::new();
+
+    if let Some(entries) = lock.get("packages").and_then(Value::as_object) {
+        for (path, entry) in entries {
+            let Some(name) = npm_lock_package_name(path, entry) else {
+                continue;
+            };
+            packages.insert(name, npm_locked_package(entry, entries));
+        }
+    }
+
+    if let Some(entries) = lock.get("dependencies").and_then(Value::as_object) {
+        for (name, entry) in entries {
+            packages
+                .entry(name.to_string())
+                .or_insert_with(|| npm_locked_package(entry, &serde_json::Map::new()));
+        }
+    }
+
+    packages
+}
+
+fn npm_lock_package_name(path: &str, entry: &Value) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    entry
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            path.strip_prefix("node_modules/")
+                .or_else(|| {
+                    path.rsplit_once("/node_modules/")
+                        .map(|(_, package)| package)
+                })
+                .map(str::to_string)
+        })
+}
+
+fn npm_locked_package(entry: &Value, packages: &serde_json::Map<String, Value>) -> LockedPackage {
+    let resolved_entry = entry
+        .get("resolved")
+        .and_then(Value::as_str)
+        .and_then(|resolved| packages.get(resolved));
+
+    LockedPackage {
+        version: entry
+            .get("version")
+            .or_else(|| resolved_entry.and_then(|entry| entry.get("version")))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        reference: entry
+            .get("resolved")
+            .or_else(|| entry.get("integrity"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
 }
 
 fn read_json_file(path: &Path) -> Result<Value> {
