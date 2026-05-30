@@ -2,6 +2,13 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.19.4] - 2026-05-30
+
+### Changed
+- Add generic settings accessors
+- Use core helper for annotation sidecars
+- share test result parser adapters
+
 ## [1.19.3] - 2026-05-30
 
 ### Fixed
