@@ -4,6 +4,34 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.206.0] - 2026-05-30
+
+### Added
+- expose invocation context JSON
+- clarify structured sidecar manifest contract
+- add typed sidecar writer dispatch
+- add archive install deploy policy
+- route changed tests from manifest config
+- add shared runner prelude helper
+- add shell bench scenario writer
+- add read-only refs command
+
+### Changed
+- Preflight runner extension parity
+- keep command surface guards current
+- route dependency operations through provider seam
+
+### Fixed
+- split archive deploy manifest config
+- avoid constant assertion clippy warning
+- derive dependency stack edges from providers
+- keep runtime helpers available without HOME
+- allow extension deploy overrides for archives
+- avoid routing source test modules directly
+- add annotation sidecar writer helper
+- narrow finding projection exports
+- normalize test and budget findings
+
 ## [0.205.0] - 2026-05-30
 
 ### Added
