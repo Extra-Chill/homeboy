@@ -3,7 +3,7 @@
 # Shared JSON sidecar writer for extension runner scripts.
 #
 # The helper owns the common "sidecar is a JSON array" file mechanics used by
-# lint findings, test failures, and fix results. Callers still build the
+# lint findings, test failures, fix results, and annotation files. Callers still build the
 # domain-specific JSON object; this helper validates it, writes atomically, and
 # keeps empty/missing target env vars as no-ops for legacy compatibility.
 #
@@ -12,6 +12,7 @@
 #   homeboy_sidecar_append_json "$HOMEBOY_LINT_FINDINGS_FILE" '{"message":"..."}'
 #   homeboy_sidecar_write_json_array "$HOMEBOY_TEST_FAILURES_FILE" "$failure_json"
 #   homeboy_sidecar_merge_json_array "$HOMEBOY_FIX_RESULTS_FILE" "$tmp_results"
+#   homeboy_write_annotations "phpcs" "$annotation_json"
 
 homeboy_sidecar_python() {
     if command -v python3 >/dev/null 2>&1; then
@@ -156,6 +157,18 @@ except Exception:
 PYEOF
 }
 
+homeboy_annotation_file() {
+    local source="${1:-}"
+    local dir="${HOMEBOY_ANNOTATIONS_DIR:-}"
+
+    if [ -z "$dir" ] || [ -z "$source" ]; then
+        return 0
+    fi
+
+    source="$(printf '%s' "$source" | tr -c 'A-Za-z0-9_.-' '-')"
+    printf '%s/%s.json\n' "$dir" "$source"
+}
+
 homeboy_write_lint_findings() {
     homeboy_sidecar_write_json_array "${HOMEBOY_LINT_FINDINGS_FILE:-}" "$@"
 }
@@ -190,4 +203,31 @@ homeboy_append_fix_result() {
 
 homeboy_merge_fix_results() {
     homeboy_sidecar_merge_json_array "${HOMEBOY_FIX_RESULTS_FILE:-}" "$1"
+}
+
+homeboy_write_annotations() {
+    local source="${1:-}"
+    shift || true
+
+    local target
+    target="$(homeboy_annotation_file "$source")"
+    homeboy_sidecar_write_json_array "$target" "$@"
+}
+
+homeboy_append_annotation() {
+    local source="${1:-}"
+    local item="${2:-}"
+
+    local target
+    target="$(homeboy_annotation_file "$source")"
+    homeboy_sidecar_append_json "$target" "$item"
+}
+
+homeboy_merge_annotations() {
+    local source="${1:-}"
+    local file="${2:-}"
+
+    local target
+    target="$(homeboy_annotation_file "$source")"
+    homeboy_sidecar_merge_json_array "$target" "$file"
 }
