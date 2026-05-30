@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.105.6] - 2026-05-30
+
+### Fixed
+- emit WordPress lint producer summaries
+
 ## [2.105.5] - 2026-05-30
 
 ### Fixed
