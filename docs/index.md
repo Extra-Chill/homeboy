@@ -42,7 +42,7 @@ repository.
 
 JSON configuration schemas for components, projects, servers, fleets, and extensions:
 
-- [Component schema](schemas/component-schema.md) - Buildable/deployable units
+- [Component schema](schemas/component-schema.md) - Buildable, testable, reviewable units
 - [Project schema](schemas/project-schema.md) - Deployable environments
 - [Server schema](schemas/server-schema.md) - SSH connection settings
 - [Fleet schema](schemas/fleet-schema.md) - Named groups of projects

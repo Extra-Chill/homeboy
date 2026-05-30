@@ -18,8 +18,7 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
   "platform": {},
   "structured_sidecars": {},
   "commands": {},
-  "actions": {},
-  "release_actions": {},
+  "actions": [],
   "hooks": {},
   "docs": [],
   "capabilities": [],
@@ -46,8 +45,7 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
 - **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
 - **`structured_sidecars`** (object): Declares public machine-readable run-directory sidecar contracts
 - **`commands`** (object): Additional CLI commands provided by extension
-- **`actions`** (object): Action definitions for `homeboy extension action`
-- **`release_actions`** (object): Release pipeline step definitions
+- **`actions`** (array): Action definitions for `homeboy extension action`; release actions are normal actions whose IDs start with `release.`
 - **`hooks`** (object): Lifecycle hooks (pre/post version bump, deploy, release)
 - **`docs`** (array): Documentation topic paths
 - **`capabilities`** (array): Capabilities provided by extension (e.g., `["storage"]`)
@@ -74,7 +72,7 @@ Declares what file types and capabilities this extension handles. Used by the au
 
 - **`file_extensions`** (array): File extensions this extension can process (e.g., `["php", "inc"]`, `["rs"]`)
 - **`capabilities`** (array): Capabilities this extension supports (e.g., `["fingerprint", "refactor"]`)
-- **`discovery_markers`** (array): Component-root marker rules used by `homeboy context` gap reporting to suggest an extension without core knowing ecosystem-specific files.
+- **`discovery_markers`** (array): Component-root marker rules used by diagnostics and gap reporting to suggest an extension without core knowing ecosystem-specific files.
 
 Each `discovery_markers` rule supports:
 
@@ -415,38 +413,44 @@ Extensions can register additional top-level CLI commands.
 ## Actions Configuration
 
 Actions define executable operations accessible via `homeboy extension action`.
+They are an array of typed action objects.
 
 ```json
 {
-  "actions": {
-    "<action_id>": {
-      "type": "cli|api",
-      "description": "string",
-      "config": {}
+  "actions": [
+    {
+      "id": "sync",
+      "label": "Sync data",
+      "type": "command",
+      "command": "scripts/sync.sh"
     }
-  }
+  ]
 }
 ```
 
 ### Action Fields
 
-- **`type`** (string): `"cli"` or `"api"`
-- **`description`** (string): Action description
-- **`config`** (object): Action-specific configuration
+- **`id`** (string): Stable action identifier
+- **`label`** (string): Human-readable action label
+- **`type`** (string): `"command"`, `"api"`, or `"builtin"`
+- **`command`** (string): Command to execute for `command` actions
+- **`endpoint`** (string): Endpoint for `api` actions
+- **`method`** (string): HTTP method for `api` actions
+- **`payload`** (object): Optional payload template for `api` actions
+- **`builtin`** (string): Legacy UI action type for `builtin` actions
 
-#### CLI Action
+#### Command Action
 
 ```json
 {
-  "actions": {
-    "sync": {
-      "type": "cli",
-      "description": "Sync data",
-      "config": {
-        "command": "sync --output {{format}}"
-      }
+  "actions": [
+    {
+      "id": "sync",
+      "label": "Sync data",
+      "type": "command",
+      "command": "scripts/sync.sh"
     }
-  }
+  ]
 }
 ```
 
@@ -454,43 +458,47 @@ Actions define executable operations accessible via `homeboy extension action`.
 
 ```json
 {
-  "actions": {
-    "create_release": {
+  "actions": [
+    {
+      "id": "create_release",
+      "label": "Create GitHub release",
       "type": "api",
-      "description": "Create GitHub release",
-      "config": {
-        "method": "POST",
-        "path": "/repos/{owner}/{repo}/releases",
-        "template": {
-          "tag_name": "{{release.tag}}",
-          "name": "{{release.name}}",
-          "body": "{{release.notes}}"
-        }
+      "method": "POST",
+      "endpoint": "/repos/{owner}/{repo}/releases",
+      "payload": {
+        "tag_name": "{{release.tag}}",
+        "name": "{{release.name}}",
+        "body": "{{release.notes}}"
       }
     }
-  }
+  ]
 }
 ```
 
 ## Release Actions Configuration
 
-Release actions define steps for release pipelines.
+Release actions are normal extension `actions` whose IDs start with
+`release.`. Core release planning detects configured extensions with release
+actions and routes prepare/package/publish behavior through those actions.
 
 ```json
 {
-  "release_actions": {
-    "<step_type>": {
-      "type": "extension.run|extension.action",
-      "config": {}
+  "actions": [
+    {
+      "id": "release.publish.github",
+      "label": "Publish GitHub release",
+      "type": "command",
+      "command": "scripts/publish-github-release.sh"
     }
-  }
+  ]
 }
 ```
 
 ### Release Action Types
 
-- **`extension.run`**: Execute extension runtime command
-- **`extension.action`**: Execute extension action
+- **`command`**: Execute an extension-owned command.
+- **`api`**: Execute an API request configured by the extension action.
+- **`builtin`**: Legacy UI action type parsed by the CLI but not executed.
 
 ### Release Action Output Contract
 
@@ -515,17 +523,14 @@ For skipped or authentication-related results, include **`reason`** or **`messag
 
 ```json
 {
-  "release_actions": {
-    "publish": {
-      "type": "extension.run",
-      "config": {
-        "extension": "github",
-        "inputs": [
-          {"id": "create_release", "value": "true"}
-        ]
-      }
+  "actions": [
+    {
+      "id": "release.publish.github",
+      "label": "Publish GitHub release",
+      "type": "command",
+      "command": "scripts/publish-github-release.sh"
     }
-  }
+  ]
 }
 ```
 

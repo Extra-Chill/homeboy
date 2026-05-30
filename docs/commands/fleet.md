@@ -10,12 +10,13 @@ homeboy fleet <COMMAND>
 
 ## Overview
 
-Fleets enable cloud version management by grouping projects that share components. Use fleets to:
+Fleets group projects that share components or operational policies. Use fleets
+to:
 
-- Deploy updates to multiple sites simultaneously
-- Check version drift across your network
-- Coordinate deployments between staging/production environments
-- Keep shared plugins/themes in sync across a WordPress multisite network
+- Inspect status and version drift across a project group
+- Coordinate deployments between staging and production environments
+- Keep shared components in sync across multiple sites, apps, or servers
+- Produce read-only attention reports for a group of environments
 
 **Hierarchy:**
 - **Component** → versioned thing (plugin, CLI tool, extension)

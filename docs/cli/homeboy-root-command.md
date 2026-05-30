@@ -8,7 +8,9 @@ homeboy [OPTIONS] <COMMAND>
 
 ## Description
 
-`homeboy` is a CLI tool for development and deployment automation.
+`homeboy` is headless automation for agentic software engineering workflows. It
+keeps local developers, CI, scheduled jobs, and coding agents on the same
+component-aware command surface and structured evidence contract.
 
 ## Global flags
 
@@ -18,6 +20,8 @@ These are provided by clap:
 - `--help` / `-h`: print help and exit
 - `--output <PATH>`: write the structured JSON envelope to a file in addition to stdout
 - `--force-hot`: suppress resource policy warnings for intentionally hot commands
+- `--artifact-root <DIR>`: copy persisted run artifacts to a specific directory
+- `--runner <RUNNER_ID>`: offload supported hot commands to a connected Homeboy Lab runner
 
 `--output` is a global flag, so pass it before the subcommand:
 
