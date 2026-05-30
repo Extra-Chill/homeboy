@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_support::with_isolated_home;
+use crate::test_support::{home_env_guard, with_isolated_home};
 
 #[test]
 fn ensure_all_helpers_writes_all_files() {
@@ -80,6 +80,30 @@ fn runner_prelude_initializes_context_steps_trap_and_sidecar() {
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         "/tmp/ext|/tmp/project|/tmp/project|"
+    );
+}
+
+#[test]
+fn ensure_all_helpers_falls_back_when_home_is_unavailable() {
+    let _guard = home_env_guard();
+    let prior = std::env::var("HOME").ok();
+    std::env::remove_var("HOME");
+
+    let pairs = ensure_all_helpers().expect("helpers should fall back to temp runtime dir");
+    let sidecar = pairs
+        .iter()
+        .find_map(|(key, value)| (key == SIDECAR_WRITER_ENV).then_some(value))
+        .expect("sidecar writer helper");
+    let sidecar_exists = std::path::Path::new(sidecar).is_file();
+
+    match prior {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+
+    assert!(
+        sidecar_exists,
+        "sidecar helper should be written under fallback runtime dir: {sidecar}"
     );
 }
 
