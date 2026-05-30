@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.20.4] - 2026-05-30
+
+### Changed
+- use typed sidecar writer APIs
+
 ## [1.20.3] - 2026-05-30
 
 ### Changed
