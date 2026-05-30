@@ -33,6 +33,67 @@ export function setting(key, fallback = '', options = {}) {
     return env[envKey] !== undefined ? env[envKey] : fallback;
 }
 
+export function settingInt(key, fallback = 0, options = {}) {
+    const value = settingValue(key, undefined, options);
+    const parsed = typeof value === 'number'
+        ? value
+        : (/^[+-]?\d+$/.test(String(value ?? '').trim()) ? Number(String(value).trim()) : Number.NaN);
+    if (!Number.isInteger(parsed)) return fallback;
+    if (options.min !== undefined && parsed < options.min) return fallback;
+    if (options.max !== undefined && parsed > options.max) return fallback;
+    return parsed;
+}
+
+export function settingBool(key, fallback = false, options = {}) {
+    const value = settingValue(key, undefined, options);
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') {
+        if (value === 1) return true;
+        if (value === 0) return false;
+        return fallback;
+    }
+
+    const normalized = String(value ?? '').trim().toLowerCase();
+    if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+    return fallback;
+}
+
+export function settingList(key, fallback = [], options = {}) {
+    const value = settingValue(key, undefined, options);
+    if (Array.isArray(value)) return value.map((item) => String(item));
+    if (value === undefined || value === null || value === '') return fallback;
+
+    const separator = options.separator || ',';
+    const parts = String(value).split(separator).map((item) => (options.trim === false ? item : item.trim()));
+    return options.keepEmpty === true ? parts : parts.filter((item) => item !== '');
+}
+
+export function settingJson(key, fallback = undefined, options = {}) {
+    const value = settingValue(key, undefined, options);
+    if (value === undefined || value === null || value === '') return fallback;
+    if (typeof value === 'object') return value;
+
+    try {
+        return JSON.parse(String(value));
+    } catch {
+        return fallback;
+    }
+}
+
+export function expandHome(value, options = {}) {
+    const input = String(value ?? '');
+    if (input === '~') return options.homeDir || os.homedir();
+    if (input.startsWith('~/')) return path.join(options.homeDir || os.homedir(), input.slice(2));
+    return input;
+}
+
+export function resolvePath(value, options = {}) {
+    const expanded = expandHome(value, options);
+    if (path.isAbsolute(expanded)) return expanded;
+    return path.resolve(options.baseDir || process.env.HOMEBOY_COMPONENT_PATH || process.cwd(), expanded);
+}
+
 export function metric(value, fallback = 0) {
     const number = Number(value ?? fallback);
     return Number.isFinite(number) ? number : fallback;
@@ -158,4 +219,15 @@ function sanitizeSegment(value) {
         .replace(/[^A-Za-z0-9._-]+/g, '-')
         .replace(/^-+|-+$/g, '');
     return segment || 'workload';
+}
+
+function settingValue(key, fallback = undefined, options = {}) {
+    const env = options.env || process.env;
+    const resolved = settings(env);
+    if (Object.hasOwn(resolved, key) && resolved[key] !== undefined && resolved[key] !== null) {
+        return resolved[key];
+    }
+
+    const envKey = `${options.prefix || DEFAULT_SETTINGS_PREFIX}${String(key).toUpperCase()}`;
+    return env[envKey] !== undefined ? env[envKey] : fallback;
 }
