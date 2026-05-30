@@ -160,10 +160,11 @@ With `--dry-run`:
 
 ### CI / bot semver recommendation example
 
-For automation, run dry-run JSON and consume:
+For automation, run a dry-run and persist the structured payload with the global
+`--output <PATH>` flag:
 
 ```sh
-homeboy release <component_id> --dry-run --json
+homeboy --output release-plan.json release <component_id> --dry-run
 ```
 
 Semver recommendation is exposed at:

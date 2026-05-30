@@ -14,20 +14,26 @@ homeboy component [OPTIONS] <COMMAND>
 ### `create`
 
 ```sh
-homeboy component create [OPTIONS] --local-path <path> --remote-path <path> --build-artifact <path>
+homeboy component create [OPTIONS]
 ```
 
 The component ID comes from an existing `homeboy.json` `id` when present; otherwise it is derived from the `--local-path` directory name (lowercased). For example, `--local-path /path/to/extrachill-api` creates a component with ID `extrachill-api`.
 
 Options:
 
-- `--json <spec>`: JSON input spec for create/update (supports single or bulk)
-- `--skip-existing`: skip items that already exist (JSON mode only)
 - `--local-path <path>`: absolute path to local **source / git checkout** directory (required; ID derived from directory name; `~` is expanded). Must be a git repo — not the production deploy target (see [component schema](../schemas/component-schema.md#local_path-vs-remote_path))
-- `--remote-path <path>`: remote path relative to project `base_path` (required unless in `homeboy.json`)
-- `--build-artifact <path>`: build artifact path relative to `local_path` (required; must include a filename)
+- `--remote-path <path>`: remote path relative to project `base_path` (required for deployable components unless already present in `homeboy.json`)
+- `--build-artifact <path>`: build artifact path relative to `local_path` (required for artifact deploys; must include a filename)
 - `--version-target <TARGET>`: version target in format `file` or `file::pattern` (repeatable)
+- `--version-targets <JSON>`: version targets as a JSON array (supports `@file.json` and `-` for stdin)
 - `--extract-command <command>`: command to run after upload (optional; supports `{artifact}` and `{targetDir}`)
+- `--changelog-target <path>`: changelog path relative to `local_path`
+- `--extension <extension>`: extension this component uses (repeatable)
+- `--project <project>`: attach the component to a project after creation
+
+Legacy JSON bulk create flags are rejected. `component create` now initializes
+repo-owned `homeboy.json` from explicit flags, then registers the component for
+ID-based discovery.
 
 #### Extract Command Execution Context
 
@@ -202,24 +208,24 @@ This is useful for:
 
 ```json
 {
-  "command": "component.create|component.show|component.set|component.delete|component.rename|component.list|component.projects",
+  "command": "component.create|component.show|component.set|component.delete|component.rename|component.list|component.projects|component.shared|component.env|component.add-version-target|component.reconcile|component.artifacts",
   "component_id": "<id>|null",
   "success": true,
   "updated_fields": ["local_path", "remote_path"],
   "component": {},
   "components": [],
-  "import": null,
   "project_ids": ["project-1", "project-2"],
-  "projects": []
+  "projects": [],
+  "shared": {}
 }
 ```
 
 Notes:
 
-- In JSON import mode (`homeboy component create --json ...`), `command` is still `component.create` and `import` is populated.
-- `updated_fields` is empty for all actions except `set`/`rename`.
+- `updated_fields` is populated for mutations such as `set`, `rename`, `reconcile --apply`, and `artifacts --apply`.
 - `rename` does not include the old ID; capture it from your input if needed.
 - `project_ids` and `projects` are only populated for `component.projects`.
+- `shared` is only populated for `component.shared`.
 
 
 ## Related
