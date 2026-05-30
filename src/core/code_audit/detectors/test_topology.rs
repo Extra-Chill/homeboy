@@ -386,7 +386,7 @@ JSON
             test: None,
             bench: None,
             trace: None,
-            annotations_schema_version: None,
+            structured_sidecars: std::collections::BTreeMap::new(),
             actions: vec![],
             hooks: std::collections::HashMap::new(),
             settings: vec![],
