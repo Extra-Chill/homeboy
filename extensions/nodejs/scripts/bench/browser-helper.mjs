@@ -3,6 +3,12 @@ import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import {
+    collectBrowserPhases,
+    normalizeBrowserArtifact,
+    normalizeBrowserBottleneck,
+    normalizeBrowserPerformanceProfile,
+} from '../../../scripts/lib/browser-result-shapes.mjs';
 
 const DEFAULT_NETWORK_IDLE_TIMEOUT_MS = 5000;
 const BROWSER_PERFORMANCE_STATE = new WeakMap();
@@ -192,7 +198,7 @@ export async function collectBrowserPerformanceProfile(page, options = {}) {
         ...state.phaseMarks.filter((mark) => !browserPhaseNames.has(mark.name)),
     ].sort(comparePhaseMarks);
 
-    return stableJson({
+    return normalizeBrowserPerformanceProfile({
         schema_version: 1,
         page_url: browserEntries.url || '',
         summary: summarizeBrowserProfile({ navigation, resources, network: state.network, browserEntries, state }),
@@ -206,7 +212,7 @@ export async function collectBrowserPerformanceProfile(page, options = {}) {
         layout_shifts: browserEntries.layout_shifts.map(normalizeLayoutShiftEntry).sort(compareByNameThenStart),
         long_tasks: browserEntries.long_tasks.map(normalizeLongTaskEntry).sort(compareByNameThenStart),
         phase_marks: phaseMarks,
-        phases: collectPhases(phaseMarks),
+        phases: collectBrowserPhases(phaseMarks),
     });
 }
 
@@ -466,11 +472,11 @@ export async function runBrowserBench(options) {
             const interactionEvidence = await runBrowserActions(page, config.actions, { ...actionFailureOptions, ...config.actionOptions });
             metrics.browser_interaction_count = interactionEvidence.actions.length;
             metrics.browser_interaction_duration_ms = interactionEvidence.duration_ms;
-            artifacts.interactions = {
+            artifacts.interactions = normalizeBrowserArtifact({
                 path: join(config.artifactsDir, `${config.id}-interactions.json`),
                 kind: 'browser-interactions',
                 label: 'Browser interaction evidence',
-            };
+            });
             await writeJson(artifacts.interactions.path, interactionEvidence);
         }
 
@@ -484,63 +490,63 @@ export async function runBrowserBench(options) {
         const performanceProfile = await performanceController.collect();
         const profilePath = join(config.artifactsDir, `${config.id}-browser-profile.json`);
         await writeJson(profilePath, performanceProfile);
-        artifacts.browserProfile = {
+        artifacts.browserProfile = normalizeBrowserArtifact({
             path: profilePath,
             kind: 'browser-performance-profile',
             label: 'Browser performance profile',
-        };
+        });
 
         const traceSummary = summarizeBrowserPerformanceProfile(performanceProfile);
         Object.assign(metrics, collectBrowserSummaryMetrics(traceSummary));
         const traceSummaryPath = join(config.artifactsDir, `${config.id}-trace-summary.json`);
         await writeJson(traceSummaryPath, traceSummary);
-        artifacts.traceSummary = {
+        artifacts.traceSummary = normalizeBrowserArtifact({
             path: traceSummaryPath,
             kind: 'browser-trace-summary',
             label: 'Browser trace bottleneck summary',
-        };
+        });
 
         const traceSummaryMarkdownPath = join(config.artifactsDir, `${config.id}-trace-summary.md`);
         await writeFile(traceSummaryMarkdownPath, formatBrowserPerformanceSummaryMarkdown(traceSummary, { title: `${config.id} browser trace bottlenecks` }));
-        artifacts.traceSummaryMarkdown = {
+        artifacts.traceSummaryMarkdown = normalizeBrowserArtifact({
             path: traceSummaryMarkdownPath,
             kind: 'browser-trace-summary-markdown',
             label: 'Browser trace bottleneck summary markdown',
-        };
+        });
 
         if (config.screenshot) {
             const screenshotPath = join(config.artifactsDir, `${config.id}-screenshot.png`);
             await page.screenshot({ path: screenshotPath, fullPage: true });
-            artifacts.screenshot = {
+            artifacts.screenshot = normalizeBrowserArtifact({
                 path: screenshotPath,
                 kind: 'screenshot',
                 label: 'Final screenshot',
-            };
+            });
         }
 
         const networkPath = join(config.artifactsDir, `${config.id}-network.json`);
         await writeJson(networkPath, network);
-        artifacts.network = {
+        artifacts.network = normalizeBrowserArtifact({
             path: networkPath,
             kind: 'network-log',
             label: 'Network log',
-        };
+        });
 
         const consolePath = join(config.artifactsDir, `${config.id}-console.json`);
         await writeJson(consolePath, consoleMessages);
-        artifacts.console = {
+        artifacts.console = normalizeBrowserArtifact({
             path: consolePath,
             kind: 'console-log',
             label: 'Console log',
-        };
+        });
 
         if (config.trace) {
             await context.tracing.stop({ path: tracePath });
-            artifacts.trace = {
+            artifacts.trace = normalizeBrowserArtifact({
                 path: tracePath,
                 kind: 'playwright-trace',
                 label: 'Playwright trace',
-            };
+            });
         }
     } catch (error) {
         if (page && typeof page.screenshot === 'function') {
@@ -605,11 +611,11 @@ export async function runBrowserPageScenario(options) {
     await writeJson(rawResultPath, config.sanitizeRawResult ? await config.sanitizeRawResult(rawResult) : rawResult);
     artifacts = stableJson({
         ...artifacts,
-        rawResult: {
+        rawResult: normalizeBrowserArtifact({
             path: rawResultPath,
             kind: 'browser-page-scenario-result',
             label: 'Browser page scenario raw result',
-        },
+        }),
     });
 
     if (config.sanitizeArtifacts) {
@@ -1139,7 +1145,7 @@ function normalizeTraceSummaryOptions(options) {
 }
 
 function bottleneck(kind, phase, message, data) {
-    return stableJson({ kind, phase: phase || 'all', message, data });
+    return normalizeBrowserBottleneck({ kind, phase: phase || 'all', message, data });
 }
 
 function summarizeTransferFamilies(resources, maxItems) {
@@ -1491,20 +1497,6 @@ function summarizeBrowserProfile({ navigation, resources, network, browserEntrie
         console_message_count: state.consoleMessages.length,
         page_error_count: state.pageErrors.length,
     });
-}
-
-function collectPhases(phaseMarks) {
-    const phases = {};
-    for (let i = 0; i < phaseMarks.length; i++) {
-        const current = phaseMarks[i];
-        const next = phaseMarks[i + 1];
-        phases[current.name] = {
-            start_time_ms: current.start_time_ms,
-            end_time_ms: next ? next.start_time_ms : null,
-            duration_ms: next ? Math.max(0, roundNumber(next.start_time_ms - current.start_time_ms)) : 0,
-        };
-    }
-    return stableJson(phases);
 }
 
 function profileComparisonMetrics(profile) {

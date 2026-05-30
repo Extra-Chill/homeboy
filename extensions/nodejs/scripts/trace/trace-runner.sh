@@ -18,18 +18,18 @@ set -euo pipefail
 #   HOMEBOY_RUN_DIR               — run-scoped working directory
 #   HOMEBOY_DEBUG                 — verbose output
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${SCRIPT_DIR}/../lib/bash-preflight.sh}"
+TRACE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${TRACE_SCRIPT_DIR}/../lib/bash-preflight.sh}"
 # shellcheck source=/dev/null
 source "$BASH_PREFLIGHT_HELPER"
 homeboy_require_bash_version 4
 
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${TRACE_SCRIPT_DIR}/../lib/resolve-context.sh}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
 # shellcheck source=../lib/node-helpers.sh
-source "${SCRIPT_DIR}/../lib/node-helpers.sh"
+source "${TRACE_SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
 homeboy_detect_package_manager
 
@@ -44,8 +44,8 @@ export HOMEBOY_TRACE_ARTIFACT_DIR="$ARTIFACT_DIR"
 export HOMEBOY_RUN_DIR="$RUN_DIR"
 export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
 export HOMEBOY_COMPONENT_PATH="$PROJECT_PATH"
-export HOMEBOY_NODEJS_INVOCATION_RUNTIME_HELPER="${HOMEBOY_NODEJS_INVOCATION_RUNTIME_HELPER:-${SCRIPT_DIR}/../runtime/invocation-runtime.mjs}"
-export HOMEBOY_TRACE_HELPER_DIR="${SCRIPT_DIR}/lib"
+export HOMEBOY_NODEJS_INVOCATION_RUNTIME_HELPER="${HOMEBOY_NODEJS_INVOCATION_RUNTIME_HELPER:-${TRACE_SCRIPT_DIR}/../runtime/invocation-runtime.mjs}"
+export HOMEBOY_TRACE_HELPER_DIR="${TRACE_SCRIPT_DIR}/lib"
 
 mkdir -p "$(dirname "$RESULTS_FILE")" "$RUN_DIR" "$ARTIFACT_DIR"
 

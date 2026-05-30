@@ -17,7 +17,8 @@ const { pollHttp } = await import(`${helperDir}/probes.mjs`);
   the final Homeboy trace JSON envelope. `TraceRecorder#recordCheck()` maps a
   boolean check to a pass/fail assertion, and `TraceRecorder#writeArtifact()`
   writes an artifact under `HOMEBOY_TRACE_ARTIFACT_DIR` while registering it in
-  the result envelope.
+  the result envelope. Timeline, assertion, artifact, and envelope rows use the
+  shared product-neutral shapes documented in `../../docs/browser-result-shapes.md`.
 - `process.mjs` launches black-box commands, captures a best-effort process
   tree artifact on macOS/Linux, waits for exits, and cleans up spawned process
   groups on process exit/signals.
