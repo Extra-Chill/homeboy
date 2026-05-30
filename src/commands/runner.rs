@@ -130,7 +130,6 @@ enum RunnerCommand {
         id: String,
     },
     /// Modify runner settings
-    #[command(visible_aliases = ["edit", "merge"])]
     Set {
         #[command(flatten)]
         args: DynamicSetArgs,

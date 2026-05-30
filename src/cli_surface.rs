@@ -46,12 +46,10 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Manage project configuration
-    #[command(visible_alias = "projects")]
     Project(project::ProjectArgs),
     /// SSH into a project server or configured server
     Ssh(ssh::SshArgs),
     /// Manage SSH server configurations
-    #[command(visible_alias = "servers")]
     Server(server::ServerArgs),
     /// Run tests for a component
     Test(test::TestArgs),
@@ -66,7 +64,6 @@ pub enum Commands {
     /// Database operations
     Db(db::DbArgs),
     /// Manage component dependencies
-    #[command(visible_alias = "dependencies")]
     Deps(deps::DepsArgs),
     /// Inspect CI reproduction profiles and discovered CI surfaces
     Ci(ci::CiArgs),
@@ -75,7 +72,6 @@ pub enum Commands {
     /// Remote file operations
     File(file::FileArgs),
     /// Manage fleets (groups of projects)
-    #[command(visible_alias = "fleets")]
     Fleet(fleet::FleetArgs),
     /// Remote log viewing
     Logs(logs::LogsArgs),
@@ -84,14 +80,12 @@ pub enum Commands {
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
     /// Manage standalone component configurations
-    #[command(visible_alias = "components")]
     Component(component::ComponentArgs),
     /// Manage global Homeboy configuration
     Config(config::ConfigArgs),
     /// Run the local-only HTTP API daemon
     Daemon(daemon::DaemonArgs),
     /// Execute CLI-compatible extensions
-    #[command(visible_alias = "extensions")]
     Extension(extension::ExtensionArgs),
     /// Actionable component status overview
     Status(status::StatusArgs),
@@ -122,10 +116,8 @@ pub enum Commands {
     /// Read-only reference discovery for a symbol or term
     Refs(refs::RefsArgs),
     /// Manage local dev rigs (reproducible multi-component environments)
-    #[command(visible_alias = "rigs")]
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
-    #[command(visible_alias = "runners")]
     Runner(runner::RunnerArgs),
     /// Manage private service tunnel declarations
     Tunnel(tunnel::TunnelArgs),
@@ -135,7 +127,6 @@ pub enum Commands {
     #[command(name = "self")]
     SelfCmd(self_cmd::SelfArgs),
     /// Manage stacks (combined-fixes branches built from base + cherry-picked PRs)
-    #[command(visible_alias = "stacks")]
     Stack(stack::StackArgs),
     /// Undo the last write operation (audit fix, refactor, etc.)
     Undo(undo::UndoArgs),

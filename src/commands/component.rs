@@ -72,7 +72,6 @@ enum ComponentCommand {
     ///
     /// Supports dedicated flags for common fields (e.g., --local-path, --changelog-target)
     /// as well as --json/--base64 for arbitrary object updates.
-    #[command(visible_aliases = ["edit", "merge"])]
     Set {
         #[command(flatten)]
         args: DynamicSetArgs,

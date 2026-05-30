@@ -71,7 +71,7 @@ enum ExtensionCommand {
         #[arg(long)]
         id: Option<String>,
         /// Git ref to check out for URL installs (branch, tag, or commit)
-        #[arg(long = "ref", alias = "revision")]
+        #[arg(long = "ref")]
         revision: Option<String>,
         /// Replace an existing extension install/link
         #[arg(long)]
@@ -134,7 +134,6 @@ enum ExtensionCommand {
         args: Vec<String>,
     },
     /// Update extension manifest fields
-    #[command(visible_aliases = ["edit", "merge"])]
     Set {
         /// Extension ID (optional if provided in JSON body)
         extension_id: Option<String>,

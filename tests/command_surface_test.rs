@@ -43,13 +43,13 @@ fn includes_first_level_subcommands() {
 }
 
 #[test]
-fn includes_visible_aliases() {
+fn excludes_removed_cli_aliases() {
     let surface = current_command_surface();
 
-    assert!(surface.contains_path(&["components"]));
-    assert!(surface.contains_path(&["dependencies"]));
-    assert!(surface.contains_path(&["rigs"]));
-    assert!(surface.contains_path(&["stacks", "inspect"]));
+    assert!(!surface.contains_path(&["components"]));
+    assert!(!surface.contains_path(&["dependencies"]));
+    assert!(!surface.contains_path(&["rigs"]));
+    assert!(!surface.contains_path(&["stacks", "inspect"]));
 }
 
 #[test]

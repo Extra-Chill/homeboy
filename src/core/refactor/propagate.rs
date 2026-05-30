@@ -291,7 +291,7 @@ fn find_struct_definition(struct_name: &str, root: &Path) -> Result<PathBuf, Err
         ),
         None,
         Some(vec![format!(
-            "homeboy refactor propagate --struct {} --definition src/path/to/file.rs",
+            "homeboy refactor propagate --struct-name {} --definition src/path/to/file.rs",
             struct_name
         )]),
     ))
