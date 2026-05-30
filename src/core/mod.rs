@@ -15,6 +15,7 @@ pub mod engine;
 pub mod error;
 pub(crate) mod expand;
 pub mod extension;
+pub mod finding;
 pub mod fleet;
 pub mod git;
 pub mod http_api;

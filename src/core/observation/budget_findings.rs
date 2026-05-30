@@ -1,29 +1,29 @@
 use crate::core::budget::BudgetFinding;
+use crate::core::finding::{FindingSource, HomeboyFinding};
 
 use super::records::NewFindingRecord;
 
+pub fn homeboy_finding_from_budget(finding: &BudgetFinding) -> HomeboyFinding {
+    let mut normalized = HomeboyFinding::builder("budget", finding.message.clone())
+        .rule(finding.code.clone())
+        .category(finding.category.clone())
+        .severity(finding.severity.clone())
+        .fingerprint(finding.fingerprint())
+        .source(FindingSource::new("budget").label(finding.context_label.clone()))
+        .metadata("context_label", finding.context_label.clone())
+        .metadata("actual", finding.actual)
+        .metadata("expected", finding.expected)
+        .metadata("unit", finding.unit.clone())
+        .metadata("subject", finding.subject.clone())
+        .metadata("passed", finding.passed)
+        .raw(finding)
+        .build();
+    normalized.file = finding.file.clone();
+    normalized
+}
+
 fn finding_record_from_budget(run_id: &str, finding: &BudgetFinding) -> NewFindingRecord {
-    NewFindingRecord {
-        run_id: run_id.to_string(),
-        tool: "budget".to_string(),
-        rule: Some(finding.code.clone()),
-        file: finding.file.clone(),
-        line: None,
-        severity: Some(finding.severity.clone()),
-        fingerprint: Some(finding.fingerprint()),
-        message: finding.message.clone(),
-        fixable: None,
-        metadata_json: serde_json::json!({
-            "category": finding.category,
-            "context_label": finding.context_label,
-            "actual": finding.actual,
-            "expected": finding.expected,
-            "unit": finding.unit,
-            "subject": finding.subject,
-            "passed": finding.passed,
-            "raw": finding,
-        }),
-    }
+    NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_budget(finding))
 }
 
 pub fn finding_records_from_budget(

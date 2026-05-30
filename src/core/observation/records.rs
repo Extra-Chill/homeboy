@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, path::Path};
 
 use crate::core::code_audit::{self, report::finding_kind_key};
 use crate::core::extension::lint::LintFinding;
+use crate::core::finding::{FindingSource, HomeboyFinding};
 
 mod run_builder;
 mod run_status;
@@ -114,6 +115,24 @@ pub struct NewFindingRecord {
     pub metadata_json: serde_json::Value,
 }
 
+impl NewFindingRecord {
+    pub fn from_homeboy_finding(run_id: impl Into<String>, finding: HomeboyFinding) -> Self {
+        let metadata_json = finding.metadata_json();
+        Self {
+            run_id: run_id.into(),
+            tool: finding.tool,
+            rule: finding.rule,
+            file: finding.file,
+            line: finding.line,
+            severity: finding.severity,
+            fingerprint: finding.fingerprint,
+            message: finding.message,
+            fixable: finding.fixable,
+            metadata_json,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FindingRecord {
     pub id: String,
@@ -152,23 +171,28 @@ pub struct AnnotationFindingRecord {
     pub extra: BTreeMap<String, Value>,
 }
 
+pub fn homeboy_finding_from_lint(finding: &LintFinding) -> HomeboyFinding {
+    let mut normalized = HomeboyFinding::builder(
+        finding.tool.clone().unwrap_or_else(|| "lint".to_string()),
+        finding.message.clone(),
+    )
+    .category(finding.category.clone())
+    .fingerprint(finding.id.clone())
+    .source(FindingSource::new("sidecar").label("lint-findings"))
+    .metadata("source_sidecar", "lint-findings")
+    .raw(finding)
+    .build();
+    normalized.rule = lint_extra_string(finding, "rule").or_else(|| Some(finding.category.clone()));
+    normalized.file = finding.file.clone();
+    normalized.line = lint_extra_i64(finding, "line");
+    normalized.column = lint_extra_i64(finding, "column");
+    normalized.severity = finding.severity.clone();
+    normalized.fixable = lint_extra_bool(finding, "fixable");
+    normalized
+}
+
 pub fn finding_record_from_lint(run_id: &str, finding: &LintFinding) -> NewFindingRecord {
-    NewFindingRecord {
-        run_id: run_id.to_string(),
-        tool: finding.tool.clone().unwrap_or_else(|| "lint".to_string()),
-        rule: lint_extra_string(finding, "rule").or_else(|| Some(finding.category.clone())),
-        file: finding.file.clone(),
-        line: lint_extra_i64(finding, "line"),
-        severity: finding.severity.clone(),
-        fingerprint: Some(finding.id.clone()),
-        message: finding.message.clone(),
-        fixable: lint_extra_bool(finding, "fixable"),
-        metadata_json: serde_json::json!({
-            "category": finding.category,
-            "source_sidecar": "lint-findings",
-            "raw": finding,
-        }),
-    }
+    NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_lint(finding))
 }
 
 pub fn finding_records_from_lint(run_id: &str, findings: &[LintFinding]) -> Vec<NewFindingRecord> {
@@ -178,27 +202,26 @@ pub fn finding_records_from_lint(run_id: &str, findings: &[LintFinding]) -> Vec<
         .collect()
 }
 
-pub fn finding_record_from_audit(run_id: &str, finding: &code_audit::Finding) -> NewFindingRecord {
+pub fn homeboy_finding_from_audit(finding: &code_audit::Finding) -> HomeboyFinding {
     let kind = finding_kind_key(&finding.kind);
-    NewFindingRecord {
-        run_id: run_id.to_string(),
-        tool: "audit".to_string(),
-        rule: Some(kind.clone()),
-        file: Some(finding.file.clone()),
-        line: None,
-        severity: Some(audit_severity_key(&finding.severity)),
-        fingerprint: Some(audit_finding_fingerprint(finding)),
-        message: finding.description.clone(),
-        fixable: None,
-        metadata_json: serde_json::json!({
-            "source_sidecar": "audit-findings",
-            "convention": finding.convention,
-            "suggestion": finding.suggestion,
-            "confidence": finding.kind.confidence(),
-            "kind": kind,
-            "raw": finding,
-        }),
-    }
+    HomeboyFinding::builder("audit", finding.description.clone())
+        .rule(kind.clone())
+        .category(finding.convention.clone())
+        .file(finding.file.clone())
+        .severity(audit_severity_key(&finding.severity))
+        .fingerprint(audit_finding_fingerprint(finding))
+        .source(FindingSource::new("sidecar").label("audit-findings"))
+        .metadata("source_sidecar", "audit-findings")
+        .metadata("convention", finding.convention.clone())
+        .metadata("suggestion", finding.suggestion.clone())
+        .metadata("confidence", finding.kind.confidence())
+        .metadata("kind", kind)
+        .raw(finding)
+        .build()
+}
+
+pub fn finding_record_from_audit(run_id: &str, finding: &code_audit::Finding) -> NewFindingRecord {
+    NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_audit(finding))
 }
 
 pub fn finding_records_from_audit(
@@ -306,26 +329,33 @@ pub fn finding_record_from_annotation(
     annotation: &AnnotationFindingRecord,
     source_file: &str,
 ) -> NewFindingRecord {
+    NewFindingRecord::from_homeboy_finding(
+        run_id,
+        homeboy_finding_from_annotation(annotation, source_file),
+    )
+}
+
+pub fn homeboy_finding_from_annotation(
+    annotation: &AnnotationFindingRecord,
+    source_file: &str,
+) -> HomeboyFinding {
     let tool = annotation
         .source
         .clone()
         .unwrap_or_else(|| annotation_file_stem(source_file));
-    NewFindingRecord {
-        run_id: run_id.to_string(),
-        tool,
-        rule: annotation.code.clone(),
-        file: annotation.file.clone(),
-        line: annotation.line,
-        severity: annotation.severity.clone(),
-        fingerprint: annotation_fingerprint(annotation),
-        message: annotation.message.clone(),
-        fixable: annotation.fixable,
-        metadata_json: serde_json::json!({
-            "source_sidecar": "annotations",
-            "annotation_file": source_file,
-            "raw": annotation,
-        }),
-    }
+    let mut normalized = HomeboyFinding::builder(tool, annotation.message.clone())
+        .source(FindingSource::new("annotation").path(source_file))
+        .metadata("source_sidecar", "annotations")
+        .metadata("annotation_file", source_file)
+        .raw(annotation)
+        .build();
+    normalized.rule = annotation.code.clone();
+    normalized.file = annotation.file.clone();
+    normalized.line = annotation.line;
+    normalized.severity = annotation.severity.clone();
+    normalized.fingerprint = annotation_fingerprint(annotation);
+    normalized.fixable = annotation.fixable;
+    normalized
 }
 
 fn annotation_file_stem(source_file: &str) -> String {
