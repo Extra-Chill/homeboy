@@ -10,17 +10,17 @@ homeboy project [OPTIONS] <COMMAND>
 
 ### Linking Components to a Project
 
-After creating components, link them to a project:
+After creating a repo-owned component config, attach that checkout to a project:
 
 ```sh
-# Add components to existing project
-homeboy project components add my-project component-1 component-2
+homeboy project components attach-path my-project /path/to/component-repo
 
-# Or set all components at once (replaces existing)
-homeboy project components set my-project component-1 component-2
+# Or replace all component attachments at once
+homeboy project components set my-project --json '[{"id":"component-1","local_path":"/repo/component-1","remote_path":"wp-content/plugins/component-1"}]'
 ```
 
-Components must exist (created via `homeboy component create`) before linking.
+`attach-path` discovers the component from the checkout's `homeboy.json` and
+adds a project attachment for that repo path.
 
 ## Subcommands
 
@@ -135,7 +135,7 @@ homeboy project create my-site my-site.local \
 
 All commands execute locally when no `server_id` is configured:
 
-- **CLI tools** (`homeboy wp`, `homeboy composer`) - execute in local shell
+- **Extension CLI tools** (`homeboy wp`, `homeboy cargo`, or extension-provided verbs) - execute in local shell
 - **Database** (`homeboy db`) - uses extension templates, executes locally
 - **Logs** (`homeboy logs`) - reads files from `base_path`
 - **Files** (`homeboy file`) - browses/edits files at `base_path`
@@ -247,13 +247,14 @@ JSON output:
 }
 ```
 
-#### `components add`
+#### `components attach-path`
 
 ```sh
-homeboy project components add <project_id> <component_id> [<component_id>...]
+homeboy project components attach-path <project_id> <local_path>
 ```
 
-Adds components to the project if they are not already present.
+Attaches a repo path for a project component discovered via that repo's
+`homeboy.json`.
 
 #### `components remove`
 
@@ -274,21 +275,23 @@ Removes all components from the project.
 #### `components set`
 
 ```sh
-homeboy project components set <project_id> <component_id> [<component_id>...]
+homeboy project components set <project_id> --json '<attachments-json>'
 ```
 
-Replaces the full `component_ids` list on the project (deduped, order-preserving). Component IDs must exist in `homeboy component list`.
+Replaces the full component attachment list on the project. The JSON payload is
+an array of attachments with fields such as `id`, `local_path`, and
+`remote_path`.
 
-You can also do this via `project set` by merging `component_ids`:
+You can also do this via `project set` by merging `components`:
 
 ```sh
-homeboy project set <project_id> --json '{"component_ids":["chubes-theme","chubes-blocks"]}'
+homeboy project set <project_id> --json '{"components":[{"id":"chubes-theme","local_path":"/repo/chubes-theme","remote_path":"wp-content/themes/chubes-theme"}]}'
 ```
 
 Example:
 
 ```sh
-homeboy project components set chubes chubes-theme chubes-blocks chubes-contact chubes-docs chubes-games
+homeboy project components set chubes --json '[{"id":"chubes-theme","local_path":"/repo/chubes-theme","remote_path":"wp-content/themes/chubes-theme"}]'
 ```
 
 JSON output:
@@ -303,9 +306,35 @@ JSON output:
     "component_ids": ["<component_id>", "<component_id>"],
     "components": [ { } ]
   },
-  "updated": ["component_ids"]
+  "updated": ["components"]
 }
 ```
+
+### `delete`
+
+```sh
+homeboy project delete <project_id>
+```
+
+Deletes a project configuration.
+
+### `init`
+
+```sh
+homeboy project init <project_id>
+```
+
+Initializes the configured project directory.
+
+### `status`
+
+```sh
+homeboy project status <project_id>
+homeboy project status <project_id> --health-only
+```
+
+Shows live server health and component versions for a project. Use
+`--health-only` to skip component version checks.
 
 ### `pin`
 
