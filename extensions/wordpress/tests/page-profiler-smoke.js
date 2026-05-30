@@ -627,6 +627,7 @@ async function main() {
 		baseUrl: 'https://example.test',
 		manifest,
 		fixtures: [{ id: 'profile-ready', type: 'wp-cli', command: 'option update profile_ready 1' }],
+		fixtureExecutionRoute: 'host',
 		runCli: async (command) => ({ exitCode: 0, stdout: command, stderr: '' }),
 	});
 	assert.equal(multi.pages.length, 2);
