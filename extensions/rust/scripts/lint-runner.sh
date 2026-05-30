@@ -22,31 +22,14 @@ set -euo pipefail
 #   HOMEBOY_FIX_RESULTS_FILE — JSON sidecar receiving applied fix records
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/lib/resolve-context.sh}"
-RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../../scripts/lib/runner-steps.sh}"
 COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/lib/command-capture.sh}"
-FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../scripts/lib/runner-prelude.sh}"
 FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/lib/fix-results.sh}"
 # shellcheck source=/dev/null
-source "$RESOLVE_CONTEXT_HELPER"
-homeboy_resolve_context
-# shellcheck source=./lib/runner-steps.sh
-source "${RUNNER_STEPS_HELPER}"
+source "$RUNNER_PRELUDE"
+homeboy_runner_init --steps --failure-trap --sidecar-writer
 # shellcheck source=./lib/command-capture.sh
 source "${COMMAND_CAPTURE_HELPER}"
-# shellcheck source=/dev/null
-if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
-    source "$FAILURE_TRAP_HELPER"
-    homeboy_init_failure_trap
-else
-    FAILED_STEP=""
-    FAILURE_OUTPUT=""
-fi
-# shellcheck source=/dev/null
-if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
-    source "$SIDECAR_WRITER_HELPER"
-fi
 # shellcheck source=./lib/fix-results.sh
 source "$FIX_RESULTS_HELPER"
 
