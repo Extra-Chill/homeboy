@@ -3,13 +3,13 @@
 /**
  * Strict Comparison Fixer
  *
- * Converts loose comparisons to strict:
- *   == → ===
- *   != → !==
+ * Reports loose comparisons that need manual review:
+ *   ==
+ *   !=
  *
  * WPCS marks Universal.Operators.StrictComparisons as phpcs-only (phpcbf won't fix it)
- * because loose-to-strict can change behavior. This fixer handles it since the codebase
- * has opted into strict comparisons via the WordPress coding standard.
+ * because loose-to-strict can change behavior. This fixer intentionally stays
+ * report-only so fix-only runs surface the issue without changing semantics.
  *
  * Usage: php strict-comparison-fixer.php <path>
  */
@@ -31,9 +31,9 @@ if (!file_exists($path)) {
 $result = fixer_process_path($path, 'process_file');
 
 if ($result['total_fixes'] > 0) {
-    echo "Strict comparison fixer: Fixed {$result['total_fixes']} comparison(s) in {$result['files_fixed']} file(s)\n";
+    echo "Strict comparison fixer: Reported {$result['total_fixes']} loose comparison(s) in {$result['files_fixed']} file(s); no automatic rewrites applied\n";
 } else {
-    echo "Strict comparison fixer: No fixable comparisons found\n";
+    echo "Strict comparison fixer: No loose comparisons found\n";
 }
 
 exit(0);
@@ -53,35 +53,24 @@ function process_file($filepath) {
     }
 
     $fixes = 0;
-    $new_content = '';
     $count = count($tokens);
 
     for ($i = 0; $i < $count; $i++) {
         $token = $tokens[$i];
 
         if (is_array($token)) {
-            // == → ===
             if ($token[0] === T_IS_EQUAL) {
-                $new_content .= '===';
+                echo "$filepath:{$token[2]}: loose comparison '==' requires manual review\n";
                 $fixes++;
                 continue;
             }
 
-            // != → !==
             if ($token[0] === T_IS_NOT_EQUAL) {
-                $new_content .= '!==';
+                echo "$filepath:{$token[2]}: loose comparison '!=' requires manual review\n";
                 $fixes++;
                 continue;
             }
-
-            $new_content .= $token[1];
-        } else {
-            $new_content .= $token;
         }
-    }
-
-    if ($fixes > 0) {
-        file_put_contents($filepath, $new_content);
     }
 
     return $fixes;

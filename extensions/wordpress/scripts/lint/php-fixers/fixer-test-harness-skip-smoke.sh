@@ -22,6 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WP_FILESYSTEM_FIXER="${SCRIPT_DIR}/wp-filesystem-fixer.php"
 SHORT_TERNARY_FIXER="${SCRIPT_DIR}/short-ternary-fixer.php"
 LONELY_IF_FIXER="${SCRIPT_DIR}/lonely-if-fixer.php"
+STRICT_COMPARISON_FIXER="${SCRIPT_DIR}/strict-comparison-fixer.php"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -194,5 +195,32 @@ assert_grep 'if \( config\.type === '\''checkbox'\'' \)' "${TMPDIR}/assets/Handl
 	"JavaScript nested if must not become PHP elseif"
 assert_not_grep 'elseif' "${TMPDIR}/assets/HandlerModel.js" \
 	"JavaScript file must not contain PHP elseif after lonely-if fixer"
+
+# === Bug 4: strict-comparison fixer must not rewrite loose comparisons ===
+
+rm -rf "${TMPDIR}"/*
+mkdir -p "${TMPDIR}"
+
+cat > "${TMPDIR}/loose-comparisons.php" <<'PHP'
+<?php
+$matches_zero_string = $id == '0';
+$not_false = $enabled != false;
+PHP
+
+php "$STRICT_COMPARISON_FIXER" "${TMPDIR}/loose-comparisons.php" > "${TMPDIR}/strict-comparison-output.txt"
+
+assert_grep '\$id == '\''0'\''' "${TMPDIR}/loose-comparisons.php" \
+    "strict-comparison fixer must leave == unchanged for manual review"
+assert_grep '\$enabled != false' "${TMPDIR}/loose-comparisons.php" \
+    "strict-comparison fixer must leave != unchanged for manual review"
+assert_not_grep '===' "${TMPDIR}/loose-comparisons.php" \
+    "strict-comparison fixer must not introduce === automatically"
+assert_not_grep '!==' "${TMPDIR}/loose-comparisons.php" \
+    "strict-comparison fixer must not introduce !== automatically"
+assert_grep 'Reported 2 loose comparison' "${TMPDIR}/strict-comparison-output.txt" \
+    "strict-comparison fixer must report loose comparisons for audit"
+assert_grep "loose-comparisons.php:[0-9]+: loose comparison '==' requires manual review" \
+    "${TMPDIR}/strict-comparison-output.txt" \
+    "strict-comparison fixer must include file and line context"
 
 echo "OK: fixer test harness skip + short-ternary call guard regression smoke passed"
