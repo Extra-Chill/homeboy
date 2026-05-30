@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.19.5] - 2026-05-30
+
+### Changed
+- Add shared command capture helper
+
 ## [1.19.4] - 2026-05-30
 
 ### Changed
