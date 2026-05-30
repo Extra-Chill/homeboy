@@ -20,7 +20,7 @@ pub use super::manifest_config::{
     TestChangedFileExclusiveEnv, TestChangedFileRouting, TestChangedFileRoutingStrategy,
     TestConfig, TraceConfig, VersionPatternConfig,
 };
-pub use super::manifest_deploy_config::{DeployArchiveInstallPolicy, DeployRequiredHeader};
+pub use super::manifest_deploy_config::DeployArchiveInstallPolicy;
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
 
 /// Type of action that can be executed by a extension.
