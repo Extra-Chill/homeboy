@@ -20,12 +20,8 @@ pub struct HomeboyFinding {
     pub severity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub column: Option<i64>,
+    #[serde(default, skip_serializing_if = "HomeboyFindingLocation::is_empty")]
+    pub location: HomeboyFindingLocation,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixable: Option<bool>,
@@ -40,6 +36,23 @@ pub struct HomeboyFinding {
 impl HomeboyFinding {
     pub fn builder(tool: impl Into<String>, message: impl Into<String>) -> HomeboyFindingBuilder {
         HomeboyFindingBuilder::new(tool, message)
+    }
+}
+
+/// Optional source location for a finding.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyFindingLocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<i64>,
+}
+
+impl HomeboyFindingLocation {
+    pub fn is_empty(&self) -> bool {
+        self.file.is_none() && self.line.is_none() && self.column.is_none()
     }
 }
 
@@ -83,9 +96,7 @@ impl HomeboyFindingBuilder {
                 category: None,
                 severity: None,
                 fingerprint: None,
-                file: None,
-                line: None,
-                column: None,
+                location: HomeboyFindingLocation::default(),
                 message: message.into(),
                 fixable: None,
                 producer: HomeboyFindingProducer::default(),
@@ -121,17 +132,17 @@ impl HomeboyFindingBuilder {
     }
 
     pub fn file(mut self, value: impl Into<String>) -> Self {
-        self.finding.file = Some(value.into());
+        self.finding.location.file = Some(value.into());
         self
     }
 
     pub fn line(mut self, value: impl Into<i64>) -> Self {
-        self.finding.line = Some(value.into());
+        self.finding.location.line = Some(value.into());
         self
     }
 
     pub fn column(mut self, value: impl Into<i64>) -> Self {
-        self.finding.column = Some(value.into());
+        self.finding.location.column = Some(value.into());
         self
     }
 
@@ -254,6 +265,7 @@ mod tests {
 
         assert_eq!(finding.tool, "test");
         assert_eq!(finding.category.as_deref(), Some("test_failure"));
+        assert_eq!(finding.location.line, Some(44));
         assert_eq!(finding.metadata["test_name"], "ExampleTest::test_save");
     }
 
@@ -289,7 +301,7 @@ mod tests {
             .source_artifact("compiler-warnings.json")
             .build();
 
-        assert_eq!(finding.column, Some(13));
+        assert_eq!(finding.location.column, Some(13));
         assert_eq!(
             finding.producer.source_artifact.as_deref(),
             Some("compiler-warnings.json")

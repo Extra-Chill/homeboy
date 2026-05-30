@@ -14,7 +14,7 @@ Common fields stay stable across producers:
 - `category`: broad grouping such as `security`, `code_audit`, `test_failure`, or `budget`.
 - `severity`: producer severity as a string so extensions can preserve their own taxonomy.
 - `fingerprint`: stable identity used for baselines, dedupe, and trend tracking.
-- `file`, `line`, `column`: optional source location.
+- `location.file`, `location.line`, `location.column`: optional source location.
 - `message`: human-facing summary.
 - `fixable`: whether automated or guided remediation is available.
 - `producer`: command, extension, step, sidecar, and artifact provenance.
