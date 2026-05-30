@@ -545,6 +545,30 @@ impl Component {
         !self.script_commands(capability).is_empty()
     }
 
+    pub fn validate_supported_build_config(&self) -> crate::core::Result<()> {
+        let Some(command) = self
+            .build_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+        else {
+            return Ok(());
+        };
+
+        Err(crate::core::Error::validation_invalid_argument(
+            "build_command",
+            format!(
+                "Component '{}' uses unsupported legacy build_command. Use scripts.build instead.",
+                self.id
+            ),
+            Some(command.to_string()),
+            Some(vec![
+                "Move the command into homeboy.json as: \"scripts\": { \"build\": [\"<command>\"] }".to_string(),
+                "Homeboy does not execute component-level build_command.".to_string(),
+            ]),
+        ))
+    }
+
     /// Ensure `remote_path` is populated. If empty, attempt auto-resolution.
     ///
     /// This should be called after all config layers (repo portable, project overrides)
@@ -734,6 +758,24 @@ mod tests {
     fn validate_version_pattern_rejects_invalid_regex() {
         let result = validate_version_pattern(r"Version: (\d+\.\d+");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_supported_build_config_rejects_legacy_build_command() {
+        let component = Component {
+            id: "wp-codebox".to_string(),
+            build_command: Some("npm run package:wordpress-plugin".to_string()),
+            ..Default::default()
+        };
+
+        let err = component
+            .validate_supported_build_config()
+            .expect_err("legacy build_command should be unsupported");
+
+        assert!(err.message.contains("unsupported legacy build_command"));
+        assert!(err.message.contains("Use scripts.build instead"));
+        assert_eq!(err.details["field"].as_str(), Some("build_command"));
+        assert!(err.details["tried"].to_string().contains("scripts"));
     }
 
     #[test]

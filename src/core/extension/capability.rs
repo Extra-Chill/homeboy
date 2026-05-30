@@ -216,7 +216,7 @@ pub(crate) fn extension_guidance_hints(
         link_hint,
         "List installed extensions: homeboy extension list".to_string(),
         "The component path resolved correctly; the requested command needs an extension provider.".to_string(),
-        "For one-off shell builds or checks without `build_artifact`, model the workflow as a rig `command` step; component-level `build_command` is only used for artifact-producing builds.".to_string(),
+        "Use `scripts.build` for component-owned build commands; component-level `build_command` is unsupported.".to_string(),
     ]
 }
 

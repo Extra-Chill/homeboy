@@ -29,6 +29,7 @@ pub(super) fn deploy_components(
     base_path: &str,
 ) -> Result<DeployOrchestrationResult> {
     let loaded = load_project_components(project, &config.component_ids)?;
+    validate_supported_build_configs(&loaded.deployable)?;
     if loaded.deployable.is_empty() {
         let message = if loaded.skipped.is_empty() {
             "No components configured for project".to_string()
@@ -222,6 +223,14 @@ pub(super) fn deploy_components(
             skipped: 0,
         },
     })
+}
+
+fn validate_supported_build_configs(components: &[Component]) -> Result<()> {
+    for component in components {
+        component.validate_supported_build_config()?;
+    }
+
+    Ok(())
 }
 
 fn prepare_component_deployments(
@@ -885,6 +894,22 @@ mod tests {
             !message.contains("uncommitted changes"),
             "error must not conflate non-git with dirty git, got: {message}"
         );
+    }
+
+    #[test]
+    fn deploy_validation_rejects_legacy_build_command_before_artifact_checks() {
+        let dir = TempDir::new().expect("temp dir");
+        let mut component = make_component("wp-codebox", &dir.path().to_string_lossy());
+        component.build_artifact =
+            Some("packages/wordpress-plugin/dist/wp-codebox.zip".to_string());
+        component.build_command = Some("npm run package:wordpress-plugin".to_string());
+
+        let err = validate_supported_build_configs(&[component])
+            .expect_err("legacy build_command should fail deploy preflight");
+
+        assert!(err.message.contains("unsupported legacy build_command"));
+        assert!(err.message.contains("Use scripts.build instead"));
+        assert_eq!(err.details["field"].as_str(), Some("build_command"));
     }
 
     #[test]

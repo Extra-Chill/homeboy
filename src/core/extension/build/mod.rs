@@ -205,29 +205,6 @@ pub(crate) fn build_component(component: &component::Component) -> (Option<i32>,
     }
 }
 
-fn execute_explicit_build_command(comp: &Component, build_cmd: &str) -> Result<(BuildOutput, i32)> {
-    let validated_path = component::validate_local_path(comp)?;
-    let local_path_str = validated_path.to_string_lossy().to_string();
-
-    permissions::fix_local_permissions(&local_path_str);
-
-    let env = [("HOMEBOY_PLUGIN_PATH", comp.local_path.as_str())];
-    let output = execute_local_command_in_dir(build_cmd, Some(&local_path_str), Some(&env));
-    let success = output.success;
-    let exit_code = output.exit_code;
-
-    Ok((
-        BuildOutput {
-            command: "build.run".to_string(),
-            component_id: comp.id.clone(),
-            build_command: build_cmd.to_string(),
-            output: CapturedOutput::new(output.stdout, output.stderr),
-            success,
-        },
-        exit_code,
-    ))
-}
-
 /// Format a build error message with context from stderr/stdout.
 /// Only includes universal POSIX exit code hints - Homeboy is technology-agnostic.
 fn format_build_error(
@@ -353,9 +330,7 @@ fn execute_build(component_id: &str, path_override: Option<&str>) -> Result<(Bui
 }
 
 fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
-    if let Some(command) = artifact_build_command(comp) {
-        return execute_explicit_build_command(comp, command);
-    }
+    comp.validate_supported_build_config()?;
 
     // Validate required extensions are installed before resolving build commands.
     // Without this, missing extensions cause vague "no build command" errors.
@@ -446,16 +421,6 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
     ))
 }
 
-fn artifact_build_command(component: &Component) -> Option<&str> {
-    component.build_artifact.as_ref()?;
-
-    component
-        .build_command
-        .as_deref()
-        .map(str::trim)
-        .filter(|command| !command.is_empty())
-}
-
 /// Run pre-build scripts from all configured extensions.
 /// Returns Some((exit_code, stderr)) if any script fails, None if all pass or no scripts.
 fn run_pre_build_scripts(
@@ -534,15 +499,13 @@ mod tests {
             hint.message
                 .contains("homeboy component set plain-package --extension")
         }));
-        assert!(err.hints.iter().any(|hint| {
-            hint.message.contains(
-                "component-level `build_command` is only used for artifact-producing builds",
-            )
-        }));
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains("Use `scripts.build` for component-owned build commands")));
     }
 
     #[test]
-    fn deploy_build_uses_explicit_command_when_artifact_is_required() {
+    fn deploy_build_rejects_legacy_build_command_before_fallback() {
         let temp = tempfile::tempdir().expect("tempdir");
         let component = Component {
             id: "artifact-component".to_string(),
@@ -560,17 +523,19 @@ mod tests {
 
         let (exit_code, error) = build_component(&component);
 
-        assert_eq!(exit_code, Some(0));
-        assert_eq!(error, None);
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("dist/component.zip")).unwrap(),
-            "explicit"
+        assert_eq!(exit_code, Some(1));
+        let error = error.expect("legacy build_command should fail");
+        assert!(
+            error.contains("unsupported legacy build_command"),
+            "{error}"
         );
+        assert!(error.contains("Use scripts.build instead"), "{error}");
+        assert!(!temp.path().join("dist/component.zip").exists());
         assert!(!temp.path().join("dist/generic.zip").exists());
     }
 
     #[test]
-    fn build_run_uses_explicit_command_when_artifact_is_required() {
+    fn build_run_rejects_legacy_build_command_before_fallback() {
         let temp = tempfile::tempdir().expect("tempdir");
         let component = Component {
             id: "artifact-component".to_string(),
@@ -586,22 +551,14 @@ mod tests {
             ..Default::default()
         };
 
-        let (result, exit_code) = run_component(&component).expect("build should run");
+        let err = run_component(&component).expect_err("legacy build_command should fail");
 
-        let BuildResult::Single(output) = result else {
-            panic!("expected single build result");
-        };
-        assert_eq!(exit_code, 0);
-        assert!(output.success);
-        assert_eq!(output.build_command, component.build_command.unwrap());
-        assert_eq!(
-            std::fs::read_to_string(
-                temp.path()
-                    .join("packages/content-plugin/dist/component.zip")
-            )
-            .unwrap(),
-            "artifact"
-        );
+        assert!(err.message.contains("unsupported legacy build_command"));
+        assert!(err.message.contains("Use scripts.build instead"));
+        assert!(!temp
+            .path()
+            .join("packages/content-plugin/dist/component.zip")
+            .exists());
         assert!(!temp.path().join("dist/generic.zip").exists());
     }
 }
