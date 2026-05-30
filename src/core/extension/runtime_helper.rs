@@ -112,7 +112,9 @@ fn legacy_runtime_dir() -> Result<Option<PathBuf>> {
 
 /// Ensure all runtime helpers are written and return (env_var, path) pairs.
 pub fn ensure_all_helpers() -> Result<Vec<(String, String)>> {
-    let runtime_dir = paths::homeboy()?.join("runtime");
+    let runtime_dir = paths::homeboy()
+        .map(|path| path.join("runtime"))
+        .unwrap_or_else(|_| env::temp_dir().join("homeboy-runtime"));
     fs::create_dir_all(&runtime_dir).map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -120,7 +122,7 @@ pub fn ensure_all_helpers() -> Result<Vec<(String, String)>> {
         )
     })?;
 
-    let legacy_runtime_dir = legacy_runtime_dir()?;
+    let legacy_runtime_dir = legacy_runtime_dir().unwrap_or(None);
     if let Some(ref legacy_dir) = legacy_runtime_dir {
         fs::create_dir_all(legacy_dir).map_err(|e| {
             Error::internal_io(

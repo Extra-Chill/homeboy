@@ -16,6 +16,38 @@ fn test_env_vars() {
         assert!(Path::new(&value_for(&env, "HOMEBOY_INVOCATION_ARTIFACT_DIR")).is_dir());
         assert!(Path::new(&value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR")).is_dir());
         assert!(value_for_optional(&env, "HOMEBOY_INVOCATION_PORT_BASE").is_none());
+        assert!(value_for_optional(&env, "HOMEBOY_INVOCATION_CONTEXT_JSON").is_some());
+
+        run_dir.cleanup();
+    });
+}
+
+#[test]
+fn structured_context_matches_legacy_isolated_dirs() {
+    with_isolated_home(|_| {
+        let run_dir = RunDir::create().expect("run dir");
+        let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
+            .expect("invocation guard");
+        let env = guard.env_vars();
+        let context: serde_json::Value =
+            serde_json::from_str(&value_for(&env, "HOMEBOY_INVOCATION_CONTEXT_JSON"))
+                .expect("context json");
+
+        assert_eq!(context["id"], value_for(&env, "HOMEBOY_INVOCATION_ID"));
+        assert_eq!(
+            context["state_dir"],
+            value_for(&env, "HOMEBOY_INVOCATION_STATE_DIR")
+        );
+        assert_eq!(
+            context["artifact_dir"],
+            value_for(&env, "HOMEBOY_INVOCATION_ARTIFACT_DIR")
+        );
+        assert_eq!(
+            context["tmp_dir"],
+            value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR")
+        );
+        assert!(context.get("port_range").is_none());
+        assert!(context.get("named_leases").is_none());
 
         run_dir.cleanup();
     });
@@ -41,9 +73,41 @@ fn port_ranges_do_not_overlap_while_leased() {
         let second_base: u16 = value_for(&second.env_vars(), "HOMEBOY_INVOCATION_PORT_BASE")
             .parse()
             .expect("second base");
+        let context: serde_json::Value = serde_json::from_str(&value_for(
+            &first.env_vars(),
+            "HOMEBOY_INVOCATION_CONTEXT_JSON",
+        ))
+        .expect("context json");
 
         assert!(second_base > first_max);
         assert_eq!(first_max - first_base + 1, 4);
+        assert_eq!(context["port_range"]["base"], first_base);
+        assert_eq!(context["port_range"]["max"], first_max);
+
+        run_dir.cleanup();
+    });
+}
+
+#[test]
+fn structured_context_includes_named_leases() {
+    with_isolated_home(|_| {
+        let run_dir = RunDir::create().expect("run dir");
+        let requirements = InvocationRequirements {
+            port_range_size: None,
+            named_leases: vec!["playground-browser-profile".to_string()],
+        };
+
+        let guard = InvocationGuard::acquire(&run_dir, &requirements).expect("lease");
+        let context: serde_json::Value = serde_json::from_str(&value_for(
+            &guard.env_vars(),
+            "HOMEBOY_INVOCATION_CONTEXT_JSON",
+        ))
+        .expect("context json");
+
+        assert_eq!(
+            context["named_leases"],
+            serde_json::json!(["playground-browser-profile"])
+        );
 
         run_dir.cleanup();
     });
