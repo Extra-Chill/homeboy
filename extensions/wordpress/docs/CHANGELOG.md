@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.108.0] - 2026-05-30
+
+### Added
+- share browser result shapes
+
 ## [2.107.0] - 2026-05-30
 
 ### Added
