@@ -61,6 +61,19 @@ function fixtureCommand(step) {
 	return normalizeCliCommand(step.command);
 }
 
+function fixtureRecipeStep(step) {
+	if (step.type === 'wp-eval-file') {
+		return {
+			command: 'wordpress.run-php',
+			args: [`code-file=${step.path}`],
+		};
+	}
+	return {
+		command: 'wordpress.wp-cli',
+		args: [`command=${normalizeCliCommand(step.command)}`],
+	};
+}
+
 function defaultRunCli(command, options = {}) {
 	const cliPath = options.cliPath || 'wp';
 	const args = [normalizeCliCommand(command)];
@@ -107,14 +120,63 @@ function normalizeCliResult(result) {
 		return { exitCode: 0, stdout: result, stderr: '' };
 	}
 	if (isPlainObject(result)) {
+		let exitCode = 0;
+		if (Number.isInteger(result.exitCode)) {
+			exitCode = result.exitCode;
+		} else if (Number.isInteger(result.code)) {
+			exitCode = result.code;
+		}
 		return {
 			...result,
-			exitCode: Number.isInteger(result.exitCode) ? result.exitCode : (Number.isInteger(result.code) ? result.code : 0),
+			exitCode,
 			stdout: result.stdout === undefined ? '' : String(result.stdout),
 			stderr: result.stderr === undefined ? '' : String(result.stderr),
 		};
 	}
 	return { exitCode: 0, stdout: String(result), stderr: '' };
+}
+
+function normalizeExecutionRoute(options) {
+	const route = options.fixtureExecutionRoute || options.executionRoute || options.route;
+	if (route === 'wp-codebox' || route === 'codebox') {
+		return 'wp-codebox';
+	}
+	if (route === 'host' || route === 'live-site' || route === 'live') {
+		return 'host';
+	}
+	if (options.runRecipeStep || options.runWpCodeboxStep) {
+		return 'wp-codebox';
+	}
+	if (options.runCli) {
+		return 'host';
+	}
+	return '';
+}
+
+function createFixtureRunner(options, context) {
+	const route = normalizeExecutionRoute(options);
+	if (route === 'wp-codebox') {
+		const runRecipeStep = options.runRecipeStep || options.runWpCodeboxStep;
+		if (typeof runRecipeStep !== 'function') {
+			throw new Error('WP Codebox fixture setup requires runRecipeStep or runWpCodeboxStep.');
+		}
+		return async (step, stepContext) => {
+			const recipeStep = fixtureRecipeStep(step);
+			const result = normalizeCliResult(await runRecipeStep(recipeStep, { ...context, ...stepContext, recipeStep }));
+			return {
+				...result,
+				recipeStep,
+			};
+		};
+	}
+	if (route === 'host') {
+		const runCli = options.runCli || ((command, runContext) => defaultRunCli(command, {
+			...options,
+			...runContext,
+		}));
+		return async (step, stepContext) => runCli(fixtureCommand(step), { ...context, ...stepContext });
+	}
+	throw new Error('WordPress fixture setup requires an explicit execution route: fixtureExecutionRoute="wp-codebox" with runRecipeStep, or fixtureExecutionRoute="host" for live-site host wp execution.');
 }
 
 function excerpt(value) {
@@ -151,11 +213,11 @@ function normalizeSkipCheck(skipIf) {
 	throw new TypeError('fixture skipIf must be a string or object');
 }
 
-async function runStep(runCli, step, context, role = 'fixture') {
+async function runStep(runFixtureStep, step, context, role = 'fixture') {
 	const command = fixtureCommand(step);
 	const startedAt = new Date().toISOString();
 	const started = Date.now();
-	const result = normalizeCliResult(await runCli(command, { ...context, step, role }));
+	const result = normalizeCliResult(await runFixtureStep(step, { step, role }));
 	const summary = {
 		label: step.label,
 		type: step.type,
@@ -171,6 +233,9 @@ async function runStep(runCli, step, context, role = 'fixture') {
 	if (result.signal) {
 		summary.signal = result.signal;
 	}
+	if (result.recipeStep) {
+		summary.recipeStep = result.recipeStep;
+	}
 	if (result.exitCode !== 0) {
 		throw Object.assign(failedStepError(step, command, result), { fixtureStep: summary });
 	}
@@ -183,24 +248,26 @@ async function runWordPressFixtureSetup(options = {}) {
 	}
 	const startedAt = new Date().toISOString();
 	const steps = [];
-	const runCli = options.runCli || ((command, context) => defaultRunCli(command, {
-		...options,
-		...context,
-	}));
 	const context = {
 		sitePath: options.sitePath,
 		artifactDir: options.artifactDir,
 		cwd: options.cwd,
 		env: options.env,
 	};
+	const runFixtureStep = createFixtureRunner(options, context);
+	const runCli = async (command, runContext = {}) => runFixtureStep(
+		normalizeFixtureStep({ type: 'wp-cli', command, label: runContext.label || 'wp-cli' }, 0),
+		runContext
+	);
 
 	if (typeof options.setupWordPressFixture === 'function') {
 		try {
 			const calls = [];
 			const capturingRunCli = async (command, callOptions = {}) => {
-				const result = normalizeCliResult(await runCli(command, { ...context, ...callOptions, role: 'hook' }));
+				const result = normalizeCliResult(await runCli(command, { ...callOptions, role: 'hook' }));
 				calls.push({
 					command: normalizeCliCommand(command),
+					...(result.recipeStep ? { recipeStep: result.recipeStep } : {}),
 					exitCode: result.exitCode,
 					stdout: result.stdout,
 					stderr: result.stderr,
@@ -225,7 +292,7 @@ async function runWordPressFixtureSetup(options = {}) {
 		for (const step of normalizeFixtureList(options.fixtures)) {
 			const skipCheck = normalizeSkipCheck(step.skipIf || step.idempotencyCheck);
 			if (skipCheck) {
-				const check = await runStep(runCli, skipCheck, context, 'idempotency-check').catch((error) => error.fixtureStep || {
+				const check = await runStep(runFixtureStep, skipCheck, context, 'idempotency-check').catch((error) => error.fixtureStep || {
 					label: skipCheck.label,
 					type: skipCheck.type,
 					role: 'idempotency-check',
@@ -238,7 +305,7 @@ async function runWordPressFixtureSetup(options = {}) {
 				}
 				steps.push({ ...check, fixture: step.label, status: 'check-failed' });
 			}
-			steps.push(await runStep(runCli, step, context));
+			steps.push(await runStep(runFixtureStep, step, context));
 		}
 	} catch (error) {
 		if (error.fixtureStep) {
@@ -269,6 +336,7 @@ function writeFixtureSummary(summary, options, error) {
 }
 
 module.exports = {
+	fixtureRecipeStep,
 	defaultRunCli,
 	normalizeFixtureList,
 	runWordPressFixtureSetup,
