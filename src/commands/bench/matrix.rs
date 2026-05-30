@@ -27,8 +27,12 @@ struct RigBenchContext {
     _lease: Option<ActiveRigRunLease>,
 }
 
-fn prepare_rig_bench_context(rig_id: &str) -> homeboy::core::Result<RigBenchContext> {
-    let spec = rig::load(rig_id)?;
+fn prepare_rig_bench_context(
+    rig_id: &str,
+    args: &BenchRunArgs,
+) -> homeboy::core::Result<RigBenchContext> {
+    let mut spec = rig::load(rig_id)?;
+    apply_bench_path_override(&mut spec, args);
     let lease = rig::lease::acquire_active_run_lease(&spec, "bench")?;
     if let Some(prepare) = rig::run_bench_prepare(&spec)? {
         if !prepare.success {
@@ -49,6 +53,23 @@ fn prepare_rig_bench_context(rig_id: &str) -> homeboy::core::Result<RigBenchCont
         snapshot,
         _lease: lease,
     })
+}
+
+fn apply_bench_path_override(spec: &mut RigSpec, args: &BenchRunArgs) {
+    let Some(path) = args.comp.path.as_ref() else {
+        return;
+    };
+    let component_id = args.comp.id().map(str::to_string).or_else(|| {
+        spec.bench
+            .as_ref()
+            .and_then(|bench| bench_component_ids(bench).into_iter().next())
+    });
+    let Some(component_id) = component_id else {
+        return;
+    };
+    if let Some(component) = spec.components.get_mut(&component_id) {
+        component.path = path.clone();
+    }
 }
 
 pub(super) fn bench_component_ids(bench: &BenchSpec) -> Vec<String> {
@@ -311,7 +332,7 @@ pub(super) fn run_single_rig(
     passthrough_args: &[String],
     rig_id: String,
 ) -> CmdResult<BenchCommandOutput> {
-    let context = prepare_rig_bench_context(&rig_id)?;
+    let context = prepare_rig_bench_context(&rig_id, args)?;
     let matrix_components = if let Some(explicit) = args.comp.id() {
         vec![explicit.to_string()]
     } else {
@@ -407,7 +428,7 @@ pub(super) fn run_single(
 ) -> CmdResult<BenchCommandOutput> {
     let rig_context = match rig_id_override.as_deref() {
         None => None,
-        Some(rig_id) => Some(prepare_rig_bench_context(rig_id)?),
+        Some(rig_id) => Some(prepare_rig_bench_context(rig_id, args)?),
     };
     run_component_with_rig_context(args, passthrough_args, rig_context.as_ref(), None, None)
 }
@@ -658,6 +679,35 @@ mod tests {
         .expect("write extension manifest");
     }
 
+    fn bench_args(component: Option<&str>, path: Option<&str>) -> BenchRunArgs {
+        BenchRunArgs {
+            comp: PositionalComponentArgs {
+                component: component.map(str::to_string),
+                path: path.map(str::to_string),
+            },
+            extension_override: ExtensionOverrideArgs::default(),
+            iterations: 1,
+            warmup: None,
+            runs: 1,
+            shared_state: None,
+            concurrency: 1,
+            baseline_args: BaselineArgs::default(),
+            regression_threshold: 5.0,
+            setting_args: SettingArgs::default(),
+            args: Vec::new(),
+            json_summary: false,
+            status_file: None,
+            report: Vec::new(),
+            rig: vec!["rig".to_string()],
+            rig_order: crate::commands::bench::BenchRigOrder::Input,
+            rig_concurrency: 1,
+            scenario_ids: Vec::new(),
+            profile: None,
+            ci_profile: None,
+            ignore_default_baseline: false,
+        }
+    }
+
     #[test]
     fn rig_bench_components_prefers_matrix_over_default_component() {
         let rig_spec: RigSpec = serde_json::from_str(
@@ -692,32 +742,8 @@ mod tests {
 
     #[test]
     fn component_shared_state_uses_subdirs_for_matrix_only() {
-        let mut args = BenchRunArgs {
-            comp: PositionalComponentArgs {
-                component: None,
-                path: None,
-            },
-            extension_override: ExtensionOverrideArgs::default(),
-            iterations: 1,
-            warmup: None,
-            runs: 1,
-            shared_state: Some(PathBuf::from("/tmp/shared")),
-            concurrency: 1,
-            baseline_args: BaselineArgs::default(),
-            regression_threshold: 5.0,
-            setting_args: SettingArgs::default(),
-            args: Vec::new(),
-            json_summary: false,
-            status_file: None,
-            report: Vec::new(),
-            rig: vec!["rig".to_string()],
-            rig_order: crate::commands::bench::BenchRigOrder::Input,
-            rig_concurrency: 1,
-            scenario_ids: Vec::new(),
-            profile: None,
-            ci_profile: None,
-            ignore_default_baseline: false,
-        };
+        let mut args = bench_args(None, None);
+        args.shared_state = Some(PathBuf::from("/tmp/shared"));
 
         assert_eq!(
             component_shared_state(&args, "mdi-primary", 3),
@@ -730,6 +756,52 @@ mod tests {
 
         args.shared_state = None;
         assert_eq!(component_shared_state(&args, "mdi-primary", 3), None);
+    }
+
+    #[test]
+    fn bench_path_override_updates_rig_component_before_prepare() {
+        let mut rig_spec: RigSpec = serde_json::from_str(
+            r#"{
+                "id": "gutenberg-rtc",
+                "components": {
+                    "gutenberg": { "path": "~/Developer/gutenberg" }
+                },
+                "bench": { "default_component": "gutenberg" }
+            }"#,
+        )
+        .expect("parse rig spec");
+        let args = bench_args(
+            None,
+            Some("/home/chubes/Developer/_lab_workspaces/gutenberg"),
+        );
+
+        apply_bench_path_override(&mut rig_spec, &args);
+
+        assert_eq!(
+            rig_spec.components["gutenberg"].path,
+            "/home/chubes/Developer/_lab_workspaces/gutenberg"
+        );
+    }
+
+    #[test]
+    fn bench_path_override_prefers_explicit_component() {
+        let mut rig_spec: RigSpec = serde_json::from_str(
+            r#"{
+                "id": "dual",
+                "components": {
+                    "primary": { "path": "/src/primary" },
+                    "candidate": { "path": "/src/candidate" }
+                },
+                "bench": { "default_component": "primary" }
+            }"#,
+        )
+        .expect("parse rig spec");
+        let args = bench_args(Some("candidate"), Some("/tmp/candidate"));
+
+        apply_bench_path_override(&mut rig_spec, &args);
+
+        assert_eq!(rig_spec.components["primary"].path, "/src/primary");
+        assert_eq!(rig_spec.components["candidate"].path, "/tmp/candidate");
     }
 
     #[test]
