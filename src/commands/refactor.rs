@@ -172,10 +172,10 @@ enum RefactorCommand {
     /// Scans the codebase for instantiations of the named struct, detects which fields
     /// are missing, and inserts them with sensible defaults (None, vec![], false, etc.).
     ///
-    /// Example: `refactor propagate --struct FileFingerprint --component homeboy`
+    /// Example: `refactor propagate --struct-name FileFingerprint --component homeboy`
     Propagate {
         /// Name of the struct to propagate fields for
-        #[arg(long, value_name = "NAME", alias = "struct")]
+        #[arg(long, value_name = "NAME")]
         struct_name: String,
 
         /// File containing the struct definition (auto-detected if omitted)

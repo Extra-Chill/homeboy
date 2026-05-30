@@ -162,7 +162,7 @@ pub struct TraceArgs {
     pub stale: bool,
 
     /// Remove stale trace overlay locks even when touched files are dirty.
-    #[arg(long, alias = "force-stale-lock-cleanup")]
+    #[arg(long)]
     pub force: bool,
 }
 

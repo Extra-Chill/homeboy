@@ -97,7 +97,6 @@ enum TunnelServiceCommand {
         id: String,
     },
     /// Modify a private service tunnel declaration
-    #[command(visible_aliases = ["edit", "merge"])]
     Set {
         #[command(flatten)]
         args: DynamicSetArgs,

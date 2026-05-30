@@ -44,7 +44,6 @@ enum ProjectCommand {
         table_prefix: Option<String>,
     },
     /// Update project configuration fields
-    #[command(visible_aliases = ["edit", "merge"])]
     Set {
         #[command(flatten)]
         args: super::DynamicSetArgs,

@@ -40,7 +40,6 @@ enum FleetCommand {
         id: String,
     },
     /// Update fleet configuration
-    #[command(visible_aliases = ["edit", "merge"])]
     Set {
         #[command(flatten)]
         args: DynamicSetArgs,
