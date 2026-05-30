@@ -71,7 +71,12 @@ pub fn from_main_workflow_with_ci_context(
         .map(|findings| findings.len())
         .unwrap_or(0);
     let json_summary = result.summary.is_some();
-    let phase = lint_phase_report(exit_code, &result.status, finding_count);
+    let phase = lint_phase_report(
+        exit_code,
+        &result.status,
+        finding_count,
+        &result.producer_summaries,
+    );
     let failure = if exit_code == 0 {
         None
     } else {
@@ -99,7 +104,12 @@ pub fn from_main_workflow_with_ci_context(
     )
 }
 
-fn lint_phase_report(exit_code: i32, status: &str, finding_count: usize) -> PhaseReport {
+fn lint_phase_report(
+    exit_code: i32,
+    status: &str,
+    finding_count: usize,
+    producer_summaries: &[FindingProducerSummary],
+) -> PhaseReport {
     PhaseReport {
         phase: VerificationPhase::Lint,
         status: phase_status_from_exit_code(exit_code),
@@ -108,12 +118,31 @@ fn lint_phase_report(exit_code: i32, status: &str, finding_count: usize) -> Phas
             "lint phase passed with no findings".to_string()
         } else if exit_code >= 2 {
             format!("lint phase infrastructure failure (exit {})", exit_code)
+        } else if !producer_summaries.is_empty() {
+            format!(
+                "lint phase failed with {} finding(s) across {}",
+                finding_count,
+                producer_summary_label(producer_summaries)
+            )
         } else if finding_count > 0 {
             format!("lint phase reported {} finding(s)", finding_count)
         } else {
             format!("lint phase {} (exit {})", status, exit_code)
         },
     }
+}
+
+fn producer_summary_label(producer_summaries: &[FindingProducerSummary]) -> String {
+    producer_summaries
+        .iter()
+        .map(|producer| {
+            format!(
+                "{} {}: {}",
+                producer.tool, producer.status, producer.finding_count
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Build a [`LintCommandOutput`] from a `homeboy lint --fix` dispatch.
@@ -201,5 +230,41 @@ fn lint_phase_failure(exit_code: i32, finding_count: usize) -> PhaseFailure {
             }
         },
         category,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lint_phase_summary_aggregates_multiple_producers() {
+        let result = LintRunWorkflowResult {
+            status: "failed".to_string(),
+            component: "fixture".to_string(),
+            exit_code: 1,
+            autofix: None,
+            hints: None,
+            baseline_comparison: None,
+            findings: Some(vec![
+                HomeboyFinding::builder("eslint", "eslint error").build(),
+                HomeboyFinding::builder("phpstan", "phpstan error").build(),
+            ]),
+            producer_summaries: vec![
+                FindingProducerSummary::new("phpcs", "passed").finding_count(0),
+                FindingProducerSummary::new("eslint", "failed").finding_count(1),
+                FindingProducerSummary::new("phpstan", "failed").finding_count(1),
+            ],
+            summary: None,
+            self_check_capture: None,
+        };
+
+        let (output, exit_code) = from_main_workflow(result);
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(
+            output.phase.summary,
+            "lint phase failed with 2 finding(s) across phpcs passed: 0, eslint failed: 1, phpstan failed: 1"
+        );
     }
 }
