@@ -20,6 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/lib/resolve-context.sh}"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/lib/runner-steps.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
@@ -33,6 +34,10 @@ else
     FAILED_STEP=""
     FAILURE_OUTPUT=""
     FAILURE_REPLAY_MODE="full"
+fi
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -300,7 +305,12 @@ else
     fi
 
     if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
-        python3 - "$PROJECT_PATH" "$TEST_TMPFILE" "$HOMEBOY_TEST_FAILURES_FILE" <<'PY'
+        if ! type homeboy_merge_test_failures >/dev/null 2>&1; then
+            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
+            exit 1
+        fi
+        TEST_FAILURES_TMP="$(mktemp)"
+        python3 - "$PROJECT_PATH" "$TEST_TMPFILE" "$TEST_FAILURES_TMP" <<'PY'
 import hashlib
 import json
 import os
@@ -357,6 +367,8 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(failures, handle, indent=2)
     handle.write("\n")
 PY
+        homeboy_merge_test_failures "$TEST_FAILURES_TMP"
+        rm -f "$TEST_FAILURES_TMP"
     fi
 
     FAILED_STEP="cargo test"

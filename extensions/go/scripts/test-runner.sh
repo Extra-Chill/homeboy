@@ -2,6 +2,11 @@
 set -euo pipefail
 
 PROJECT_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
 OUTPUT_FILE="$(mktemp)"
 trap 'rm -f "$OUTPUT_FILE"' EXIT
 
@@ -11,7 +16,12 @@ TEST_EXIT=${PIPESTATUS[0]}
 set -e
 
 if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
-    python3 - "$PROJECT_PATH" "$OUTPUT_FILE" "$HOMEBOY_TEST_FAILURES_FILE" <<'PY'
+    if ! type homeboy_merge_test_failures >/dev/null 2>&1; then
+        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
+        exit 1
+    fi
+    TEST_FAILURES_TMP="$(mktemp)"
+    python3 - "$PROJECT_PATH" "$OUTPUT_FILE" "$TEST_FAILURES_TMP" <<'PY'
 import hashlib
 import json
 import os
@@ -81,6 +91,8 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(failures, handle, indent=2)
     handle.write("\n")
 PY
+    homeboy_merge_test_failures "$TEST_FAILURES_TMP"
+    rm -f "$TEST_FAILURES_TMP"
 fi
 
 exit "$TEST_EXIT"

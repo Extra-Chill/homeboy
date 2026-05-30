@@ -5,8 +5,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
+
+if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
+    echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
+    exit 1
+fi
 
 PROJECT_DIR="${TMP_DIR}/project"
 FAKE_BIN="${TMP_DIR}/bin"
@@ -58,6 +65,7 @@ PATH="${FAKE_BIN}:${PATH}" \
 HOMEBOY_COMPONENT_PATH="${PROJECT_DIR}" \
 HOMEBOY_EXTENSION_PATH="${ROOT_DIR}/rust" \
 HOMEBOY_RUNTIME_RUNNER_STEPS="${ROOT_DIR}/wordpress/scripts/lib/runner-steps.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 HOMEBOY_FIX_ONLY=1 \
 HOMEBOY_FIX_RESULTS_FILE="${RESULTS_FILE}" \
     bash "${SCRIPT_DIR}/lint-runner.sh" >/dev/null

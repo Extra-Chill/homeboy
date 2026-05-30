@@ -28,9 +28,14 @@ source "$BASH_PREFLIGHT_HELPER"
 homeboy_require_bash_version 4
 
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
@@ -48,6 +53,11 @@ fi
 
 FIX_MODE="${HOMEBOY_FIX_ONLY:-0}"
 FINDINGS_FILE="${HOMEBOY_LINT_FINDINGS_FILE:-${PROJECT_PATH}/.node-lint-findings.json}"
+export HOMEBOY_LINT_FINDINGS_FILE="$FINDINGS_FILE"
+if ! type homeboy_merge_lint_findings >/dev/null 2>&1; then
+    echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
+    exit 1
+fi
 
 # Detect if eslint is available locally (vendored in node_modules) — that's
 # our preferred runner because we can ask for JSON output.
@@ -75,7 +85,7 @@ if [ -n "${HOMEBOY_NODE_LINT_COMMAND:-}" ]; then
         else
             FAILED_STEP="No typecheck script defined"
             FAILURE_OUTPUT="CI job requested typecheck, but package.json does not define scripts.typecheck. Set HOMEBOY_NODE_LINT_COMMAND to a project-specific command or add scripts.typecheck."
-            echo "[]" > "$FINDINGS_FILE"
+            homeboy_write_lint_findings
             exit 1
         fi
     else
@@ -99,7 +109,7 @@ elif [ $HAS_ESLINT_CONFIG -eq 1 ]; then
         # clear message rather than silently npx-installing it.
         FAILED_STEP="eslint config found but eslint not installed"
         FAILURE_OUTPUT="Run: npm i -D eslint (or your package manager equivalent) in ${PROJECT_PATH}"
-        echo "[]" > "$FINDINGS_FILE"
+        homeboy_write_lint_findings
         exit 1
     fi
 else
@@ -108,7 +118,7 @@ else
     echo "⚠ No lint surface detected (no scripts.lint, no eslint config)."
     echo "  Skipping lint — emitting empty findings."
     echo ""
-    echo "[]" > "$FINDINGS_FILE"
+    homeboy_write_lint_findings
     exit 0
 fi
 
@@ -148,7 +158,8 @@ if [ $USE_ESLINT_JSON -eq 1 ] && [ -s "$OUTPUT_FILE" ]; then
     # only if HOMEBOY_LINT_INCLUDE_WARNINGS=1 (matches Rust extension's
     # ratchet-friendly default).
     INCLUDE_WARNINGS="${HOMEBOY_LINT_INCLUDE_WARNINGS:-0}"
-    node - "$OUTPUT_FILE" "$FINDINGS_FILE" "$INCLUDE_WARNINGS" "$PROJECT_PATH" <<'NODEJS'
+    FINDINGS_TMP="$(mktemp)"
+    node - "$OUTPUT_FILE" "$FINDINGS_TMP" "$INCLUDE_WARNINGS" "$PROJECT_PATH" <<'NODEJS'
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -229,9 +240,11 @@ for (const file of report) {
 
 fs.writeFileSync(outputFile, JSON.stringify(findings, null, 2));
 NODEJS
+    homeboy_merge_lint_findings "$FINDINGS_TMP"
+    rm -f "$FINDINGS_TMP"
 else
     # Unknown runner output — emit empty findings, rely on exit code.
-    echo "[]" > "$FINDINGS_FILE"
+    homeboy_write_lint_findings
 fi
 
 rm -f "$OUTPUT_FILE"

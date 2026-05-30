@@ -3,9 +3,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_DIR}/../.." && pwd)/homeboy}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 RUNNER="$SCRIPT_DIR/lint-runner.sh"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+
+if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
+    echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
+    exit 1
+fi
 
 PROJECT_PATH="$TMPDIR/project"
 FINDINGS_FILE="$TMPDIR/lint-findings.json"
@@ -27,6 +34,7 @@ set +e
 HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
 HOMEBOY_COMPONENT_PATH="$PROJECT_PATH" \
 HOMEBOY_COMPONENT_ID="node-lint-sidecar-smoke" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 HOMEBOY_LINT_FINDINGS_FILE="$FINDINGS_FILE" \
     bash "$RUNNER" >"$OUTPUT_FILE" 2>&1
 status=$?

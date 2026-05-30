@@ -34,9 +34,14 @@ source "$BASH_PREFLIGHT_HELPER"
 homeboy_require_bash_version 4
 
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
@@ -190,42 +195,39 @@ extract_vitest_failure_line() {
 write_node_failure_json() {
     [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] || return 0
     [ -n "$FAILED_TEST_NAME" ] || return 0
+    if ! type homeboy_append_test_failure >/dev/null 2>&1; then
+        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
+        return 1
+    fi
 
-    HOMEBOY_NODE_TEST_OUTPUT="$OUTPUT" node - "$HOMEBOY_TEST_FAILURES_FILE" "$FAILED_TEST_NAME" "$FAILED_TEST_FILE" "$FAILED_ERROR_TYPE" "$FAILED_MESSAGE" "$TOTAL" "$PASSED" <<'JS'
+    FAILURE_JSON="$(HOMEBOY_NODE_TEST_OUTPUT="$OUTPUT" node - "$FAILED_TEST_NAME" "$FAILED_TEST_FILE" "$FAILED_ERROR_TYPE" "$FAILED_MESSAGE" <<'JS'
 const crypto = require('node:crypto');
-const fs = require('node:fs');
 
-const [file, testName, testFile, errorType, message, total, passed] = process.argv.slice(2);
-const parsedTotal = Number.parseInt(total || '0', 10) || 0;
-const parsedPassed = Number.parseInt(passed || '0', 10) || 0;
+const [testName, testFile, errorType, message] = process.argv.slice(2);
 const stdout = process.env.HOMEBOY_NODE_TEST_OUTPUT || '';
 const fingerprintInput = [testName, testFile, errorType, message].join('\0');
 const fingerprint = crypto.createHash('sha256').update(fingerprintInput).digest('hex');
 const stdoutExcerpt = stdout.split(/\r?\n/).slice(-40).join('\n');
 
-fs.writeFileSync(file, JSON.stringify({
-  total: parsedTotal,
-  passed: parsedPassed,
-  failures: [
-    {
-      test_name: testName,
-      test_file: testFile,
-      error_type: errorType,
-      test_id: testName,
-      suite: '',
-      file: testFile,
-      line: 0,
-      message,
-      failure_type: errorType,
-      fingerprint,
-      stdout_excerpt: stdoutExcerpt,
-      stderr_excerpt: '',
-      source_file: testFile,
-      source_line: 0
-    }
-  ]
-}, null, 2));
+console.log(JSON.stringify({
+  test_name: testName,
+  test_file: testFile,
+  error_type: errorType,
+  test_id: testName,
+  suite: '',
+  file: testFile,
+  line: 0,
+  message,
+  failure_type: errorType,
+  fingerprint,
+  stdout_excerpt: stdoutExcerpt,
+  stderr_excerpt: '',
+  source_file: testFile,
+  source_line: 0
+}));
 JS
+)"
+    homeboy_append_test_failure "$FAILURE_JSON"
 }
 
 # Vitest summary lines look like:

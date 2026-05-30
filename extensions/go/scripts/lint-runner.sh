@@ -2,6 +2,11 @@
 set -euo pipefail
 
 PROJECT_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
 
 write_lint_findings() {
     local gofmt_file="$1"
@@ -11,7 +16,15 @@ write_lint_findings() {
         return 0
     fi
 
-    python3 - "$PROJECT_PATH" "$gofmt_file" "$govet_file" "$HOMEBOY_LINT_FINDINGS_FILE" <<'PY'
+    if ! type homeboy_merge_lint_findings >/dev/null 2>&1; then
+        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
+        return 1
+    fi
+
+    local findings_file
+    findings_file="$(mktemp)"
+
+    python3 - "$PROJECT_PATH" "$gofmt_file" "$govet_file" "$findings_file" <<'PY'
 import hashlib
 import json
 import os
@@ -90,6 +103,8 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(findings, handle, indent=2)
     handle.write("\n")
 PY
+    homeboy_merge_lint_findings "$findings_file"
+    rm -f "$findings_file"
 }
 
 GOFMT_FILE="$(mktemp)"

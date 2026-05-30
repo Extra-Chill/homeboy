@@ -2,8 +2,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT}/.." && pwd)/homeboy}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
+    echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
+    exit 1
+fi
 
 assert_json_fields() {
     local file="$1"
@@ -39,6 +46,7 @@ EOF
 GO_LINT_FINDINGS="$TMP_DIR/go-lint-findings.json"
 set +e
 HOMEBOY_COMPONENT_PATH="$GO_PROJECT" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 HOMEBOY_LINT_FINDINGS_FILE="$GO_LINT_FINDINGS" \
 bash "$ROOT/go/scripts/lint-runner.sh" >/dev/null 2>&1
 GO_LINT_EXIT=$?
@@ -55,6 +63,7 @@ EOF
 GO_TEST_FAILURES="$TMP_DIR/go-test-failures.json"
 set +e
 HOMEBOY_COMPONENT_PATH="$GO_PROJECT" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 HOMEBOY_TEST_FAILURES_FILE="$GO_TEST_FAILURES" \
 bash "$ROOT/go/scripts/test-runner.sh" >/dev/null 2>&1
 GO_TEST_EXIT=$?
@@ -97,6 +106,7 @@ PATH="$RUST_BIN:$PATH" \
 HOMEBOY_EXTENSION_PATH="$ROOT/rust" \
 HOMEBOY_COMPONENT_PATH="$RUST_PROJECT" \
 HOMEBOY_RUNTIME_RUNNER_STEPS="$ROOT/wordpress/scripts/lib/runner-steps.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 HOMEBOY_LINT_FINDINGS_FILE="$RUST_LINT_FINDINGS" \
 bash "$ROOT/rust/scripts/lint-runner.sh" >/dev/null 2>&1
 RUST_LINT_EXIT=$?
@@ -110,6 +120,7 @@ PATH="$RUST_BIN:$PATH" \
 HOMEBOY_EXTENSION_PATH="$ROOT/rust" \
 HOMEBOY_COMPONENT_PATH="$RUST_PROJECT" \
 HOMEBOY_RUNTIME_RUNNER_STEPS="$ROOT/wordpress/scripts/lib/runner-steps.sh" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 HOMEBOY_SKIP_LINT=1 \
 HOMEBOY_TEST_FAILURES_FILE="$RUST_TEST_FAILURES" \
 bash "$ROOT/rust/scripts/test-runner.sh" >/dev/null 2>&1
@@ -141,6 +152,7 @@ set +e
 PATH="$SWIFT_BIN:$PATH" \
 HOMEBOY_EXTENSION_PATH="$ROOT/swift" \
 HOMEBOY_COMPONENT_PATH="$SWIFT_PROJECT" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 HOMEBOY_LINT_FINDINGS_FILE="$SWIFT_LINT_FINDINGS" \
 bash "$ROOT/swift/scripts/lint-runner.sh" >/dev/null 2>&1
 SWIFT_LINT_EXIT=$?
@@ -153,6 +165,7 @@ set +e
 PATH="$SWIFT_BIN:$PATH" \
 HOMEBOY_EXTENSION_PATH="$ROOT/swift" \
 HOMEBOY_COMPONENT_PATH="$SWIFT_PROJECT" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 HOMEBOY_TEST_FAILURES_FILE="$SWIFT_TEST_FAILURES" \
 bash "$ROOT/swift/scripts/test-runner.sh" >/dev/null 2>&1
 SWIFT_TEST_EXIT=$?

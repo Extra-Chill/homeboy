@@ -3,9 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/lib/resolve-context.sh}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
 
 echo "Running Swift lint for: $(basename "$COMPONENT_PATH")"
 
@@ -16,7 +21,15 @@ write_swiftlint_findings() {
         return 0
     fi
 
-    python3 - "$COMPONENT_PATH" "$input_file" "$HOMEBOY_LINT_FINDINGS_FILE" <<'PY'
+    if ! type homeboy_merge_lint_findings >/dev/null 2>&1; then
+        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
+        return 1
+    fi
+
+    local findings_file
+    findings_file="$(mktemp)"
+
+    python3 - "$COMPONENT_PATH" "$input_file" "$findings_file" <<'PY'
 import hashlib
 import json
 import os
@@ -75,6 +88,8 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(findings, handle, indent=2)
     handle.write("\n")
 PY
+    homeboy_merge_lint_findings "$findings_file"
+    rm -f "$findings_file"
 }
 
 if command -v swiftlint >/dev/null 2>&1; then

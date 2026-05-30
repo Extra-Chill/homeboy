@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/failure-trap.sh}"
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/write-test-results.sh}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 BASH_PREFLIGHT_HELPERS=(
     "${ROOT_DIR}/nodejs/scripts/lib/bash-preflight.sh"
     "${ROOT_DIR}/rust/scripts/lib/bash-preflight.sh"
@@ -43,6 +44,8 @@ assert_not_contains() {
 
 assert_file "$FAILURE_TRAP_HELPER"
 assert_file "$WRITE_TEST_RESULTS_HELPER"
+assert_file "$SIDECAR_WRITER_HELPER"
+bash -c 'source "$1"; type homeboy_merge_lint_findings >/dev/null; type homeboy_merge_test_failures >/dev/null; type homeboy_write_fix_results >/dev/null' _ "$SIDECAR_WRITER_HELPER"
 for bash_preflight_helper in "${BASH_PREFLIGHT_HELPERS[@]}"; do
     assert_file "$bash_preflight_helper"
     bash -c 'source "$1"; homeboy_require_bash_version 4' _ "$bash_preflight_helper"

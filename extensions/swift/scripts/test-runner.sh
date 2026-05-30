@@ -3,9 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/lib/resolve-context.sh}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -66,7 +71,12 @@ if [ "$TEST_TYPE" = "xcodebuild" ]; then
     fi
 
     if [ "$XCODE_EXIT" -ne 0 ] && [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
-        python3 - "$COMPONENT_PATH" "$XCODE_OUTPUT" "$HOMEBOY_TEST_FAILURES_FILE" <<'PY'
+        if ! type homeboy_merge_test_failures >/dev/null 2>&1; then
+            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
+            exit 1
+        fi
+        TEST_FAILURES_TMP="$(mktemp)"
+        python3 - "$COMPONENT_PATH" "$XCODE_OUTPUT" "$TEST_FAILURES_TMP" <<'PY'
 import hashlib
 import json
 import re
@@ -116,6 +126,8 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(failures, handle, indent=2)
     handle.write("\n")
 PY
+        homeboy_merge_test_failures "$TEST_FAILURES_TMP"
+        rm -f "$TEST_FAILURES_TMP"
     fi
     exit "$XCODE_EXIT"
 else
@@ -156,7 +168,12 @@ else
 
     if [ $TESTS_FAILED -gt 0 ]; then
         if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
-            python3 - "$FAILURES_FILE" "$HOMEBOY_TEST_FAILURES_FILE" <<'PY'
+            if ! type homeboy_merge_test_failures >/dev/null 2>&1; then
+                echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
+                exit 1
+            fi
+            TEST_FAILURES_TMP="$(mktemp)"
+            python3 - "$FAILURES_FILE" "$TEST_FAILURES_TMP" <<'PY'
 import hashlib
 import json
 import sys
@@ -190,6 +207,8 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(failures, handle, indent=2)
     handle.write("\n")
 PY
+            homeboy_merge_test_failures "$TEST_FAILURES_TMP"
+            rm -f "$TEST_FAILURES_TMP"
         fi
         while IFS=$'\t' read -r _ output_path; do
             [ -n "$output_path" ] && rm -f "$output_path"

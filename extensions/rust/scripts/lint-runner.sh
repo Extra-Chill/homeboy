@@ -25,6 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/lib/resolve-context.sh}"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/lib/runner-steps.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
@@ -37,6 +38,10 @@ if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
 else
     FAILED_STEP=""
     FAILURE_OUTPUT=""
+fi
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -100,7 +105,19 @@ print(json.dumps(results))
 
 write_fix_results_sidecar() {
     if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ] && [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ]; then
-        printf '%s\n' "$FIX_RESULTS_JSON" > "${HOMEBOY_FIX_RESULTS_FILE}"
+        if ! type homeboy_write_fix_results >/dev/null 2>&1; then
+            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write fix results" >&2
+            return 1
+        fi
+        HOMEBOY_FIX_RESULTS_JSON="$FIX_RESULTS_JSON" python3 - <<'PY' | while IFS= read -r result; do
+import json
+import os
+
+for item in json.loads(os.environ.get("HOMEBOY_FIX_RESULTS_JSON", "[]")):
+    print(json.dumps(item, separators=(",", ":")))
+PY
+            homeboy_append_fix_result "$result"
+        done
     fi
 }
 
@@ -112,7 +129,15 @@ write_lint_findings_from_output() {
         return 0
     fi
 
-    python3 - "$PROJECT_PATH" "$tool" "$output_file" "$HOMEBOY_LINT_FINDINGS_FILE" <<'PY'
+    if ! type homeboy_merge_lint_findings >/dev/null 2>&1; then
+        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
+        return 1
+    fi
+
+    local findings_file
+    findings_file="$(mktemp)"
+
+    python3 - "$PROJECT_PATH" "$tool" "$output_file" "$findings_file" <<'PY'
 import hashlib
 import json
 import os
@@ -205,6 +230,8 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(findings, handle, indent=2)
     handle.write("\n")
 PY
+    homeboy_merge_lint_findings "$findings_file"
+    rm -f "$findings_file"
 }
 
 trap write_fix_results_sidecar EXIT
