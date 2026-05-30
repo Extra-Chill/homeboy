@@ -10,6 +10,7 @@
     "./request-profiler": "./lib/request-profiler.js",
     "./agent-terminal-actions": "./lib/agent-terminal-actions.js",
     "./timing-correlator": "./lib/timing-correlator.js",
+    "./codebox-memory-report": "./lib/codebox-memory-report.js",
     "./wp-codebox-apply-adapter": "./lib/wp-codebox-apply-adapter.js",
     "./wp-codebox-browser-metrics": "./lib/wp-codebox-browser-metrics.js",
     "./audit-wp-codebox-fanout": "./lib/audit-wp-codebox-fanout.js"
@@ -25,6 +26,7 @@
     "test:playground-readiness": "node tests/playground-readiness-smoke.js",
     "test:request-profiler": "node tests/request-profiler-smoke.js",
     "test:timing-correlator": "node tests/timing-correlator-smoke.js",
+    "test:codebox-memory-report": "node tests/codebox-memory-report-smoke.js",
     "test:wp-codebox-apply-adapter": "node tests/wp-codebox-apply-adapter-smoke.js",
     "test:wp-codebox-browser-metrics": "node tests/wp-codebox-browser-metrics-smoke.js",
     "test:audit-wp-codebox-fanout": "node tests/audit-wp-codebox-fanout-smoke.js",

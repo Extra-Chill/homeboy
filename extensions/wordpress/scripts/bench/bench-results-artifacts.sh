@@ -94,10 +94,13 @@ homeboy_wordpress_bench_leaderboard_filter() {
 }
 
 homeboy_wordpress_emit_bench_results_artifacts() {
-    local bench_results_file="$1"
-    local artifact_dir
-    local jsonl_file
-    local leaderboard_file
+	local bench_results_file="$1"
+	local artifact_dir
+	local jsonl_file
+	local leaderboard_file
+	local baseline_results_file
+	local codebox_memory_report_file
+	local codebox_thresholds_json
 
     if [ -z "$bench_results_file" ] || [ ! -s "$bench_results_file" ]; then
         return 0
@@ -106,21 +109,36 @@ homeboy_wordpress_emit_bench_results_artifacts() {
     artifact_dir="$(homeboy_wordpress_bench_artifact_dir "$bench_results_file")"
     mkdir -p "$artifact_dir"
 
-    jsonl_file="${artifact_dir}/results.jsonl"
-    leaderboard_file="${artifact_dir}/leaderboard.md"
+	jsonl_file="${artifact_dir}/results.jsonl"
+	leaderboard_file="${artifact_dir}/leaderboard.md"
+	codebox_memory_report_file="${artifact_dir}/codebox-browser-memory-comparison.md"
 
     if ! homeboy_wordpress_bench_jsonl_filter < "$bench_results_file" > "$jsonl_file"; then
         echo "ERROR: failed to emit bench results JSONL artifact at $jsonl_file" >&2
         return 1
     fi
 
-    if ! homeboy_wordpress_bench_leaderboard_filter < "$jsonl_file" > "$leaderboard_file"; then
-        echo "ERROR: failed to emit bench leaderboard artifact at $leaderboard_file" >&2
-        return 1
-    fi
+	if ! homeboy_wordpress_bench_leaderboard_filter < "$jsonl_file" > "$leaderboard_file"; then
+		echo "ERROR: failed to emit bench leaderboard artifact at $leaderboard_file" >&2
+		return 1
+	fi
 
-    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-        echo "DEBUG: [bench] Results JSONL: $jsonl_file"
-        echo "DEBUG: [bench] Leaderboard: $leaderboard_file"
-    fi
+	baseline_results_file="${HOMEBOY_BENCH_BASELINE_RESULTS_FILE:-${HOMEBOY_CODEBOX_MEMORY_BASELINE_RESULTS_FILE:-}}"
+	if [ -n "$baseline_results_file" ] && [ -s "$baseline_results_file" ]; then
+		codebox_thresholds_json="${HOMEBOY_CODEBOX_MEMORY_THRESHOLDS_JSON:-${HOMEBOY_BENCH_CODEBOX_MEMORY_THRESHOLDS_JSON:-{}}}"
+		if ! node "${SCRIPT_DIR}/../../lib/codebox-memory-report.js" \
+			--baseline "$baseline_results_file" \
+			--candidate "$bench_results_file" \
+			--thresholds-json "$codebox_thresholds_json" \
+			> "$codebox_memory_report_file"; then
+			echo "ERROR: failed to emit Codebox browser memory comparison at $codebox_memory_report_file" >&2
+			return 1
+		fi
+	fi
+
+	if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+		echo "DEBUG: [bench] Results JSONL: $jsonl_file"
+		echo "DEBUG: [bench] Leaderboard: $leaderboard_file"
+		[ -s "$codebox_memory_report_file" ] && echo "DEBUG: [bench] Codebox browser memory comparison: $codebox_memory_report_file"
+	fi
 }
