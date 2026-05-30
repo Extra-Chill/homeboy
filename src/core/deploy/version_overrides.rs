@@ -9,7 +9,8 @@ use crate::core::engine::shell;
 use crate::core::engine::template::{render_map, TemplateVars};
 use crate::core::error::{Error, Result};
 use crate::core::extension::{
-    load_all_extensions, DeployOverride, DeployVerification, ExtensionManifest,
+    load_all_extensions, DeployArchiveInstallPolicy, DeployOverride, DeployVerification,
+    ExtensionManifest,
 };
 use crate::core::paths as base_path;
 use crate::core::project::Project;
@@ -211,6 +212,11 @@ pub(super) fn find_deploy_verification(target_path: &str) -> Option<DeployVerifi
                 return Some(verification.clone());
             }
         }
+        for policy in extension.deploy_archive_installs() {
+            if target_path.contains(&policy.path_pattern) {
+                return archive_install_verification(policy);
+            }
+        }
     }
     None
 }
@@ -225,8 +231,84 @@ pub(super) fn find_deploy_override(
                 return Some((override_config.clone(), extension));
             }
         }
+        for policy in extension.deploy_archive_installs() {
+            if target_path.contains(&policy.path_pattern) {
+                return Some((archive_install_override(policy), extension));
+            }
+        }
     }
     None
+}
+
+fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverride {
+    let root_check = if policy.root_must_match_target_basename {
+        " && target_slug=$(basename \"{{targetDir}}\") && if [ \"$zip_root\" != \"$target_slug\" ]; then echo \"ERROR: archive root $zip_root does not match target basename $target_slug\" && exit 1; fi"
+    } else {
+        ""
+    };
+
+    DeployOverride {
+        path_pattern: policy.path_pattern.clone(),
+        staging_path: policy.staging_path.clone(),
+        install_command: format!(
+            "zip_root=$(unzip -Z1 \"{{{{stagingArtifact}}}}\" | awk -F/ 'NF && $1 != \"\" {{ print $1; exit }}') && if [ -z \"$zip_root\" ]; then echo 'ERROR: Could not determine archive root directory' && exit 1; fi{root_check} && rm -rf \"{{{{targetDir}}}}\" && mkdir -p \"{{{{targetParentDir}}}}\" && unzip -oq \"{{{{stagingArtifact}}}}\" -d \"{{{{targetParentDir}}}}\" && test -d \"{{{{targetDir}}}}\" || (echo 'ERROR: archive install failed' && exit 1)"
+        ),
+        cleanup_command: Some("rm -f \"{{stagingArtifact}}\"".to_string()),
+        skip_permissions_fix: policy.skip_permissions_fix,
+    }
+}
+
+fn archive_install_verification(policy: &DeployArchiveInstallPolicy) -> Option<DeployVerification> {
+    let header = policy.required_header.as_ref()?;
+    let selector = if let Some(file) = header.file.as_deref() {
+        format!(
+            "candidate=$(printf '%s\\n' \"$entries\" | awk -v required={} '{{ slash = index($0, \"/\"); rel = slash ? substr($0, slash + 1) : $0; if (rel == required) {{ print $0; exit }} }}')",
+            shell::quote_arg(file)
+        )
+    } else if let Some(file_glob) = header.file_glob.as_deref() {
+        let file_regex = glob_to_awk_regex(file_glob);
+        format!(
+            "candidate=$(printf '%s\\n' \"$entries\" | awk -v pattern={} '{{ slash = index($0, \"/\"); rel = slash ? substr($0, slash + 1) : $0; count = split(rel, parts, \"/\"); base = parts[count]; if (base ~ pattern) {{ print $0; exit }} }}')",
+            shell::quote_arg(&file_regex)
+        )
+    } else {
+        return None;
+    };
+
+    let root_check = if policy.root_must_match_target_basename {
+        " && target_slug=$(basename \"{{targetDir}}\") && [ \"$zip_root\" = \"$target_slug\" ]"
+    } else {
+        ""
+    };
+    let contains = shell::quote_arg(&header.contains);
+
+    Some(DeployVerification {
+        path_pattern: policy.path_pattern.clone(),
+        verify_command: Some(format!(
+            "test -f \"{{{{stagingArtifact}}}}\" && entries=$(unzip -Z1 \"{{{{stagingArtifact}}}}\") && zip_root=$(printf '%s\\n' \"$entries\" | awk -F/ 'NF && $1 != \"\" {{ print $1; exit }}'){root_check} && {selector} && test -n \"$candidate\" && rel=\"$candidate\" && case \"$rel\" in */*) rel=\"${{rel#*/}}\" ;; esac && test -f \"{{{{targetDir}}}}/$rel\" && unzip -p \"{{{{stagingArtifact}}}}\" \"$candidate\" | cmp -s - \"{{{{targetDir}}}}/$rel\" && grep -F -l {contains} \"{{{{targetDir}}}}/$rel\" 2>/dev/null"
+        )),
+        verify_error_message: Some(
+            "Archive install verification failed for {{targetDir}}: installed header file does not match {{stagingArtifact}} or required header was not found"
+                .to_string(),
+        ),
+    })
+}
+
+fn glob_to_awk_regex(glob: &str) -> String {
+    let mut regex = String::from("^");
+    for ch in glob.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
+        }
+    }
+    regex.push('$');
+    regex
 }
 
 /// Deploy using extension-defined override strategy.
@@ -456,10 +538,14 @@ pub(super) fn run_post_deploy_hooks(
 mod tests {
     use super::*;
     use crate::core::component::VersionTarget;
-    use crate::core::extension::{DeployOverride, DeployVerification, ExtensionManifest};
+    use crate::core::extension::{
+        DeployArchiveInstallPolicy, DeployOverride, DeployRequiredHeader, DeployVerification,
+        ExtensionManifest,
+    };
     use crate::core::server::SshClient;
     use std::collections::HashMap;
     use std::fs;
+    use std::io::Write;
 
     fn local_client() -> SshClient {
         SshClient {
@@ -491,6 +577,47 @@ mod tests {
                 pattern: Some(r"Version:\s*(\d+\.\d+\.\d+)".to_string()),
             }]),
             ..Default::default()
+        }
+    }
+
+    fn write_zip(path: &Path, files: &[(&str, &str)]) {
+        let file = fs::File::create(path).expect("zip file");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default();
+
+        for (name, contents) in files {
+            zip.start_file(*name, options).expect("zip entry");
+            zip.write_all(contents.as_bytes()).expect("zip contents");
+        }
+
+        zip.finish().expect("finish zip");
+    }
+
+    fn plugin_archive_policy(staging_path: String) -> DeployArchiveInstallPolicy {
+        DeployArchiveInstallPolicy {
+            path_pattern: "/wp-content/plugins/".to_string(),
+            staging_path,
+            root_must_match_target_basename: true,
+            required_header: Some(DeployRequiredHeader {
+                file: None,
+                file_glob: Some("*.php".to_string()),
+                contains: "Plugin Name:".to_string(),
+            }),
+            skip_permissions_fix: true,
+        }
+    }
+
+    fn theme_archive_policy(staging_path: String) -> DeployArchiveInstallPolicy {
+        DeployArchiveInstallPolicy {
+            path_pattern: "/wp-content/themes/".to_string(),
+            staging_path,
+            root_must_match_target_basename: true,
+            required_header: Some(DeployRequiredHeader {
+                file: Some("style.css".to_string()),
+                file_glob: None,
+                contains: "Theme Name:".to_string(),
+            }),
+            skip_permissions_fix: true,
         }
     }
 
@@ -597,6 +724,126 @@ mod tests {
         assert_eq!(
             fs::read_to_string(target.join("installed.zip")).expect("installed artifact"),
             "artifact bytes"
+        );
+    }
+
+    #[test]
+    fn test_archive_install_policy_replaces_target_and_verifies_header() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("fixture.zip");
+        let staging = temp.path().join("staging");
+        let target = temp.path().join("wp-content/plugins/fixture");
+
+        fs::create_dir_all(&target).expect("target dir");
+        fs::write(target.join("stale.php"), "stale").expect("stale file");
+        write_zip(
+            &artifact,
+            &[(
+                "fixture/fixture.php",
+                "<?php\n/*\nPlugin Name: Fixture\n*/\n",
+            )],
+        );
+
+        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let override_config = archive_install_override(&policy);
+        let verification = archive_install_verification(&policy).expect("verification");
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            Some(&verification),
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy failed: {:?}", result.error);
+        assert!(target.join("fixture.php").exists());
+        assert!(!target.join("stale.php").exists());
+        assert!(!staging.join("fixture.zip").exists());
+    }
+
+    #[test]
+    fn test_archive_install_policy_verifies_required_file_header() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("fixture-theme.zip");
+        let staging = temp.path().join("staging");
+        let target = temp.path().join("wp-content/themes/fixture-theme");
+
+        write_zip(
+            &artifact,
+            &[(
+                "fixture-theme/style.css",
+                "/*\nTheme Name: Fixture Theme\n*/\n",
+            )],
+        );
+
+        let policy = theme_archive_policy(staging.to_string_lossy().to_string());
+        let override_config = archive_install_override(&policy);
+        let verification = archive_install_verification(&policy).expect("verification");
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            Some(&verification),
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy failed: {:?}", result.error);
+        assert!(target.join("style.css").exists());
+    }
+
+    #[test]
+    fn test_archive_install_policy_rejects_wrong_root() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("fixture.zip");
+        let staging = temp.path().join("staging");
+        let target = temp.path().join("wp-content/plugins/fixture");
+
+        write_zip(
+            &artifact,
+            &[("other/fixture.php", "<?php\n/*\nPlugin Name: Fixture\n*/\n")],
+        );
+
+        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let override_config = archive_install_override(&policy);
+        let verification = archive_install_verification(&policy).expect("verification");
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            Some(&verification),
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("does not match target basename"),
+            "unexpected error: {:?}",
+            result.error
         );
     }
 
