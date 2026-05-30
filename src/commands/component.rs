@@ -511,6 +511,8 @@ fn show(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
         })?,
     };
 
+    component.validate_supported_build_config()?;
+
     let resolved_id = component.id.clone();
     let drift_files = homeboy::core::component::drift::drift_file_paths(&component);
 
@@ -1185,6 +1187,26 @@ mod tests {
             .expect("portable id should be used");
 
         assert_eq!(id, "homeboy");
+    }
+
+    #[test]
+    fn component_show_rejects_legacy_build_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join("homeboy.json"),
+            r#"{
+                "id": "wp-codebox",
+                "build_artifact": "packages/wordpress-plugin/dist/wp-codebox.zip",
+                "build_command": "npm run package:wordpress-plugin"
+            }"#,
+        )
+        .expect("homeboy.json");
+
+        let err = show(None, Some(&temp.path().to_string_lossy()))
+            .expect_err("component show should reject legacy build_command");
+
+        assert!(err.message.contains("unsupported legacy build_command"));
+        assert!(err.message.contains("Use scripts.build instead"));
     }
 
     #[test]

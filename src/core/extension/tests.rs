@@ -261,9 +261,9 @@ fn extension_guidance_hints_point_to_supported_paths() {
     assert!(hints
         .iter()
         .any(|hint| { hint.contains("homeboy component set plain-package --extension") }));
-    assert!(hints.iter().any(|hint| {
-        hint.contains("component-level `build_command` is only used for artifact-producing builds")
-    }));
+    assert!(hints
+        .iter()
+        .any(|hint| { hint.contains("Use `scripts.build` for component-owned build commands") }));
     assert!(hints
         .iter()
         .any(|hint| hint.contains("homeboy extension list")));
