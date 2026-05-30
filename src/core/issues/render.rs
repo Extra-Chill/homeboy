@@ -149,7 +149,7 @@ fn render_audit_body(
 
 fn render_lint(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsInput {
     let mut by_category: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
-    if let Some(findings) = data.get("lint_findings").and_then(Value::as_array) {
+    if let Some(findings) = data.get("findings").and_then(Value::as_array) {
         for finding in findings {
             let category = finding
                 .get("category")
@@ -272,7 +272,7 @@ fn render_lint_body(
     let _ = writeln!(out, "\n### Findings");
     for finding in findings.iter().take(20) {
         let id = finding
-            .get("id")
+            .get("fingerprint")
             .and_then(Value::as_str)
             .or_else(|| finding.get("context_label").and_then(Value::as_str))
             .unwrap_or("lint");

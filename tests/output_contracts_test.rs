@@ -13,13 +13,14 @@ use homeboy::core::code_audit::report::{
     AuditSummaryGroup, AuditSummaryOutput, FixabilityKindBreakdown,
 };
 use homeboy::core::code_audit::{AuditFinding, FindingConfidence, Severity};
-use homeboy::core::extension::lint::{LintCommandOutput, LintFinding};
+use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::{
     FailedTest, RawTestOutput, TestCommandOutput, TestCounts, TestSummaryOutput,
 };
 use homeboy::core::extension::{
     PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
 };
+use homeboy::core::finding::{FindingProducerSummary, FindingSource, HomeboyFinding};
 use homeboy::core::plan::HomeboyPlan;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -508,15 +509,28 @@ fn lint_findings_output() -> LintCommandOutput {
             "Run `homeboy lint fixture --fix` to apply safe fixes.".to_string(),
         ]),
         baseline_comparison: None,
-        lint_findings: Some(vec![LintFinding {
-            id: "lint:src/lib.rs:12:trailing-whitespace".to_string(),
-            message: "Trailing whitespace".to_string(),
-            category: "whitespace".to_string(),
-            tool: Some("fixture-linter".to_string()),
-            file: Some("src/lib.rs".to_string()),
-            severity: Some("warning".to_string()),
-            extra: BTreeMap::new(),
-        }]),
+        findings: Some(vec![HomeboyFinding::builder(
+            "fixture-linter",
+            "Trailing whitespace",
+        )
+        .category("whitespace")
+        .rule("trailing-whitespace")
+        .file("src/lib.rs")
+        .severity("warning")
+        .fingerprint("lint:src/lib.rs:12:trailing-whitespace")
+        .source(
+            FindingSource::new("sidecar")
+                .label("lint-findings")
+                .path("lint-findings.json"),
+        )
+        .build()]),
+        producer_summaries: vec![FindingProducerSummary::new("fixture-linter", "failed")
+            .finding_count(1)
+            .source(
+                FindingSource::new("sidecar")
+                    .label("lint-findings")
+                    .path("lint-findings.json"),
+            )],
         summary: None,
         self_check_capture: None,
         ci_context: None,

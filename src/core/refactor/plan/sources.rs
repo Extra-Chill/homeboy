@@ -685,8 +685,8 @@ fn run_lint_stage(
                 let content = std::fs::read_to_string(&file).ok()?;
                 let json: serde_json::Value = serde_json::from_str(&content).ok()?;
                 let data = json.get("data")?;
-                let findings: Vec<crate::core::extension::lint::LintFinding> =
-                    serde_json::from_value(data.get("lint_findings")?.clone()).ok()?;
+                let findings: Vec<crate::core::finding::HomeboyFinding> =
+                    serde_json::from_value(data.get("findings")?.clone()).ok()?;
                 Some(findings)
             })
             .unwrap_or_default();
@@ -700,7 +700,7 @@ fn run_lint_stage(
     };
 
     let lint_source_result = serde_json::json!({
-        "lint_findings": &lint_findings,
+        "findings": &lint_findings,
     });
     if let Some(stage) = try_extension_refactor_source_stage(
         "lint",

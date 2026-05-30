@@ -5,7 +5,7 @@ pub mod run;
 use crate::core::component::Component;
 use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
 
-pub use baseline::{BaselineComparison, LintBaseline, LintBaselineMetadata, LintFinding};
+pub use baseline::{BaselineComparison, LintBaseline, LintBaselineMetadata};
 pub use report::LintCommandOutput;
 pub use run::{
     run_main_lint_workflow, run_self_check_lint_workflow, LintRunWorkflowArgs,

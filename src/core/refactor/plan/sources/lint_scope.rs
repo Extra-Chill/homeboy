@@ -135,11 +135,11 @@ pub(super) fn constrain_lint_fix_changes(
 }
 
 pub(super) fn lint_finding_scope_files(
-    findings: &[crate::core::extension::lint::LintFinding],
+    findings: &[crate::core::finding::HomeboyFinding],
 ) -> Vec<String> {
     let mut files = BTreeSet::new();
     for finding in findings {
-        let Some(file) = finding.file.as_deref() else {
+        let Some(file) = finding.location.file.as_deref() else {
             continue;
         };
         if let Some(normalized) = normalize_relative_release_path(file) {
@@ -339,26 +339,19 @@ mod tests {
     #[test]
     fn lint_finding_scope_files_normalizes_reported_files() {
         let findings = vec![
-            crate::core::extension::lint::LintFinding {
-                file: Some("src/b.php".to_string()),
-                ..Default::default()
-            },
-            crate::core::extension::lint::LintFinding {
-                file: Some("./src/a.php".to_string()),
-                ..Default::default()
-            },
-            crate::core::extension::lint::LintFinding {
-                file: Some("src/b.php".to_string()),
-                ..Default::default()
-            },
-            crate::core::extension::lint::LintFinding {
-                file: Some("../outside.php".to_string()),
-                ..Default::default()
-            },
-            crate::core::extension::lint::LintFinding {
-                file: None,
-                ..Default::default()
-            },
+            crate::core::finding::HomeboyFinding::builder("lint", "message")
+                .file("src/b.php")
+                .build(),
+            crate::core::finding::HomeboyFinding::builder("lint", "message")
+                .file("./src/a.php")
+                .build(),
+            crate::core::finding::HomeboyFinding::builder("lint", "message")
+                .file("src/b.php")
+                .build(),
+            crate::core::finding::HomeboyFinding::builder("lint", "message")
+                .file("../outside.php")
+                .build(),
+            crate::core::finding::HomeboyFinding::builder("lint", "message").build(),
         ];
 
         assert_eq!(

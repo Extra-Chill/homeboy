@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::core::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
+use crate::core::finding::{FindingProducer, FindingSource, HomeboyFinding};
 
 const BASELINE_KEY: &str = "lint";
 
@@ -18,7 +19,7 @@ const BASELINE_KEY: &str = "lint";
 mod lint_baseline_test;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LintFinding {
+struct LintSidecarFinding {
     pub id: String,
     pub message: String,
     pub category: String,
@@ -37,26 +38,32 @@ pub struct LintBaselineMetadata {
     pub findings_count: usize,
 }
 
-struct LintFingerprint<'a>(&'a LintFinding);
+struct LintFingerprint<'a>(&'a HomeboyFinding);
 
 impl Fingerprintable for LintFingerprint<'_> {
     fn fingerprint(&self) -> String {
-        self.0.id.clone()
+        self.0
+            .fingerprint
+            .clone()
+            .unwrap_or_else(|| self.0.message.clone())
     }
 
     fn description(&self) -> String {
-        self.0.message.to_string()
+        self.0.message.clone()
     }
 
     fn context_label(&self) -> String {
-        format!("lint:{}", self.0.category)
+        format!(
+            "lint:{}",
+            self.0.category.as_deref().unwrap_or(self.0.tool.as_str())
+        )
     }
 }
 
 pub type LintBaseline = generic::Baseline<LintBaselineMetadata>;
 pub type BaselineComparison = generic::Comparison;
 
-pub fn parse_findings_file(path: &Path) -> crate::core::error::Result<Vec<LintFinding>> {
+pub fn parse_findings_file(path: &Path) -> crate::core::error::Result<Vec<HomeboyFinding>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -76,20 +83,23 @@ pub fn parse_findings_file(path: &Path) -> crate::core::error::Result<Vec<LintFi
         return Ok(Vec::new());
     }
 
-    let findings: Vec<LintFinding> = serde_json::from_str(&content).map_err(|e| {
+    let findings: Vec<LintSidecarFinding> = serde_json::from_str(&content).map_err(|e| {
         crate::core::Error::internal_io(
             format!("Malformed lint findings JSON in {}: {}", path.display(), e),
             Some("lint.baseline.parse".to_string()),
         )
     })?;
 
-    Ok(findings)
+    Ok(findings
+        .into_iter()
+        .map(|finding| homeboy_finding_from_sidecar(finding, path))
+        .collect())
 }
 
 pub fn save_baseline(
     source_path: &Path,
     component_id: &str,
-    findings: &[LintFinding],
+    findings: &[HomeboyFinding],
 ) -> crate::core::error::Result<std::path::PathBuf> {
     let config = BaselineConfig::new(source_path, BASELINE_KEY);
     let metadata = LintBaselineMetadata {
@@ -104,47 +114,86 @@ pub fn load_baseline(source_path: &Path) -> Option<LintBaseline> {
     generic::load::<LintBaselineMetadata>(&config).unwrap_or_default()
 }
 
-pub fn compare(findings: &[LintFinding], baseline: &LintBaseline) -> BaselineComparison {
+pub fn compare(findings: &[HomeboyFinding], baseline: &LintBaseline) -> BaselineComparison {
     let items: Vec<LintFingerprint> = findings.iter().map(LintFingerprint).collect();
     generic::compare(&items, baseline)
+}
+
+fn homeboy_finding_from_sidecar(finding: LintSidecarFinding, path: &Path) -> HomeboyFinding {
+    let tool = finding.tool.clone().unwrap_or_else(|| "lint".to_string());
+    let mut builder = HomeboyFinding::builder(tool.clone(), finding.message.clone())
+        .category(finding.category.clone())
+        .fingerprint(finding.id.clone())
+        .producer(FindingProducer::new(tool.clone()))
+        .source(
+            FindingSource::new("sidecar")
+                .label("lint-findings")
+                .path(path.display().to_string()),
+        )
+        .metadata("source_sidecar", "lint-findings")
+        .metadata("source_sidecar_path", path.display().to_string())
+        .raw(&finding);
+
+    if let Some(file) = finding.file.clone() {
+        builder = builder.file(file);
+    }
+    if let Some(severity) = finding.severity.clone() {
+        builder = builder.severity(severity);
+    }
+    if let Some(rule) = finding.extra.get("rule").and_then(|value| value.as_str()) {
+        builder = builder.rule(rule.to_string());
+    } else {
+        builder = builder.rule(finding.category.clone());
+    }
+    if let Some(line) = finding.extra.get("line").and_then(|value| value.as_i64()) {
+        builder = builder.line(line);
+    }
+    if let Some(column) = finding.extra.get("column").and_then(|value| value.as_i64()) {
+        builder = builder.column(column);
+    }
+    if let Some(fixable) = finding
+        .extra
+        .get("fixable")
+        .and_then(|value| value.as_bool())
+    {
+        builder = builder.fixable(fixable);
+    }
+    for (key, value) in finding.extra {
+        builder = builder.metadata(key, value);
+    }
+
+    builder.build()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn lint_finding(id: &str, category: &str, message: &str) -> HomeboyFinding {
+        HomeboyFinding::builder("lint", message)
+            .category(category)
+            .rule(category)
+            .fingerprint(id)
+            .build()
+    }
+
     #[test]
     fn test_fingerprint() {
-        let finding = LintFinding {
-            id: "id-1".to_string(),
-            message: "message".to_string(),
-            category: "security".to_string(),
-            ..LintFinding::default()
-        };
+        let finding = lint_finding("id-1", "security", "message");
         let fp = LintFingerprint(&finding);
         assert_eq!(fp.fingerprint(), "id-1");
     }
 
     #[test]
     fn test_description() {
-        let finding = LintFinding {
-            id: "id-1".to_string(),
-            message: "message".to_string(),
-            category: "security".to_string(),
-            ..LintFinding::default()
-        };
+        let finding = lint_finding("id-1", "security", "message");
         let fp = LintFingerprint(&finding);
         assert_eq!(fp.description(), "message");
     }
 
     #[test]
     fn test_context_label() {
-        let finding = LintFinding {
-            id: "id-1".to_string(),
-            message: "message".to_string(),
-            category: "security".to_string(),
-            ..LintFinding::default()
-        };
+        let finding = lint_finding("id-1", "security", "message");
         let fp = LintFingerprint(&finding);
         assert_eq!(fp.context_label(), "lint:security");
     }
@@ -152,12 +201,7 @@ mod tests {
     #[test]
     fn test_save_baseline() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let finding = LintFinding {
-            id: "id-1".to_string(),
-            message: "message".to_string(),
-            category: "security".to_string(),
-            ..LintFinding::default()
-        };
+        let finding = lint_finding("id-1", "security", "message");
 
         let saved = save_baseline(dir.path(), "homeboy", &[finding]).expect("baseline saved");
 
@@ -167,12 +211,7 @@ mod tests {
     #[test]
     fn test_load_baseline() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let finding = LintFinding {
-            id: "id-1".to_string(),
-            message: "message".to_string(),
-            category: "security".to_string(),
-            ..LintFinding::default()
-        };
+        let finding = lint_finding("id-1", "security", "message");
         save_baseline(dir.path(), "homeboy", &[finding]).expect("baseline saved");
 
         let loaded = load_baseline(dir.path()).expect("baseline loaded");
@@ -191,18 +230,8 @@ mod tests {
             metadata: LintBaselineMetadata { findings_count: 1 },
         };
         let findings = vec![
-            LintFinding {
-                id: "id-1".to_string(),
-                message: "message".to_string(),
-                category: "security".to_string(),
-                ..LintFinding::default()
-            },
-            LintFinding {
-                id: "id-2".to_string(),
-                message: "message 2".to_string(),
-                category: "i18n".to_string(),
-                ..LintFinding::default()
-            },
+            lint_finding("id-1", "security", "message"),
+            lint_finding("id-2", "i18n", "message 2"),
         ];
 
         let comparison = compare(&findings, &baseline);
@@ -224,6 +253,7 @@ mod tests {
         let findings = parse_findings_file(&path).expect("findings parsed");
 
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].file.as_deref(), Some("src/lib.rs"));
+        assert_eq!(findings[0].location.file.as_deref(), Some("src/lib.rs"));
+        assert_eq!(findings[0].fingerprint.as_deref(), Some("id-1"));
     }
 }
