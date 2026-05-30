@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 mod findings;
@@ -360,8 +359,8 @@ impl ObservationStore {
         let id = Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
         let size_bytes = i64::try_from(metadata.len()).ok();
-        let sha256 = Some(sha256_file(path)?);
-        let mime = mime_from_path(path);
+        let sha256 = Some(crate::core::artifact_metadata::sha256_file(path)?);
+        let mime = crate::core::artifact_metadata::content_type_from_path(path);
         let stored_path = persisted_artifact_path(run_id, &id, path)?;
         copy_artifact_file(path, &stored_path)?;
         let path_string = stored_path.to_string_lossy().to_string();
@@ -987,16 +986,6 @@ fn collect_rows<T>(
     Ok(records)
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("read artifact bytes {}", path.display())),
-        )
-    })?;
-    Ok(format!("{:x}", Sha256::digest(&bytes)))
-}
-
 fn persisted_artifact_path(run_id: &str, artifact_id: &str, source: &Path) -> Result<PathBuf> {
     let file_name = source
         .file_name()
@@ -1069,26 +1058,6 @@ fn copy_artifact_directory(source: &Path, target: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn mime_from_path(path: &Path) -> Option<String> {
-    let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
-    let mime = match extension.as_str() {
-        "json" => "application/json",
-        "md" | "markdown" => "text/markdown",
-        "html" | "htm" => "text/html",
-        "txt" | "log" => "text/plain",
-        "csv" => "text/csv",
-        "xml" => "application/xml",
-        "zip" => "application/zip",
-        "gz" => "application/gzip",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        _ => return None,
-    };
-    Some(mime.to_string())
 }
 
 fn sqlite_error(context: impl Into<String>) -> impl FnOnce(rusqlite::Error) -> Error {

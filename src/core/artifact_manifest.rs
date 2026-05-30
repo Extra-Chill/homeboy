@@ -5,7 +5,6 @@
 
 use crate::core::error::{Error, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -150,7 +149,7 @@ impl ArtifactManifest {
                 entry.size_bytes = Some(actual_size);
             }
 
-            let actual_sha256 = sha256_file(&absolute_path)?;
+            let actual_sha256 = crate::core::artifact_metadata::sha256_file(&absolute_path)?;
             if let Some(expected_sha256) = &entry.sha256 {
                 if expected_sha256 != &actual_sha256 {
                     return Err(Error::validation_invalid_argument(
@@ -168,7 +167,8 @@ impl ArtifactManifest {
             }
 
             if entry.content_type.is_none() {
-                entry.content_type = mime_from_path(&absolute_path);
+                entry.content_type =
+                    crate::core::artifact_metadata::content_type_from_path(&absolute_path);
             }
 
             validated.push(ValidatedArtifactManifestEntry {
@@ -180,12 +180,8 @@ impl ArtifactManifest {
     }
 }
 
-pub fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
+fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
     root.as_ref().join(ARTIFACT_MANIFEST_FILE)
-}
-
-pub fn manifest_exists(root: impl AsRef<Path>) -> bool {
-    manifest_path(root).is_file()
 }
 
 pub fn read_manifest_from_root(root: impl AsRef<Path>) -> Result<ArtifactManifest> {
@@ -248,9 +244,9 @@ fn collect_manifest_entries(
             artifacts.push(ArtifactManifestEntry {
                 kind: "file".to_string(),
                 label: None,
-                content_type: mime_from_path(&path),
+                content_type: crate::core::artifact_metadata::content_type_from_path(&path),
                 size_bytes: Some(metadata.len()),
-                sha256: Some(sha256_file(&path)?),
+                sha256: Some(crate::core::artifact_metadata::sha256_file(&path)?),
                 redaction: None,
                 metadata: serde_json::Value::Object(serde_json::Map::new()),
                 path: relative,
@@ -373,36 +369,6 @@ fn canonicalize_existing_dir(path: &Path, field: &str) -> Result<PathBuf> {
         ));
     }
     Ok(canonical)
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("read artifact bytes {}", path.display())),
-        )
-    })?;
-    Ok(format!("{:x}", Sha256::digest(&bytes)))
-}
-
-fn mime_from_path(path: &Path) -> Option<String> {
-    let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
-    let mime = match extension.as_str() {
-        "json" => "application/json",
-        "md" | "markdown" => "text/markdown",
-        "html" | "htm" => "text/html",
-        "txt" | "log" => "text/plain",
-        "csv" => "text/csv",
-        "xml" => "application/xml",
-        "zip" => "application/zip",
-        "gz" => "application/gzip",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        _ => return None,
-    };
-    Some(mime.to_string())
 }
 
 fn slash_path(path: &Path) -> String {
