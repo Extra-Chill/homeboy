@@ -69,23 +69,18 @@ fn manifest_parses_declared_structured_sidecars() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
-        "structured_sidecars": [
-            {
-                "name": "findings",
+        "structured_sidecars": {
+            "findings": {
                 "path": "findings.json",
                 "schema_version": "1"
             },
-            {
-                "name": "producer.summary",
+            "producer.summary": {
                 "path": "producer-summary.json",
                 "schema_version": "1"
             },
-            {
-                "name": "lint.findings",
-                "path": "lint-findings.json",
-                "schema_version": "1"
-            }
-        ]
+            "lint.findings": true,
+            "test.coverage": false
+        }
     }))
     .unwrap();
 
@@ -93,11 +88,12 @@ fn manifest_parses_declared_structured_sidecars() {
     assert_eq!(sidecars.len(), 3);
     assert_eq!(sidecars[0].name, "findings");
     assert_eq!(sidecars[0].path, "findings.json");
-    assert_eq!(sidecars[0].schema_version, "1");
-    assert_eq!(sidecars[1].name, "producer.summary");
-    assert_eq!(sidecars[1].path, "producer-summary.json");
-    assert_eq!(sidecars[2].name, "lint.findings");
-    assert_eq!(sidecars[2].path, "lint-findings.json");
+    assert_eq!(sidecars[0].schema_version.as_deref(), Some("1"));
+    assert_eq!(sidecars[1].name, "lint.findings");
+    assert_eq!(sidecars[1].path, "lint-findings.json");
+    assert_eq!(sidecars[1].schema_version, None);
+    assert_eq!(sidecars[2].name, "producer.summary");
+    assert_eq!(sidecars[2].path, "producer-summary.json");
 }
 
 #[test]
@@ -139,18 +135,17 @@ fn structured_sidecar_declarations_reject_unknown_fields() {
     let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
-        "structured_sidecars": [
-            {
-                "name": "findings",
+        "structured_sidecars": {
+            "findings": {
                 "path": "findings.json",
                 "schema_version": "1",
                 "legacy": true
             }
-        ]
+        }
     }))
     .expect_err("sidecar declarations should have one explicit shape");
 
-    assert!(err.to_string().contains("legacy"));
+    assert!(err.to_string().contains("data did not match"));
 }
 
 #[test]

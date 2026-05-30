@@ -385,7 +385,7 @@ JSON
             test: None,
             bench: None,
             trace: None,
-            structured_sidecars: vec![],
+            structured_sidecars: std::collections::BTreeMap::new(),
             actions: vec![],
             hooks: std::collections::HashMap::new(),
             settings: vec![],
