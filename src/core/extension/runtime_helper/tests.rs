@@ -154,14 +154,14 @@ fn sidecar_writer_supports_annotation_source_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let helper_path = dir.path().join("sidecar-writer.sh");
     let annotations_dir = dir.path().join("annotations");
-    let source_path = dir.path().join("phpstan-extra.json");
+    let source_path = dir.path().join("annotations-extra.json");
     std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
     std::fs::write(&source_path, r#"[{"file":"b.php","line":2}]"#).expect("source");
 
     let output = std::process::Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "source {}; HOMEBOY_ANNOTATIONS_DIR={}; homeboy_write_annotations phpcs '{{\"file\":\"a.php\",\"line\":1}}'; homeboy_merge_annotations phpstan {}; printf '%s\n%s' \"$(cat {}/phpcs.json)\" \"$(cat {}/phpstan.json)\"",
+            "source {}; HOMEBOY_ANNOTATIONS_DIR={}; homeboy_write_annotations fixture-a '{{\"file\":\"a.php\",\"line\":1}}'; homeboy_merge_annotations fixture-b {}; printf '%s\n%s' \"$(cat {}/fixture-a.json)\" \"$(cat {}/fixture-b.json)\"",
             helper_path.display(),
             annotations_dir.display(),
             source_path.display(),

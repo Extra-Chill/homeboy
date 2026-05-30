@@ -18,12 +18,20 @@ pub enum ComposerAction {
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderDependencyStatus {
     pub package_manager: String,
+    pub dependency_identities: Vec<String>,
+    pub packages: Vec<DependencyPackage>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DependencyProviderSnapshot {
+    pub identities: BTreeSet<String>,
     pub packages: Vec<DependencyPackage>,
 }
 
 pub(crate) enum DependencyProvider {
     Composer(ComposerDependencyProvider),
     Extension(ExtensionDependencyProvider),
+    ComponentScript(ComponentScriptDependencyProvider),
 }
 
 impl DependencyProvider {
@@ -38,6 +46,9 @@ impl DependencyProvider {
             DependencyProvider::Extension(provider) => {
                 provider.status(component, path, package_filter)
             }
+            DependencyProvider::ComponentScript(provider) => {
+                provider.status(component, path, package_filter)
+            }
         }
     }
 
@@ -45,6 +56,7 @@ impl DependencyProvider {
         match self {
             DependencyProvider::Composer(provider) => provider.handles_package(path, package),
             DependencyProvider::Extension(_) => Ok(true),
+            DependencyProvider::ComponentScript(_) => Ok(true),
         }
     }
 
@@ -62,6 +74,9 @@ impl DependencyProvider {
             DependencyProvider::Extension(provider) => {
                 provider.update(component, path, package, constraint)
             }
+            DependencyProvider::ComponentScript(provider) => {
+                provider.update(component, path, package, constraint)
+            }
         }
     }
 }
@@ -74,6 +89,12 @@ pub(crate) fn resolve_dependency_providers(
 
     if ComposerDependencyProvider::supports(path) {
         providers.push(DependencyProvider::Composer(ComposerDependencyProvider));
+    }
+
+    if component.has_script(ExtensionCapability::Deps) {
+        providers.push(DependencyProvider::ComponentScript(
+            ComponentScriptDependencyProvider,
+        ));
     }
 
     if component
@@ -108,6 +129,30 @@ pub(crate) fn resolve_dependency_providers(
     Ok(providers)
 }
 
+pub(crate) fn dependency_provider_snapshot(
+    component: &Component,
+    path: &Path,
+) -> Result<DependencyProviderSnapshot> {
+    let mut snapshot = DependencyProviderSnapshot::default();
+    snapshot.identities.insert(component.id.clone());
+    snapshot
+        .identities
+        .extend(component.aliases.iter().cloned());
+
+    let providers = match resolve_dependency_providers(component, path) {
+        Ok(providers) => providers,
+        Err(_) => return Ok(snapshot),
+    };
+
+    for provider in providers {
+        let status = provider.status(component, path, None)?;
+        snapshot.identities.extend(status.dependency_identities);
+        snapshot.packages.extend(status.packages);
+    }
+
+    Ok(snapshot)
+}
+
 pub fn composer_command_args(package: &str, action: &ComposerAction) -> Vec<String> {
     match action {
         ComposerAction::Require { constraint } => vec![
@@ -139,6 +184,7 @@ impl ComposerDependencyProvider {
     ) -> Result<ProviderDependencyStatus> {
         Ok(ProviderDependencyStatus {
             package_manager: "composer".to_string(),
+            dependency_identities: composer_identities(path)?,
             packages: read_composer_packages(path, package_filter)?,
         })
     }
@@ -231,6 +277,7 @@ impl ExtensionDependencyProvider {
 
         Ok(ProviderDependencyStatus {
             package_manager: status.package_manager,
+            dependency_identities: status.dependency_identities,
             packages: status.packages,
         })
     }
@@ -274,9 +321,75 @@ impl ExtensionDependencyProvider {
     }
 }
 
+pub(crate) struct ComponentScriptDependencyProvider;
+
+impl ComponentScriptDependencyProvider {
+    fn status(
+        &self,
+        component: &Component,
+        path: &Path,
+        package_filter: Option<&str>,
+    ) -> Result<ProviderDependencyStatus> {
+        let mut args = vec!["status".to_string()];
+        if let Some(package_filter) = package_filter {
+            args.push(package_filter.to_string());
+        }
+        let output = self.run(component, path, &args)?;
+        let status: ExtensionStatusOutput = parse_extension_output(&output.stdout, "deps status")?;
+
+        Ok(ProviderDependencyStatus {
+            package_manager: status.package_manager,
+            dependency_identities: status.dependency_identities,
+            packages: status.packages,
+        })
+    }
+
+    fn update(
+        &self,
+        component: &Component,
+        path: &Path,
+        package: &str,
+        constraint: Option<&str>,
+    ) -> Result<DependencyUpdateResult> {
+        let mut args = vec!["update".to_string(), package.to_string()];
+        if let Some(constraint) = constraint {
+            args.push(constraint.to_string());
+        }
+        let output = self.run(component, path, &args)?;
+        let mut result: DependencyUpdateResult =
+            parse_extension_output(&output.stdout, "deps update")?;
+        result.component_id = component.id.clone();
+        result.component_path = path.display().to_string();
+        result.package = package.to_string();
+        result.requested_constraint = constraint.map(str::to_string);
+        result.stdout = output.stdout;
+        result.stderr = output.stderr;
+        Ok(result)
+    }
+
+    fn run(
+        &self,
+        component: &Component,
+        path: &Path,
+        args: &[String],
+    ) -> Result<crate::core::extension::RunnerOutput> {
+        let output = crate::core::extension::component_script::run_component_scripts_with_env(
+            component,
+            ExtensionCapability::Deps,
+            path,
+            false,
+            &[],
+            args,
+        )?;
+        Ok(output.into())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ExtensionStatusOutput {
     package_manager: String,
+    #[serde(default)]
+    dependency_identities: Vec<String>,
     #[serde(default)]
     packages: Vec<DependencyPackage>,
 }
@@ -291,6 +404,15 @@ fn package_snapshot(path: &Path, package: &str) -> Result<Option<DependencyPacka
     Ok(read_composer_packages(path, Some(package))?
         .into_iter()
         .next())
+}
+
+fn composer_identities(path: &Path) -> Result<Vec<String>> {
+    let manifest = read_json_file(&path.join("composer.json"))?;
+    Ok(manifest
+        .get("name")
+        .and_then(Value::as_str)
+        .map(|name| vec![name.to_string()])
+        .unwrap_or_default())
 }
 
 fn read_composer_packages(
