@@ -105,7 +105,7 @@ fn test_command_if_missing_runs_when_path_is_missing() {
                 "bench_prepare": [{{
                     "kind": "command-if-missing",
                     "cwd": "{}",
-                    "missing": "node_modules/.bin/wp-env",
+                    "missing": "node_modules/.bin/project-env",
                     "command": "printf installed > {}"
                 }}]
             }}
@@ -125,9 +125,9 @@ fn test_command_if_missing_runs_when_path_is_missing() {
 #[test]
 fn test_command_if_missing_skips_when_path_exists() {
     let tmp = tempfile::tempdir().expect("tmpdir");
-    let wp_env = tmp.path().join("node_modules/.bin/wp-env");
-    std::fs::create_dir_all(wp_env.parent().expect("parent")).expect("mkdir");
-    std::fs::write(&wp_env, "#!/bin/sh\n").expect("write");
+    let tool_bin = tmp.path().join("node_modules/.bin/project-env");
+    std::fs::create_dir_all(tool_bin.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&tool_bin, "#!/bin/sh\n").expect("write");
     let marker = tmp.path().join("installed.txt");
     let marker_arg = marker.to_string_lossy();
     let cwd_arg = tmp.path().to_string_lossy();
@@ -138,7 +138,7 @@ fn test_command_if_missing_skips_when_path_exists() {
                 "bench_prepare": [{{
                     "kind": "command-if-missing",
                     "cwd": "{}",
-                    "missing": "node_modules/.bin/wp-env",
+                    "missing": "node_modules/.bin/project-env",
                     "command": "printf installed > {}"
                 }}]
             }}

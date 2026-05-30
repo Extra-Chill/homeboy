@@ -168,21 +168,9 @@ fn run_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
             dry_run,
             ..
         } => run_stack_step(rig, component, *op, *dry_run),
-        PipelineStep::Command {
-            cmd,
-            cwd,
-            env,
-            label: _,
-            ..
-        } => run_command_step(rig, cmd, cwd.as_deref(), env),
-        PipelineStep::CommandIfMissing {
-            missing,
-            cmd,
-            cwd,
-            env,
-            label: _,
-            ..
-        } => run_command_if_missing_step(rig, missing, cmd, cwd.as_deref(), env),
+        PipelineStep::Command { .. } | PipelineStep::CommandIfMissing { .. } => {
+            run_command_pipeline_step(rig, step)
+        }
         PipelineStep::Symlink { op, .. } => run_symlink_step(rig, *op),
         PipelineStep::SharedPath { op, .. } => run_shared_path_step(rig, *op),
         PipelineStep::Patch {
@@ -602,6 +590,22 @@ fn run_command_step(
         ));
     }
     Ok(())
+}
+
+fn run_command_pipeline_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
+    match step {
+        PipelineStep::Command { cmd, cwd, env, .. } => {
+            run_command_step(rig, cmd, cwd.as_deref(), env)
+        }
+        PipelineStep::CommandIfMissing {
+            missing,
+            cmd,
+            cwd,
+            env,
+            ..
+        } => run_command_if_missing_step(rig, missing, cmd, cwd.as_deref(), env),
+        _ => unreachable!("command pipeline helper only accepts command steps"),
+    }
 }
 
 fn run_command_if_missing_step(

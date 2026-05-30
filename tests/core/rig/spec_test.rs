@@ -98,11 +98,8 @@ fn test_spec_pipeline_steps_discriminate_correctly() {
 
     let check = spec.pipeline.get("check").unwrap();
     assert!(matches!(check[3], PipelineStep::Check { .. }));
-}
 
-#[test]
-fn test_spec_parses_declarative_rig_primitives() {
-    let spec: RigSpec = serde_json::from_str(
+    let declarative_spec: RigSpec = serde_json::from_str(
         r#"{
             "id": "declarative-primitives",
             "pipeline": {
@@ -110,15 +107,15 @@ fn test_spec_parses_declarative_rig_primitives() {
                     {
                         "kind": "check",
                         "label": "compat server exists",
-                        "any_file_exists": ["lib/compat/wordpress-7.1/server.php", "lib/compat/wordpress-7.0/server.php"]
+                        "any_file_exists": ["lib/compat/runtime-v2/server.txt", "lib/compat/runtime-v1/server.txt"]
                     }
                 ],
                 "bench_prepare": [
                     {
                         "kind": "command-if-missing",
-                        "label": "Install npm dependencies when wp-env is missing",
+                        "label": "Install dependencies when project-env is missing",
                         "cwd": "/tmp/project",
-                        "missing": "node_modules/.bin/wp-env",
+                        "missing": "node_modules/.bin/project-env",
                         "command": "npm install"
                     }
                 ]
@@ -127,13 +124,16 @@ fn test_spec_parses_declarative_rig_primitives() {
     )
     .expect("parse declarative primitives");
 
-    let check = spec.pipeline.get("check").expect("check pipeline");
-    match &check[0] {
+    let declarative_check = declarative_spec
+        .pipeline
+        .get("check")
+        .expect("check pipeline");
+    match &declarative_check[0] {
         PipelineStep::Check { spec, .. } => assert_eq!(spec.any_file_exists.len(), 2),
         other => panic!("expected check step, got {other:?}"),
     }
 
-    let prepare = spec
+    let prepare = declarative_spec
         .pipeline
         .get("bench_prepare")
         .expect("prepare pipeline");
@@ -141,7 +141,7 @@ fn test_spec_parses_declarative_rig_primitives() {
         PipelineStep::CommandIfMissing {
             missing, cmd, cwd, ..
         } => {
-            assert_eq!(missing, "node_modules/.bin/wp-env");
+            assert_eq!(missing, "node_modules/.bin/project-env");
             assert_eq!(cmd, "npm install");
             assert_eq!(cwd.as_deref(), Some("/tmp/project"));
         }
