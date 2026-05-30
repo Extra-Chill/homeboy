@@ -20,6 +20,12 @@ RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${SCRIPT_DIR}/../lib/runner
 # shellcheck source=../lib/runner-steps.sh
 source "${RUNNER_STEPS_HELPER}"
 
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
+
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -115,21 +121,28 @@ merge_findings_into_sidecar() {
     [ -z "$target" ] && return 0
     [ ! -f "$extra_file" ] && return 0
 
-    # If the target doesn't exist yet, just copy the extra file
-    if [ ! -f "$target" ]; then
-        cp "$extra_file" "$target"
-        return 0
+    if ! type homeboy_merge_lint_findings >/dev/null 2>&1; then
+        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to merge lint findings" >&2
+        return 1
     fi
 
-    # Merge both JSON arrays into one
-    if command -v php &> /dev/null; then
-        php -r '
-            $existing = json_decode(file_get_contents($argv[1]), true) ?: [];
-            $extra = json_decode(file_get_contents($argv[2]), true) ?: [];
-            $merged = array_merge($existing, $extra);
-            file_put_contents($argv[1], json_encode($merged, JSON_UNESCAPED_SLASHES) . "\n");
-        ' "$target" "$extra_file" 2>/dev/null || true
+    homeboy_merge_lint_findings "$extra_file"
+}
+
+write_json_array_sidecar_file() {
+    local target="$1"
+    local source="$2"
+
+    [ -z "$target" ] && return 0
+    [ ! -f "$source" ] && return 0
+
+    if ! type homeboy_sidecar_merge_json_array >/dev/null 2>&1; then
+        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write JSON array sidecars" >&2
+        return 1
     fi
+
+    rm -f "$target"
+    homeboy_sidecar_merge_json_array "$target" "$source"
 }
 
 # Determine lint target (file, glob, or full component)
@@ -574,12 +587,18 @@ print(json.dumps(results))
 
     # Write fix plan sidecar for planning flows (same shape as fix results)
     if [ -n "${HOMEBOY_FIX_PLAN_FILE:-}" ]; then
-        echo "$FIX_RESULTS_JSON" > "${HOMEBOY_FIX_PLAN_FILE}"
+        FIX_RESULTS_TMPFILE=$(homeboy_mktemp 'wordpress-fix-results.XXXXXX')
+        printf '%s\n' "$FIX_RESULTS_JSON" > "$FIX_RESULTS_TMPFILE"
+        write_json_array_sidecar_file "${HOMEBOY_FIX_PLAN_FILE}" "$FIX_RESULTS_TMPFILE"
+        rm -f "$FIX_RESULTS_TMPFILE"
     fi
 
     # Write fix results sidecar for homeboy to consume
     if [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ]; then
-        echo "$FIX_RESULTS_JSON" > "${HOMEBOY_FIX_RESULTS_FILE}"
+        FIX_RESULTS_TMPFILE=$(homeboy_mktemp 'wordpress-fix-results.XXXXXX')
+        printf '%s\n' "$FIX_RESULTS_JSON" > "$FIX_RESULTS_TMPFILE"
+        write_json_array_sidecar_file "${HOMEBOY_FIX_RESULTS_FILE}" "$FIX_RESULTS_TMPFILE"
+        rm -f "$FIX_RESULTS_TMPFILE"
     fi
 
     # Post-fix syntax validation — catch any fixer that produced broken PHP
@@ -785,7 +804,8 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
     #   [{id: "file::source::line", message: "...", category: "..."}]
     # Category is derived from the top-level PHPCS source namespace.
     if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
-        echo "$json_output" | php -r '
+        _PHPCS_FINDINGS_TMPFILE=$(homeboy_mktemp 'phpcs-findings.XXXXXX')
+        if echo "$json_output" | php -r '
             ini_set("memory_limit", "-1");
             $json = json_decode(file_get_contents("php://stdin"), true);
             if (!$json || empty($json["files"])) {
@@ -858,7 +878,10 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
                 }
             }
             file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");
-        ' "$PLUGIN_PATH" "${HOMEBOY_LINT_FINDINGS_FILE}" 2>/dev/null || true
+        ' "$PLUGIN_PATH" "${_PHPCS_FINDINGS_TMPFILE}" 2>/dev/null; then
+            write_json_array_sidecar_file "${HOMEBOY_LINT_FINDINGS_FILE}" "${_PHPCS_FINDINGS_TMPFILE}" || exit 1
+        fi
+        rm -f "${_PHPCS_FINDINGS_TMPFILE}"
     fi
 fi
 

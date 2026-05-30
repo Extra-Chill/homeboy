@@ -2,9 +2,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 RUNNER="${SCRIPT_DIR}/lint-runner.sh"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+
+if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
+    echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
+    exit 1
+fi
 
 EXTENSION_DIR="${TMPDIR}/extension"
 COMPONENT_DIR="${TMPDIR}/component"
@@ -65,6 +73,7 @@ run_lint() {
         "HOMEBOY_COMPONENT_PATH=$COMPONENT_DIR"
         "HOMEBOY_COMPONENT_ID=autofixable-fixture"
         "HOMEBOY_LINT_FINDINGS_FILE=$FINDINGS_FILE"
+        "HOMEBOY_RUNTIME_SIDECAR_WRITER=$SIDECAR_WRITER_HELPER"
         "HOMEBOY_STEP=phpcs"
         "HOMEBOY_SUMMARY_MODE=$mode"
     )

@@ -22,9 +22,30 @@ fi
 # Resolve execution context (shared helper)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=../lib/resolve-context.sh
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
+
+write_eslint_findings_sidecar() {
+    local target="$1"
+    local source="$2"
+
+    [ -z "$target" ] && return 0
+    [ ! -s "$source" ] && return 0
+
+    if ! type homeboy_sidecar_merge_json_array >/dev/null 2>&1; then
+        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write ESLint lint findings" >&2
+        return 1
+    fi
+
+    rm -f "$target"
+    homeboy_sidecar_merge_json_array "$target" "$source"
+}
 
 # Check if component has JavaScript files
 js_file_count=$(find "$PLUGIN_PATH" -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \) \
@@ -178,6 +199,7 @@ set -e
 # and PHPStan findings. Direct ESLint runs may write HOMEBOY_LINT_FINDINGS_FILE.
 ESLINT_FINDINGS_FILE="${_HOMEBOY_ESLINT_FINDINGS_FILE:-${HOMEBOY_LINT_FINDINGS_FILE:-}}"
 if [ -n "$ESLINT_FINDINGS_FILE" ] && [ -n "$json_output" ] && command -v node &> /dev/null; then
+    ESLINT_FINDINGS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-eslint-findings.XXXXXX")
     node -e '
         const fs = require("fs");
         const path = require("path");
@@ -227,7 +249,9 @@ if [ -n "$ESLINT_FINDINGS_FILE" ] && [ -n "$json_output" ] && command -v node &>
             }
         }
         fs.writeFileSync(outputFile, JSON.stringify(findings) + "\n");
-    ' "$json_output" "$PLUGIN_PATH" "$ESLINT_FINDINGS_FILE" 2>/dev/null || true
+    ' "$json_output" "$PLUGIN_PATH" "$ESLINT_FINDINGS_TMPFILE" 2>/dev/null || true
+    write_eslint_findings_sidecar "$ESLINT_FINDINGS_FILE" "$ESLINT_FINDINGS_TMPFILE" || exit 1
+    rm -f "$ESLINT_FINDINGS_TMPFILE"
 fi
 
 # Parse JSON and print summary header (only if issues exist)

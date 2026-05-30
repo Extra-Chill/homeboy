@@ -3,8 +3,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+
+if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
+    echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
+    exit 1
+fi
 
 assert_contains() {
     local file="$1"
@@ -27,6 +35,7 @@ assert_not_contains() {
 }
 
 component_dir="${TMPDIR}/component"
+findings_file="${TMPDIR}/eslint-findings.json"
 mkdir -p "${component_dir}/inc" "${component_dir}/assets" "${EXTENSION_PATH}/node_modules/.bin"
 touch "${EXTENSION_PATH}/.eslintrc.json"
 printf '%s\n' '<?php' > "${component_dir}/inc/Thing.php"
@@ -60,11 +69,20 @@ HOMEBOY_COMPONENT_PATH="$component_dir" \
 HOMEBOY_COMPONENT_TEXT_DOMAIN="component" \
 HOMEBOY_SUMMARY_MODE=1 \
 HOMEBOY_LINT_GLOB="{${component_dir}/inc/Thing.php,${component_dir}/assets/app.js}" \
+HOMEBOY_LINT_FINDINGS_FILE="$findings_file" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 ESLINT_LOG="$eslint_log" \
     bash "${EXTENSION_PATH}/scripts/lint/eslint-runner.sh" > "${TMPDIR}/mixed.out"
 
 assert_contains "${TMPDIR}/mixed.out" "Linting 1 JS/TS files matching"
 assert_contains "$eslint_log" "${component_dir}/assets/app.js"
 assert_not_contains "$eslint_log" "${component_dir}/inc/Thing.php"
+
+python3 - "$findings_file" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1], encoding="utf-8")) == []
+PY
 
 echo "ESLint glob filter smoke passed"

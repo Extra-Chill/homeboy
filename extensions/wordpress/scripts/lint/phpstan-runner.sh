@@ -89,9 +89,14 @@ fi
 
 # Resolve execution context (shared helper)
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=../lib/resolve-context.sh
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH
+# shellcheck source=/dev/null
+if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
+    source "$SIDECAR_WRITER_HELPER"
+fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Extension path: $EXTENSION_PATH"
@@ -158,6 +163,22 @@ homeboy_mktemp() {
     fi
 
     mktemp 2>/dev/null
+}
+
+write_phpstan_findings_sidecar() {
+    local target="$1"
+    local source="$2"
+
+    [ -z "$target" ] && return 0
+    [ ! -s "$source" ] && return 0
+
+    if ! type homeboy_sidecar_merge_json_array >/dev/null 2>&1; then
+        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write PHPStan lint findings" >&2
+        return 1
+    fi
+
+    rm -f "$target"
+    homeboy_sidecar_merge_json_array "$target" "$source"
 }
 
 # Validate PHPStan exists (soft failure - not all installations have it)
@@ -900,6 +921,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     #   [{id: "file::identifier::line", message: "...", category: "phpstan"}]
     # The lint-runner merges these with PHPCS findings into the final baseline.
     if [ -n "${_HOMEBOY_PHPSTAN_FINDINGS_FILE:-}" ] && [ -n "$json_output" ]; then
+        _PHPSTAN_FINDINGS_OUTPUT_TMPFILE=$(homeboy_mktemp 'phpstan-findings.XXXXXX')
         echo "$json_output" | php -r '
             $json = json_decode(file_get_contents("php://stdin"), true);
             if (!$json || empty($json["files"])) {
@@ -944,7 +966,9 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                 }
             }
             file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");
-        ' "$PLUGIN_PATH" "${_HOMEBOY_PHPSTAN_FINDINGS_FILE}" 2>/dev/null || true
+        ' "$PLUGIN_PATH" "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}" 2>/dev/null || true
+        write_phpstan_findings_sidecar "${_HOMEBOY_PHPSTAN_FINDINGS_FILE}" "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}" || exit 1
+        rm -f "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}"
     fi
 
     # Fallback: show stderr if PHPStan failed without producing JSON

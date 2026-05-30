@@ -2,9 +2,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 RUNNER="${SCRIPT_DIR}/phpstan-runner.sh"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+
+if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
+    echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
+    exit 1
+fi
 
 EXTENSION_DIR="${TMPDIR}/extension"
 COMPONENT_DIR="${TMPDIR}/component"
@@ -183,6 +191,7 @@ PHPSTAN_CONFIG_CAPTURE="$CONFIG_CAPTURE" \
 PHPSTAN_AUTOLOAD_CAPTURE="$AUTOLOAD_CAPTURE" \
 PHPSTAN_EMIT_ERROR=1 \
 _HOMEBOY_PHPSTAN_FINDINGS_FILE="$FINDINGS_FILE" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 HOMEBOY_SUMMARY_MODE=1 \
 "$RUNNER" >"$OUTPUT_FILE"
 phpstan_error_status=$?
