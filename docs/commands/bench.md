@@ -244,6 +244,10 @@ and `lte`.
 Every bench child process receives generic invocation-scoped environment
 variables, independent of runner implementation:
 
+- `HOMEBOY_INVOCATION_CONTEXT_JSON`: structured JSON contract for the same
+  invocation context. Prefer this for new extension helpers so they consume one
+  audited Homeboy-owned shape instead of reconstructing context from individual
+  env names.
 - `HOMEBOY_INVOCATION_ID`: stable identifier for this child workload invocation.
 - `HOMEBOY_INVOCATION_STATE_DIR`: private state directory for files that should
   outlive one internal iteration but remain scoped to this invocation.
@@ -251,6 +255,24 @@ variables, independent of runner implementation:
   screenshots, traces, and downloaded/build artifacts.
 - `HOMEBOY_INVOCATION_TMP_DIR`: private temporary directory for project copies,
   browser profiles, wasm caches, and other scratch state.
+
+The structured context currently has this substrate-agnostic shape:
+
+```json
+{
+  "id": "inv-0123456789",
+  "state_dir": "/tmp/hb/0123456789",
+  "artifact_dir": "/tmp/hb/0123456789.a",
+  "tmp_dir": "/tmp/hb/0123456789.t",
+  "port_range": { "base": 20000, "max": 20007 },
+  "named_leases": ["playground-browser-profile"]
+}
+```
+
+`port_range` is omitted when the workload did not request ports.
+`named_leases` is omitted when no named leases were requested. The legacy
+`HOMEBOY_INVOCATION_*` env vars remain part of the contract for existing
+extensions and scripts.
 
 ### Runtime path contract
 
