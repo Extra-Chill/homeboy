@@ -385,7 +385,7 @@ JSON
             test: None,
             bench: None,
             trace: None,
-            annotations_schema_version: None,
+            structured_sidecars: vec![],
             actions: vec![],
             hooks: std::collections::HashMap::new(),
             settings: vec![],
