@@ -1,5 +1,5 @@
 use crate::core::component::{
-    associated_projects, inventory, mutate_portable, rename_component, resolve_effective, Component,
+    associated_projects, inventory, rename_component, resolve_effective, Component,
 };
 use crate::core::config;
 use crate::core::error::{Error, Result};
@@ -44,41 +44,30 @@ pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Re
         map.remove("id");
     }
 
-    let updates_standalone_registration = patch
-        .as_object()
-        .map(|obj| obj.contains_key("local_path") || obj.contains_key("remote_path"))
-        .unwrap_or(false);
-
-    let component = mutate_portable(id, |component| {
-        let fields = config::merge_config(component, patch.clone(), replace_fields)?;
-        if fields.updated_fields.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "merge",
-                "Merge patch cannot be empty",
-                None,
-                None,
-            ));
-        }
-        Ok(())
-    })?;
-
-    if updates_standalone_registration {
-        inventory::write_standalone_registration(&component)?;
+    let mut component = resolve_effective(Some(id), None, None)?;
+    let fields = config::merge_config(&mut component, patch.clone(), replace_fields)?;
+    if fields.updated_fields.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "merge",
+            "Merge patch cannot be empty",
+            None,
+            None,
+        ));
     }
+
+    if component.id.trim().is_empty() {
+        component.id = id.to_string();
+    }
+
+    inventory::write_standalone_component_config(&component)?;
 
     if let Some(local_path) = patch.get("local_path").and_then(|value| value.as_str()) {
         update_project_attachment_local_paths(id, local_path)?;
     }
 
-    let updated_fields = match patch {
-        Value::Object(obj) => obj.keys().cloned().collect(),
-        _ => vec![],
-    };
-
-    let _ = component;
     Ok(MergeOutput::Single(MergeResult {
         id: id.to_string(),
-        updated_fields,
+        updated_fields: fields.updated_fields,
     }))
 }
 
@@ -243,6 +232,64 @@ mod tests {
                     .get("local_path")
                     .and_then(|value| value.as_str()),
                 Some(new_repo.to_string_lossy().as_ref())
+            );
+        });
+    }
+
+    #[test]
+    fn merge_writes_registry_without_rewriting_portable_config() {
+        crate::test_support::with_isolated_home(|home| {
+            let repo = home.path().join("codebox");
+            fs::create_dir_all(&repo).expect("repo dir");
+            let portable = r#"{"id":"codebox","remote_path":"deploy/codebox"}"#;
+            fs::write(repo.join("homeboy.json"), portable).expect("homeboy.json");
+
+            let component = Component::new(
+                "codebox".to_string(),
+                repo.to_string_lossy().to_string(),
+                "deploy/codebox".to_string(),
+                None,
+            );
+            inventory::write_standalone_registration(&component)
+                .expect("write initial standalone registration");
+
+            let patch = serde_json::json!({
+                "scripts": {
+                    "build": ["npm run package"]
+                }
+            })
+            .to_string();
+            let result = merge(Some("codebox"), &patch, &[]).expect("component merge");
+            let MergeOutput::Single(result) = result else {
+                panic!("expected single merge result");
+            };
+            assert_eq!(result.updated_fields, vec!["scripts".to_string()]);
+
+            assert_eq!(
+                fs::read_to_string(repo.join("homeboy.json")).expect("read portable config"),
+                portable,
+                "component set must not rewrite repo-owned homeboy.json by default"
+            );
+
+            let loaded = crate::core::component::load("codebox").expect("load component");
+            assert_eq!(
+                loaded.scripts.expect("scripts should be registered").build,
+                vec!["npm run package".to_string()]
+            );
+
+            let registration_path = home.path().join(".config/homeboy/components/codebox.json");
+            let registration: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(registration_path).expect("read registration"),
+            )
+            .expect("parse registration");
+            assert_eq!(
+                registration
+                    .get("scripts")
+                    .and_then(|value| value.get("build"))
+                    .and_then(|value| value.as_array())
+                    .and_then(|commands| commands.first())
+                    .and_then(|command| command.as_str()),
+                Some("npm run package")
             );
         });
     }
