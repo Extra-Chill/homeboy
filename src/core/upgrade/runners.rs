@@ -340,6 +340,7 @@ mod tests {
             mirror_run_id: None,
             patch: None,
             metrics: None,
+            capture: None,
         }
     }
 }

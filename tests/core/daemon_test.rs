@@ -3,6 +3,8 @@ use crate::core::api_jobs::{JobEventKind, JobStatus, JobStore};
 use crate::core::observation::{NewRunRecord, ObservationStore};
 use crate::test_support::HomeGuard;
 
+const DAEMON_TEST_RESPONSE_LIMIT_BYTES: u64 = 64 * 1024;
+
 #[test]
 fn parse_bind_addr_defaults_to_loopback_shape() {
     let addr = parse_bind_addr(DEFAULT_ADDR).expect("parse default");
@@ -106,8 +108,13 @@ fn test_serve_writes_state_and_routes_health_requests() {
     stream
         .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         .expect("write request");
-    let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read response");
+    let mut response_bytes = Vec::new();
+    stream
+        .take(DAEMON_TEST_RESPONSE_LIMIT_BYTES + 1)
+        .read_to_end(&mut response_bytes)
+        .expect("read response");
+    assert!(response_bytes.len() <= DAEMON_TEST_RESPONSE_LIMIT_BYTES as usize);
+    let response = String::from_utf8_lossy(&response_bytes);
 
     let status = read_status().expect("status");
 

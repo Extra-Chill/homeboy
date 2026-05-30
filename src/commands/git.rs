@@ -14,6 +14,8 @@ use crate::commands::version;
 
 use super::CmdResult;
 
+const BODY_STDIN_LIMIT_BYTES: u64 = 256 * 1024;
+
 #[derive(Args)]
 pub struct GitArgs {
     #[command(subcommand)]
@@ -1240,10 +1242,27 @@ fn resolve_body(
 
     if path == "-" {
         use std::io::Read;
-        let mut buf = String::new();
-        std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take(BODY_STDIN_LIMIT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| {
+                homeboy::core::Error::internal_io(
+                    format!("Failed to read body from stdin: {}", e),
+                    Some("stdin".into()),
+                )
+            })?;
+        if bytes.len() > BODY_STDIN_LIMIT_BYTES as usize {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "body_file",
+                "stdin body exceeds the retained byte limit",
+                Some(format!("limit_bytes={BODY_STDIN_LIMIT_BYTES}")),
+                None,
+            ));
+        }
+        let buf = String::from_utf8(bytes).map_err(|e| {
             homeboy::core::Error::internal_io(
-                format!("Failed to read body from stdin: {}", e),
+                format!("Failed to decode body from stdin as UTF-8: {}", e),
                 Some("stdin".into()),
             )
         })?;

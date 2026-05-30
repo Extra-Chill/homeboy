@@ -9,6 +9,7 @@ use std::path::Path;
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
 use crate::core::extension::{self, ExtensionManifest};
 
 #[path = "../test_quality.rs"]
@@ -201,7 +202,7 @@ fn run_topology_script(
                 let payload = serde_json::to_vec(input).ok()?;
                 let _ = stdin.write_all(&payload);
             }
-            child.wait_with_output().ok()
+            wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).ok()
         });
 
     let Some(output) = output else {

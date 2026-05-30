@@ -1,9 +1,13 @@
 //! Command execution primitives with consistent error handling.
 
-use std::process::{Command, Output};
+use std::io::{self, Read};
+use std::process::{Child, Command, ExitStatus, Output};
+use std::thread;
 
 use crate::core::error::{Error, Result};
 use serde::Serialize;
+
+pub const DEFAULT_CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
 
 pub fn run(program: &str, args: &[&str], context: &str) -> Result<String> {
     let output = Command::new(program).args(args).output().map_err(|e| {
@@ -93,6 +97,147 @@ pub fn require_success(success: bool, stderr: &str, operation: &str) -> Result<(
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct CaptureMetadata {
+    pub bytes_seen: u64,
+    pub bytes_retained: usize,
+    pub byte_limit: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct CommandCaptureMetadata {
+    pub stdout: CaptureMetadata,
+    pub stderr: CaptureMetadata,
+}
+
+#[derive(Debug)]
+pub struct BoundedCommandOutput {
+    pub status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub capture: CommandCaptureMetadata,
+}
+
+impl BoundedCommandOutput {
+    pub fn into_output(self) -> Output {
+        Output {
+            status: self.status,
+            stdout: self.stdout,
+            stderr: self.stderr,
+        }
+    }
+}
+
+pub fn wait_with_bounded_output(
+    mut child: Child,
+    byte_limit: usize,
+) -> io::Result<BoundedCommandOutput> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle =
+        stdout.map(|stream| thread::spawn(move || capture_tail(stream, byte_limit)));
+    let stderr_handle =
+        stderr.map(|stream| thread::spawn(move || capture_tail(stream, byte_limit)));
+
+    let status = child.wait()?;
+    let stdout = join_capture(stdout_handle)?;
+    let stderr = join_capture(stderr_handle)?;
+
+    Ok(BoundedCommandOutput {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+        capture: CommandCaptureMetadata {
+            stdout: stdout.metadata,
+            stderr: stderr.metadata,
+        },
+    })
+}
+
+#[derive(Debug)]
+struct BoundedStreamCapture {
+    bytes: Vec<u8>,
+    metadata: CaptureMetadata,
+}
+
+fn join_capture(
+    handle: Option<thread::JoinHandle<io::Result<BoundedStreamCapture>>>,
+) -> io::Result<BoundedStreamCapture> {
+    match handle {
+        Some(handle) => handle
+            .join()
+            .map_err(|_| io::Error::other("capture thread panicked"))?,
+        None => Ok(BoundedStreamCapture {
+            bytes: Vec::new(),
+            metadata: CaptureMetadata::default(),
+        }),
+    }
+}
+
+fn capture_tail(mut stream: impl Read, byte_limit: usize) -> io::Result<BoundedStreamCapture> {
+    let mut capture = TailCapture::new(byte_limit);
+    let mut buf = [0_u8; 8192];
+    loop {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        capture.push(&buf[..n]);
+    }
+    Ok(capture.finish())
+}
+
+struct TailCapture {
+    bytes: Vec<u8>,
+    bytes_seen: u64,
+    byte_limit: usize,
+}
+
+impl TailCapture {
+    fn new(byte_limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            bytes_seen: 0,
+            byte_limit,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.bytes_seen = self
+            .bytes_seen
+            .saturating_add(chunk.len().try_into().unwrap_or(u64::MAX));
+        if self.byte_limit == 0 {
+            self.bytes.clear();
+            return;
+        }
+        if chunk.len() >= self.byte_limit {
+            self.bytes.clear();
+            self.bytes
+                .extend_from_slice(&chunk[chunk.len() - self.byte_limit..]);
+            return;
+        }
+        self.bytes.extend_from_slice(chunk);
+        let overflow = self.bytes.len().saturating_sub(self.byte_limit);
+        if overflow > 0 {
+            self.bytes.drain(..overflow);
+        }
+    }
+
+    fn finish(self) -> BoundedStreamCapture {
+        let bytes_retained = self.bytes.len();
+        BoundedStreamCapture {
+            bytes: self.bytes,
+            metadata: CaptureMetadata {
+                bytes_seen: self.bytes_seen,
+                bytes_retained,
+                byte_limit: self.byte_limit,
+                truncated: self.bytes_seen > bytes_retained as u64,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CapturedOutput {
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -108,5 +253,38 @@ impl CapturedOutput {
 
     pub fn is_empty(&self) -> bool {
         self.stdout.is_empty() && self.stderr.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tail_capture_retains_last_bytes_and_marks_truncated() {
+        let mut capture = TailCapture::new(5);
+        capture.push(b"hello");
+        capture.push(b" world");
+
+        let captured = capture.finish();
+
+        assert_eq!(captured.bytes, b"world");
+        assert_eq!(captured.metadata.bytes_seen, 11);
+        assert_eq!(captured.metadata.bytes_retained, 5);
+        assert_eq!(captured.metadata.byte_limit, 5);
+        assert!(captured.metadata.truncated);
+    }
+
+    #[test]
+    fn tail_capture_reports_untruncated_stream() {
+        let mut capture = TailCapture::new(10);
+        capture.push(b"ok");
+
+        let captured = capture.finish();
+
+        assert_eq!(captured.bytes, b"ok");
+        assert_eq!(captured.metadata.bytes_seen, 2);
+        assert_eq!(captured.metadata.bytes_retained, 2);
+        assert!(!captured.metadata.truncated);
     }
 }
