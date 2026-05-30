@@ -63,12 +63,6 @@ fi
 settings_json="${HOMEBOY_SETTINGS_JSON:-}"
 [ -n "$settings_json" ] || settings_json="{}"
 
-if printf '%s' "$settings_json" | jq -e '((.bench_site_mode // "fresh") == "installed")' >/dev/null 2>&1; then
-    echo "Error: bench_site_mode=installed requires a persisted-site WP Codebox recipe contract." >&2
-    FAILED_STEP="WP Codebox bench configuration"
-    exit 1
-fi
-
 homeboy_wp_codebox_resolve_host_path() {
     local base_dir="$1"
     local path_value="$2"
@@ -93,7 +87,7 @@ homeboy_wp_codebox_component_relative_path() {
 homeboy_wp_codebox_compile_scenario_manifests() {
     local entries_json
     entries_json=$(printf '%s' "$settings_json" | jq -c '
-        .playground_scenario_manifests // .scenario_manifests // []
+        .wp_codebox_scenario_manifests // .scenario_manifests // []
         | if type == "array" then . elif type == "string" or type == "object" then [.] else [] end
     ' 2>/dev/null || echo '[]')
 
@@ -125,7 +119,7 @@ homeboy_wp_codebox_compile_scenario_manifests() {
         elif [ "$entry_type" = "object" ]; then
             manifest_json=$(printf '%s' "$manifest_entry" | jq -c '.')
         else
-            echo "Error: playground_scenario_manifests[$index] must be a path string or object" >&2
+            echo "Error: wp_codebox_scenario_manifests[$index] must be a path string or object" >&2
             FAILED_STEP="Scenario manifest setup"
             exit 1
         fi
@@ -260,10 +254,10 @@ homeboy_wp_codebox_compile_scenario_manifests() {
 
 homeboy_wp_codebox_compile_scenario_manifests
 
-PLAYGROUND_WORDPRESS_VERSION="7.0"
+WP_CODEBOX_WORDPRESS_VERSION="7.0"
 if [ "$settings_json" != "{}" ]; then
-    extracted=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_wordpress_version // .playground_wordpress_version // empty' 2>/dev/null || true)
-    [ -n "$extracted" ] && [ "$extracted" != "null" ] && PLAYGROUND_WORDPRESS_VERSION="$extracted"
+    extracted=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_wordpress_version // empty' 2>/dev/null || true)
+    [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"
 fi
 
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-3}"
@@ -297,13 +291,13 @@ DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
 
 WP_CONFIG_DEFINES_JSON="{}"
 BENCH_ENV_JSON="{}"
-PLAYGROUND_WORKLOADS_JSON="[]"
+WP_CODEBOX_WORKLOADS_JSON="[]"
 if [ "$settings_json" != "{}" ]; then
     WP_CONFIG_DEFINES_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     BENCH_ENV_JSON=$(printf '%s' "$settings_json" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
-    PLAYGROUND_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.playground_workloads // []' 2>/dev/null || echo "[]")
+    WP_CODEBOX_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_workloads // []' 2>/dev/null || echo "[]")
 fi
-PLAYGROUND_WORKLOADS_JSON=$(jq -nc --argjson declared "$PLAYGROUND_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$declared + $scenarios')
+WP_CODEBOX_WORKLOADS_JSON=$(jq -nc --argjson declared "$WP_CODEBOX_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$declared + $scenarios')
 
 EXTRA_PLUGINS_JSON=$(jq -nc --arg source "$PLUGIN_PATH" --arg slug "$PLUGIN_SLUG" '[{source: $source, slug: $slug, activate: false}]')
 MOUNTS_JSON="[]"
@@ -322,18 +316,18 @@ if [ -f "$PLUGIN_DB_PHP" ]; then
     MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$PLUGIN_DB_PHP" '$mounts + [{source: $source, target: "/wordpress/wp-content/db.php", mode: "readonly"}]')
 fi
 
-PLAYGROUND_FILE_MOUNTS_JSON="[]"
+WP_CODEBOX_FILE_MOUNTS_JSON="[]"
 if [ "$settings_json" != "{}" ]; then
-    PLAYGROUND_FILE_MOUNTS_JSON=$(printf '%s' "$settings_json" | jq -c '.playground_file_mounts // []' 2>/dev/null || echo "[]")
+    WP_CODEBOX_FILE_MOUNTS_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_file_mounts // []' 2>/dev/null || echo "[]")
 fi
-if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+if printf '%s' "$WP_CODEBOX_FILE_MOUNTS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
     while IFS= read -r mount_json; do
         [ -n "$mount_json" ] || continue
         mount_from=$(printf '%s' "$mount_json" | jq -r '.from // empty')
         mount_to=$(printf '%s' "$mount_json" | jq -r '.to // empty')
         mount_dependency=$(printf '%s' "$mount_json" | jq -r '.from_dependency // empty')
         if [ -z "$mount_from" ] || [ -z "$mount_to" ] || [[ "$mount_from" = /* ]] || [[ "$mount_from" == *..* ]] || [[ "$mount_to" != /* ]]; then
-            echo "Error: playground_file_mounts entries require relative 'from' and absolute 'to' paths." >&2
+            echo "Error: wp_codebox_file_mounts entries require relative 'from' and absolute 'to' paths." >&2
             FAILED_STEP="WP Codebox file mount setup"
             exit 1
         fi
@@ -352,18 +346,18 @@ if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and lengt
             fi
         fi
         if [ -z "$mount_root" ]; then
-            echo "Error: playground_file_mounts dependency not found: $mount_dependency" >&2
+            echo "Error: wp_codebox_file_mounts dependency not found: $mount_dependency" >&2
             FAILED_STEP="WP Codebox file mount setup"
             exit 1
         fi
         mount_host="${mount_root}/${mount_from}"
         if [ ! -f "$mount_host" ]; then
-            echo "Error: playground_file_mounts source file not found: $mount_host" >&2
+            echo "Error: wp_codebox_file_mounts source file not found: $mount_host" >&2
             FAILED_STEP="WP Codebox file mount setup"
             exit 1
         fi
         MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$mount_host" --arg target "$mount_to" '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
-    done < <(printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -c '.[]')
+    done < <(printf '%s' "$WP_CODEBOX_FILE_MOUNTS_JSON" | jq -c '.[]')
 fi
 
 SHARED_STATE_HOST="${HOMEBOY_BENCH_SHARED_STATE:-}"
@@ -380,7 +374,7 @@ if ! homeboy_wordpress_emit_browser_target "$settings_json" "$SHARED_STATE_HOST"
 fi
 
 BENCH_DIR="${PLUGIN_PATH}/tests/bench"
-if [ ! -d "$BENCH_DIR" ] && ! printf '%s' "$PLAYGROUND_WORKLOADS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+if [ ! -d "$BENCH_DIR" ] && ! printf '%s' "$WP_CODEBOX_WORKLOADS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
     echo "Warning: No bench workloads found for ${PLUGIN_PATH}" >&2
     if [ -n "${HOMEBOY_BENCH_RESULTS_FILE:-}" ]; then
         homeboy_write_empty_bench_results "$COMPONENT_ID" 0 "$RESULTS_FILE"
@@ -391,19 +385,19 @@ fi
 
 echo "Running bench workloads via WP Codebox..."
 echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
-echo "  Backend: wp-codebox (WordPress Playground runtime)"
+echo "  Backend: wp-codebox"
 
 DEPENDENCY_SLUGS_CSV=""
 if [ ${#DEPENDENCY_SLUGS[@]} -gt 0 ]; then
     DEPENDENCY_SLUGS_CSV=$(IFS=,; printf '%s' "${DEPENDENCY_SLUGS[*]}")
 fi
 
-PLAYGROUND_BLUEPRINT_JSON="{}"
+WP_CODEBOX_BLUEPRINT_JSON="{}"
 if [ "$settings_json" != "{}" ]; then
-    PLAYGROUND_BLUEPRINT_JSON=$(printf '%s' "$settings_json" | jq -c '.playground_blueprint // {}' 2>/dev/null || echo "{}")
+    WP_CODEBOX_BLUEPRINT_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_blueprint // {}' 2>/dev/null || echo "{}")
 fi
 RUNTIME_BLUEPRINT_JSON=$(jq -nc \
-    --argjson base "$PLAYGROUND_BLUEPRINT_JSON" \
+    --argjson base "$WP_CODEBOX_BLUEPRINT_JSON" \
     --argjson scenario "$SCENARIO_MANIFEST_BLUEPRINT_JSON" \
     --argjson defines "$WP_CONFIG_DEFINES_JSON" '
     ($base + $scenario) as $merged |
@@ -422,7 +416,7 @@ WORKFLOW_STEP_JSON=$(jq -nc \
     --arg warmup "$WARMUP_ITERATIONS" \
     --arg dependencySlugs "$DEPENDENCY_SLUGS_CSV" \
     --argjson env "$BENCH_ENV_JSON" \
-    --argjson workloads "$PLAYGROUND_WORKLOADS_JSON" '
+    --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" '
     {
         command: "wordpress.bench",
         args: [
@@ -439,7 +433,7 @@ WORKFLOW_STEP_JSON=$(jq -nc \
 
 RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-recipe.XXXXXX")
 jq -n \
-    --arg wp "$PLAYGROUND_WORDPRESS_VERSION" \
+    --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
     --argjson blueprint "$RUNTIME_BLUEPRINT_JSON" \
     --argjson extraPlugins "$EXTRA_PLUGINS_JSON" \
     --argjson mounts "$MOUNTS_JSON" \

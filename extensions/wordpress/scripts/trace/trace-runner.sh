@@ -83,7 +83,7 @@ homeboy_wordpress_trace_wp_version() {
     local extracted=""
 
     if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
-        extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground_wordpress_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
+        extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_wordpress_version // empty' 2>/dev/null || true)
         [ -n "$extracted" ] && [ "$extracted" != "null" ] && version="$extracted"
     fi
 

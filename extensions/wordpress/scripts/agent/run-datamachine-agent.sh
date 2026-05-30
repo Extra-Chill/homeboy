@@ -140,7 +140,7 @@ PHP
     done < <(homeboy_datamachine_agent_wp_codebox_secret_env_names)
 
     jq -n \
-        --arg wp "$PLAYGROUND_WORDPRESS_VERSION" \
+        --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
         --argjson extraPlugins "$extra_plugins_json" \
         --argjson mounts "$mounts_json" \
         --argjson secretEnv "$secret_env_json" \
@@ -834,7 +834,7 @@ fi
 
 WORKLOAD_ID=$(jq -r '.workload_id // "datamachine-agent"' "$CONFIG_PATH")
 WORKLOAD_LABEL=$(jq -r '.workload_label // "Run Data Machine agent"' "$CONFIG_PATH")
-PLAYGROUND_WORDPRESS_VERSION=$(jq -r '.playground_wordpress_version // "7.0"' "$CONFIG_PATH")
+WP_CODEBOX_WORDPRESS_VERSION=$(jq -r '.wp_codebox_wordpress_version // "7.0"' "$CONFIG_PATH")
 ENABLE_TERMINAL_ACTIONS=$(jq -r 'if (.enable_terminal_actions // .enable_wp_cli_tool // false) then "1" else "0" end' <<<"$CONFIG_JSON")
 if [ "$ENABLE_TERMINAL_ACTIONS" = "1" ]; then
     if [ -z "$RUNTIME_DIR" ]; then

@@ -106,12 +106,19 @@ HOMEBOY_SETTINGS_JSON='{"test_backend":"host-smoke"}' \
 assert_contains "${TMPDIR}/router-host-smoke.out" "Backend: host-smoke"
 assert_not_contains "${TMPDIR}/router-host-smoke.out" "Backend: playground"
 
+set +e
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component-pass" \
 HOMEBOY_COMPONENT_PATH="$component_pass" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_SETTINGS_JSON='{"test_backend":"host"}' \
-    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/router-host-alias.out"
-assert_contains "${TMPDIR}/router-host-alias.out" "Backend: host-smoke"
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/router-host-alias.out" 2>&1
+host_alias_exit=$?
+set -e
+if [ "$host_alias_exit" -eq 0 ]; then
+    echo "Expected legacy host backend alias to fail" >&2
+    exit 1
+fi
+assert_contains "${TMPDIR}/router-host-alias.out" "Unsupported WordPress test backend: host"
 
 echo "Host smoke runner smoke passed"

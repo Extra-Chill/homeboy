@@ -26,7 +26,7 @@ homeboy_wordpress_emit_browser_target() {
     local shared_state_host="$2"
     local component_id="$3"
     local plugin_slug="$4"
-    local bench_site_mode="$5"
+    local runtime_mode="$5"
 
     if ! homeboy_wordpress_browser_target_enabled "$settings_json"; then
         return 0
@@ -66,7 +66,7 @@ homeboy_wordpress_emit_browser_target() {
     printf '%s' "$settings_json" | jq \
         --arg component_id "$component_id" \
         --arg plugin_slug "$plugin_slug" \
-        --arg bench_site_mode "$bench_site_mode" \
+        --arg runtime_mode "$runtime_mode" \
         --arg password "$password" '
         def target_config:
             if .bench_browser_target == true then {} else (.bench_browser_target // {}) end;
@@ -98,7 +98,7 @@ homeboy_wordpress_emit_browser_target() {
                 wpVersion: "6.9",
                 componentId: $component_id,
                 pluginSlug: $plugin_slug,
-                benchSiteMode: $bench_site_mode
+                runtimeMode: $runtime_mode
             },
             artifactPolicy: {
                 publishRaw: false,

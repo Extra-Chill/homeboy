@@ -88,7 +88,7 @@ name: Data Machine Agent CI (reusable)
         description: Ref for WordPress/ai-provider-for-openai when mounting the default OpenAI provider plugin.
         type: string
         default: trunk
-      playground_wordpress:
+      wp_codebox_wordpress_version:
         type: string
         default: "7.0"
       success_requires_pr:
@@ -183,19 +183,18 @@ name: Data Machine Agent CI (reusable)
           Default '{}' means no extra defines.
         type: string
         default: "{}"
-      extra_playground_file_mounts:
+      extra_wp_codebox_mounts:
         description: |
-          JSON array appended to the runner config playground_file_mounts after
-          the default ci-driver fixture mount. Use for plugin drop-ins,
-          must-use plugin mounts, or any consumer-specific WordPress sandbox file
-          placement. Default '[]' means no extra mounts.
+          JSON string array appended to the runner config wp_codebox_mounts after
+          the default ci-driver fixture mount. Each entry is SOURCE:TARGET[:MODE]
+          for a WP Codebox sandbox mount. Default '[]' means no extra mounts.
         type: string
         default: "[]"
       workload_run_before:
         description: |
           JSON array of pre-run hooks executed before the main bench workload
           inside the WordPress sandbox. Each entry is { type, file } the same way
-          playground_workloads[*].run entries are. Default '[]' means no
+          wp_codebox_workloads[*].run entries are. Default '[]' means no
           pre-run hook.
         type: string
         default: "[]"
@@ -599,7 +598,7 @@ jobs:
           PROMPT: ${{ inputs.prompt }}
           PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
-          PLAYGROUND_WORDPRESS: ${{ inputs.playground_wordpress }}
+          WP_CODEBOX_WORDPRESS_VERSION: ${{ inputs.wp_codebox_wordpress_version }}
           SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
           SUCCESS_COMPLETION_OUTCOMES: ${{ inputs.success_completion_outcomes }}
           MAX_TURNS: ${{ inputs.max_turns }}
@@ -613,7 +612,7 @@ jobs:
           WP_GYM_BENCHMARK_MODE: ${{ inputs.wp_gym_benchmark_mode }}
           DRY_RUN: ${{ inputs.dry_run }}
           EXTRA_WP_CONFIG_DEFINES: ${{ inputs.extra_wp_config_defines }}
-          EXTRA_PLAYGROUND_FILE_MOUNTS: ${{ inputs.extra_playground_file_mounts }}
+          EXTRA_WP_CODEBOX_MOUNTS: ${{ inputs.extra_wp_codebox_mounts }}
           WORKLOAD_RUN_BEFORE: ${{ inputs.workload_run_before }}
           WORKLOAD_RUN_AFTER: ${{ inputs.workload_run_after }}
           DAILY_MEMORY_ENABLED: ${{ inputs.daily_memory_enabled }}
@@ -657,7 +656,7 @@ jobs:
           execute_workflow_mounts_json="[]"
           if [ -n "$EXECUTE_WORKFLOW_PATH" ] && [[ "$EXECUTE_WORKFLOW_PATH" != /* ]]; then
             execute_workflow_guest_path="/wordpress/wp-content/plugins/${component_slug}/${EXECUTE_WORKFLOW_PATH}"
-            execute_workflow_mounts_json="$(jq -nc --arg from "$EXECUTE_WORKFLOW_PATH" --arg to "$execute_workflow_guest_path" '[{from: $from, to: $to}]')"
+            execute_workflow_mounts_json="$(jq -nc --arg source "${GITHUB_WORKSPACE}/${EXECUTE_WORKFLOW_PATH}" --arg target "$execute_workflow_guest_path" '[$source + ":" + $target + ":readonly"]')"
           fi
           mapfile -t validation_paths < <(find "${GITHUB_WORKSPACE}/.ci" -mindepth 1 -maxdepth 1 -type d | sort)
           provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | jq -Rsc --arg provider "$PROVIDER" --arg openaiRef "$OPENAI_PROVIDER_REF" '
@@ -705,7 +704,7 @@ jobs:
             fi
           }
           extra_wp_config_defines_json="$(validate_json_input extra_wp_config_defines object "$EXTRA_WP_CONFIG_DEFINES")"
-          extra_playground_file_mounts_json="$(validate_json_input extra_playground_file_mounts array "$EXTRA_PLAYGROUND_FILE_MOUNTS")"
+          extra_wp_codebox_mounts_json="$(validate_json_input extra_wp_codebox_mounts array "$EXTRA_WP_CODEBOX_MOUNTS")"
           workload_run_before_json="$(validate_json_input workload_run_before array "$WORKLOAD_RUN_BEFORE")"
           workload_run_after_json="$(validate_json_input workload_run_after array "$WORKLOAD_RUN_AFTER")"
           extra_required_abilities_json="$(validate_json_input extra_required_abilities array "$EXTRA_REQUIRED_ABILITIES")"
@@ -753,7 +752,8 @@ jobs:
             --arg providerPluginHostPath "$provider_plugin_host_path" \
             --arg engineKey "$ENGINE_KEY" \
             --arg toolResultsKey "$TOOL_RESULTS_KEY" \
-            --arg playgroundWordPress "$PLAYGROUND_WORDPRESS" \
+            --arg wpCodeboxWordPressVersion "$WP_CODEBOX_WORDPRESS_VERSION" \
+            --arg homeboyExtensionsPath "${GITHUB_WORKSPACE}/.ci/homeboy-extensions" \
             --arg transcriptGuestDir "$transcript_guest_dir" \
             --arg githubAppToken "$GITHUB_APP_TOKEN_VALUE" \
             --arg githubRepositoryToken "$GITHUB_REPOSITORY_TOKEN_VALUE" \
@@ -773,7 +773,7 @@ jobs:
             --argjson timeBudgetMs "$TIME_BUDGET_MS" \
             --argjson dryRun "$DRY_RUN" \
             --argjson extraWpConfigDefines "$extra_wp_config_defines_json" \
-            --argjson extraPlaygroundFileMounts "$extra_playground_file_mounts_json" \
+            --argjson extraWpCodeboxMounts "$extra_wp_codebox_mounts_json" \
             --argjson executeWorkflowMounts "$execute_workflow_mounts_json" \
             --argjson workloadRunBefore "$workload_run_before_json" \
             --argjson workloadRunAfter "$workload_run_after_json" \
@@ -799,14 +799,10 @@ jobs:
               workload_id: $flowSlug,
               workload_label: ("Run " + $agentSlug + " Data Machine agent"),
               validation_dependencies: $validationDependencies,
-              playground_wordpress_version: $playgroundWordPress,
-              playground_file_mounts: ([
-                {
-                  from_dependency: "homeboy-extensions",
-                  from: "wordpress/tests/fixtures/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php",
-                  to: "/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php"
-                }
-              ] + $extraPlaygroundFileMounts + $executeWorkflowMounts),
+              wp_codebox_wordpress_version: $wpCodeboxWordPressVersion,
+              wp_codebox_mounts: ([
+                $homeboyExtensionsPath + "/wordpress/tests/fixtures/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php:/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php:readonly"
+              ] + $extraWpCodeboxMounts + $executeWorkflowMounts),
               wp_config_defines: $extraWpConfigDefines,
               workload_run_before: $workloadRunBefore,
               workload_run_after: $workloadRunAfter,

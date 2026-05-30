@@ -159,7 +159,7 @@ if [ -n "$TARGET_FILE" ]; then
 fi
 
 case "$TEST_BACKEND" in
-    host|host-smoke)
+    host-smoke)
         exec bash "$HOST_SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
         ;;
     ""|wp-codebox)
@@ -167,7 +167,7 @@ case "$TEST_BACKEND" in
         ;;
     *)
         echo "ERROR: Unsupported WordPress test backend: ${TEST_BACKEND}" >&2
-        echo "Supported backends: wp-codebox, host, host-smoke" >&2
+        echo "Supported backends: wp-codebox, host-smoke" >&2
         exit 2
         ;;
 esac

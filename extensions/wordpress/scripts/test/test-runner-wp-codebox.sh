@@ -219,10 +219,10 @@ DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
 
 WP_CONFIG_DEFINES_JSON="{}"
 BENCH_ENV_JSON="{}"
-PLAYGROUND_FILE_MOUNTS_JSON="[]"
+WP_CODEBOX_FILE_MOUNTS_JSON="[]"
 PHPUNIT_NO_TESTS="skipped"
-PLAYGROUND_WORDPRESS_VERSION="6.9"
-PLAYGROUND_MULTISITE=""
+WP_CODEBOX_WORDPRESS_VERSION="6.9"
+WP_CODEBOX_MULTISITE=""
 if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     [ -n "$extracted" ] && WP_CONFIG_DEFINES_JSON="$extracted"
@@ -230,26 +230,23 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
     [ -n "$extracted" ] && BENCH_ENV_JSON="$extracted"
 
-    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.playground_file_mounts // []' 2>/dev/null || echo "[]")
-    [ -n "$extracted" ] && [ "$extracted" != "null" ] && PLAYGROUND_FILE_MOUNTS_JSON="$extracted"
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_codebox_file_mounts // []' 2>/dev/null || echo "[]")
+    [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_FILE_MOUNTS_JSON="$extracted"
 
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.phpunit_no_tests // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && PHPUNIT_NO_TESTS="$extracted"
 
-    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground_wordpress_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
-    [ -n "$extracted" ] && [ "$extracted" != "null" ] && PLAYGROUND_WORDPRESS_VERSION="$extracted"
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_wordpress_version // empty' 2>/dev/null || true)
+    [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"
 
-    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground.multisite // .wp_codebox_multisite // .multisite // empty' 2>/dev/null || true)
-    [ -n "$extracted" ] && [ "$extracted" != "null" ] && PLAYGROUND_MULTISITE="$extracted"
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_multisite // empty' 2>/dev/null || true)
+    [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_MULTISITE="$extracted"
 fi
 if [ -n "${HOMEBOY_WORDPRESS_MULTISITE+x}" ]; then
-    PLAYGROUND_MULTISITE="$HOMEBOY_WORDPRESS_MULTISITE"
+    WP_CODEBOX_MULTISITE="$HOMEBOY_WORDPRESS_MULTISITE"
 fi
-if [ -n "${HOMEBOY_PLAYGROUND_MULTISITE+x}" ]; then
-    PLAYGROUND_MULTISITE="$HOMEBOY_PLAYGROUND_MULTISITE"
-fi
-if [ -z "$PLAYGROUND_MULTISITE" ] && detect_network_plugin_header; then
-    PLAYGROUND_MULTISITE="1"
+if [ -z "$WP_CODEBOX_MULTISITE" ] && detect_network_plugin_header; then
+    WP_CODEBOX_MULTISITE="1"
 fi
 
 CHANGED_TEST_FILES_JSON="[]"
@@ -305,24 +302,24 @@ if [ -f "$PLUGIN_DB_PHP" ]; then
     homeboy_wp_codebox_add_recipe_mount "${PLUGIN_DB_PHP}" "/wordpress/wp-content/db.php"
 fi
 
-if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+if printf '%s' "$WP_CODEBOX_FILE_MOUNTS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
     while IFS= read -r mount_json; do
         [ -n "$mount_json" ] || continue
         mount_from=$(printf '%s' "$mount_json" | jq -r '.from // empty')
         mount_to=$(printf '%s' "$mount_json" | jq -r '.to // empty')
         mount_dependency=$(printf '%s' "$mount_json" | jq -r '.from_dependency // empty')
         if [ -z "$mount_from" ] || [ -z "$mount_to" ]; then
-            echo "Error: playground_file_mounts entries require 'from' and 'to'" >&2
+            echo "Error: wp_codebox_file_mounts entries require 'from' and 'to'" >&2
             FAILED_STEP="WP Codebox file mount setup"
             exit 1
         fi
         if [[ "$mount_from" = /* ]] || [[ "$mount_from" == *..* ]]; then
-            echo "Error: playground_file_mounts 'from' must be a relative path without '..' (got '$mount_from')" >&2
+            echo "Error: wp_codebox_file_mounts 'from' must be a relative path without '..' (got '$mount_from')" >&2
             FAILED_STEP="WP Codebox file mount setup"
             exit 1
         fi
         if [[ "$mount_to" != /* ]]; then
-            echo "Error: playground_file_mounts 'to' must be an absolute Playground path (got '$mount_to')" >&2
+            echo "Error: wp_codebox_file_mounts 'to' must be an absolute WP Codebox sandbox path (got '$mount_to')" >&2
             FAILED_STEP="WP Codebox file mount setup"
             exit 1
         fi
@@ -341,7 +338,7 @@ if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and lengt
                 done <<< "$DEPENDENCY_PATHS"
             fi
             if [ -z "$mount_root" ]; then
-                echo "Error: playground_file_mounts dependency not found: $mount_dependency" >&2
+                echo "Error: wp_codebox_file_mounts dependency not found: $mount_dependency" >&2
                 FAILED_STEP="WP Codebox file mount setup"
                 exit 1
             fi
@@ -349,12 +346,12 @@ if printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -e 'type == "array" and lengt
 
         mount_host="${mount_root}/${mount_from}"
         if [ ! -f "$mount_host" ]; then
-            echo "Error: playground_file_mounts source file not found: $mount_host" >&2
+            echo "Error: wp_codebox_file_mounts source file not found: $mount_host" >&2
             FAILED_STEP="WP Codebox file mount setup"
             exit 1
         fi
         homeboy_wp_codebox_add_recipe_mount "${mount_host}" "${mount_to}"
-    done < <(printf '%s' "$PLAYGROUND_FILE_MOUNTS_JSON" | jq -c '.[]')
+    done < <(printf '%s' "$WP_CODEBOX_FILE_MOUNTS_JSON" | jq -c '.[]')
 fi
 
 EXTENSION_VENDOR_PATH="$(homeboy_wp_codebox_resolve_mount_path "${EXTENSION_PATH}/vendor")"
@@ -362,15 +359,15 @@ homeboy_wp_codebox_add_recipe_mount "${EXTENSION_VENDOR_PATH}" "/wp-codebox-vend
 EXTENSION_MOUNT_PATH="$(homeboy_wp_codebox_resolve_mount_path "${EXTENSION_PATH}")"
 homeboy_wp_codebox_add_recipe_mount "${EXTENSION_MOUNT_PATH}" "/homeboy-extension" "readonly"
 
-PLAYGROUND_DEP_MOUNTS=""
+WP_CODEBOX_DEP_MOUNTS=""
 if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
         [ -z "$dep_path" ] && continue
         dep_slug="$(homeboy_get_validation_dependency_slug "$dep_path" || basename "$dep_path")"
-        if [ -n "$PLAYGROUND_DEP_MOUNTS" ]; then
-            PLAYGROUND_DEP_MOUNTS+="\\n"
+        if [ -n "$WP_CODEBOX_DEP_MOUNTS" ]; then
+            WP_CODEBOX_DEP_MOUNTS+="\\n"
         fi
-        PLAYGROUND_DEP_MOUNTS+="/wordpress/wp-content/plugins/${dep_slug}"
+        WP_CODEBOX_DEP_MOUNTS+="/wordpress/wp-content/plugins/${dep_slug}"
     done <<< "$DEPENDENCY_PATHS"
 fi
 
@@ -387,12 +384,12 @@ fi
 
 echo "Running PHPUnit tests via WP Codebox..."
 echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
-echo "  Backend: wp-codebox (WordPress Playground runtime)"
+echo "  Backend: wp-codebox"
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "  Mounts: ${MOUNTS_JSON}"
-    echo "  WordPress version: ${PLAYGROUND_WORDPRESS_VERSION}"
-    echo "  Multisite: ${PLAYGROUND_MULTISITE:-0}"
+    echo "  WordPress version: ${WP_CODEBOX_WORDPRESS_VERSION}"
+    echo "  Multisite: ${WP_CODEBOX_MULTISITE:-0}"
     echo "  Artifacts: ${ARTIFACTS_DIR}"
 fi
 
@@ -407,15 +404,15 @@ case "$WP_CODEBOX_BIN" in
 esac
 
 jq -n \
-    --arg wp "$PLAYGROUND_WORDPRESS_VERSION" \
+    --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
     --argjson mounts "$MOUNTS_JSON" \
     --arg pluginSlug "$PLUGIN_SLUG" \
     --arg selectedTestFile "$SELECTED_TEST_FILE_REL" \
     --arg changedTestsJson "$CHANGED_TEST_FILES_JSON" \
     --arg envJson "$BENCH_ENV_JSON" \
     --arg definesJson "$WP_CONFIG_DEFINES_JSON" \
-    --arg dependencyMounts "$PLAYGROUND_DEP_MOUNTS" \
-    --arg multisite "$PLAYGROUND_MULTISITE" \
+    --arg dependencyMounts "$WP_CODEBOX_DEP_MOUNTS" \
+    --arg multisite "$WP_CODEBOX_MULTISITE" \
     '{
         schema: "wp-codebox/workspace-recipe/v1",
         runtime: {wp: $wp, blueprint: {steps: []}},

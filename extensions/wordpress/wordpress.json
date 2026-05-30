@@ -908,7 +908,7 @@
       "label": "Test backend",
       "type": "string",
       "default": "wp-codebox",
-      "description": "WordPress test backend. Use 'wp-codebox' for default PHPUnit execution, or 'host-smoke' / 'host' for standalone tests/**/*-smoke.php scripts that run under host PHP without WordPress bootstrap."
+      "description": "WordPress test backend. Use 'wp-codebox' for default PHPUnit execution, or 'host-smoke' for standalone tests/**/*-smoke.php scripts that run under host PHP without WordPress bootstrap."
     },
     {
       "id": "validation_dependencies",
@@ -946,32 +946,25 @@
       "description": "How the WP Codebox PHPUnit backend treats successful WordPress install/activation when discovery finds zero PHPUnit files. Use 'skipped' for components that intentionally test through smoke scripts, or 'failed' when the component expects PHPUnit coverage. Components with phpunit.xml(.dist) still fail on zero discovery."
     },
     {
-      "id": "playground_blueprint",
-      "label": "Playground blueprint",
+      "id": "wp_codebox_blueprint",
+      "label": "WP Codebox blueprint",
       "type": "object",
       "default": {},
       "description": "Runtime blueprint merged into the generated WP Codebox bench recipe. Empty object means stock WordPress."
     },
     {
-      "id": "playground_workloads",
+      "id": "wp_codebox_workloads",
       "label": "Bench workloads",
       "type": "array",
       "default": [],
       "description": "Config-declared WordPress bench workloads passed to wordpress.bench through the generated WP Codebox recipe after dependency mounts and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file}, {type: 'ability', ability|name, input}, or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata. Step returns use the same {metrics, artifacts, metadata} shape as Node.js bench workloads."
     },
     {
-      "id": "playground_scenario_manifests",
-      "label": "Playground scenario manifests",
+      "id": "wp_codebox_scenario_manifests",
+      "label": "WP Codebox scenario manifests",
       "type": "array",
       "default": [],
       "description": "Scenario manifest files or inline objects compiled into wordpress.bench workloads in the generated WP Codebox recipe. Prompt, blueprint, grader, verifier hooks, rules, tags, limits, policy metadata, and metadata are preserved in BenchResults metadata."
-    },
-    {
-      "id": "bench_site_mode",
-      "label": "Bench site mode",
-      "type": "string",
-      "default": "fresh",
-      "description": "WordPress bench boot shape. 'fresh' uses the disposable WP Codebox runtime. 'installed' currently fails fast until a WP Codebox persisted-site contract lands."
     },
     {
       "id": "bench_browser_target",
@@ -981,18 +974,11 @@
       "description": "Optional browser bench target descriptor. Set {\"enabled\": true} to write HOMEBOY_BENCH_SHARED_STATE/browser-target.json. Include baseUrl/adminUrl for an already-running site; otherwise the file is metadata-only because the WP Codebox bench command exits after workloads complete. Login supports method plus username/password or password_env; raw target files are handoff artifacts and must not be published in reports."
     },
     {
-      "id": "playground_wordpress_version",
+      "id": "wp_codebox_wordpress_version",
       "label": "WordPress runtime version",
       "type": "string",
       "default": "",
       "description": "Optional WordPress core version passed to WP Codebox test and bench runners. Leave empty for the runner default. Use this when a component needs classes or behavior from a newer WordPress core build."
-    },
-    {
-      "id": "playground_wordpress_install_mode",
-      "label": "Playground WordPress install mode",
-      "type": "string",
-      "default": "",
-      "description": "Legacy direct-Playground pass-through retained only for config compatibility. The WP Codebox bench runner ignores this setting."
     }
   ],
   "actions": [

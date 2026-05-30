@@ -75,12 +75,12 @@ Each dependency entry may be either:
 - a registered Homeboy component ID
 - an absolute path to another local plugin checkout
 
-## Configurable Playground Bench Workloads
+## Configurable WP Codebox Bench Workloads
 
-WordPress bench runs can declare Playground workloads in extension settings when
+WordPress bench runs can declare WP Codebox workloads in extension settings when
 the workload should be configured by the repo instead of living under
-`tests/bench/*.php`. Configured workloads run after the existing Playground
-bootstrap, `playground_blueprint`, dependency mounts, and component load through
+`tests/bench/*.php`. Configured workloads run after the existing WP Codebox
+bootstrap, `wp_codebox_blueprint`, dependency mounts, and component load through
 a generated WP Codebox recipe.
 
 ```json
@@ -88,7 +88,7 @@ a generated WP Codebox recipe.
   "extensions": {
     "wordpress": {
       "settings": {
-        "playground_workloads": [
+        "wp_codebox_workloads": [
           {
             "id": "generated-site-preview",
             "label": "Generated site preview",
@@ -344,10 +344,10 @@ WordPress substrate. See
 [`../../wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
 for the dedicated agent sandbox guide.
 
-## Playground Scenario Manifests
+## WP Codebox Scenario Manifests
 
 Repos can declare first-class scenario manifests and let the WordPress runner
-compile them into `playground_workloads`. This keeps eval/RL-style scenarios on
+compile them into `wp_codebox_workloads`. This keeps eval/RL-style scenarios on
 the WP Codebox recipe execution path instead of adding a second runner.
 
 ```json
@@ -355,7 +355,7 @@ the WP Codebox recipe execution path instead of adding a second runner.
   "extensions": {
     "wordpress": {
       "settings": {
-        "playground_scenario_manifests": [
+        "wp_codebox_scenario_manifests": [
           "scenarios/navigation-001.json"
         ]
       }
@@ -394,7 +394,7 @@ Supported fields:
   references resolve relative to the manifest file.
 - `blueprint` or `blueprint_file`: inline object or JSON file passed to
   WP Codebox as part of the generated recipe runtime blueprint.
-- `run`: existing `playground_workloads` steps for the model or agent action
+- `run`: existing `wp_codebox_workloads` steps for the model or agent action
   loop. The supported step types are still `php`, `ability`, and `wp-cli`.
 - `grader` or `grader_file`: PHP file appended after `run`, so grading happens
   after the action loop.
@@ -423,12 +423,12 @@ Example: drive a plugin's pipeline through an Abilities API entry point.
   "extensions": {
     "wordpress": {
       "settings": {
-        "playground_blueprint": {
+        "wp_codebox_blueprint": {
           "steps": [
             { "step": "installPlugin", "pluginData": { "resource": "wordpress.org/plugins", "slug": "data-machine" } }
           ]
         },
-        "playground_workloads": [
+        "wp_codebox_workloads": [
           {
             "id": "smoke-pipeline",
             "run": [

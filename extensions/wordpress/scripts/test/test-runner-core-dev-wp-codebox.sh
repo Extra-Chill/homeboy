@@ -3,7 +3,7 @@ set -euo pipefail
 
 # WP Codebox-backed test runner for wordpress-develop / WordPress core source
 # checkouts. Unlike plugin/theme tests, core tests mount the checkout's src and
-# tests/phpunit directories into a core-shaped Playground runtime. If the core
+# tests/phpunit directories into a core-shaped WP Codebox runtime. If the core
 # vendor autoload is absent, WP Codebox reports that as a structured runtime
 # failure instead of this wrapper provisioning host dependencies.
 
@@ -105,22 +105,19 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
 fi
 
 WP_CONFIG_DEFINES_JSON="{}"
-PLAYGROUND_WORDPRESS_VERSION="6.9"
-PLAYGROUND_MULTISITE="${HOMEBOY_WORDPRESS_MULTISITE:-}"
+WP_CODEBOX_WORDPRESS_VERSION="6.9"
+WP_CODEBOX_MULTISITE="${HOMEBOY_WORDPRESS_MULTISITE:-}"
 if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     [ -n "$extracted" ] && WP_CONFIG_DEFINES_JSON="$extracted"
 
-    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground_wordpress_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
-    [ -n "$extracted" ] && [ "$extracted" != "null" ] && PLAYGROUND_WORDPRESS_VERSION="$extracted"
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_wordpress_version // empty' 2>/dev/null || true)
+    [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"
 
-    if [ -z "$PLAYGROUND_MULTISITE" ]; then
-        extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.playground.multisite // .wp_codebox_multisite // .multisite // empty' 2>/dev/null || true)
-        [ -n "$extracted" ] && [ "$extracted" != "null" ] && PLAYGROUND_MULTISITE="$extracted"
+    if [ -z "$WP_CODEBOX_MULTISITE" ]; then
+        extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_multisite // empty' 2>/dev/null || true)
+        [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_MULTISITE="$extracted"
     fi
-fi
-if [ -n "${HOMEBOY_PLAYGROUND_MULTISITE+x}" ]; then
-    PLAYGROUND_MULTISITE="$HOMEBOY_PLAYGROUND_MULTISITE"
 fi
 
 MOUNTS_JSON=$(jq -nc \
@@ -142,7 +139,7 @@ fi
 
 echo "Running WordPress core PHPUnit tests via WP Codebox..."
 echo "  Core: ${CORE_PATH}"
-echo "  Backend: wp-codebox (WordPress Playground runtime)"
+echo "  Backend: wp-codebox"
 
 WP_CODEBOX_TMPFILE=$(mktemp)
 PHPUNIT_STDOUT_TMPFILE=$(mktemp)
@@ -155,12 +152,12 @@ case "$WP_CODEBOX_BIN" in
 esac
 
 jq -n \
-    --arg wp "$PLAYGROUND_WORDPRESS_VERSION" \
+    --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
     --argjson mounts "$MOUNTS_JSON" \
     --arg selectedTestFile "$SELECTED_TEST_FILE" \
     --arg changedTestsJson "$CHANGED_TEST_FILES_JSON" \
     --arg definesJson "$WP_CONFIG_DEFINES_JSON" \
-    --arg multisite "$PLAYGROUND_MULTISITE" \
+    --arg multisite "$WP_CODEBOX_MULTISITE" \
     '{
         schema: "wp-codebox/workspace-recipe/v1",
         runtime: {wp: $wp, blueprint: {steps: []}},

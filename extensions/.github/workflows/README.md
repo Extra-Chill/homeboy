@@ -96,7 +96,7 @@ jobs:
       target_repo: chubes4/world-of-wordpress
       prompt: ${{ inputs.prompt }}
       validation_dependencies: chubes4/world-of-wordpress@main,chubes4/markdown-database-integration@main
-      playground_wordpress: beta
+      wp_codebox_wordpress_version: beta
       max_turns: 16
       step_budget: 20
       time_budget_ms: 900000
@@ -105,13 +105,9 @@ jobs:
           "MARKDOWN_DB_MODE": "primary",
           "MARKDOWN_DB_CONTENT_DIR": "/wordpress/wp-content/plugins/world-of-wordpress/content"
         }
-      extra_playground_file_mounts: |
+      extra_wp_codebox_mounts: |
         [
-          {
-            "from_dependency": "markdown-database-integration",
-            "from": "db.php",
-            "to": "/wordpress/wp-content/db.php"
-          }
+          "${{ github.workspace }}/.ci/markdown-database-integration/db.php:/wordpress/wp-content/db.php:readonly"
         ]
       workload_run_before: |
         [
@@ -141,7 +137,7 @@ jobs:
 - `dry_run` is intended for workflow smoke tests only; production consumers should leave it `false`.
 - `transcript_artifact_name` controls artifact upload. An empty value skips upload.
 - `extra_wp_config_defines` must be a JSON object and is merged into the runner config `wp_config_defines`.
-- `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`, and `extra_required_abilities` must be JSON arrays.
+- `extra_wp_codebox_mounts`, `workload_run_before`, `workload_run_after`, and `extra_required_abilities` must be JSON arrays.
 - `workload_run_after` runs post-agent verifier hooks in the same WordPress scenario, so consumers can assert the agent left WordPress in a valid state.
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
 - `tool_recorders` configures tool-result projection, forced parameters, and engine-data capture. It must be a JSON array.

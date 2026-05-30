@@ -130,10 +130,10 @@ SETTINGS_JSON=$(jq -nc \
     --argjson wpConfig '{"WP_DEBUG":true,"CUSTOM_NUMBER":7}' \
     --argjson benchEnv '{"HOMEBOY_FLAG":"yes"}' \
     '{
-        playground_wordpress_version: "6.10",
+        wp_codebox_wordpress_version: "6.10",
         wp_config_defines: $wpConfig,
         bench_env: $benchEnv,
-        playground_file_mounts: [
+        wp_codebox_file_mounts: [
             {from: "config/component-extra.php", to: "/wordpress/wp-content/component-extra.php"},
             {from_dependency: "dep-plugin", from: "fixtures/dep-extra.php", to: "/wordpress/wp-content/dep-extra.php"}
         ]

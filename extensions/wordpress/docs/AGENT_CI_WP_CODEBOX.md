@@ -108,9 +108,7 @@ The runner converts the agent config into a single WP Codebox sandbox run:
 - The workflow checks out and builds WP Codebox whenever `run_agent` is true.
 - `include_agent_runtime_dependencies` mounts the standard Data Machine agent
   runtime before consumer-supplied `validation_dependencies`.
-- `playground_file_mounts` adds fixture files such as the CI driver plugin. The
-  setting name is inherited from the previous direct-runner contract and is kept
-  as part of the current workflow input surface.
+- `wp_codebox_mounts` adds fixture files such as the CI driver plugin.
 - `bench_env` forwards credentials and the serialized runner config into the
   sandbox.
 - `workload_run_before` and `workload_run_after` attach setup and verifier hooks
@@ -135,7 +133,7 @@ The runner converts the agent config into a single WP Codebox sandbox run:
   execute like a real command. In WP Codebox agent runs, the default
   `run_wp_cli` tool posts to the authenticated runtime WP-CLI bridge injected by
   `wp-codebox.agent-sandbox-run`; the bridge executes the command with WP
-  Codebox's `wordpress.wp-cli` primitive inside the active Playground runtime
+  Codebox's `wordpress.wp-cli` primitive inside the active WP Codebox runtime
   and returns exit code, stdout, and stderr. Use `wp_cli_tool_name` only when a
   consumer needs a different agent-facing tool name.
 - `pipeline_step_patches` and `flow_step_patches` can adjust imported bundle
@@ -159,7 +157,7 @@ knobs to `run-datamachine-agent.sh`:
 - Bundle location: `bundle_path`, `bundle_repo`, `bundle_ref`, `bundle_path_in_repo`.
 - Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
 - Provider plugin: `provider_plugin`, with OpenAI defaults preserved when omitted for `provider: openai`.
-- WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `playground_wordpress`, `wp_codebox_ref`, `extra_wp_config_defines`, `extra_playground_file_mounts`, `workload_run_before`, `workload_run_after`.
+- WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `wp_codebox_wordpress_version`, `wp_codebox_ref`, `extra_wp_config_defines`, `extra_wp_codebox_mounts`, `workload_run_before`, `workload_run_after`.
 - GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.
