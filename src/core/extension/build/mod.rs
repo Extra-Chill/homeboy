@@ -545,11 +545,11 @@ mod tests {
     fn deploy_build_uses_explicit_command_when_artifact_is_required() {
         let temp = tempfile::tempdir().expect("tempdir");
         let component = Component {
-            id: "wp-codebox".to_string(),
+            id: "artifact-component".to_string(),
             local_path: temp.path().to_string_lossy().to_string(),
-            build_artifact: Some("dist/wp-codebox.zip".to_string()),
+            build_artifact: Some("dist/component.zip".to_string()),
             build_command: Some(
-                "mkdir -p dist && printf explicit > dist/wp-codebox.zip".to_string(),
+                "mkdir -p dist && printf explicit > dist/component.zip".to_string(),
             ),
             scripts: Some(ComponentScriptsConfig {
                 build: vec!["mkdir -p dist && printf generic > dist/generic.zip".to_string()],
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(exit_code, Some(0));
         assert_eq!(error, None);
         assert_eq!(
-            std::fs::read_to_string(temp.path().join("dist/wp-codebox.zip")).unwrap(),
+            std::fs::read_to_string(temp.path().join("dist/component.zip")).unwrap(),
             "explicit"
         );
         assert!(!temp.path().join("dist/generic.zip").exists());
@@ -573,11 +573,11 @@ mod tests {
     fn build_run_uses_explicit_command_when_artifact_is_required() {
         let temp = tempfile::tempdir().expect("tempdir");
         let component = Component {
-            id: "wp-codebox".to_string(),
+            id: "artifact-component".to_string(),
             local_path: temp.path().to_string_lossy().to_string(),
-            build_artifact: Some("packages/wordpress-plugin/dist/wp-codebox.zip".to_string()),
+            build_artifact: Some("packages/content-plugin/dist/component.zip".to_string()),
             build_command: Some(
-                "mkdir -p packages/wordpress-plugin/dist && printf artifact > packages/wordpress-plugin/dist/wp-codebox.zip".to_string(),
+                "mkdir -p packages/content-plugin/dist && printf artifact > packages/content-plugin/dist/component.zip".to_string(),
             ),
             scripts: Some(ComponentScriptsConfig {
                 build: vec!["mkdir -p dist && printf generic > dist/generic.zip".to_string()],
@@ -597,7 +597,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(
                 temp.path()
-                    .join("packages/wordpress-plugin/dist/wp-codebox.zip")
+                    .join("packages/content-plugin/dist/component.zip")
             )
             .unwrap(),
             "artifact"
