@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.204.9] - 2026-05-30
+
+### Changed
+- keep build fixtures domain agnostic
+
+### Fixed
+- prepare rig benches before timed workloads
+- honor artifact build commands
+- deploy released tag from release handoff
+
 ## [0.204.8] - 2026-05-29
 
 ### Fixed
