@@ -79,7 +79,7 @@ homeboy_node_package_value() {
 
 homeboy_node_script_command() {
     local script_name="$1"
-    printf '%s' "${PKG_RUN} ${script_name} --"
+    printf '%s --' "$(homeboy_project_run_script_command "$script_name")"
 }
 
 homeboy_node_targeted_test_script() {
@@ -129,7 +129,7 @@ if [ -n "${HOMEBOY_NODE_TEST_COMMAND:-}" ]; then
 elif [ ${#RUNNER_ARGS[@]} -gt 0 ] && TARGETED_TEST_SCRIPT="$(homeboy_node_targeted_test_script)"; then
     TEST_CMD="$(homeboy_node_script_command "$TARGETED_TEST_SCRIPT")"
 elif homeboy_has_npm_script "test"; then
-    TEST_CMD="$PKG_RUN test"
+    TEST_CMD="$(homeboy_project_run_script_command test)"
 else
     # Node 18+ ships a built-in test runner. This is the right default
     # for tiny projects without an explicit script.

@@ -58,18 +58,18 @@ elif [ -f "${PROJECT_PATH}/nx.json" ]; then
     # the project author choose the exact `nx ...` invocation), else
     # default to `nx run-many`.
     if homeboy_has_npm_script "build"; then
-        BUILD_CMD="$PKG_RUN build"
+        BUILD_CMD="$(homeboy_project_run_script_command build)"
     else
-        BUILD_CMD="$PKG_EXEC nx run-many --target=build --all"
+        BUILD_CMD="$(homeboy_project_exec_command nx run-many --target=build --all)"
     fi
 elif [ -f "${PROJECT_PATH}/turbo.json" ]; then
     if homeboy_has_npm_script "build"; then
-        BUILD_CMD="$PKG_RUN build"
+        BUILD_CMD="$(homeboy_project_run_script_command build)"
     else
-        BUILD_CMD="$PKG_EXEC turbo run build"
+        BUILD_CMD="$(homeboy_project_exec_command turbo run build)"
     fi
 elif homeboy_has_npm_script "build"; then
-    BUILD_CMD="$PKG_RUN build"
+    BUILD_CMD="$(homeboy_project_run_script_command build)"
 else
     FAILED_STEP="No build defined"
     FAILURE_OUTPUT="No scripts.build in package.json and no nx.json/turbo.json detected. Set HOMEBOY_NODE_BUILD_COMMAND or add a scripts.build entry."

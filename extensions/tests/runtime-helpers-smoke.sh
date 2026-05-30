@@ -6,6 +6,7 @@ HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/failure-trap.sh}"
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/write-test-results.sh}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
+PROJECT_SCRIPTS_HELPER="${ROOT_DIR}/scripts/lib/project-scripts.sh"
 BASH_PREFLIGHT_HELPERS=(
     "${ROOT_DIR}/nodejs/scripts/lib/bash-preflight.sh"
     "${ROOT_DIR}/rust/scripts/lib/bash-preflight.sh"
@@ -45,7 +46,9 @@ assert_not_contains() {
 assert_file "$FAILURE_TRAP_HELPER"
 assert_file "$WRITE_TEST_RESULTS_HELPER"
 assert_file "$SIDECAR_WRITER_HELPER"
+assert_file "$PROJECT_SCRIPTS_HELPER"
 bash -c 'source "$1"; type homeboy_merge_lint_findings >/dev/null; type homeboy_merge_test_failures >/dev/null; type homeboy_write_fix_results >/dev/null' _ "$SIDECAR_WRITER_HELPER"
+bash -c 'source "$1"; type homeboy_project_init >/dev/null; type homeboy_project_has_script >/dev/null; type homeboy_project_run_script_command >/dev/null' _ "$PROJECT_SCRIPTS_HELPER"
 for bash_preflight_helper in "${BASH_PREFLIGHT_HELPERS[@]}"; do
     assert_file "$bash_preflight_helper"
     bash -c 'source "$1"; homeboy_require_bash_version 4' _ "$bash_preflight_helper"
@@ -122,6 +125,22 @@ mkdir -p "$NODE_PROJECT"
 cat > "$NODE_PROJECT/package.json" <<'EOF'
 {"name":"runtime-helper-smoke","scripts":{}}
 EOF
+
+PROJECT_HELPER_NODE_PROJECT="$TMP_DIR/project-helper-node"
+mkdir -p "$PROJECT_HELPER_NODE_PROJECT/subdir"
+cat > "$PROJECT_HELPER_NODE_PROJECT/package.json" <<'EOF'
+{"name":"project-helper-node","scripts":{"test":"node --test","lint:fix":"eslint . --fix"}}
+EOF
+bash -c '
+    source "$1"
+    PROJECT_PATH="$2/subdir"
+    homeboy_project_init --ecosystem node --path "$PROJECT_PATH"
+    [ "$HOMEBOY_PROJECT_ROOT" = "$2" ]
+    [ "$(homeboy_project_run_script_command test)" = "npm run test" ]
+    homeboy_project_has_script test
+    homeboy_project_has_script lint:fix
+    ! homeboy_project_has_script build
+' _ "$PROJECT_SCRIPTS_HELPER" "$PROJECT_HELPER_NODE_PROJECT"
 
 set +e
 HOMEBOY_RUNTIME_FAILURE_TRAP="$FAILURE_TRAP_HELPER" \
