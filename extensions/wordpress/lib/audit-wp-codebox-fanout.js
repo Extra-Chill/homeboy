@@ -792,7 +792,8 @@ function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', 
   }
 
   const changedFiles = artifactChangedFiles(artifact);
-  if (success && changedFiles.length > 0) {
+  const hasPatch = artifactHasPatch(artifact);
+  if (success && changedFiles.length > 0 && hasPatch) {
     const falsePositive = outputLooksFalsePositive(parsed);
     return structuredTaskOutcome(taskRequest, {
       kind: falsePositive ? 'false_positive_artifact' : 'fix_artifact',
@@ -816,7 +817,7 @@ function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', 
   );
   const prUrl = explicit.pr_url || explicit.pull_request_url || explicit.pullRequestUrl || urls[0] || '';
   const falsePositivePrUrl = explicit.false_positive_pr_url || explicit.falsePositivePullRequestUrl || (falsePositive ? prUrl : '');
-  let kind = success ? 'unable_to_remediate' : 'explicit_failure';
+  let kind = 'explicit_failure';
 
   if (timedOut) {
     kind = 'timeout';
@@ -829,7 +830,7 @@ function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', 
   if (!success) {
     failure = errorMessage;
   } else if (kind === 'explicit_failure') {
-    failure = 'WP Codebox task failed without a structured outcome';
+    failure = 'WP Codebox task succeeded without an actionable patch, changed files, PR URL, or justified no-op outcome';
   }
 
   return {
@@ -843,6 +844,15 @@ function taskOutcome(taskRequest, parsed, artifact, success, errorMessage = '', 
     false_positive: falsePositive,
     artifact_id: artifact?.id || '',
     failure,
+    non_actionable: success && kind === 'explicit_failure',
+    evidence: success && kind === 'explicit_failure' ? {
+      artifact_id: artifact?.id || '',
+      artifact_directory: artifact?.directory || artifact?.path || '',
+      changed_file_count: changedFiles.length,
+      has_patch: hasPatch,
+      pr_url: prUrl,
+      false_positive_pr_url: falsePositivePrUrl,
+    } : undefined,
   };
 }
 
@@ -861,6 +871,11 @@ function artifactChangedFiles(artifact) {
     relative_path: file.relativePath || file.relative_path || '',
     status: file.status || '',
   })).filter((file) => file.path || file.relative_path);
+}
+
+function artifactHasPatch(artifact) {
+  const directory = artifact?.directory || artifact?.path || '';
+  return Boolean(directory && fs.existsSync(path.join(directory, 'files', 'patch.diff')));
 }
 
 function outputLooksFalsePositive(parsed) {
@@ -961,7 +976,20 @@ function wpCodeboxOutcomeErrorMessage(explicit) {
 }
 
 function taskOutcomeSucceeded(outcome) {
-  return ['fix_artifact', 'false_positive_artifact', 'noop_artifact', 'unable_to_remediate', 'fix_pr', 'false_positive_pr'].includes(outcome?.kind);
+  if (['fix_artifact', 'false_positive_artifact', 'noop_artifact', 'fix_pr', 'false_positive_pr'].includes(outcome?.kind)) {
+    return true;
+  }
+  return outcome?.kind === 'unable_to_remediate' && hasJustifiedNoopOutcome(outcome);
+}
+
+function hasJustifiedNoopOutcome(outcome) {
+  return [
+    outcome?.justification,
+    outcome?.noop_reason,
+    outcome?.reason,
+    outcome?.remediation_summary,
+    outcome?.failure,
+  ].some((value) => typeof value === 'string' && value.trim());
 }
 
 function pullRequestUrls(value, urls = []) {

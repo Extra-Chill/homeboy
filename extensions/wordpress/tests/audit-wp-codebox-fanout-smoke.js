@@ -202,6 +202,28 @@ process.stdin.on('end', () => {
     }));
     process.exit(0);
   }
+  if (process.env.FIXTURE_NO_ACTIONABLE_GROUP === request.group_key) {
+    const artifactDirectory = path.join(root, 'no-actionable-' + request.sandbox_session_id);
+    fs.mkdirSync(artifactDirectory, { recursive: true });
+    fs.writeFileSync(path.join(artifactDirectory, 'artifact.txt'), 'fixture non-actionable artifact bytes\\n');
+    process.stdout.write(JSON.stringify({
+      success: true,
+      artifacts: {
+        id: 'artifact-no-actionable-' + request.sandbox_session_id,
+        directory: artifactDirectory,
+      },
+      metrics: {
+        duration_ms: 99,
+        peak_rss_bytes: 123456,
+        sample_count: 3,
+        child_process_count_peak: 2,
+        cpu_user_ms: 12,
+        cpu_system_ms: 4,
+        source: 'linux_procfs_process_tree',
+      },
+    }));
+    process.exit(0);
+  }
   if (request.group_key === 'docs-reference') {
     if (process.env.FIXTURE_EXPECT_INCREMENTAL_RUN) {
       const run = JSON.parse(fs.readFileSync(process.env.FIXTURE_EXPECT_INCREMENTAL_RUN, 'utf8'));
@@ -434,8 +456,9 @@ try {
       directory: path.join(root, 'zero-change-artifact'),
     },
   }, { id: 'artifact-zero-change', directory: path.join(root, 'zero-change-artifact') }, true);
-  assert.equal(zeroChangeOutcome.kind, 'unable_to_remediate');
-  assert.equal(taskOutcomeSucceeded(zeroChangeOutcome), true);
+  assert.equal(zeroChangeOutcome.kind, 'explicit_failure');
+  assert.equal(zeroChangeOutcome.non_actionable, true);
+  assert.equal(taskOutcomeSucceeded(zeroChangeOutcome), false);
   assert.deepEqual(zeroChangeOutcome.finding_ids, ['finding-doc-001']);
 
   const noopOutcome = taskOutcome(docsRequest, {
@@ -649,6 +672,25 @@ try {
   assert.equal(noopRecord.outcome.kind, 'noop_artifact');
   assertMetrics(noopRecord, { runnerMetrics: true });
   assert.equal(noopRecord.metrics.artifact_bytes, null);
+
+  const noActionableExecution = await executeAuditWpCodeboxFanout({
+    report,
+    wp_codebox_command: process.execPath,
+    wp_codebox_args: [fixtureCommand],
+    concurrency: 1,
+    env: { FIXTURE_NO_ACTIONABLE_GROUP: 'PHPCS Formatting/Auto Fix!' },
+  });
+  const noActionableRecord = noActionableExecution.records.find((record) => record.group_key === 'PHPCS Formatting/Auto Fix!');
+  assert.equal(noActionableExecution.status, 'failed');
+  assert.equal(noActionableRecord.status, 'failed');
+  assert.equal(noActionableRecord.command.exit_code, 0);
+  assert.equal(noActionableRecord.outcome.kind, 'explicit_failure');
+  assert.equal(noActionableRecord.outcome.non_actionable, true);
+  assert.equal(noActionableRecord.outcome.evidence.changed_file_count, 0);
+  assert.match(noActionableRecord.outcome.failure, /without an actionable patch/);
+  assert.equal(noActionableRecord.outcome.failure_metadata.exit_code, 0);
+  assert.equal(noActionableRecord.outcome.failure_metadata.group_key, 'PHPCS Formatting/Auto Fix!');
+  assertMetrics(noActionableRecord, { runnerMetrics: true, artifactBytes: true });
 
   const timeoutRunsOutputPath = path.join(root, 'fanout-timeout-run.json');
   const timeoutArtifactsRoot = path.join(root, 'timeout-artifacts');
