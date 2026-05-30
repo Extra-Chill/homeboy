@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.5.3] - 2026-05-30
+
+### Changed
+- Use core sidecar helpers in non-WP runners
+
 ## [1.5.2] - 2026-05-22
 
 ### Fixed
