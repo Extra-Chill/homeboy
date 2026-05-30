@@ -117,6 +117,43 @@ fn missing_sidecar_declarations_have_no_structured_contract() {
 }
 
 #[test]
+fn manifest_parses_changed_test_routing_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "test": {
+            "extension_script": "test.sh",
+            "changed_file_routing": {
+                "strategy": "exclusive_env",
+                "exclusive_env": {
+                    "name": "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES",
+                    "globs": ["tests/**/*-smoke.php"]
+                }
+            }
+        }
+    }))
+    .unwrap();
+
+    let routing = manifest
+        .test
+        .as_ref()
+        .and_then(|test| test.changed_file_routing.as_ref())
+        .expect("test routing should parse");
+
+    assert_eq!(
+        routing.strategy,
+        TestChangedFileRoutingStrategy::ExclusiveEnv
+    );
+    assert_eq!(
+        routing
+            .exclusive_env
+            .as_ref()
+            .map(|exclusive_env| exclusive_env.name.as_str()),
+        Some("HOMEBOY_WORDPRESS_HOST_SMOKE_FILES")
+    );
+}
+
+#[test]
 fn manifest_rejects_legacy_discovery_marker_alias() {
     let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
         "name": "Example",

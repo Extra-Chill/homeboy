@@ -18,6 +18,7 @@ pub use super::manifest_config::{
     CliHelpConfig, DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployVerification,
     DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition, LintChangedFileRoute,
     LintConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, SinceTagConfig,
+    TestChangedFileExclusiveEnv, TestChangedFileRouting, TestChangedFileRoutingStrategy,
     TestConfig, TraceConfig, VersionPatternConfig,
 };
 
