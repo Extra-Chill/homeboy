@@ -8,7 +8,7 @@ set -euo pipefail
 # runner. Pure host-PHP smoke suites can explicitly use the host-smoke backend.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../../scripts/lib/runner-prelude.sh}"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../lib/runner-prelude.sh}"
 
 HOST_SMOKE_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE:-${SCRIPT_DIR}/test-runner-host-smoke.sh}"
 WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-wp-codebox.sh}"

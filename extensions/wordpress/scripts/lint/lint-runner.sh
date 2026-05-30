@@ -11,7 +11,7 @@ set -euo pipefail
 # flows go through `homeboy refactor --from lint --write` (#1145).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../../scripts/lib/runner-prelude.sh}"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../lib/runner-prelude.sh}"
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"
 homeboy_runner_init --bash 4 --steps --sidecar-writer --component-alias PLUGIN_PATH

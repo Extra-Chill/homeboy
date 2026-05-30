@@ -23,7 +23,7 @@ set -euo pipefail
 #   HOMEBOY_DEBUG                — verbose
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../../scripts/lib/runner-prelude.sh}"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../lib/runner-prelude.sh}"
 COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/../lib/command-capture.sh}"
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"

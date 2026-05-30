@@ -18,7 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/lib/command-capture.sh}"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../scripts/lib/runner-prelude.sh}"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/lib/runner-prelude.sh}"
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"
 homeboy_runner_init --steps --failure-trap --sidecar-writer
