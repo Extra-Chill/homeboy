@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.107.0] - 2026-05-30
+
+### Added
+- add bootstrap timeline profiler helpers
+
 ## [2.106.1] - 2026-05-30
 
 ### Fixed
