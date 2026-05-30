@@ -1,8 +1,7 @@
 //! Declarative check evaluation.
 //!
-//! A `CheckSpec` has optional `http` / `file` / `command` fields. Exactly one
-//! should be set per spec. `evaluate` returns `Ok(())` on pass, a structured
-//! `Error` on fail.
+//! A `CheckSpec` has optional probe fields. Exactly one should be set per spec.
+//! `evaluate` returns `Ok(())` on pass, a structured `Error` on fail.
 //!
 //! Kept deliberately small — no retries, no fancy wait-for semantics. A
 //! failing check means fix-the-env, not poll-until-it-works.
@@ -26,6 +25,9 @@ pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {
     if check.file.is_some() {
         set += 1;
     }
+    if !check.any_file_exists.is_empty() {
+        set += 1;
+    }
     if check.command.is_some() {
         set += 1;
     }
@@ -36,7 +38,7 @@ pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {
     if set == 0 {
         return Err(Error::validation_invalid_argument(
             "check",
-            "Check must specify one of `http`, `file`, `command`, or `newer_than`",
+            "Check must specify one of `http`, `file`, `any_file_exists`, `command`, or `newer_than`",
             None,
             None,
         ));
@@ -44,7 +46,7 @@ pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {
     if set > 1 {
         return Err(Error::validation_invalid_argument(
             "check",
-            "Check must specify exactly one of `http`, `file`, `command`, or `newer_than`",
+            "Check must specify exactly one of `http`, `file`, `any_file_exists`, `command`, or `newer_than`",
             None,
             None,
         ));
@@ -55,6 +57,9 @@ pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {
     }
     if let Some(path) = &check.file {
         return file_check(rig, path, check.contains.as_deref());
+    }
+    if !check.any_file_exists.is_empty() {
+        return any_file_exists_check(rig, &check.any_file_exists);
     }
     if let Some(cmd) = &check.command {
         return command_check(rig, cmd, check.expect_exit.unwrap_or(0));
@@ -160,6 +165,24 @@ fn file_check(rig: &RigSpec, path: &str, contains: Option<&str>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn any_file_exists_check(rig: &RigSpec, paths: &[String]) -> Result<()> {
+    let resolved = paths
+        .iter()
+        .map(|path| expand_vars(rig, path))
+        .collect::<Vec<_>>();
+
+    if resolved.iter().any(|path| PathBuf::from(path).exists()) {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "check.any_file_exists",
+        format!("None of the candidate files exist: {}", resolved.join(", ")),
+        None,
+        None,
+    ))
 }
 
 fn command_check(rig: &RigSpec, cmd: &str, expect_exit: i32) -> Result<()> {

@@ -98,6 +98,55 @@ fn test_spec_pipeline_steps_discriminate_correctly() {
 
     let check = spec.pipeline.get("check").unwrap();
     assert!(matches!(check[3], PipelineStep::Check { .. }));
+
+    let declarative_spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "declarative-primitives",
+            "pipeline": {
+                "check": [
+                    {
+                        "kind": "check",
+                        "label": "compat server exists",
+                        "any_file_exists": ["lib/compat/runtime-v2/server.txt", "lib/compat/runtime-v1/server.txt"]
+                    }
+                ],
+                "bench_prepare": [
+                    {
+                        "kind": "command-if-missing",
+                        "label": "Install dependencies when project-env is missing",
+                        "cwd": "/tmp/project",
+                        "missing": "node_modules/.bin/project-env",
+                        "command": "npm install"
+                    }
+                ]
+            }
+        }"#,
+    )
+    .expect("parse declarative primitives");
+
+    let declarative_check = declarative_spec
+        .pipeline
+        .get("check")
+        .expect("check pipeline");
+    match &declarative_check[0] {
+        PipelineStep::Check { spec, .. } => assert_eq!(spec.any_file_exists.len(), 2),
+        other => panic!("expected check step, got {other:?}"),
+    }
+
+    let prepare = declarative_spec
+        .pipeline
+        .get("bench_prepare")
+        .expect("prepare pipeline");
+    match &prepare[0] {
+        PipelineStep::CommandIfMissing {
+            missing, cmd, cwd, ..
+        } => {
+            assert_eq!(missing, "node_modules/.bin/project-env");
+            assert_eq!(cmd, "npm install");
+            assert_eq!(cwd.as_deref(), Some("/tmp/project"));
+        }
+        other => panic!("expected command-if-missing step, got {other:?}"),
+    }
 }
 
 #[test]
