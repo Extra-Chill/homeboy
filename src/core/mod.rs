@@ -31,6 +31,7 @@ pub mod plan;
 pub mod process;
 pub mod project;
 pub mod quality;
+pub mod redaction;
 pub mod refactor;
 pub mod release;
 pub mod rig;
