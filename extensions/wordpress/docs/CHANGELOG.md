@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.105.7] - 2026-05-30
+
+### Fixed
+- harden build helper installs
+
 ## [2.105.6] - 2026-05-30
 
 ### Fixed
