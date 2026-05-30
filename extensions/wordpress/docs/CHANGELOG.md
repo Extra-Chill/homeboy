@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.105.5] - 2026-05-30
+
+### Fixed
+- keep runner prelude self-contained
+
 ## [2.105.4] - 2026-05-30
 
 ### Fixed
