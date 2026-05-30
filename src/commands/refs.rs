@@ -93,8 +93,10 @@ pub struct RefsFile {
 #[derive(Debug, Serialize)]
 pub struct RefsItem {
     pub line: usize,
-    pub column: usize,
-    pub matched: String,
+    #[serde(rename = "column")]
+    pub reference_column: usize,
+    #[serde(rename = "matched")]
+    pub matched_text: String,
     pub variant: String,
     pub kind: ReferenceKind,
     pub context: String,
@@ -249,8 +251,8 @@ fn run_single(
             .or_default()
             .push(RefsItem {
                 line: reference.line,
-                column: reference.column,
-                matched: reference.matched,
+                reference_column: reference.column,
+                matched_text: reference.matched,
                 variant: reference.variant,
                 kind,
                 context: reference.context,
