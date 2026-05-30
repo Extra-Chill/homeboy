@@ -5,7 +5,7 @@ use crate::core::finding::{FindingSource, HomeboyFinding};
 
 use super::records::NewFindingRecord;
 
-pub fn homeboy_finding_from_test_failure(failure: &TestFailure) -> HomeboyFinding {
+fn homeboy_finding_from_test_failure(failure: &TestFailure) -> HomeboyFinding {
     let mut normalized = HomeboyFinding::builder("test", test_failure_message(failure))
         .severity("error")
         .fingerprint(test_failure_fingerprint(failure))
@@ -25,11 +25,11 @@ pub fn homeboy_finding_from_test_failure(failure: &TestFailure) -> HomeboyFindin
     normalized
 }
 
-pub fn finding_record_from_test_failure(run_id: &str, failure: &TestFailure) -> NewFindingRecord {
+fn finding_record_from_test_failure(run_id: &str, failure: &TestFailure) -> NewFindingRecord {
     NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_test_failure(failure))
 }
 
-pub fn finding_records_from_test_analysis_input(
+pub(crate) fn finding_records_from_test_analysis_input(
     run_id: &str,
     input: &TestAnalysisInput,
 ) -> Vec<NewFindingRecord> {
@@ -40,7 +40,7 @@ pub fn finding_records_from_test_analysis_input(
         .collect()
 }
 
-pub fn homeboy_finding_from_failure_cluster(cluster: &FailureCluster) -> HomeboyFinding {
+fn homeboy_finding_from_failure_cluster(cluster: &FailureCluster) -> HomeboyFinding {
     let category = failure_category_slug(&cluster.category);
     let mut normalized = HomeboyFinding::builder("test", cluster.pattern.clone())
         .rule(format!("cluster:{category}"))
@@ -60,14 +60,11 @@ pub fn homeboy_finding_from_failure_cluster(cluster: &FailureCluster) -> Homeboy
     normalized
 }
 
-pub fn finding_record_from_failure_cluster(
-    run_id: &str,
-    cluster: &FailureCluster,
-) -> NewFindingRecord {
+fn finding_record_from_failure_cluster(run_id: &str, cluster: &FailureCluster) -> NewFindingRecord {
     NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_failure_cluster(cluster))
 }
 
-pub fn finding_records_from_failure_clusters(
+pub(crate) fn finding_records_from_failure_clusters(
     run_id: &str,
     clusters: &[FailureCluster],
 ) -> Vec<NewFindingRecord> {

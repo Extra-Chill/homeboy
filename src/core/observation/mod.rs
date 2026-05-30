@@ -13,9 +13,7 @@ pub mod timeline;
 
 pub use lifecycle::{merge_metadata, run_owner_pid, running_status_note, ActiveObservation};
 
-pub use budget_findings::{
-    finding_record_from_budget, finding_records_from_budget, homeboy_finding_from_budget,
-};
+pub use budget_findings::finding_records_from_budget;
 pub use records::{
     finding_record_from_annotation, finding_record_from_audit, finding_record_from_lint,
     finding_records_from_annotation_file, finding_records_from_annotations_dir,
@@ -30,10 +28,8 @@ pub use records::{
 pub use store::{
     ObservationDbStatus, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,
 };
-pub use test_findings::{
-    finding_record_from_failure_cluster, finding_record_from_test_failure,
+pub(crate) use test_findings::{
     finding_records_from_failure_clusters, finding_records_from_test_analysis_input,
-    homeboy_finding_from_failure_cluster, homeboy_finding_from_test_failure,
 };
 pub use timeline::{
     ObservationEvent, ObservationPhaseMilestone, ObservationSpanDefinition, ObservationSpanResult,
