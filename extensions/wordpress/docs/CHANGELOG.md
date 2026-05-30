@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.103.2] - 2026-05-30
+
+### Changed
+- Parse Codebox browser artifacts into bench metrics
+
 ## [2.103.1] - 2026-05-29
 
 ### Changed
