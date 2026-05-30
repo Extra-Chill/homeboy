@@ -16,7 +16,7 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
   "deploy": {},
   "executable": {},
   "platform": {},
-  "annotations_schema_version": "string",
+  "structured_sidecars": {},
   "commands": {},
   "actions": {},
   "release_actions": {},
@@ -44,7 +44,7 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
 - **`deploy`** (object): Deploy lifecycle — verifications, overrides, version patterns
 - **`executable`** (object): Standalone tool runtime, inputs, output schema
 - **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
-- **`annotations_schema_version`** (string): Schema version for structured files emitted under the run-dir annotations sidecar
+- **`structured_sidecars`** (object): Declares public machine-readable run-directory sidecar contracts
 - **`commands`** (object): Additional CLI commands provided by extension
 - **`actions`** (object): Action definitions for `homeboy extension action`
 - **`release_actions`** (object): Release pipeline step definitions
@@ -126,33 +126,37 @@ Scripts that implement extension capabilities. Each script path is relative to t
 
 ## Structured Sidecar Declarations
 
-Extensions can declare which well-known structured sidecars they emit and which schema version each sidecar follows. Declarations are explicit contracts: if a field is missing, the extension has not declared that structured sidecar.
+Extensions can declare which structured run-directory sidecars they emit. `structured_sidecars` is the only manifest field that declares sidecar contracts. Declarations are explicit contracts: if an entry is missing or set to `false`, the extension has not declared that structured sidecar.
 
 ```json
 {
-  "lint": {
-    "extension_script": "scripts/lint.sh",
-    "findings_schema_version": "1"
-  },
-  "test": {
-    "extension_script": "scripts/test.sh",
-    "results_schema_version": "1",
-    "failures_schema_version": "1"
-  },
-  "annotations_schema_version": "1"
+  "structured_sidecars": {
+    "findings": {
+      "path": "findings.json",
+      "schema_version": "1"
+    },
+    "producer.summary": {
+      "path": "producer-summary.json",
+      "schema_version": "1"
+    },
+    "lint.findings": true,
+    "test.coverage": false
+  }
 }
 ```
 
 ### Sidecar Fields
 
-- **`lint.findings_schema_version`** (string): Declares structured `lint-findings.json` output in the run directory.
-- **`test.results_schema_version`** (string): Declares structured `test-results.json` output in the run directory.
-- **`test.failures_schema_version`** (string): Declares structured `test-failures.json` output in the run directory.
-- **`annotations_schema_version`** (string): Declares structured annotation files under the run directory's annotations sidecar subdirectory.
+- **`structured_sidecars.<name>`** (boolean or object): Stable logical sidecar name, for example `findings`, `producer.summary`, `lint.findings`, or `annotations`. `true` declares the sidecar with its default run-dir path. `false` explicitly leaves it undeclared.
+- **`structured_sidecars.<name>.enabled`** (boolean): Optional object form enablement flag. Defaults to `true`.
+- **`structured_sidecars.<name>.path`** (string): Optional run-directory relative sidecar file or directory path. Known names such as `lint.findings`, `test.results`, `test.failures`, `bench.results`, and `annotations` have default paths.
+- **`structured_sidecars.<name>.schema_version`** (string): Optional version of the sidecar payload contract.
+
+The generic `findings` and `producer.summary` names are the preferred contracts for normalized finding output and producer summaries. Legacy producer-specific names such as `lint.findings` can be declared during migration, but they use the same top-level declaration shape.
 
 ### Inspection Behavior
 
-Core exposes declared sidecars through manifest inspection. Consumers that need machine-readable output should require the matching declaration before relying on a sidecar.
+Core exposes declared sidecars through manifest inspection, including `homeboy extension show <id>` JSON output. Consumers that need machine-readable output should require the matching declaration before relying on a sidecar.
 
 ## Audit Configuration
 

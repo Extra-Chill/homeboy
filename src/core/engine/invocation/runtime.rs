@@ -310,15 +310,16 @@ mod tests {
         // workloads commonly nest a workload-id/daemon/daemon.sock segment
         // (~40 bytes) under STATE_DIR. The contract guarantees ≥48 bytes
         // of headroom on macOS so realistic workload paths always fit.
+        let headroom = SOCKET_HEADROOM_BYTES;
         #[cfg(target_os = "macos")]
         assert!(
-            SOCKET_HEADROOM_BYTES >= 48,
-            "macOS headroom must be at least 48 bytes; got {SOCKET_HEADROOM_BYTES}"
+            headroom >= 48,
+            "macOS headroom must be at least 48 bytes; got {headroom}"
         );
         #[cfg(not(target_os = "macos"))]
         assert!(
-            SOCKET_HEADROOM_BYTES >= 32,
-            "non-macOS headroom must be at least 32 bytes; got {SOCKET_HEADROOM_BYTES}"
+            headroom >= 32,
+            "non-macOS headroom must be at least 32 bytes; got {headroom}"
         );
     }
 }

@@ -67,7 +67,52 @@ fn extension_capability_owns_labels_and_scripts() {
 }
 
 #[test]
-fn manifest_parses_declared_structured_sidecar_schema_versions() {
+fn manifest_parses_declared_structured_sidecars() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "structured_sidecars": {
+            "findings": {
+                "path": "findings.json",
+                "schema_version": "1"
+            },
+            "producer.summary": {
+                "path": "producer-summary.json",
+                "schema_version": "1"
+            },
+            "lint.findings": true,
+            "test.coverage": false
+        }
+    }))
+    .unwrap();
+
+    let sidecars = manifest.structured_sidecars();
+    assert_eq!(sidecars.len(), 3);
+    assert_eq!(sidecars[0].name, "findings");
+    assert_eq!(sidecars[0].path, "findings.json");
+    assert_eq!(sidecars[0].schema_version.as_deref(), Some("1"));
+    assert_eq!(sidecars[1].name, "lint.findings");
+    assert_eq!(sidecars[1].path, "lint-findings.json");
+    assert_eq!(sidecars[1].schema_version, None);
+    assert_eq!(sidecars[2].name, "producer.summary");
+    assert_eq!(sidecars[2].path, "producer-summary.json");
+}
+
+#[test]
+fn missing_sidecar_declarations_have_no_structured_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "lint": { "extension_script": "lint.sh" },
+        "test": { "extension_script": "test.sh" }
+    }))
+    .unwrap();
+
+    assert!(manifest.structured_sidecars().is_empty());
+}
+
+#[test]
+fn legacy_sidecar_schema_fields_do_not_declare_structured_contracts() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
@@ -84,36 +129,25 @@ fn manifest_parses_declared_structured_sidecar_schema_versions() {
     }))
     .unwrap();
 
-    assert_eq!(manifest.lint_findings_schema_version(), Some("1"));
-    assert_eq!(manifest.test_results_schema_version(), Some("1"));
-    assert_eq!(manifest.test_failures_schema_version(), Some("1"));
-
-    let sidecars = manifest.structured_sidecars();
-    assert_eq!(sidecars.len(), 4);
-    assert_eq!(sidecars[0].name, "lint.findings");
-    assert_eq!(sidecars[0].path, "lint-findings.json");
-    assert_eq!(sidecars[1].name, "test.results");
-    assert_eq!(sidecars[1].path, "test-results.json");
-    assert_eq!(sidecars[2].name, "test.failures");
-    assert_eq!(sidecars[2].path, "test-failures.json");
-    assert_eq!(sidecars[3].name, "annotations");
-    assert_eq!(sidecars[3].path, "annotations");
+    assert!(manifest.structured_sidecars().is_empty());
 }
 
 #[test]
-fn missing_sidecar_declarations_have_no_structured_contract() {
-    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+fn structured_sidecar_declarations_reject_unknown_fields() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
-        "lint": { "extension_script": "lint.sh" },
-        "test": { "extension_script": "test.sh" }
+        "structured_sidecars": {
+            "findings": {
+                "path": "findings.json",
+                "schema_version": "1",
+                "legacy": true
+            }
+        }
     }))
-    .unwrap();
+    .expect_err("sidecar declarations should have one explicit shape");
 
-    assert_eq!(manifest.lint_findings_schema_version(), None);
-    assert_eq!(manifest.test_results_schema_version(), None);
-    assert_eq!(manifest.test_failures_schema_version(), None);
-    assert!(manifest.structured_sidecars().is_empty());
+    assert!(err.to_string().contains("data did not match"));
 }
 
 #[test]

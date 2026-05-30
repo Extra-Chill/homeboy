@@ -1,6 +1,5 @@
 use crate::core::component::AuditConfig;
 use crate::core::config::ConfigEntity;
-use crate::core::engine::run_dir;
 use crate::core::error::{Error, Result};
 use crate::core::paths;
 use serde::{Deserialize, Serialize};
@@ -22,6 +21,7 @@ pub use super::manifest_config::{
     TestChangedFileRouting, TestChangedFileRoutingStrategy, TestConfig, TraceConfig,
     VersionPatternConfig,
 };
+pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
 
 /// Type of action that can be executed by a extension.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -457,10 +457,10 @@ pub struct ExtensionManifest {
     /// are reverted and the fixes are reclassified as declined. See #1167.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autofix_verify: Option<AutofixVerifyConfig>,
-    /// Schema version for structured CI annotations emitted under the
-    /// `annotations/` run-dir sidecar.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub annotations_schema_version: Option<String>,
+    /// Structured run-directory sidecars this extension declares as a public
+    /// machine-readable contract.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub structured_sidecars: BTreeMap<String, StructuredSidecarContract>,
 
     // Actions (cross-cutting: used by both platform and executable extensions)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -597,63 +597,13 @@ impl ExtensionManifest {
     }
 
     /// Structured sidecars this extension explicitly declares.
-    ///
     /// Missing declarations mean the extension has no structured sidecar
     /// contract for that output.
     pub fn structured_sidecars(&self) -> Vec<StructuredSidecarDeclaration> {
-        let mut sidecars = Vec::new();
-
-        if let Some(schema_version) = self.lint_findings_schema_version() {
-            sidecars.push(StructuredSidecarDeclaration {
-                name: "lint.findings".to_string(),
-                path: run_dir::files::LINT_FINDINGS.to_string(),
-                schema_version: schema_version.to_string(),
-            });
-        }
-
-        if let Some(schema_version) = self.test_results_schema_version() {
-            sidecars.push(StructuredSidecarDeclaration {
-                name: "test.results".to_string(),
-                path: run_dir::files::TEST_RESULTS.to_string(),
-                schema_version: schema_version.to_string(),
-            });
-        }
-
-        if let Some(schema_version) = self.test_failures_schema_version() {
-            sidecars.push(StructuredSidecarDeclaration {
-                name: "test.failures".to_string(),
-                path: run_dir::files::TEST_FAILURES.to_string(),
-                schema_version: schema_version.to_string(),
-            });
-        }
-
-        if let Some(schema_version) = self.annotations_schema_version.as_deref() {
-            sidecars.push(StructuredSidecarDeclaration {
-                name: "annotations".to_string(),
-                path: run_dir::files::ANNOTATIONS_DIR.to_string(),
-                schema_version: schema_version.to_string(),
-            });
-        }
-
-        sidecars
-    }
-
-    pub fn lint_findings_schema_version(&self) -> Option<&str> {
-        self.lint
-            .as_ref()
-            .and_then(|lint| lint.findings_schema_version.as_deref())
-    }
-
-    pub fn test_results_schema_version(&self) -> Option<&str> {
-        self.test
-            .as_ref()
-            .and_then(|test| test.results_schema_version.as_deref())
-    }
-
-    pub fn test_failures_schema_version(&self) -> Option<&str> {
-        self.test
-            .as_ref()
-            .and_then(|test| test.failures_schema_version.as_deref())
+        self.structured_sidecars
+            .iter()
+            .filter_map(|(name, contract)| contract.declaration(name))
+            .collect()
     }
 
     /// Convenience: get deploy verifications (empty if no deploy capability).
@@ -882,11 +832,4 @@ pub struct RuntimeRequirementsConfig {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeRequirementConfig {
     pub version: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StructuredSidecarDeclaration {
-    pub name: String,
-    pub path: String,
-    pub schema_version: String,
 }
