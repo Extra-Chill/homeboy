@@ -6,10 +6,11 @@ use crate::core::extension::test::baseline::{self, TestBaselineComparison, TestC
 use crate::core::extension::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope, parse_coverage_file,
     parse_failures_file, parse_test_results_file, parse_test_results_text,
-    parse_test_results_text_with_spec, CoverageOutput, FailedTest, TestScopeOutput,
-    TestSummaryOutput,
+    parse_test_results_text_with_spec, CoverageOutput, TestScopeOutput, TestSummaryOutput,
 };
 use crate::core::extension::{self, ExtensionCapability};
+use crate::core::finding::HomeboyFinding;
+use crate::core::observation::homeboy_findings_from_test_analysis_input;
 use crate::core::refactor::AppliedRefactor;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -37,7 +38,7 @@ pub struct TestRunWorkflowResult {
     pub component: String,
     pub exit_code: i32,
     pub test_counts: Option<TestCounts>,
-    pub failed_tests: Option<Vec<FailedTest>>,
+    pub findings: Option<Vec<HomeboyFinding>>,
     #[serde(skip)]
     pub failure_analysis_input: Option<TestAnalysisInput>,
     pub coverage: Option<CoverageOutput>,
@@ -97,44 +98,6 @@ pub struct RawTestOutput {
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
 const PHPUNIT_NO_DISCOVERY_MARKER: &str = "NO PHPUNIT TEST FILES DISCOVERED";
 const REQUIRE_PHPUNIT_TESTS_SETTING: &str = "require_phpunit_tests";
-
-fn failed_tests_from_analysis_input(input: &TestAnalysisInput) -> Option<Vec<FailedTest>> {
-    if input.failures.is_empty() {
-        return None;
-    }
-
-    Some(
-        input
-            .failures
-            .iter()
-            .map(|failure| {
-                let detail = if failure.error_type.is_empty() {
-                    failure.message.clone()
-                } else if failure.message.is_empty() {
-                    failure.error_type.clone()
-                } else {
-                    format!("{}: {}", failure.error_type, failure.message)
-                };
-
-                let location = if !failure.source_file.is_empty() {
-                    if failure.source_line > 0 {
-                        format!("{}:{}", failure.source_file, failure.source_line)
-                    } else {
-                        failure.source_file.clone()
-                    }
-                } else {
-                    failure.test_file.clone()
-                };
-
-                FailedTest {
-                    name: failure.test_name.clone(),
-                    detail: (!detail.is_empty()).then_some(detail),
-                    location: (!location.is_empty()).then_some(location),
-                }
-            })
-            .collect(),
-    )
-}
 
 fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
     let lines: Vec<&str> = s.lines().collect();
@@ -228,7 +191,7 @@ pub fn run_main_test_workflow(
                 component: args.component_label,
                 exit_code: 0,
                 test_counts: None,
-                failed_tests: None,
+                findings: None,
                 failure_analysis_input: None,
                 coverage: None,
                 baseline_comparison: None,
@@ -301,9 +264,9 @@ pub fn run_main_test_workflow(
         .and_then(|file| parse_coverage_file(file).ok());
 
     let failure_analysis_input = parse_failures_file(&failures_file);
-    let failed_tests = failure_analysis_input
+    let findings = failure_analysis_input
         .as_ref()
-        .and_then(failed_tests_from_analysis_input);
+        .and_then(homeboy_findings_from_test_analysis_input);
 
     let analysis = if args.analyze {
         let analysis_input = failure_analysis_input
@@ -496,7 +459,7 @@ pub fn run_main_test_workflow(
         component: args.component_label,
         exit_code,
         test_counts,
-        failed_tests,
+        findings,
         failure_analysis_input,
         coverage,
         baseline_comparison,
@@ -548,7 +511,7 @@ pub fn run_self_check_test_workflow(
         component: component_label,
         exit_code: output.exit_code,
         test_counts: None,
-        failed_tests: None,
+        findings: None,
         failure_analysis_input: None,
         coverage: None,
         baseline_comparison: None,
@@ -600,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_tests_from_analysis_input_preserves_name_detail_and_location() {
+    fn test_findings_from_analysis_input_preserve_failure_details() {
         let input = TestAnalysisInput {
             failures: vec![TestFailure {
                 test_name: "tests::fails".to_string(),
@@ -614,14 +577,12 @@ mod tests {
             passed: 1,
         };
 
-        let failed_tests = failed_tests_from_analysis_input(&input).expect("failed tests");
-        assert_eq!(failed_tests.len(), 1);
-        assert_eq!(failed_tests[0].name, "tests::fails");
-        assert_eq!(
-            failed_tests[0].detail.as_deref(),
-            Some("AssertionFailed: expected true")
-        );
-        assert_eq!(failed_tests[0].location.as_deref(), Some("src/lib.rs:42"));
+        let findings = homeboy_findings_from_test_analysis_input(&input).expect("findings");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].metadata_json()["test_name"], "tests::fails");
+        assert_eq!(findings[0].message, "AssertionFailed: expected true");
+        assert_eq!(findings[0].location.file.as_deref(), Some("tests/fails.rs"));
+        assert_eq!(findings[0].location.line, Some(42));
     }
 
     #[test]

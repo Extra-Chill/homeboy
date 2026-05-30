@@ -231,11 +231,11 @@ fn render_test_section(out: &mut String, output_dir: &Path, run_url: &str) {
     let (data, error) = envelope_parts(read_command_json(output_dir, "test"));
     render_error_details(out, &error);
 
-    let failed_tests = array_value(&data, "failed_tests");
-    let failed_count = test_failed_count(&data, failed_tests.len());
+    let findings = array_value(&data, "findings");
+    let failed_count = test_failed_count(&data, findings.len());
     let _ = writeln!(out, "- Failed tests: **{}**", failed_count);
 
-    let details = failed_tests
+    let details = findings
         .iter()
         .take(10)
         .enumerate()
@@ -487,9 +487,21 @@ fn summarize_test_failure(item: &Value, idx: usize) -> String {
         return format!("{}. {}", idx, item.as_str().unwrap_or("unknown"));
     };
 
-    let name = string_value(obj, "name").unwrap_or_else(|| "unknown".to_string());
+    let name = object_value(obj, "metadata")
+        .get("test_name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| string_value(obj, "name"))
+        .unwrap_or_else(|| "unknown".to_string());
     let detail = string_value(obj, "detail").or_else(|| string_value(obj, "message"));
-    let location = string_value(obj, "location").or_else(|| string_value(obj, "file"));
+    let location = string_value(obj, "location").or_else(|| {
+        string_value(obj, "file").map(|file| {
+            obj.get("line")
+                .and_then(Value::as_i64)
+                .map(|line| format!("{}:{}", file, line))
+                .unwrap_or(file)
+        })
+    });
     let mut parts = vec![format!("{}. {}", idx, name)];
     if let Some(detail) = detail {
         parts.push(detail);

@@ -15,7 +15,7 @@ use homeboy::core::code_audit::report::{
 use homeboy::core::code_audit::{AuditFinding, FindingConfidence, Severity};
 use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::{
-    FailedTest, RawTestOutput, TestCommandOutput, TestCounts, TestSummaryOutput,
+    RawTestOutput, TestCommandOutput, TestCounts, TestSummaryOutput,
 };
 use homeboy::core::extension::{
     PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
@@ -555,11 +555,15 @@ fn test_summary_output() -> TestCommandOutput {
             summary: "1 test failure(s) detected".to_string(),
         }),
         test_counts: Some(TestCounts::new(3, 2, 1, 0)),
-        failed_tests: Some(vec![FailedTest {
-            name: "fixture::fails_contract".to_string(),
-            detail: Some("expected stable JSON envelope".to_string()),
-            location: Some("tests/output_contract.rs:24".to_string()),
-        }]),
+        findings: Some(vec![HomeboyFinding::builder(
+            "test",
+            "expected stable JSON envelope",
+        )
+        .severity("error")
+        .file("tests/output_contract.rs")
+        .line(24)
+        .metadata("test_name", "fixture::fails_contract")
+        .build()]),
         coverage: None,
         baseline_comparison: None,
         analysis: None,
