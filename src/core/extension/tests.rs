@@ -160,7 +160,7 @@ fn manifest_parses_changed_test_routing_contract() {
             "changed_file_routing": {
                 "strategy": "exclusive_env",
                 "exclusive_env": {
-                    "name": "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES",
+                    "name": "HOMEBOY_FIXTURE_HOST_SMOKE_FILES",
                     "globs": ["tests/**/*-smoke.php"]
                 }
             }
@@ -183,7 +183,7 @@ fn manifest_parses_changed_test_routing_contract() {
             .exclusive_env
             .as_ref()
             .map(|exclusive_env| exclusive_env.name.as_str()),
-        Some("HOMEBOY_WORDPRESS_HOST_SMOKE_FILES")
+        Some("HOMEBOY_FIXTURE_HOST_SMOKE_FILES")
     );
 }
 

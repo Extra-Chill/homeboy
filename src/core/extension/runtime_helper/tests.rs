@@ -384,7 +384,7 @@ fn bench_shell_helper_writes_scenario_inventory() {
     let output = std::process::Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "source {}; homeboy_write_bench_scenario_inventory --results-file {} --component demo --iterations 11 'bench-http=src/bin/bench-http.rs=rust-bin'; cat {}",
+            "source {}; homeboy_write_bench_scenario_inventory --results-file {} --component demo --iterations 11 'bench-http=src/bin/bench-http.rs=native-bin'; cat {}",
             helper_path.display(),
             results_path.display(),
             results_path.display()
@@ -404,7 +404,7 @@ fn bench_shell_helper_writes_scenario_inventory() {
     assert_eq!(value["scenarios"][0]["iterations"], 0);
     assert_eq!(value["scenarios"][0]["default_iterations"], 11);
     assert_eq!(value["scenarios"][0]["file"], "src/bin/bench-http.rs");
-    assert_eq!(value["scenarios"][0]["source"], "rust-bin");
+    assert_eq!(value["scenarios"][0]["source"], "native-bin");
 }
 
 #[test]
