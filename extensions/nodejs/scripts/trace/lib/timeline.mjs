@@ -1,7 +1,7 @@
 import { mkdir, appendFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { artifactPath, artifactRelativePath } from './artifacts.mjs';
+import { artifactPath, artifactRelativePath, writeArtifact as writeArtifactFile } from './artifacts.mjs';
 
 const VALID_ASSERTION_STATUSES = new Set(['pass', 'fail', 'skip', 'unknown']);
 const VALID_ENVELOPE_STATUSES = new Set(['pass', 'fail', 'error', 'skip', 'unknown']);
@@ -45,6 +45,10 @@ export class TraceRecorder {
         return assertion;
     }
 
+    recordCheck(id, ok, message, data = undefined) {
+        return this.recordAssertion(id, ok ? 'pass' : 'fail', message, data);
+    }
+
     addArtifact(label, path, kind = undefined) {
         const artifact = { label, path: artifactRelativePath(path) };
         if (kind) artifact.kind = kind;
@@ -54,6 +58,11 @@ export class TraceRecorder {
         }
 
         return artifact;
+    }
+
+    async writeArtifact(label, name, content, kind = undefined) {
+        const artifact = await writeArtifactFile(name, content);
+        return this.addArtifact(label, artifact.path, kind);
     }
 
     async writeTraceResults(options = {}) {

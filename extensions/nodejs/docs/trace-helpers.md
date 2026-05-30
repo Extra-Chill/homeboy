@@ -14,7 +14,10 @@ const { pollHttp } = await import(`${helperDir}/probes.mjs`);
 ## Stable Helpers
 
 - `timeline.mjs` records timestamped events, assertions, artifacts, and writes
-  the final Homeboy trace JSON envelope.
+  the final Homeboy trace JSON envelope. `TraceRecorder#recordCheck()` maps a
+  boolean check to a pass/fail assertion, and `TraceRecorder#writeArtifact()`
+  writes an artifact under `HOMEBOY_TRACE_ARTIFACT_DIR` while registering it in
+  the result envelope.
 - `process.mjs` launches black-box commands, captures a best-effort process
   tree artifact on macOS/Linux, waits for exits, and cleans up spawned process
   groups on process exit/signals.
@@ -26,7 +29,10 @@ const { pollHttp } = await import(`${helperDir}/probes.mjs`);
   records first response, status transitions, compact repeated-status history,
   ready, and timeout evidence without emitting one event per poll. Use
   `createHttpStatusHistory()` when a workload has to drive its own HTTP-style
-  probing loop.
+  probing loop. `installConsoleBridge()` and `captureTraceEventText()` parse
+  prefixed JSON bridge events. Payloads shaped as `{ source, event, data }` are
+  dispatched as structured timeline events; other payloads fall back to the
+  configured bridge source/event.
 
 ## Platform-Specific Helpers
 

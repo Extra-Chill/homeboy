@@ -185,21 +185,53 @@ export async function parseLogLines(text, patterns, onEvent, options = {}) {
     return emitted;
 }
 
+export async function captureTraceEventText(text, onEvent, options = {}) {
+    const lines = String(text || '').split(/\r?\n/).filter(Boolean);
+    const emitted = [];
+
+    for (const line of lines) {
+        const parsed = parseTraceEventLine(line, options);
+        if (!parsed) continue;
+        emitted.push(await emitBridgePayload(parsed, onEvent, options));
+    }
+
+    return emitted;
+}
+
+export function parseTraceEventLine(line, options = {}) {
+    const prefix = options.prefix || '[HOMEBOY_TRACE] ';
+    const text = String(line || '');
+    if (!text.startsWith(prefix)) return null;
+    return parseBridgePayload(text.slice(prefix.length).trim());
+}
+
+export function parseBridgePayload(raw) {
+    try {
+        const parsed = JSON.parse(String(raw || '').trim());
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { value: parsed };
+    } catch {
+        return { message: String(raw || '').trim() };
+    }
+}
+
+export async function emitBridgePayload(payload, onEvent, options = {}) {
+    const fallbackSource = options.source || 'browser';
+    const fallbackEvent = options.event || 'console.bridge';
+    const item = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : { value: payload };
+
+    if (typeof item.source === 'string' && typeof item.event === 'string') {
+        return await emit(onEvent, item.source, item.event, item.data || {});
+    }
+
+    return await emit(onEvent, fallbackSource, fallbackEvent, item);
+}
+
 export function installConsoleBridge(page, options = {}) {
     const prefix = options.prefix || 'trace:';
-    const source = options.source || 'browser';
     const handler = async (message) => {
         const text = typeof message.text === 'function' ? message.text() : String(message);
         if (!text.startsWith(prefix)) return;
-        const raw = text.slice(prefix.length).trim();
-        let data = { message: raw };
-        try {
-            const parsed = JSON.parse(raw);
-            data = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { value: parsed };
-        } catch {
-            // Plain console messages are valid bridge payloads.
-        }
-        await emit(options.onEvent, source, options.event || 'console.bridge', data);
+        await emitBridgePayload(parseBridgePayload(text.slice(prefix.length).trim()), options.onEvent, options);
     };
 
     if (typeof page.on !== 'function') throw new Error('installConsoleBridge requires a page-like object with on(event, handler)');

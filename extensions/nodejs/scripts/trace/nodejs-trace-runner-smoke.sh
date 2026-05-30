@@ -130,6 +130,10 @@ if [ ! -f "$HELPER_ARTIFACTS/trace.jsonl" ]; then
     echo "expected timeline jsonl artifact to be written" >&2
     exit 1
 fi
+if [ ! -f "$HELPER_ARTIFACTS/note.txt" ]; then
+    echo "expected recorder artifact to be written" >&2
+    exit 1
+fi
 assert_json "$HELPER_RESULTS" '
 if (data.status !== "pass") throw new Error("helper scenario should pass");
 if (data.summary !== "helper scenario passed") throw new Error("helper summary missing");
@@ -151,7 +155,10 @@ if (!data.timeline.find((event) => event.event === "http.ready" && event.data.st
 if (!data.timeline.find((event) => event.event === "process.seen")) throw new Error("process seen event missing");
 if (!data.timeline.find((event) => event.event === "log.port_known" && event.data.port === 1234)) throw new Error("log parse event missing");
 if (!data.timeline.find((event) => event.event === "console.bridge" && event.data.event === "bridge-ok")) throw new Error("console bridge event missing");
+if (!data.timeline.find((event) => event.source === "renderer" && event.event === "site_event_received" && event.data.running === true)) throw new Error("structured console bridge event missing");
+if (!data.timeline.find((event) => event.source === "ipc" && event.event === "createSite.resolve" && event.data.result.port === 9999)) throw new Error("prefixed trace line event missing");
 if (!data.assertions.find((assertion) => assertion.id === "dummy-process-exited" && assertion.status === "pass")) throw new Error("process assertion missing");
+if (!data.assertions.find((assertion) => assertion.id === "record-check-helper" && assertion.status === "pass")) throw new Error("recordCheck assertion missing");
 if (!data.assertions.find((assertion) => assertion.id === "json-poll-port-known" && assertion.status === "pass")) throw new Error("json poll assertion missing");
 if (!data.assertions.find((assertion) => assertion.id === "http-poll-ready" && assertion.status === "pass")) throw new Error("http poll assertion missing");
 if (!data.assertions.find((assertion) => assertion.id === "http-status-history" && assertion.status === "pass")) throw new Error("http status history assertion missing");
@@ -160,6 +167,7 @@ if (!data.assertions.find((assertion) => assertion.id === "process-poll-seen" &&
 if (!data.assertions.find((assertion) => assertion.id === "observation-window-resolved" && assertion.status === "pass")) throw new Error("observation window assertion missing");
 if (!data.artifacts.find((artifact) => artifact.path === "process-tree.txt")) throw new Error("process tree artifact missing from envelope");
 if (!data.artifacts.find((artifact) => artifact.path === "trace.jsonl")) throw new Error("timeline artifact missing from envelope");
+if (!data.artifacts.find((artifact) => artifact.path === "note.txt" && artifact.kind === "text/plain")) throw new Error("recorder-written artifact missing from envelope");
 '
 
 SCRIPT_PROJECT="$(make_project scripts-scenario)"

@@ -9,6 +9,7 @@ const { createTraceRecorder } = await import(pathToFileURL(`${helperDir}/timelin
 const { launchProcess, waitForExit, captureProcessTree } = await import(pathToFileURL(`${helperDir}/process.mjs`).href);
 const { observeVisibleWindows } = await import(pathToFileURL(`${helperDir}/desktop.mjs`).href);
 const {
+    captureTraceEventText,
     createHttpStatusHistory,
     installConsoleBridge,
     parseLogLines,
@@ -21,6 +22,7 @@ const {
 const recorder = createTraceRecorder();
 await recorder.recordEvent('scenario', 'helper.start', { helperDir: Boolean(helperDir) });
 const onEvent = recorder.recordEvent.bind(recorder);
+await recorder.writeArtifact('helper note', 'note.txt', 'artifact note', 'text/plain');
 
 const child = launchProcess('node', {
     args: ['-e', 'setTimeout(() => process.exit(0), 50)'],
@@ -32,6 +34,7 @@ await captureProcessTree(child.pid, 'process-tree.txt', { recorder });
 const exit = await waitForExit(child);
 await recorder.recordEvent('process', 'process.exit', exit);
 recorder.recordAssertion('dummy-process-exited', exit.code === 0 ? 'pass' : 'fail', `dummy process exited with ${exit.code}`);
+recorder.recordCheck('record-check-helper', exit.code === 0, 'recordCheck converts booleans to assertion status');
 
 const jsonPath = join(process.env.HOMEBOY_TRACE_ARTIFACT_DIR, 'state.json');
 const jsonPoll = pollJsonFile(jsonPath, {
@@ -107,6 +110,8 @@ recorder.recordAssertion('observation-window-resolved', observed === 'done' ? 'p
 const page = new EventEmitter();
 installConsoleBridge(page, { prefix: 'trace:', onEvent });
 page.emit('console', { text: () => 'trace:{"event":"bridge-ok"}' });
+page.emit('console', { text: () => 'trace:{"source":"renderer","event":"site_event_received","data":{"running":true}}' });
+await captureTraceEventText('[HOMEBOY_TRACE] {"source":"ipc","event":"createSite.resolve","data":{"result":{"port":9999}}}', onEvent);
 
 const windows = await observeVisibleWindows();
 recorder.recordAssertion(

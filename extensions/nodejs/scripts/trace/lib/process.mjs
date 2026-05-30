@@ -34,6 +34,10 @@ export function launchProcess(command, options = {}) {
 }
 
 export async function waitForExit(child) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+        return { code: child.exitCode, signal: child.signalCode };
+    }
+
     const [code, signal] = await once(child, 'exit');
     return { code, signal };
 }
