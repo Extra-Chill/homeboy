@@ -4,12 +4,13 @@
 //! builder function to convert a workflow result into the command output tuple.
 
 use crate::core::ci_profile::CiContext;
-use crate::core::extension::lint::baseline::{BaselineComparison, LintFinding};
+use crate::core::extension::lint::baseline::BaselineComparison;
 use crate::core::extension::self_check::SelfCheckCaptureMetadata;
 use crate::core::extension::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, VerificationPhase,
 };
+use crate::core::finding::{FindingProducerSummary, HomeboyFinding};
 use crate::core::refactor::plan::RefactorSourceRun;
 use crate::core::refactor::AppliedRefactor;
 use serde::Serialize;
@@ -36,7 +37,9 @@ pub struct LintCommandOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_comparison: Option<BaselineComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lint_findings: Option<Vec<LintFinding>>,
+    pub findings: Option<Vec<HomeboyFinding>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub producer_summaries: Vec<FindingProducerSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<LintSummaryOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,7 +66,7 @@ pub fn from_main_workflow_with_ci_context(
         result.exit_code
     };
     let finding_count = result
-        .lint_findings
+        .findings
         .as_ref()
         .map(|findings| findings.len())
         .unwrap_or(0);
@@ -86,11 +89,8 @@ pub fn from_main_workflow_with_ci_context(
             autofix: result.autofix,
             hints: result.hints,
             baseline_comparison: result.baseline_comparison,
-            lint_findings: if json_summary {
-                None
-            } else {
-                result.lint_findings
-            },
+            findings: if json_summary { None } else { result.findings },
+            producer_summaries: result.producer_summaries,
             summary: result.summary,
             self_check_capture: result.self_check_capture,
             ci_context,
@@ -174,7 +174,8 @@ pub fn from_lint_fix(component_label: String, run: RefactorSourceRun) -> (LintCo
             autofix: Some(autofix),
             hints,
             baseline_comparison: None,
-            lint_findings: None,
+            findings: None,
+            producer_summaries: Vec::new(),
             summary: None,
             self_check_capture: None,
             ci_context: None,

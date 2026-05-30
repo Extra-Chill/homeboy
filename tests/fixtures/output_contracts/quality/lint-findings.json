@@ -19,14 +19,32 @@
     "hints": [
       "Run `homeboy lint fixture --fix` to apply safe fixes."
     ],
-    "lint_findings": [
+    "findings": [
       {
-        "id": "lint:src/lib.rs:12:trailing-whitespace",
-        "message": "Trailing whitespace",
-        "category": "whitespace",
         "tool": "fixture-linter",
+        "rule": "trailing-whitespace",
+        "category": "whitespace",
+        "severity": "warning",
         "file": "src/lib.rs",
-        "severity": "warning"
+        "message": "Trailing whitespace",
+        "fingerprint": "lint:src/lib.rs:12:trailing-whitespace",
+        "source": {
+          "kind": "sidecar",
+          "label": "lint-findings",
+          "path": "lint-findings.json"
+        }
+      }
+    ],
+    "producer_summaries": [
+      {
+        "tool": "fixture-linter",
+        "status": "failed",
+        "finding_count": 1,
+        "source": {
+          "kind": "sidecar",
+          "label": "lint-findings",
+          "path": "lint-findings.json"
+        }
       }
     ]
   }

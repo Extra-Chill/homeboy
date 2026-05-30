@@ -1,22 +1,20 @@
-use homeboy::core::extension::lint::baseline::{self as lint_baseline, LintFinding};
+use homeboy::core::extension::lint::baseline as lint_baseline;
+use homeboy::core::finding::HomeboyFinding;
 use std::path::Path;
+
+fn lint_finding(id: &str, category: &str, message: &str) -> HomeboyFinding {
+    HomeboyFinding::builder("lint", message)
+        .category(category)
+        .fingerprint(id)
+        .build()
+}
 
 #[test]
 fn test_save_baseline() {
     let dir = tempfile::tempdir().expect("temp dir");
     let findings = vec![
-        LintFinding {
-            id: "a".to_string(),
-            message: "m1".to_string(),
-            category: "cat1".to_string(),
-            ..Default::default()
-        },
-        LintFinding {
-            id: "b".to_string(),
-            message: "m2".to_string(),
-            category: "cat2".to_string(),
-            ..Default::default()
-        },
+        lint_finding("a", "cat1", "m1"),
+        lint_finding("b", "cat2", "m2"),
     ];
 
     let saved = lint_baseline::save_baseline(dir.path(), "homeboy", &findings)
@@ -27,12 +25,7 @@ fn test_save_baseline() {
 #[test]
 fn test_load_baseline() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let findings = vec![LintFinding {
-        id: "a".to_string(),
-        message: "m1".to_string(),
-        category: "cat1".to_string(),
-        ..Default::default()
-    }];
+    let findings = vec![lint_finding("a", "cat1", "m1")];
     lint_baseline::save_baseline(dir.path(), "homeboy", &findings).expect("baseline saved");
 
     let loaded = lint_baseline::load_baseline(dir.path()).expect("baseline should load");
@@ -43,24 +36,11 @@ fn test_load_baseline() {
 #[test]
 fn test_compare() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let base = vec![LintFinding {
-        id: "a".to_string(),
-        message: "m1".to_string(),
-        category: "cat1".to_string(),
-        ..Default::default()
-    }];
+    let base = vec![lint_finding("a", "cat1", "m1")];
     lint_baseline::save_baseline(dir.path(), "homeboy", &base).expect("baseline saved");
     let loaded = lint_baseline::load_baseline(dir.path()).expect("baseline should load");
 
-    let current = vec![
-        base[0].clone(),
-        LintFinding {
-            id: "b".to_string(),
-            message: "m2".to_string(),
-            category: "cat2".to_string(),
-            ..Default::default()
-        },
-    ];
+    let current = vec![base[0].clone(), lint_finding("b", "cat2", "m2")];
 
     let comparison = lint_baseline::compare(&current, &loaded);
     assert!(comparison.drift_increased);
@@ -76,7 +56,7 @@ fn test_parse_findings_file() {
 
     let parsed = lint_baseline::parse_findings_file(&file).expect("should parse findings");
     assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].id, "a");
+    assert_eq!(parsed[0].fingerprint.as_deref(), Some("a"));
 }
 
 #[test]

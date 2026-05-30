@@ -3,7 +3,6 @@ use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
 use crate::core::code_audit::{self, report::finding_kind_key};
-use crate::core::extension::lint::LintFinding;
 use crate::core::finding::{FindingSource, HomeboyFinding};
 
 mod run_builder;
@@ -171,31 +170,18 @@ pub struct AnnotationFindingRecord {
     pub extra: BTreeMap<String, Value>,
 }
 
-pub fn homeboy_finding_from_lint(finding: &LintFinding) -> HomeboyFinding {
-    let mut normalized = HomeboyFinding::builder(
-        finding.tool.clone().unwrap_or_else(|| "lint".to_string()),
-        finding.message.clone(),
-    )
-    .category(finding.category.clone())
-    .fingerprint(finding.id.clone())
-    .source(FindingSource::new("sidecar").label("lint-findings"))
-    .metadata("source_sidecar", "lint-findings")
-    .raw(finding)
-    .build();
-    normalized.rule = lint_extra_string(finding, "rule").or_else(|| Some(finding.category.clone()));
-    normalized.location.file = finding.file.clone();
-    normalized.location.line = lint_extra_i64(finding, "line");
-    normalized.location.column = lint_extra_i64(finding, "column");
-    normalized.severity = finding.severity.clone();
-    normalized.fix.fixable = lint_extra_bool(finding, "fixable");
-    normalized
+pub fn homeboy_finding_from_lint(finding: &HomeboyFinding) -> HomeboyFinding {
+    finding.clone()
 }
 
-pub fn finding_record_from_lint(run_id: &str, finding: &LintFinding) -> NewFindingRecord {
+pub fn finding_record_from_lint(run_id: &str, finding: &HomeboyFinding) -> NewFindingRecord {
     NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_lint(finding))
 }
 
-pub fn finding_records_from_lint(run_id: &str, findings: &[LintFinding]) -> Vec<NewFindingRecord> {
+pub fn finding_records_from_lint(
+    run_id: &str,
+    findings: &[HomeboyFinding],
+) -> Vec<NewFindingRecord> {
     findings
         .iter()
         .map(|finding| finding_record_from_lint(run_id, finding))
@@ -380,22 +366,6 @@ fn annotation_fingerprint(annotation: &AnnotationFindingRecord) -> Option<String
     ))
 }
 
-fn lint_extra_string(finding: &LintFinding, key: &str) -> Option<String> {
-    finding.extra.get(key)?.as_str().map(str::to_string)
-}
-
-fn lint_extra_i64(finding: &LintFinding, key: &str) -> Option<i64> {
-    finding.extra.get(key)?.as_i64()
-}
-
-fn lint_extra_bool(finding: &LintFinding, key: &str) -> Option<bool> {
-    match finding.extra.get(key)? {
-        Value::Bool(value) => Some(*value),
-        Value::String(value) => value.parse().ok(),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct NewTraceRunRecord {
     pub run_id: String,
@@ -466,19 +436,17 @@ mod tests {
 
     #[test]
     fn test_finding_record_from_lint() {
-        let finding = LintFinding {
-            id: "src/lib.rs:10:lint/security".to_string(),
-            message: "escape output".to_string(),
-            category: "security".to_string(),
-            tool: Some("phpcs".to_string()),
-            file: Some("src/lib.rs".to_string()),
-            severity: Some("error".to_string()),
-            extra: BTreeMap::from([
-                ("line".to_string(), serde_json::json!(10)),
-                ("rule".to_string(), serde_json::json!("WordPress.Security")),
-                ("fixable".to_string(), serde_json::json!(true)),
-            ]),
-        };
+        let finding = HomeboyFinding::builder("phpcs", "escape output")
+            .category("security")
+            .rule("WordPress.Security")
+            .file("src/lib.rs")
+            .line(10)
+            .severity("error")
+            .fingerprint("src/lib.rs:10:lint/security")
+            .fixable(true)
+            .source(FindingSource::new("sidecar").label("lint-findings"))
+            .metadata("source_sidecar", "lint-findings")
+            .build();
 
         let record = finding_record_from_lint("run-1", &finding);
 
@@ -632,16 +600,13 @@ mod tests {
         assert_eq!(record.fixable, Some(false));
     }
 
-    fn lint_finding(id: &str, category: &str, tool: Option<&str>) -> LintFinding {
-        LintFinding {
-            id: id.to_string(),
-            message: format!("{category} finding"),
-            category: category.to_string(),
-            tool: tool.map(str::to_string),
-            file: Some("src/lib.rs".to_string()),
-            severity: Some("error".to_string()),
-            extra: BTreeMap::new(),
-        }
+    fn lint_finding(id: &str, category: &str, tool: Option<&str>) -> HomeboyFinding {
+        HomeboyFinding::builder(tool.unwrap_or("lint"), format!("{category} finding"))
+            .category(category)
+            .file("src/lib.rs")
+            .severity("error")
+            .fingerprint(id)
+            .build()
     }
 
     fn audit_finding() -> code_audit::Finding {
