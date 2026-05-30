@@ -2,6 +2,19 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.104.0] - 2026-05-30
+
+### Added
+- expose admin page scenario profiler
+
+### Changed
+- Use core sidecar helpers in WordPress runners
+- Route Playground validation through WP Codebox
+- Fail non-actionable Codebox fanout success
+- Stop strict comparison fixer rewrites
+- Report Codebox browser memory comparisons
+- Parse Codebox browser artifacts into bench metrics
+
 ## [2.103.1] - 2026-05-29
 
 ### Changed
