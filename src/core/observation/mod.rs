@@ -8,6 +8,7 @@ mod budget_findings;
 mod lifecycle;
 pub mod records;
 pub mod store;
+mod test_findings;
 pub mod timeline;
 
 pub use lifecycle::{merge_metadata, run_owner_pid, running_status_note, ActiveObservation};
@@ -26,6 +27,9 @@ pub use records::{
 };
 pub use store::{
     ObservationDbStatus, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,
+};
+pub(crate) use test_findings::{
+    finding_records_from_failure_clusters, finding_records_from_test_analysis_input,
 };
 pub use timeline::{
     ObservationEvent, ObservationPhaseMilestone, ObservationSpanDefinition, ObservationSpanResult,
