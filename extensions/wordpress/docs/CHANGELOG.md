@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.105.1] - 2026-05-30
+
+### Changed
+- Normalize extension fix result capture
+
 ## [2.105.0] - 2026-05-30
 
 ### Added
