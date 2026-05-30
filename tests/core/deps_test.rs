@@ -283,6 +283,7 @@ fn stack_plan_keeps_explicit_edge_config_when_provider_edge_matches() {
         downstream: "downstream".to_string(),
         package: "fixture/upstream".to_string(),
         update: Some("fixture-provider update fixture/upstream".to_string()),
+        rebuild: false,
         post_update: vec!["fixture-provider build".to_string()],
         test: vec!["fixture-provider test".to_string()],
     };

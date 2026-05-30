@@ -272,6 +272,7 @@ fn stack_edges_from_components(
                 downstream: component.id.clone(),
                 package: package.name.clone(),
                 update: None,
+                rebuild: false,
                 post_update: Vec::new(),
                 test: Vec::new(),
             };
