@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.105.9] - 2026-05-30
+
+### Fixed
+- retire native core-dev test runner
+
 ## [2.105.8] - 2026-05-30
 
 ### Fixed
