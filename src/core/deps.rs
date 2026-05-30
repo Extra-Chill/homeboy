@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 mod stack;
 
 use crate::extensions::deps_provider as provider;
-pub use crate::extensions::deps_provider::{composer_command_args, ComposerAction};
 pub use stack::{
     stack_apply, stack_plan, stack_plan_from_components, stack_status, DependencyStackApplyResult,
     DependencyStackApplyStep, DependencyStackCommandResult, DependencyStackEdgeStatus,

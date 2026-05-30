@@ -2,12 +2,15 @@ use crate::core::component::Component;
 use crate::core::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
 use crate::core::extension::{self, ExtensionCapability, ExtensionExecutionContext};
 use crate::core::{Error, Result};
+use crate::extensions::npm_deps_provider::NpmDependencyProvider;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+
+pub use crate::extensions::npm_deps_provider::npm_command_args;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerAction {
@@ -30,6 +33,7 @@ pub(crate) struct DependencyProviderSnapshot {
 
 pub(crate) enum DependencyProvider {
     Composer(ComposerDependencyProvider),
+    Npm(NpmDependencyProvider),
     Extension(ExtensionDependencyProvider),
     ComponentScript(ComponentScriptDependencyProvider),
 }
@@ -43,6 +47,7 @@ impl DependencyProvider {
     ) -> Result<ProviderDependencyStatus> {
         match self {
             DependencyProvider::Composer(provider) => provider.status(path, package_filter),
+            DependencyProvider::Npm(provider) => provider.status(path, package_filter),
             DependencyProvider::Extension(provider) => {
                 provider.status(component, path, package_filter)
             }
@@ -55,6 +60,7 @@ impl DependencyProvider {
     pub(crate) fn handles_package(&self, path: &Path, package: &str) -> Result<bool> {
         match self {
             DependencyProvider::Composer(provider) => provider.handles_package(path, package),
+            DependencyProvider::Npm(provider) => provider.manages_package(path, package),
             DependencyProvider::Extension(_) => Ok(true),
             DependencyProvider::ComponentScript(_) => Ok(true),
         }
@@ -69,6 +75,9 @@ impl DependencyProvider {
     ) -> Result<DependencyUpdateResult> {
         match self {
             DependencyProvider::Composer(provider) => {
+                provider.update(component, path, package, constraint)
+            }
+            DependencyProvider::Npm(provider) => {
                 provider.update(component, path, package, constraint)
             }
             DependencyProvider::Extension(provider) => {
@@ -87,6 +96,7 @@ impl DependencyProvider {
     ) -> Result<Option<DependencyCommandResult>> {
         match self {
             DependencyProvider::Composer(provider) => provider.install(component, path),
+            DependencyProvider::Npm(provider) => provider.install(component, path),
             DependencyProvider::ComponentScript(provider) => provider.install(component, path),
             DependencyProvider::Extension(provider) => provider.install(component, path),
         }
@@ -107,6 +117,10 @@ pub(crate) fn resolve_dependency_providers(
         providers.push(DependencyProvider::ComponentScript(
             ComponentScriptDependencyProvider,
         ));
+    }
+
+    if NpmDependencyProvider::supports(path) {
+        providers.push(DependencyProvider::Npm(NpmDependencyProvider));
     }
 
     if component
@@ -515,8 +529,8 @@ fn read_composer_packages(
     let lock = read_optional_json_file(&path.join("composer.lock"))?;
     let mut direct = BTreeMap::new();
 
-    collect_manifest_section(&manifest, "require", &mut direct);
-    collect_manifest_section(&manifest, "require-dev", &mut direct);
+    collect_composer_manifest_section(&manifest, "require", &mut direct);
+    collect_composer_manifest_section(&manifest, "require-dev", &mut direct);
 
     let locked = lock
         .as_ref()
@@ -549,7 +563,7 @@ fn read_composer_packages(
     Ok(packages)
 }
 
-fn collect_manifest_section(
+fn collect_composer_manifest_section(
     manifest: &Value,
     section: &str,
     direct: &mut BTreeMap<String, (String, String)>,

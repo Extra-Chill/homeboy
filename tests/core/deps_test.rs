@@ -1,5 +1,6 @@
 use homeboy::core::component::{Component, ComponentScriptsConfig, DependencyStackEdge};
-use homeboy::core::deps::{self, ComposerAction, DependencyUpdateOptions};
+use homeboy::core::deps::{self, DependencyUpdateOptions};
+use homeboy::extensions::deps_provider::{self, ComposerAction};
 use std::fs;
 use tempfile::tempdir;
 
@@ -143,7 +144,7 @@ fn status_filters_to_one_package() {
 #[test]
 fn test_composer_command_args() {
     assert_eq!(
-        deps::composer_command_args(
+        deps_provider::composer_command_args(
             "fixture/package",
             &ComposerAction::Require {
                 constraint: "^2.0".to_string(),
@@ -158,7 +159,7 @@ fn test_composer_command_args() {
     );
 
     assert_eq!(
-        deps::composer_command_args("fixture/package", &ComposerAction::Update),
+        deps_provider::composer_command_args("fixture/package", &ComposerAction::Update),
         vec![
             "update",
             "fixture/package",
@@ -437,7 +438,13 @@ esac
 fn deps_orchestration_stays_package_manager_agnostic() {
     let source = fs::read_to_string("src/core/deps.rs").unwrap();
 
-    for forbidden in ["composer.json", "composer.lock", "Command::new", "npm", "Cargo"] {
+    for forbidden in [
+        "composer",
+        "composer.json",
+        "composer.lock",
+        "Command::new",
+        "Cargo",
+    ] {
         assert!(
             !source.contains(forbidden),
             "core deps orchestration must not contain package-manager literal {forbidden:?}"
