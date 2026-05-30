@@ -12,10 +12,10 @@ use crate::core::{Error, Result};
 use super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_changed_since_ref,
     lab_offload_metadata, lab_runner_capability_plan, load, preflight_lab_offload_changed_since,
-    prepare_git_lab_offload_changed_since, status, sync_workspace, LabRunnerCapabilityContract,
-    LabRunnerGateDecision, LabRunnerGateMode, RunnerCapabilityPreflight, RunnerConnectReport,
-    RunnerExecOptions, RunnerRequiredTool, RunnerStatusReport, RunnerTunnelMode,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    prepare_git_lab_offload_changed_since, rig_materialization, status, sync_workspace,
+    LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
+    RunnerCapabilityPreflight, RunnerConnectReport, RunnerExecOptions, RunnerRequiredTool,
+    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,6 +408,21 @@ fn run_lab_offload_inner(
         plan = with_step(
             plan,
             PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
+        );
+    }
+
+    let synced_rigs = rig_materialization::sync_lab_offload_rigs(
+        runner_id,
+        homeboy_path,
+        &remote_cwd,
+        &changed_since_preflight.args,
+    )?;
+    if synced_rigs > 0 {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.sync_rigs", "lab.sync_rigs")
+                .inputs(PlanValues::new().json("count", &synced_rigs))
+                .build(),
         );
     }
 

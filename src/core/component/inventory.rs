@@ -135,21 +135,9 @@ fn load_standalone_components() -> Result<Vec<Component>> {
         // (it's the source of truth for version_targets, extensions, etc.)
         // and merge the standalone file's fields as fallback.
         if local_dir.exists() {
-            if let Some(mut discovered) = discover_from_portable(local_dir) {
-                // The portable config is authoritative, but the standalone file
-                // may have fields the portable config doesn't (e.g., remote_path
-                // for deploy, settings that were set via `component set`).
-                if discovered.remote_path.is_empty() {
-                    if let Some(rp) = json.get("remote_path").and_then(|v| v.as_str()) {
-                        if !rp.is_empty() {
-                            discovered.remote_path = rp.to_string();
-                        }
-                    }
-                }
-
-                // Ensure the ID matches the filename (canonical source)
-                discovered.id = id;
-                components.push(discovered);
+            if let Some(discovered) = discover_from_portable(local_dir) {
+                let component = overlay_standalone_registration(&id, discovered, json);
+                components.push(component);
                 continue;
             }
         } else if let Some(parent) = local_dir.parent() {
@@ -175,6 +163,33 @@ fn load_standalone_components() -> Result<Vec<Component>> {
     }
 
     Ok(components)
+}
+
+fn overlay_standalone_registration(
+    id: &str,
+    discovered: Component,
+    standalone: serde_json::Value,
+) -> Component {
+    let mut merged = serde_json::to_value(&discovered).unwrap_or_else(|_| serde_json::json!({}));
+
+    if let (Some(base), Some(overrides)) = (merged.as_object_mut(), standalone.as_object()) {
+        for (key, value) in overrides {
+            if key == "id" || value.is_null() {
+                continue;
+            }
+            base.insert(key.clone(), value.clone());
+        }
+    }
+
+    if let Some(obj) = merged.as_object_mut() {
+        obj.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+    }
+
+    serde_json::from_value::<Component>(merged).unwrap_or_else(|_| {
+        let mut fallback = discovered;
+        fallback.id = id.to_string();
+        fallback
+    })
 }
 
 /// Discover sibling repos when a standalone registration points at a path that
@@ -508,6 +523,47 @@ pub fn write_standalone_registration(component: &Component) -> Result<()> {
         &path,
         &content,
         &format!("write standalone registration {}", path.display()),
+    )
+}
+
+/// Write the effective component config to the standalone registry without
+/// mutating the repo-owned portable `homeboy.json`.
+pub fn write_standalone_component_config(component: &Component) -> Result<()> {
+    if component.id.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "id",
+            "Cannot write standalone component config with a blank component ID",
+            None,
+            None,
+        ));
+    }
+
+    let dir = crate::core::paths::components()?;
+    crate::core::engine::local_files::local().ensure_dir(&dir)?;
+    let path = dir.join(format!("{}.json", component.id));
+
+    let mut json = serde_json::to_value(component).map_err(|error| {
+        Error::validation_invalid_argument(
+            "component",
+            "Failed to serialize component registration",
+            Some(error.to_string()),
+            None,
+        )
+    })?;
+    if let Some(obj) = json.as_object_mut() {
+        obj.remove("id");
+        obj.insert(
+            "local_path".to_string(),
+            serde_json::Value::String(component.local_path.clone()),
+        );
+    }
+
+    crate::core::component::portable::validate_component_remote_urls(&json)?;
+    let content = crate::core::config::to_string_pretty(&json)?;
+    crate::core::engine::local_files::write_file_atomic(
+        &path,
+        &content,
+        &format!("write standalone component config {}", path.display()),
     )
 }
 

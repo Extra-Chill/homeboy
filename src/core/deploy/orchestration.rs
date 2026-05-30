@@ -8,7 +8,9 @@ use crate::core::git;
 use crate::core::project::Project;
 use crate::core::release::version;
 
-use super::execution::execute_component_deploy;
+use super::execution::{
+    execute_preflighted_component_deploy, prepare_component_deploy, PreparedComponentDeploy,
+};
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{
     calculate_component_status, calculate_release_state, load_project_components, plan_components,
@@ -145,26 +147,42 @@ pub(super) fn deploy_components(
         .filter_map(|c| version::get_component_version(c).map(|v| (c.id.clone(), v)))
         .collect();
 
-    // Execute deployments
+    // Build and validate every local artifact before the first remote write.
+    let prepared_deployments = match prepare_component_deployments(
+        &components,
+        config,
+        &project,
+        base_path,
+        &local_versions,
+        &remote_versions,
+    ) {
+        Ok(prepared) => prepared,
+        Err(failures) => {
+            let failed = failures.len() as u32;
+            if !tag_checkouts.is_empty() {
+                restore_branches(&tag_checkouts);
+            }
+            return Ok(DeployOrchestrationResult {
+                results: failures,
+                summary: DeploySummary {
+                    total: failed,
+                    succeeded: 0,
+                    failed,
+                    skipped: 0,
+                },
+            });
+        }
+    };
+
+    // Execute deployments only after every component passed the local preflight.
     let mut results: Vec<ComponentDeployResult> = vec![];
     let mut succeeded: u32 = 0;
     let mut failed: u32 = 0;
 
-    for component in &components {
-        // Apply per-project overrides (e.g. different extract_command or remote_owner)
-        let component = crate::core::project::apply_component_overrides(component, &project);
+    for prepared in &prepared_deployments {
+        let component = &prepared.component;
 
-        let effective_config = clone_config(config);
-
-        let mut result = execute_component_deploy(
-            &component,
-            &effective_config,
-            ctx,
-            base_path,
-            &project,
-            local_versions.get(&component.id).cloned(),
-            remote_versions.get(&component.id).cloned(),
-        );
+        let mut result = execute_preflighted_component_deploy(prepared, ctx, base_path, &project);
 
         // Record which git ref was deployed
         if let Some(checkout) = tag_checkouts
@@ -213,6 +231,41 @@ fn validate_supported_build_configs(components: &[Component]) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn prepare_component_deployments(
+    components: &[Component],
+    config: &DeployConfig,
+    project: &Project,
+    base_path: &str,
+    local_versions: &HashMap<String, String>,
+    remote_versions: &HashMap<String, String>,
+) -> std::result::Result<Vec<PreparedComponentDeploy>, Vec<ComponentDeployResult>> {
+    let mut prepared_deployments = Vec::new();
+    let mut failures = Vec::new();
+
+    for component in components {
+        let component = crate::core::project::apply_component_overrides(component, project);
+        let effective_config = clone_config(config);
+
+        match prepare_component_deploy(
+            &component,
+            &effective_config,
+            base_path,
+            project,
+            local_versions.get(&component.id).cloned(),
+            remote_versions.get(&component.id).cloned(),
+        ) {
+            Ok(prepared) => prepared_deployments.push(prepared),
+            Err(result) => failures.push(result),
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(prepared_deployments)
+    } else {
+        Err(failures)
+    }
 }
 
 fn validate_effective_remote_paths(
@@ -765,10 +818,22 @@ fn verify_expected_version(components: &[Component], expected: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     fn make_component(id: &str, local_path: &str) -> Component {
         Component::new(id.to_string(), local_path.to_string(), String::new(), None)
+    }
+
+    fn artifact_component(id: &str, local_path: &str, artifact: &str) -> Component {
+        let mut component = Component::new(
+            id.to_string(),
+            local_path.to_string(),
+            format!("wp-content/plugins/{id}"),
+            Some(artifact.to_string()),
+        );
+        component.extract_command = Some("unzip -o {artifact}".to_string());
+        component
     }
 
     fn base_deploy_config() -> DeployConfig {
@@ -923,6 +988,57 @@ mod tests {
                 .contains("local version is 1.0.0 (expected 1.0.1)"),
             "unexpected error: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn deploy_preflight_aborts_batch_when_later_artifact_is_missing() {
+        let dir = TempDir::new().expect("temp dir");
+        let ready_path = dir.path().join("ready");
+        let missing_path = dir.path().join("missing");
+        std::fs::create_dir_all(ready_path.join("dist")).expect("ready dist");
+        std::fs::create_dir_all(&missing_path).expect("missing component dir");
+        std::fs::write(ready_path.join("dist/ready.zip"), b"artifact").expect("ready artifact");
+
+        let components = vec![
+            artifact_component("ready", &ready_path.to_string_lossy(), "dist/ready.zip"),
+            artifact_component(
+                "missing",
+                &missing_path.to_string_lossy(),
+                "dist/missing.zip",
+            ),
+        ];
+        let project = Project {
+            id: "site".to_string(),
+            ..Project::default()
+        };
+        let mut config = base_deploy_config();
+        config.skip_build = true;
+        config.force = true;
+
+        let failures = match prepare_component_deployments(
+            &components,
+            &config,
+            &project,
+            "/srv/site",
+            &HashMap::new(),
+            &HashMap::new(),
+        ) {
+            Ok(_) => panic!("a later missing artifact must abort the whole deploy batch"),
+            Err(failures) => failures,
+        };
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].id, "missing");
+        assert_eq!(failures[0].status, "failed");
+        assert!(
+            failures[0]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("missing.zip"),
+            "unexpected error: {:?}",
+            failures[0].error
         );
     }
 }
