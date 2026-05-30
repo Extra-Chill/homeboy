@@ -10,12 +10,13 @@ homeboy fleet <COMMAND>
 
 ## Overview
 
-Fleets enable cloud version management by grouping projects that share components. Use fleets to:
+Fleets group projects that share components or operational policies. Use fleets
+to:
 
-- Deploy updates to multiple sites simultaneously
-- Check version drift across your network
-- Coordinate deployments between staging/production environments
-- Keep shared plugins/themes in sync across a WordPress multisite network
+- Inspect status and version drift across a project group
+- Coordinate deployments between staging and production environments
+- Keep shared components in sync across multiple sites, apps, or servers
+- Produce read-only attention reports for a group of environments
 
 **Hierarchy:**
 - **Component** → versioned thing (plugin, CLI tool, extension)
@@ -106,11 +107,15 @@ Useful for understanding which components are shared and where they're deployed.
 
 ```sh
 homeboy fleet status <id>
+homeboy fleet status <id> --cached
+homeboy fleet status <id> --health-only
 ```
 
-Show component versions for each project in the fleet. Reads local configuration only (no SSH).
+Show live component versions and server health for each project in the fleet via SSH.
 
-Use `fleet check` for drift detection that compares local vs remote versions.
+- `--cached`: use locally cached versions instead of a live SSH check.
+- `--health-only`: skip component versions and report only server health.
+- Use `fleet check` for drift detection that compares local vs remote versions.
 
 ### `check`
 
@@ -139,16 +144,6 @@ homeboy fleet exec <id> -- <command>
 ```
 
 Runs a command across projects in the fleet via each project's configured SSH connection. `fleet exec` participates in resource-policy warnings because it can create heavy remote work, but it intentionally stays local for Lab offload: the command depends on local fleet, project, and server configuration before opening those SSH sessions, and runner-side config parity is not guaranteed.
-
-### `sync` (deprecated)
-
-> **Deprecated.** Use `homeboy deploy` to sync files across servers instead. Register shared configs as components and deploy them like any other component. See [#101](https://github.com/Extra-Chill/homeboy/issues/101).
-
-```sh
-# Instead of: homeboy fleet sync fleet-servers
-# Use:
-homeboy deploy my-config --fleet fleet-servers
-```
 
 ## Fleet Deployment
 
@@ -209,7 +204,7 @@ Top-level fields:
 - `fleets`: list for `list` command
 - `projects`: project details for `projects` command
 - `components`: component usage map for `components` command
-- `status`: version info per project for `status` command
+- `status`: live or cached version and health info per project for `status` command
 - `check`: drift detection results for `check` command
 - `summary`: aggregate counts for `check` command
 
@@ -220,13 +215,6 @@ Check result fields:
 Summary fields:
 - `total_projects`, `projects_checked`, `projects_failed`
 - `components_up_to_date`, `components_needs_update`, `components_unknown`
-
-Sync result fields:
-- `leader_project_id`: source of truth server
-- `dry_run`: whether this was a preview run
-- `projects[]`: per-project results with `project_id`, `server_id`, `status`, `error`
-- `projects[].categories[]`: per-category results with `category`, `status`, `error`, `files_synced`
-- `summary`: `total_projects`, `projects_synced`, `projects_failed`, `projects_skipped`, `total_categories`, `categories_synced`, `categories_failed`
 
 ## Related
 

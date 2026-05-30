@@ -22,7 +22,8 @@ summary artifact.
 
 ## Top-level envelope
 
-In JSON mode, Homeboy prints a `CliResponse<T>` (implemented in the `homeboy-cli` crate) where `T` is the **command-specific output struct**.
+In JSON mode, Homeboy prints a `CliResponse<T>` where `T` is the
+**command-specific output struct**.
 
 Success:
 
@@ -86,7 +87,7 @@ The `summary` object provides counts for quick overview:
 {
   "summary": {
     "total_components": 24,
-    "by_module": { "wordpress": 21, "rust": 2, "swift": 1 },
+    "by_extension": { "wordpress": 21, "rust": 2, "swift": 1 },
     "by_status": { "clean": 5, "uncommitted": 8, "needs_release": 11 }
   }
 }
@@ -127,7 +128,7 @@ The `next_steps` array contains context-aware actionable guidance based on the c
 
 ## Error fields
 
-`error` is a `CliError` (implemented in the `homeboy-cli` crate).
+`error` is a `CliError`.
 
 - `code` (string): stable error code (see `homeboy::error::ErrorCode::as_str()`).
 - `message` (string): human-readable message.

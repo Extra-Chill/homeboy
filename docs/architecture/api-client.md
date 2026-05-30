@@ -10,7 +10,7 @@ Homeboy projects can configure an API client for making HTTP requests to project
 - Template-based URL and header construction
 - Keychain-stored authentication tokens
 - JSON request/response handling
-- Bulk request operations
+- Project-scoped `get`, `post`, `put`, `patch`, and `delete` requests
 
 ## Configuration
 
@@ -88,65 +88,33 @@ Authentication header templates use `{{var}}` placeholders.
 ### Make Request
 
 ```bash
-homeboy api <project_id> <method> <endpoint> [options]
+homeboy api <project_id> <command> <endpoint> [options]
 ```
 
 **Arguments:**
 - `<project_id>`: Project identifier
-- `<method>`: HTTP method (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`)
+- `<command>`: Request command (`get`, `post`, `put`, `patch`, `delete`)
 - `<endpoint>`: API endpoint path (appended to `base_url`)
 
 **Options:**
-- `--data <json>`: Request body (JSON)
-- `--params <key=value>`: Query parameters (repeatable)
-- `--header <key=value>`: Request headers (repeatable)
-- `--output <path>`: Save response to file
-- `--json`: Return response as JSON (when applicable)
+- `--body <json>`: Request body for `post`, `put`, and `patch`
+- `--form <key=value>`: Form field for `post`, `put`, and `patch` (repeatable)
+- `--output <path>`: Write the structured JSON envelope to a file
 
 **Examples:**
 
 ```bash
 # GET request
-homeboy api myproject GET /posts
+homeboy api myproject get /posts
 
-# POST with data
-homeboy api myproject POST /posts --data '{"title": "Hello", "content": "World"}'
+# POST with JSON body
+homeboy api myproject post /posts --body '{"title": "Hello", "content": "World"}'
 
-# With query parameters
-homeboy api myproject GET /posts --params page=1 --params per_page=10
+# POST with form fields
+homeboy api myproject post /posts --form title=Hello --form status=draft
 
-# Custom header
-homeboy api myproject GET /posts --header "Authorization: Bearer {{token}}"
-
-# Save response
-homeboy api myproject GET /posts --output /tmp/posts.json
-```
-
-### Bulk Requests
-
-```bash
-homeboy api --json <spec>
-```
-
-**JSON Spec Format:**
-
-```json
-{
-  "project_id": "myproject",
-  "requests": [
-    {
-      "method": "GET",
-      "endpoint": "/posts",
-      "params": {"page": 1, "per_page": 10},
-      "output": "/tmp/posts.json"
-    },
-    {
-      "method": "POST",
-      "endpoint": "/posts",
-      "data": {"title": "New Post", "content": "Content"}
-    }
-  ]
-}
+# Write structured response to a file
+homeboy --output /tmp/posts.json api myproject get /posts
 ```
 
 ## Extension Integration
@@ -157,17 +125,16 @@ Extensions can define API actions in their manifest for automated API interactio
 
 ```json
 {
-  "actions": {
-    "sync_posts": {
+  "actions": [
+    {
+      "id": "sync_posts",
+      "label": "Sync posts from API",
       "type": "api",
-      "description": "Sync posts from API",
-      "config": {
-        "method": "GET",
-        "endpoint": "/posts",
-        "params": {"per_page": 100}
-      }
+      "method": "GET",
+      "endpoint": "/posts",
+      "payload": {"per_page": 100}
     }
-  }
+  ]
 }
 ```
 
@@ -177,12 +144,10 @@ Extension API actions can use template variables:
 
 ```json
 {
-  "config": {
-    "method": "POST",
-    "endpoint": "/posts/{{postId}}/comments",
-    "template": {
-      "content": "{{payload.comment}}"
-    }
+  "method": "POST",
+  "endpoint": "/posts/{{postId}}/comments",
+  "payload": {
+    "content": "{{payload.comment}}"
   }
 }
 ```
@@ -237,10 +202,10 @@ All API commands return responses wrapped in the global JSON envelope:
 
 ```bash
 # List posts
-homeboy api myproject GET /wp/v2/posts
+homeboy api myproject get /wp/v2/posts
 
 # Create post
-homeboy api myproject POST /wp/v2/posts --data '{"title": "New Post"}'
+homeboy api myproject post /wp/v2/posts --body '{"title": "New Post"}'
 ```
 
 ### Custom API
@@ -256,7 +221,7 @@ homeboy api myproject POST /wp/v2/posts --data '{"title": "New Post"}'
 
 ```bash
 # Make authenticated request
-homeboy api myproject GET /users
+homeboy api myproject get /users
 ```
 
 ## Security Considerations

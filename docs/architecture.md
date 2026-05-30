@@ -133,7 +133,7 @@ the higher-level system model and core/extension boundary, see
 
 ### `RuntimeConfig`
 
-- `runtime_type` — Desktop app runtime type (python/shell/cli). CLI ignores this field.
+- `runtime_type` — Legacy UI/runtime hint (python/shell/cli). CLI ignores this field.
 - `run_command` — Shell command to execute when running the extension. Template variables: {{entrypoint}}, {{args}}, {{extensionPath}}, plus project context vars.
 - `setup_command` — Shell command to set up the extension (e.g., create venv, install deps).
 - `ready_check` — Shell command to check if extension is ready. Exit 0 = ready.
@@ -141,8 +141,8 @@ the higher-level system model and core/extension boundary, see
 - `entrypoint` — Entry point file (used in template substitution).
 - `args` — Default args template (used in template substitution).
 - `default_site` — Default site for this extension (used by some CLI extensions).
-- `dependencies` — Desktop app: Python dependencies to install.
-- `playwright_browsers` — Desktop app: Playwright browsers to install.
+- `dependencies` — Legacy UI/runtime hint for Python dependencies to install.
+- `playwright_browsers` — Legacy UI/runtime hint for Playwright browsers to install.
 
 ### `InputConfig`
 
@@ -172,7 +172,7 @@ the higher-level system model and core/extension boundary, see
 - `requires_auth`
 - `payload`
 - `command`
-- `builtin` — Builtin action type (Desktop app only). CLI parses but does not execute.
+- `builtin` — Legacy UI action type. CLI parses but does not execute.
 - `column` — Column identifier for copy-column builtin action.
 
 ### `SettingConfig`

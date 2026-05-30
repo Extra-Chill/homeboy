@@ -83,8 +83,6 @@ File-based storage for configurations:
 - Handles atomic operations for safety
 - Cross-platform paths (macOS, Linux, Windows)
 
-**Future:** Storage abstraction trait for database backends (see `storage-system-decoupling-plan.md`)
-
 ### Template System
 
 **Location:** `src/core/engine/template.rs`
@@ -195,8 +193,8 @@ Local orchestration system:
 - Execute with error handling
 
 Step types:
-- Built-in: build, version_bump, git_commit, git_tag, git_push
-- Extension: extension_run, extension_action
+- Core: preflight, changelog, version, git, deploy, cleanup, and artifact steps
+- Extension-backed: prepare, package, and publish actions declared by extensions
 
 ### Code Audit
 
@@ -233,11 +231,11 @@ Documentation verification:
 
 **Location:** `src/core/fleet/`
 
-Fleet management for cloud version management:
+Fleet management for grouped environments:
 - Named groups of projects
 - Shared component detection
-- Fleet-wide operations (status, check, deploy)
-- Coordinated deployments across multiple servers
+- Fleet-wide status, triage, and deploy operations
+- Coordinated operations across multiple servers or local environments
 
 Config entities:
 - **Fleets**: Named groups of projects for batch operations
@@ -298,7 +296,7 @@ Embedded documentation:
 
 ### Release Pipeline Flow
 
-1. CLI parses `homeboy release run <component>`
+1. CLI parses `homeboy release <component>`
 2. Load component configuration
 3. Parse release pipeline steps
 4. Validate step dependencies
@@ -329,11 +327,10 @@ Extensions are loaded from:
 
 ### Extension Execution
 
-Two execution paths:
-1. **Direct execution**: `homeboy extension run <extension_id>`
-2. **Pipeline step**: `extension.run` step in release pipeline
-
-Both paths use the same execution context builder and template resolver.
+Direct extension execution uses `homeboy extension run <extension_id>`. Other
+Homeboy command families, such as lint, test, build, bench, trace, release, and
+deploy, can also invoke extension-owned scripts or actions through their own
+typed contracts.
 
 ## Error Handling
 

@@ -1,6 +1,10 @@
 # Project Schema
 
-Project configuration defines deployable environments stored in `projects/<id>.json`.
+Project configuration defines environment-specific context stored in
+`projects/<id>.json`: server bindings, domains, local paths, remote paths,
+project-scoped CLI settings, API settings, database settings, and component
+attachments. Components can run local quality loops without a project; projects
+matter when the workflow needs environment context.
 
 ## Schema
 

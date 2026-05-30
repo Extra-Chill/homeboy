@@ -47,7 +47,7 @@ Stored for project API authentication.
 homeboy auth set --project <project_id> token
 
 # Token is automatically retrieved during API requests
-homeboy api <project_id> GET /posts
+homeboy api <project_id> get /posts
 ```
 
 ### Database Passwords

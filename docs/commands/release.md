@@ -63,7 +63,7 @@ The release command coordinates versioning, committing, tagging, and pushing.
 Release pipelines support two step types:
 
 - **Core steps**: `build`, `changes`, `version`, `git.commit`, `git.tag`, `git.push`
-- **Extension-backed steps**: any custom step type implemented as a extension action named `release.<step_type>`
+- **Extension-backed steps**: publish/package/prepare behavior implemented by extension release actions such as `release.prepare`, `release.package`, or `release.publish.<target>`
 
 ### Core step: `git.commit`
 
@@ -95,26 +95,16 @@ These files are modified during the release anyway and included in the release c
 
 Any other uncommitted changes will cause the release to fail with guidance to commit first.
 
-### Pipeline step: `extension.run`
+### Extension-backed release behavior
 
-Use `extension.run` to execute a extension runtime command as part of the release pipeline.
+Older release docs may mention generic `extension.run` steps. Current release
+execution is intentionally narrower: the executable release plan is built from
+known core steps plus extension-backed release actions declared in extension
+manifests.
 
-Example step configuration:
-
-```json
-{
-  "id": "scrape",
-  "type": "extension.run",
-  "needs": ["build"],
-  "config": {
-    "extension": "bandcamp-scraper",
-    "inputs": [
-      { "id": "artist", "value": "some-artist" }
-    ],
-    "args": ["--verbose"]
-  }
-}
-```
+Use extension manifests for release-specific prepare, package, and publish
+actions. Core keeps the release graph generic; extensions own platform-specific
+work.
 
 - `config.extension` is required.
 - `config.inputs` is optional; each entry must include `id` and `value`.

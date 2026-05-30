@@ -43,7 +43,7 @@ homeboy extension set [extension_id] --json <JSON> [--replace <field>]...
 homeboy extension set [extension_id] --json '<JSON>'
 ```
 
-Updates a extension manifest by merging a JSON object into the extension config.
+Updates an extension manifest by merging a JSON object into the extension config.
 
 Options:
 
@@ -66,7 +66,7 @@ homeboy extension setup <extension_id>
 homeboy extension install <source> [--id <extension_id>] [--ref <git-ref>] [--revision <git-ref>] [--replace]
 ```
 
-Installs a extension into Homeboy's extensions directory.
+Installs an extension into Homeboy's extensions directory.
 
 - If `<source>` is a git URL, Homeboy clones it and writes `sourceUrl` into the installed extension's `<extension_id>.json` manifest.
 - For git URL installs, `--ref` (alias `--revision`) checks out a branch, tag, or commit after cloning. The installed metadata still records the resolved `source_revision` SHA.
@@ -99,7 +99,7 @@ Updates a git-cloned extension.
 homeboy extension uninstall <extension_id>
 ```
 
-Uninstalls a extension.
+Uninstalls an extension.
 
 - If the extension is **symlinked**, Homeboy removes the symlink (the source directory is preserved).
 - If the extension is **git-cloned**, Homeboy deletes the extension directory.
@@ -130,7 +130,7 @@ Homeboy builds an **effective settings** map for each extension by merging setti
 1. Project (`projects/<project_id>.json`): `extensions.<extension_id>.settings`
 2. Component (`components/<component_id>.json`): `extensions.<extension_id>.settings`
 
-When running a extension, Homeboy passes an execution context via environment variables:
+When running an extension, Homeboy passes an execution context via environment variables:
 
 - `HOMEBOY_EXEC_CONTEXT_VERSION`: currently `2`
 - `HOMEBOY_EXTENSION_ID`
@@ -148,7 +148,10 @@ Extensions can define additional environment variables via `runtime.env` in thei
 
 Extension settings validation happens during extension execution and may also be checked by other commands.
 
-`homeboy extension run` requires the extension to be installed/linked under the Homeboy extensions directory (discovered by scanning `<config dir>/homeboy/extensions/<extension_id>/<extension_id>.json`). There is no separate "installedModules in global config" requirement.
+`homeboy extension run` requires the extension to be installed or linked under
+the Homeboy extensions directory, discovered by scanning
+`~/.config/homeboy/extensions/<extension_id>/<extension_id>.json`. There is no
+separate `installedModules` requirement in global config.
 
 ## Runtime Configuration
 
@@ -201,10 +204,10 @@ Extension entry (`extensions[]`):
 - `id`, `name`, `version`, `description`
 - `runtime`: `executable` (has runtime config) or `platform` (no runtime config)
 - `compatible` (with optional `--project`)
-- `ready` (runtime readiness based on `readyCheck`)
-- `configured`: currently always `true` for discovered extensions (reserved for future richer config state)
+- `ready` (runtime readiness based on `ready_check`)
 - `linked`: whether the extension is symlinked
 - `path`: extension directory path (may be empty if unknown)
+- Optional fields include `ready_reason`, `ready_detail`, `error`, `symlink_target`, `source_revision`, `cli_tool`, `cli_display_name`, `actions`, `has_setup`, and `has_ready_check`.
 
 Extension detail (`extension.show`):
 
@@ -212,8 +215,8 @@ Extension detail (`extension.show`):
 
 ## Exit code
 
-- `extension.run`: exit code of the executed extension's `runCommand`.
-- `extension.setup`: `0` on success; if no `setupCommand` defined, returns `0` without action.
+- `extension.run`: exit code of the executed extension's `run_command`.
+- `extension.setup`: `0` on success; if no `setup_command` is defined, returns `0` without action.
 
 ## Extension-provided commands and docs
 
@@ -225,7 +228,7 @@ Discover what’s available on your machine:
 homeboy docs list
 ```
 
-Render a extension-provided topic:
+Render an extension-provided topic:
 
 ```sh
 homeboy docs <topic>

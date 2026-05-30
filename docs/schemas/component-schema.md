@@ -151,12 +151,9 @@ Setting `local_path` to the same directory as the deploy target is a misconfigur
     "enabled": true,
     "steps": [
       {
-        "id": "test",
-        "type": "extension.run",
-        "label": "Run Tests",
-        "config": {
-          "extension": "rust"
-        }
+        "id": "preflight.test",
+        "type": "preflight.test",
+        "label": "Run Tests"
       }
     ]
   }
