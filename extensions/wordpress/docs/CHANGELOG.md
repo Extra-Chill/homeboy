@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.105.8] - 2026-05-30
+
+### Fixed
+- project wp-codebox apply artifacts into core contract
+
 ## [2.105.7] - 2026-05-30
 
 ### Fixed
