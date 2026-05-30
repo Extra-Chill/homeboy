@@ -310,6 +310,104 @@ fn bench_shell_helper_writes_empty_envelope() {
 }
 
 #[test]
+fn bench_shell_helper_writes_scenarios_from_payload_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("bench-helper.sh");
+    let results_path = dir.path().join("bench-results.json");
+    let payload_path = dir.path().join("payload.json");
+    let extras_path = dir.path().join("extras.json");
+    std::fs::write(&helper_path, assets::BENCH_HELPER_SH).expect("write helper");
+    std::fs::write(
+        &payload_path,
+        r#"{
+  "timings_ns": [1000000, 3000000, 5000000],
+  "peak_rss_bytes": 4096,
+  "source": "custom",
+  "metadata": {"fixture": true},
+  "artifacts": {"stdout": {"path": "bench.log", "kind": "text"}},
+  "metrics": {"custom_ms": 9.5}
+}"#,
+    )
+    .expect("write payload");
+    std::fs::write(
+        &extras_path,
+        r#"{
+  "metadata": {"runner": {"status": "ok"}},
+  "metric_groups": {"phases": {"setup_ms": 12}},
+  "timeline": [{"id": "setup", "duration_ms": 12}]
+}"#,
+    )
+    .expect("write extras");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_write_bench_results_from_payload_files --results-file {} --component demo --iterations 3 --extras-file {} 'bench-fast={}'; cat {}",
+            helper_path.display(),
+            results_path.display(),
+            extras_path.display(),
+            payload_path.display(),
+            results_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(value["component_id"], "demo");
+    assert_eq!(value["iterations"], 3);
+    assert_eq!(value["metadata"]["runner"]["status"], "ok");
+    assert_eq!(value["metric_groups"]["phases"]["setup_ms"], 12);
+    assert_eq!(value["timeline"][0]["id"], "setup");
+    assert_eq!(value["scenarios"][0]["id"], "bench-fast");
+    assert_eq!(value["scenarios"][0]["iterations"], 3);
+    assert_eq!(value["scenarios"][0]["metrics"]["mean_ms"], 3.0);
+    assert_eq!(value["scenarios"][0]["metrics"]["p50_ms"], 3.0);
+    assert_eq!(value["scenarios"][0]["metrics"]["custom_ms"], 9.5);
+    assert_eq!(value["scenarios"][0]["memory"]["peak_bytes"], 4096);
+    assert_eq!(value["scenarios"][0]["source"], "custom");
+    assert_eq!(value["scenarios"][0]["metadata"]["fixture"], true);
+    assert_eq!(value["scenarios"][0]["artifacts"]["stdout"]["path"], "bench.log");
+}
+
+#[test]
+fn bench_shell_helper_writes_scenario_inventory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("bench-helper.sh");
+    let results_path = dir.path().join("bench-results.json");
+    std::fs::write(&helper_path, assets::BENCH_HELPER_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_write_bench_scenario_inventory --results-file {} --component demo --iterations 11 'bench-http=src/bin/bench-http.rs=rust-bin'; cat {}",
+            helper_path.display(),
+            results_path.display(),
+            results_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(value["component_id"], "demo");
+    assert_eq!(value["iterations"], 0);
+    assert_eq!(value["scenarios"][0]["id"], "bench-http");
+    assert_eq!(value["scenarios"][0]["iterations"], 0);
+    assert_eq!(value["scenarios"][0]["default_iterations"], 11);
+    assert_eq!(value["scenarios"][0]["file"], "src/bin/bench-http.rs");
+    assert_eq!(value["scenarios"][0]["source"], "rust-bin");
+}
+
+#[test]
 fn bench_js_helper_emits_compact_progress_to_stderr() {
     let dir = tempfile::tempdir().expect("tempdir");
     let helper_path = dir.path().join("bench-helper.mjs");
@@ -369,7 +467,11 @@ homeboyBenchProgress({ scenario: 'studio-agent-site-build', phase: 'setup' });
 
 #[test]
 fn bench_runtime_helpers_document_shared_contract() {
-    for content in [assets::BENCH_HELPER_JS, assets::BENCH_HELPER_PHP] {
+    for content in [
+        assets::BENCH_HELPER_JS,
+        assets::BENCH_HELPER_PHP,
+        assets::BENCH_HELPER_SH,
+    ] {
         assert!(
             content.contains("R-7 percentile"),
             "helper should document percentile method"
