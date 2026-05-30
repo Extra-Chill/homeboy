@@ -53,7 +53,7 @@ assert_file "$FAILURE_TRAP_HELPER"
 assert_file "$WRITE_TEST_RESULTS_HELPER"
 assert_file "$SIDECAR_WRITER_HELPER"
 assert_file "$PROJECT_SCRIPTS_HELPER"
-bash -c 'source "$1"; type homeboy_merge_lint_findings >/dev/null; type homeboy_merge_test_failures >/dev/null; type homeboy_write_fix_results >/dev/null' _ "$SIDECAR_WRITER_HELPER"
+bash -c 'source "$1"; type homeboy_merge_lint_findings >/dev/null; type homeboy_merge_test_failures >/dev/null; type homeboy_write_fix_results >/dev/null; type homeboy_merge_annotations >/dev/null' _ "$SIDECAR_WRITER_HELPER"
 bash -c 'source "$1"; type homeboy_project_init >/dev/null; type homeboy_project_has_script >/dev/null; type homeboy_project_run_script_command >/dev/null' _ "$PROJECT_SCRIPTS_HELPER"
 for bash_preflight_helper in "${BASH_PREFLIGHT_HELPERS[@]}"; do
     assert_file "$bash_preflight_helper"
@@ -79,6 +79,13 @@ fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+ANNOTATIONS_DIR="$TMP_DIR/annotations"
+ANNOTATIONS_SOURCE="$TMP_DIR/extra-annotations.json"
+printf '[{"file":"b.php","line":2}]\n' > "$ANNOTATIONS_SOURCE"
+HOMEBOY_ANNOTATIONS_DIR="$ANNOTATIONS_DIR" bash -c 'source "$1"; homeboy_write_annotations phpcs "{\"file\":\"a.php\",\"line\":1}"; homeboy_merge_annotations phpstan "$2"' _ "$SIDECAR_WRITER_HELPER" "$ANNOTATIONS_SOURCE"
+assert_contains "$ANNOTATIONS_DIR/phpcs.json" '"file":"a.php"'
+assert_contains "$ANNOTATIONS_DIR/phpstan.json" '"file":"b.php"'
 
 WORDPRESS_OUTPUT="$TMP_DIR/phpunit.txt"
 WORDPRESS_RESULTS="$TMP_DIR/wordpress-results.json"
