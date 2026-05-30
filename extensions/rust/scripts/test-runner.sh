@@ -232,7 +232,7 @@ else
     fi
 
     if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
-        if ! type homeboy_merge_test_failures >/dev/null 2>&1; then
+        if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
             echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
             exit 1
         fi
@@ -294,7 +294,7 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(failures, handle, indent=2)
     handle.write("\n")
 PY
-        homeboy_merge_test_failures "$TEST_FAILURES_TMP"
+        homeboy_sidecar_merge test.failures "$TEST_FAILURES_TMP"
         rm -f "$TEST_FAILURES_TMP"
     fi
 

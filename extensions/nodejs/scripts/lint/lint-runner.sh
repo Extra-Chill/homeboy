@@ -37,7 +37,7 @@ homeboy_detect_package_manager
 FIX_MODE="${HOMEBOY_FIX_ONLY:-0}"
 FINDINGS_FILE="${HOMEBOY_LINT_FINDINGS_FILE:-${PROJECT_PATH}/.node-lint-findings.json}"
 export HOMEBOY_LINT_FINDINGS_FILE="$FINDINGS_FILE"
-if ! type homeboy_merge_lint_findings >/dev/null 2>&1; then
+if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
     echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
     exit 1
 fi
@@ -68,7 +68,7 @@ if [ -n "${HOMEBOY_NODE_LINT_COMMAND:-}" ]; then
         else
             FAILED_STEP="No typecheck script defined"
             FAILURE_OUTPUT="CI job requested typecheck, but package.json does not define scripts.typecheck. Set HOMEBOY_NODE_LINT_COMMAND to a project-specific command or add scripts.typecheck."
-            homeboy_write_lint_findings
+            homeboy_sidecar_write lint.findings
             exit 1
         fi
     else
@@ -92,7 +92,7 @@ elif [ $HAS_ESLINT_CONFIG -eq 1 ]; then
         # clear message rather than silently npx-installing it.
         FAILED_STEP="eslint config found but eslint not installed"
         FAILURE_OUTPUT="Run: npm i -D eslint (or your package manager equivalent) in ${PROJECT_PATH}"
-        homeboy_write_lint_findings
+        homeboy_sidecar_write lint.findings
         exit 1
     fi
 else
@@ -101,7 +101,7 @@ else
     echo "⚠ No lint surface detected (no scripts.lint, no eslint config)."
     echo "  Skipping lint — emitting empty findings."
     echo ""
-    homeboy_write_lint_findings
+    homeboy_sidecar_write lint.findings
     exit 0
 fi
 
@@ -234,11 +234,11 @@ for (const file of report) {
 
 fs.writeFileSync(outputFile, JSON.stringify(findings, null, 2));
 NODEJS
-    homeboy_merge_lint_findings "$FINDINGS_TMP"
+    homeboy_sidecar_merge lint.findings "$FINDINGS_TMP"
     rm -f "$FINDINGS_TMP"
 else
     # Unknown runner output — emit empty findings, rely on exit code.
-    homeboy_write_lint_findings
+    homeboy_sidecar_write lint.findings
 fi
 
 rm -f "$OUTPUT_FILE"
