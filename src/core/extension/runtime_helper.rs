@@ -8,6 +8,7 @@ use std::path::PathBuf;
 mod assets;
 
 pub const RUNNER_STEPS_ENV: &str = "HOMEBOY_RUNTIME_RUNNER_STEPS";
+pub const RUNNER_PRELUDE_ENV: &str = "HOMEBOY_RUNTIME_RUNNER_PRELUDE";
 pub const FAILURE_TRAP_ENV: &str = "HOMEBOY_RUNTIME_FAILURE_TRAP";
 pub const WRITE_TEST_RESULTS_ENV: &str = "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS";
 pub const SIDECAR_WRITER_ENV: &str = "HOMEBOY_RUNTIME_SIDECAR_WRITER";
@@ -28,6 +29,12 @@ const HELPERS: &[RuntimeHelper] = &[
         filename: "runner-steps.sh",
         content: assets::RUNNER_STEPS_SH,
         env_var: RUNNER_STEPS_ENV,
+        legacy_fallback: false,
+    },
+    RuntimeHelper {
+        filename: "runner-prelude.sh",
+        content: assets::RUNNER_PRELUDE_SH,
+        env_var: RUNNER_PRELUDE_ENV,
         legacy_fallback: false,
     },
     RuntimeHelper {

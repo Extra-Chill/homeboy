@@ -18,6 +18,10 @@ fn ensure_all_helpers_writes_all_files() {
             "failure trap helper should be in pairs"
         );
         assert!(
+            pairs.iter().any(|(k, _)| k == RUNNER_PRELUDE_ENV),
+            "runner prelude helper should be in pairs"
+        );
+        assert!(
             pairs.iter().any(|(k, _)| k == WRITE_TEST_RESULTS_ENV),
             "write test results helper should be in pairs"
         );
@@ -38,6 +42,45 @@ fn ensure_all_helpers_writes_all_files() {
             "bench PHP helper should be in pairs"
         );
     });
+}
+
+#[test]
+fn runner_prelude_initializes_context_steps_trap_and_sidecar() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime_dir = dir.path().join("runtime");
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+    std::fs::write(runtime_dir.join("runner-prelude.sh"), assets::RUNNER_PRELUDE_SH)
+        .expect("write prelude");
+    std::fs::write(runtime_dir.join("resolve-context.sh"), assets::RESOLVE_CONTEXT_SH)
+        .expect("write resolve context");
+    std::fs::write(runtime_dir.join("runner-steps.sh"), assets::RUNNER_STEPS_SH)
+        .expect("write runner steps");
+    std::fs::write(runtime_dir.join("failure-trap.sh"), assets::FAILURE_TRAP_SH)
+        .expect("write failure trap");
+    std::fs::write(runtime_dir.join("sidecar-writer.sh"), assets::SIDECAR_WRITER_SH)
+        .expect("write sidecar writer");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_runner_init --bash 4 --component-alias PLUGIN_PATH --steps --failure-trap --sidecar-writer; should_run_step test; type homeboy_append_lint_finding >/dev/null; printf '%s|%s|%s|%s' \"$EXTENSION_PATH\" \"$COMPONENT_PATH\" \"$PLUGIN_PATH\" \"$FAILED_STEP\"",
+            runtime_dir.join("runner-prelude.sh").display()
+        ))
+        .env("HOMEBOY_EXTENSION_PATH", "/tmp/ext")
+        .env("HOMEBOY_COMPONENT_PATH", "/tmp/project")
+        .env("HOMEBOY_COMPONENT_ID", "demo")
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "/tmp/ext|/tmp/project|/tmp/project|"
+    );
 }
 
 #[test]
