@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.20.0] - 2026-05-30
+
+### Added
+- consume manifest changed-test routing
+
 ## [1.19.5] - 2026-05-30
 
 ### Changed
