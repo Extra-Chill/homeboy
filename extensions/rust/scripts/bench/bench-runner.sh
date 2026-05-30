@@ -58,6 +58,7 @@ homeboy_require_bash_version 4
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../lib/settings.sh}"
+BENCH_HELPER_SH="${HOMEBOY_RUNTIME_BENCH_HELPER_SH:-${HOME}/.homeboy/runtime/bench-helper.sh}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
@@ -70,6 +71,13 @@ if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
 else
     FAILED_STEP=""
     FAILURE_OUTPUT=""
+fi
+# shellcheck source=/dev/null
+if [ -f "$BENCH_HELPER_SH" ]; then
+    source "$BENCH_HELPER_SH"
+else
+    echo "ERROR: Homeboy bench helper not found at ${BENCH_HELPER_SH}" >&2
+    exit 2
 fi
 
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
@@ -312,32 +320,11 @@ if [ "$LIST_ONLY" = "1" ]; then
         done
     fi
 
-    python3 - <<PYTHON_LIST "$RESULTS_FILE" "$COMPONENT_ID" "$ITERATIONS" "${SCENARIO_ARGS[@]:-}"
-import json, os, sys
-
-results_file = sys.argv[1]
-component_id = sys.argv[2]
-iterations = int(sys.argv[3])
-scenario_kvs = sys.argv[4:]
-scenarios = []
-for kv in scenario_kvs:
-    scenario_id, rel_file, source = kv.split('=', 2)
-    scenario = {
-        'id': scenario_id,
-        'iterations': 0,
-        'default_iterations': iterations,
-        'tags': [],
-        'metrics': {},
-        'source': source,
-    }
-    if rel_file != 'null':
-        scenario['file'] = rel_file
-    scenarios.append(scenario)
-
-os.makedirs(os.path.dirname(results_file) or '.', exist_ok=True)
-with open(results_file, 'w', encoding='utf-8') as fh:
-    json.dump({'component_id': component_id, 'iterations': 0, 'scenarios': scenarios}, fh, indent=2)
-PYTHON_LIST
+    homeboy_write_bench_scenario_inventory \
+        --results-file "$RESULTS_FILE" \
+        --component "$COMPONENT_ID" \
+        --iterations "$ITERATIONS" \
+        "${SCENARIO_ARGS[@]:-}"
 
     echo "Discovered ${#SCENARIO_ARGS[@]} Rust bench scenarios."
     exit 0
@@ -349,9 +336,7 @@ if [ "${#BENCH_BINS[@]}" -eq 0 ] && ! profiles_requested && ! criterion_requeste
     echo "  Bench binaries must be named 'bench-*' and live at" >&2
     echo "  src/bin/bench-*.rs or be declared as [[bin]] entries in Cargo.toml." >&2
     echo "" >&2
-    cat > "$RESULTS_FILE" <<EMPTY
-{"component_id":"${COMPONENT_ID}","iterations":0,"scenarios":[]}
-EMPTY
+    homeboy_write_empty_bench_results "$COMPONENT_ID" 0 "$RESULTS_FILE"
     exit 0
 fi
 
@@ -735,56 +720,35 @@ fi
 
 # ── Build the BenchResults envelope ────────────────────────────────
 #
-# Use python3 for the JSON math: jq doesn't have a clean way to do
-# percentile interpolation, and we want bit-for-bit parity with the
-# WP and Node runners' R-7 method.
+# Core owns the generic BenchResults scenario shape and timing metric math.
+# The Rust runner only prepares Rust-specific envelope metadata and artifacts.
 
 if ! command -v python3 >/dev/null 2>&1; then
     FAILED_STEP="python3 not on PATH"
-    FAILURE_OUTPUT="bench-runner.sh requires python3 for percentile math"
+    FAILURE_OUTPUT="bench-runner.sh requires python3 for bench metadata preparation"
     exit 1
 fi
 
 PARSE_START_MS="$(now_ms)"
-python3 - <<PYTHON_AGGREGATE "$RESULTS_FILE" "$COMPONENT_ID" "$ITERATIONS" "$CARGO_TIMING_STATUS" "$CARGO_TIMING_NOTE" "$CARGO_TIMING_ARTIFACT" --phases "${PHASE_RECORDS[@]:-}" --scenarios "${SCENARIOS_PATHS[@]:-}"
+BENCH_EXTRAS_FILE="${SCENARIOS_JSON_TMPDIR}/bench-extras.json"
+python3 - <<PYTHON_EXTRAS "$BENCH_EXTRAS_FILE" "$CARGO_TIMING_STATUS" "$CARGO_TIMING_NOTE" "$CARGO_TIMING_ARTIFACT" --phases "${PHASE_RECORDS[@]:-}"
 import json, os, sys
 
-results_file = sys.argv[1]
-component_id = sys.argv[2]
-iterations   = int(sys.argv[3])
-cargo_timing_status = sys.argv[4]
-cargo_timing_note = sys.argv[5]
-cargo_timing_artifact = sys.argv[6]
+extras_file = sys.argv[1]
+cargo_timing_status = sys.argv[2]
+cargo_timing_note = sys.argv[3]
+cargo_timing_artifact = sys.argv[4]
 
-args = sys.argv[7:]
+args = sys.argv[5:]
 phase_records = []
-scenario_kvs = []
 mode = None
 for arg in args:
     if arg == "--phases":
         mode = "phases"
         continue
-    if arg == "--scenarios":
-        mode = "scenarios"
-        continue
     if mode == "phases" and arg:
         phase_records.append(arg)
-    elif mode == "scenarios" and arg:
-        scenario_kvs.append(arg)
 
-def percentile_r7(sorted_ms, p):
-    n = len(sorted_ms)
-    if n == 0: return 0.0
-    if n == 1: return sorted_ms[0]
-    rank = p * (n - 1)
-    lo, hi = int(rank), -(-int(rank * 10 ** 9) // 10 ** 9)  # ceil
-    hi = min(int(rank) + (1 if rank > int(rank) else 0), n - 1)
-    if lo == hi: return sorted_ms[lo]
-    frac = rank - lo
-    return sorted_ms[lo] * (1 - frac) + sorted_ms[hi] * frac
-
-scenarios = []
-workload_phase_ms = {}
 timeline = []
 phase_metrics = {}
 for record in phase_records:
@@ -805,57 +769,6 @@ for record in phase_records:
     })
     metric_key = f"{name.replace(':', '_')}_ms"
     phase_metrics[metric_key] = duration_value
-    if name.startswith("workload:"):
-        workload_phase_ms[name.split(":", 1)[1]] = duration_value
-
-for kv in scenario_kvs:
-    if not kv: continue
-    sid, path = kv.split("=", 1)
-    with open(path) as f:
-        payload = json.load(f)
-
-    timings_ns = payload.get("timings_ns", [])
-    timings_ms = sorted(t / 1_000_000.0 for t in timings_ns)
-    n = len(timings_ms)
-
-    if n == 0:
-        sys.stderr.write(f"WORKLOAD_WARN: {sid} emitted no timings\n")
-        continue
-
-    metrics = {
-        "mean_ms": sum(timings_ms) / n,
-        "p50_ms":  percentile_r7(timings_ms, 0.50),
-        "p95_ms":  percentile_r7(timings_ms, 0.95),
-        "p99_ms":  percentile_r7(timings_ms, 0.99),
-        "min_ms":  timings_ms[0],
-        "max_ms":  timings_ms[-1],
-    }
-    for key, value in payload.get("metrics", {}).items():
-        if isinstance(value, (int, float)):
-            metrics[key] = value
-
-    scenario = {
-        "id": sid,
-        "iterations": n,
-        "metrics": metrics,
-        "metadata": {
-            "rust_runner": {
-                "workload_run_ms": workload_phase_ms.get(sid),
-            }
-        },
-    }
-    if "file" in payload:
-        scenario["file"] = payload["file"]
-    if "source" in payload:
-        scenario["source"] = payload["source"]
-    if "metadata" in payload:
-        scenario["metadata"] = payload["metadata"]
-    if "artifacts" in payload:
-        scenario["artifacts"] = payload["artifacts"]
-    if "peak_rss_bytes" in payload:
-        scenario["memory"] = {"peak_bytes": int(payload["peak_rss_bytes"])}
-
-    scenarios.append(scenario)
 
 metadata = {
     "rust_runner": {
@@ -872,10 +785,7 @@ if cargo_timing_artifact:
         "label": "Cargo build timing report",
     }
 
-envelope = {
-    "component_id": component_id,
-    "iterations":   iterations,
-    "scenarios":    scenarios,
+extras = {
     "metadata":     metadata,
     "metric_groups": {
         "rust_runner_phases_ms": phase_metrics,
@@ -889,14 +799,68 @@ envelope = {
     "timeline": timeline,
 }
 if artifacts:
-    envelope["artifacts"] = artifacts
+    extras["artifacts"] = artifacts
 
-os.makedirs(os.path.dirname(results_file) or ".", exist_ok=True)
-with open(results_file, "w") as f:
-    json.dump(envelope, f, indent=2)
+with open(extras_file, "w", encoding="utf-8") as f:
+    json.dump(extras, f, indent=2)
+PYTHON_EXTRAS
 
-print(f"\nResults: {len(scenarios)} scenario(s) written to {results_file}")
-PYTHON_AGGREGATE
+python3 - <<PYTHON_SCENARIO_METADATA --phases "${PHASE_RECORDS[@]:-}" --scenarios "${SCENARIOS_PATHS[@]:-}"
+import json, sys
+
+args = sys.argv[1:]
+phase_records = []
+scenario_kvs = []
+mode = None
+for arg in args:
+    if arg == "--phases":
+        mode = "phases"
+        continue
+    if arg == "--scenarios":
+        mode = "scenarios"
+        continue
+    if mode == "phases" and arg:
+        phase_records.append(arg)
+    elif mode == "scenarios" and arg:
+        scenario_kvs.append(arg)
+
+workload_phase_ms = {}
+for record in phase_records:
+    parts = record.split("=", 2)
+    if len(parts) != 3:
+        continue
+    name, _start_ms, duration_ms = parts
+    if not name.startswith("workload:"):
+        continue
+    try:
+        workload_phase_ms[name.split(":", 1)[1]] = int(duration_ms)
+    except ValueError:
+        continue
+
+for kv in scenario_kvs:
+    if not kv:
+        continue
+    scenario_id, payload_path = kv.split("=", 1)
+    phase_ms = workload_phase_ms.get(scenario_id)
+    if phase_ms is None:
+        continue
+    with open(payload_path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    metadata = payload.setdefault("metadata", {})
+    rust_runner = metadata.setdefault("rust_runner", {})
+    rust_runner.setdefault("workload_run_ms", phase_ms)
+    with open(payload_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+PYTHON_SCENARIO_METADATA
+
+homeboy_write_bench_results_from_payload_files \
+    --results-file "$RESULTS_FILE" \
+    --component "$COMPONENT_ID" \
+    --iterations "$ITERATIONS" \
+    --extras-file "$BENCH_EXTRAS_FILE" \
+    "${SCENARIOS_PATHS[@]:-}"
+
+printf '\nResults: %s scenario(s) written to %s\n' "${#SCENARIOS_PATHS[@]}" "$RESULTS_FILE"
 PARSE_END_MS="$(now_ms)"
 RESULT_PARSE_MS=$(( PARSE_END_MS - PARSE_START_MS ))
 [ "$RESULT_PARSE_MS" -lt 0 ] && RESULT_PARSE_MS=0
