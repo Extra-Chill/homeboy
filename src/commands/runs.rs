@@ -567,8 +567,8 @@ mod tests {
     use std::path::Path;
 
     use homeboy::core::observation::{
-        FindingListFilter, FindingRecord, NewFindingRecord, NewRunRecord, NewTraceSpanRecord,
-        RunRecord, RunStatus, TraceSpanRecord,
+        FindingListFilter, NewFindingRecord, NewRunRecord, NewTraceSpanRecord,
+        RecordedHomeboyFinding, RunRecord, RunStatus, TraceSpanRecord,
     };
     use homeboy::test_support::with_isolated_home;
     use serde::Deserialize;
@@ -870,14 +870,14 @@ mod tests {
             };
             assert_eq!(output.findings.len(), 1);
             assert_eq!(output.findings[0].id, recorded.id);
-            assert_eq!(output.findings[0].message, "Missing escaping");
+            assert_eq!(output.findings[0].finding.message, "Missing escaping");
 
             let (output, _) = findings::finding(&recorded.id).expect("show finding");
             let RunsOutput::Finding(output) = output else {
                 panic!("expected finding output");
             };
-            assert_eq!(output.finding.metadata_json["category"], "security");
-            assert_eq!(output.finding.fixable, Some(true));
+            assert_eq!(output.finding.finding.category.as_deref(), Some("security"));
+            assert_eq!(output.finding.finding.fix.fixable, Some(true));
         });
     }
 
@@ -971,7 +971,7 @@ mod tests {
             assert_eq!(output.command, "runs.latest-finding");
             assert_eq!(output.run.id, latest_run.id);
             assert_eq!(output.finding.id, latest_finding.id);
-            assert_eq!(output.finding.message, "Latest finding");
+            assert_eq!(output.finding.finding.message, "Latest finding");
         });
     }
 
@@ -1194,11 +1194,12 @@ mod tests {
             };
             assert_eq!(result.finding_count, 2);
             assert_eq!(result.test_failure_count, 1);
-            let findings: Vec<FindingRecord> = read_bundle_test_json(&output.join("findings.json"));
-            let test_failures: Vec<FindingRecord> =
+            let findings: Vec<RecordedHomeboyFinding> =
+                read_bundle_test_json(&output.join("findings.json"));
+            let test_failures: Vec<RecordedHomeboyFinding> =
                 read_bundle_test_json(&output.join("test_failures.json"));
-            assert_eq!(findings, vec![lint, failure.clone()]);
-            assert_eq!(test_failures, vec![failure]);
+            assert_eq!(findings, vec![lint.into(), failure.clone().into()]);
+            assert_eq!(test_failures, vec![failure.into()]);
         });
     }
 

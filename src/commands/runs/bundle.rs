@@ -5,7 +5,8 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 
 use homeboy::core::observation::{
-    ArtifactRecord, FindingRecord, ObservationStore, RunRecord, TraceSpanRecord,
+    ArtifactRecord, FindingRecord, ObservationStore, RecordedHomeboyFinding, RunRecord,
+    TraceSpanRecord,
 };
 use homeboy::core::runner::is_reportable_artifact_evidence_path;
 use homeboy::core::Error;
@@ -83,8 +84,8 @@ struct ObservationBundle {
     runs: Vec<RunRecord>,
     artifacts: Vec<ArtifactRecord>,
     trace_spans: Vec<TraceSpanRecord>,
-    findings: Vec<FindingRecord>,
-    test_failures: Vec<FindingRecord>,
+    findings: Vec<RecordedHomeboyFinding>,
+    test_failures: Vec<RecordedHomeboyFinding>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -190,7 +191,7 @@ pub(super) fn import_runs(args: RunsImportArgs) -> CmdResult<RunsOutput> {
         store.import_trace_span(span)?;
     }
     for finding in bundle.findings.iter().chain(bundle.test_failures.iter()) {
-        store.import_finding(finding)?;
+        store.import_finding(&FindingRecord::from(finding.clone()))?;
     }
 
     Ok((
@@ -265,7 +266,12 @@ fn build_bundle(
                 .map(portable_bundle_artifact_record),
         );
         trace_spans.extend(store.list_trace_spans(&run.id)?);
-        findings.extend(store.list_findings_for_run(&run.id)?);
+        findings.extend(
+            store
+                .list_findings_for_run(&run.id)?
+                .into_iter()
+                .map(RecordedHomeboyFinding::from),
+        );
     }
     let test_failures = findings
         .iter()
@@ -366,8 +372,9 @@ fn read_bundle_dir(path: &Path) -> homeboy::core::Result<ObservationBundle> {
     let runs: Vec<RunRecord> = read_json(path.join("runs.json"))?;
     let artifacts: Vec<ArtifactRecord> = read_json(path.join("artifacts.json"))?;
     let trace_spans: Vec<TraceSpanRecord> = read_json(path.join("trace_spans.json"))?;
-    let mut findings: Vec<FindingRecord> = read_optional_json(path.join("findings.json"))?;
-    let test_failures: Vec<FindingRecord> = read_optional_json(path.join("test_failures.json"))?;
+    let mut findings: Vec<RecordedHomeboyFinding> = read_optional_json(path.join("findings.json"))?;
+    let test_failures: Vec<RecordedHomeboyFinding> =
+        read_optional_json(path.join("test_failures.json"))?;
     for test_failure in &test_failures {
         if !findings.iter().any(|finding| finding.id == test_failure.id) {
             findings.push(test_failure.clone());
@@ -396,15 +403,14 @@ fn read_bundle_dir(path: &Path) -> homeboy::core::Result<ObservationBundle> {
     })
 }
 
-fn is_test_failure_finding(finding: &FindingRecord) -> bool {
-    finding.tool == "test"
-        && (finding
-            .metadata_json
+fn is_test_failure_finding(finding: &RecordedHomeboyFinding) -> bool {
+    let metadata_json = finding.finding.metadata_json();
+    finding.finding.tool == "test"
+        && (metadata_json
             .get("record_kind")
             .and_then(|value| value.as_str())
             == Some("failure")
-            || finding
-                .metadata_json
+            || metadata_json
                 .get("source_sidecar")
                 .and_then(|value| value.as_str())
                 == Some("test-failures"))

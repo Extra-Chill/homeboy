@@ -1,7 +1,7 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::core::observation::{FindingListFilter, FindingRecord, ObservationStore};
+use homeboy::core::observation::{FindingListFilter, ObservationStore, RecordedHomeboyFinding};
 use homeboy::core::Error;
 
 use crate::commands::{
@@ -56,25 +56,29 @@ pub struct RunsLatestFindingArgs {
 pub struct RunsFindingsOutput {
     pub command: &'static str,
     pub run_id: String,
-    pub findings: Vec<FindingRecord>,
+    pub findings: Vec<RecordedHomeboyFinding>,
 }
 
 #[derive(Serialize)]
 pub struct RunsFindingOutput {
     pub command: &'static str,
-    pub finding: FindingRecord,
+    pub finding: RecordedHomeboyFinding,
 }
 
 pub fn findings(args: RunsFindingsArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     require_run(&store, &args.run_id)?;
-    let findings = store.list_findings(FindingListFilter {
-        run_id: Some(args.run_id.clone()),
-        tool: args.tool,
-        file: args.file,
-        fingerprint: args.fingerprint,
-        limit: Some(args.limit),
-    })?;
+    let findings = store
+        .list_findings(FindingListFilter {
+            run_id: Some(args.run_id.clone()),
+            tool: args.tool,
+            file: args.file,
+            fingerprint: args.fingerprint,
+            limit: Some(args.limit),
+        })?
+        .into_iter()
+        .map(RecordedHomeboyFinding::from)
+        .collect();
 
     Ok((
         RunsOutput::Findings(RunsFindingsOutput {
@@ -100,7 +104,7 @@ pub fn finding(finding_id: &str) -> CmdResult<RunsOutput> {
     Ok((
         RunsOutput::Finding(RunsFindingOutput {
             command: "runs.finding",
-            finding,
+            finding: RecordedHomeboyFinding::from(finding),
         }),
         0,
     ))
@@ -137,7 +141,7 @@ pub fn latest_finding(args: RunsLatestFindingArgs) -> CmdResult<RunsOutput> {
         RunsOutput::LatestFinding(RunsLatestFindingOutput {
             command: "runs.latest-finding",
             run: run_summary(run),
-            finding,
+            finding: RecordedHomeboyFinding::from(finding),
         }),
         0,
     ))

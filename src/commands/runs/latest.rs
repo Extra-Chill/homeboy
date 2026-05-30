@@ -1,7 +1,9 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::core::observation::{FindingRecord, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::observation::{
+    ObservationStore, RecordedHomeboyFinding, RunListFilter, RunRecord,
+};
 use homeboy::core::Error;
 
 use crate::commands::{
@@ -35,7 +37,7 @@ pub struct RunsLatestRunOutput {
 pub struct RunsLatestFindingOutput {
     pub command: &'static str,
     pub run: RunSummary,
-    pub finding: FindingRecord,
+    pub finding: RecordedHomeboyFinding,
 }
 
 pub fn latest_run(args: RunsLatestRunArgs) -> CmdResult<RunsOutput> {

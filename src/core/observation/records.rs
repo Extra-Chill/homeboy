@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
 use crate::core::code_audit::{self, report::finding_kind_key};
-use crate::core::finding::{FindingSource, HomeboyFinding};
+use crate::core::finding::{FindingProducer, FindingSource, HomeboyFinding};
 
 mod run_builder;
 mod run_status;
@@ -146,6 +146,98 @@ pub struct FindingRecord {
     pub fixable: Option<bool>,
     pub metadata_json: serde_json::Value,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecordedHomeboyFinding {
+    pub id: String,
+    pub run_id: String,
+    #[serde(flatten)]
+    pub finding: HomeboyFinding,
+    pub created_at: String,
+}
+
+impl From<FindingRecord> for RecordedHomeboyFinding {
+    fn from(record: FindingRecord) -> Self {
+        let mut metadata = record
+            .metadata_json
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let category = take_optional_string(&mut metadata, "category");
+        let column = take_optional_i64(&mut metadata, "column");
+        let producer = take_optional_json::<FindingProducer>(&mut metadata, "producer");
+        let source = take_optional_json::<FindingSource>(&mut metadata, "source");
+        let raw = metadata.remove("raw");
+        let finding = HomeboyFinding {
+            tool: record.tool,
+            rule: record.rule,
+            category,
+            severity: record.severity,
+            location: crate::core::finding::FindingLocation {
+                file: record.file,
+                line: record.line,
+                column,
+            },
+            message: record.message,
+            fingerprint: record.fingerprint,
+            fix: crate::core::finding::FindingFix {
+                fixable: record.fixable,
+            },
+            producer,
+            source,
+            metadata,
+            raw,
+        };
+        Self {
+            id: record.id,
+            run_id: record.run_id,
+            finding,
+            created_at: record.created_at,
+        }
+    }
+}
+
+impl From<RecordedHomeboyFinding> for FindingRecord {
+    fn from(recorded: RecordedHomeboyFinding) -> Self {
+        let metadata_json = recorded.finding.metadata_json();
+        Self {
+            id: recorded.id,
+            run_id: recorded.run_id,
+            tool: recorded.finding.tool,
+            rule: recorded.finding.rule,
+            file: recorded.finding.location.file,
+            line: recorded.finding.location.line,
+            severity: recorded.finding.severity,
+            fingerprint: recorded.finding.fingerprint,
+            message: recorded.finding.message,
+            fixable: recorded.finding.fix.fixable,
+            metadata_json,
+            created_at: recorded.created_at,
+        }
+    }
+}
+
+fn take_optional_string(
+    metadata: &mut serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<String> {
+    metadata
+        .remove(key)
+        .and_then(|value| value.as_str().map(str::to_string))
+}
+
+fn take_optional_i64(metadata: &mut serde_json::Map<String, Value>, key: &str) -> Option<i64> {
+    metadata.remove(key).and_then(|value| value.as_i64())
+}
+
+fn take_optional_json<T: for<'de> Deserialize<'de>>(
+    metadata: &mut serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<T> {
+    metadata
+        .remove(key)
+        .and_then(|value| serde_json::from_value(value).ok())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -598,6 +690,37 @@ mod tests {
         assert_eq!(record.severity.as_deref(), Some("notice"));
         assert_eq!(record.fingerprint.as_deref(), Some("custom-id"));
         assert_eq!(record.fixable, Some(false));
+    }
+
+    #[test]
+    fn recorded_homeboy_finding_projects_normalized_shape() {
+        let record = FindingRecord {
+            id: "finding-1".to_string(),
+            run_id: "run-1".to_string(),
+            tool: "phpcs".to_string(),
+            rule: Some("WordPress.Security".to_string()),
+            file: Some("src/lib.php".to_string()),
+            line: Some(12),
+            severity: Some("warning".to_string()),
+            fingerprint: Some("src/lib.php:12:WordPress.Security".to_string()),
+            message: "escape output".to_string(),
+            fixable: Some(true),
+            metadata_json: serde_json::json!({
+                "category": "security",
+                "column": 4,
+                "source_sidecar": "lint-findings",
+                "source": { "kind": "sidecar", "path": "lint-findings.json" }
+            }),
+            created_at: "2026-05-30T16:00:00Z".to_string(),
+        };
+
+        let recorded = RecordedHomeboyFinding::from(record.clone());
+
+        assert_eq!(recorded.id, "finding-1");
+        assert_eq!(recorded.finding.category.as_deref(), Some("security"));
+        assert_eq!(recorded.finding.location.column, Some(4));
+        assert_eq!(recorded.finding.metadata["source_sidecar"], "lint-findings");
+        assert_eq!(FindingRecord::from(recorded), record);
     }
 
     fn lint_finding(id: &str, category: &str, tool: Option<&str>) -> HomeboyFinding {
