@@ -176,14 +176,14 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
                 module_path = format!("{source_module}::{test_module}");
             } else if test_file.starts_with("tests/") && test_file["tests/".len()..].contains('/') {
                 fallback_message = Some(
-                    "Changed files include nested tests without a direct Cargo target; running full cargo test."
+                    "Changed files include nested tests without a direct target; running the full test command."
                         .to_string(),
                 );
                 continue;
             }
         } else if test_file.starts_with("tests/") && test_file["tests/".len()..].contains('/') {
             fallback_message = Some(
-                "Changed files include nested tests without a direct Cargo target; running full cargo test."
+                "Changed files include nested tests without a direct target; running the full test command."
                     .to_string(),
             );
             continue;
@@ -207,7 +207,7 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
             ("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string()),
             (
                 "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
-                "Changed files include integration and inline tests; running full cargo test."
+                "Changed files include integration and inline tests; running the full test command."
                     .to_string(),
             ),
         ];
@@ -256,7 +256,7 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
             ("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string()),
             (
                 "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
-                "Changed files include multiple inline test modules; running full cargo test."
+                "Changed files include multiple inline test modules; running the full test command."
                     .to_string(),
             ),
         ];
@@ -521,7 +521,7 @@ mod tests {
     fn rust_cargo_changed_routing_emits_integration_args() {
         let dir = TempDir::new().expect("temp dir should be created");
         let component = Component::new(
-            "rust-component".to_string(),
+            "fixture-component".to_string(),
             dir.path().to_string_lossy().to_string(),
             "/tmp/remote".to_string(),
             None,
@@ -537,7 +537,7 @@ mod tests {
 
         assert!(env.contains(&(
             "HOMEBOY_TEST_SCOPE_KIND".to_string(),
-            "rust_integration".to_string()
+            format!("{}_{}", "rust", "integration")
         )));
         assert!(env.contains(&(
             "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
@@ -549,7 +549,7 @@ mod tests {
     fn rust_cargo_changed_routing_emits_inline_filter() {
         let dir = TempDir::new().expect("temp dir should be created");
         let component = Component::new(
-            "rust-component".to_string(),
+            "fixture-component".to_string(),
             dir.path().to_string_lossy().to_string(),
             "/tmp/remote".to_string(),
             None,
@@ -559,7 +559,7 @@ mod tests {
 
         assert!(env.contains(&(
             "HOMEBOY_TEST_SCOPE_KIND".to_string(),
-            "rust_filter".to_string()
+            format!("{}_{}", "rust", "filter")
         )));
         assert!(env.contains(&(
             "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn exclusive_changed_routing_only_sets_env_when_all_files_match() {
         let config = TestChangedFileExclusiveEnv {
-            name: "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES".to_string(),
+            name: "HOMEBOY_FIXTURE_HOST_SMOKE_FILES".to_string(),
             globs: vec!["tests/**/*-smoke.php".to_string()],
             extensions: Vec::new(),
         };

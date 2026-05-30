@@ -43,10 +43,29 @@ pub struct InvocationEnv {
     pub port_max: Option<u16>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvocationPortRange {
+    pub base: u16,
+    pub max: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvocationContext {
+    pub id: String,
+    pub state_dir: PathBuf,
+    pub artifact_dir: PathBuf,
+    pub tmp_dir: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_range: Option<InvocationPortRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_leases: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct InvocationGuard {
     env: InvocationEnv,
     lease_id: Option<String>,
+    named_leases: Vec<String>,
     /// Sibling invocation directories (state, artifact, tmp) under
     /// [`invocation_runtime_root`]. All three are removed on `Drop` so
     /// concurrent invocations do not accumulate stale state on disk.
@@ -167,11 +186,13 @@ impl InvocationGuard {
                 port_max,
             },
             lease_id,
+            named_leases: requirements.named_leases.clone(),
             cleanup_paths,
         })
     }
 
     pub fn env_vars(&self) -> Vec<(String, String)> {
+        let context = self.context();
         let mut vars = vec![
             ("HOMEBOY_INVOCATION_ID".to_string(), self.env.id.clone()),
             (
@@ -186,12 +207,30 @@ impl InvocationGuard {
                 "HOMEBOY_INVOCATION_TMP_DIR".to_string(),
                 self.env.tmp_dir.to_string_lossy().to_string(),
             ),
+            (
+                "HOMEBOY_INVOCATION_CONTEXT_JSON".to_string(),
+                serde_json::to_string(&context).expect("serialize invocation context"),
+            ),
         ];
         if let (Some(base), Some(max)) = (self.env.port_base, self.env.port_max) {
             vars.push(("HOMEBOY_INVOCATION_PORT_BASE".to_string(), base.to_string()));
             vars.push(("HOMEBOY_INVOCATION_PORT_MAX".to_string(), max.to_string()));
         }
         vars
+    }
+
+    pub fn context(&self) -> InvocationContext {
+        InvocationContext {
+            id: self.env.id.clone(),
+            state_dir: self.env.state_dir.clone(),
+            artifact_dir: self.env.artifact_dir.clone(),
+            tmp_dir: self.env.tmp_dir.clone(),
+            port_range: match (self.env.port_base, self.env.port_max) {
+                (Some(base), Some(max)) => Some(InvocationPortRange { base, max }),
+                _ => None,
+            },
+            named_leases: self.named_leases.clone(),
+        }
     }
 
     pub fn preserve_artifacts(&self, run_dir: &RunDir) -> Result<Option<PathBuf>> {

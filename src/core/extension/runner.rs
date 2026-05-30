@@ -316,6 +316,7 @@ mod tests {
     use crate::core::component::Component;
     use crate::core::engine::run_dir::RunDir;
     use crate::core::extension::ExtensionCapability;
+    use crate::test_support::with_isolated_home;
 
     fn context() -> ExtensionExecutionContext {
         ExtensionExecutionContext {
@@ -346,6 +347,22 @@ mod tests {
                 && value == &run_dir.path().to_string_lossy()));
 
         run_dir.cleanup();
+    }
+
+    #[test]
+    fn runner_without_run_dir_does_not_create_invocation_context() {
+        with_isolated_home(|_| {
+            let runner = ExtensionRunner::for_context(context());
+
+            assert!(runner
+                .acquire_invocation_guard()
+                .expect("invocation guard")
+                .is_none());
+            assert!(!runner
+                .env_vars
+                .iter()
+                .any(|(key, _)| key.starts_with("HOMEBOY_INVOCATION_")));
+        });
     }
 
     #[test]

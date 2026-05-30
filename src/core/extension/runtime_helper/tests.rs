@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_support::with_isolated_home;
+use crate::test_support::{home_env_guard, with_isolated_home};
 
 #[test]
 fn ensure_all_helpers_writes_all_files() {
@@ -84,6 +84,30 @@ fn runner_prelude_initializes_context_steps_trap_and_sidecar() {
 }
 
 #[test]
+fn ensure_all_helpers_falls_back_when_home_is_unavailable() {
+    let _guard = home_env_guard();
+    let prior = std::env::var("HOME").ok();
+    std::env::remove_var("HOME");
+
+    let pairs = ensure_all_helpers().expect("helpers should fall back to temp runtime dir");
+    let sidecar = pairs
+        .iter()
+        .find_map(|(key, value)| (key == SIDECAR_WRITER_ENV).then_some(value))
+        .expect("sidecar writer helper");
+    let sidecar_exists = std::path::Path::new(sidecar).is_file();
+
+    match prior {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+
+    assert!(
+        sidecar_exists,
+        "sidecar helper should be written under fallback runtime dir: {sidecar}"
+    );
+}
+
+#[test]
 fn sidecar_writer_appends_and_merges_json_arrays() {
     let dir = tempfile::tempdir().expect("tempdir");
     let helper_path = dir.path().join("sidecar-writer.sh");
@@ -154,14 +178,14 @@ fn sidecar_writer_supports_annotation_source_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let helper_path = dir.path().join("sidecar-writer.sh");
     let annotations_dir = dir.path().join("annotations");
-    let source_path = dir.path().join("phpstan-extra.json");
+    let source_path = dir.path().join("annotations-extra.json");
     std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
     std::fs::write(&source_path, r#"[{"file":"b.php","line":2}]"#).expect("source");
 
     let output = std::process::Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "source {}; HOMEBOY_ANNOTATIONS_DIR={}; homeboy_write_annotations phpcs '{{\"file\":\"a.php\",\"line\":1}}'; homeboy_merge_annotations phpstan {}; printf '%s\n%s' \"$(cat {}/phpcs.json)\" \"$(cat {}/phpstan.json)\"",
+            "source {}; HOMEBOY_ANNOTATIONS_DIR={}; homeboy_write_annotations fixture-a '{{\"file\":\"a.php\",\"line\":1}}'; homeboy_merge_annotations fixture-b {}; printf '%s\n%s' \"$(cat {}/fixture-a.json)\" \"$(cat {}/fixture-b.json)\"",
             helper_path.display(),
             annotations_dir.display(),
             source_path.display(),
@@ -384,7 +408,7 @@ fn bench_shell_helper_writes_scenario_inventory() {
     let output = std::process::Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "source {}; homeboy_write_bench_scenario_inventory --results-file {} --component demo --iterations 11 'bench-http=src/bin/bench-http.rs=rust-bin'; cat {}",
+            "source {}; homeboy_write_bench_scenario_inventory --results-file {} --component demo --iterations 11 'bench-http=src/bin/bench-http.rs=native-bin'; cat {}",
             helper_path.display(),
             results_path.display(),
             results_path.display()
@@ -404,7 +428,7 @@ fn bench_shell_helper_writes_scenario_inventory() {
     assert_eq!(value["scenarios"][0]["iterations"], 0);
     assert_eq!(value["scenarios"][0]["default_iterations"], 11);
     assert_eq!(value["scenarios"][0]["file"], "src/bin/bench-http.rs");
-    assert_eq!(value["scenarios"][0]["source"], "rust-bin");
+    assert_eq!(value["scenarios"][0]["source"], "native-bin");
 }
 
 #[test]

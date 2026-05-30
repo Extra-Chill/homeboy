@@ -393,6 +393,7 @@ mod tests {
             deploy: Some(DeployCapability {
                 verifications: Vec::new(),
                 overrides: Vec::new(),
+                archive_install: Vec::new(),
                 remote_path_inference: Vec::new(),
                 path_roots: vec![RemotePathRootRule {
                     path_prefix: "wp-content".to_string(),
