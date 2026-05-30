@@ -1,4 +1,5 @@
 use crate::core::component::{self, Component};
+use crate::core::extension::build;
 use crate::core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -49,6 +50,35 @@ pub struct DependencyUpdateResult {
     pub after: Option<DependencyPackage>,
     pub stdout: String,
     pub stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install: Option<DependencyCommandResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebuild: Option<DependencyCommandResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DependencyCommandResult {
+    pub command: Vec<String>,
+    pub skipped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DependencyUpdateOptions {
+    pub install: bool,
+    pub rebuild: bool,
+}
+
+impl Default for DependencyUpdateOptions {
+    fn default() -> Self {
+        Self {
+            install: true,
+            rebuild: false,
+        }
+    }
 }
 
 pub fn status(
@@ -72,13 +102,21 @@ pub fn update(
     path_override: Option<&str>,
     package: &str,
     constraint: Option<&str>,
+    options: DependencyUpdateOptions,
 ) -> Result<DependencyUpdateResult> {
     let (component, path) = resolve_component_path(component_id, path_override)?;
     let providers = provider::resolve_dependency_providers(&component, &path)?;
 
     for provider in providers {
         if provider.handles_package(&path, package)? {
-            return provider.update(&component, &path, package, constraint);
+            let mut result = provider.update(&component, &path, package, constraint)?;
+            if options.install {
+                result.install = provider.install(&component, &path)?;
+            }
+            if options.rebuild {
+                result.rebuild = Some(rebuild_component(&component, &path)?);
+            }
+            return Ok(result);
         }
     }
 
@@ -91,6 +129,42 @@ pub fn update(
         Some(package.to_string()),
         None,
     ))
+}
+
+fn rebuild_component(component: &Component, path: &Path) -> Result<DependencyCommandResult> {
+    let mut build_component = component.clone();
+    build_component.local_path = path.display().to_string();
+    let (result, exit_code) = build::run_component(&build_component)?;
+    let stdout = serde_json::to_string(&result).map_err(|e| {
+        Error::internal_json(e.to_string(), Some("serialize deps rebuild".to_string()))
+    })?;
+    let command = vec![
+        "homeboy".to_string(),
+        "build".to_string(),
+        component.id.clone(),
+        "--path".to_string(),
+        path.display().to_string(),
+    ];
+
+    if exit_code != 0 {
+        return Err(Error::validation_invalid_argument(
+            "rebuild",
+            format!(
+                "Dependency update rebuild failed for '{}' with status {}",
+                component.id, exit_code
+            ),
+            Some(component.id.clone()),
+            Some(vec![format!("Run manually: {}", command.join(" "))]),
+        ));
+    }
+
+    Ok(DependencyCommandResult {
+        command,
+        skipped: false,
+        status: Some(exit_code),
+        stdout,
+        stderr: String::new(),
+    })
 }
 
 fn resolve_component_path(

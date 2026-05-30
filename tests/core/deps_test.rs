@@ -1,5 +1,5 @@
 use homeboy::core::component::{Component, ComponentScriptsConfig, DependencyStackEdge};
-use homeboy::core::deps::{self, ComposerAction};
+use homeboy::core::deps::{self, ComposerAction, DependencyUpdateOptions};
 use std::fs;
 use tempfile::tempdir;
 
@@ -179,6 +179,7 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
                 downstream: "block-format-bridge".to_string(),
                 package: "chubes4/html-to-blocks-converter".to_string(),
                 update: None,
+                rebuild: false,
                 post_update: vec!["composer build".to_string()],
                 test: vec!["homeboy test --path . --extension wordpress".to_string()],
             }],
@@ -191,6 +192,7 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
                 downstream: "static-site-importer".to_string(),
                 package: "chubes4/block-format-bridge".to_string(),
                 update: Some("composer update chubes4/block-format-bridge".to_string()),
+                rebuild: false,
                 post_update: Vec::new(),
                 test: vec!["homeboy test --path . --extension wordpress".to_string()],
             }],
@@ -281,6 +283,7 @@ fn stack_plan_keeps_explicit_edge_config_when_provider_edge_matches() {
         downstream: "downstream".to_string(),
         package: "fixture/upstream".to_string(),
         update: Some("fixture-provider update fixture/upstream".to_string()),
+        rebuild: false,
         post_update: vec!["fixture-provider build".to_string()],
         test: vec!["fixture-provider test".to_string()],
     };
@@ -331,6 +334,7 @@ fn stack_plan_dedupes_cycles_by_edge_identity() {
                 downstream: "b".to_string(),
                 package: "fixture/b".to_string(),
                 update: None,
+                rebuild: false,
                 post_update: Vec::new(),
                 test: Vec::new(),
             }],
@@ -343,6 +347,7 @@ fn stack_plan_dedupes_cycles_by_edge_identity() {
                 downstream: "a".to_string(),
                 package: "fixture/a".to_string(),
                 update: None,
+                rebuild: false,
                 post_update: Vec::new(),
                 test: Vec::new(),
             }],
@@ -366,6 +371,66 @@ fn non_composer_component_returns_clear_unsupported_error() {
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert!(err.message.contains("dependency provider"));
     assert!(err.message.contains("No dependency provider found"));
+}
+
+#[test]
+fn update_runs_component_provider_install_and_optional_rebuild() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("scripts")).unwrap();
+    write_file(
+        &root.join("homeboy.json"),
+        r#"{
+            "id": "fixture",
+            "scripts": {
+                "deps": ["sh scripts/deps.sh"],
+                "build": ["sh scripts/build.sh"]
+            }
+        }"#,
+    );
+    write_file(
+        &root.join("scripts/deps.sh"),
+        r#"#!/bin/sh
+case "$1" in
+  update)
+    printf '{"component_id":"ignored","component_path":"ignored","package_manager":"fixture","package":"ignored","requested_constraint":"ignored","command":["fixture-provider","update"],"stdout":"provider update","stderr":""}'
+    ;;
+  install)
+    printf 'installed' > provider-install-marker
+    printf 'provider install'
+    ;;
+  *)
+    printf 'unknown deps action' >&2
+    exit 2
+    ;;
+esac
+"#,
+    );
+    write_file(
+        &root.join("scripts/build.sh"),
+        "#!/bin/sh\nprintf 'rebuilt' > build-marker\nprintf 'provider build'\n",
+    );
+
+    let root_path = root.display().to_string();
+    let result = deps::update(
+        Some("fixture"),
+        Some(&root_path),
+        "fixture/package",
+        Some("^2.0"),
+        DependencyUpdateOptions {
+            install: true,
+            rebuild: true,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.package_manager, "fixture");
+    assert_eq!(result.package, "fixture/package");
+    assert_eq!(result.requested_constraint.as_deref(), Some("^2.0"));
+    assert!(result.install.is_some());
+    assert!(result.rebuild.is_some());
+    assert_eq!(fs::read_to_string(root.join("provider-install-marker")).unwrap(), "installed");
+    assert_eq!(fs::read_to_string(root.join("build-marker")).unwrap(), "rebuilt");
 }
 
 #[test]
@@ -447,6 +512,10 @@ fn update_with_constraint_changes_manifest_and_lock_for_local_path_package() {
         Some(&root_path),
         "fixture/package",
         Some("1.1.0"),
+        DependencyUpdateOptions {
+            install: true,
+            rebuild: false,
+        },
     )
     .unwrap();
 

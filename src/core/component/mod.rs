@@ -152,6 +152,8 @@ pub struct DependencyStackEdge {
     pub package: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub rebuild: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub post_update: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -401,6 +403,9 @@ fn is_default_remote(s: &str) -> bool {
 }
 fn is_default_branch(s: &str) -> bool {
     s == "main"
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Component {
