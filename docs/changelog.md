@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.211.0] - 2026-05-30
+
+### Added
+- add declarative rig file guards
+
+### Fixed
+- keep rig primitive checks generic
+
 ## [0.210.1] - 2026-05-30
 
 ### Fixed
