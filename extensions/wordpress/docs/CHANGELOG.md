@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.105.4] - 2026-05-30
+
+### Fixed
+- use archive install policy for WordPress deploys
+
 ## [2.105.3] - 2026-05-30
 
 ### Changed
