@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 'use strict';
 
+/**
+ * External dependencies
+ */
+const fs = require('node:fs');
+
+/**
+ * Internal dependencies
+ */
 const { applyApprovedWpCodeboxArtifact } = require('../../lib/wp-codebox-apply-adapter');
 
 function argValue(name) {
@@ -13,10 +21,11 @@ function hasArg(name) {
 }
 
 function usage() {
-  console.error('Usage: wp-codebox-apply-adapter.cjs --bundle <artifact-dir> --worktree <path> --branch <branch> --approved-file <sandbox-path> [--patch-strip <n>] [--push] [--open-pr]');
+  console.error('Usage: wp-codebox-apply-adapter.cjs (--bundle <artifact-dir> --approved-file <sandbox-path> | --request <apply-request.json>) --worktree <path> [--branch <branch>] [--patch-strip <n>] [--push] [--open-pr]');
   process.exit(1);
 }
 
+const requestPath = argValue('--request');
 const bundlePath = argValue('--bundle');
 const worktreePath = argValue('--worktree');
 const branch = argValue('--branch');
@@ -30,12 +39,14 @@ for (let index = 0; index < process.argv.length; index += 1) {
   }
 }
 
-if (!bundlePath || !worktreePath || approvedFiles.length === 0) {
+if (!worktreePath || (!requestPath && (!bundlePath || approvedFiles.length === 0))) {
   usage();
 }
 
 try {
+  const applyRequest = requestPath ? JSON.parse(fs.readFileSync(requestPath, 'utf8')) : undefined;
   const result = applyApprovedWpCodeboxArtifact({
+    applyRequest,
     bundlePath,
     worktreePath,
     branch,
