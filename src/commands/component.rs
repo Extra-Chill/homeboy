@@ -1195,9 +1195,9 @@ mod tests {
         fs::write(
             temp.path().join("homeboy.json"),
             r#"{
-                "id": "wp-codebox",
-                "build_artifact": "packages/wordpress-plugin/dist/wp-codebox.zip",
-                "build_command": "npm run package:wordpress-plugin"
+                "id": "sample-codebox",
+                "build_artifact": "packages/browser-extension/dist/sample-codebox.zip",
+                "build_command": "npm run package:browser-extension"
             }"#,
         )
         .expect("homeboy.json");
