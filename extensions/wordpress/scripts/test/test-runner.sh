@@ -3,9 +3,8 @@ set -euo pipefail
 
 # Test runner router for WordPress Homeboy extension.
 #
-# Plugin/theme PHPUnit tests run through WP Codebox by default. Core-dev
-# checkouts (wordpress-develop) dispatch to WordPress core's native PHPUnit
-# runner. Pure host-PHP smoke suites can explicitly use the host-smoke backend.
+# Plugin/theme PHPUnit tests and core-dev checkouts run through WP Codebox.
+# Pure host-PHP smoke suites can explicitly use the host-smoke backend.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../lib/runner-prelude.sh}"
@@ -70,12 +69,9 @@ if [ "$COMPONENT_SHAPE" = "core-dev" ]; then
             fi
             exec bash "$CORE_WP_CODEBOX_RUNNER" "${PASSTHROUGH_ARGS[@]}"
             ;;
-        native|core|core-native)
-            exec bash "${SCRIPT_DIR}/test-runner-core-dev.sh" "${PASSTHROUGH_ARGS[@]}"
-            ;;
         *)
             echo "ERROR: Unsupported WordPress core-dev test backend: ${TEST_BACKEND}" >&2
-            echo "Supported core-dev backends: wp-codebox, native, core-native" >&2
+            echo "Supported core-dev backend: wp-codebox" >&2
             exit 2
             ;;
     esac
