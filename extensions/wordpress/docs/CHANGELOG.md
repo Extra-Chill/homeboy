@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.104.2] - 2026-05-30
+
+### Changed
+- Add generic settings accessors
+- Use core helper for annotation sidecars
+- share test result parser adapters
+
 ## [2.104.1] - 2026-05-30
 
 ### Fixed
