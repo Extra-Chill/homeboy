@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::budget::BudgetFinding;
-
+use super::budget_findings;
 use super::parsing::{BenchMetrics, BenchResults};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -99,7 +98,7 @@ pub fn evaluate_gates(results: &mut BenchResults) -> Vec<String> {
                 .iter()
                 .filter(|result| !result.passed)
                 .map(|result| {
-                    BudgetFinding::failure(
+                    budget_findings::failure(
                         format!("bench.gate.{}", result.metric),
                         format!("bench:{}", scenario.id),
                         result.reason.clone().unwrap_or_else(|| {
@@ -116,7 +115,6 @@ pub fn evaluate_gates(results: &mut BenchResults) -> Vec<String> {
                         "value",
                         Some(result.metric.clone()),
                     )
-                    .to_homeboy_finding()
                 }),
         );
         failures.extend(
@@ -130,19 +128,10 @@ pub fn evaluate_gates(results: &mut BenchResults) -> Vec<String> {
         results
             .budget_findings
             .iter()
-            .filter(|finding| is_budget_gate_failure(finding))
+            .filter(|finding| budget_findings::is_gate_failure(finding))
             .map(|finding| finding.message.clone()),
     );
     failures.sort();
     failures.dedup();
     failures
-}
-
-fn is_budget_gate_failure(finding: &crate::core::finding::HomeboyFinding) -> bool {
-    finding.severity.as_deref() == Some("error")
-        || finding
-            .metadata
-            .get("passed")
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
 }
