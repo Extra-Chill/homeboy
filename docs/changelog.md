@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.214.0] - 2026-05-31
+
+### Added
+- add generic agent task schemas
+
+### Fixed
+- detect packaged plugin remote versions
+- fence ssh runner exec as diagnostic
+
 ## [0.213.10] - 2026-05-31
 
 ### Changed
