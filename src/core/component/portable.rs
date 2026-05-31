@@ -125,22 +125,19 @@ pub fn portable_json(component: &Component) -> Result<Value> {
     Ok(value)
 }
 
-/// Write component data to the repo-local homeboy.json, preserving unknown fields.
+/// Write component data to the repo-local homeboy.json.
 ///
-/// Uses a read-modify-write pattern: reads the existing JSON first, merges the
-/// component's known fields on top, and writes the result. This preserves fields
-/// like `baselines`, `audit_rules`, and custom local metadata that the Component
-/// struct doesn't model but other subsystems or users read/write directly.
-///
-/// If no existing file exists, writes from scratch (no fields to preserve).
+/// Component-owned fields round-trip through `Component`. Subsystem-owned
+/// portable state is preserved only for the explicit keys below; arbitrary
+/// unknown fields are dropped so stale metadata cannot masquerade as active
+/// component config.
 pub fn write_portable_config(dir: &Path, component: &Component) -> Result<()> {
     let path = dir.join("homeboy.json");
     let portable = portable_json(component)?;
 
-    // Read existing file to preserve unknown fields
     let merged = if path.is_file() {
         if let Ok(Some(existing)) = read_portable_config(dir) {
-            merge_preserving_unknown(existing, portable)
+            merge_portable_config(existing, portable)
         } else {
             portable
         }
@@ -198,38 +195,35 @@ fn validate_github_remote_url_field(component: &Value, field: &str) -> Result<()
     ))
 }
 
-/// Merge component fields into existing JSON, preserving keys the Component struct doesn't know about.
-///
-/// Strategy: start with the existing JSON, overlay all keys from the new component JSON.
-/// Keys in the existing JSON that are NOT in the new JSON are preserved.
-/// Keys in the new JSON overwrite existing values.
-fn merge_preserving_unknown(existing: Value, component: Value) -> Value {
-    match (existing, component) {
-        (Value::Object(mut base), Value::Object(overlay)) => {
-            for (key, value) in overlay {
-                // Skip null values from the component — don't overwrite existing data with nulls
-                if value.is_null() {
-                    continue;
-                }
-                // Skip empty strings for remote_path — don't blank a real value
-                if key == "remote_path" {
-                    if let Some(s) = value.as_str() {
-                        if s.is_empty() {
-                            // Only write empty remote_path if no existing value
-                            if !base.contains_key("remote_path") {
-                                base.insert(key, value);
-                            }
-                            continue;
-                        }
-                    }
-                }
-                base.insert(key, value);
-            }
-            Value::Object(base)
+const PORTABLE_SUBSYSTEM_KEYS: &[&str] = &["baselines", "audit_rules"];
+
+/// Merge component fields with the explicit non-component portable owners.
+fn merge_portable_config(existing: Value, component: Value) -> Value {
+    let (existing, mut component) = match (existing, component) {
+        (Value::Object(existing), Value::Object(component)) => (existing, component),
+        (_, component) => return component,
+    };
+
+    for key in PORTABLE_SUBSYSTEM_KEYS {
+        if component.contains_key(*key) {
+            continue;
         }
-        // Fallback: if either isn't an object, prefer the component value
-        (_, component) => component,
+        if let Some(value) = existing.get(*key).filter(|value| !value.is_null()) {
+            component.insert((*key).to_string(), value.clone());
+        }
     }
+
+    if component
+        .get("remote_path")
+        .and_then(|value| value.as_str())
+        .is_some_and(str::is_empty)
+    {
+        if let Some(value) = existing.get("remote_path").filter(|value| !value.is_null()) {
+            component.insert("remote_path".to_string(), value.clone());
+        }
+    }
+
+    Value::Object(component)
 }
 
 pub(crate) fn has_portable_config(path: &Path) -> bool {
@@ -257,14 +251,6 @@ where
     }
 
     mutator(&mut component)?;
-
-    // Defensive: if the mutator wiped `id` (for example via `config::merge_config`,
-    // which round-trips through serde and `RawComponent.id` is `skip_serializing`),
-    // restore it from the caller-provided id. Legitimate rename mutations set a
-    // non-empty new id inside the closure, so this check does not clobber them. (#1140)
-    if component.id.trim().is_empty() {
-        component.id = id.to_string();
-    }
 
     write_portable_config(&local_path, &component)?;
     Ok(component)
@@ -317,14 +303,14 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn write_preserves_unknown_fields() {
+    fn write_preserves_portable_subsystem_fields_and_drops_unknown_fields() {
         let dir = TempDir::new().expect("temp dir");
 
-        // Write initial homeboy.json with extra fields the Component struct doesn't know
         let initial = serde_json::json!({
             "id": "test-comp",
             "remote_path": "wp-content/plugins/test",
             "baselines": { "audit": { "item_count": 42 } },
+            "audit_rules": { "layer_rules": [] },
             "custom_field": "preserve-me"
         });
         fs::write(
@@ -333,7 +319,6 @@ mod tests {
         )
         .unwrap();
 
-        // Create a component and write it — simulating a mutate_portable operation
         let component = Component::new(
             "test-comp".to_string(),
             dir.path().to_string_lossy().to_string(),
@@ -342,7 +327,6 @@ mod tests {
         );
         write_portable_config(dir.path(), &component).expect("write should succeed");
 
-        // Read back and verify unknown fields are preserved
         let content = fs::read_to_string(dir.path().join("homeboy.json")).unwrap();
         let result: Value = serde_json::from_str(&content).unwrap();
 
@@ -356,9 +340,17 @@ mod tests {
             "baselines should be preserved"
         );
         assert_eq!(
-            result.get("custom_field").and_then(|v| v.as_str()),
-            Some("preserve-me"),
-            "custom fields should be preserved"
+            result
+                .get("audit_rules")
+                .and_then(|v| v.get("layer_rules"))
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(0),
+            "audit_rules should be preserved as subsystem-owned config"
+        );
+        assert!(
+            result.get("custom_field").is_none(),
+            "unknown fields should not be preserved as active config"
         );
         assert_eq!(
             result.get("id").and_then(|v| v.as_str()),
@@ -416,14 +408,9 @@ mod tests {
     }
 
     #[test]
-    fn merge_config_roundtrip_wipes_id_regression() {
-        // Regression test for #1140: `Component` serializes via `RawComponent`
-        // which has `#[serde(skip_serializing)]` on `id`. A `merge_config` round
-        // trip (serialize → deep_merge → deserialize) therefore drops `id`,
-        // leaving the component with a blank string. Callers like
-        // `mutate_portable` must restore the caller-provided id before writing
-        // to homeboy.json, or `portable_json` will refuse the write with
-        // "Cannot write portable config with a blank component ID".
+    fn merge_config_roundtrip_preserves_component_id_regression() {
+        // Regression test for #1140: component identity must be part of the typed
+        // serialization round-trip so portable mutations do not need to restore it.
         let mut component = Component::new(
             "intelligence".to_string(),
             "/tmp/intelligence".to_string(),
@@ -435,10 +422,7 @@ mod tests {
         crate::core::config::merge_config(&mut component, patch, &[])
             .expect("merge should succeed");
 
-        assert!(
-            component.id.trim().is_empty(),
-            "documented failure mode — remove this assert and the restore hack in mutate_portable if serde behavior changes"
-        );
+        assert_eq!(component.id, "intelligence");
         assert_eq!(component.local_path, "/new/path");
     }
 
@@ -542,21 +526,29 @@ mod tests {
     }
 
     #[test]
-    fn merge_preserving_unknown_keeps_existing_keys() {
+    fn merge_portable_config_keeps_only_explicit_subsystem_keys() {
         let existing = serde_json::json!({
             "id": "old",
             "baselines": { "audit": {} },
-            "remote_path": "real/path"
+            "audit_rules": { "layer_rules": [] },
+            "remote_path": "real/path",
+            "custom_field": "stale"
         });
         let component = serde_json::json!({
             "id": "new",
+            "remote_path": "",
             "auto_cleanup": false
         });
 
-        let merged = merge_preserving_unknown(existing, component);
+        let merged = merge_portable_config(existing, component);
 
         assert_eq!(merged.get("id").and_then(|v| v.as_str()), Some("new"));
         assert!(merged.get("baselines").is_some(), "baselines preserved");
+        assert!(merged.get("audit_rules").is_some(), "audit_rules preserved");
+        assert!(
+            merged.get("custom_field").is_none(),
+            "arbitrary unknowns are dropped"
+        );
         assert_eq!(
             merged.get("remote_path").and_then(|v| v.as_str()),
             Some("real/path")
