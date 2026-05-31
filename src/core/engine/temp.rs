@@ -219,7 +219,7 @@ fn unique_name(prefix: &str, suffix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::home_env_guard;
+    use crate::test_support::{home_env_guard, with_isolated_home};
 
     #[test]
     fn runtime_temp_dir_honors_override() {
@@ -236,11 +236,13 @@ mod tests {
 
     #[test]
     fn runtime_temp_dir_creates_dir() {
-        let result = runtime_temp_dir("test-dir");
-        assert!(result.is_ok());
-        if let Ok(path) = result {
-            assert!(path.is_dir());
-        }
+        with_isolated_home(|_| {
+            let result = runtime_temp_dir("test-dir");
+            assert!(result.is_ok());
+            if let Ok(path) = result {
+                assert!(path.is_dir());
+            }
+        });
     }
 
     #[test]
