@@ -122,28 +122,7 @@
       "src/core/code_audit/detectors/test_vacuity.rs",
       "src/core/code_audit/detectors/upstream_workaround.rs"
     ],
-    "remote_execution_safety": {
-      "artifact_access_markers": [
-        "is_remote_runner_artifact_path"
-      ],
-      "artifact_capture_markers": [
-        "capture_patch: true"
-      ],
-      "artifact_report_markers": [
-        "patch_artifact_id",
-        "patch_artifact_path"
-      ],
-      "artifact_snapshot_markers": [
-        "source_snapshot"
-      ],
-      "capability_preflight_markers": [
-        "evaluate_lab_runner_capabilities",
-        "lab_runner_capability_plan"
-      ],
-      "path_translation_markers": [
-        "rewrite_lab_offload_args"
-      ]
-    }
+    "remote_execution_safety": {}
   },
   "auto_cleanup": false,
   "autofix_verify": {

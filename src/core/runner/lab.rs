@@ -68,6 +68,7 @@ pub struct LabOffloadCommand {
     pub unsupported_reason: Option<&'static str>,
     pub workspace_mode_policy: LabOffloadWorkspaceModePolicy,
     pub requires_extension_parity: bool,
+    pub required_extensions: Vec<String>,
     pub requires_playwright: bool,
 }
 
@@ -90,10 +91,7 @@ pub enum LabOffloadOutcome {
     },
 }
 
-pub fn execute_lab_offload(
-    request: LabOffloadRequest<'_>,
-    mut extension_parity_preflight: impl FnMut(&str, &str, &str) -> Result<()>,
-) -> Result<LabOffloadOutcome> {
+pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
     let unsupported_runner_error = |runner_id: &str, message: String| {
         Error::validation_invalid_argument(
             "runner",
@@ -220,14 +218,7 @@ pub fn execute_lab_offload(
         }
     }
 
-    run_lab_offload_inner(
-        request,
-        selection,
-        contract,
-        plan,
-        messages,
-        &mut extension_parity_preflight,
-    )
+    run_lab_offload_inner(request, selection, contract, plan, messages)
 }
 
 fn run_lab_offload_inner(
@@ -236,7 +227,6 @@ fn run_lab_offload_inner(
     contract: LabOffloadCommand,
     mut plan: HomeboyPlan,
     messages: Vec<String>,
-    extension_parity_preflight: &mut impl FnMut(&str, &str, &str) -> Result<()>,
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner = load(runner_id)?;
@@ -404,7 +394,6 @@ fn run_lab_offload_inner(
     );
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     if contract.requires_extension_parity {
-        extension_parity_preflight(runner_id, homeboy_path, &remote_cwd)?;
         plan = with_step(
             plan,
             PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
@@ -471,7 +460,7 @@ fn run_lab_offload_inner(
             raw_exec: false,
             source_snapshot: Some(source_snapshot),
             capability_preflight,
-            required_extensions: Vec::new(),
+            required_extensions: contract.required_extensions,
         },
     )?;
 
@@ -966,6 +955,7 @@ mod tests {
             unsupported_reason: None,
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             requires_extension_parity: true,
+            required_extensions: Vec::new(),
             requires_playwright: false,
         }
     }
@@ -977,6 +967,7 @@ mod tests {
             unsupported_reason: Some(reason),
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             requires_extension_parity: false,
+            required_extensions: Vec::new(),
             requires_playwright: false,
         }
     }
@@ -1324,16 +1315,13 @@ mod tests {
 
     #[test]
     fn plan_records_skipped_auto_offload() {
-        let outcome = execute_lab_offload(
-            LabOffloadRequest {
-                command: Some(portable_lab_command("test")),
-                normalized_args: &["homeboy".to_string(), "test".to_string()],
-                explicit_runner: None,
-                force_hot: true,
-                capture_patch: false,
-            },
-            |_, _, _| Ok(()),
-        )
+        let outcome = execute_lab_offload(LabOffloadRequest {
+            command: Some(portable_lab_command("test")),
+            normalized_args: &["homeboy".to_string(), "test".to_string()],
+            explicit_runner: None,
+            force_hot: true,
+            capture_patch: false,
+        })
         .expect("outcome");
 
         let LabOffloadOutcome::RunLocal { plan, metadata, .. } = outcome else {

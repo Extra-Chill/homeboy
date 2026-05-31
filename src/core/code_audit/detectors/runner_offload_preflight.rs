@@ -75,6 +75,7 @@ struct RemoteExecutionSafetyPolicy<'a> {
     artifact_capture_markers: Vec<&'a str>,
     artifact_snapshot_markers: Vec<&'a str>,
     extension_parity_markers: Vec<&'a str>,
+    extension_selector_markers: Vec<&'a str>,
     artifact_report_markers: Vec<&'a str>,
     artifact_access_markers: Vec<&'a str>,
 }
@@ -82,63 +83,21 @@ struct RemoteExecutionSafetyPolicy<'a> {
 impl<'a> RemoteExecutionSafetyPolicy<'a> {
     fn new(config: &'a RemoteExecutionSafetyConfig) -> Self {
         Self {
-            dispatch_markers: with_defaults(
-                &["RunnerExecOptions", "runner::exec", "core::runner::exec"],
-                &config.dispatch_markers,
-            ),
-            path_translation_markers: with_defaults(
-                &[
-                    "translate_remote_path",
-                    "remote_path",
-                    "sync_workspace",
-                    "strip_local_output",
-                ],
-                &config.path_translation_markers,
-            ),
-            capability_preflight_markers: with_defaults(
-                &[
-                    "RunnerDoctorOutput",
-                    "runner doctor",
-                    "capability_plan",
-                    "capability_preflight",
-                ],
-                &config.capability_preflight_markers,
-            ),
-            artifact_capture_markers: with_defaults(&[], &config.artifact_capture_markers),
-            artifact_snapshot_markers: with_defaults(&[], &config.artifact_snapshot_markers),
-            extension_parity_markers: with_defaults(
-                &[
-                    "extension_parity",
-                    "required_extensions",
-                    "runner_extension",
-                    "validate_runner_extension",
-                ],
-                &config.extension_parity_markers,
-            ),
-            artifact_report_markers: with_defaults(
-                &["runner-artifact://", "artifact.path"],
-                &config.artifact_report_markers,
-            ),
-            artifact_access_markers: with_defaults(
-                &[
-                    "download_remote_artifact",
-                    "is_reportable_artifact_evidence_path",
-                    "is_retrievable_runner_artifact",
-                    "reportable_artifact_evidence_path",
-                    "fs::metadata",
-                    ".is_file()",
-                    "get_artifact",
-                ],
-                &config.artifact_access_markers,
-            ),
+            dispatch_markers: configured(&config.dispatch_markers),
+            path_translation_markers: configured(&config.path_translation_markers),
+            capability_preflight_markers: configured(&config.capability_preflight_markers),
+            artifact_capture_markers: configured(&config.artifact_capture_markers),
+            artifact_snapshot_markers: configured(&config.artifact_snapshot_markers),
+            extension_parity_markers: configured(&config.extension_parity_markers),
+            extension_selector_markers: configured(&config.extension_selector_markers),
+            artifact_report_markers: configured(&config.artifact_report_markers),
+            artifact_access_markers: configured(&config.artifact_access_markers),
         }
     }
 }
 
-fn with_defaults<'a>(defaults: &[&'a str], configured: &'a [String]) -> Vec<&'a str> {
-    let mut markers = defaults.to_vec();
-    markers.extend(configured.iter().map(String::as_str));
-    markers
+fn configured(configured: &[String]) -> Vec<&str> {
+    configured.iter().map(String::as_str).collect()
 }
 
 fn is_remote_dispatch_file(content: &str, policy: &RemoteExecutionSafetyPolicy) -> bool {
@@ -176,8 +135,7 @@ fn dispatches_without_capability_preflight(
     content: &str,
     policy: &RemoteExecutionSafetyPolicy,
 ) -> bool {
-    let dispatches_remote_work =
-        contains_any(content, &policy.dispatch_markers) || content.contains("sync_workspace");
+    let dispatches_remote_work = contains_any(content, &policy.dispatch_markers);
     let has_capability_preflight = contains_any(content, &policy.capability_preflight_markers);
 
     dispatches_remote_work && !has_capability_preflight
@@ -187,7 +145,7 @@ fn dispatches_extension_without_parity_preflight(
     content: &str,
     policy: &RemoteExecutionSafetyPolicy,
 ) -> bool {
-    let accepts_extension = contains_any(content, &["--extension", "extension_id", "extension"]);
+    let accepts_extension = contains_any(content, &policy.extension_selector_markers);
     let has_parity_preflight = contains_any(content, &policy.extension_parity_markers);
 
     accepts_extension && !has_parity_preflight
@@ -234,6 +192,7 @@ mod tests {
 
     fn policy_config() -> RemoteExecutionSafetyConfig {
         RemoteExecutionSafetyConfig {
+            dispatch_markers: vec!["runner::exec".to_string(), "RunnerExecOptions".to_string()],
             path_translation_markers: vec!["rewrite_component_remote_args".to_string()],
             capability_preflight_markers: vec![
                 "component_runner_capability_plan".to_string(),
@@ -241,9 +200,10 @@ mod tests {
             ],
             artifact_capture_markers: vec!["capture_change: true".to_string()],
             artifact_snapshot_markers: vec!["source_snapshot".to_string()],
+            extension_selector_markers: vec!["extension_selector".to_string()],
+            extension_parity_markers: vec!["required_extensions".to_string()],
             artifact_report_markers: vec!["change_artifact_path".to_string()],
             artifact_access_markers: vec!["is_retrievable_runner_artifact".to_string()],
-            ..Default::default()
         }
     }
 
@@ -361,7 +321,7 @@ mod tests {
         let fp = fingerprint(
             "src/main.rs",
             r#"
-            fn run(command: Vec<String>, extension_id: &str) {
+            fn run(command: Vec<String>, extension_selector: &str) {
                 runner::exec("remote", RunnerExecOptions { command, capture_change: false });
             }
             "#,
