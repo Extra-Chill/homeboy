@@ -6,6 +6,7 @@ pub mod baseline;
 pub mod cli_tool;
 pub mod codebase_scan;
 pub mod command;
+pub mod detail_output;
 pub mod edit_op;
 pub mod edit_op_apply;
 pub mod execution_context;

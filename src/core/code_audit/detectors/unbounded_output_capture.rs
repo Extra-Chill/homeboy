@@ -16,7 +16,9 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
             continue;
         }
 
-        if has_unbounded_capture_shape(&fp.content) {
+        let detector_content = strip_test_modules(&strip_string_literals(&fp.content));
+
+        if has_unbounded_capture_shape(&detector_content) {
             findings.push(Finding {
                 convention: "output_capture".to_string(),
                 severity: Severity::Warning,
@@ -27,7 +29,7 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
             });
         }
 
-        if has_unbounded_detail_output_shape(&fp.content) {
+        if has_unbounded_detail_output_shape(&detector_content) {
             findings.push(Finding {
                 convention: "output_capture".to_string(),
                 severity: Severity::Warning,
@@ -41,6 +43,83 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
 
     findings.sort_by(|a, b| a.file.cmp(&b.file));
     findings
+}
+
+fn strip_string_literals(content: &str) -> String {
+    let mut stripped = String::with_capacity(content.len());
+    let chars = content.chars();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in chars {
+        if in_string {
+            if escaped {
+                escaped = false;
+                stripped.push(' ');
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    escaped = true;
+                    stripped.push(' ');
+                }
+                '"' => {
+                    in_string = false;
+                    stripped.push('"');
+                }
+                '\n' => stripped.push('\n'),
+                _ => stripped.push(' '),
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+        }
+        stripped.push(ch);
+    }
+
+    stripped
+}
+
+fn strip_test_modules(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut stripped = String::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        if lines[index].trim() == "#[cfg(test)]" {
+            let mut skip_until = index + 1;
+            while skip_until < lines.len() && !lines[skip_until].contains('{') {
+                skip_until += 1;
+            }
+            if skip_until < lines.len() {
+                let mut depth = 0_i32;
+                for (offset, line) in lines[skip_until..].iter().enumerate() {
+                    for ch in line.chars() {
+                        match ch {
+                            '{' => depth += 1,
+                            '}' => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                    if depth <= 0 && offset > 0 {
+                        index = skip_until + offset + 1;
+                        break;
+                    }
+                }
+                if index > skip_until {
+                    continue;
+                }
+            }
+        }
+
+        stripped.push_str(lines[index]);
+        stripped.push('\n');
+        index += 1;
+    }
+
+    stripped
 }
 
 fn has_unbounded_capture_shape(content: &str) -> bool {
@@ -69,43 +148,49 @@ fn has_unbounded_capture_shape(content: &str) -> bool {
 }
 
 fn has_unbounded_detail_output_shape(content: &str) -> bool {
-    let emits_text = content.contains("println!")
-        || content.contains("eprintln!")
-        || content.contains("writeln!")
-        || content.contains("push_str(&format!")
-        || content.contains("push_str(format!");
-    if !emits_text {
-        return false;
-    }
-
-    let has_detail_loop = content.lines().any(|line| {
+    let lines: Vec<&str> = content.lines().collect();
+    lines.iter().enumerate().any(|(index, line)| {
         let line = line.trim();
         if !line.starts_with("for ") || !line.contains(" in ") {
             return false;
         }
 
         let lower = line.to_ascii_lowercase();
-        [
+        let detail_loop = [
             "matches", "findings", "files", "details", "entries", "items",
         ]
         .iter()
-        .any(|needle| lower.contains(needle))
-    });
-    if !has_detail_loop {
-        return false;
-    }
+        .any(|needle| lower.contains(needle));
+        if !detail_loop {
+            return false;
+        }
 
-    let has_bound = content.contains(".take(")
+        let window_end = lines.len().min(index + 24);
+        let window = lines[index..window_end].join("\n");
+        emits_text(&window) && !has_detail_bound(&window)
+    })
+}
+
+fn emits_text(content: &str) -> bool {
+    content.contains("println!")
+        || content.contains("eprintln!")
+        || content.contains("writeln!")
+        || content.contains("push_str(&format!")
+        || content.contains("push_str(format!")
+}
+
+fn has_detail_bound(content: &str) -> bool {
+    content.contains(".take(")
         || content.contains(".truncate(")
         || content.contains("omitted")
         || content.contains("remaining")
+        || content.contains("remainder")
         || content.contains("detail_limit")
         || content.contains("DETAIL_LIMIT")
         || content.contains("MAX_DETAIL")
         || content.contains("max_detail")
-        || content.contains("summary");
-
-    !has_bound
+        || content.contains("TOP_N")
+        || content.contains("summary")
 }
 
 #[cfg(test)]
@@ -195,6 +280,42 @@ mod tests {
                 if omitted > 0 {
                     out.push_str(&format!("... {omitted} omitted\n"));
                 }
+            }
+            "#,
+        );
+
+        assert!(run(&[&file]).is_empty());
+    }
+
+    #[test]
+    fn ignores_detail_shapes_inside_test_modules() {
+        let file = fp(
+            "src/report.rs",
+            r#"
+            fn production() {}
+
+            #[cfg(test)]
+            mod tests {
+                fn sample() {
+                    let matches = vec!["a", "b"];
+                    for item in matches {
+                        println!("{item}");
+                    }
+                }
+            }
+            "#,
+        );
+
+        assert!(run(&[&file]).is_empty());
+    }
+
+    #[test]
+    fn ignores_detail_shapes_inside_string_literals() {
+        let file = fp(
+            "src/report.rs",
+            r#"
+            fn sample_fixture() -> &'static str {
+                "for item in items { println!(\"{item}\"); }"
             }
             "#,
         );

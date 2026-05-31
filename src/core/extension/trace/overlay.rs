@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::core::engine::detail_output::{bounded_items, DEFAULT_DETAIL_ITEM_LIMIT};
 use crate::core::engine::run_dir::RunDir;
 use crate::core::error::{Error, Result};
 
@@ -168,8 +169,18 @@ fn print_trace_overlay(action: &str, patch_path: &Path, touched_files: &[String]
         return;
     }
     eprintln!("  touched files:");
-    for file in touched_files {
+    let (visible_files, metadata) = bounded_items(touched_files, DEFAULT_DETAIL_ITEM_LIMIT);
+    for file in visible_files {
         eprintln!("    - {file}");
+    }
+    if metadata.truncated {
+        eprintln!(
+            "    ... {} touched file(s) omitted (shown: {}, total: {}, limit: {})",
+            metadata.omitted_item_count,
+            metadata.items_rendered,
+            metadata.items_seen,
+            metadata.item_limit
+        );
     }
 }
 
