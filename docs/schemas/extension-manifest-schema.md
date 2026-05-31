@@ -150,7 +150,23 @@ Extensions can declare which structured run-directory sidecars they emit. `struc
 - **`structured_sidecars.<name>.path`** (string): Optional run-directory relative sidecar file or directory path. Known names such as `lint.findings`, `test.results`, `test.failures`, `bench.results`, and `annotations` have default paths.
 - **`structured_sidecars.<name>.schema_version`** (string): Optional version of the sidecar payload contract.
 
-The generic `findings` and `producer.summary` names are the preferred contracts for normalized finding output and producer summaries. Legacy producer-specific names such as `lint.findings` can be declared during migration, but they use the same top-level declaration shape.
+The generic `findings` and `producer.summary` names are the preferred contracts for normalized finding output and producer summaries. Legacy producer-specific names such as `lint.findings` can be declared during migration, but they use the same top-level declaration shape. Schema versions are read only from `structured_sidecars.<name>.schema_version`; nested producer fields such as `lint.findings_schema_version` do not declare sidecar contracts.
+
+Known sidecar names default to these run-directory paths when `path` is omitted:
+
+| Name | Default path |
+| --- | --- |
+| `findings` | `findings.json` |
+| `producer.summary` | `producer-summary.json` |
+| `lint.findings` | `lint-findings.json` |
+| `lint.producers` | `lint-producers.json` |
+| `test.results` | `test-results.json` |
+| `test.failures` | `test-failures.json` |
+| `test.coverage` | `coverage.json` |
+| `bench.results` | `bench-results.json` |
+| `trace.results` | `trace.json` |
+| `resource.summary` | `resource-summary.json` |
+| `annotations` | `annotations` |
 
 ### Inspection Behavior
 
