@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.108.4] - 2026-05-31
+
+### Fixed
+- report datamachine agent auth mode
+
 ## [2.108.3] - 2026-05-31
 
 ### Fixed
