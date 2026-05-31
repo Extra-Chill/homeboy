@@ -1027,13 +1027,22 @@ jobs:
           scenario_json="$(jq -ec --arg scenario "${{ inputs.flow_slug }}" '.scenarios[] | select(.id == $scenario)' "$RESULTS_FILE")"
           job_status="$(jq -r '.metadata.job_status // ""' <<< "$scenario_json")"
           success_status="$(jq -r '.metadata.success_status // ""' <<< "$scenario_json")"
+          error_message="$(jq -r '.metadata.error_message // ""' <<< "$scenario_json")"
           completion_outcome_satisfied="$(jq -r 'if .metadata.completion_outcome_satisfied == true then "true" else "false" end' <<< "$scenario_json")"
           no_changes_allowed="${{ inputs.success_requires_pr && 'false' || 'true' }}"
 
           printf 'job_status:                      %s\n' "$job_status"
           printf 'success_status:                  %s\n' "$success_status"
+          printf 'error_message:                   %s\n' "$error_message"
           printf 'completion_outcome_satisfied:    %s\n' "$completion_outcome_satisfied"
           printf 'no_changes_allowed:              %s\n' "$no_changes_allowed"
+
+          if [ -n "$error_message" ]; then
+            printf 'ERROR: scenario %s completed with error_message=%s\n' \
+              "${{ inputs.flow_slug }}" \
+              "$error_message" >&2
+            exit 1
+          fi
 
           if [ "$job_status" = "completed" ] || [ "$success_status" = "pr_opened" ] || [ "$completion_outcome_satisfied" = "true" ] || { [ "$success_status" = "no_changes" ] && [ "$no_changes_allowed" = "true" ]; }; then
             exit 0
