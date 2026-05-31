@@ -442,16 +442,20 @@ set -e
 rm -f "$RECIPE_FILE"
 
 WP_CODEBOX_OUTPUT=$(cat "$WP_CODEBOX_TMPFILE")
-if [ -n "$WP_CODEBOX_OUTPUT" ]; then
-    jq -r '(.executions // [])[-1].stdout // empty' "$WP_CODEBOX_TMPFILE" 2>/dev/null || cat "$WP_CODEBOX_TMPFILE"
-fi
-
 PHPUNIT_OUTPUT=""
 if [ -f "$RESULT_FILE" ]; then
     PHPUNIT_OUTPUT=$(cat "$RESULT_FILE")
 fi
 PHPUNIT_STDOUT=$(jq -r '(.executions // [])[-1].stdout // empty' "$WP_CODEBOX_TMPFILE" 2>/dev/null || true)
 printf '%s\n' "$PHPUNIT_STDOUT" > "$PHPUNIT_STDOUT_TMPFILE"
+
+if [ -n "$WP_CODEBOX_OUTPUT" ]; then
+    if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES" && [ "$PHPUNIT_NO_TESTS" != "failed" ] && [ "$PHPUNIT_NO_TESTS" != "fail" ] && [ ! -f "${PLUGIN_PATH}/phpunit.xml" ] && [ ! -f "${PLUGIN_PATH}/phpunit.xml.dist" ]; then
+        :
+    else
+        jq -r '(.executions // [])[-1].stdout // empty' "$WP_CODEBOX_TMPFILE" 2>/dev/null || cat "$WP_CODEBOX_TMPFILE"
+    fi
+fi
 
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/test/parse-test-results.sh"
 PARSE_FAILURES="${EXTENSION_PATH}/scripts/test/parse-test-failures.sh"
@@ -573,7 +577,6 @@ if [ $wp_codebox_exit -ne 0 ] && echo "$PHPUNIT_STDOUT" | grep -qE '^(PHP Parse 
 fi
 
 if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
-    dump_diagnostics "NO PHPUNIT TEST FILES DISCOVERED"
     if component_has_composer_test_script; then
         rm -f "$RESULT_FILE"
         run_composer_test_script
@@ -581,6 +584,7 @@ if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
     fi
 
     if [ "$PHPUNIT_NO_TESTS" = "failed" ] || [ "$PHPUNIT_NO_TESTS" = "fail" ] || [ -f "${PLUGIN_PATH}/phpunit.xml" ] || [ -f "${PLUGIN_PATH}/phpunit.xml.dist" ]; then
+        dump_diagnostics "NO PHPUNIT TEST FILES DISCOVERED"
         echo ""
         if [ "$PHPUNIT_NO_TESTS" = "failed" ] || [ "$PHPUNIT_NO_TESTS" = "fail" ]; then
             echo "PHPUnit no-test discovery is configured as failure, and no files matched the WordPress runner discovery contract."
