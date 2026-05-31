@@ -35,9 +35,12 @@ use super::parse_key_val;
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
 use super::{audit, lint, test, CmdResult, GlobalArgs};
 
+mod artifact_findings;
 mod observation;
 pub(super) mod raw_output;
 mod render;
+
+use artifact_findings::ReviewArtifactFindings;
 
 #[derive(Args, Debug, Clone)]
 pub struct ReviewArgs {
@@ -176,30 +179,6 @@ pub struct ReviewArtifactCommand {
     pub findings: Vec<HomeboyFinding>,
     pub artifacts: Vec<Value>,
 }
-
-pub(super) trait ReviewArtifactFindings {
-    fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
-        Vec::new()
-    }
-}
-
-impl ReviewArtifactFindings for AuditCommandOutput {}
-
-impl ReviewArtifactFindings for LintCommandOutput {
-    fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
-        self.findings.clone().unwrap_or_default()
-    }
-}
-
-impl ReviewArtifactFindings for TestCommandOutput {
-    fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
-        self.findings.clone().unwrap_or_default()
-    }
-}
-
-impl ReviewArtifactFindings for CiRunOutput {}
-
-impl ReviewArtifactFindings for Value {}
 
 struct ReviewStageDescriptor<Args, Output: Serialize + ReviewArtifactFindings> {
     name: &'static str,
