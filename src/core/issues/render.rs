@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::code_audit::FindingConfidence;
+use crate::core::finding::HomeboyFinding;
 
 /// Canonical input shape consumed by `homeboy issues reconcile`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -70,6 +71,11 @@ pub fn build_findings_from_native_output(
 }
 
 fn render_audit(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsInput {
+    let normalized_findings = normalized_findings(data);
+    if !normalized_findings.is_empty() {
+        return render_normalized_findings("audit", normalized_findings, context);
+    }
+
     let mut by_kind: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
     let findings = data
         .get("findings")
@@ -148,6 +154,11 @@ fn render_audit_body(
 }
 
 fn render_lint(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsInput {
+    let normalized_findings = normalized_findings(data);
+    if !normalized_findings.is_empty() {
+        return render_normalized_findings("lint", normalized_findings, context);
+    }
+
     let mut by_category: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
     if let Some(findings) = data.get("findings").and_then(Value::as_array) {
         for finding in findings {
@@ -290,6 +301,11 @@ fn render_lint_body(
 }
 
 fn render_test(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsInput {
+    let normalized_findings = normalized_findings(data);
+    if !normalized_findings.is_empty() {
+        return render_normalized_findings("test", normalized_findings, context);
+    }
+
     let mut groups = BTreeMap::new();
 
     if let Some(clusters) = data.pointer("/analysis/clusters").and_then(Value::as_array) {
@@ -338,6 +354,108 @@ fn render_test(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsI
         command: "test".to_string(),
         groups,
     }
+}
+
+fn normalized_findings(data: &Value) -> Vec<HomeboyFinding> {
+    let Some(findings) = data.get("findings").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let parsed: Vec<HomeboyFinding> = findings
+        .iter()
+        .filter_map(|finding| serde_json::from_value(finding.clone()).ok())
+        .collect();
+    if parsed.len() == findings.len() {
+        parsed
+    } else {
+        Vec::new()
+    }
+}
+
+fn render_normalized_findings(
+    command: &str,
+    findings: Vec<HomeboyFinding>,
+    context: &IssueRenderContext,
+) -> ReconcileFindingsInput {
+    let mut by_category: BTreeMap<String, Vec<HomeboyFinding>> = BTreeMap::new();
+    for finding in findings {
+        let category = finding_category(command, &finding);
+        by_category.entry(category).or_default().push(finding);
+    }
+
+    let mut groups = BTreeMap::new();
+    for (category, findings) in by_category {
+        groups.insert(
+            category.clone(),
+            RenderedIssueGroup {
+                count: findings.len(),
+                label: labelize(&category),
+                body: render_normalized_findings_body(command, &category, &findings, context),
+                confidence: None,
+            },
+        );
+    }
+
+    ReconcileFindingsInput {
+        command: command.to_string(),
+        groups,
+    }
+}
+
+fn finding_category(command: &str, finding: &HomeboyFinding) -> String {
+    finding
+        .category
+        .clone()
+        .or_else(|| finding.rule.clone())
+        .unwrap_or_else(|| format!("{}_finding", command))
+}
+
+fn render_normalized_findings_body(
+    command: &str,
+    category: &str,
+    findings: &[HomeboyFinding],
+    context: &IssueRenderContext,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "## {}", labelize(category));
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{} {} finding(s) in this category.",
+        findings.len(),
+        command
+    );
+    if let Some(url) = context.run_url.as_deref() {
+        let _ = writeln!(out, "\nRun: {}", url);
+    }
+    let _ = writeln!(out, "\n### Findings");
+    for finding in findings.iter().take(20) {
+        render_normalized_finding_line(&mut out, finding);
+    }
+    if findings.len() > 20 {
+        let _ = writeln!(out, "- _... {} more finding(s)_", findings.len() - 20);
+    }
+    out
+}
+
+fn render_normalized_finding_line(out: &mut String, finding: &HomeboyFinding) {
+    let label = finding
+        .fingerprint
+        .as_deref()
+        .or(finding.rule.as_deref())
+        .or(finding.location.file.as_deref())
+        .unwrap_or(&finding.tool);
+    let _ = write!(out, "- `{}` — {}", label, finding.message);
+    if let Some(file) = finding.location.file.as_deref() {
+        if label != file {
+            let _ = write!(out, " (`{}", file);
+            if let Some(line) = finding.location.line {
+                let _ = write!(out, ":{}", line);
+            }
+            let _ = write!(out, "`)");
+        }
+    }
+    out.push('\n');
 }
 
 fn render_test_cluster_body(

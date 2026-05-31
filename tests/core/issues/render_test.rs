@@ -133,6 +133,37 @@ fn renders_lint_output_grouped_by_category() {
 }
 
 #[test]
+fn renders_normalized_lint_findings() {
+    let output = json!({
+        "data": {
+            "passed": false,
+            "status": "failed",
+            "exit_code": 1,
+            "findings": [
+                {
+                    "tool": "lint",
+                    "category": "style",
+                    "message": "trailing whitespace",
+                    "fingerprint": "lint-1",
+                    "file": "src/lib.rs",
+                    "line": 12
+                }
+            ]
+        }
+    });
+
+    let rendered =
+        build_findings_from_native_output("lint", output, &IssueRenderContext::default()).unwrap();
+
+    let group = rendered.groups.get("style").unwrap();
+    assert_eq!(group.count, 1);
+    assert!(group.body.contains("1 lint finding(s) in this category."));
+    assert!(group
+        .body
+        .contains("- `lint-1` — trailing whitespace (`src/lib.rs:12`)"));
+}
+
+#[test]
 fn renders_lint_aggregate_fallback_when_findings_are_missing() {
     let output = json!({
         "data": {
@@ -248,6 +279,37 @@ fn renders_test_analysis_clusters_by_category() {
         .contains("**Pattern:** undefined method Widget::render"));
     assert!(group.body.contains("- `tests/widget.rs`"));
     assert!(group.body.contains("- `widget_renders`"));
+}
+
+#[test]
+fn renders_normalized_test_findings() {
+    let output = json!({
+        "data": {
+            "passed": false,
+            "status": "failed",
+            "exit_code": 1,
+            "findings": [
+                {
+                    "tool": "test",
+                    "category": "assertion_failure",
+                    "message": "expected 200, got 500",
+                    "fingerprint": "test-1",
+                    "file": "tests/http.rs",
+                    "line": 44
+                }
+            ]
+        }
+    });
+
+    let rendered =
+        build_findings_from_native_output("test", output, &IssueRenderContext::default()).unwrap();
+
+    let group = rendered.groups.get("assertion_failure").unwrap();
+    assert_eq!(group.count, 1);
+    assert!(group.body.contains("1 test finding(s) in this category."));
+    assert!(group
+        .body
+        .contains("- `test-1` — expected 200, got 500 (`tests/http.rs:44`)"));
 }
 
 #[test]

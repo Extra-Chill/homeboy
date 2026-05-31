@@ -621,10 +621,9 @@ fn review_artifact_output() -> ReviewCommandOutput {
                 status: "fail".to_string(),
                 exit_code: 1,
                 summary: "1 lint finding(s) detected".to_string(),
-                findings: vec![json!({
-                    "id": "lint:src/lib.rs:12:trailing-whitespace",
-                    "message": "Trailing whitespace"
-                })],
+                findings: vec![HomeboyFinding::builder("lint", "Trailing whitespace")
+                    .fingerprint("lint:src/lib.rs:12:trailing-whitespace")
+                    .build()],
                 artifacts: Vec::new(),
             }],
         },

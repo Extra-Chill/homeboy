@@ -24,8 +24,9 @@
           "summary": "1 lint finding(s) detected",
           "findings": [
             {
-              "id": "lint:src/lib.rs:12:trailing-whitespace",
-              "message": "Trailing whitespace"
+              "tool": "lint",
+              "message": "Trailing whitespace",
+              "fingerprint": "lint:src/lib.rs:12:trailing-whitespace"
             }
           ],
           "artifacts": []
