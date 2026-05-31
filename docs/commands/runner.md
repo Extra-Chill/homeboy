@@ -137,6 +137,25 @@ The broker exposes `POST /runner/jobs`, `POST /runner/jobs/claim`,
 controllers can queue work and reverse runners can claim, stream progress, and
 return results without inbound access to the lab machine.
 
+Daemon and broker HTTP responses use one canonical envelope. The outer response
+reports transport success and the endpoint payload always lives under
+`data.body`; runner clients require that shape and do not parse legacy direct
+`data` payloads.
+
+```json
+{
+  "success": true,
+  "data": {
+    "status": 200,
+    "endpoint": "runner.jobs.submit",
+    "body": {
+      "job": {},
+      "poll": {}
+    }
+  }
+}
+```
+
 For the generic controller-to-runner operator path, see
 [Controller to runner reverse-runner setup](../operators/controller-runner-reverse-runner.md).
 That guide is machine-agnostic and intentionally explicit about what is available
@@ -258,6 +277,7 @@ Path rules:
 - Omitting `--cwd` on an SSH runner uses the runner `workspace_root`.
 - `--project <id>` feeds the runner trust policy project allowlist check.
 - `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
+- Raw SSH execution remains intentionally explicit and should not be used as production Lab/offload evidence; use connected daemon or reverse broker execution for job/event/artifact-compatible output.
 
 Runner metrics:
 

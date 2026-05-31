@@ -131,7 +131,7 @@ fn claim_job(
         }),
         "claim reverse runner job",
     )?;
-    let claim = data["body"]["claim"].clone();
+    let claim = data["claim"].clone();
     if claim.is_null() {
         return Ok(None);
     }
@@ -175,7 +175,7 @@ fn finish_job(
         }),
         "finish reverse runner job",
     )?;
-    serde_json::from_value(data["body"]["job"].clone()).map_err(|err| {
+    serde_json::from_value(data["job"].clone()).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some("parse finished reverse runner job".to_string()),
