@@ -141,6 +141,13 @@ The runner converts the agent config into a single WP Codebox sandbox run:
 - `fallback_pull_request` can open a PR when files were written but the agent did
   not explicitly call the PR tool.
 
+The reusable workflow reports the selected GitHub token path as `auth_mode` and
+in the run summary. Same-repo consumers can use the repository-scoped
+`github.token` fallback, which posts as `github-actions[bot]`. Central,
+cross-repo, and private-target runs should provide Homeboy GitHub App secrets,
+set `app_token_repos` to every repository the run must access, and enable
+`require_homeboy_app_token` so missing app credentials fail before agent setup.
+
 Inside WP Codebox, `datamachine-agent-workload.php` installs the bundle,
 configures the provider, starts the Data Machine flow, drains queued work,
 records tool results, exports the transcript, and writes a Homeboy scenario
@@ -158,7 +165,7 @@ knobs to `run-datamachine-agent.sh`:
 - Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
 - Provider plugin: `provider_plugin`, with OpenAI defaults preserved when omitted for `provider: openai`.
 - WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `wp_codebox_wordpress_version`, `wp_codebox_ref`, `extra_wp_config_defines`, `extra_wp_codebox_mounts`, `workload_run_before`, `workload_run_after`.
-- GitHub access: `target_repo`, `app_token_repos`, `allowed_repos`, `engine_key`, `tool_results_key`.
+- GitHub access: `target_repo`, `app_token_repos`, `require_homeboy_app_token`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.
 - Eval projection: `wp_gym_benchmark_mode` turns missing wp-gym replay/evidence references into errors.

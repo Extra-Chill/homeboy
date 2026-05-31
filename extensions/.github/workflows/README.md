@@ -54,7 +54,25 @@ for the WP Codebox contract, runtime surface, and evaluation notes.
 The reusable workflow exposes `engine_data_json` as one combined JSON object.
 Dynamic per-key `workflow_call` outputs are not possible in GitHub Actions, so
 callers should parse this object in their own workflow when they need named
-values.
+values. It also exposes `auth_mode`, which is `homeboy_app_token` when the
+workflow generated and used a Homeboy GitHub App installation token, or
+`github_token_fallback` when it used the repository-scoped GitHub Actions token.
+
+## GitHub auth modes
+
+The workflow keeps two GitHub authentication modes:
+
+- Same-repo consumer workflows can rely on the built-in `github.token` fallback.
+  Branches, commits, PRs, and comments created this way appear as
+  `github-actions[bot]`, and `auth_mode` is `github_token_fallback`.
+- Central, cross-repo, or private-target workflows should provide
+  `HOMEBOY_APP_ID` and `HOMEBOY_APP_PRIVATE_KEY`, set `app_token_repos` to the
+  repositories the run must access, and set `require_homeboy_app_token: true` so
+  missing app credentials fail before expensive setup. In this mode, `auth_mode`
+  is `homeboy_app_token`.
+
+The run summary includes the selected auth mode, target repository, token scope,
+and whether the caller required a Homeboy App token. Tokens are never printed.
 
 ## Example
 
@@ -131,7 +149,8 @@ jobs:
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
 - `bundle_path` is resolved relative to the consumer checkout.
 - `bundle_repo`, `bundle_ref`, and `bundle_path_in_repo` let a consumer run against a bundle stored in another repository. The runner clones that repository before mounting the bundle into the WordPress substrate.
-- `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`.
+- `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`. Use it when the workflow needs app-token access to more than the target repository.
+- `require_homeboy_app_token` fails before agent setup when Homeboy App credentials are missing. Enable it for central, cross-repo, and private-target runs; leave it false for same-repo consumers that intentionally use `github.token` fallback.
 - `allowed_repos` is a JSON array of `OWNER/REPO` entries exposed to the injected GitHub profile. It defaults to `[target_repo]`.
 - `engine_key` and `tool_results_key` control where built-in GitHub tool captures and fallback PR data are written in `metadata.engine_data`.
 - `dry_run` is intended for workflow smoke tests only; production consumers should leave it `false`.
@@ -166,6 +185,7 @@ jobs:
       flow_slug: docs-agent-flow
       target_repo: Automattic/agents-api
       app_token_repos: Automattic/agents-api,Automattic/docs-agent
+      require_homeboy_app_token: true
       allowed_repos: '["Automattic/agents-api", "Automattic/docs-agent"]'
       engine_key: docs_agent
       tool_results_key: github_tool_results
