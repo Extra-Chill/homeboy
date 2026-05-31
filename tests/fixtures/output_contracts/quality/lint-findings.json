@@ -9,7 +9,7 @@
       "phase": "lint",
       "status": "failed",
       "exit_code": 1,
-      "summary": "lint phase reported 1 finding(s)"
+      "summary": "lint phase failed with 1 finding(s) across fixture-linter failed: 1"
     },
     "failure": {
       "phase": "lint",

@@ -500,7 +500,8 @@ fn lint_findings_output() -> LintCommandOutput {
             phase: VerificationPhase::Lint,
             status: PhaseStatus::Failed,
             exit_code: Some(1),
-            summary: "lint phase reported 1 finding(s)".to_string(),
+            summary: "lint phase failed with 1 finding(s) across fixture-linter failed: 1"
+                .to_string(),
         },
         failure: Some(PhaseFailure {
             phase: VerificationPhase::Lint,
