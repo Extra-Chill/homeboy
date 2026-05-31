@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.213.9] - 2026-05-31
+
+### Fixed
+- flag stale deploy source checkouts
+- type portable component config ownership
+
+## [0.213.8] - 2026-05-31
+
+### Changed
+- guard core against Homeboy-domain leaks
+- split test coverage behavior regressions
+- split release executor helpers
+- add change artifact apply contract
+- document planned change execution contracts
+- route review through plan executor
+- reuse generic requested detector language parsing
+
+### Fixed
+- require canonical runner response envelopes
+- keep split detector tests selectable
+- keep execution mode helpers internal
+
 ## [0.213.7] - 2026-05-31
 
 ### Changed

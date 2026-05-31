@@ -333,8 +333,7 @@ fn exec_via_reverse_broker(
         })?,
         "submit reverse runner job",
     )?;
-    let body = data.get("body").unwrap_or(&data);
-    let job_value = body
+    let job_value = data
         .get("job")
         .ok_or_else(|| Error::internal_unexpected("reverse broker submit returned no job"))?;
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
@@ -448,7 +447,7 @@ fn exec_via_daemon(
     let data = envelope
         .data
         .ok_or_else(|| Error::internal_unexpected("daemon exec returned no data"))?;
-    let body = data.get("body").unwrap_or(&data);
+    let body = canonical_daemon_body(&data, "daemon exec response")?;
     let job_value = body
         .get("job")
         .ok_or_else(|| Error::internal_unexpected("daemon exec returned no job"))?;
@@ -534,15 +533,22 @@ fn preflight_runner_capability_plan(
 
 fn fetch_daemon_job(client: &Client, local_url: &str, job_id: &str) -> Result<Job> {
     let data = daemon_get(client, local_url, &format!("/jobs/{job_id}"))?;
-    serde_json::from_value(data["body"]["job"].clone())
+    let body = canonical_daemon_body(&data, "daemon job response")?;
+    serde_json::from_value(body["job"].clone())
         .map_err(|err| Error::internal_json(err.to_string(), Some("parse daemon job".to_string())))
 }
 
 fn fetch_daemon_events(client: &Client, local_url: &str, job_id: &str) -> Result<Vec<JobEvent>> {
     let data = daemon_get(client, local_url, &format!("/jobs/{job_id}/events"))?;
-    serde_json::from_value(data["body"]["events"].clone()).map_err(|err| {
+    let body = canonical_daemon_body(&data, "daemon job events response")?;
+    serde_json::from_value(body["events"].clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon job events".to_string()))
     })
+}
+
+pub(crate) fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Result<&'a Value> {
+    data.get("body")
+        .ok_or_else(|| Error::internal_unexpected(format!("{context} missing canonical data.body")))
 }
 
 fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result<Value> {
@@ -1019,6 +1025,20 @@ mod tests {
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
             assert!(err.message.contains("connected to a daemon"));
         });
+    }
+
+    #[test]
+    fn canonical_daemon_body_requires_nested_body() {
+        let err = canonical_daemon_body(&json!({ "job": {} }), "daemon exec response")
+            .expect_err("reject legacy direct data");
+        assert!(err.message.contains("data.body"));
+    }
+
+    #[test]
+    fn canonical_daemon_body_returns_nested_body() {
+        let data = json!({ "body": { "job": { "id": "job-1" } } });
+        let body = canonical_daemon_body(&data, "daemon exec response").expect("body");
+        assert_eq!(body["job"]["id"], "job-1");
     }
 
     #[test]

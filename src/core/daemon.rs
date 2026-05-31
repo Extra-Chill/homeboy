@@ -256,15 +256,7 @@ where
             artifact: None,
         },
         ("POST", "/exec") => match enqueue_exec_job(body, job_store) {
-            Ok(body) => HttpResponse {
-                status_code: 200,
-                body: json!({
-                    "status": 200,
-                    "endpoint": "jobs.exec",
-                    "body": body,
-                }),
-                artifact: None,
-            },
+            Ok(body) => daemon_endpoint_response("jobs.exec", body),
             Err(err) => error_response(400, err),
         },
         ("GET", "/exec") => HttpResponse {

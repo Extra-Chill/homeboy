@@ -33,7 +33,33 @@ pub(crate) fn post_json(
             envelope.error.unwrap_or(Value::Null)
         )));
     }
-    envelope
+    let data = envelope
         .data
-        .ok_or_else(|| Error::internal_unexpected("broker response missing data"))
+        .ok_or_else(|| Error::internal_unexpected("broker response missing data"))?;
+    canonical_broker_body(&data)
+}
+
+fn canonical_broker_body(data: &Value) -> Result<Value> {
+    data.get("body")
+        .cloned()
+        .ok_or_else(|| Error::internal_unexpected("broker response missing canonical data.body"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn canonical_broker_body_requires_data_body() {
+        let err = canonical_broker_body(&json!({ "job": {} })).expect_err("reject legacy data");
+        assert!(err.message.contains("data.body"));
+    }
+
+    #[test]
+    fn canonical_broker_body_returns_nested_body() {
+        let body =
+            canonical_broker_body(&json!({ "body": { "job": { "id": "job-1" } } })).expect("body");
+        assert_eq!(body["job"]["id"], "job-1");
+    }
 }

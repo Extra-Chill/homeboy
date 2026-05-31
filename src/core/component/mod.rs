@@ -230,11 +230,17 @@ pub struct Component {
     /// that may be safely removed by cleanup/reporting surfaces.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cleanup_artifacts: Vec<CleanupArtifactDeclaration>,
+    /// Subsystem-owned baseline snapshots stored in repo-local portable config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baselines: Option<HashMap<String, serde_json::Value>>,
+    /// Subsystem-owned architecture audit rule config stored in repo-local portable config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_rules: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct RawComponent {
-    #[serde(default, skip_serializing)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     aliases: Vec<String>,
@@ -296,6 +302,10 @@ struct RawComponent {
     extra_drift_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     cleanup_artifacts: Vec<CleanupArtifactDeclaration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    baselines: Option<HashMap<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audit_rules: Option<serde_json::Value>,
 }
 
 impl From<RawComponent> for Component {
@@ -330,6 +340,8 @@ impl From<RawComponent> for Component {
             cli_path: raw.cli_path,
             extra_drift_files: raw.extra_drift_files,
             cleanup_artifacts: raw.cleanup_artifacts,
+            baselines: raw.baselines,
+            audit_rules: raw.audit_rules,
         }
     }
 }
@@ -366,6 +378,8 @@ impl From<Component> for RawComponent {
             cli_path: c.cli_path,
             extra_drift_files: c.extra_drift_files,
             cleanup_artifacts: c.cleanup_artifacts,
+            baselines: c.baselines,
+            audit_rules: c.audit_rules,
         }
     }
 }
@@ -445,6 +459,8 @@ impl Component {
             cli_path: None,
             extra_drift_files: Vec::new(),
             cleanup_artifacts: Vec::new(),
+            baselines: None,
+            audit_rules: None,
         }
     }
 
@@ -1081,8 +1097,8 @@ mod tests {
 
     #[test]
     fn discover_from_portable_with_baselines_and_extensions() {
-        // Mirrors data-machine's real homeboy.json — includes baselines (unknown field)
-        // and extensions (known field). This must not silently fail.
+        // Mirrors data-machine's real homeboy.json — includes subsystem-owned
+        // baselines and component-owned extensions. This must not silently fail.
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().to_path_buf();
 

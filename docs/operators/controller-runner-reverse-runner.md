@@ -242,6 +242,11 @@ private smoke environment that provides equivalent branch builds.
 For PR or incident evidence, capture the command output plus the matching worker
 log lines showing the same `job_id`, claim, event, and finish result.
 
+The controller broker API wraps every successful response as
+`success: true` with endpoint data under `data.body`. Consumers should treat
+responses without `data.body` as malformed instead of falling back to direct
+`data` payload parsing.
+
 ## Troubleshooting
 
 | Symptom | Check | Likely fix |

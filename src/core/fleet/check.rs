@@ -70,12 +70,13 @@ pub fn collect_check(
                         Some(deploy::ComponentStatus::NeedsUpdate) => "needs_update",
                         Some(deploy::ComponentStatus::BehindRemote) => "behind_remote",
                         Some(deploy::ComponentStatus::BehindUpstream) => "behind_upstream",
+                        Some(deploy::ComponentStatus::SourceStale) => "source_stale",
                         Some(deploy::ComponentStatus::Unknown) | None => "unknown",
                     };
 
                     match status_str {
                         "up_to_date" => summary.components_up_to_date += 1,
-                        "needs_update" | "behind_remote" | "behind_upstream" => {
+                        "needs_update" | "behind_remote" | "behind_upstream" | "source_stale" => {
                             summary.components_needs_update += 1
                         }
                         _ => summary.components_unknown += 1,

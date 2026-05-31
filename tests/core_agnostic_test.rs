@@ -130,9 +130,49 @@ const TERMS: &[Term] = &[
         name: "Action Scheduler",
         kind: MatchKind::Literal,
     },
+    Term {
+        name: "Homeboy",
+        kind: MatchKind::Token,
+    },
+    Term {
+        name: "homeboy.json",
+        kind: MatchKind::Literal,
+    },
+    Term {
+        name: ".homeboy",
+        kind: MatchKind::Literal,
+    },
+    Term {
+        name: "HOMEBOY_",
+        kind: MatchKind::Literal,
+    },
+    Term {
+        name: "homeboy/lab-offload/v1",
+        kind: MatchKind::Literal,
+    },
+    Term {
+        name: "Lab",
+        kind: MatchKind::Token,
+    },
+    Term {
+        name: "offload",
+        kind: MatchKind::Token,
+    },
+    Term {
+        name: "homeboy-run",
+        kind: MatchKind::Literal,
+    },
+    Term {
+        name: "runner-artifact://",
+        kind: MatchKind::Literal,
+    },
 ];
 
 // Baseline mode for issue #2241 while the cleanup wave in #2240 lands.
+// Issue #3195 extends this guard to Homeboy-domain product assumptions in
+// core-owned source. Generic concepts like command, artifact, capability,
+// preflight, and runner can remain in core; product/domain values should come
+// from configuration, extension manifests, or typed extension contracts.
 // Each entry is a known production-code leak in core-owned source. Fixtures and
 // examples are not listed here: the scanner skips Rust test modules and source
 // test helpers instead of allowing broad paths like `tests/**`.
@@ -465,9 +505,606 @@ const BASELINE: &[ViolationKey] = &[
         path: "src/core/upgrade/mod.rs",
         term: "cargo",
     },
+    // Homeboy-domain core debt tracked by #3195.
+    ViolationKey {
+        path: "src/commands/component.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/commands/extension.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/commands/report.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/change_artifact.rs",
+        term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/ci_profile.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/cleanup.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/baseline.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/detectors/artifact_portability.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/detectors/artifact_portability.rs",
+        term: "runner-artifact://",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/detectors/command_status_contracts.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/detectors/command_status_contracts.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/detectors/layer_ownership.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/detectors/rust_test_wiring.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/code_audit/detectors/wrapper_inference.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/component/drift.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/component/inventory.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/component/mod.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/component/mod.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/component/mutations.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/component/portable.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/component/resolution.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/daemon/artifact_download.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/daemon/broker_config.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/daemon/remote_runner.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/defaults.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/defaults.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/defaults.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/defaults/builtins.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/defaults/builtins.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/deploy/transfer.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/deploy/version_overrides.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/deps/stack.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/deps/stack.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/engine/baseline.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/engine/baseline.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/engine/codebase_scan.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/engine/execution_context.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/engine/invocation.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/engine/invocation.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/engine/invocation/runtime.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/engine/invocation/runtime.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/engine/resource.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/engine/run_dir.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/engine/run_dir.rs",
+        term: "homeboy-run",
+    },
+    ViolationKey {
+        path: "src/core/engine/temp.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/engine/undo/snapshot.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/execution.rs",
+        term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/baseline.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/baseline.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/mod.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/parsing.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/parsing.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/run.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/run.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/run.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/extension/bench/run_metadata.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/build/mod.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/build/mod.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/extension/exec_context.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/execution.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/lifecycle/source_metadata.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/extension/lint/mod.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/lint/run.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/lint/run.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/extension/manifest.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/manifest.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/extension/manifest_config.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/extension/runner.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/runtime_helper.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/extension/runtime_helper.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/runtime_helper.rs",
+        term: "homeboy-run",
+    },
+    ViolationKey {
+        path: "src/core/extension/test/mod.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/test/run.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/test/run.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/extension/trace/mod.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/extension/trace/run.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/extension/trace/run.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/extension/update_check.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/finding.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/git/github.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/git/github_comment_sections.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/git/github_pr_comments.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/git/github_types.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/http_api.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/http_api.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/issues/render.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/observation/mod.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/observation/records/run_builder.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/observation/context.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/observation/store.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/output.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/paths.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/paths.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/paths.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/paths/rigs.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/plan.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/project/component/attachments.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/project/component/resolution.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/project/types.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/refactor/auto/verify.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/refactor/plan/sources.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/refactor/plan/sources/cache.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/refactor/plan/sources/extension_source.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/release/changelog/sections.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/release/context.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/release/executor.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/release/planning_changelog.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/release/planning_worktree.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/release/planning_worktree.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/release/types.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/rig/app/bundle.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/rig/app/bundle.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/rig/spec.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/rig/spec.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/apply.rs",
+        term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/runner/capabilities.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/capabilities.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/capabilities.rs",
+        term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/runner/capabilities.rs",
+        term: "offload",
+    },
+    ViolationKey {
+        path: "src/core/runner/connection.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/connection.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/connection_daemon.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/evidence.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/evidence.rs",
+        term: "runner-artifact://",
+    },
+    ViolationKey {
+        path: "src/core/runner/execution.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/execution/policy.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/lab.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/lab.rs",
+        term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/runner/lab.rs",
+        term: "offload",
+    },
+    ViolationKey {
+        path: "src/core/runner/offload_changed_since.rs",
+        term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/runner/offload_changed_since.rs",
+        term: "offload",
+    },
+    ViolationKey {
+        path: "src/core/runner/offload_metadata.rs",
+        term: "homeboy/lab-offload/v1",
+    },
+    ViolationKey {
+        path: "src/core/runner/offload_metadata.rs",
+        term: "offload",
+    },
+    ViolationKey {
+        path: "src/core/runner/rig_materialization.rs",
+        term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/runner/rig_materialization.rs",
+        term: "offload",
+    },
+    ViolationKey {
+        path: "src/core/runner/session.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/workspace.rs",
+        term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/runner/workspace.rs",
+        term: "offload",
+    },
+    ViolationKey {
+        path: "src/core/scope.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/server/client.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/server/client.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/server/http.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/source_snapshot.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/upgrade/execution.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/upgrade/execution.rs",
+        term: "homeboy.json",
+    },
+    ViolationKey {
+        path: "src/core/upgrade/runners.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/upgrade/runners.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/upgrade/update_check.rs",
+        term: "HOMEBOY_",
+    },
+    ViolationKey {
+        path: "src/core/upgrade/update_check.rs",
+        term: "Homeboy",
+    },
 ];
 
-const BASELINE_OCCURRENCES: usize = 140;
+const BASELINE_OCCURRENCES: usize = 637;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.
@@ -644,7 +1281,7 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
 
     assert!(
         unexpected.is_empty(),
-        "core-owned source contains non-baselined ecosystem behavior:\n{}\n\nAdd extension-owned behavior instead, or update the narrow baseline only for known issue #2240 cleanup violations.\n\n{}",
+        "core-owned source contains non-baselined ecosystem or Homeboy-domain behavior:\n{}\n\nCore concepts are allowed when generic (command, artifact, capability, preflight, runner), but product/domain values must come from config, extension manifests, or typed extension contracts. Add extension-owned behavior instead, or update the narrow baseline only for known issue-linked cleanup violations (#2240 or #3195).\n\n{}",
         unexpected.join("\n"),
         debt_report
     );
@@ -652,7 +1289,7 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
     let stale_baseline = stale_baseline_rows(&found);
     assert!(
         stale_baseline.is_empty(),
-        "core-owned source ecosystem baseline contains stale entries. Remove stale BASELINE entries so the #2240 guard only allows current debt:\n{}\n\n{}",
+        "core-owned source agnostic baseline contains stale entries. Remove stale BASELINE entries so the #2240/#3195 guard only allows current debt:\n{}\n\n{}",
         stale_baseline.join("\n"),
         debt_report
     );
@@ -660,7 +1297,7 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
     let occurrence_count = found.values().map(Vec::len).sum::<usize>();
     assert_eq!(
         occurrence_count, BASELINE_OCCURRENCES,
-        "core-owned source ecosystem baseline occurrence count changed. If this went down, lower BASELINE_OCCURRENCES and remove stale BASELINE entries. If it went up, move behavior into an extension-owned layer.\n\n{}",
+        "core-owned source agnostic baseline occurrence count changed. If this went down, lower BASELINE_OCCURRENCES and remove stale BASELINE entries. If it went up, move behavior into config, extension manifests, or typed extension contracts.\n\n{}",
         debt_report
     );
 
@@ -671,7 +1308,7 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
     );
     assert!(
         !term_distribution.is_empty(),
-        "baseline should stay explicit until the #2240 cleanup removes existing core leaks"
+        "baseline should stay explicit until the #2240/#3195 cleanup removes existing core leaks"
     );
 }
 
@@ -1001,7 +1638,7 @@ fn format_baseline_debt_report(found: &BTreeMap<(String, String), Vec<usize>>) -
     sort_counted_rows_desc(&mut path_rows);
 
     format!(
-        "Core-agnostic baseline debt (#2240): {occurrence_count} occurrences across {} path/term pairs and {} files.\nTop terms:\n{}\nTop files:\n{}\nStale baseline entries to prune after cleanup:\n{}",
+        "Core-agnostic baseline debt (#2240/#3195): {occurrence_count} occurrences across {} path/term pairs and {} files.\nTop terms:\n{}\nTop files:\n{}\nStale baseline entries to prune after cleanup:\n{}",
         found.len(),
         paths.len(),
         first_counted_rows(term_rows),
@@ -1080,8 +1717,14 @@ impl Term {
     }
 
     fn matches_test_content(self, line: &str) -> bool {
-        matches!(self.kind, MatchKind::Token) && contains_test_content_variant(line, self.name)
+        matches!(self.kind, MatchKind::Token)
+            && !is_source_only_homeboy_domain_term(self.name)
+            && contains_test_content_variant(line, self.name)
     }
+}
+
+fn is_source_only_homeboy_domain_term(term: &str) -> bool {
+    matches!(term, "Homeboy" | "Lab" | "offload")
 }
 
 fn contains_token(haystack: &str, needle: &str) -> bool {
