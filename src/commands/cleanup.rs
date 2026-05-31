@@ -1,0 +1,39 @@
+use std::path::PathBuf;
+
+use clap::{Args, Subcommand};
+use homeboy::core::cleanup::{self, ArtifactCleanupOptions, ArtifactCleanupOutput};
+
+use super::CmdResult;
+
+#[derive(Args)]
+pub struct CleanupArgs {
+    #[command(subcommand)]
+    pub command: CleanupCommand,
+}
+
+#[derive(Subcommand)]
+pub enum CleanupCommand {
+    /// Inspect or remove declared reconstructable artifacts across repo worktrees
+    Artifacts(CleanupArtifactsArgs),
+}
+
+#[derive(Args)]
+pub struct CleanupArtifactsArgs {
+    /// Apply cleanup. Omit for dry-run output.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Resolve managed worktrees from this checkout instead of the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<PathBuf>,
+}
+
+pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<ArtifactCleanupOutput> {
+    match args.command {
+        CleanupCommand::Artifacts(args) => cleanup::cleanup_artifacts(ArtifactCleanupOptions {
+            path: args.path,
+            apply: args.apply,
+        })
+        .map(|output| (output, 0)),
+    }
+}
