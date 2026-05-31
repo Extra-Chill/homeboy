@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.108.5] - 2026-05-31
+
+### Fixed
+- quiet skipped phpunit discovery
+
 ## [2.108.4] - 2026-05-31
 
 ### Fixed
