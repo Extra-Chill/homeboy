@@ -71,11 +71,11 @@ mod tests {
                     "severity": "error",
                     "message": "REST response exceeded 250 KB budget",
                     "fingerprint": "rest.max_response_bytes:/wp-json/datamachine/v1/pipelines?per_page=100",
-                    "source": { "kind": "budget", "label": "profile:wordpress-rest" },
+                    "source": { "kind": "budget", "label": "profile:http-api" },
                     "metadata": {
                         "code": "rest.max_response_bytes",
                         "category": "budget",
-                        "context_label": "profile:wordpress-rest",
+                        "context_label": "profile:http-api",
                         "actual": 4378195,
                         "expected": 250000,
                         "unit": "bytes",
@@ -84,7 +84,7 @@ mod tests {
                     }
                 }
             ],
-            "scenarios": [{ "id": "wordpress-rest", "iterations": 1, "metrics": { "p95_ms": 50.0 } }]
+            "scenarios": [{ "id": "http-api", "iterations": 1, "metrics": { "p95_ms": 50.0 } }]
         }"#;
 
         let mut parsed = parse_bench_results_str(raw).unwrap();
