@@ -79,20 +79,14 @@ pub fn run_refactor_script_result(
     // Invoke the script directly so its shebang resolves the interpreter.
     // Wrapping with `sh -c <script>` bypasses `#!/usr/bin/env bash` and runs
     // under POSIX sh — which breaks scripts using bash-only features. See #1276.
-    let output = std::process::Command::new(&script_path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(RefactorScriptFailure::spawn_failed)
-        .and_then(|mut child| {
-            use std::io::Write;
-            if let Some(ref mut stdin) = child.stdin {
-                let _ = stdin.write_all(command.to_string().as_bytes());
-            }
-            wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES)
-                .map_err(RefactorScriptFailure::spawn_failed)
-        })?;
+    let mut child =
+        spawn_refactor_script(&script_path).map_err(RefactorScriptFailure::spawn_failed)?;
+    use std::io::Write;
+    if let Some(ref mut stdin) = child.stdin {
+        let _ = stdin.write_all(command.to_string().as_bytes());
+    }
+    let output = wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES)
+        .map_err(RefactorScriptFailure::spawn_failed)?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -115,6 +109,35 @@ pub fn run_refactor_script_result(
         stderr,
         parsed_stdout: None,
     })
+}
+
+fn spawn_refactor_script(script_path: &std::path::Path) -> std::io::Result<std::process::Child> {
+    let mut last_error = None;
+
+    for attempt in 0..3 {
+        match std::process::Command::new(script_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(error) if is_transient_spawn_error(&error) && attempt < 2 => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(25 * (attempt + 1)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error.expect("transient spawn error captured before retry"))
+}
+
+fn is_transient_spawn_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+    ) || matches!(error.raw_os_error(), Some(11) | Some(26))
 }
 
 impl RefactorScriptFailure {
