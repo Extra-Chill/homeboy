@@ -6,32 +6,15 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::BTreeMap;
 
 use crate::core::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
-use crate::core::finding::{FindingProducer, FindingSource, HomeboyFinding};
+use crate::core::finding::{FindingSource, HomeboyFinding};
 
 const BASELINE_KEY: &str = "lint";
 
 #[cfg(test)]
 #[path = "../../../../tests/core/lint_baseline_test.rs"]
 mod lint_baseline_test;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LegacyLintSidecarFinding {
-    pub id: String,
-    pub message: String,
-    pub category: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub severity: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LintBaselineMetadata {
@@ -83,23 +66,17 @@ pub fn parse_findings_file(path: &Path) -> crate::core::error::Result<Vec<Homebo
         return Ok(Vec::new());
     }
 
-    let findings: Vec<Value> = serde_json::from_str(&content).map_err(|e| {
+    let findings: Vec<HomeboyFinding> = serde_json::from_str(&content).map_err(|e| {
         crate::core::Error::internal_io(
             format!("Malformed lint findings JSON in {}: {}", path.display(), e),
             Some("lint.baseline.parse".to_string()),
         )
     })?;
 
-    findings
+    Ok(findings
         .into_iter()
-        .map(|finding| parse_sidecar_finding(finding, path))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            crate::core::Error::internal_io(
-                format!("Malformed lint findings JSON in {}: {}", path.display(), e),
-                Some("lint.baseline.parse".to_string()),
-            )
-        })
+        .map(|finding| normalize_sidecar_finding(finding, path))
+        .collect())
 }
 
 pub fn save_baseline(
@@ -142,72 +119,6 @@ fn normalize_sidecar_finding(mut finding: HomeboyFinding, path: &Path) -> Homebo
         .entry("source_sidecar_path".to_string())
         .or_insert_with(|| serde_json::json!(path.display().to_string()));
     finding
-}
-
-fn parse_sidecar_finding(value: Value, path: &Path) -> Result<HomeboyFinding, serde_json::Error> {
-    if is_legacy_lint_sidecar_finding(&value) {
-        return serde_json::from_value::<LegacyLintSidecarFinding>(value)
-            .map(|finding| legacy_finding_from_sidecar(finding, path));
-    }
-
-    match serde_json::from_value::<HomeboyFinding>(value.clone()) {
-        Ok(finding) => Ok(normalize_sidecar_finding(finding, path)),
-        Err(canonical_error) => serde_json::from_value::<LegacyLintSidecarFinding>(value)
-            .map(|finding| legacy_finding_from_sidecar(finding, path))
-            .map_err(|_| canonical_error),
-    }
-}
-
-fn is_legacy_lint_sidecar_finding(value: &Value) -> bool {
-    value
-        .as_object()
-        .is_some_and(|object| object.contains_key("id") && !object.contains_key("fingerprint"))
-}
-
-fn legacy_finding_from_sidecar(finding: LegacyLintSidecarFinding, path: &Path) -> HomeboyFinding {
-    let tool = finding.tool.clone().unwrap_or_else(|| "lint".to_string());
-    let mut builder = HomeboyFinding::builder(tool.clone(), finding.message.clone())
-        .category(finding.category.clone())
-        .fingerprint(finding.id.clone())
-        .producer(FindingProducer::new(tool.clone()))
-        .source(
-            FindingSource::new("sidecar")
-                .label("lint-findings")
-                .path(path.display().to_string()),
-        )
-        .metadata("source_sidecar", "lint-findings")
-        .metadata("source_sidecar_path", path.display().to_string())
-        .raw(&finding);
-
-    if let Some(file) = finding.file.clone() {
-        builder = builder.file(file);
-    }
-    if let Some(severity) = finding.severity.clone() {
-        builder = builder.severity(severity);
-    }
-    if let Some(rule) = finding.extra.get("rule").and_then(|value| value.as_str()) {
-        builder = builder.rule(rule.to_string());
-    } else {
-        builder = builder.rule(finding.category.clone());
-    }
-    if let Some(line) = finding.extra.get("line").and_then(|value| value.as_i64()) {
-        builder = builder.line(line);
-    }
-    if let Some(column) = finding.extra.get("column").and_then(|value| value.as_i64()) {
-        builder = builder.column(column);
-    }
-    if let Some(fixable) = finding
-        .extra
-        .get("fixable")
-        .and_then(|value| value.as_bool())
-    {
-        builder = builder.fixable(fixable);
-    }
-    for (key, value) in finding.extra {
-        builder = builder.metadata(key, value);
-    }
-
-    normalize_sidecar_finding(builder.build(), path)
 }
 
 #[cfg(test)]

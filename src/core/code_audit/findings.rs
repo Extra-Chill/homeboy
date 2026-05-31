@@ -3,7 +3,7 @@
 use super::checks::{CheckResult, CheckStatus};
 use super::conventions::AuditFinding;
 use crate::core::finding::{FindingSource, HomeboyFinding};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserializer, Serializer};
 use serde_json::Value;
 use std::str::FromStr;
 
@@ -40,18 +40,8 @@ impl<'de> serde::Deserialize<'de> for Finding {
     {
         let value = Value::deserialize(deserializer)?;
 
-        if let Ok(finding) = serde_json::from_value::<AuditFindingPayload>(value.clone()) {
-            return Ok(finding.into());
-        }
-
         let normalized: HomeboyFinding =
             serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        if let Some(raw) = normalized.raw.clone() {
-            if let Ok(finding) = serde_json::from_value::<AuditFindingPayload>(raw) {
-                return Ok(finding.into());
-            }
-        }
-
         let kind = normalized
             .rule
             .as_deref()
@@ -84,30 +74,6 @@ impl<'de> serde::Deserialize<'de> for Finding {
                 .to_string(),
             kind: AuditFinding::from_str(kind).map_err(serde::de::Error::custom)?,
         })
-    }
-}
-
-// Legacy typed audit payload accepted when reading older saved audit JSON.
-#[derive(Serialize, Deserialize)]
-struct AuditFindingPayload {
-    convention: String,
-    severity: Severity,
-    file: String,
-    description: String,
-    suggestion: String,
-    kind: AuditFinding,
-}
-
-impl From<AuditFindingPayload> for Finding {
-    fn from(payload: AuditFindingPayload) -> Self {
-        Self {
-            convention: payload.convention,
-            severity: payload.severity,
-            file: payload.file,
-            description: payload.description,
-            suggestion: payload.suggestion,
-            kind: payload.kind,
-        }
     }
 }
 
@@ -414,7 +380,7 @@ mod tests {
         assert_eq!(json["message"], "unused import");
         assert!(
             json.get("raw").is_none(),
-            "canonical audit findings should not serialize the legacy typed payload"
+            "canonical audit findings should not serialize a typed raw payload"
         );
     }
 
@@ -440,23 +406,6 @@ mod tests {
         assert_eq!(finding.file, "src/lib.rs");
         assert_eq!(finding.description, "unused import");
         assert_eq!(finding.suggestion, "remove it");
-    }
-
-    #[test]
-    fn finding_deserializes_legacy_payloads() {
-        let value = serde_json::json!({
-            "convention": "compiler",
-            "severity": "warning",
-            "file": "src/lib.rs",
-            "description": "unused import",
-            "suggestion": "remove it",
-            "kind": "compiler_warning"
-        });
-
-        let finding: Finding = serde_json::from_value(value).expect("deserialize finding");
-
-        assert_eq!(finding.kind, AuditFinding::CompilerWarning);
-        assert_eq!(finding.description, "unused import");
     }
 
     #[test]
