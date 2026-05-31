@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.213.9] - 2026-05-31
+
+### Fixed
+- flag stale deploy source checkouts
+- type portable component config ownership
+
 ## [0.213.8] - 2026-05-31
 
 ### Changed
