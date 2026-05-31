@@ -37,7 +37,7 @@ pub(super) fn execute_release_plan_step(
             Ok(Some(run_changelog_bootstrap_preflight(step, context)))
         }
         "preflight.package" => Ok(Some(
-            executor::run_package_preflight(
+            executor::package_preflight::run_package_preflight(
                 context.extensions,
                 context.component_id,
                 &context.component.local_path,
