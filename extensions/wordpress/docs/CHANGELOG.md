@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.108.3] - 2026-05-31
+
+### Fixed
+- support file mounts in agent ci recipes
+
 ## [2.108.2] - 2026-05-31
 
 ### Fixed
