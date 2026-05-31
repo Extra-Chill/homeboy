@@ -36,6 +36,14 @@ pub(super) fn execute_release_plan_step(
         "preflight.changelog_bootstrap" => {
             Ok(Some(run_changelog_bootstrap_preflight(step, context)))
         }
+        "preflight.package" => Ok(Some(
+            executor::run_package_preflight(
+                context.extensions,
+                context.component_id,
+                &context.component.local_path,
+            )
+            .unwrap_or_else(|err| failed_result("preflight.package", "preflight.package", err)),
+        )),
         "changelog.finalize" => {
             executor::changelog::run_changelog_finalize(step, context.component, &mut context.state)
                 .map(Some)
@@ -161,7 +169,8 @@ fn release_step_is_plan_only(step: &PlanStep) -> bool {
         && step.kind != "preflight.bump_policy"
         && step.kind != "preflight.lint"
         && step.kind != "preflight.test"
-        && step.kind != "preflight.changelog_bootstrap")
+        && step.kind != "preflight.changelog_bootstrap"
+        && step.kind != "preflight.package")
         || step.kind == "changelog.policy"
         || step.kind == "changelog.generate"
 }
@@ -372,6 +381,7 @@ pub(super) fn release_step_is_show_stopper(result: &ReleaseStepResult) -> bool {
             | "preflight.lint"
             | "preflight.test"
             | "preflight.changelog_bootstrap"
+            | "preflight.package"
             | "version"
             | "release.prepare"
             | "git.commit"
@@ -449,6 +459,7 @@ mod tests {
         assert!(!release_step_is_plan_only(&plan_step(
             "preflight.changelog_bootstrap"
         )));
+        assert!(!release_step_is_plan_only(&plan_step("preflight.package")));
         assert!(!release_step_is_plan_only(&plan_step("changelog.finalize")));
         assert!(!release_step_is_plan_only(&plan_step("deploy")));
     }
@@ -827,6 +838,7 @@ mod tests {
         let lint_failure = failed_step_result("preflight.lint");
         let test_failure = failed_step_result("preflight.test");
         let bootstrap_failure = failed_step_result("preflight.changelog_bootstrap");
+        let package_preflight_failure = failed_step_result("preflight.package");
         let changelog_failure = failed_step_result("changelog.finalize");
         let publish_failure = failed_step_result("publish.crates");
 
@@ -838,6 +850,7 @@ mod tests {
         assert!(release_step_is_show_stopper(&lint_failure));
         assert!(release_step_is_show_stopper(&test_failure));
         assert!(release_step_is_show_stopper(&bootstrap_failure));
+        assert!(release_step_is_show_stopper(&package_preflight_failure));
         assert!(release_step_is_show_stopper(&changelog_failure));
         assert!(!release_step_is_show_stopper(&publish_failure));
     }

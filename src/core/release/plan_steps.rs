@@ -233,10 +233,21 @@ pub(super) fn build_release_steps(
         );
     }
 
+    let package_preflight_step_id = add_package_preflight_step(
+        &mut steps,
+        extensions,
+        &publish_targets,
+        options,
+        "preflight.changelog_bootstrap",
+    );
+
     steps.extend(build_changelog_steps(
         changelog_plan,
         current_version,
         new_version,
+        package_preflight_step_id
+            .as_deref()
+            .unwrap_or("preflight.changelog_bootstrap"),
     ));
 
     let version_config = StepConfig::new()
@@ -526,6 +537,31 @@ fn build_head_release_steps(
     steps
 }
 
+fn add_package_preflight_step(
+    steps: &mut Vec<PlanStep>,
+    extensions: &[ExtensionManifest],
+    publish_targets: &[String],
+    options: &ReleaseOptions,
+    needs: &str,
+) -> Option<String> {
+    if publish_targets.is_empty()
+        || options.pipeline.skip_publish
+        || !has_package_capability(extensions)
+    {
+        return None;
+    }
+
+    let step_id = "preflight.package".to_string();
+    steps.push(ready_step(
+        &step_id,
+        "preflight.package",
+        "Validate package tooling",
+        vec![needs.to_string()],
+        StepConfig::new(),
+    ));
+    Some(step_id)
+}
+
 fn add_release_extension_diagnostics(
     component: &Component,
     extensions: &[ExtensionManifest],
@@ -594,6 +630,7 @@ fn build_changelog_steps(
     changelog_plan: &ReleaseChangelogPlan,
     current_version: &str,
     new_version: &str,
+    initial_need: &str,
 ) -> Vec<PlanStep> {
     let policy_config = StepConfig::new()
         .string("policy", changelog_plan.policy.clone())
@@ -617,7 +654,7 @@ fn build_changelog_steps(
             "changelog.policy",
             "changelog.policy",
             "Resolve changelog policy",
-            vec!["preflight.changelog_bootstrap".to_string()],
+            vec![initial_need.to_string()],
             policy_config,
         ),
         ready_step(
@@ -972,6 +1009,76 @@ mod tests {
         assert_eq!(steps[version_index].needs, vec!["changelog.finalize"]);
         assert_eq!(steps[prepare_index].needs, vec!["version"]);
         assert_eq!(steps[commit_index].needs, vec!["release.prepare"]);
+    }
+
+    #[test]
+    fn release_plan_runs_package_preflight_before_mutating_release_steps() {
+        let mut component = fixture_component();
+        component.extensions = Some(std::collections::HashMap::from([(
+            "fixture-packager".to_string(),
+            ScopedExtensionConfig::default(),
+        )]));
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "Fixture Packager",
+            "version": "1.0.0",
+            "actions": [
+                {
+                    "id": "release.package",
+                    "label": "Package release",
+                    "type": "command",
+                    "command": "true"
+                },
+                {
+                    "id": "release.publish",
+                    "label": "Publish release",
+                    "type": "command",
+                    "command": "true"
+                }
+            ]
+        }))
+        .expect("extension manifest");
+        extension.id = "fixture-packager".to_string();
+        let mut warnings = Vec::new();
+        let mut hints = Vec::new();
+        let options = ReleaseOptions {
+            bump_type: "patch".to_string(),
+            ..Default::default()
+        };
+
+        let steps = build_release_steps(
+            &component,
+            &[extension],
+            "1.0.0",
+            "1.0.1",
+            &fixture_changelog_plan(),
+            &options,
+            None,
+            &mut warnings,
+            &mut hints,
+        )
+        .expect("steps");
+
+        let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+        let package_preflight_index = step_index(&ids, "preflight.package");
+        let changelog_finalize_index = step_index(&ids, "changelog.finalize");
+        let version_index = step_index(&ids, "version");
+        let commit_index = step_index(&ids, "git.commit");
+
+        assert!(package_preflight_index < changelog_finalize_index);
+        assert!(package_preflight_index < version_index);
+        assert!(package_preflight_index < commit_index);
+
+        let package_preflight = &steps[package_preflight_index];
+        assert_eq!(
+            package_preflight.needs,
+            vec!["preflight.changelog_bootstrap"]
+        );
+
+        let changelog_policy = steps
+            .iter()
+            .find(|step| step.id == "changelog.policy")
+            .expect("changelog policy step");
+        assert_eq!(changelog_policy.needs, vec!["preflight.package"]);
     }
 
     #[test]
