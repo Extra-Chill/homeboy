@@ -183,7 +183,6 @@
     }
   },
   "build_artifact": "target/release/homeboy",
-  "build_command": "cargo build --release",
   "changelog_target": "docs/changelog.md",
   "cleanup_artifacts": [
     {
@@ -197,6 +196,11 @@
   },
   "hooks": {},
   "id": "homeboy",
+  "scripts": {
+    "build": [
+      "cargo build --release"
+    ]
+  },
   "version_targets": [
     {
       "file": "Cargo.toml",
