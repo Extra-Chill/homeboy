@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.213.2] - 2026-05-31
+
+### Changed
+- remove no-op lint finding adapter
+- keep lint sidecar branch fixtures generic
+- stop serializing legacy audit finding payload
+- narrow annotation sidecar finding adapter
+- extract refactor script spawn failure
+- remove budget finding compatibility DTO
+
+### Fixed
+- normalize lint sidecar findings
+- bound remaining output detail reporting
+- hide runtime temp root helper
+
 ## [0.213.1] - 2026-05-31
 
 ### Fixed
