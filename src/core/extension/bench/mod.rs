@@ -23,6 +23,7 @@ pub mod aggregation;
 pub mod artifact;
 pub(crate) mod artifact_validation;
 pub mod baseline;
+pub(crate) mod budget_findings;
 pub mod diagnostic;
 pub mod distribution;
 pub(crate) mod failure_diagnostic;

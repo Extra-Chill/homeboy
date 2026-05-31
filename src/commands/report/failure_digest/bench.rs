@@ -8,6 +8,8 @@ use super::{
 };
 use crate::commands::escape_markdown_table_cell;
 
+use super::budget_values;
+
 pub(super) fn render_bench_section(out: &mut String, output_dir: &Path, run_url: &str) {
     let (data, error) = super::envelope_parts(read_command_json(output_dir, "bench"));
 
@@ -85,19 +87,19 @@ fn render_budget_findings(out: &mut String, data: &Map<String, Value>) {
         let Some(finding) = finding.as_object() else {
             continue;
         };
-        let code = budget_string_value(finding, "code")
+        let code = budget_values::string_value(finding, "code")
             .or_else(|| string_value(finding, "rule"))
             .unwrap_or_else(|| "budget".to_string());
-        let subject = budget_string_value(finding, "subject")
-            .or_else(|| budget_string_value(finding, "context_label"))
+        let subject = budget_values::string_value(finding, "subject")
+            .or_else(|| budget_values::string_value(finding, "context_label"))
             .unwrap_or_else(|| "-".to_string());
-        let actual = budget_number_value(finding, "actual")
+        let actual = budget_values::number_value(finding, "actual")
             .map(format_report_number)
             .unwrap_or_else(|| "-".to_string());
-        let expected = budget_number_value(finding, "expected")
+        let expected = budget_values::number_value(finding, "expected")
             .map(format_report_number)
             .unwrap_or_else(|| "-".to_string());
-        let unit = budget_string_value(finding, "unit").unwrap_or_else(|| "-".to_string());
+        let unit = budget_values::string_value(finding, "unit").unwrap_or_else(|| "-".to_string());
         let message = string_value(finding, "message").unwrap_or_default();
         let _ = writeln!(
             out,
@@ -111,43 +113,6 @@ fn render_budget_findings(out: &mut String, data: &Map<String, Value>) {
         );
     }
     out.push('\n');
-}
-
-fn budget_string_value(finding: &Map<String, Value>, key: &str) -> Option<String> {
-    string_value(finding, key)
-        .or_else(|| {
-            object_value(finding, "metadata")
-                .get(key)
-                .and_then(value_to_string)
-        })
-        .or_else(|| {
-            object_value(finding, "raw")
-                .get(key)
-                .and_then(value_to_string)
-        })
-}
-
-fn budget_number_value(finding: &Map<String, Value>, key: &str) -> Option<f64> {
-    number_value(finding, key)
-        .or_else(|| {
-            object_value(finding, "metadata")
-                .get(key)
-                .and_then(Value::as_f64)
-        })
-        .or_else(|| {
-            object_value(finding, "raw")
-                .get(key)
-                .and_then(Value::as_f64)
-        })
-}
-
-fn value_to_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(s) if !s.is_empty() => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        Value::Bool(b) => Some(b.to_string()),
-        _ => None,
-    }
 }
 
 fn format_report_number(value: f64) -> String {

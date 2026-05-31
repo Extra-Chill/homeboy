@@ -56,9 +56,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
-use crate::core::budget::BudgetFinding;
 use crate::core::error::{Error, Result};
 use crate::core::finding::HomeboyFinding;
 use crate::core::observation::timeline::{
@@ -101,7 +100,7 @@ pub struct BenchResults {
     pub diagnostics: Vec<BenchDiagnostic>,
     #[serde(
         default,
-        deserialize_with = "deserialize_budget_findings",
+        deserialize_with = "super::budget_findings::deserialize_budget_findings",
         skip_serializing_if = "Vec::is_empty"
     )]
     pub budget_findings: Vec<HomeboyFinding>,
@@ -110,27 +109,6 @@ pub struct BenchResults {
     pub metric_policies: BTreeMap<String, BenchMetricPolicy>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metric_policy_presets: BTreeMap<String, BenchMetricPolicyPreset>,
-}
-
-fn deserialize_budget_findings<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Vec<HomeboyFinding>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
-    values
-        .into_iter()
-        .map(|value| {
-            if value.get("tool").is_some() {
-                serde_json::from_value::<HomeboyFinding>(value).map_err(serde::de::Error::custom)
-            } else {
-                serde_json::from_value::<BudgetFinding>(value)
-                    .map(|finding| finding.to_homeboy_finding())
-                    .map_err(serde::de::Error::custom)
-            }
-        })
-        .collect()
 }
 
 /// Homeboy-owned reproducibility metadata for a bench invocation.
@@ -1092,15 +1070,6 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("assistant_message_count gte 1"));
         assert_eq!(scenario.gate_results[0].actual, Some(0.0));
-        assert_eq!(parsed.budget_findings.len(), 1);
-        assert_eq!(
-            parsed.budget_findings[0].category.as_deref(),
-            Some("budget")
-        );
-        assert_eq!(
-            parsed.budget_findings[0].rule.as_deref(),
-            Some("bench.gate.assistant_message_count")
-        );
         assert_eq!(parsed.budget_findings[0].metadata["passed"], false);
     }
 

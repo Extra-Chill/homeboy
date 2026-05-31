@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use super::failure_digest::budget_values;
 use crate::commands::escape_markdown_table_cell;
 use homeboy::core::engine::run_dir::files;
 
@@ -327,57 +328,21 @@ mod helpers {
             .filter_map(|value| {
                 let obj = value.as_object()?;
                 Some(BudgetFindingDigest {
-                    code: budget_string_value(obj, "code")
+                    code: budget_values::string_value(obj, "code")
                         .or_else(|| string_value(obj, "rule"))
                         .unwrap_or_else(|| "budget".to_string()),
-                    subject: budget_string_value(obj, "subject")
-                        .or_else(|| budget_string_value(obj, "context_label"))
+                    subject: budget_values::string_value(obj, "subject")
+                        .or_else(|| budget_values::string_value(obj, "context_label"))
                         .unwrap_or_else(|| "-".to_string()),
-                    actual: budget_number_value(obj, "actual"),
-                    expected: budget_number_value(obj, "expected"),
-                    unit: budget_string_value(obj, "unit").unwrap_or_else(|| "-".to_string()),
+                    actual: budget_values::number_value(obj, "actual"),
+                    expected: budget_values::number_value(obj, "expected"),
+                    unit: budget_values::string_value(obj, "unit")
+                        .unwrap_or_else(|| "-".to_string()),
                     severity: string_value(obj, "severity").unwrap_or_else(|| "error".to_string()),
                     message: string_value(obj, "message").unwrap_or_default(),
                 })
             })
             .collect()
-    }
-
-    fn budget_string_value(finding: &Map<String, Value>, key: &str) -> Option<String> {
-        string_value(finding, key)
-            .or_else(|| {
-                object_value(finding, "metadata")
-                    .get(key)
-                    .and_then(value_to_string)
-            })
-            .or_else(|| {
-                object_value(finding, "raw")
-                    .get(key)
-                    .and_then(value_to_string)
-            })
-    }
-
-    fn budget_number_value(finding: &Map<String, Value>, key: &str) -> Option<f64> {
-        number_value(finding, key)
-            .or_else(|| {
-                object_value(finding, "metadata")
-                    .get(key)
-                    .and_then(Value::as_f64)
-            })
-            .or_else(|| {
-                object_value(finding, "raw")
-                    .get(key)
-                    .and_then(Value::as_f64)
-            })
-    }
-
-    fn value_to_string(value: &Value) -> Option<String> {
-        match value {
-            Value::String(s) if !s.is_empty() => Some(s.clone()),
-            Value::Number(n) => Some(n.to_string()),
-            Value::Bool(b) => Some(b.to_string()),
-            _ => None,
-        }
     }
 
     pub(super) fn collect_benchmark_memory(

@@ -94,18 +94,7 @@ fn bench_json() -> &'static str {
                         "subject": "/wp-json/datamachine/v1/pipelines?per_page=100",
                         "passed": false
                     },
-                    "raw": {
-                        "category": "budget",
-                        "code": "rest.max_response_bytes",
-                        "severity": "error",
-                        "context_label": "profile:wordpress-rest",
-                        "message": "REST response exceeded 250 KB budget",
-                        "actual": 4378195,
-                        "expected": 250000,
-                        "unit": "bytes",
-                        "subject": "/wp-json/datamachine/v1/pipelines?per_page=100",
-                        "passed": false
-                    }
+                    "raw": { "category": "budget" }
                 }
             ],
             "artifacts": [
