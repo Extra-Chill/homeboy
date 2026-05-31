@@ -70,21 +70,21 @@ mod tests {
                     "category": "budget",
                     "severity": "error",
                     "message": "REST response exceeded 250 KB budget",
-                    "fingerprint": "rest.max_response_bytes:/wp-json/datamachine/v1/pipelines?per_page=100",
-                    "source": { "kind": "budget", "label": "profile:http-api" },
+                    "fingerprint": "rest.max_response_bytes:/api/example/v1/items?per_page=100",
+                    "source": { "kind": "budget", "label": "profile:example-rest" },
                     "metadata": {
                         "code": "rest.max_response_bytes",
                         "category": "budget",
-                        "context_label": "profile:http-api",
+                        "context_label": "profile:example-rest",
                         "actual": 4378195,
                         "expected": 250000,
                         "unit": "bytes",
-                        "subject": "/wp-json/datamachine/v1/pipelines?per_page=100",
+                        "subject": "/api/example/v1/items?per_page=100",
                         "passed": false
                     }
                 }
             ],
-            "scenarios": [{ "id": "http-api", "iterations": 1, "metrics": { "p95_ms": 50.0 } }]
+            "scenarios": [{ "id": "example-rest", "iterations": 1, "metrics": { "p95_ms": 50.0 } }]
         }"#;
 
         let mut parsed = parse_bench_results_str(raw).unwrap();

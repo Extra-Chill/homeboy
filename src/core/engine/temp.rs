@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 const HOMEBOY_RUNTIME_TMPDIR_ENV: &str = "HOMEBOY_RUNTIME_TMPDIR";
 
-pub fn runtime_root() -> Result<PathBuf> {
+fn runtime_root() -> Result<PathBuf> {
     if let Ok(override_dir) = env::var(HOMEBOY_RUNTIME_TMPDIR_ENV) {
         let trimmed = override_dir.trim();
         if !trimmed.is_empty() {

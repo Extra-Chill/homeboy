@@ -18,8 +18,8 @@ const BASELINE_KEY: &str = "lint";
 #[path = "../../../../tests/core/lint_baseline_test.rs"]
 mod lint_baseline_test;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct LintSidecarFinding {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyLintSidecarFinding {
     pub id: String,
     pub message: String,
     pub category: String,
@@ -83,17 +83,23 @@ pub fn parse_findings_file(path: &Path) -> crate::core::error::Result<Vec<Homebo
         return Ok(Vec::new());
     }
 
-    let findings: Vec<LintSidecarFinding> = serde_json::from_str(&content).map_err(|e| {
+    let findings: Vec<Value> = serde_json::from_str(&content).map_err(|e| {
         crate::core::Error::internal_io(
             format!("Malformed lint findings JSON in {}: {}", path.display(), e),
             Some("lint.baseline.parse".to_string()),
         )
     })?;
 
-    Ok(findings
+    findings
         .into_iter()
-        .map(|finding| homeboy_finding_from_sidecar(finding, path))
-        .collect())
+        .map(|finding| parse_sidecar_finding(finding, path))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            crate::core::Error::internal_io(
+                format!("Malformed lint findings JSON in {}: {}", path.display(), e),
+                Some("lint.baseline.parse".to_string()),
+            )
+        })
 }
 
 pub fn save_baseline(
@@ -119,7 +125,46 @@ pub fn compare(findings: &[HomeboyFinding], baseline: &LintBaseline) -> Baseline
     generic::compare(&items, baseline)
 }
 
-fn homeboy_finding_from_sidecar(finding: LintSidecarFinding, path: &Path) -> HomeboyFinding {
+fn normalize_sidecar_finding(mut finding: HomeboyFinding, path: &Path) -> HomeboyFinding {
+    if finding.source.is_none() {
+        finding.source = Some(
+            FindingSource::new("sidecar")
+                .label("lint-findings")
+                .path(path.display().to_string()),
+        );
+    }
+    finding
+        .metadata
+        .entry("source_sidecar".to_string())
+        .or_insert_with(|| serde_json::json!("lint-findings"));
+    finding
+        .metadata
+        .entry("source_sidecar_path".to_string())
+        .or_insert_with(|| serde_json::json!(path.display().to_string()));
+    finding
+}
+
+fn parse_sidecar_finding(value: Value, path: &Path) -> Result<HomeboyFinding, serde_json::Error> {
+    if is_legacy_lint_sidecar_finding(&value) {
+        return serde_json::from_value::<LegacyLintSidecarFinding>(value)
+            .map(|finding| legacy_finding_from_sidecar(finding, path));
+    }
+
+    match serde_json::from_value::<HomeboyFinding>(value.clone()) {
+        Ok(finding) => Ok(normalize_sidecar_finding(finding, path)),
+        Err(canonical_error) => serde_json::from_value::<LegacyLintSidecarFinding>(value)
+            .map(|finding| legacy_finding_from_sidecar(finding, path))
+            .map_err(|_| canonical_error),
+    }
+}
+
+fn is_legacy_lint_sidecar_finding(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("id") && !object.contains_key("fingerprint"))
+}
+
+fn legacy_finding_from_sidecar(finding: LegacyLintSidecarFinding, path: &Path) -> HomeboyFinding {
     let tool = finding.tool.clone().unwrap_or_else(|| "lint".to_string());
     let mut builder = HomeboyFinding::builder(tool.clone(), finding.message.clone())
         .category(finding.category.clone())
@@ -162,7 +207,7 @@ fn homeboy_finding_from_sidecar(finding: LintSidecarFinding, path: &Path) -> Hom
         builder = builder.metadata(key, value);
     }
 
-    builder.build()
+    normalize_sidecar_finding(builder.build(), path)
 }
 
 #[cfg(test)]
@@ -246,7 +291,7 @@ mod tests {
         let path = dir.path().join("lint-findings.json");
         std::fs::write(
             &path,
-            r#"[{"id":"id-1","message":"message","category":"security","file":"src/lib.rs"}]"#,
+            r#"[{"tool":"lint","message":"message","category":"security","fingerprint":"id-1","file":"src/lib.rs"}]"#,
         )
         .expect("findings file written");
 
