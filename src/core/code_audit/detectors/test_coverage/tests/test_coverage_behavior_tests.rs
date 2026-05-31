@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn behavioral_test_names_not_flagged_as_orphaned() {
     // Regression: test_helpers_without_test_attr_not_counted_as_test_methods
@@ -86,7 +88,7 @@ fn short_rust_behavior_test_names_not_flagged_as_orphaned() {
     assert_eq!(
         orphaned.len(),
         1,
-        "short behavior names that cover live Rust source methods should not be orphaned: {:?}",
+        "short behavior names that cover live source methods should not be orphaned: {:?}",
         orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
     );
     assert!(orphaned[0].description.contains("old_function"));
@@ -149,7 +151,7 @@ fn rust_include_wrapper_for_nested_test_path_is_not_misplaced() {
 
     assert!(
         misplaced.is_empty(),
-        "include wrappers keep nested Cargo tests discoverable: {:?}",
+        "include wrappers keep nested test files discoverable: {:?}",
         misplaced.iter().map(|f| &f.description).collect::<Vec<_>>()
     );
 
@@ -212,7 +214,7 @@ fn scenario_test_names_not_flagged_as_orphaned() {
 
 #[test]
 fn production_method_with_test_prefix_not_flagged_orphaned() {
-    // Regression for Extra-Chill/homeboy#1471: `ExtensionManifest::test_script()`
+    // Regression for issue #1471: `ExtensionManifest::test_script()`
     // and `test_mapping()` are production accessors on a manifest struct —
     // public methods whose names happen to start with `test_`. They are
     // NOT `#[test]` functions. The detector used to flag them as orphaned

@@ -1416,5 +1416,5 @@ fn test_chat_tools() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    include!("test_coverage_behavior_tests.rs");
+    mod test_coverage_behavior_tests;
 }

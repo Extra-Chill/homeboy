@@ -232,11 +232,7 @@ fn execute_review_plan_steps<R, Dispatch>(
 where
     Dispatch: FnMut(&PlanStep) -> homeboy::core::Result<Option<R>>,
 {
-    execution::execute_plan_steps(steps, dispatch, review_step_is_show_stopper)
-}
-
-fn review_step_is_show_stopper<R>(_result: &R) -> bool {
-    false
+    execution::execute_plan_steps(steps, dispatch, |_| false)
 }
 
 fn dispatch_review_plan_step(
