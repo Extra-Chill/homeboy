@@ -137,10 +137,10 @@ assert_equals \
   "bench includes first-class benchmark flags"
 unset BENCH_RIG BENCH_SCENARIO BENCH_RUNS BENCH_ITERATIONS BENCH_REGRESSION_THRESHOLD
 
-HOMEBOY_SETTINGS_JSON='{"playground_workloads":[{"id":"ssi-import","run":[{"type":"wp-cli","command":"wp static-site-importer import-theme static-sites/demo/index.html --format=json","parse":"json"}]}],"playground_blueprint":{"preferredVersions":{"php":"8.3","wp":"latest"}}}'
+HOMEBOY_SETTINGS_JSON='{"wp_codebox_workloads":[{"id":"ssi-import","run":[{"type":"wp-cli","command":"wp static-site-importer import-theme static-sites/demo/index.html --format=json","parse":"json"}]}],"wp_codebox_blueprint":{"preferredVersions":{"php":"8.3","wp":"latest"}}}'
 bench_settings_cmd="$(build_run_command "bench" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")"
-assert_contains "${bench_settings_cmd}" "--setting-json playground_workloads=" "bench forwards playground workloads as typed settings"
-assert_contains "${bench_settings_cmd}" "--setting-json playground_blueprint=" "bench forwards playground blueprint as typed settings"
+assert_contains "${bench_settings_cmd}" "--setting-json wp_codebox_workloads=" "bench forwards WP Codebox workloads as typed settings"
+assert_contains "${bench_settings_cmd}" "--setting-json wp_codebox_blueprint=" "bench forwards WP Codebox blueprint as typed settings"
 assert_not_contains "${bench_settings_cmd}" "HOMEBOY_SETTINGS_JSON" "bench does not pass raw settings env name as argument"
 unset HOMEBOY_SETTINGS_JSON
 EXTRA_ARGS="--format json"
