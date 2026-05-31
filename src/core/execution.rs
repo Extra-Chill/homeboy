@@ -118,14 +118,30 @@ pub enum ExecutionPhase {
 }
 
 impl ExecutionMode {
-    /// Normalize common CLI spellings into the shared mode names.
-    pub(crate) fn from_cli_value(value: &str) -> Option<Self> {
+    /// Normalize legacy CLI mode values into the shared execution vocabulary.
+    pub fn from_cli_value(value: &str) -> Option<Self> {
         match value {
             "plan" | "preview" => Some(Self::Plan),
             "dry-run" | "dry_run" => Some(Self::DryRun),
             "capture-patch" | "capture_patch" => Some(Self::CapturePatch),
             "apply" | "write" => Some(Self::Apply),
             "execute" | "run" => Some(Self::Execute),
+            _ => None,
+        }
+    }
+
+    /// Map existing Homeboy boolean CLI flags to the shared execution mode.
+    ///
+    /// This preserves command-specific public output contracts while giving
+    /// planners, extensions, and adapters a single internal vocabulary for the
+    /// execution lifecycle.
+    pub fn from_cli_flag(flag: &str) -> Option<Self> {
+        match flag {
+            "--plan" | "--preview" => Some(Self::Plan),
+            "--dry-run" => Some(Self::DryRun),
+            "--capture-patch" => Some(Self::CapturePatch),
+            "--apply" | "--write" => Some(Self::Apply),
+            "--execute" | "--run" => Some(Self::Execute),
             _ => None,
         }
     }
@@ -447,6 +463,49 @@ mod tests {
             Some(ExecutionMode::Execute)
         );
         assert_eq!(ExecutionMode::from_cli_value("unknown"), None);
+    }
+
+    #[test]
+    fn legacy_cli_flags_map_to_execution_modes() {
+        assert_eq!(
+            ExecutionMode::from_cli_flag("--plan"),
+            Some(ExecutionMode::Plan)
+        );
+        assert_eq!(
+            ExecutionMode::from_cli_flag("--dry-run"),
+            Some(ExecutionMode::DryRun)
+        );
+        assert_eq!(
+            ExecutionMode::from_cli_flag("--capture-patch"),
+            Some(ExecutionMode::CapturePatch)
+        );
+        assert_eq!(
+            ExecutionMode::from_cli_flag("--write"),
+            Some(ExecutionMode::Apply)
+        );
+        assert_eq!(
+            ExecutionMode::from_cli_flag("--execute"),
+            Some(ExecutionMode::Execute)
+        );
+        assert_eq!(ExecutionMode::from_cli_flag("--json"), None);
+    }
+
+    #[test]
+    fn lifecycle_vocabulary_serializes_in_order() {
+        let phases = vec![
+            ExecutionPhase::Execute,
+            ExecutionPhase::Artifact,
+            ExecutionPhase::Approve,
+            ExecutionPhase::Apply,
+            ExecutionPhase::Publish,
+        ];
+
+        let value = serde_json::to_value(&phases).expect("serialize phases");
+
+        assert_eq!(
+            value,
+            serde_json::json!(["execute", "artifact", "approve", "apply", "publish"])
+        );
     }
 
     #[test]
