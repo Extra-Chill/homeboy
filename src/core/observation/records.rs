@@ -250,16 +250,16 @@ pub struct FindingListFilter {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AnnotationFindingRecord {
-    pub file: Option<String>,
-    pub line: Option<i64>,
-    pub message: String,
-    pub source: Option<String>,
-    pub severity: Option<String>,
-    pub code: Option<String>,
-    pub fixable: Option<bool>,
+struct AnnotationSidecarItem {
+    file: Option<String>,
+    line: Option<i64>,
+    message: String,
+    source: Option<String>,
+    severity: Option<String>,
+    code: Option<String>,
+    fixable: Option<bool>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
+    extra: BTreeMap<String, Value>,
 }
 
 pub fn homeboy_finding_from_lint(finding: &HomeboyFinding) -> HomeboyFinding {
@@ -339,6 +339,15 @@ pub fn finding_records_from_annotation_file(
     run_id: &str,
     path: &Path,
 ) -> crate::core::error::Result<Vec<NewFindingRecord>> {
+    Ok(homeboy_findings_from_annotation_file(path)?
+        .into_iter()
+        .map(|finding| NewFindingRecord::from_homeboy_finding(run_id, finding))
+        .collect())
+}
+
+fn homeboy_findings_from_annotation_file(
+    path: &Path,
+) -> crate::core::error::Result<Vec<HomeboyFinding>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -353,13 +362,12 @@ pub fn finding_records_from_annotation_file(
         return Ok(Vec::new());
     }
 
-    let annotations: Vec<AnnotationFindingRecord> =
-        serde_json::from_str(&content).map_err(|e| {
-            crate::core::Error::internal_io(
-                format!("Malformed annotations JSON in {}: {}", path.display(), e),
-                Some("observation.findings.annotations".to_string()),
-            )
-        })?;
+    let annotations: Vec<AnnotationSidecarItem> = serde_json::from_str(&content).map_err(|e| {
+        crate::core::Error::internal_io(
+            format!("Malformed annotations JSON in {}: {}", path.display(), e),
+            Some("observation.findings.annotations".to_string()),
+        )
+    })?;
     let source_file = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -367,23 +375,12 @@ pub fn finding_records_from_annotation_file(
 
     Ok(annotations
         .iter()
-        .map(|annotation| finding_record_from_annotation(run_id, annotation, source_file))
+        .map(|annotation| homeboy_finding_from_annotation(annotation, source_file))
         .collect())
 }
 
-pub fn finding_record_from_annotation(
-    run_id: &str,
-    annotation: &AnnotationFindingRecord,
-    source_file: &str,
-) -> NewFindingRecord {
-    NewFindingRecord::from_homeboy_finding(
-        run_id,
-        homeboy_finding_from_annotation(annotation, source_file),
-    )
-}
-
-pub fn homeboy_finding_from_annotation(
-    annotation: &AnnotationFindingRecord,
+fn homeboy_finding_from_annotation(
+    annotation: &AnnotationSidecarItem,
     source_file: &str,
 ) -> HomeboyFinding {
     let tool = annotation
@@ -413,7 +410,7 @@ fn annotation_file_stem(source_file: &str) -> String {
         .to_string()
 }
 
-fn annotation_fingerprint(annotation: &AnnotationFindingRecord) -> Option<String> {
+fn annotation_fingerprint(annotation: &AnnotationSidecarItem) -> Option<String> {
     if let Some(id) = annotation.extra.get("id").and_then(Value::as_str) {
         return Some(id.to_string());
     }
@@ -638,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_finding_record_from_annotation() {
-        let annotation = AnnotationFindingRecord {
+        let annotation = AnnotationSidecarItem {
             file: Some("src/lib.rs".to_string()),
             line: Some(33),
             message: "escape output".to_string(),
@@ -649,7 +646,10 @@ mod tests {
             extra: BTreeMap::from([("id".to_string(), serde_json::json!("custom-id"))]),
         };
 
-        let record = finding_record_from_annotation("run-1", &annotation, "phpcs.json");
+        let record = NewFindingRecord::from_homeboy_finding(
+            "run-1",
+            homeboy_finding_from_annotation(&annotation, "phpcs.json"),
+        );
 
         assert_eq!(record.run_id, "run-1");
         assert_eq!(record.tool, "phpcs");

@@ -12,6 +12,9 @@ use std::collections::HashMap;
 // ============================================================================
 
 /// A single test failure parsed from test runner output.
+///
+/// This is domain input for failure clustering and analysis. Persisted and
+/// command-output finding records should project through `HomeboyFinding`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestFailure {
     /// Fully qualified test name (e.g., "Namespace\\ClassTest::testMethod").
@@ -31,6 +34,9 @@ pub struct TestFailure {
 }
 
 /// Full test analysis input from extension.
+///
+/// This preserves structured test-runner facts so analysis can cluster related
+/// failures before the findings layer emits canonical `HomeboyFinding` values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestAnalysisInput {
     /// All test failures.
