@@ -119,29 +119,13 @@ pub enum ExecutionPhase {
 
 impl ExecutionMode {
     /// Normalize legacy CLI mode values into the shared execution vocabulary.
-    pub fn from_cli_value(value: &str) -> Option<Self> {
+    pub(crate) fn from_cli_value(value: &str) -> Option<Self> {
         match value {
             "plan" | "preview" => Some(Self::Plan),
             "dry-run" | "dry_run" => Some(Self::DryRun),
             "capture-patch" | "capture_patch" => Some(Self::CapturePatch),
             "apply" | "write" => Some(Self::Apply),
             "execute" | "run" => Some(Self::Execute),
-            _ => None,
-        }
-    }
-
-    /// Map existing Homeboy boolean CLI flags to the shared execution mode.
-    ///
-    /// This preserves command-specific public output contracts while giving
-    /// planners, extensions, and adapters a single internal vocabulary for the
-    /// execution lifecycle.
-    pub fn from_cli_flag(flag: &str) -> Option<Self> {
-        match flag {
-            "--plan" | "--preview" => Some(Self::Plan),
-            "--dry-run" => Some(Self::DryRun),
-            "--capture-patch" => Some(Self::CapturePatch),
-            "--apply" | "--write" => Some(Self::Apply),
-            "--execute" | "--run" => Some(Self::Execute),
             _ => None,
         }
     }
@@ -463,31 +447,6 @@ mod tests {
             Some(ExecutionMode::Execute)
         );
         assert_eq!(ExecutionMode::from_cli_value("unknown"), None);
-    }
-
-    #[test]
-    fn legacy_cli_flags_map_to_execution_modes() {
-        assert_eq!(
-            ExecutionMode::from_cli_flag("--plan"),
-            Some(ExecutionMode::Plan)
-        );
-        assert_eq!(
-            ExecutionMode::from_cli_flag("--dry-run"),
-            Some(ExecutionMode::DryRun)
-        );
-        assert_eq!(
-            ExecutionMode::from_cli_flag("--capture-patch"),
-            Some(ExecutionMode::CapturePatch)
-        );
-        assert_eq!(
-            ExecutionMode::from_cli_flag("--write"),
-            Some(ExecutionMode::Apply)
-        );
-        assert_eq!(
-            ExecutionMode::from_cli_flag("--execute"),
-            Some(ExecutionMode::Execute)
-        );
-        assert_eq!(ExecutionMode::from_cli_flag("--json"), None);
     }
 
     #[test]

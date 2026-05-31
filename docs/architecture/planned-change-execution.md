@@ -40,8 +40,9 @@ semantics:
 | `--write`, `--apply`, `write`, `apply` | `apply` | Materialize an approved or command-permitted change locally. |
 | `--execute`, `run`, `execute` | `execute` | Execute the requested workflow directly. |
 
-Use `ExecutionMode::from_cli_value()` for value-style inputs and
-`ExecutionMode::from_cli_flag()` for boolean flag names.
+Use `ExecutionMode::from_cli_value()` for value-style inputs. Boolean flag
+handlers should map their selected command behavior to the same mode values at
+the call site when they adopt the contract.
 
 ## Existing Workflow Mapping
 
