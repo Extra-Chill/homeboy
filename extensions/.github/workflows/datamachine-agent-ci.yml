@@ -186,8 +186,9 @@ name: Data Machine Agent CI (reusable)
       extra_wp_codebox_mounts:
         description: |
           JSON string array appended to the runner config wp_codebox_mounts after
-          the default ci-driver fixture mount. Each entry is SOURCE:TARGET[:MODE]
-          for a WP Codebox sandbox mount. Default '[]' means no extra mounts.
+          the default ci-driver fixture mount. Entries may be SOURCE:TARGET[:MODE]
+          strings or objects with source, target, mode, and optional type
+          (directory or file). Default '[]' means no extra mounts.
         type: string
         default: "[]"
       workload_run_before:
@@ -655,8 +656,13 @@ jobs:
           execute_workflow_guest_path="$EXECUTE_WORKFLOW_PATH"
           execute_workflow_mounts_json="[]"
           if [ -n "$EXECUTE_WORKFLOW_PATH" ] && [[ "$EXECUTE_WORKFLOW_PATH" != /* ]]; then
+            execute_workflow_host_path="${GITHUB_WORKSPACE}/${EXECUTE_WORKFLOW_PATH}"
+            execute_workflow_mount_type="directory"
+            if [ -f "$execute_workflow_host_path" ]; then
+              execute_workflow_mount_type="file"
+            fi
             execute_workflow_guest_path="/wordpress/wp-content/plugins/${component_slug}/${EXECUTE_WORKFLOW_PATH}"
-            execute_workflow_mounts_json="$(jq -nc --arg source "${GITHUB_WORKSPACE}/${EXECUTE_WORKFLOW_PATH}" --arg target "$execute_workflow_guest_path" '[$source + ":" + $target + ":readonly"]')"
+            execute_workflow_mounts_json="$(jq -nc --arg type "$execute_workflow_mount_type" --arg source "$execute_workflow_host_path" --arg target "$execute_workflow_guest_path" '[{type: $type, source: $source, target: $target, mode: "readonly"}]')"
           fi
           mapfile -t validation_paths < <(find "${GITHUB_WORKSPACE}/.ci" -mindepth 1 -maxdepth 1 -type d | sort)
           provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | jq -Rsc --arg provider "$PROVIDER" --arg openaiRef "$OPENAI_PROVIDER_REF" '
@@ -801,7 +807,12 @@ jobs:
               validation_dependencies: $validationDependencies,
               wp_codebox_wordpress_version: $wpCodeboxWordPressVersion,
               wp_codebox_mounts: ([
-                $homeboyExtensionsPath + "/wordpress/tests/fixtures/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php:/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php:readonly"
+                {
+                  type: "file",
+                  source: ($homeboyExtensionsPath + "/wordpress/tests/fixtures/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php"),
+                  target: "/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php",
+                  mode: "readonly"
+                }
               ] + $extraWpCodeboxMounts + $executeWorkflowMounts),
               wp_config_defines: $extraWpConfigDefines,
               workload_run_before: $workloadRunBefore,
