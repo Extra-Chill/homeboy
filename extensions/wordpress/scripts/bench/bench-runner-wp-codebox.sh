@@ -84,6 +84,19 @@ homeboy_wp_codebox_component_relative_path() {
     fi
 }
 
+homeboy_wp_codebox_find_plugin_file() {
+    local plugin_dir="$1"
+    local candidate
+    for candidate in "$plugin_dir"/*.php; do
+        [ -f "$candidate" ] || continue
+        if grep -q 'Plugin Name:' "$candidate"; then
+            basename "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 homeboy_wp_codebox_compile_scenario_manifests() {
     local entries_json
     entries_json=$(printf '%s' "$settings_json" | jq -c '
@@ -295,12 +308,18 @@ WP_CODEBOX_WORKLOADS_JSON="[]"
 if [ "$settings_json" != "{}" ]; then
     WP_CONFIG_DEFINES_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     BENCH_ENV_JSON=$(printf '%s' "$settings_json" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
-    WP_CODEBOX_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_workloads // []' 2>/dev/null || echo "[]")
+    WP_CODEBOX_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_workloads // .playground_workloads // []' 2>/dev/null || echo "[]")
 fi
 WP_CODEBOX_WORKLOADS_JSON=$(jq -nc --argjson declared "$WP_CODEBOX_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$declared + $scenarios')
 
-EXTRA_PLUGINS_JSON=$(jq -nc --arg source "$PLUGIN_PATH" --arg slug "$PLUGIN_SLUG" '[{source: $source, slug: $slug, activate: false}]')
 MOUNTS_JSON="[]"
+COMPONENT_PLUGIN_FILE="$(homeboy_wp_codebox_find_plugin_file "$PLUGIN_PATH" || true)"
+if [ -n "$COMPONENT_PLUGIN_FILE" ]; then
+    EXTRA_PLUGINS_JSON=$(jq -nc --arg source "$PLUGIN_PATH" --arg slug "$PLUGIN_SLUG" --arg pluginFile "${PLUGIN_SLUG}/${COMPONENT_PLUGIN_FILE}" '[{source: $source, slug: $slug, pluginFile: $pluginFile, activate: false}]')
+else
+    EXTRA_PLUGINS_JSON="[]"
+    MOUNTS_JSON=$(jq -nc --arg source "$PLUGIN_PATH" --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}" '[{source: $source, target: $target, mode: "readonly"}]')
+fi
 DEPENDENCY_SLUGS=()
 if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
@@ -318,7 +337,7 @@ fi
 
 WP_CODEBOX_FILE_MOUNTS_JSON="[]"
 if [ "$settings_json" != "{}" ]; then
-    WP_CODEBOX_FILE_MOUNTS_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_file_mounts // []' 2>/dev/null || echo "[]")
+    WP_CODEBOX_FILE_MOUNTS_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_file_mounts // .playground_file_mounts // []' 2>/dev/null || echo "[]")
 fi
 if printf '%s' "$WP_CODEBOX_FILE_MOUNTS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
     while IFS= read -r mount_json; do
@@ -394,7 +413,7 @@ fi
 
 WP_CODEBOX_BLUEPRINT_JSON="{}"
 if [ "$settings_json" != "{}" ]; then
-    WP_CODEBOX_BLUEPRINT_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_blueprint // {}' 2>/dev/null || echo "{}")
+    WP_CODEBOX_BLUEPRINT_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_blueprint // .playground_blueprint // {}' 2>/dev/null || echo "{}")
 fi
 RUNTIME_BLUEPRINT_JSON=$(jq -nc \
     --argjson base "$WP_CODEBOX_BLUEPRINT_JSON" \

@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORDPRESS_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-static-source-smoke.XXXXXX")"
+trap 'rm -rf "$TMP_ROOT"' EXIT
+
+SOURCE_ROOT="${TMP_ROOT}/wp-site-generator"
+mkdir -p "${SOURCE_ROOT}/static-sites/demo" "${SOURCE_ROOT}/.github/homeboy"
+printf '<!doctype html><title>Demo</title>\n' > "${SOURCE_ROOT}/static-sites/demo/index.html"
+printf '<?php return array();\n' > "${SOURCE_ROOT}/.github/homeboy/ssi-import-diagnostics.php"
+
+RESOLVE_HELPER="${TMP_ROOT}/resolve-context.sh"
+cat > "$RESOLVE_HELPER" <<'STUB'
+homeboy_resolve_context() {
+    PLUGIN_PATH="$HOMEBOY_SMOKE_SOURCE_ROOT"
+    COMPONENT_ID="wp-site-generator"
+}
+STUB
+
+BENCH_HELPER="${TMP_ROOT}/bench-helper.sh"
+cat > "$BENCH_HELPER" <<'STUB'
+homeboy_write_empty_bench_results() {
+    printf '{"schema":"homeboy/bench-results/v1","benchmarks":[]}\n' > "$3"
+}
+STUB
+
+RESULTS_ARTIFACTS_HELPER="${WORDPRESS_DIR}/scripts/bench/bench-results-artifacts.sh"
+BROWSER_TARGET_HELPER="${TMP_ROOT}/browser-target.sh"
+cat > "$BROWSER_TARGET_HELPER" <<'STUB'
+homeboy_wordpress_emit_browser_target() {
+    return 0
+}
+STUB
+
+DEPENDENCY_HELPER="${TMP_ROOT}/validation-dependencies.sh"
+cat > "$DEPENDENCY_HELPER" <<'STUB'
+homeboy_export_validation_dependency_paths() {
+    return 0
+}
+homeboy_get_validation_dependency_slug() {
+    basename "$1"
+}
+STUB
+
+CAPTURE_FILE="${TMP_ROOT}/capture.json"
+WP_CODEBOX_BIN="${TMP_ROOT}/fixture-wp-codebox.js"
+cat > "$WP_CODEBOX_BIN" <<'STUB'
+#!/usr/bin/env node
+'use strict';
+const fs = require('node:fs');
+const recipeIndex = process.argv.indexOf('--recipe');
+const recipePath = recipeIndex >= 0 ? process.argv[recipeIndex + 1] : '';
+const recipe = recipePath ? JSON.parse(fs.readFileSync(recipePath, 'utf8')) : null;
+fs.writeFileSync(process.env.HOMEBOY_SMOKE_CAPTURE_FILE, `${JSON.stringify({ argv: process.argv.slice(2), recipe }, null, 2)}\n`);
+process.stdout.write(JSON.stringify({
+  success: true,
+  benchResults: {
+    schema: 'homeboy/bench-results/v1',
+    component_id: 'wp-site-generator',
+    benchmarks: [],
+    warmup_iterations: 1
+  }
+}));
+STUB
+chmod +x "$WP_CODEBOX_BIN"
+
+SETTINGS_JSON=$(jq -nc '{
+    playground_blueprint: {
+        steps: [
+            {step: "installPlugin", pluginData: {resource: "git:directory", url: "https://github.com/chubes4/static-site-importer", ref: "main", refType: "branch"}, options: {activate: true, targetFolderName: "static-site-importer"}}
+        ]
+    },
+    playground_workloads: [
+        {
+            id: "ssi-import",
+            run: [
+                {type: "wp-cli", command: "wp static-site-importer import-theme /wordpress/wp-content/plugins/wp-site-generator/static-sites/demo/index.html --slug=demo --format=json", parse: "json"},
+                {type: "php", file: ".github/homeboy/ssi-import-diagnostics.php"}
+            ]
+        }
+    ]
+}')
+
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
+HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
+HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_SMOKE_SOURCE_ROOT="$SOURCE_ROOT" \
+HOMEBOY_SMOKE_CAPTURE_FILE="$CAPTURE_FILE" \
+HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
+HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
+HOMEBOY_BENCH_RESULTS_FILE="${TMP_ROOT}/bench-results.json" \
+HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/artifacts" \
+HOMEBOY_RUNTIME_FAILURE_TRAP="" \
+HOMEBOY_BENCH_ITERATIONS=1 \
+HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
+bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
+
+jq -e --arg sourceRoot "$SOURCE_ROOT" '
+    .recipe.inputs.extraPlugins == []
+    and (.recipe.inputs.mounts[] | select(.source == $sourceRoot and .target == "/wordpress/wp-content/plugins/wp-site-generator" and .mode == "readonly"))
+    and (.recipe.runtime.blueprint.steps[] | select(.step == "installPlugin" and .options.targetFolderName == "static-site-importer"))
+    and (.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("static-site-importer import-theme")))
+' "$CAPTURE_FILE" >/dev/null
+
+PLUGIN_ROOT="${TMP_ROOT}/plugin-component"
+mkdir -p "$PLUGIN_ROOT"
+printf '<?php\n/**\n * Plugin Name: Fixture Component\n */\n' > "${PLUGIN_ROOT}/plugin-main.php"
+PLUGIN_CAPTURE_FILE="${TMP_ROOT}/plugin-capture.json"
+
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
+HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
+HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_SMOKE_SOURCE_ROOT="$PLUGIN_ROOT" \
+HOMEBOY_SMOKE_CAPTURE_FILE="$PLUGIN_CAPTURE_FILE" \
+HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
+HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
+HOMEBOY_BENCH_RESULTS_FILE="${TMP_ROOT}/plugin-bench-results.json" \
+HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/plugin-artifacts" \
+HOMEBOY_RUNTIME_FAILURE_TRAP="" \
+HOMEBOY_BENCH_ITERATIONS=1 \
+HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
+bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
+
+jq -e --arg sourceRoot "$PLUGIN_ROOT" '
+    .recipe.inputs.extraPlugins == [{source: $sourceRoot, slug: "wp-site-generator", pluginFile: "wp-site-generator/plugin-main.php", activate: false}]
+    and ([.recipe.inputs.mounts[] | select(.source == $sourceRoot and .target == "/wordpress/wp-content/plugins/wp-site-generator")] | length == 0)
+' "$PLUGIN_CAPTURE_FILE" >/dev/null
+
+echo "WP Codebox static-source bench smoke passed"
