@@ -746,7 +746,7 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
         }
         if ($errors > 0 || $warnings > 0) {
             echo "============================================\n";
-            echo "LINT SUMMARY: " . $errors . " errors, " . $warnings . " warnings\n";
+            echo "PHPCS SUMMARY: " . $errors . " errors, " . $warnings . " warnings\n";
             echo "Fixable: " . $fixable . " | Files with issues: " . $filesWithIssues . " of " . $files . "\n";
             echo "============================================\n";
         }
