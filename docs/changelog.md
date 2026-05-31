@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.213.3] - 2026-05-31
+
+### Changed
+- remove residual lint finding adapter
+- remove legacy finding readers
+- isolate runtime cleanup fixture
+- split structural audit records
+- keep bench budget fixtures generic
+- refresh detector agnostic baseline
+
+### Fixed
+- retry transient refactor script spawn failures
+- move lab offload extension parity into runner exec
+
 ## [0.213.2] - 2026-05-31
 
 ### Changed
