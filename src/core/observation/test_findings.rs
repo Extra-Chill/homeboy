@@ -3,7 +3,7 @@ use crate::core::extension::test::{
 };
 use crate::core::finding::{FindingSource, HomeboyFinding};
 
-use super::records::NewFindingRecord;
+use super::records::{finding_records_from_homeboy_findings, NewFindingRecord};
 
 pub(crate) fn homeboy_finding_from_test_failure(failure: &TestFailure) -> HomeboyFinding {
     let mut normalized = HomeboyFinding::builder("test", test_failure_message(failure))
@@ -41,19 +41,14 @@ pub(crate) fn homeboy_findings_from_test_analysis_input(
     )
 }
 
-fn finding_record_from_test_failure(run_id: &str, failure: &TestFailure) -> NewFindingRecord {
-    NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_test_failure(failure))
-}
-
 pub(crate) fn finding_records_from_test_analysis_input(
     run_id: &str,
     input: &TestAnalysisInput,
 ) -> Vec<NewFindingRecord> {
-    input
-        .failures
-        .iter()
-        .map(|failure| finding_record_from_test_failure(run_id, failure))
-        .collect()
+    finding_records_from_homeboy_findings(
+        run_id,
+        input.failures.iter().map(homeboy_finding_from_test_failure),
+    )
 }
 
 fn homeboy_finding_from_failure_cluster(cluster: &FailureCluster) -> HomeboyFinding {
@@ -76,6 +71,7 @@ fn homeboy_finding_from_failure_cluster(cluster: &FailureCluster) -> HomeboyFind
     normalized
 }
 
+#[cfg(test)]
 fn finding_record_from_failure_cluster(run_id: &str, cluster: &FailureCluster) -> NewFindingRecord {
     NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_failure_cluster(cluster))
 }
@@ -84,10 +80,10 @@ pub(crate) fn finding_records_from_failure_clusters(
     run_id: &str,
     clusters: &[FailureCluster],
 ) -> Vec<NewFindingRecord> {
-    clusters
-        .iter()
-        .map(|cluster| finding_record_from_failure_cluster(run_id, cluster))
-        .collect()
+    finding_records_from_homeboy_findings(
+        run_id,
+        clusters.iter().map(homeboy_finding_from_failure_cluster),
+    )
 }
 
 fn test_failure_message(failure: &TestFailure) -> String {

@@ -217,8 +217,7 @@ impl ReconcilePlan {
 fn actions_from_plan(plan: &HomeboyPlan) -> Vec<ReconcileAction> {
     plan.steps
         .iter()
-        .filter_map(|step| step.inputs.get("action"))
-        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .filter_map(|step| step.input_as("action"))
         .collect()
 }
 

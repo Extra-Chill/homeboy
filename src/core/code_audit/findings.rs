@@ -29,7 +29,7 @@ impl serde::Serialize for Finding {
     where
         S: Serializer,
     {
-        homeboy_finding_from_audit(self).serialize(serializer)
+        HomeboyFinding::from(self).serialize(serializer)
     }
 }
 
@@ -78,20 +78,26 @@ impl<'de> serde::Deserialize<'de> for Finding {
 }
 
 pub fn homeboy_finding_from_audit(finding: &Finding) -> HomeboyFinding {
-    let kind = finding_kind_key(&finding.kind);
-    HomeboyFinding::builder("audit", finding.description.clone())
-        .rule(kind.clone())
-        .category(finding.convention.clone())
-        .file(finding.file.clone())
-        .severity(audit_severity_key(&finding.severity))
-        .fingerprint(audit_finding_fingerprint(finding))
-        .source(FindingSource::new("sidecar").label("audit-findings"))
-        .metadata("source_sidecar", "audit-findings")
-        .metadata("convention", finding.convention.clone())
-        .metadata("suggestion", finding.suggestion.clone())
-        .metadata("confidence", finding.kind.confidence())
-        .metadata("kind", kind)
-        .build()
+    HomeboyFinding::from(finding)
+}
+
+impl From<&Finding> for HomeboyFinding {
+    fn from(finding: &Finding) -> Self {
+        let kind = finding_kind_key(&finding.kind);
+        HomeboyFinding::builder("audit", finding.description.clone())
+            .rule(kind.clone())
+            .category(finding.convention.clone())
+            .file(finding.file.clone())
+            .severity(audit_severity_key(&finding.severity))
+            .fingerprint(audit_finding_fingerprint(finding))
+            .source(FindingSource::new("sidecar").label("audit-findings"))
+            .metadata("source_sidecar", "audit-findings")
+            .metadata("convention", finding.convention.clone())
+            .metadata("suggestion", finding.suggestion.clone())
+            .metadata("confidence", finding.kind.confidence())
+            .metadata("kind", kind)
+            .build()
+    }
 }
 
 pub(crate) fn finding_kind_key(finding: &AuditFinding) -> String {
