@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.108.8] - 2026-05-31
+
+### Fixed
+- request app token write permissions
+
 ## [2.108.7] - 2026-05-31
 
 ### Fixed
