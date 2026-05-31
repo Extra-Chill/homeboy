@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.108.12] - 2026-05-31
+
+### Fixed
+- omit empty agent CI app profiles
+
 ## [2.108.11] - 2026-05-31
 
 ### Fixed
