@@ -27,6 +27,7 @@ use super::utils::{extract_latest_notes, parse_release_artifacts};
 pub(crate) mod artifacts;
 pub(crate) mod changelog;
 mod github_release;
+pub(crate) mod package_preflight;
 pub(crate) mod prepare;
 mod version_targets;
 
