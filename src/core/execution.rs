@@ -118,7 +118,7 @@ pub enum ExecutionPhase {
 }
 
 impl ExecutionMode {
-    /// Normalize common CLI spellings into the shared mode names.
+    /// Normalize legacy CLI mode values into the shared execution vocabulary.
     pub(crate) fn from_cli_value(value: &str) -> Option<Self> {
         match value {
             "plan" | "preview" => Some(Self::Plan),
@@ -447,6 +447,24 @@ mod tests {
             Some(ExecutionMode::Execute)
         );
         assert_eq!(ExecutionMode::from_cli_value("unknown"), None);
+    }
+
+    #[test]
+    fn lifecycle_vocabulary_serializes_in_order() {
+        let phases = vec![
+            ExecutionPhase::Execute,
+            ExecutionPhase::Artifact,
+            ExecutionPhase::Approve,
+            ExecutionPhase::Apply,
+            ExecutionPhase::Publish,
+        ];
+
+        let value = serde_json::to_value(&phases).expect("serialize phases");
+
+        assert_eq!(
+            value,
+            serde_json::json!(["execute", "artifact", "approve", "apply", "publish"])
+        );
     }
 
     #[test]
