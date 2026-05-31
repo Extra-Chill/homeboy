@@ -234,14 +234,6 @@ const BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/detectors/requested_detectors.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/requested_detectors.rs",
-        term: "rust",
-    },
-    ViolationKey {
         path: "src/core/code_audit/requirements.rs",
         term: "composer",
     },
@@ -475,7 +467,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 142;
+const BASELINE_OCCURRENCES: usize = 140;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.

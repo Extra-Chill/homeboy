@@ -587,14 +587,19 @@ fn language_matches(rule: &RequestedDetectorRule, fp: &FileFingerprint) -> bool 
     let Some(language) = &rule.language else {
         return true;
     };
-    match language.trim().to_ascii_lowercase().as_str() {
-        "php" => fp.language == Language::Php,
-        "rust" => fp.language == Language::Rust,
-        "javascript" | "js" => fp.language == Language::JavaScript,
-        "typescript" | "ts" => fp.language == Language::TypeScript,
-        "unknown" => fp.language == Language::Unknown,
-        _ => false,
-    }
+    expected_language(language)
+        .as_ref()
+        .is_some_and(|expected| fp.language == *expected)
+}
+
+fn expected_language(language: &str) -> Option<Language> {
+    let normalized = language.trim().to_ascii_lowercase();
+    serde_json::from_value::<Language>(serde_json::Value::String(normalized.clone()))
+        .ok()
+        .or_else(|| {
+            let language = Language::from_extension(&normalized);
+            (language != Language::Unknown).then_some(language)
+        })
 }
 
 fn finding_from_captures(
@@ -781,6 +786,16 @@ mod tests {
             requested_detectors: vec![rule],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn language_filter_uses_generic_language_names_and_extensions() {
+        assert_eq!(expected_language("javascript"), Some(Language::JavaScript));
+        assert_eq!(expected_language("js"), Some(Language::JavaScript));
+        assert_eq!(expected_language("typescript"), Some(Language::TypeScript));
+        assert_eq!(expected_language("ts"), Some(Language::TypeScript));
+        assert_eq!(expected_language("unknown"), Some(Language::Unknown));
+        assert_eq!(expected_language("not-a-language"), None);
     }
 
     #[test]
