@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.6] - 2026-05-31
+
+### Fixed
+- expect WP Codebox setting names
+
 ## [2.7.5] - 2026-05-27
 
 ### Fixed
