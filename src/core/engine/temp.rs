@@ -219,7 +219,7 @@ fn unique_name(prefix: &str, suffix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::home_env_guard;
+    use crate::test_support::{home_env_guard, with_isolated_home};
 
     #[test]
     fn runtime_temp_dir_honors_override() {
@@ -236,11 +236,13 @@ mod tests {
 
     #[test]
     fn runtime_temp_dir_creates_dir() {
-        let result = runtime_temp_dir("test-dir");
-        assert!(result.is_ok());
-        if let Ok(path) = result {
-            assert!(path.is_dir());
-        }
+        with_isolated_home(|_| {
+            let result = runtime_temp_dir("test-dir");
+            assert!(result.is_ok());
+            if let Ok(path) = result {
+                assert!(path.is_dir());
+            }
+        });
     }
 
     #[test]
@@ -248,15 +250,16 @@ mod tests {
         let _guard = home_env_guard();
         let dir = tempfile::tempdir().expect("tempdir");
         env::set_var(HOMEBOY_RUNTIME_TMPDIR_ENV, dir.path());
-        let stale = runtime_temp_dir("homeboy-run").expect("temp dir");
+        let prefix = "homeboy-cleanup-test";
+        let stale = runtime_temp_dir(prefix).expect("temp dir");
         fs::write(stale.join("trace.json"), b"trace").expect("write trace");
 
-        let dry = cleanup_runtime_tmp(false, 0, Some("homeboy-run"), 100).expect("dry-run");
+        let dry = cleanup_runtime_tmp(false, 0, Some(prefix), 100).expect("dry-run");
         assert!(dry.dry_run);
         assert_eq!(dry.planned_count, 1);
         assert!(stale.exists());
 
-        let applied = cleanup_runtime_tmp(true, 0, Some("homeboy-run"), 100).expect("apply");
+        let applied = cleanup_runtime_tmp(true, 0, Some(prefix), 100).expect("apply");
         assert!(!applied.dry_run);
         assert_eq!(applied.removed_count, 1);
         assert!(!stale.exists());
