@@ -361,8 +361,7 @@ fn stack_step(step: &DependencyStackPlanStep) -> PlanStep {
 fn stack_steps_from_plan(plan: &HomeboyPlan) -> Vec<DependencyStackPlanStep> {
     plan.steps
         .iter()
-        .filter_map(|step| step.inputs.get("stack_step"))
-        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .filter_map(|step| step.input_as("stack_step"))
         .collect()
 }
 

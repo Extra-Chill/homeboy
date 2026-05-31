@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
-use crate::core::code_audit::{self, homeboy_finding_from_audit as audit_homeboy_finding};
+use crate::core::code_audit;
 use crate::core::finding::{FindingProducer, FindingSource, HomeboyFinding};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -35,6 +35,17 @@ impl NewFindingRecord {
             metadata_json,
         }
     }
+}
+
+pub fn finding_records_from_homeboy_findings(
+    run_id: &str,
+    findings: impl IntoIterator<Item = HomeboyFinding>,
+) -> Vec<NewFindingRecord> {
+    let run_id = run_id.to_string();
+    findings
+        .into_iter()
+        .map(|finding| NewFindingRecord::from_homeboy_finding(run_id.clone(), finding))
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -175,15 +186,11 @@ pub fn finding_records_from_lint(
     run_id: &str,
     findings: &[HomeboyFinding],
 ) -> Vec<NewFindingRecord> {
-    findings
-        .iter()
-        .cloned()
-        .map(|finding| finding_record_from_lint(run_id, finding))
-        .collect()
+    finding_records_from_homeboy_findings(run_id, findings.iter().cloned())
 }
 
 pub fn homeboy_finding_from_audit(finding: &code_audit::Finding) -> HomeboyFinding {
-    audit_homeboy_finding(finding)
+    HomeboyFinding::from(finding)
 }
 
 pub fn finding_record_from_audit(run_id: &str, finding: &code_audit::Finding) -> NewFindingRecord {
@@ -241,10 +248,10 @@ pub fn finding_records_from_annotation_file(
     run_id: &str,
     path: &Path,
 ) -> crate::core::error::Result<Vec<NewFindingRecord>> {
-    Ok(homeboy_findings_from_annotation_file(path)?
-        .into_iter()
-        .map(|finding| NewFindingRecord::from_homeboy_finding(run_id, finding))
-        .collect())
+    Ok(finding_records_from_homeboy_findings(
+        run_id,
+        homeboy_findings_from_annotation_file(path)?,
+    ))
 }
 
 fn homeboy_findings_from_annotation_file(

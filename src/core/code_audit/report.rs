@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::core::code_audit::{
-    baseline, homeboy_finding_from_audit, AuditFinding, CodeAuditResult, ConventionReport,
-    DirectoryConvention, FindingConfidence, Severity,
+    baseline, AuditFinding, CodeAuditResult, ConventionReport, DirectoryConvention,
+    FindingConfidence, Severity,
 };
 use crate::core::finding::HomeboyFinding;
 use serde::Serialize;
@@ -193,7 +193,7 @@ pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSum
     let top_findings = top_finding_refs
         .into_iter()
         .take(20)
-        .map(homeboy_finding_from_audit)
+        .map(HomeboyFinding::from)
         .collect();
     let finding_groups = build_finding_groups(result);
 

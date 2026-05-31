@@ -1,7 +1,8 @@
 use crate::core::finding::HomeboyFinding;
 
-use super::records::NewFindingRecord;
+use super::records::{finding_records_from_homeboy_findings, NewFindingRecord};
 
+#[cfg(test)]
 fn finding_record_from_budget(run_id: &str, finding: &HomeboyFinding) -> NewFindingRecord {
     NewFindingRecord::from_homeboy_finding(run_id, finding.clone())
 }
@@ -10,10 +11,7 @@ pub fn finding_records_from_budget(
     run_id: &str,
     findings: &[HomeboyFinding],
 ) -> Vec<NewFindingRecord> {
-    findings
-        .iter()
-        .map(|finding| finding_record_from_budget(run_id, finding))
-        .collect()
+    finding_records_from_homeboy_findings(run_id, findings.iter().cloned())
 }
 
 #[cfg(test)]

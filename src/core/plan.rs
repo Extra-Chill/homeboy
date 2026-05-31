@@ -5,7 +5,7 @@
 //! why it will run, whether it blocks progress, and what artifacts/results are
 //! expected.
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -267,6 +267,12 @@ impl PlanStep {
         Self::disabled(id, kind)
             .input_value("reason", serde_json::Value::String(reason.clone()))
             .skip_reason(reason)
+    }
+
+    pub(crate) fn input_as<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
+        self.inputs
+            .get(key)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
     }
 }
 
@@ -741,6 +747,21 @@ mod tests {
             step.inputs.get("reason"),
             Some(&serde_json::json!("manual"))
         );
+    }
+
+    #[test]
+    fn test_input_as() {
+        let step = PlanStep::ready("refactor", "refactor.decompose")
+            .input_value("items", serde_json::json!(["first", "second"]))
+            .build();
+
+        let items: Option<Vec<String>> = step.input_as("items");
+        let missing: Option<Vec<String>> = step.input_as("missing");
+        let wrong_type: Option<bool> = step.input_as("items");
+
+        assert_eq!(items, Some(vec!["first".to_string(), "second".to_string()]));
+        assert_eq!(missing, None);
+        assert_eq!(wrong_type, None);
     }
 
     #[test]
