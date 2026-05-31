@@ -4,6 +4,7 @@ pub mod config;
 pub mod api_jobs;
 pub mod artifact_manifest;
 pub(crate) mod artifact_metadata;
+pub mod change_artifact;
 pub mod ci_profile;
 pub mod cleanup;
 pub mod code_audit;

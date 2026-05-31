@@ -6,6 +6,9 @@ use std::process::{Command, Stdio};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use crate::core::change_artifact::{
+    ChangeApplyResult, ChangeApplyStatus, ChangeArtifact, ChangeDelta, ChangePatch,
+};
 use crate::core::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
 use crate::core::error::{Error, Result};
 use crate::core::source_snapshot::SourceSnapshot;
@@ -16,78 +19,57 @@ pub struct RunnerWorkspaceApplyOptions {
     pub force: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerWorkspaceApplyStatus {
-    Applied,
-}
+pub type RunnerWorkspaceApplyStatus = ChangeApplyStatus;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerWorkspaceApplyOutput {
     pub command: &'static str,
     pub local_path: String,
-    pub apply_status: RunnerWorkspaceApplyStatus,
-    pub force: bool,
-    pub expected_snapshot_hash: String,
-    pub current_snapshot_hash: String,
-    pub modified_files: Vec<String>,
+    #[serde(flatten)]
+    pub result: ChangeApplyResult,
 }
 
 #[derive(Debug, Deserialize)]
 struct LabPatchApplyInput {
+    #[serde(flatten)]
+    artifact: ChangeArtifact,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyLabPatchApplyInput {
     source_snapshot: SourceSnapshot,
     #[serde(default)]
-    patch: Option<LabPatch>,
+    patch: Option<ChangePatch>,
     #[serde(default)]
-    delta: Option<LabDelta>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LabPatch {
-    #[serde(default)]
-    format: Option<String>,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct LabDelta {
-    files: Vec<LabDeltaFile>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LabDeltaFile {
-    path: String,
-    #[serde(default)]
-    content_base64: Option<String>,
-    #[serde(default)]
-    delete: bool,
+    delta: Option<ChangeDelta>,
 }
 
 pub fn apply_workspace_patch(
     options: RunnerWorkspaceApplyOptions,
 ) -> Result<(RunnerWorkspaceApplyOutput, i32)> {
     let input = read_apply_input(&options.input)?;
-    let local_path = local_source_path(&input.source_snapshot)?;
+    let artifact = input.artifact;
+    let local_path = local_source_path(&artifact.source_snapshot)?;
     let current = SourceSnapshot::collect_local(
-        &input.source_snapshot.runner_id,
+        &artifact.source_snapshot.runner_id,
         &local_path,
-        input.source_snapshot.remote_path.as_deref(),
-        &input.source_snapshot.sync_mode,
+        artifact.source_snapshot.remote_path.as_deref(),
+        &artifact.source_snapshot.sync_mode,
     );
 
-    if current.snapshot_hash != input.source_snapshot.snapshot_hash && !options.force {
+    if current.snapshot_hash != artifact.source_snapshot.snapshot_hash && !options.force {
         return Err(Error::validation_invalid_argument(
             "source_snapshot",
             "local source worktree has drifted since the Lab snapshot; rerun the Lab job from a fresh snapshot or pass --force to apply explicitly",
             Some(local_path.display().to_string()),
             Some(vec![format!(
                 "expected {}, current {}",
-                input.source_snapshot.snapshot_hash, current.snapshot_hash
+                artifact.source_snapshot.snapshot_hash, current.snapshot_hash
             )]),
         ));
     }
 
-    let modified_files = match (input.patch, input.delta) {
+    let modified_files = match (artifact.patch.clone(), artifact.delta.clone()) {
         (Some(patch), None) => apply_unified_patch(&local_path, patch)?,
         (None, Some(delta)) => apply_delta(&local_path, delta)?,
         (Some(_), Some(_)) => {
@@ -108,15 +90,19 @@ pub fn apply_workspace_patch(
         }
     };
 
+    let artifact_summary = artifact.summary();
+
     Ok((
         RunnerWorkspaceApplyOutput {
             command: "runner.workspace.apply",
             local_path: local_path.display().to_string(),
-            apply_status: RunnerWorkspaceApplyStatus::Applied,
-            force: options.force,
-            expected_snapshot_hash: input.source_snapshot.snapshot_hash,
-            current_snapshot_hash: current.snapshot_hash,
-            modified_files,
+            result: ChangeApplyResult::applied(
+                options.force,
+                artifact.source_snapshot.snapshot_hash,
+                current.snapshot_hash,
+                modified_files,
+                Some(artifact_summary),
+            ),
         },
         0,
     ))
@@ -125,9 +111,28 @@ pub fn apply_workspace_patch(
 fn read_apply_input(path: &str) -> Result<LabPatchApplyInput> {
     let contents = fs::read_to_string(path)
         .map_err(|err| Error::internal_io(err.to_string(), Some(format!("read {path}"))))?;
-    serde_json::from_str(&contents).map_err(|err| {
-        Error::internal_json(err.to_string(), Some("parse Lab apply input".to_string()))
-    })
+    match serde_json::from_str(&contents) {
+        Ok(input) => Ok(input),
+        Err(contract_error) => {
+            let legacy: LegacyLabPatchApplyInput =
+                serde_json::from_str(&contents).map_err(|_| {
+                    Error::internal_json(
+                        contract_error.to_string(),
+                        Some("parse Lab apply input".to_string()),
+                    )
+                })?;
+            Ok(LabPatchApplyInput {
+                artifact: ChangeArtifact {
+                    schema: crate::core::change_artifact::CHANGE_ARTIFACT_SCHEMA.to_string(),
+                    source_snapshot: legacy.source_snapshot,
+                    patch: legacy.patch,
+                    delta: legacy.delta,
+                    provenance: None,
+                    digest: None,
+                },
+            })
+        }
+    }
 }
 
 fn local_source_path(snapshot: &SourceSnapshot) -> Result<PathBuf> {
@@ -157,13 +162,12 @@ fn local_source_path(snapshot: &SourceSnapshot) -> Result<PathBuf> {
     })
 }
 
-fn apply_unified_patch(local_path: &Path, patch: LabPatch) -> Result<Vec<String>> {
-    let format = patch.format.as_deref().unwrap_or("unified_diff");
-    if format != "unified_diff" {
+fn apply_unified_patch(local_path: &Path, patch: ChangePatch) -> Result<Vec<String>> {
+    if patch.format != "unified_diff" {
         return Err(Error::validation_invalid_argument(
             "patch.format",
             "only unified_diff Lab patches are supported",
-            Some(format.to_string()),
+            Some(patch.format),
             None,
         ));
     }
@@ -213,7 +217,7 @@ fn run_git_with_stdin(local_path: &Path, args: &[&str], stdin: &str) -> Result<S
     )))
 }
 
-fn apply_delta(local_path: &Path, delta: LabDelta) -> Result<Vec<String>> {
+fn apply_delta(local_path: &Path, delta: ChangeDelta) -> Result<Vec<String>> {
     if delta.files.is_empty() {
         return Err(Error::validation_invalid_argument(
             "delta.files",
@@ -321,8 +325,11 @@ mod tests {
         .expect("apply patch");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output.apply_status, RunnerWorkspaceApplyStatus::Applied);
-        assert_eq!(output.modified_files, vec!["file.txt".to_string()]);
+        assert_eq!(
+            output.result.apply_status,
+            RunnerWorkspaceApplyStatus::Applied
+        );
+        assert_eq!(output.result.modified_files, vec!["file.txt".to_string()]);
         assert_eq!(
             fs::read_to_string(repo.path().join("file.txt")).unwrap(),
             "after\n"
@@ -393,8 +400,11 @@ mod tests {
         })
         .expect("force delta");
 
-        assert!(output.force);
-        assert_eq!(output.modified_files, vec!["nested/file.txt".to_string()]);
+        assert!(output.result.force);
+        assert_eq!(
+            output.result.modified_files,
+            vec!["nested/file.txt".to_string()]
+        );
         assert_eq!(
             fs::read_to_string(repo.path().join("nested/file.txt")).unwrap(),
             "delta\n"
@@ -403,6 +413,65 @@ mod tests {
             fs::read_to_string(repo.path().join("other.txt")).unwrap(),
             "local drift\n"
         );
+    }
+
+    #[test]
+    fn output_serializes_flat_apply_result_with_artifact_summary() {
+        let repo = git_repo();
+        let snapshot =
+            SourceSnapshot::collect_local("lab", repo.path(), Some("/lab/repo"), "snapshot");
+        let input_dir = tempfile::tempdir().expect("input tempdir");
+        let input = input_dir.path().join("change-artifact.json");
+        fs::write(
+            &input,
+            serde_json::json!({
+                "schema": crate::core::change_artifact::CHANGE_ARTIFACT_SCHEMA,
+                "source_snapshot": snapshot,
+                "provenance": {
+                    "producer": "runner.capture_patch",
+                    "run_id": "run-1",
+                    "artifact_id": "patch.diff",
+                    "command": ["homeboy", "lab"]
+                },
+                "digest": {
+                    "algorithm": "sha256",
+                    "value": "abc123"
+                },
+                "delta": {
+                    "files": [{
+                        "path": "file.txt",
+                        "content_base64": "Y29udHJhY3QK"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .expect("write input");
+
+        let (output, exit_code) = apply_workspace_patch(RunnerWorkspaceApplyOptions {
+            input: input.display().to_string(),
+            force: false,
+        })
+        .expect("apply change artifact");
+        let json = serde_json::to_value(&output).expect("serialize output");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(json["command"], "runner.workspace.apply");
+        assert_eq!(
+            json["schema"],
+            crate::core::change_artifact::CHANGE_APPLY_RESULT_SCHEMA
+        );
+        assert_eq!(json["apply_status"], "applied");
+        assert_eq!(json["modified_files"], serde_json::json!(["file.txt"]));
+        assert_eq!(
+            json["artifact"]["schema"],
+            crate::core::change_artifact::CHANGE_ARTIFACT_SCHEMA
+        );
+        assert_eq!(
+            json["artifact"]["provenance"]["producer"],
+            "runner.capture_patch"
+        );
+        assert_eq!(json["artifact"]["digest"]["value"], "abc123");
     }
 
     #[test]
