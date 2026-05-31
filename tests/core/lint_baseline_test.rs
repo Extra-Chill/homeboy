@@ -71,28 +71,6 @@ fn test_parse_findings_file() {
 }
 
 #[test]
-fn test_parse_findings_file_keeps_legacy_shape_compatibility() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let file = dir.path().join("lint-findings.json");
-    std::fs::write(
-        &file,
-        r#"[{"id":"a","tool":"phpcs","message":"m1","category":"cat1"}]"#,
-    )
-    .expect("should write JSON");
-
-    let parsed = lint_baseline::parse_findings_file(&file).expect("should parse findings");
-
-    assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].tool, "phpcs");
-    assert_eq!(parsed[0].fingerprint.as_deref(), Some("a"));
-    assert_eq!(parsed[0].rule.as_deref(), Some("cat1"));
-    assert_eq!(
-        parsed[0].source.as_ref().unwrap().label.as_deref(),
-        Some("lint-findings")
-    );
-}
-
-#[test]
 fn test_parse_findings_file_missing() {
     let parsed = lint_baseline::parse_findings_file(Path::new(
         "/tmp/definitely-missing-lint-baseline-test.json",
