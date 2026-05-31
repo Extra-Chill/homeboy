@@ -9,7 +9,7 @@
 #
 # Usage:
 #   source "${HOMEBOY_RUNTIME_SIDECAR_WRITER}"
-#   homeboy_sidecar_emit lint.finding '{"message":"..."}'
+#   homeboy_sidecar_emit lint.finding '{"tool":"eslint","message":"...","fingerprint":"..."}'
 #   homeboy_sidecar_write test.failures "$failure_json"
 #   homeboy_sidecar_merge annotation.phpcs "$tmp_annotations"
 
