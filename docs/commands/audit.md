@@ -44,8 +44,9 @@ The audit runs in 6 phases:
    - **4d: Near-duplication** — Structurally similar files with different identifiers
    - **4e: Dead code** — Unused params, unreferenced exports, orphaned internals
    - **4f: Test coverage gaps** — Missing test files, uncovered methods, orphaned tests (requires extension `test_mapping` config)
-   - **4h: Layer ownership** — Optional architecture/layer ownership rule violations (`layer_ownership_violation`)
-   - **4t: Requested detectors** — Extension/component-owned regex detector packs, including generic config round-trip key asymmetry (`config_roundtrip_asymmetry`)
+    - **4h: Layer ownership** — Optional architecture/layer ownership rule violations (`layer_ownership_violation`)
+    - **4t: Requested detectors** — Extension/component-owned regex detector packs, including generic config round-trip key asymmetry (`config_roundtrip_asymmetry`)
+    - **Remote execution preflight** — Component-owned remote dispatch markers checked for path translation, capability parity, extension parity, artifact snapshot, and artifact retrievability contracts (`remote_execution_preflight`)
 5. **Report** — Aggregate findings, compute alignment score
 6. **Cross-directory conventions** — Detect patterns shared by sibling subdirectories
 
@@ -106,6 +107,7 @@ homeboy audit homeboy --conventions
 
 # Drill into or suppress specific finding kinds
 homeboy audit homeboy --only missing_test_file
+homeboy audit homeboy --only remote_execution_preflight
 homeboy audit homeboy --exclude near_duplicate_file
 
 # Save baseline after a cleanup sprint

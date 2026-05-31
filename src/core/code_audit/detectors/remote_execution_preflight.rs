@@ -1,7 +1,8 @@
 //! Remote execution preflight detector.
 //!
-//! Flags remote runner dispatch sites that can hand local paths or artifacts to
-//! a runner without an explicit translation/mirror contract.
+//! Flags remote execution dispatch sites that can hand local paths or artifacts
+//! to another execution environment without an explicit translation/mirror
+//! contract.
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
@@ -25,15 +26,15 @@ pub(in crate::core::code_audit) fn run(
         if forwards_args_without_path_preflight(&fp.content, &policy) {
             findings.push(finding(
                 fp,
-                "Remote runner dispatch builds command argv from caller args without an explicit path-translation preflight.",
-                "Route argv through a rewrite/preflight function that strips local-only wrapper flags and translates or rejects local filesystem paths before runner dispatch.",
+                "Remote execution dispatch builds command argv from caller args without an explicit path-translation preflight.",
+                "Route argv through a rewrite/preflight function that strips local-only wrapper flags and translates or rejects local filesystem paths before remote dispatch.",
             ));
         }
 
         if captures_artifacts_without_snapshot(&fp.content, &policy) {
             findings.push(finding(
                 fp,
-                "Remote runner dispatch can request artifact capture without a source snapshot or mirror contract.",
+                "Remote execution dispatch can request artifact capture without a source snapshot or mirror contract.",
                 "Attach a source snapshot or equivalent mirror verification contract before reporting remote artifacts as run evidence.",
             ));
         }
@@ -41,24 +42,24 @@ pub(in crate::core::code_audit) fn run(
         if dispatches_without_capability_preflight(&fp.content, &policy) {
             findings.push(finding(
                 fp,
-                "Remote runner dispatch starts execution without validating runner capability parity first.",
-                "Check runner capabilities before dispatch so missing tools, components, or environment requirements fail before remote execution starts.",
+                "Remote execution dispatch starts without validating remote capability parity first.",
+                "Check remote execution capabilities before dispatch so missing tools, components, or environment requirements fail before remote execution starts.",
             ));
         }
 
         if dispatches_extension_without_parity_preflight(&fp.content, &policy) {
             findings.push(finding(
                 fp,
-                "Remote runner dispatch accepts an extension selector without validating runner extension parity before execution.",
-                "Add a pre-dispatch extension parity check so missing runner-side extension support fails before command execution.",
+                "Remote execution dispatch accepts an extension selector without validating remote extension parity before execution.",
+                "Add a pre-dispatch extension parity check so missing remote-side extension support fails before command execution.",
             ));
         }
 
         if reports_remote_artifact_without_access_check(&fp.content, &policy) {
             findings.push(finding(
                 fp,
-                "Remote runner artifact reporting does not prove the reported artifact path is locally accessible or retrievable.",
-                "Verify mirrored artifact paths with local metadata or a retrievable runner-artifact token before exposing them as run evidence.",
+                "Remote artifact reporting does not prove the reported artifact path is locally accessible or retrievable.",
+                "Verify mirrored artifact paths with local metadata or a retrievable remote-artifact token before exposing them as run evidence.",
             ));
         }
     }
@@ -75,6 +76,7 @@ struct RemoteExecutionSafetyPolicy<'a> {
     artifact_capture_markers: Vec<&'a str>,
     artifact_snapshot_markers: Vec<&'a str>,
     extension_parity_markers: Vec<&'a str>,
+    extension_selector_markers: Vec<&'a str>,
     artifact_report_markers: Vec<&'a str>,
     artifact_access_markers: Vec<&'a str>,
 }
@@ -82,63 +84,21 @@ struct RemoteExecutionSafetyPolicy<'a> {
 impl<'a> RemoteExecutionSafetyPolicy<'a> {
     fn new(config: &'a RemoteExecutionSafetyConfig) -> Self {
         Self {
-            dispatch_markers: with_defaults(
-                &["RunnerExecOptions", "runner::exec", "core::runner::exec"],
-                &config.dispatch_markers,
-            ),
-            path_translation_markers: with_defaults(
-                &[
-                    "translate_remote_path",
-                    "remote_path",
-                    "sync_workspace",
-                    "strip_local_output",
-                ],
-                &config.path_translation_markers,
-            ),
-            capability_preflight_markers: with_defaults(
-                &[
-                    "RunnerDoctorOutput",
-                    "runner doctor",
-                    "capability_plan",
-                    "capability_preflight",
-                ],
-                &config.capability_preflight_markers,
-            ),
-            artifact_capture_markers: with_defaults(&[], &config.artifact_capture_markers),
-            artifact_snapshot_markers: with_defaults(&[], &config.artifact_snapshot_markers),
-            extension_parity_markers: with_defaults(
-                &[
-                    "extension_parity",
-                    "required_extensions",
-                    "runner_extension",
-                    "validate_runner_extension",
-                ],
-                &config.extension_parity_markers,
-            ),
-            artifact_report_markers: with_defaults(
-                &["runner-artifact://", "artifact.path"],
-                &config.artifact_report_markers,
-            ),
-            artifact_access_markers: with_defaults(
-                &[
-                    "download_remote_artifact",
-                    "is_reportable_artifact_evidence_path",
-                    "is_retrievable_runner_artifact",
-                    "reportable_artifact_evidence_path",
-                    "fs::metadata",
-                    ".is_file()",
-                    "get_artifact",
-                ],
-                &config.artifact_access_markers,
-            ),
+            dispatch_markers: configured(&config.dispatch_markers),
+            path_translation_markers: configured(&config.path_translation_markers),
+            capability_preflight_markers: configured(&config.capability_preflight_markers),
+            artifact_capture_markers: configured(&config.artifact_capture_markers),
+            artifact_snapshot_markers: configured(&config.artifact_snapshot_markers),
+            extension_parity_markers: configured(&config.extension_parity_markers),
+            extension_selector_markers: configured(&config.extension_selector_markers),
+            artifact_report_markers: configured(&config.artifact_report_markers),
+            artifact_access_markers: configured(&config.artifact_access_markers),
         }
     }
 }
 
-fn with_defaults<'a>(defaults: &[&'a str], configured: &'a [String]) -> Vec<&'a str> {
-    let mut markers = defaults.to_vec();
-    markers.extend(configured.iter().map(String::as_str));
-    markers
+fn configured(configured: &[String]) -> Vec<&str> {
+    configured.iter().map(String::as_str).collect()
 }
 
 fn is_remote_dispatch_file(content: &str, policy: &RemoteExecutionSafetyPolicy) -> bool {
@@ -176,8 +136,7 @@ fn dispatches_without_capability_preflight(
     content: &str,
     policy: &RemoteExecutionSafetyPolicy,
 ) -> bool {
-    let dispatches_remote_work =
-        contains_any(content, &policy.dispatch_markers) || content.contains("sync_workspace");
+    let dispatches_remote_work = contains_any(content, &policy.dispatch_markers);
     let has_capability_preflight = contains_any(content, &policy.capability_preflight_markers);
 
     dispatches_remote_work && !has_capability_preflight
@@ -187,7 +146,7 @@ fn dispatches_extension_without_parity_preflight(
     content: &str,
     policy: &RemoteExecutionSafetyPolicy,
 ) -> bool {
-    let accepts_extension = contains_any(content, &["--extension", "extension_id", "extension"]);
+    let accepts_extension = contains_any(content, &policy.extension_selector_markers);
     let has_parity_preflight = contains_any(content, &policy.extension_parity_markers);
 
     accepts_extension && !has_parity_preflight
@@ -209,12 +168,12 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
 
 fn finding(fp: &FileFingerprint, description: &str, suggestion: &str) -> Finding {
     Finding {
-        convention: "runner_offload_preflight".to_string(),
+        convention: "remote_execution_preflight".to_string(),
         severity: Severity::Warning,
         file: fp.relative_path.clone(),
         description: description.to_string(),
         suggestion: suggestion.to_string(),
-        kind: AuditFinding::RunnerOffloadPreflight,
+        kind: AuditFinding::RemoteExecutionPreflight,
     }
 }
 
@@ -234,17 +193,47 @@ mod tests {
 
     fn policy_config() -> RemoteExecutionSafetyConfig {
         RemoteExecutionSafetyConfig {
-            path_translation_markers: vec!["rewrite_component_remote_args".to_string()],
+            dispatch_markers: vec![
+                "execute_remote_work".to_string(),
+                "RemoteWorkOptions".to_string(),
+            ],
+            path_translation_markers: vec!["translate_remote_args".to_string()],
             capability_preflight_markers: vec![
-                "component_runner_capability_plan".to_string(),
-                "evaluate_component_runner_capabilities".to_string(),
+                "remote_capability_plan".to_string(),
+                "evaluate_remote_capabilities".to_string(),
             ],
             artifact_capture_markers: vec!["capture_change: true".to_string()],
             artifact_snapshot_markers: vec!["source_snapshot".to_string()],
+            extension_selector_markers: vec!["extension_selector".to_string()],
+            extension_parity_markers: vec!["required_extensions".to_string()],
             artifact_report_markers: vec!["change_artifact_path".to_string()],
-            artifact_access_markers: vec!["is_retrievable_runner_artifact".to_string()],
-            ..Default::default()
+            artifact_access_markers: vec!["is_retrievable_remote_artifact".to_string()],
         }
+    }
+
+    #[test]
+    fn marker_names_come_from_config_not_detector_defaults() {
+        let fp = fingerprint(
+            "src/main.rs",
+            r#"
+            fn run(command: Vec<String>) {
+                runner::exec("remote", RunnerExecOptions { command, capture_change: false });
+            }
+            "#,
+        );
+
+        assert!(run(&[&fp], &policy_config()).is_empty());
+
+        let config = RemoteExecutionSafetyConfig {
+            dispatch_markers: vec!["runner::exec".to_string(), "RunnerExecOptions".to_string()],
+            ..Default::default()
+        };
+
+        let findings = run(&[&fp], &config);
+
+        assert!(findings
+            .iter()
+            .any(|finding| finding.kind == AuditFinding::RemoteExecutionPreflight));
     }
 
     #[test]
@@ -255,7 +244,7 @@ mod tests {
             fn run(args: &[String]) {
                 let mut command = vec!["tool".to_string()];
                 command.extend(args.iter().cloned());
-                runner::exec("remote", RunnerExecOptions { command, capture_change: false });
+                execute_remote_work("remote", RemoteWorkOptions { command, capture_change: false });
             }
             "#,
         );
@@ -263,7 +252,7 @@ mod tests {
         let findings = run(&[&fp], &policy_config());
 
         assert!(findings.iter().any(|finding| {
-            finding.kind == AuditFinding::RunnerOffloadPreflight
+            finding.kind == AuditFinding::RemoteExecutionPreflight
                 && finding
                     .suggestion
                     .contains("strips local-only wrapper flags")
@@ -276,11 +265,11 @@ mod tests {
             "src/main.rs",
             r#"
             fn run(normalized_args: &[String], remote_path: &str) {
-                let plan = component_runner_capability_plan(command, source_path).unwrap();
-                evaluate_component_runner_capabilities(runner_id, &plan, &capabilities, mode);
+                let plan = remote_capability_plan(command, source_path).unwrap();
+                evaluate_remote_capabilities(target_id, &plan, &capabilities, mode);
                 let mut command = vec!["tool".to_string()];
-                command.extend(rewrite_component_remote_args(normalized_args, remote_path));
-                runner::exec("remote", RunnerExecOptions {
+                command.extend(translate_remote_args(normalized_args, remote_path));
+                execute_remote_work("remote", RemoteWorkOptions {
                     command,
                     capture_change: true,
                     source_snapshot: Some(source_snapshot),
@@ -293,12 +282,12 @@ mod tests {
     }
 
     #[test]
-    fn flags_runner_dispatch_without_capability_preflight() {
+    fn flags_remote_dispatch_without_capability_preflight() {
         let fp = fingerprint(
             "src/main.rs",
             r#"
             fn run(command: Vec<String>) {
-                runner::exec("remote", RunnerExecOptions {
+                execute_remote_work("remote", RemoteWorkOptions {
                     command,
                     capture_change: false,
                     source_snapshot: None,
@@ -315,14 +304,14 @@ mod tests {
     }
 
     #[test]
-    fn accepts_runner_dispatch_with_capability_preflight() {
+    fn accepts_remote_dispatch_with_capability_preflight() {
         let fp = fingerprint(
             "src/main.rs",
             r#"
             fn run(command: Vec<String>) {
-                let plan = component_runner_capability_plan(command_kind, source_path).unwrap();
-                evaluate_component_runner_capabilities(runner_id, &plan, &capabilities, mode);
-                runner::exec("remote", RunnerExecOptions {
+                let plan = remote_capability_plan(command_kind, source_path).unwrap();
+                evaluate_remote_capabilities(target_id, &plan, &capabilities, mode);
+                execute_remote_work("remote", RemoteWorkOptions {
                     command,
                     capture_change: false,
                     source_snapshot: None,
@@ -341,10 +330,10 @@ mod tests {
     #[test]
     fn flags_artifact_capture_without_snapshot_contract() {
         let fp = fingerprint(
-            "src/core/runner.rs",
+            "src/core/remote.rs",
             r#"
             fn run(command: Vec<String>) {
-                runner::exec("remote", RunnerExecOptions { command, capture_change: true });
+                execute_remote_work("remote", RemoteWorkOptions { command, capture_change: true });
             }
             "#,
         );
@@ -361,8 +350,8 @@ mod tests {
         let fp = fingerprint(
             "src/main.rs",
             r#"
-            fn run(command: Vec<String>, extension_id: &str) {
-                runner::exec("remote", RunnerExecOptions { command, capture_change: false });
+            fn run(command: Vec<String>, extension_selector: &str) {
+                execute_remote_work("remote", RemoteWorkOptions { command, capture_change: false });
             }
             "#,
         );
@@ -377,7 +366,7 @@ mod tests {
     #[test]
     fn flags_remote_artifact_reporting_without_access_check() {
         let fp = fingerprint(
-            "src/core/runner/evidence.rs",
+            "src/core/remote/evidence.rs",
             r#"
             fn mirrored_patch_result(patch: Value, artifact: ArtifactRecord) -> Value {
                 let mut patched = patch.clone();
@@ -396,10 +385,10 @@ mod tests {
     #[test]
     fn accepts_remote_artifact_reporting_with_access_check() {
         let fp = fingerprint(
-            "src/core/runner/evidence.rs",
+            "src/core/remote/evidence.rs",
             r#"
             fn mirrored_patch_result(patch: Value, artifact: ArtifactRecord) -> Value {
-                let accessible = is_retrievable_runner_artifact(&artifact.path);
+                let accessible = is_retrievable_remote_artifact(&artifact.path);
                 if accessible {
                     let mut patched = patch.clone();
                     patched["change_artifact_path"] = Value::String(artifact.path);

@@ -124,24 +124,60 @@
     ],
     "remote_execution_safety": {
       "artifact_access_markers": [
-        "is_remote_runner_artifact_path"
+        ".is_file()",
+        "download_remote_artifact",
+        "fs::metadata",
+        "get_artifact",
+        "is_remote_runner_artifact_path",
+        "is_reportable_artifact_evidence_path",
+        "is_retrievable_runner_artifact",
+        "reportable_artifact_evidence_path"
       ],
       "artifact_capture_markers": [
         "capture_patch: true"
       ],
       "artifact_report_markers": [
+        "artifact.path",
         "patch_artifact_id",
-        "patch_artifact_path"
+        "patch_artifact_path",
+        "runner-artifact://"
       ],
       "artifact_snapshot_markers": [
         "source_snapshot"
       ],
       "capability_preflight_markers": [
+        "capability_plan",
+        "capability_preflight",
         "evaluate_lab_runner_capabilities",
-        "lab_runner_capability_plan"
+        "lab_runner_capability_plan",
+        "RunnerDoctorOutput",
+        "runner doctor"
+      ],
+      "dispatch_markers": [
+        "RunnerExecOptions",
+        "core::runner::exec",
+        "runner::exec"
+      ],
+      "extension_parity_markers": [
+        "extension_parity",
+        "required_extensions",
+        "runner_extension",
+        "validate_runner_extension",
+        "validate_runner_extension_parity"
+      ],
+      "extension_selector_markers": [
+        "--extension",
+        "extension",
+        "extension_id",
+        "extension_selector"
       ],
       "path_translation_markers": [
-        "rewrite_lab_offload_args"
+        "remote_path",
+        "rewrite_lab_offload_args",
+        "RunnerWorkspaceSyncMode",
+        "strip_local_output",
+        "sync_workspace",
+        "translate_remote_path"
       ]
     }
   },

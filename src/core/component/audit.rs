@@ -99,6 +99,9 @@ pub struct RemoteExecutionSafetyConfig {
     /// Markers that prove selected extensions/tools are available remotely.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_parity_markers: Vec<String>,
+    /// Markers that identify remote dispatch sites accepting extension selectors.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_selector_markers: Vec<String>,
     /// Markers that identify remotely reported artifact references.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_report_markers: Vec<String>,
@@ -115,6 +118,7 @@ impl RemoteExecutionSafetyConfig {
             && self.artifact_capture_markers.is_empty()
             && self.artifact_snapshot_markers.is_empty()
             && self.extension_parity_markers.is_empty()
+            && self.extension_selector_markers.is_empty()
             && self.artifact_report_markers.is_empty()
             && self.artifact_access_markers.is_empty()
     }
@@ -140,6 +144,10 @@ impl RemoteExecutionSafetyConfig {
         extend_unique(
             &mut self.extension_parity_markers,
             &other.extension_parity_markers,
+        );
+        extend_unique(
+            &mut self.extension_selector_markers,
+            &other.extension_selector_markers,
         );
         extend_unique(
             &mut self.artifact_report_markers,
