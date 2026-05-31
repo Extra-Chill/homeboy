@@ -481,10 +481,6 @@ const BASELINE_OCCURRENCES: usize = 142;
 // explicit so stale rows and occurrence-count changes force cleanup or review.
 const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     ViolationKey {
-        path: "src/core/budget.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
         path: "src/core/code_audit/core_fingerprint.rs",
         term: "rust",
     },
@@ -519,10 +515,6 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     ViolationKey {
         path: "src/core/engine/symbol_graph.rs",
         term: "php",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/parsing.rs",
-        term: "wordpress",
     },
     ViolationKey {
         path: "src/core/extension/bench/run_metadata.rs",
@@ -638,7 +630,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 109;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 105;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
