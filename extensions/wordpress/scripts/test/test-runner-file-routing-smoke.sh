@@ -76,6 +76,11 @@ if [ -n "$recipe_path" ] && [ -f "$recipe_path" ]; then
     component_path="$(jq -r '.inputs.mounts[]? | select(.target == "/wordpress/wp-content/plugins/component") | .source' "$recipe_path" | head -n 1)"
 fi
 if [ -n "$component_path" ]; then
+    if [ "${WP_CODEBOX_STUB_NO_PHPUNIT:-}" = "1" ]; then
+        printf 'NO_TEST_FILES\n' > "${component_path}/.pg-test-result.txt"
+        printf '%s\n' '{"success":false,"executions":[{"stdout":"wordpress.phpunit crashed before producing a structured response\n","stderr":""}]}'
+        exit 1
+    fi
     if [ "${WP_CODEBOX_STUB_REGISTRATION_DRIFT:-}" = "1" ]; then
         printf 'SOME TESTS FAILED\nTESTS: 4 FAILURES: 3 ERRORS: 1\n' > "${component_path}/.pg-test-result.txt"
         printf '%s\n' '{"success":false,"executions":[{"stdout":"Abilities not registered during plugin boot: datamachine/get-flows, datamachine/create-flow\\nAbility category '\''datamachine-content'\'' should be registered during plugin boot\\nUnexpected incorrect usage notice for WP_Abilities_Registry::get_registered.\\nAbility \\\"datamachine/execute-workflow\\\" not found.\\nFailed asserting that an array has the key '\''image_generation'\''.\\nFailed asserting that an array has the key '\''web_fetch'\''.\\n","stderr":""}]}'
@@ -86,6 +91,17 @@ fi
 printf '{"success":true,"executions":[{"stdout":"OK (1 test, 1 assertion)\n","stderr":""}]}\n'
 SH
 chmod +x "${TMPDIR}/stubs/wp-codebox.sh"
+
+cat > "${TMPDIR}/stubs/composer" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" != "test" ]; then
+    echo "Unexpected composer command: $*" >&2
+    exit 2
+fi
+echo "contract smoke passed"
+SH
+chmod +x "${TMPDIR}/stubs/composer"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
@@ -183,6 +199,26 @@ fi
 assert_contains "${TMPDIR}/registration-drift.out" "HARNESS PREFLIGHT FAILURE: WordPress bootstrap registration drift"
 assert_contains "${TMPDIR}/registration-drift.out" "Changed-since PHPUnit hit broad missing registration drift"
 assert_contains "${TMPDIR}/registration-drift.out" "changed-since: origin/main"
+
+no_phpunit_component="${TMPDIR}/no-phpunit-component"
+mkdir -p "${no_phpunit_component}/tests"
+cat > "${no_phpunit_component}/composer.json" <<'JSON'
+{"scripts":{"test":"php tests/contract-smoke.php"}}
+JSON
+
+WP_CODEBOX_STUB_NO_PHPUNIT=1 \
+PATH="${TMPDIR}/stubs:${PATH}" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$no_phpunit_component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/no-phpunit-composer.out" 2>&1
+
+assert_contains "${TMPDIR}/no-phpunit-composer.out" "Running Composer test script"
+assert_contains "${TMPDIR}/no-phpunit-composer.out" "contract smoke passed"
+assert_not_contains "${TMPDIR}/no-phpunit-composer.out" "NO PHPUNIT TEST FILES DISCOVERED"
+assert_not_contains "${TMPDIR}/no-phpunit-composer.out" "wordpress.phpunit crashed before producing a structured response"
 
 set +e
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
