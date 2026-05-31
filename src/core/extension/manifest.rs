@@ -606,6 +606,19 @@ impl ExtensionManifest {
             .collect()
     }
 
+    /// Schema version declared by the canonical `structured_sidecars` manifest
+    /// section for a logical sidecar name.
+    pub fn structured_sidecar_schema_version(&self, name: &str) -> Option<&str> {
+        self.structured_sidecars
+            .get(name)
+            .and_then(|contract| match contract {
+                StructuredSidecarContract::Detail(detail) if detail.enabled => {
+                    detail.schema_version.as_deref()
+                }
+                _ => None,
+            })
+    }
+
     /// Convenience: get deploy verifications (empty if no deploy capability).
     pub fn deploy_verifications(&self) -> &[DeployVerification] {
         self.deploy

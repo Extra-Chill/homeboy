@@ -77,25 +77,64 @@ fn manifest_parses_declared_structured_sidecars() {
                 "schema_version": "1"
             },
             "producer.summary": {
-                "path": "producer-summary.json",
                 "schema_version": "1"
             },
             "lint.findings": true,
+            "lint.producers": true,
+            "trace.results": true,
             "test.coverage": false
         }
     }))
     .unwrap();
 
     let sidecars = manifest.structured_sidecars();
-    assert_eq!(sidecars.len(), 3);
+    assert_eq!(sidecars.len(), 5);
     assert_eq!(sidecars[0].name, "findings");
     assert_eq!(sidecars[0].path, "findings.json");
     assert_eq!(sidecars[0].schema_version.as_deref(), Some("1"));
     assert_eq!(sidecars[1].name, "lint.findings");
     assert_eq!(sidecars[1].path, "lint-findings.json");
     assert_eq!(sidecars[1].schema_version, None);
-    assert_eq!(sidecars[2].name, "producer.summary");
-    assert_eq!(sidecars[2].path, "producer-summary.json");
+    assert_eq!(sidecars[2].name, "lint.producers");
+    assert_eq!(sidecars[2].path, "lint-producers.json");
+    assert_eq!(sidecars[3].name, "producer.summary");
+    assert_eq!(sidecars[3].path, "producer-summary.json");
+    assert_eq!(sidecars[4].name, "trace.results");
+    assert_eq!(sidecars[4].path, "trace.json");
+}
+
+#[test]
+fn structured_sidecar_schema_versions_come_from_top_level_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "structured_sidecars": {
+            "findings": {
+                "path": "findings.json",
+                "schema_version": "2"
+            },
+            "lint.findings": true,
+            "test.failures": false
+        },
+        "lint": {
+            "extension_script": "lint.sh",
+            "findings_schema_version": "1"
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        manifest.structured_sidecar_schema_version("findings"),
+        Some("2")
+    );
+    assert_eq!(
+        manifest.structured_sidecar_schema_version("lint.findings"),
+        None
+    );
+    assert_eq!(
+        manifest.structured_sidecar_schema_version("test.failures"),
+        None
+    );
 }
 
 #[test]

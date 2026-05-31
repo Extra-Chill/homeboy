@@ -53,10 +53,15 @@ fn default_true() -> bool {
 fn default_structured_sidecar_path(name: &str) -> String {
     match name {
         "lint.findings" => run_dir::files::LINT_FINDINGS,
+        "lint.producers" => run_dir::files::LINT_PRODUCERS,
         "test.results" => run_dir::files::TEST_RESULTS,
         "test.failures" => run_dir::files::TEST_FAILURES,
         "test.coverage" => run_dir::files::COVERAGE,
         "bench.results" => run_dir::files::BENCH_RESULTS,
+        "trace.results" => run_dir::files::TRACE_RESULTS,
+        "resource.summary" => run_dir::files::RESOURCE_SUMMARY,
+        "producer.summary" => "producer-summary.json",
+        "findings" => "findings.json",
         "annotations" => run_dir::files::ANNOTATIONS_DIR,
         _ => name,
     }

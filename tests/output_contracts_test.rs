@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::cli_surface::current_command_surface;
 use homeboy::commands::bench::BenchOutput;
+use homeboy::commands::extension::{ExtensionDetail, ExtensionOutput};
 use homeboy::commands::review::{
     ReviewArtifact, ReviewArtifactCommand, ReviewCommandOutput, ReviewStage, ReviewSummary,
 };
@@ -18,7 +19,8 @@ use homeboy::core::extension::test::{
     RawTestOutput, TestCommandOutput, TestCounts, TestSummaryOutput,
 };
 use homeboy::core::extension::{
-    PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
+    PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, StructuredSidecarDeclaration,
+    VerificationPhase,
 };
 use homeboy::core::finding::{FindingProducerSummary, FindingSource, HomeboyFinding};
 use homeboy::core::plan::HomeboyPlan;
@@ -325,6 +327,47 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
             variant_contract("observation", json!({ "command": "runs.list", "runs": [] })),
         ],
     );
+}
+
+#[test]
+fn extension_show_output_contracts_use_top_level_structured_sidecars() {
+    let output = typed_output_value(ExtensionOutput::Show {
+        extension: ExtensionDetail {
+            id: "wordpress".to_string(),
+            name: "WordPress".to_string(),
+            version: "1.0.0".to_string(),
+            description: None,
+            author: None,
+            homepage: None,
+            source_url: None,
+            runtime: "platform".to_string(),
+            runtime_requirements: None,
+            has_setup: None,
+            has_ready_check: None,
+            ready: true,
+            ready_reason: None,
+            ready_detail: None,
+            linked: false,
+            path: "/extensions/wordpress".to_string(),
+            source_revision: None,
+            cli: None,
+            actions: Vec::new(),
+            inputs: Vec::new(),
+            settings: Vec::new(),
+            structured_sidecars: vec![StructuredSidecarDeclaration {
+                name: "findings".to_string(),
+                path: "findings.json".to_string(),
+                schema_version: Some("1".to_string()),
+            }],
+            requires: None,
+        },
+    });
+
+    assert_eq!(
+        output["extension"]["structured_sidecars"],
+        json!([{ "name": "findings", "path": "findings.json", "schema_version": "1" }])
+    );
+    assert_eq!(output["extension"].get("lint"), None);
 }
 
 fn quality_output_contract_scenarios() -> Vec<OutputContractScenario> {
