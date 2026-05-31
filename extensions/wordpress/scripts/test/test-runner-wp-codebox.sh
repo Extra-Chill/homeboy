@@ -460,14 +460,20 @@ fi
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/test/parse-test-results.sh"
 PARSE_FAILURES="${EXTENSION_PATH}/scripts/test/parse-test-failures.sh"
 if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
-    if [ -n "$PHPUNIT_STDOUT" ]; then
-        bash "$PARSE_RESULTS" "$PHPUNIT_STDOUT_TMPFILE" || true
-    elif [ -n "$PHPUNIT_OUTPUT" ]; then
-        bash "$PARSE_RESULTS" "$RESULT_FILE" || true
-    fi
+	if [ -f "${ARTIFACTS_DIR}/files/test-results.json" ]; then
+		bash "$PARSE_RESULTS" "$ARTIFACTS_DIR" || true
+	elif [ -n "$PHPUNIT_STDOUT" ]; then
+		bash "$PARSE_RESULTS" "$PHPUNIT_STDOUT_TMPFILE" || true
+	elif [ -n "$PHPUNIT_OUTPUT" ]; then
+		bash "$PARSE_RESULTS" "$RESULT_FILE" || true
+	fi
 fi
-if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] && [ -f "$PARSE_FAILURES" ] && [ -n "$PHPUNIT_STDOUT" ]; then
-    bash "$PARSE_FAILURES" "$PHPUNIT_STDOUT_TMPFILE" "${PLUGIN_PATH:-}" || true
+if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] && [ -f "$PARSE_FAILURES" ]; then
+	if [ -f "${ARTIFACTS_DIR}/files/test-results.json" ]; then
+		bash "$PARSE_FAILURES" "$ARTIFACTS_DIR" "${PLUGIN_PATH:-}" || true
+	elif [ -n "$PHPUNIT_STDOUT" ]; then
+		bash "$PARSE_FAILURES" "$PHPUNIT_STDOUT_TMPFILE" "${PLUGIN_PATH:-}" || true
+	fi
 fi
 rm -f "$WP_CODEBOX_TMPFILE" "$PHPUNIT_STDOUT_TMPFILE"
 

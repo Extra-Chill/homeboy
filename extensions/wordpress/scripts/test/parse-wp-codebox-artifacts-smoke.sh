@@ -45,6 +45,31 @@ cat > "$ARTIFACT_DIR/files/test-results.json" <<'JSON'
 }
 JSON
 
+cat > "$ARTIFACT_DIR/files/diagnostics.json" <<'JSON'
+{
+  "schema": "wp-codebox/artifact-diagnostics/v1",
+  "status": "reported",
+  "summary": { "total": 2, "error": 0, "warning": 1, "notice": 1, "info": 0 },
+  "diagnostics": [
+    {
+      "id": "layout-gap-1",
+      "type": "layout_fidelity_gap",
+      "severity": "warning",
+      "message": "Generated artifact lost source grid structure.",
+      "path": "/tmp/plugin/inc/Layout.php",
+      "selector": ".hero",
+      "details": { "source_report": { "html": { "element_count": 8 } } }
+    },
+    {
+      "id": "trace-note-1",
+      "type": "trace_note",
+      "severity": "notice",
+      "message": "Notice diagnostics stay out of failure sidecars."
+    }
+  ]
+}
+JSON
+
 cat > "$ARTIFACT_DIR/commands.jsonl" <<'JSONL'
 {"command":"phpunit","exitCode":1,"summary":"Tests: 3, Assertions: 4, Failures: 1, Skipped: 1."}
 JSONL
@@ -103,7 +128,7 @@ with open(sys.argv[2], encoding="utf-8") as handle:
 assert failures_payload["total"] == 3, failures_payload
 assert failures_payload["passed"] == 1, failures_payload
 failures = failures_payload["failures"]
-assert len(failures) == 1, failures
+assert len(failures) == 2, failures
 failure = failures[0]
 
 expected = {
@@ -127,6 +152,13 @@ assert len(failure.get("fingerprint", "")) == 64
 assert "commands.log" in failure.get("stdout_excerpt", "")
 assert "runtime completed" in failure.get("stdout_excerpt", "")
 assert failure.get("stderr_excerpt") == ""
+
+diagnostic_failure = failures[1]
+assert diagnostic_failure["test_id"] == "layout-gap-1", diagnostic_failure
+assert diagnostic_failure["suite"] == "wp-codebox-diagnostics", diagnostic_failure
+assert diagnostic_failure["file"] == "inc/Layout.php", diagnostic_failure
+assert diagnostic_failure["failure_type"] == "WPCodeboxWarningDiagnostic", diagnostic_failure
+assert diagnostic_failure["diagnostic"]["details"]["source_report"]["html"]["element_count"] == 8, diagnostic_failure
 
 print("wordpress parse wp-codebox artifacts smoke passed")
 PY
