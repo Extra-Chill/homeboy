@@ -2586,16 +2586,6 @@ if ( ! function_exists( 'homeboy_datamachine_agent_configure_settings' ) ) {
             $allowed_repos = is_array( $config['allowed_repos'] ?? null ) ? $config['allowed_repos'] : array( $target_repo );
             $profile_id    = homeboy_datamachine_agent_scalar( $config, 'github_profile_id', 'homeboy-agent-ci' );
             $profiles      = array();
-            if ( '' !== $github_token ) {
-                $profiles[] = array(
-                    'id'            => $profile_id,
-                    'label'         => 'Homeboy agent CI token',
-                    'mode'          => 'pat',
-                    'pat'           => $github_token,
-                    'default_repo'  => $target_repo,
-                    'allowed_repos' => array_values( array_unique( array_filter( array_map( 'strval', $allowed_repos ) ) ) ),
-                );
-            }
             if ( '' !== $github_repository_token ) {
                 $profiles[] = array(
                     'id'            => $profile_id . '-repository',
@@ -2606,8 +2596,18 @@ if ( ! function_exists( 'homeboy_datamachine_agent_configure_settings' ) ) {
                     'allowed_repos' => array( $target_repo ),
                 );
             }
+            if ( '' !== $github_token ) {
+                $profiles[] = array(
+                    'id'            => $profile_id,
+                    'label'         => 'Homeboy agent CI token',
+                    'mode'          => 'pat',
+                    'pat'           => $github_token,
+                    'default_repo'  => $target_repo,
+                    'allowed_repos' => array_values( array_unique( array_filter( array_map( 'strval', $allowed_repos ) ) ) ),
+                );
+            }
             $settings['github_credential_profiles'] = $profiles;
-            $settings['github_default_profile_id']  = '' !== $github_token ? $profile_id : $profile_id . '-repository';
+            $settings['github_default_profile_id']  = '' !== $github_repository_token ? $profile_id . '-repository' : $profile_id;
             $settings['github_default_repo']       = $target_repo;
         }
 
