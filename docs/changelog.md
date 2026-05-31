@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.213.10] - 2026-05-31
+
+### Changed
+- genericize test coverage fixtures
+- refresh detector agnostic baseline
+- type observation run provenance
+
+### Fixed
+- clear observation context audit drift
+
 ## [0.213.9] - 2026-05-31
 
 ### Fixed
