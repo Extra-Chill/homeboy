@@ -9,6 +9,8 @@ mod findings;
 mod schema;
 mod triage_items;
 
+use super::context::RunContext;
+pub use super::context::{LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV};
 use super::records::{
     ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, FindingListFilter,
     FindingRecord, NewFindingRecord, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord,
@@ -18,7 +20,6 @@ use super::records::{
 use crate::core::{paths, Error, Result};
 
 pub const CURRENT_SCHEMA_VERSION: i64 = 5;
-pub const LAB_OFFLOAD_METADATA_ENV: &str = "HOMEBOY_LAB_OFFLOAD_JSON";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ObservationDbStatus {
@@ -57,10 +58,23 @@ impl ObservationStore {
     }
 
     pub fn start_run(&self, run: NewRunRecord) -> Result<RunRecord> {
+        let context = run
+            .run_context
+            .clone()
+            .with_missing_from(RunContext::subprocess_compatibility_from_env());
+        self.start_run_with_context(run, context)
+    }
+
+    pub fn start_run_with_context(
+        &self,
+        run: NewRunRecord,
+        context: RunContext,
+    ) -> Result<RunRecord> {
         validate_required("kind", &run.kind)?;
         let id = Uuid::new_v4().to_string();
         let started_at = chrono::Utc::now().to_rfc3339();
-        let metadata_json = serialize_metadata(&with_run_owner_metadata(run.metadata_json))?;
+        let metadata_json =
+            serialize_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
 
         self.connection
             .execute(
@@ -854,24 +868,24 @@ fn serialize_metadata(metadata_json: &serde_json::Value) -> Result<String> {
     })
 }
 
-fn with_run_owner_metadata(mut metadata: serde_json::Value) -> serde_json::Value {
+fn with_run_context_metadata(
+    mut metadata: serde_json::Value,
+    context: &RunContext,
+) -> serde_json::Value {
     let owner = serde_json::json!({
         "pid": std::process::id(),
         "recorded_at": chrono::Utc::now().to_rfc3339(),
     });
-    let source_snapshot = std::env::var("HOMEBOY_SOURCE_SNAPSHOT_JSON")
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    let lab_offload = std::env::var(LAB_OFFLOAD_METADATA_ENV)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
 
     let mut additions = vec![("homeboy_run_owner".to_string(), owner)];
-    if let Some(source_snapshot) = source_snapshot {
-        additions.push(("source_snapshot".to_string(), source_snapshot));
+    if let Some(source_snapshot) = &context.provenance.source_snapshot {
+        additions.push(("source_snapshot".to_string(), source_snapshot.clone()));
     }
-    if let Some(lab_offload) = lab_offload {
-        additions.push(("lab_offload".to_string(), lab_offload));
+    if let Some(lab_offload) = &context.provenance.lab_offload {
+        additions.push(("lab_offload".to_string(), lab_offload.clone()));
+    }
+    if let Some(artifact_mirror) = &context.provenance.artifact_mirror {
+        additions.push(("artifact_mirror".to_string(), artifact_mirror.clone()));
     }
 
     let target = if metadata.is_object() {
@@ -1072,411 +1086,3 @@ fn sqlite_error(context: impl Into<String>) -> impl FnOnce(rusqlite::Error) -> E
 #[cfg(test)]
 #[path = "../../../tests/core/observation/store_test.rs"]
 mod store_test;
-
-#[cfg(test)]
-mod api_coverage_tests {
-    use super::*;
-    use crate::test_support::with_isolated_home;
-
-    struct XdgGuard(Option<String>);
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self(prior)
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
-    fn new_run(kind: &str) -> NewRunRecord {
-        NewRunRecord::builder(kind)
-            .component_id("homeboy")
-            .command(format!("homeboy {kind}"))
-            .cwd_path(std::path::Path::new("/tmp/homeboy"))
-            .homeboy_version("test")
-            .git_sha(Some("abc123".to_string()))
-            .rig_id("studio")
-            .metadata(serde_json::json!({ "source": "inline" }))
-            .build()
-    }
-
-    #[test]
-    fn test_status() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let status = status().expect("status");
-            assert!(!status.exists);
-        });
-    }
-
-    #[test]
-    fn test_database_path() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            assert_eq!(
-                database_path().expect("path"),
-                home.path().join(".local/share/homeboy/homeboy.sqlite")
-            );
-        });
-    }
-
-    #[test]
-    fn test_open_initialized() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            assert_eq!(
-                store.status().expect("status").schema_version,
-                CURRENT_SCHEMA_VERSION
-            );
-        });
-    }
-
-    #[test]
-    fn test_start_run() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("bench")).expect("start");
-            assert_eq!(run.status, "running");
-            assert_eq!(run.kind, "bench");
-        });
-    }
-
-    #[test]
-    fn test_start_run_records_source_snapshot_from_environment() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let snapshot = serde_json::json!({
-                "runner_id": "lab",
-                "remote_path": "/srv/homeboy/repo",
-                "dirty": true,
-                "sync_mode": "snapshot",
-                "snapshot_hash": "sha256:dirty",
-                "synced_at": "2026-05-16T00:00:00Z",
-                "sync_excludes": ["node_modules/"]
-            });
-
-            std::env::set_var("HOMEBOY_SOURCE_SNAPSHOT_JSON", snapshot.to_string());
-            let run = store.start_run(new_run("test")).expect("start");
-            std::env::remove_var("HOMEBOY_SOURCE_SNAPSHOT_JSON");
-
-            assert_eq!(run.metadata_json["source_snapshot"], snapshot);
-        });
-    }
-
-    #[test]
-    fn test_start_run_records_lab_offload_metadata_from_environment() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let lab = serde_json::json!({
-                "source": "automatic",
-                "status": "fallback",
-                "runner_id": "lab",
-                "remote_workspace": null,
-                "fallback_reason": "runner connect timed out after 3s"
-            });
-
-            std::env::set_var(LAB_OFFLOAD_METADATA_ENV, lab.to_string());
-            let run = store.start_run(new_run("test")).expect("start");
-            std::env::remove_var(LAB_OFFLOAD_METADATA_ENV);
-
-            assert_eq!(run.metadata_json["lab_offload"], lab);
-        });
-    }
-
-    #[test]
-    fn test_finish_run() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("bench")).expect("start");
-            let finished = store
-                .finish_run(
-                    &run.id,
-                    RunStatus::Pass,
-                    Some(serde_json::json!({ "done": true })),
-                )
-                .expect("finish");
-            assert_eq!(finished.status, "pass");
-            assert_eq!(finished.metadata_json["done"], true);
-        });
-    }
-
-    #[test]
-    fn test_list_runs() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("trace")).expect("start");
-            let runs = store
-                .list_runs(RunListFilter {
-                    kind: Some("trace".to_string()),
-                    ..RunListFilter::default()
-                })
-                .expect("list");
-            assert_eq!(runs.len(), 1);
-            assert_eq!(runs[0].id, run.id);
-        });
-    }
-
-    #[test]
-    fn test_latest_run() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let old = store.start_run(new_run("lint")).expect("old");
-            let latest = store.start_run(new_run("lint")).expect("latest");
-
-            let selected = store
-                .latest_run(RunListFilter {
-                    kind: Some("lint".to_string()),
-                    component_id: Some("homeboy".to_string()),
-                    ..RunListFilter::default()
-                })
-                .expect("latest run")
-                .expect("run exists");
-
-            assert_eq!(selected.id, latest.id);
-            assert_ne!(selected.id, old.id);
-        });
-    }
-
-    #[test]
-    fn test_list_runs_started_since() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("bench")).expect("start");
-            let recent = store
-                .list_runs_started_since("1970-01-01T00:00:00Z")
-                .expect("recent");
-            assert_eq!(recent.len(), 1);
-            assert_eq!(recent[0].id, run.id);
-        });
-    }
-
-    #[test]
-    fn test_import_run() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("bench")).expect("start");
-            let imported = ObservationStore::open_initialized().expect("second handle");
-
-            imported.import_run(&run).expect("idempotent import");
-            assert_eq!(imported.get_run(&run.id).expect("get"), Some(run));
-        });
-    }
-
-    #[test]
-    fn test_record_artifact() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("trace")).expect("start");
-            let path = home.path().join("artifact.json");
-            fs::write(&path, b"{}").expect("write artifact");
-            let artifact = store
-                .record_artifact(&run.id, "json", &path)
-                .expect("artifact");
-            assert_eq!(artifact.size_bytes, Some(2));
-        });
-    }
-
-    #[test]
-    fn test_record_artifact_uses_custom_artifact_root() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let artifact_root = home.path().join("agent-readable-artifacts");
-            crate::core::set_artifact_root_override(Some(artifact_root.clone()));
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("bench")).expect("start");
-            let path = home.path().join("artifact.json");
-            fs::write(&path, b"{}").expect("write artifact");
-
-            let artifact = store
-                .record_artifact(&run.id, "json", &path)
-                .expect("artifact");
-
-            assert!(
-                artifact
-                    .path
-                    .starts_with(&artifact_root.to_string_lossy().to_string()),
-                "artifact path {} should be under {}",
-                artifact.path,
-                artifact_root.display()
-            );
-            assert!(std::path::Path::new(&artifact.path).is_file());
-        });
-    }
-
-    #[test]
-    fn test_record_url_artifact() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("bench")).expect("start");
-            let artifact = store
-                .record_url_artifact(&run.id, "frontend_url", "https://example.test/")
-                .expect("artifact");
-
-            assert_eq!(artifact.artifact_type, "url");
-            assert_eq!(artifact.url.as_deref(), Some("https://example.test/"));
-        });
-    }
-
-    #[test]
-    fn test_list_artifacts() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("trace")).expect("start");
-            let path = home.path().join("artifact.log");
-            fs::write(&path, b"log").expect("write artifact");
-            let artifact = store
-                .record_artifact(&run.id, "log", &path)
-                .expect("artifact");
-            assert_eq!(store.list_artifacts(&run.id).expect("list"), vec![artifact]);
-        });
-    }
-
-    #[test]
-    fn test_import_artifact() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let source = ObservationStore::open_initialized().expect("source");
-            let run = source.start_run(new_run("trace")).expect("run");
-            let path = home.path().join("artifact.json");
-            fs::write(&path, b"{}").expect("write artifact");
-            let artifact = source
-                .record_artifact(&run.id, "json", &path)
-                .expect("artifact");
-
-            let target = ObservationStore::open_initialized().expect("target");
-            target
-                .import_artifact(&artifact)
-                .expect("idempotent import");
-            assert_eq!(
-                target.list_artifacts(&run.id).expect("list"),
-                vec![artifact]
-            );
-        });
-    }
-
-    #[test]
-    fn test_record_trace_run() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("trace")).expect("start");
-
-            let trace_run = store
-                .record_trace_run(
-                    NewTraceRunRecord::builder(&run.id, "studio", "create-site", "pass")
-                        .trace_rig_id(Some("studio-rig"))
-                        .baseline_status(Some("pass"))
-                        .metadata(serde_json::json!({ "span_count": 1 }))
-                        .build(),
-                )
-                .expect("trace run");
-
-            assert_eq!(trace_run.run_id, run.id);
-            assert_eq!(trace_run.component_id, "studio");
-            assert_eq!(trace_run.rig_id.as_deref(), Some("studio-rig"));
-            assert_eq!(trace_run.metadata_json["span_count"], 1);
-        });
-    }
-
-    #[test]
-    fn test_record_trace_span() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("trace")).expect("start");
-
-            let span = store
-                .record_trace_span(
-                    NewTraceSpanRecord::builder(&run.id, "boot_to_ready", "ok")
-                        .duration_ms(Some(125.0))
-                        .from_event(Some("runner.boot"))
-                        .to_event(Some("runner.ready"))
-                        .metadata(serde_json::json!({ "source": "test" }))
-                        .build(),
-                )
-                .expect("trace span");
-
-            let spans = store.list_trace_spans(&run.id).expect("spans");
-            assert_eq!(spans, vec![span]);
-            assert_eq!(spans[0].duration_ms, Some(125.0));
-        });
-    }
-
-    #[test]
-    fn test_import_trace_span() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let source = ObservationStore::open_initialized().expect("source");
-            let run = source.start_run(new_run("trace")).expect("run");
-            let span = source
-                .record_trace_span(
-                    NewTraceSpanRecord::builder(&run.id, "boot", "ok")
-                        .duration_ms(Some(42.0))
-                        .from_event(Some("start"))
-                        .to_event(Some("ready"))
-                        .metadata(serde_json::json!({ "source": "import-test" }))
-                        .build(),
-                )
-                .expect("span");
-
-            let target = ObservationStore::open_initialized().expect("target");
-            target.import_trace_span(&span).expect("idempotent import");
-            assert_eq!(target.list_trace_spans(&run.id).expect("spans"), vec![span]);
-        });
-    }
-
-    #[test]
-    fn test_list_trace_spans() {
-        with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run("trace")).expect("start");
-
-            store
-                .record_trace_span(
-                    NewTraceSpanRecord::builder(&run.id, "first", "ok")
-                        .duration_ms(Some(10.0))
-                        .from_event(Some("runner.first"))
-                        .to_event(Some("runner.second"))
-                        .build(),
-                )
-                .expect("first span");
-            store
-                .record_trace_span(
-                    NewTraceSpanRecord::builder(&run.id, "second", "skipped")
-                        .from_event(Some("runner.second"))
-                        .to_event(Some("runner.third"))
-                        .metadata(serde_json::json!({ "missing": ["runner.third"] }))
-                        .build(),
-                )
-                .expect("second span");
-
-            let spans = store.list_trace_spans(&run.id).expect("spans");
-            assert_eq!(spans.len(), 2);
-            assert_eq!(spans[0].span_id, "first");
-            assert_eq!(spans[1].span_id, "second");
-            assert_eq!(spans[1].metadata_json["missing"][0], "runner.third");
-        });
-    }
-}

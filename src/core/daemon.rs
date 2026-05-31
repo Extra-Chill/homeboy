@@ -369,7 +369,7 @@ fn enqueue_exec_job(
                 .current_dir(&request.cwd);
             if let Some(snapshot) = &source_snapshot {
                 command.env(
-                    "HOMEBOY_SOURCE_SNAPSHOT_JSON",
+                    crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
                     serde_json::to_string(snapshot).unwrap_or_default(),
                 );
             }

@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::core::observation::context::RunContext;
+
 use super::NewRunRecord;
 
 #[derive(Debug, Clone)]
@@ -19,6 +21,7 @@ impl NewRunRecordBuilder {
                 git_sha: None,
                 rig_id: None,
                 metadata_json: serde_json::json!({}),
+                run_context: RunContext::empty(),
             },
         }
     }

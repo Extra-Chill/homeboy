@@ -591,10 +591,6 @@ const BASELINE: &[ViolationKey] = &[
         term: "homeboy.json",
     },
     ViolationKey {
-        path: "src/core/daemon.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
         path: "src/core/daemon/artifact_download.rs",
         term: "Homeboy",
     },
@@ -863,12 +859,12 @@ const BASELINE: &[ViolationKey] = &[
         term: ".homeboy",
     },
     ViolationKey {
-        path: "src/core/observation/store.rs",
-        term: ".homeboy",
+        path: "src/core/observation/context.rs",
+        term: "HOMEBOY_",
     },
     ViolationKey {
         path: "src/core/observation/store.rs",
-        term: "HOMEBOY_",
+        term: ".homeboy",
     },
     ViolationKey {
         path: "src/core/output.rs",
@@ -1108,7 +1104,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 638;
+const BASELINE_OCCURRENCES: usize = 637;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.
@@ -1120,14 +1116,6 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     ViolationKey {
         path: "src/core/code_audit/detectors/repeated_literal_shape.rs",
         term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/test_coverage/tests/test_coverage_behavior_tests.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/test_coverage/tests/test_coverage_behavior_tests.rs",
-        term: "rust",
     },
     ViolationKey {
         path: "src/core/code_audit/requirements.rs",
@@ -1263,7 +1251,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 105;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 102;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {

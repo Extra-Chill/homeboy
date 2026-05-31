@@ -182,7 +182,7 @@ fn main() -> std::process::ExitCode {
             metadata, messages, ..
         }) => {
             if let Some(metadata) = metadata {
-                homeboy::core::runner::capture_lab_offload_metadata(metadata);
+                homeboy::core::runner::capture_lab_offload_subprocess_metadata(metadata);
             }
             for message in messages {
                 eprintln!("{message}");
