@@ -259,11 +259,66 @@ function parse_wp_codebox_test_results( array $payload, string $test_results_pat
 		}
 	}
 
+	$failures = array_merge( $failures, wp_codebox_diagnostic_failures( $artifact_root, $component_path, $raw_excerpt ) );
+
 	return [
 		'failures' => $failures,
 		'total'    => $total,
 		'passed'   => $passed,
 	];
+}
+
+/**
+ * Convert generic WP Codebox artifact diagnostics into Homeboy failure entries.
+ */
+function wp_codebox_diagnostic_failures( string $artifact_root, string $component_path, string $raw_excerpt ): array {
+	$diagnostics_path = $artifact_root . '/files/diagnostics.json';
+	if ( ! is_file( $diagnostics_path ) ) {
+		return [];
+	}
+
+	$payload = json_decode( (string) file_get_contents( $diagnostics_path ), true );
+	if ( ! is_array( $payload ) || ( $payload['schema'] ?? '' ) !== 'wp-codebox/artifact-diagnostics/v1' ) {
+		return [];
+	}
+
+	$entries     = [];
+	$diagnostics = is_array( $payload['diagnostics'] ?? null ) ? $payload['diagnostics'] : [];
+	foreach ( $diagnostics as $diagnostic ) {
+		if ( ! is_array( $diagnostic ) ) {
+			continue;
+		}
+
+		$severity = strtolower( (string) ( $diagnostic['severity'] ?? 'warning' ) );
+		if ( ! in_array( $severity, [ 'error', 'warning' ], true ) ) {
+			continue;
+		}
+
+		$diagnostic_id = (string) ( $diagnostic['id'] ?? $diagnostic['type'] ?? 'wp-codebox diagnostic' );
+		$message       = (string) ( $diagnostic['message'] ?? $diagnostic['type'] ?? $diagnostic_id );
+		$file          = wp_codebox_normalize_component_path( (string) ( $diagnostic['path'] ?? '' ), $component_path );
+		$error_type    = 'WPCodebox' . ucfirst( $severity ) . 'Diagnostic';
+
+		$entries[] = [
+			'test_name'      => $diagnostic_id,
+			'test_file'      => '',
+			'error_type'     => $error_type,
+			'message'        => $message,
+			'source_file'    => $file,
+			'source_line'    => 0,
+			'test_id'        => $diagnostic_id,
+			'suite'          => 'wp-codebox-diagnostics',
+			'file'           => $file,
+			'line'           => 0,
+			'failure_type'   => $error_type,
+			'fingerprint'    => make_failure_fingerprint( $diagnostic_id, $file, 0, $error_type, $message ),
+			'stdout_excerpt' => make_output_excerpt( explode( "\n", $raw_excerpt ) ),
+			'stderr_excerpt' => '',
+			'diagnostic'     => $diagnostic,
+		];
+	}
+
+	return $entries;
 }
 
 /**
