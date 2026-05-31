@@ -653,5 +653,23 @@ namespace {
         exit( 1 );
     }
 
+    homeboy_datamachine_agent_configure_settings(
+        array(
+            'provider'                    => 'openai',
+            'model'                       => 'gpt-5.5',
+            'github_token_env'            => 'HOMEBOY_GITHUB_APP_TOKEN',
+            'github_repository_token_env' => 'GITHUB_TOKEN',
+            'github_profile_id'           => 'smoke-ci-target-only',
+            'target_repo'                 => 'owner/repo',
+            'allowed_repos'               => array( 'owner/repo' ),
+        )
+    );
+    $datamachine_settings = $GLOBALS['homeboy_datamachine_agent_fake_options']['datamachine_settings'] ?? array();
+    $github_profiles      = $datamachine_settings['github_credential_profiles'] ?? array();
+    if ( 1 !== count( $github_profiles ) || 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) ) {
+        fwrite( STDERR, "Expected target-only runs to omit the empty app token profile.\n" );
+        exit( 1 );
+    }
+
     fwrite( STDOUT, "Data Machine agent write-without-PR smoke passed.\n" );
 }
