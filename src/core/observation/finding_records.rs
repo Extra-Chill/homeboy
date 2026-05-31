@@ -167,8 +167,8 @@ pub(crate) struct AnnotationSidecarItem {
     pub(crate) extra: BTreeMap<String, Value>,
 }
 
-pub fn finding_record_from_lint(run_id: &str, finding: &HomeboyFinding) -> NewFindingRecord {
-    NewFindingRecord::from_homeboy_finding(run_id, finding.clone())
+pub fn finding_record_from_lint(run_id: &str, finding: HomeboyFinding) -> NewFindingRecord {
+    NewFindingRecord::from_homeboy_finding(run_id, finding)
 }
 
 pub fn finding_records_from_lint(
@@ -177,6 +177,7 @@ pub fn finding_records_from_lint(
 ) -> Vec<NewFindingRecord> {
     findings
         .iter()
+        .cloned()
         .map(|finding| finding_record_from_lint(run_id, finding))
         .collect()
 }
