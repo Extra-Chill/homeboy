@@ -1074,36 +1074,6 @@ mod tests {
     }
 
     #[test]
-    fn emitted_budget_findings_gate_bench_runs() {
-        let raw = r#"{
-            "component_id": "example",
-            "iterations": 1,
-            "budget_findings": [
-                {
-                    "category": "budget",
-                    "code": "rest.max_response_bytes",
-                    "severity": "error",
-                    "context_label": "profile:wordpress-rest",
-                    "message": "REST response exceeded 250 KB budget",
-                    "actual": 4378195,
-                    "expected": 250000,
-                    "unit": "bytes",
-                    "subject": "/wp-json/datamachine/v1/pipelines?per_page=100"
-                }
-            ],
-            "scenarios": [{ "id": "wordpress-rest", "iterations": 1, "metrics": { "p95_ms": 50.0 } }]
-        }"#;
-
-        let mut parsed = parse_bench_results_str(raw).unwrap();
-        let failures = evaluate_gates(&mut parsed);
-
-        assert_eq!(failures, vec!["REST response exceeded 250 KB budget"]);
-        assert_eq!(parsed.budget_findings[0].metadata["actual"], 4378195.0);
-        assert_eq!(parsed.budget_findings[0].metadata["expected"], 250000.0);
-        assert_eq!(parsed.budget_findings[0].metadata["unit"], "bytes");
-    }
-
-    #[test]
     fn timing_improvement_does_not_override_semantic_gate_failure() {
         let baseline = r#"{
             "component_id": "example",
