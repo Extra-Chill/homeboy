@@ -373,6 +373,7 @@ fn resolve_component_drift(
         Some(deploy::ComponentStatus::NeedsUpdate) => FleetComponentDrift::NeedsUpdate,
         Some(deploy::ComponentStatus::BehindRemote) => FleetComponentDrift::BehindRemote,
         Some(deploy::ComponentStatus::BehindUpstream) => FleetComponentDrift::BehindUpstream,
+        Some(deploy::ComponentStatus::SourceStale) => FleetComponentDrift::BehindUpstream,
         Some(deploy::ComponentStatus::Unknown) | None => FleetComponentDrift::Unknown,
     };
 

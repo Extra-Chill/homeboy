@@ -91,6 +91,8 @@ pub enum ComponentStatus {
     BehindRemote,
     /// Local checkout is behind its upstream branch
     BehindUpstream,
+    /// Remote matches a configured source checkout that is stale or detached
+    SourceStale,
     /// Cannot determine status
     Unknown,
 }
@@ -304,15 +306,36 @@ impl ComponentDeployResult {
         self.local_path = Some(component.local_path.clone());
         self.git_branch = git_output(path, &["branch", "--show-current"]);
         self.git_head = git_output(path, &["rev-parse", "HEAD"]);
-        self.upstream_branch = git_output(path, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
-        self.upstream_head = git_output(path, &["rev-parse", "@{upstream}"]);
+        self.upstream_branch = git_output(path, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+            .or_else(|| default_remote_branch(path));
+        self.upstream_head = self
+            .upstream_branch
+            .as_deref()
+            .and_then(|upstream| git_output(path, &["rev-parse", upstream]));
         self.is_worktree = detect_linked_worktree(path);
-        self.behind_upstream = git_output(
-            path,
-            &["rev-list", "--left-only", "--count", "@{upstream}...HEAD"],
-        )
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|count| *count > 0);
+        self.behind_upstream = self
+            .upstream_branch
+            .as_deref()
+            .and_then(|upstream| {
+                git_output(
+                    path,
+                    &[
+                        "rev-list",
+                        "--left-only",
+                        "--count",
+                        &format!("{upstream}...HEAD"),
+                    ],
+                )
+            })
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|count| *count > 0);
+
+        if self.git_head.is_some() && self.git_branch.is_none() {
+            self.warnings.push(
+                "configured_source_detached: source checkout is detached; deploy readiness is comparing against the remote default branch"
+                    .to_string(),
+            );
+        }
 
         if head_deploy && self.is_worktree == Some(true) {
             self.warnings.push(
@@ -321,9 +344,10 @@ impl ComponentDeployResult {
             );
         }
 
-        if let (true, Some(count)) = (head_deploy, self.behind_upstream) {
+        if let Some(count) = self.behind_upstream {
             self.warnings.push(format!(
-                "--head deploy source is {count} commit(s) behind its upstream branch"
+                "configured_source_behind_upstream: source checkout is {count} commit(s) behind {}",
+                self.upstream_branch.as_deref().unwrap_or("upstream")
             ));
         }
 
@@ -353,6 +377,24 @@ fn detect_linked_worktree(path: &Path) -> Option<bool> {
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
     Some(git_dir != common_dir)
+}
+
+fn default_remote_branch(path: &Path) -> Option<String> {
+    git_output(
+        path,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .or_else(|| {
+        ["origin/main", "origin/trunk", "origin/master"]
+            .iter()
+            .find(|branch| git_output(path, &["rev-parse", "--verify", branch]).is_some())
+            .map(|branch| (*branch).to_string())
+    })
 }
 
 #[cfg(test)]
@@ -612,6 +654,40 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("non-primary git worktree")));
+    }
+
+    #[test]
+    fn test_with_source_identity_warns_for_detached_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo dir");
+        std::fs::write(repo.join("README.md"), "fixture\n").expect("fixture file");
+
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        run_git(&repo, &["add", "README.md"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        run_git(&repo, &["checkout", "--detach", "HEAD"]);
+
+        let mut component = component();
+        component.local_path = repo.to_string_lossy().to_string();
+        let result = deploy_result().with_source_identity(&component, false);
+
+        assert!(result.git_branch.is_none());
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("configured_source_detached")));
     }
 
     fn run_git(path: &std::path::Path, args: &[&str]) {
