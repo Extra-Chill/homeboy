@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.108.6] - 2026-05-31
+
+### Fixed
+- activate agent CI runtime plugins
+
 ## [2.108.5] - 2026-05-31
 
 ### Fixed
