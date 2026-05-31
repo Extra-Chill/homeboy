@@ -53,9 +53,9 @@ use self::detectors::{
     aggregate_construction, artifact_portability, command_status_contracts, config_key_usage,
     core_boundary_leak, dead_guard, deprecation_age, enum_dispatch_contracts, facade_passthrough,
     field_patterns, global_env_guard, mutating_resource_access, parallel_runner_setup,
-    public_registry_exposure, redirect_validation, repeated_literal_shape, requested_detectors,
-    runner_offload_preflight, rust_test_wiring, shared_scaffolding, test_coverage, test_topology,
-    unbounded_output_capture, wrapper_inference,
+    public_registry_exposure, redirect_validation, remote_execution_preflight,
+    repeated_literal_shape, requested_detectors, rust_test_wiring, shared_scaffolding,
+    test_coverage, test_topology, unbounded_output_capture, wrapper_inference,
 };
 
 pub use checks::{CheckResult, CheckStatus};
@@ -970,20 +970,20 @@ fn audit_internal(
         all_findings.extend(parallel_runner_findings);
     }
 
-    // Phase 4w1: Runner/offload preflight detection — remote dispatch sites
-    // that do not prove path/artifact parity before runner execution.
-    let runner_offload_findings = if plan.run_runner_offload_preflight() {
-        runner_offload_preflight::run(&all_fingerprints, &audit_config.remote_execution_safety)
+    // Phase 4w1: Remote execution preflight detection — remote dispatch sites
+    // that do not prove path/artifact parity before remote execution.
+    let remote_execution_findings = if plan.run_remote_execution_preflight() {
+        remote_execution_preflight::run(&all_fingerprints, &audit_config.remote_execution_safety)
     } else {
         Vec::new()
     };
-    if !runner_offload_findings.is_empty() {
+    if !remote_execution_findings.is_empty() {
         log_status!(
             "audit",
-            "Runner offload preflight: {} finding(s) (remote path/artifact parity gaps)",
-            runner_offload_findings.len()
+            "Remote execution preflight: {} finding(s) (remote path/artifact parity gaps)",
+            remote_execution_findings.len()
         );
-        all_findings.extend(runner_offload_findings);
+        all_findings.extend(remote_execution_findings);
     }
 
     // Phase 4w: Repeated enum-dispatch contract detection.
