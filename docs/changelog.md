@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.213.4] - 2026-05-31
+
+### Changed
+- remove lint finding pass-through adapter
+
 ## [0.213.3] - 2026-05-31
 
 ### Changed
