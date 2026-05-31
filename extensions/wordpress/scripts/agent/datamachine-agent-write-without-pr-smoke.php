@@ -644,8 +644,8 @@ namespace {
         fwrite( STDERR, "Expected repository token profile to be first for same-repo GitHub operations.\n" );
         exit( 1 );
     }
-    if ( 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'owner/repo', 'owner/other' ) !== ( $github_profiles[1]['allowed_repos'] ?? array() ) ) {
-        fwrite( STDERR, "Expected app token profile to remain available for cross-repo allowed repositories.\n" );
+    if ( 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'owner/other' ) !== ( $github_profiles[1]['allowed_repos'] ?? array() ) || '' !== ( $github_profiles[1]['default_repo'] ?? '' ) ) {
+        fwrite( STDERR, "Expected app token profile to remain available only for non-target allowed repositories.\n" );
         exit( 1 );
     }
     if ( 'smoke-ci-repository' !== ( $datamachine_settings['github_default_profile_id'] ?? '' ) ) {

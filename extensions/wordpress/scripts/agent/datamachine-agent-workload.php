@@ -2597,13 +2597,17 @@ if ( ! function_exists( 'homeboy_datamachine_agent_configure_settings' ) ) {
                 );
             }
             if ( '' !== $github_token ) {
+                $app_allowed_repos = array_values( array_unique( array_filter( array_map( 'strval', $allowed_repos ) ) ) );
+                if ( '' !== $github_repository_token ) {
+                    $app_allowed_repos = array_values( array_filter( $app_allowed_repos, static fn ( string $repo ): bool => strtolower( $repo ) !== strtolower( $target_repo ) ) );
+                }
                 $profiles[] = array(
                     'id'            => $profile_id,
                     'label'         => 'Homeboy agent CI token',
                     'mode'          => 'pat',
                     'pat'           => $github_token,
-                    'default_repo'  => $target_repo,
-                    'allowed_repos' => array_values( array_unique( array_filter( array_map( 'strval', $allowed_repos ) ) ) ),
+                    'default_repo'  => '' !== $github_repository_token ? '' : $target_repo,
+                    'allowed_repos' => $app_allowed_repos,
                 );
             }
             $settings['github_credential_profiles'] = $profiles;
