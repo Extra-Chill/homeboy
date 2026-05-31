@@ -7,7 +7,7 @@ use homeboy::core::code_audit::{
 use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
-    finding_records_from_audit, NewRunRecord, ObservationStore, RunRecord, RunStatus,
+    finding_records_from_audit, ActiveObservation, NewRunRecord, RunStatus,
 };
 
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
@@ -116,38 +116,26 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
     Ok(report::from_main_workflow(workflow))
 }
 
-struct AuditObservation {
-    store: ObservationStore,
-    audit_run: RunRecord,
-    audit_metadata: serde_json::Value,
-}
+struct AuditObservation(ActiveObservation);
 
 fn start_audit_observation(
     component_id: &str,
     source_path: &str,
     args: &AuditArgs,
 ) -> Option<AuditObservation> {
-    let store = ObservationStore::open_initialized().ok()?;
     let path = Path::new(source_path);
     let metadata = audit_observation_initial_metadata(source_path, args);
-    let run = store
-        .start_run(
-            NewRunRecord::builder("audit")
-                .component_id(component_id)
-                .command(audit_observation_command(component_id, args))
-                .cwd_path(path)
-                .current_homeboy_version()
-                .git_sha(short_head_revision_at(path))
-                .metadata(metadata.clone())
-                .build(),
-        )
-        .ok()?;
-
-    Some(AuditObservation {
-        store,
-        audit_run: run,
-        audit_metadata: metadata,
-    })
+    ActiveObservation::start_best_effort(
+        NewRunRecord::builder("audit")
+            .component_id(component_id)
+            .command(audit_observation_command(component_id, args))
+            .cwd_path(path)
+            .current_homeboy_version()
+            .git_sha(short_head_revision_at(path))
+            .metadata(metadata)
+            .build(),
+    )
+    .map(AuditObservation)
 }
 
 fn finish_audit_observation(
@@ -158,24 +146,19 @@ fn finish_audit_observation(
         return;
     };
 
-    let metadata = merge_audit_observation_metadata(
-        observation.audit_metadata,
-        serde_json::json!({
-            "observation_status": if workflow.exit_code == 0 { "pass" } else { "fail" },
-            "exit_code": workflow.exit_code,
-            "summary": audit_observation_summary(&workflow.output),
-        }),
-    );
-    let records = finding_records_from_audit(&observation.audit_run.id, &workflow.findings);
-    let _ = observation.store.record_findings(&records);
+    let metadata = serde_json::json!({
+        "observation_status": if workflow.exit_code == 0 { "pass" } else { "fail" },
+        "exit_code": workflow.exit_code,
+        "summary": audit_observation_summary(&workflow.output),
+    });
+    let records = finding_records_from_audit(observation.0.run_id(), &workflow.findings);
+    observation.0.record_findings(&records);
     let status = if workflow.exit_code == 0 {
         RunStatus::Pass
     } else {
         RunStatus::Fail
     };
-    let _ = observation
-        .store
-        .finish_run(&observation.audit_run.id, status, Some(metadata));
+    observation.0.finish_with_merged_metadata(status, metadata);
 }
 
 fn finish_audit_observation_error(
@@ -186,17 +169,12 @@ fn finish_audit_observation_error(
         return;
     };
 
-    let metadata = merge_audit_observation_metadata(
-        observation.audit_metadata,
-        serde_json::json!({
+    observation
+        .0
+        .finish_error_with_merged_metadata(serde_json::json!({
             "observation_status": "error",
             "error": error.to_string(),
-        }),
-    );
-    let _ =
-        observation
-            .store
-            .finish_run(&observation.audit_run.id, RunStatus::Error, Some(metadata));
+        }));
 }
 
 fn audit_observation_command(component_id: &str, args: &AuditArgs) -> String {
@@ -312,18 +290,6 @@ fn code_audit_result_observation_summary(
     summary
 }
 
-fn merge_audit_observation_metadata(
-    mut initial: serde_json::Value,
-    extra: serde_json::Value,
-) -> serde_json::Value {
-    if let (Some(initial), Some(extra)) = (initial.as_object_mut(), extra.as_object()) {
-        for (key, value) in extra {
-            initial.insert(key.clone(), value.clone());
-        }
-    }
-    initial
-}
-
 /// Run the extension's audit reference setup script if configured.
 ///
 /// Looks up the component's extension, checks for `audit.setup_references`, and runs it.
@@ -418,6 +384,7 @@ mod tests {
     use crate::commands::utils::args::{BaselineArgs, ExtensionOverrideArgs};
     use crate::test_support::with_isolated_home;
     use clap::Parser;
+    use homeboy::core::observation::ObservationStore;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -510,7 +477,7 @@ mod tests {
             let observation =
                 start_audit_observation("homeboy", &home.path().to_string_lossy(), &args)
                     .expect("observation should start");
-            let run_id = observation.audit_run.id.clone();
+            let run_id = observation.0.run_id().to_string();
 
             finish_audit_observation_error(
                 Some(observation),
@@ -544,7 +511,7 @@ mod tests {
             let observation =
                 start_audit_observation("homeboy", &home.path().to_string_lossy(), &args)
                     .expect("observation should start");
-            let run_id = observation.audit_run.id.clone();
+            let run_id = observation.0.run_id().to_string();
             let finding = code_audit::Finding {
                 convention: "command modules".to_string(),
                 severity: code_audit::Severity::Warning,
