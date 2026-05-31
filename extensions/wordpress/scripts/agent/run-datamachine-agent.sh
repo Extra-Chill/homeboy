@@ -46,6 +46,65 @@ homeboy_datamachine_agent_wp_codebox_secret_env_names() {
     ' <<<"$CONFIG_JSON"
 }
 
+homeboy_datamachine_agent_wp_codebox_mount_type() {
+    local source="${1:-}"
+    local explicit_type="${2:-}"
+
+    case "$explicit_type" in
+        file|directory)
+            printf '%s\n' "$explicit_type"
+            return 0
+            ;;
+        "")
+            ;;
+        *)
+            echo "ERROR: wp_codebox_mounts type must be file or directory: $explicit_type" >&2
+            exit 1
+            ;;
+    esac
+
+    if [ -f "$source" ]; then
+        printf 'file\n'
+        return 0
+    fi
+    if [ -d "$source" ]; then
+        printf 'directory\n'
+        return 0
+    fi
+
+    echo "ERROR: wp_codebox_mounts source must be an existing file or directory: $source" >&2
+    exit 1
+}
+
+homeboy_datamachine_agent_add_wp_codebox_mount() {
+    local source="${1:-}"
+    local target="${2:-}"
+    local mode="${3:-readwrite}"
+    local type="${4:-}"
+
+    if [ -z "$source" ] || [ -z "$target" ]; then
+        return 0
+    fi
+
+    case "$mode" in
+        readonly|readwrite)
+            ;;
+        *)
+            echo "ERROR: wp_codebox_mounts mode must be readonly or readwrite: $mode" >&2
+            exit 1
+            ;;
+    esac
+
+    type="$(homeboy_datamachine_agent_wp_codebox_mount_type "$source" "$type")"
+    mounts_json=$(jq -nc \
+        --argjson mounts "$mounts_json" \
+        --arg type "$type" \
+        --arg source "$source" \
+        --arg target "$target" \
+        --arg mode "$mode" \
+        '$mounts + [{type: $type, source: $source, target: $target, mode: $mode}]')
+}
+
 homeboy_datamachine_agent_wp_codebox_run() {
     local wp_codebox_bin="${HOMEBOY_WP_CODEBOX_BIN:-}"
     if [ -z "$wp_codebox_bin" ]; then
@@ -107,20 +166,28 @@ PHP
             {source: $datamachine, slug: "data-machine", activate: false},
             {source: $code, slug: "data-machine-code", activate: false}
         ]')
-    mounts_json=$(jq -nc --arg source "$EXTENSION_PATH" '[{source: $source, target: "/homeboy-extension", mode: "readonly"}]')
+    mounts_json=$(jq -nc --arg source "$EXTENSION_PATH" '[{type: "directory", source: $source, target: "/homeboy-extension", mode: "readonly"}]')
     provider_slugs_csv=""
 
     if [ -n "$BUNDLE_PATH" ]; then
-        mounts_json=$(jq -nc --argjson mounts "$mounts_json" --arg source "$BUNDLE_PATH" --arg target "$BUNDLE_GUEST_PATH" '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
+        homeboy_datamachine_agent_add_wp_codebox_mount "$BUNDLE_PATH" "$BUNDLE_GUEST_PATH" "readonly"
     fi
 
     local extra_mount
     while IFS= read -r extra_mount; do
-        IFS=: read -r mount_source mount_target mount_mode <<<"$extra_mount"
-        [ -n "$mount_source" ] && [ -n "$mount_target" ] || continue
-        mount_mode="${mount_mode:-readwrite}"
-        mounts_json=$(jq -nc --argjson mounts "$mounts_json" --arg source "$mount_source" --arg target "$mount_target" --arg mode "$mount_mode" '$mounts + [{source: $source, target: $target, mode: $mode}]')
-    done < <(jq -r '.wp_codebox_mounts? // [] | .[]? | select(type == "string" and . != "")' <<<"$CONFIG_JSON")
+        [ -n "$extra_mount" ] || continue
+        if jq -e 'type == "string"' >/dev/null 2>&1 <<<"$extra_mount"; then
+            IFS=: read -r mount_source mount_target mount_mode <<<"$(jq -r '.' <<<"$extra_mount")"
+            homeboy_datamachine_agent_add_wp_codebox_mount "$mount_source" "$mount_target" "${mount_mode:-readwrite}"
+            continue
+        fi
+
+        mount_source=$(jq -r '.source // .from // empty' <<<"$extra_mount")
+        mount_target=$(jq -r '.target // .to // empty' <<<"$extra_mount")
+        mount_mode=$(jq -r '.mode // "readwrite"' <<<"$extra_mount")
+        mount_type=$(jq -r '.type // empty' <<<"$extra_mount")
+        homeboy_datamachine_agent_add_wp_codebox_mount "$mount_source" "$mount_target" "$mount_mode" "$mount_type"
+    done < <(jq -c '.wp_codebox_mounts? // [] | .[]?' <<<"$CONFIG_JSON")
 
     local provider_plugin_path provider_slug
     while IFS= read -r provider_plugin_path; do

@@ -19,14 +19,17 @@ BUNDLE_DIR="$RUNTIME_DIR/bundle"
 AGENTS_API_DIR="$RUNTIME_DIR/agents-api"
 DATA_MACHINE_DIR="$RUNTIME_DIR/data-machine"
 DATA_MACHINE_CODE_DIR="$RUNTIME_DIR/data-machine-code"
+FILE_MOUNT_PATH="$RUNTIME_DIR/fixture-config.json"
+DIR_MOUNT_PATH="$RUNTIME_DIR/fixture-directory-mount"
 
 cleanup() {
     rm -rf "$RUNTIME_DIR"
 }
 trap cleanup EXIT
 
-mkdir -p "$BUNDLE_DIR" "$AGENTS_API_DIR" "$DATA_MACHINE_DIR" "$DATA_MACHINE_CODE_DIR"
+mkdir -p "$BUNDLE_DIR" "$AGENTS_API_DIR" "$DATA_MACHINE_DIR" "$DATA_MACHINE_CODE_DIR" "$DIR_MOUNT_PATH"
 printf '{"agent":{"slug":"wp-codebox-smoke-agent"}}\n' > "$BUNDLE_DIR/manifest.json"
+printf '{"ok":true}\n' > "$FILE_MOUNT_PATH"
 
 cat > "$FAKE_WP_CODEBOX" <<'NODE'
 #!/usr/bin/env node
@@ -91,6 +94,12 @@ if (recipe.inputs?.extraPlugins?.some((plugin) => plugin.slug === 'php-ai-client
 }
 if (!recipe.inputs?.mounts?.some((mount) => mount.source.endsWith('/bundle') && mount.target === '/wordpress/wp-content/plugins/bundle' && mount.mode === 'readonly')) {
   throw new Error('missing bundle readonly mount in recipe')
+}
+if (!recipe.inputs?.mounts?.some((mount) => mount.type === 'file' && mount.source.endsWith('/fixture-config.json') && mount.target === '/wordpress/wp-content/plugins/example/fixture-config.json' && mount.mode === 'readonly')) {
+  throw new Error('missing typed file mount in recipe')
+}
+if (!recipe.inputs?.mounts?.some((mount) => mount.type === 'directory' && mount.source.endsWith('/fixture-directory-mount') && mount.target === '/wordpress/wp-content/plugins/example/fixtures' && mount.mode === 'readwrite')) {
+  throw new Error('missing typed directory mount in recipe')
 }
 
 const artifactRoot = path.join(valueAfter('--artifacts'), 'runtime-smoke')
@@ -187,6 +196,8 @@ jq -n \
     --arg agentsApi "$AGENTS_API_DIR" \
     --arg dataMachine "$DATA_MACHINE_DIR" \
     --arg dataMachineCode "$DATA_MACHINE_CODE_DIR" \
+    --arg fileMount "$FILE_MOUNT_PATH" \
+    --arg dirMount "$DIR_MOUNT_PATH" \
     '{
         component_id: "wp-codebox-smoke-component",
         component_path: env.PWD,
@@ -209,7 +220,11 @@ jq -n \
             agents_api: $agentsApi,
             data_machine: $dataMachine,
             data_machine_code: $dataMachineCode
-        }
+        },
+        wp_codebox_mounts: [
+            {type: "file", source: $fileMount, target: "/wordpress/wp-content/plugins/example/fixture-config.json", mode: "readonly"},
+            ($dirMount + ":/wordpress/wp-content/plugins/example/fixtures:readwrite")
+        ]
     }' > "$CONFIG_TMPFILE"
 
 FAKE_WP_CODEBOX_ARGS_FILE="$FAKE_ARGS_FILE" \
