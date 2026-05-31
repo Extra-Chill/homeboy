@@ -2594,7 +2594,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_configure_settings' ) ) {
                     'pat'           => $github_repository_token,
                     'default_repo'  => $target_repo,
                     'allowed_repos' => array( $target_repo ),
-                    'capabilities'  => array( 'contents_write', 'issues_write' ),
+                    'capabilities'  => array( 'contents_write' ),
                 );
             }
             if ( '' !== $github_token ) {
