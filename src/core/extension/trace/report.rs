@@ -9,6 +9,7 @@ use super::parsing::{
     TraceArtifact, TraceAssertionStatus, TraceList, TraceResults, TraceSpanStatus,
 };
 use super::run::{TraceOverlay, TraceRunWorkflowResult};
+use crate::core::engine::detail_output::{bounded_items, DEFAULT_DETAIL_ITEM_LIMIT};
 use crate::core::rig::RigStateSnapshot;
 use crate::core::runner::is_reportable_artifact_evidence_path;
 
@@ -457,7 +458,8 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
         out.push_str("\n## Spans\n\n");
         out.push_str("| Span | From | To | Duration | Status |\n");
         out.push_str("|---|---|---|---:|---|\n");
-        for span in &results.span_results {
+        let (spans, metadata) = bounded_items(&results.span_results, DEFAULT_DETAIL_ITEM_LIMIT);
+        for span in spans {
             let duration = span
                 .duration_ms
                 .map(|ms| format!("{}ms", ms))
@@ -474,11 +476,13 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
                 span.id, span.from, span.to, duration, status
             ));
         }
+        push_omitted_detail_line(&mut out, "span(s)", &metadata);
     }
 
     if !results.assertions.is_empty() {
         out.push_str("\n## Assertions\n\n");
-        for assertion in &results.assertions {
+        let (assertions, metadata) = bounded_items(&results.assertions, DEFAULT_DETAIL_ITEM_LIMIT);
+        for assertion in assertions {
             let status = match assertion.status {
                 TraceAssertionStatus::Pass => "pass",
                 TraceAssertionStatus::Fail => "fail",
@@ -492,24 +496,29 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
                 None => out.push_str(&format!("- `{}`: **{}**\n", assertion.id, status)),
             }
         }
+        push_omitted_detail_line(&mut out, "assertion(s)", &metadata);
     }
 
     let artifacts = reportable_trace_artifacts(&results.artifacts);
     if !artifacts.is_empty() {
         out.push_str("\n## Artifacts\n\n");
-        for artifact in &artifacts {
+        let (artifacts, metadata) = bounded_items(&artifacts, DEFAULT_DETAIL_ITEM_LIMIT);
+        for artifact in artifacts {
             out.push_str(&format!("- **{}:** `{}`\n", artifact.label, artifact.path));
         }
+        push_omitted_detail_line(&mut out, "artifact(s)", &metadata);
     }
 
     if !results.timeline.is_empty() {
         out.push_str("\n## Timeline\n\n");
-        for event in &results.timeline {
+        let (events, metadata) = bounded_items(&results.timeline, DEFAULT_DETAIL_ITEM_LIMIT);
+        for event in events {
             out.push_str(&format!(
                 "- `{}ms` `{}.{}`\n",
                 event.t_ms, event.source, event.event
             ));
         }
+        push_omitted_detail_line(&mut out, "timeline event(s)", &metadata);
     }
 
     out
@@ -548,10 +557,47 @@ pub fn push_overlay_markdown(out: &mut String, overlays: &[TraceOverlay]) {
             out.push_str("  - Touched files: none reported by `git apply --numstat`\n");
         } else {
             out.push_str("  - Touched files:\n");
-            for file in &overlay.touched_files {
+            let (files, metadata) =
+                bounded_items(&overlay.touched_files, DEFAULT_DETAIL_ITEM_LIMIT);
+            for file in files {
                 out.push_str(&format!("    - `{}`\n", file));
             }
+            push_indented_omitted_detail_line(out, "touched file(s)", &metadata);
         }
+    }
+}
+
+fn push_omitted_detail_line(
+    out: &mut String,
+    label: &str,
+    metadata: &crate::core::engine::detail_output::DetailOutputMetadata,
+) {
+    if metadata.truncated {
+        out.push_str(&format!(
+            "- _... {} more {} omitted (shown: {}, total: {}, limit: {})_\n",
+            metadata.omitted_item_count,
+            label,
+            metadata.items_rendered,
+            metadata.items_seen,
+            metadata.item_limit
+        ));
+    }
+}
+
+fn push_indented_omitted_detail_line(
+    out: &mut String,
+    label: &str,
+    metadata: &crate::core::engine::detail_output::DetailOutputMetadata,
+) {
+    if metadata.truncated {
+        out.push_str(&format!(
+            "    - _... {} more {} omitted (shown: {}, total: {}, limit: {})_\n",
+            metadata.omitted_item_count,
+            label,
+            metadata.items_rendered,
+            metadata.items_seen,
+            metadata.item_limit
+        ));
     }
 }
 
