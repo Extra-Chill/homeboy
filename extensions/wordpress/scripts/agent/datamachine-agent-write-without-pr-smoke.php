@@ -640,12 +640,12 @@ namespace {
     );
     $datamachine_settings = $GLOBALS['homeboy_datamachine_agent_fake_options']['datamachine_settings'] ?? array();
     $github_profiles = $datamachine_settings['github_credential_profiles'] ?? array();
-    if ( 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) || array( 'owner/repo' ) !== ( $github_profiles[0]['allowed_repos'] ?? array() ) ) {
+    if ( 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) || array( 'owner/repo' ) !== ( $github_profiles[0]['allowed_repos'] ?? array() ) || array( 'contents_write', 'issues_write' ) !== ( $github_profiles[0]['capabilities'] ?? array() ) ) {
         fwrite( STDERR, "Expected repository token profile to be first for same-repo GitHub operations.\n" );
         exit( 1 );
     }
-    if ( 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'owner/other' ) !== ( $github_profiles[1]['allowed_repos'] ?? array() ) || '' !== ( $github_profiles[1]['default_repo'] ?? '' ) ) {
-        fwrite( STDERR, "Expected app token profile to remain available only for non-target allowed repositories.\n" );
+    if ( 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'owner/repo', 'owner/other' ) !== ( $github_profiles[1]['allowed_repos'] ?? array() ) || array( 'pull_request_create' ) !== ( $github_profiles[1]['capabilities'] ?? array() ) || '' !== ( $github_profiles[1]['default_repo'] ?? '' ) ) {
+        fwrite( STDERR, "Expected app token profile to remain available for PR creation across allowed repositories.\n" );
         exit( 1 );
     }
     if ( 'smoke-ci-repository' !== ( $datamachine_settings['github_default_profile_id'] ?? '' ) ) {
@@ -666,8 +666,8 @@ namespace {
     );
     $datamachine_settings = $GLOBALS['homeboy_datamachine_agent_fake_options']['datamachine_settings'] ?? array();
     $github_profiles      = $datamachine_settings['github_credential_profiles'] ?? array();
-    if ( 1 !== count( $github_profiles ) || 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) ) {
-        fwrite( STDERR, "Expected target-only runs to omit the empty app token profile.\n" );
+    if ( 2 !== count( $github_profiles ) || 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) || 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'pull_request_create' ) !== ( $github_profiles[1]['capabilities'] ?? array() ) ) {
+        fwrite( STDERR, "Expected target-only runs to keep app token profile for pull request creation.\n" );
         exit( 1 );
     }
 

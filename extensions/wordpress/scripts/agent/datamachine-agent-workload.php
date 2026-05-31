@@ -2594,23 +2594,20 @@ if ( ! function_exists( 'homeboy_datamachine_agent_configure_settings' ) ) {
                     'pat'           => $github_repository_token,
                     'default_repo'  => $target_repo,
                     'allowed_repos' => array( $target_repo ),
+                    'capabilities'  => array( 'contents_write', 'issues_write' ),
                 );
             }
             if ( '' !== $github_token ) {
                 $app_allowed_repos = array_values( array_unique( array_filter( array_map( 'strval', $allowed_repos ) ) ) );
-                if ( '' !== $github_repository_token ) {
-                    $app_allowed_repos = array_values( array_filter( $app_allowed_repos, static fn ( string $repo ): bool => strtolower( $repo ) !== strtolower( $target_repo ) ) );
-                }
-                if ( ! empty( $app_allowed_repos ) || '' === $github_repository_token ) {
-                    $profiles[] = array(
-                        'id'            => $profile_id,
-                        'label'         => 'Homeboy agent CI token',
-                        'mode'          => 'pat',
-                        'pat'           => $github_token,
-                        'default_repo'  => '' !== $github_repository_token ? '' : $target_repo,
-                        'allowed_repos' => $app_allowed_repos,
-                    );
-                }
+                $profiles[] = array(
+                    'id'            => $profile_id,
+                    'label'         => 'Homeboy agent CI token',
+                    'mode'          => 'pat',
+                    'pat'           => $github_token,
+                    'default_repo'  => '' !== $github_repository_token ? '' : $target_repo,
+                    'allowed_repos' => $app_allowed_repos,
+                    'capabilities'  => array( 'pull_request_create' ),
+                );
             }
             $settings['github_credential_profiles'] = $profiles;
             $settings['github_default_profile_id']  = '' !== $github_repository_token ? $profile_id . '-repository' : $profile_id;
