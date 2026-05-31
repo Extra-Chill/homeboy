@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.108.9] - 2026-05-31
+
+### Fixed
+- prefer repository token for agent CI
+
 ## [2.108.8] - 2026-05-31
 
 ### Fixed
