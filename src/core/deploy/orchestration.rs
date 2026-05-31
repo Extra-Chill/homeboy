@@ -799,6 +799,7 @@ fn verify_expected_version(components: &[Component], expected: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::project::ProjectComponentAttachment;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -890,6 +891,82 @@ mod tests {
 
         assert!(err.message.contains("unsupported legacy build_command"));
         assert!(err.message.contains("Use scripts.build instead"));
+        assert_eq!(err.details["field"].as_str(), Some("build_command"));
+    }
+
+    fn write_component_manifest(dir: &Path, id: &str, build_command: Option<&str>) {
+        let mut manifest = serde_json::json!({
+            "id": id,
+            "remote_path": format!("wp-content/plugins/{id}"),
+            "build_artifact": "dist/plugin.zip"
+        });
+
+        if let Some(command) = build_command {
+            manifest["build_command"] = serde_json::Value::String(command.to_string());
+        }
+
+        std::fs::write(dir.join("homeboy.json"), manifest.to_string()).expect("write manifest");
+    }
+
+    fn project_with_component_dirs(component_dirs: &[(&str, &Path)]) -> Project {
+        Project {
+            id: "site".to_string(),
+            components: component_dirs
+                .iter()
+                .map(|(id, path)| ProjectComponentAttachment {
+                    id: (*id).to_string(),
+                    local_path: path.to_string_lossy().to_string(),
+                    remote_path: None,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn targeted_deploy_validation_ignores_unrequested_invalid_component() {
+        let selected = TempDir::new().expect("selected dir");
+        let unrelated = TempDir::new().expect("unrelated dir");
+        write_component_manifest(selected.path(), "selected", None);
+        write_component_manifest(unrelated.path(), "unrelated", Some("npm run legacy-build"));
+
+        let project = project_with_component_dirs(&[
+            ("selected", selected.path()),
+            ("unrelated", unrelated.path()),
+        ]);
+        let loaded = load_project_components(&project, &["selected".to_string()])
+            .expect("targeted component load should ignore unrelated invalid config");
+
+        assert_eq!(
+            loaded
+                .deployable
+                .iter()
+                .map(|component| component.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["selected"]
+        );
+        validate_supported_build_configs(&loaded.deployable)
+            .expect("unrequested legacy build_command should not block targeted deploy");
+    }
+
+    #[test]
+    fn targeted_deploy_validation_still_rejects_selected_invalid_component() {
+        let selected = TempDir::new().expect("selected dir");
+        let unrelated = TempDir::new().expect("unrelated dir");
+        write_component_manifest(selected.path(), "selected", Some("npm run legacy-build"));
+        write_component_manifest(unrelated.path(), "unrelated", None);
+
+        let project = project_with_component_dirs(&[
+            ("selected", selected.path()),
+            ("unrelated", unrelated.path()),
+        ]);
+        let loaded = load_project_components(&project, &["selected".to_string()])
+            .expect("targeted component load should include selected component");
+
+        let err = validate_supported_build_configs(&loaded.deployable)
+            .expect_err("selected legacy build_command should still fail targeted deploy");
+
+        assert!(err.message.contains("unsupported legacy build_command"));
         assert_eq!(err.details["field"].as_str(), Some("build_command"));
     }
 

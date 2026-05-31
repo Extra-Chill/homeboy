@@ -317,7 +317,11 @@ pub(super) fn load_project_components(
     let mut deployable = Vec::new();
     let mut skipped = Vec::new();
 
-    for attachment in &project.components {
+    for attachment in project
+        .components
+        .iter()
+        .filter(|attachment| requested_ids.is_empty() || requested_ids.contains(&attachment.id))
+    {
         // When specific components are requested, skip extension validation for
         // unrelated components — a missing extension on an unrequested component
         // should not block deploying the ones you asked for.
