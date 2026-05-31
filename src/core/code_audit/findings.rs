@@ -87,6 +87,7 @@ impl<'de> serde::Deserialize<'de> for Finding {
     }
 }
 
+// Legacy typed audit payload accepted when reading older saved audit JSON.
 #[derive(Serialize, Deserialize)]
 struct AuditFindingPayload {
     convention: String,
@@ -124,14 +125,6 @@ pub fn homeboy_finding_from_audit(finding: &Finding) -> HomeboyFinding {
         .metadata("suggestion", finding.suggestion.clone())
         .metadata("confidence", finding.kind.confidence())
         .metadata("kind", kind)
-        .raw(AuditFindingPayload {
-            convention: finding.convention.clone(),
-            severity: finding.severity.clone(),
-            file: finding.file.clone(),
-            description: finding.description.clone(),
-            suggestion: finding.suggestion.clone(),
-            kind: finding.kind.clone(),
-        })
         .build()
 }
 
@@ -419,6 +412,51 @@ mod tests {
         assert_eq!(json["metadata"]["confidence"], "structural");
         assert_eq!(json["rule"], "compiler_warning");
         assert_eq!(json["message"], "unused import");
+        assert!(
+            json.get("raw").is_none(),
+            "canonical audit findings should not serialize the legacy typed payload"
+        );
+    }
+
+    #[test]
+    fn finding_deserializes_canonical_homeboy_finding() {
+        let value = serde_json::json!({
+            "tool": "audit",
+            "rule": "compiler_warning",
+            "category": "compiler",
+            "severity": "warning",
+            "file": "src/lib.rs",
+            "message": "unused import",
+            "metadata": {
+                "suggestion": "remove it"
+            }
+        });
+
+        let finding: Finding = serde_json::from_value(value).expect("deserialize finding");
+
+        assert_eq!(finding.kind, AuditFinding::CompilerWarning);
+        assert_eq!(finding.convention, "compiler");
+        assert_eq!(finding.severity, Severity::Warning);
+        assert_eq!(finding.file, "src/lib.rs");
+        assert_eq!(finding.description, "unused import");
+        assert_eq!(finding.suggestion, "remove it");
+    }
+
+    #[test]
+    fn finding_deserializes_legacy_payloads() {
+        let value = serde_json::json!({
+            "convention": "compiler",
+            "severity": "warning",
+            "file": "src/lib.rs",
+            "description": "unused import",
+            "suggestion": "remove it",
+            "kind": "compiler_warning"
+        });
+
+        let finding: Finding = serde_json::from_value(value).expect("deserialize finding");
+
+        assert_eq!(finding.kind, AuditFinding::CompilerWarning);
+        assert_eq!(finding.description, "unused import");
     }
 
     #[test]
