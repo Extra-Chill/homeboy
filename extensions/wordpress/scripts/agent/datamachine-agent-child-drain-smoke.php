@@ -146,6 +146,10 @@ namespace {
 		fwrite( STDERR, "Expected reusable workflow to request explicit Homeboy app token write permissions.\n" );
 		exit( 1 );
 	}
+	if ( ! str_contains( $workflow_source, 'GITHUB_TOKEN: ${{ github.token }}' ) || ! str_contains( $workflow_source, 'HOMEBOY_GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}' ) ) {
+		fwrite( STDERR, "Expected agent runtime to receive repository and Homeboy app tokens in separate environment variables.\n" );
+		exit( 1 );
+	}
 
 	$jobs = new \DataMachine\Core\Database\Jobs\Jobs();
     $summary = homeboy_datamachine_agent_drain_child_jobs( 101, array(), $jobs );

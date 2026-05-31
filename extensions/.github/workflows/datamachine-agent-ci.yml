@@ -937,7 +937,8 @@ jobs:
       - name: Run Data Machine agent
         if: ${{ inputs.run_agent }}
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HOMEBOY_GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
           PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
