@@ -3,13 +3,22 @@
 //! These isolate `HOME` / `XDG_DATA_HOME` so the developer's real local DB is
 //! never read or written.
 
-use crate::core::observation::store::{self, ObservationStore, CURRENT_SCHEMA_VERSION};
+use crate::core::observation::store::{
+    self, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,
+    SOURCE_SNAPSHOT_METADATA_ENV,
+};
 use crate::core::observation::{
-    FindingListFilter, NewFindingRecord, NewRunRecord, RunListFilter, RunRecord, RunStatus,
+    FindingListFilter, NewFindingRecord, NewRunRecord, RunContext, RunListFilter, RunProvenance,
+    RunRecord, RunStatus,
 };
 use crate::test_support::with_isolated_home;
 
 struct XdgGuard {
+    prior: Option<String>,
+}
+
+struct EnvGuard {
+    key: &'static str,
     prior: Option<String>,
 }
 
@@ -32,6 +41,23 @@ impl Drop for XdgGuard {
         match &self.prior {
             Some(value) => std::env::set_var("XDG_DATA_HOME", value),
             None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+    }
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: String) -> Self {
+        let prior = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, prior }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.prior {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
         }
     }
 }
@@ -257,6 +283,108 @@ fn test_start_run() {
 
         assert_eq!(fetched, started);
     });
+}
+
+mod run_context_tests {
+    use super::*;
+
+    #[test]
+    fn start_run_records_subprocess_source_snapshot_metadata() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let snapshot = serde_json::json!({
+                "runner_id": "lab",
+                "remote_path": "/srv/homeboy/repo",
+                "dirty": true,
+                "sync_mode": "snapshot",
+                "snapshot_hash": "sha256:dirty",
+                "synced_at": "2026-05-16T00:00:00Z",
+                "sync_excludes": ["node_modules/"]
+            });
+
+            let _env = EnvGuard::set(SOURCE_SNAPSHOT_METADATA_ENV, snapshot.to_string());
+            let run = store
+                .start_run(sample_run("test", "homeboy"))
+                .expect("start run");
+
+            assert_eq!(run.metadata_json["source_snapshot"], snapshot);
+        });
+    }
+
+    #[test]
+    fn start_run_records_subprocess_lab_offload_metadata() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let lab = serde_json::json!({
+                "source": "automatic",
+                "status": "fallback",
+                "runner_id": "lab",
+                "remote_workspace": null,
+                "fallback_reason": "runner connect timed out after 3s"
+            });
+
+            let _env = EnvGuard::set(LAB_OFFLOAD_METADATA_ENV, lab.to_string());
+            let run = store
+                .start_run(sample_run("test", "homeboy"))
+                .expect("start run");
+
+            assert_eq!(run.metadata_json["lab_offload"], lab);
+        });
+    }
+
+    #[test]
+    fn start_run_prefers_typed_context_over_subprocess_environment() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let env_snapshot = serde_json::json!({ "runner_id": "env" });
+            let explicit_snapshot = serde_json::json!({ "runner_id": "typed" });
+            let explicit_lab = serde_json::json!({ "status": "fallback", "source": "typed" });
+            let _env_snapshot =
+                EnvGuard::set(SOURCE_SNAPSHOT_METADATA_ENV, env_snapshot.to_string());
+            let _env_lab = EnvGuard::set(LAB_OFFLOAD_METADATA_ENV, "{not json".to_string());
+
+            let run = store
+                .start_run(
+                    sample_run("test", "homeboy").with_run_context(RunContext::from_provenance(
+                        RunProvenance::default()
+                            .with_source_snapshot(explicit_snapshot.clone())
+                            .with_lab_offload(explicit_lab.clone()),
+                    )),
+                )
+                .expect("start run");
+
+            assert_eq!(run.metadata_json["source_snapshot"], explicit_snapshot);
+            assert_eq!(run.metadata_json["lab_offload"], explicit_lab);
+        });
+    }
+
+    #[test]
+    fn malformed_subprocess_environment_does_not_pollute_typed_context() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let _env_snapshot =
+                EnvGuard::set(SOURCE_SNAPSHOT_METADATA_ENV, "{not json".to_string());
+            let _env_lab = EnvGuard::set(LAB_OFFLOAD_METADATA_ENV, "{not json".to_string());
+
+            let run = store
+                .start_run_with_context(
+                    sample_run("test", "homeboy"),
+                    RunContext::from_provenance(
+                        RunProvenance::default()
+                            .with_artifact_mirror(serde_json::json!({ "mirror": "typed" })),
+                    ),
+                )
+                .expect("start run");
+
+            assert!(run.metadata_json.get("source_snapshot").is_none());
+            assert!(run.metadata_json.get("lab_offload").is_none());
+            assert_eq!(run.metadata_json["artifact_mirror"]["mirror"], "typed");
+        });
+    }
 }
 
 #[test]

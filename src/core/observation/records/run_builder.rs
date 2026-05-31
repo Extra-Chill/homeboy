@@ -76,11 +76,6 @@ impl NewRunRecordBuilder {
         self
     }
 
-    pub fn run_context(mut self, run_context: RunContext) -> Self {
-        self.record.run_context = run_context;
-        self
-    }
-
     pub fn build(self) -> NewRunRecord {
         self.record
     }

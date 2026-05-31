@@ -48,9 +48,7 @@ pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since,
 };
-pub use offload_metadata::{
-    capture_lab_offload_metadata, capture_lab_offload_subprocess_metadata, lab_offload_metadata,
-};
+pub use offload_metadata::{capture_lab_offload_subprocess_metadata, lab_offload_metadata};
 pub(crate) use resource_metrics::measured_command_output;
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{

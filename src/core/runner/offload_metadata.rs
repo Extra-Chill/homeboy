@@ -57,10 +57,6 @@ fn plan_has_step(plan: &HomeboyPlan, step_id: &str) -> bool {
     plan.steps.iter().any(|step| step.id == step_id)
 }
 
-pub fn capture_lab_offload_metadata(metadata: serde_json::Value) {
-    capture_lab_offload_subprocess_metadata(metadata);
-}
-
 pub fn capture_lab_offload_subprocess_metadata(metadata: serde_json::Value) {
     if let Ok(raw) = serde_json::to_string(&metadata) {
         std::env::set_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV, raw);
