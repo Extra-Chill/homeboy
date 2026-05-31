@@ -309,9 +309,51 @@ fn import_artifact_if_absent(store: &ObservationStore, artifact: &ArtifactRecord
 
 fn remote_detail_to_run_record(detail: &Value, runner: &Runner, job: &Job) -> Result<RunRecord> {
     let id = required_str(detail, "id")?.to_string();
+    let artifact_manifest = detail
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .map(|artifacts| {
+            Value::Array(
+                artifacts
+                    .iter()
+                    .map(|artifact| {
+                        let mut object = artifact.as_object().cloned().unwrap_or_default();
+                        let artifact_type = object
+                            .get("type")
+                            .or_else(|| object.get("artifact_type"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("file");
+                        let Some(artifact_id) = object
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|artifact_id| !artifact_id.is_empty())
+                            .map(str::to_string)
+                        else {
+                            return Value::Object(object);
+                        };
+                        if artifact_type == "file" {
+                            object.insert(
+                                "type".to_string(),
+                                Value::String("remote_file".to_string()),
+                            );
+                            object.insert(
+                                "artifact_type".to_string(),
+                                Value::String("remote_file".to_string()),
+                            );
+                            object.insert(
+                                "path".to_string(),
+                                Value::String(runner_artifact_token(&runner.id, &id, &artifact_id)),
+                            );
+                            object.remove("url");
+                        }
+                        Value::Object(object)
+                    })
+                    .collect(),
+            )
+        });
     let metadata = detail.get("metadata").cloned().unwrap_or_else(|| json!({}));
     Ok(RunRecord {
-        id,
+        id: id.clone(),
         kind: required_str(detail, "kind")?.to_string(),
         component_id: detail
             .get("component_id")
@@ -343,7 +385,7 @@ fn remote_detail_to_run_record(detail: &Value, runner: &Runner, job: &Job) -> Re
             .get("rig_id")
             .and_then(Value::as_str)
             .map(str::to_string),
-        metadata_json: merge_lab_metadata(metadata, runner, job, detail.get("artifacts").cloned()),
+        metadata_json: merge_lab_metadata(metadata, runner, job, artifact_manifest),
     })
 }
 
@@ -807,5 +849,54 @@ mod tests {
         assert_eq!(artifacts[0].id, "artifact-1");
         assert_eq!(artifacts[0].artifact_type, "remote_file");
         assert_eq!(artifacts[0].path, "runner-artifact://lab/run-1/artifact-1");
+    }
+
+    #[test]
+    fn test_remote_artifact_manifest_metadata_uses_runner_tokens() {
+        let job_id = Uuid::new_v4();
+        let job = Job {
+            id: job_id,
+            operation: "exec".to_string(),
+            status: JobStatus::Succeeded,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_001_000,
+            started_at_ms: Some(1_700_000_000_000),
+            finished_at_ms: Some(1_700_000_001_000),
+            event_count: 0,
+            source_snapshot: None,
+            stale_reason: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+        };
+        let detail = json!({
+            "id": "run-1",
+            "kind": "bench",
+            "started_at": "2026-05-16T00:00:00Z",
+            "status": "pass",
+            "artifacts": [{
+                "id": "artifact-1",
+                "kind": "trace",
+                "type": "file",
+                "path": "/srv/private/trace.zip",
+                "url": "/srv/private/trace.zip",
+                "sha256": "abc",
+                "size_bytes": 12,
+                "mime": "application/zip",
+                "created_at": "2026-05-16T00:00:00Z"
+            }]
+        });
+
+        let run = remote_detail_to_run_record(&detail, &ssh_runner(), &job).expect("run");
+        let manifest = &run.metadata_json["lab"]["remote_artifact_manifest"][0];
+
+        assert_eq!(manifest["path"], "runner-artifact://lab/run-1/artifact-1");
+        assert_eq!(manifest["type"], "remote_file");
+        assert_eq!(manifest["artifact_type"], "remote_file");
+        assert!(manifest.get("url").is_none());
     }
 }
