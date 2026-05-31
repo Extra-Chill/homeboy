@@ -114,12 +114,16 @@ fn sidecar_writer_appends_and_merges_json_arrays() {
     let target_path = dir.path().join("lint-findings.json");
     let source_path = dir.path().join("extra-findings.json");
     std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
-    std::fs::write(&source_path, r#"[{"id":"third","message":"three"}]"#).expect("source");
+    std::fs::write(
+        &source_path,
+        r#"[{"tool":"lint","message":"three","fingerprint":"third"}]"#,
+    )
+    .expect("source");
 
     let output = std::process::Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "source {}; HOMEBOY_LINT_FINDINGS_FILE={}; homeboy_append_lint_finding '{{\"id\":\"first\",\"message\":\"one\"}}'; homeboy_append_lint_finding '{{\"id\":\"second\",\"message\":\"two\"}}'; homeboy_merge_lint_findings {}; cat {}",
+            "source {}; HOMEBOY_LINT_FINDINGS_FILE={}; homeboy_append_lint_finding '{{\"tool\":\"lint\",\"message\":\"one\",\"fingerprint\":\"first\"}}'; homeboy_append_lint_finding '{{\"tool\":\"lint\",\"message\":\"two\",\"fingerprint\":\"second\"}}'; homeboy_merge_lint_findings {}; cat {}",
             helper_path.display(),
             target_path.display(),
             source_path.display(),
@@ -135,7 +139,7 @@ fn sidecar_writer_appends_and_merges_json_arrays() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        r#"[{"id":"first","message":"one"},{"id":"second","message":"two"},{"id":"third","message":"three"}]
+        r#"[{"tool":"lint","message":"one","fingerprint":"first"},{"tool":"lint","message":"two","fingerprint":"second"},{"tool":"lint","message":"three","fingerprint":"third"}]
 "#
     );
 }
