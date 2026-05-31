@@ -4,6 +4,26 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.213.0] - 2026-05-31
+
+### Added
+- add artifact cleanup command
+
+### Changed
+- route deps stack constraint test through integration target
+- normalize audit findings output
+- share plan execution loop
+
+### Fixed
+- add core artifact manifest substrate
+- summarize lint producers in phase output
+- avoid artifact path doc references
+- pass stack dependency constraints through providers
+- add core redaction substrate
+- bound command output capture
+- remove vacuous core agnostic tests
+- remove legacy alias shims
+
 ## [0.212.0] - 2026-05-30
 
 ### Added
