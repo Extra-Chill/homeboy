@@ -262,12 +262,8 @@ struct AnnotationSidecarItem {
     extra: BTreeMap<String, Value>,
 }
 
-pub fn homeboy_finding_from_lint(finding: &HomeboyFinding) -> HomeboyFinding {
-    finding.clone()
-}
-
 pub fn finding_record_from_lint(run_id: &str, finding: &HomeboyFinding) -> NewFindingRecord {
-    NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_lint(finding))
+    NewFindingRecord::from_homeboy_finding(run_id, finding.clone())
 }
 
 pub fn finding_records_from_lint(
