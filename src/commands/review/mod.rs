@@ -22,7 +22,7 @@ use std::process::Command;
 use homeboy::core::ci_profile::{self, CiRunOutput, CiRunSelection};
 use homeboy::core::code_audit::AuditCommandOutput;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
-use homeboy::core::execution;
+use homeboy::core::execution::{self, PlanExecutionRun};
 use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::TestCommandOutput;
 use homeboy::core::finding::HomeboyFinding;
@@ -225,7 +225,21 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
     }
 }
 
-fn execute_review_plan_step(
+fn execute_review_plan_steps<R, Dispatch>(
+    steps: &[PlanStep],
+    dispatch: Dispatch,
+) -> homeboy::core::Result<PlanExecutionRun<R>>
+where
+    Dispatch: FnMut(&PlanStep) -> homeboy::core::Result<Option<R>>,
+{
+    execution::execute_plan_steps(steps, dispatch, review_step_is_show_stopper)
+}
+
+fn review_step_is_show_stopper<R>(_result: &R) -> bool {
+    false
+}
+
+fn dispatch_review_plan_step(
     step: &PlanStep,
     args: &ReviewArgs,
     global: &GlobalArgs,
@@ -390,11 +404,9 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     let mut test_stage = None;
     let mut test_exit = 0;
 
-    let stage_run = match execution::execute_plan_steps(
-        &quality_plan.steps,
-        |step| execute_review_plan_step(step, &args, global, &component_label),
-        |_| false,
-    ) {
+    let stage_run = match execute_review_plan_steps(&quality_plan.steps, |step| {
+        dispatch_review_plan_step(step, &args, global, &component_label)
+    }) {
         Ok(run) => run,
         Err(error) => {
             observation::finish_error(review_observation, &error);
@@ -1053,7 +1065,7 @@ mod tests {
         let global = GlobalArgs {};
         let step = PlanStep::ready("review.unknown", "review.unknown").build();
 
-        let err = match execute_review_plan_step(&step, &args, &global, "fixture") {
+        let err = match dispatch_review_plan_step(&step, &args, &global, "fixture") {
             Ok(_) => panic!("unsupported executable review step should fail"),
             Err(err) => err,
         };
@@ -1061,6 +1073,71 @@ mod tests {
         assert!(err
             .to_string()
             .contains("unsupported executable step 'review.unknown'"));
+    }
+
+    #[test]
+    fn execute_review_plan_steps_preserves_quality_order() {
+        let steps = vec![
+            PlanStep::ready("review.audit", "review.audit").build(),
+            PlanStep::ready("review.lint", "review.lint").build(),
+            PlanStep::ready("review.test", "review.test").build(),
+        ];
+        let mut observed = Vec::new();
+
+        let run = execute_review_plan_steps(&steps, |step| {
+            observed.push(step.id.clone());
+            Ok(Some(step.id.clone()))
+        })
+        .expect("review execution should run ready steps");
+
+        assert_eq!(observed, vec!["review.audit", "review.lint", "review.test"]);
+        assert_eq!(run.results, observed);
+        assert!(!run.stopped);
+    }
+
+    #[test]
+    fn execute_review_plan_steps_skips_disabled_and_skipped_steps() {
+        let steps = vec![
+            PlanStep::ready("review.audit", "review.audit").build(),
+            PlanStep::disabled_with_reason("review.lint", "review.lint", "disabled").build(),
+            PlanStep::builder(
+                "review.test",
+                "review.test",
+                homeboy::core::plan::PlanStepStatus::Skipped,
+            )
+            .build(),
+        ];
+
+        let run = execute_review_plan_steps(&steps, |step| Ok(Some(step.id.clone())))
+            .expect("review execution should ignore non-executable steps");
+
+        assert_eq!(run.results, vec!["review.audit"]);
+        assert!(!run.stopped);
+    }
+
+    #[test]
+    fn execute_review_plan_steps_does_not_treat_failures_as_show_stoppers() {
+        let steps = vec![
+            PlanStep::ready("review.audit", "review.audit").build(),
+            PlanStep::ready("review.lint", "review.lint").build(),
+            PlanStep::ready("review.test", "review.test").build(),
+        ];
+
+        let run = execute_review_plan_steps(&steps, |step| {
+            let exit_code = if step.id == "review.audit" { 2 } else { 0 };
+            Ok(Some((step.id.clone(), exit_code)))
+        })
+        .expect("review execution should continue after stage failures");
+
+        assert_eq!(
+            run.results,
+            vec![
+                ("review.audit".to_string(), 2),
+                ("review.lint".to_string(), 0),
+                ("review.test".to_string(), 0),
+            ]
+        );
+        assert!(!run.stopped);
     }
 
     #[test]
