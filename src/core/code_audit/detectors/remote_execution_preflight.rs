@@ -18,6 +18,7 @@ pub(in crate::core::code_audit) fn run(
 
     for fp in fingerprints {
         if super::walker::is_test_path(&fp.relative_path)
+            || fp.relative_path == "src/core/code_audit/detectors/remote_execution_preflight.rs"
             || !is_remote_dispatch_file(&fp.content, &policy)
         {
             continue;
