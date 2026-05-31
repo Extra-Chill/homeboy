@@ -403,6 +403,9 @@ jobs:
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
           owner: ${{ steps.token-scope.outputs.owner }}
           repositories: ${{ steps.token-scope.outputs.repositories }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
 
       - name: Report GitHub auth mode
         id: auth-mode
