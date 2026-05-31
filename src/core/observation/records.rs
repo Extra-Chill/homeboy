@@ -183,7 +183,7 @@ mod tests {
             .metadata("source_sidecar", "lint-findings")
             .build();
 
-        let record = finding_record_from_lint("run-1", &finding);
+        let record = finding_record_from_lint("run-1", finding);
 
         assert_eq!(record.run_id, "run-1");
         assert_eq!(record.tool, "phpcs");
