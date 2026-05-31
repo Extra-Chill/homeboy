@@ -3,6 +3,8 @@
 # Consumers receive one stable `engine_data_json` output. GitHub Actions cannot
 # create dynamic workflow_call outputs from `engine_data_outputs`, so callers
 # should parse that JSON map in their own workflow when they need named fields.
+# The `auth_mode` output reports whether the run used a Homeboy GitHub App token
+# or the repository-scoped GitHub Actions token fallback.
 name: Data Machine Agent CI (reusable)
 
 'on':
@@ -298,6 +300,8 @@ name: Data Machine Agent CI (reusable)
         value: ${{ jobs.run-agent.outputs.transcript_summary }}
       engine_data_json:
         value: ${{ jobs.run-agent.outputs.engine_data_json }}
+      auth_mode:
+        value: ${{ jobs.run-agent.outputs.auth_mode }}
 
 jobs:
   run-agent:
@@ -312,6 +316,7 @@ jobs:
       transcript_json: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json || steps.skipped.outputs.transcript_json }}
       transcript_summary: ${{ steps.extract.outputs.transcript_summary || steps.extract_dry_run.outputs.transcript_summary || steps.skipped.outputs.transcript_summary }}
       engine_data_json: ${{ steps.engine-data.outputs.engine_data_json || steps.skipped.outputs.engine_data_json }}
+      auth_mode: ${{ steps.auth-mode.outputs.auth_mode || steps.skipped.outputs.auth_mode }}
     steps:
       - name: Record skipped agent run
         id: skipped
@@ -322,6 +327,7 @@ jobs:
           printf 'transcript_json=\n' >> "$GITHUB_OUTPUT"
           printf 'transcript_summary=\n' >> "$GITHUB_OUTPUT"
           printf 'engine_data_json={}\n' >> "$GITHUB_OUTPUT"
+          printf 'auth_mode=skipped\n' >> "$GITHUB_OUTPUT"
 
       - name: Checkout consumer repo
         if: ${{ inputs.run_agent }}
@@ -397,6 +403,43 @@ jobs:
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
           owner: ${{ steps.token-scope.outputs.owner }}
           repositories: ${{ steps.token-scope.outputs.repositories }}
+
+      - name: Report GitHub auth mode
+        id: auth-mode
+        if: ${{ inputs.run_agent }}
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_TOKEN_OWNER: ${{ steps.token-scope.outputs.owner }}
+          APP_TOKEN_REPOSITORIES: ${{ steps.token-scope.outputs.repositories }}
+          APP_TOKEN_REPOS_INPUT: ${{ inputs.app_token_repos }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          REQUIRE_HOMEBOY_APP_TOKEN: ${{ inputs.require_homeboy_app_token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ -n "$APP_TOKEN" ]; then
+            auth_mode="homeboy_app_token"
+            token_scope="${APP_TOKEN_OWNER}/${APP_TOKEN_REPOSITORIES}"
+            token_note="Generated Homeboy GitHub App installation token."
+          else
+            auth_mode="github_token_fallback"
+            token_scope="$TARGET_REPO"
+            token_note="Using repository-scoped github.token fallback."
+          fi
+          printf 'auth_mode=%s\n' "$auth_mode" >> "$GITHUB_OUTPUT"
+          printf 'Data Machine agent CI auth_mode: %s\n' "$auth_mode"
+          printf 'Token scope: %s\n' "$token_scope"
+          printf 'require_homeboy_app_token: %s\n' "$REQUIRE_HOMEBOY_APP_TOKEN"
+          printf 'dry_run: %s\n' "$DRY_RUN"
+          {
+            printf '## Data Machine Agent CI Auth\n\n'
+            printf -- '- Auth mode: `%s`\n' "$auth_mode"
+            printf -- '- Target repository: `%s`\n' "$TARGET_REPO"
+            printf -- '- Token scope: `%s`\n' "$token_scope"
+            printf -- '- Homeboy App token repos input: `%s`\n' "${APP_TOKEN_REPOS_INPUT:-default target_repo}"
+            printf -- '- Require Homeboy App token: `%s`\n' "$REQUIRE_HOMEBOY_APP_TOKEN"
+            printf -- '- Note: %s\n' "$token_note"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout homeboy-extensions
         if: ${{ inputs.run_agent }}
