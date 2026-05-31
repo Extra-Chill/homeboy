@@ -48,7 +48,7 @@ pub(super) fn sync_lab_offload_rigs(
             RunnerExecOptions {
                 cwd: Some(remote_cwd.to_string()),
                 project_id: None,
-                allow_ssh: false,
+                allow_diagnostic_ssh: false,
                 command: vec![
                     homeboy_path.to_string(),
                     "rig".to_string(),

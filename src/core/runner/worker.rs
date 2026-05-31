@@ -75,7 +75,7 @@ pub fn run_reverse_worker(
         RunnerExecOptions {
             cwd: claim.request.cwd.clone(),
             project_id: claim.request.project_id.clone(),
-            allow_ssh: false,
+            allow_diagnostic_ssh: false,
             command: claim.request.command.clone(),
             env: claim.request.env.clone(),
             capture_patch: claim.request.capture_patch,

@@ -268,7 +268,7 @@ homeboy runner exec <runner-id> --project <project-id> --cwd /runner/workspace/p
 homeboy runner exec <runner-id> --ssh --cwd /runner/workspace/project -- <command...>
 ```
 
-`exec` submits the command to the connected runner daemon when `homeboy runner connect <runner-id>` has established a live loopback tunnel. If no daemon session is connected, local runners execute directly and SSH runners require explicit `--ssh`. SSH runner raw exec is policy-denied by default until `policy.allow_raw_exec` is explicitly true.
+`exec` submits the command to the connected runner daemon when `homeboy runner connect <runner-id>` has established a live loopback tunnel. If no daemon session is connected, local runners execute directly and SSH runners require explicit diagnostic `--ssh`. SSH runner raw exec is policy-denied by default until `policy.allow_raw_exec` is explicitly true.
 
 Path rules:
 
@@ -277,6 +277,7 @@ Path rules:
 - Omitting `--cwd` on an SSH runner uses the runner `workspace_root`.
 - `--project <id>` feeds the runner trust policy project allowlist check.
 - `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
+- Diagnostic SSH output serializes as `mode: "diagnostic_ssh"` and does not include job/event evidence.
 - Raw SSH execution remains intentionally explicit and should not be used as production Lab/offload evidence; use connected daemon or reverse broker execution for job/event/artifact-compatible output.
 
 Runner metrics:

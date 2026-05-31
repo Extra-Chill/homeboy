@@ -453,7 +453,7 @@ fn run_lab_offload_inner(
         RunnerExecOptions {
             cwd: Some(remote_cwd),
             project_id: None,
-            allow_ssh: false,
+            allow_diagnostic_ssh: false,
             command,
             env,
             capture_patch: request.capture_patch,

@@ -25,7 +25,7 @@ use policy::{validate_runner_policy, RunnerPolicyRequest};
 pub struct RunnerExecOptions {
     pub cwd: Option<String>,
     pub project_id: Option<String>,
-    pub allow_ssh: bool,
+    pub allow_diagnostic_ssh: bool,
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
     pub capture_patch: bool,
@@ -41,7 +41,7 @@ pub enum RunnerExecMode {
     Daemon,
     Local,
     ReverseBroker,
-    Ssh,
+    DiagnosticSsh,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,13 +146,13 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     match runner.kind {
         RunnerKind::Local => exec_local(&runner, cwd, options.command, options.env),
-        RunnerKind::Ssh if options.allow_ssh => {
+        RunnerKind::Ssh if options.allow_diagnostic_ssh => {
             preflight_runner_capability_plan(
                 &runner,
                 options.capability_preflight.as_ref(),
                 &request_env,
             )?;
-            exec_ssh(&runner, cwd, options.command, request_env)
+            exec_diagnostic_ssh(&runner, cwd, options.command, request_env)
         }
         RunnerKind::Ssh => Err(Error::validation_invalid_argument(
             "runner",
@@ -636,7 +636,7 @@ fn exec_local(
     ))
 }
 
-fn exec_ssh(
+fn exec_diagnostic_ssh(
     runner: &Runner,
     cwd: String,
     command: Vec<String>,
@@ -668,7 +668,7 @@ fn exec_ssh(
         SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref());
     Ok(exec_output(
         runner,
-        RunnerExecMode::Ssh,
+        RunnerExecMode::DiagnosticSsh,
         cwd,
         command,
         ProcessOutput {
@@ -807,7 +807,7 @@ fn string_field(value: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::server::{RunnerPolicy, RunnerSettings};
+    use crate::core::server::{self, RunnerPolicy, RunnerSettings};
 
     fn ssh_runner() -> Runner {
         Runner {
@@ -858,7 +858,7 @@ mod tests {
                 RunnerExecOptions {
                     cwd: None,
                     project_id: None,
-                    allow_ssh: false,
+                    allow_diagnostic_ssh: false,
                     command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
                     env: Default::default(),
                     capture_patch: false,
@@ -895,6 +895,55 @@ mod tests {
     }
 
     #[test]
+    fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
+        crate::test_support::with_isolated_home(|_| {
+            server::create(
+                r#"{"id":"lab-server","host":"192.168.86.63","user":"chubes"}"#,
+                false,
+            )
+            .expect("create server");
+
+            super::super::create(
+                r#"{"id":"lab-server","kind":"ssh","server_id":"lab-server","workspace_root":"/srv/homeboy"}"#,
+                false,
+            )
+            .expect("create ssh runner");
+
+            let err = exec(
+                "lab-server",
+                RunnerExecOptions {
+                    cwd: Some("/srv/homeboy/project".to_string()),
+                    project_id: None,
+                    allow_diagnostic_ssh: false,
+                    command: vec!["homeboy".to_string(), "test".to_string()],
+                    env: Default::default(),
+                    capture_patch: false,
+                    raw_exec: false,
+                    source_snapshot: None,
+                    capability_preflight: None,
+                    required_extensions: Vec::new(),
+                },
+            )
+            .expect_err("disconnected ssh runner needs daemon or diagnostic fallback");
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("connected to a daemon"));
+            let tried = err.details["tried"].as_array().expect("tried details");
+            assert!(tried.iter().any(|detail| detail
+                .as_str()
+                .is_some_and(|detail| detail.contains("job metadata"))));
+        });
+    }
+
+    #[test]
+    fn test_diagnostic_ssh_mode_serializes_as_diagnostic_ssh() {
+        assert_eq!(
+            serde_json::to_value(RunnerExecMode::DiagnosticSsh).expect("mode json"),
+            json!("diagnostic_ssh")
+        );
+    }
+
+    #[test]
     fn test_required_extensions_for_command_reads_extension_flags() {
         let command = vec![
             "homeboy".to_string(),
@@ -920,7 +969,7 @@ mod tests {
         let options = RunnerExecOptions {
             cwd: Some("/srv/homeboy/project".to_string()),
             project_id: Some("extrachill".to_string()),
-            allow_ssh: true,
+            allow_diagnostic_ssh: true,
             command: vec!["sh".to_string()],
             env: Default::default(),
             capture_patch: false,
@@ -952,7 +1001,7 @@ mod tests {
         let allowed = RunnerExecOptions {
             cwd: Some("/srv/homeboy/extrachill/homeboy".to_string()),
             project_id: Some("extrachill".to_string()),
-            allow_ssh: true,
+            allow_diagnostic_ssh: true,
             command: vec!["cargo".to_string(), "test".to_string()],
             env: Default::default(),
             capture_patch: false,
