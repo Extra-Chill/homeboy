@@ -84,27 +84,14 @@ pub fn run_refactor_script_result(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|err| RefactorScriptFailure {
-            kind: RefactorScriptFailureKind::SpawnFailed,
-            exit_code: None,
-            stdout: String::new(),
-            stderr: err.to_string(),
-            parsed_stdout: None,
-        })
+        .map_err(RefactorScriptFailure::spawn_failed)
         .and_then(|mut child| {
             use std::io::Write;
             if let Some(ref mut stdin) = child.stdin {
                 let _ = stdin.write_all(command.to_string().as_bytes());
             }
-            wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).map_err(|err| {
-                RefactorScriptFailure {
-                    kind: RefactorScriptFailureKind::SpawnFailed,
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: err.to_string(),
-                    parsed_stdout: None,
-                }
-            })
+            wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES)
+                .map_err(RefactorScriptFailure::spawn_failed)
         })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -131,6 +118,16 @@ pub fn run_refactor_script_result(
 }
 
 impl RefactorScriptFailure {
+    fn spawn_failed(error: std::io::Error) -> Self {
+        Self {
+            kind: RefactorScriptFailureKind::SpawnFailed,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: error.to_string(),
+            parsed_stdout: None,
+        }
+    }
+
     fn new(kind: RefactorScriptFailureKind) -> Self {
         Self {
             kind,
