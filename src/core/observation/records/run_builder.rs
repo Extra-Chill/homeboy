@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::core::observation::context::RunContext;
+
 use super::NewRunRecord;
 
 #[derive(Debug, Clone)]
@@ -19,6 +21,7 @@ impl NewRunRecordBuilder {
                 git_sha: None,
                 rig_id: None,
                 metadata_json: serde_json::json!({}),
+                run_context: RunContext::empty(),
             },
         }
     }
@@ -70,6 +73,11 @@ impl NewRunRecordBuilder {
 
     pub fn metadata(mut self, metadata_json: serde_json::Value) -> Self {
         self.record.metadata_json = metadata_json;
+        self
+    }
+
+    pub fn run_context(mut self, run_context: RunContext) -> Self {
+        self.record.run_context = run_context;
         self
     }
 

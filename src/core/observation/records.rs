@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::context::RunContext;
+
 #[path = "finding_records.rs"]
 mod finding_records;
 mod run_builder;
@@ -25,11 +27,18 @@ pub struct NewRunRecord {
     pub git_sha: Option<String>,
     pub rig_id: Option<String>,
     pub metadata_json: serde_json::Value,
+    #[serde(skip)]
+    pub run_context: RunContext,
 }
 
 impl NewRunRecord {
     pub fn builder(kind: impl Into<String>) -> NewRunRecordBuilder {
         NewRunRecordBuilder::new(kind)
+    }
+
+    pub fn with_run_context(mut self, run_context: RunContext) -> Self {
+        self.run_context = run_context;
+        self
     }
 }
 

@@ -9,6 +9,8 @@ mod findings;
 mod schema;
 mod triage_items;
 
+use super::context::RunContext;
+pub use super::context::{LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV};
 use super::records::{
     ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, FindingListFilter,
     FindingRecord, NewFindingRecord, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord,
@@ -18,7 +20,6 @@ use super::records::{
 use crate::core::{paths, Error, Result};
 
 pub const CURRENT_SCHEMA_VERSION: i64 = 5;
-pub const LAB_OFFLOAD_METADATA_ENV: &str = "HOMEBOY_LAB_OFFLOAD_JSON";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ObservationDbStatus {
@@ -57,10 +58,23 @@ impl ObservationStore {
     }
 
     pub fn start_run(&self, run: NewRunRecord) -> Result<RunRecord> {
+        let context = run
+            .run_context
+            .clone()
+            .with_missing_from(RunContext::subprocess_compatibility_from_env());
+        self.start_run_with_context(run, context)
+    }
+
+    pub fn start_run_with_context(
+        &self,
+        run: NewRunRecord,
+        context: RunContext,
+    ) -> Result<RunRecord> {
         validate_required("kind", &run.kind)?;
         let id = Uuid::new_v4().to_string();
         let started_at = chrono::Utc::now().to_rfc3339();
-        let metadata_json = serialize_metadata(&with_run_owner_metadata(run.metadata_json))?;
+        let metadata_json =
+            serialize_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
 
         self.connection
             .execute(
@@ -854,24 +868,24 @@ fn serialize_metadata(metadata_json: &serde_json::Value) -> Result<String> {
     })
 }
 
-fn with_run_owner_metadata(mut metadata: serde_json::Value) -> serde_json::Value {
+fn with_run_context_metadata(
+    mut metadata: serde_json::Value,
+    context: &RunContext,
+) -> serde_json::Value {
     let owner = serde_json::json!({
         "pid": std::process::id(),
         "recorded_at": chrono::Utc::now().to_rfc3339(),
     });
-    let source_snapshot = std::env::var("HOMEBOY_SOURCE_SNAPSHOT_JSON")
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    let lab_offload = std::env::var(LAB_OFFLOAD_METADATA_ENV)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
 
     let mut additions = vec![("homeboy_run_owner".to_string(), owner)];
-    if let Some(source_snapshot) = source_snapshot {
-        additions.push(("source_snapshot".to_string(), source_snapshot));
+    if let Some(source_snapshot) = &context.provenance.source_snapshot {
+        additions.push(("source_snapshot".to_string(), source_snapshot.clone()));
     }
-    if let Some(lab_offload) = lab_offload {
-        additions.push(("lab_offload".to_string(), lab_offload));
+    if let Some(lab_offload) = &context.provenance.lab_offload {
+        additions.push(("lab_offload".to_string(), lab_offload.clone()));
+    }
+    if let Some(artifact_mirror) = &context.provenance.artifact_mirror {
+        additions.push(("artifact_mirror".to_string(), artifact_mirror.clone()));
     }
 
     let target = if metadata.is_object() {
@@ -1079,6 +1093,10 @@ mod api_coverage_tests {
     use crate::test_support::with_isolated_home;
 
     struct XdgGuard(Option<String>);
+    struct EnvGuard {
+        key: &'static str,
+        value: Option<String>,
+    }
 
     impl XdgGuard {
         fn unset() -> Self {
@@ -1093,6 +1111,23 @@ mod api_coverage_tests {
             match &self.0 {
                 Some(value) => std::env::set_var("XDG_DATA_HOME", value),
                 None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: String) -> Self {
+            let prior = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, value: prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.value {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -1167,9 +1202,8 @@ mod api_coverage_tests {
                 "sync_excludes": ["node_modules/"]
             });
 
-            std::env::set_var("HOMEBOY_SOURCE_SNAPSHOT_JSON", snapshot.to_string());
+            let _env = EnvGuard::set(SOURCE_SNAPSHOT_METADATA_ENV, snapshot.to_string());
             let run = store.start_run(new_run("test")).expect("start");
-            std::env::remove_var("HOMEBOY_SOURCE_SNAPSHOT_JSON");
 
             assert_eq!(run.metadata_json["source_snapshot"], snapshot);
         });
@@ -1188,11 +1222,62 @@ mod api_coverage_tests {
                 "fallback_reason": "runner connect timed out after 3s"
             });
 
-            std::env::set_var(LAB_OFFLOAD_METADATA_ENV, lab.to_string());
+            let _env = EnvGuard::set(LAB_OFFLOAD_METADATA_ENV, lab.to_string());
             let run = store.start_run(new_run("test")).expect("start");
-            std::env::remove_var(LAB_OFFLOAD_METADATA_ENV);
 
             assert_eq!(run.metadata_json["lab_offload"], lab);
+        });
+    }
+
+    #[test]
+    fn test_start_run_with_context_prefers_explicit_provenance_over_environment() {
+        with_isolated_home(|_| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let env_snapshot = serde_json::json!({ "runner_id": "env" });
+            let explicit_snapshot = serde_json::json!({ "runner_id": "typed" });
+            let explicit_lab = serde_json::json!({ "status": "fallback", "source": "typed" });
+            let _env_snapshot =
+                EnvGuard::set(SOURCE_SNAPSHOT_METADATA_ENV, env_snapshot.to_string());
+            let _env_lab = EnvGuard::set(LAB_OFFLOAD_METADATA_ENV, "{not json".to_string());
+
+            let run = store
+                .start_run(
+                    new_run("test").with_run_context(RunContext::from_provenance(
+                        crate::core::observation::RunProvenance::default()
+                            .with_source_snapshot(explicit_snapshot.clone())
+                            .with_lab_offload(explicit_lab.clone()),
+                    )),
+                )
+                .expect("start");
+
+            assert_eq!(run.metadata_json["source_snapshot"], explicit_snapshot);
+            assert_eq!(run.metadata_json["lab_offload"], explicit_lab);
+        });
+    }
+
+    #[test]
+    fn test_malformed_subprocess_environment_does_not_pollute_typed_context() {
+        with_isolated_home(|_| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let _env_snapshot =
+                EnvGuard::set(SOURCE_SNAPSHOT_METADATA_ENV, "{not json".to_string());
+            let _env_lab = EnvGuard::set(LAB_OFFLOAD_METADATA_ENV, "{not json".to_string());
+
+            let run = store
+                .start_run_with_context(
+                    new_run("test"),
+                    RunContext::from_provenance(
+                        crate::core::observation::RunProvenance::default()
+                            .with_artifact_mirror(serde_json::json!({ "mirror": "typed" })),
+                    ),
+                )
+                .expect("start");
+
+            assert!(run.metadata_json.get("source_snapshot").is_none());
+            assert!(run.metadata_json.get("lab_offload").is_none());
+            assert_eq!(run.metadata_json["artifact_mirror"]["mirror"], "typed");
         });
     }
 
