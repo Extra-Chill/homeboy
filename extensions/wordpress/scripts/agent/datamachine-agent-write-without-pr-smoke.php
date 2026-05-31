@@ -640,7 +640,7 @@ namespace {
     );
     $datamachine_settings = $GLOBALS['homeboy_datamachine_agent_fake_options']['datamachine_settings'] ?? array();
     $github_profiles = $datamachine_settings['github_credential_profiles'] ?? array();
-    if ( 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) || array( 'owner/repo' ) !== ( $github_profiles[0]['allowed_repos'] ?? array() ) || array( 'contents_write', 'issues_write' ) !== ( $github_profiles[0]['capabilities'] ?? array() ) ) {
+    if ( 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) || array( 'owner/repo' ) !== ( $github_profiles[0]['allowed_repos'] ?? array() ) || array( 'contents_write' ) !== ( $github_profiles[0]['capabilities'] ?? array() ) ) {
         fwrite( STDERR, "Expected repository token profile to be first for same-repo GitHub operations.\n" );
         exit( 1 );
     }
