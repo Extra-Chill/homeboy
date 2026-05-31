@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Command;
 
 use crate::core::component::{self, Component};
 use crate::core::error::{Error, Result};
@@ -224,13 +225,90 @@ pub(super) fn calculate_component_status(
         }
     };
 
-    if matches!(version_status, ComponentStatus::UpToDate)
-        && component_is_behind_upstream(component)
-    {
-        ComponentStatus::BehindUpstream
-    } else {
-        version_status
+    if !matches!(version_status, ComponentStatus::UpToDate) {
+        return version_status;
     }
+
+    if component_is_behind_upstream(component) {
+        return ComponentStatus::BehindUpstream;
+    }
+
+    if component_is_behind_default_branch(component) {
+        return ComponentStatus::SourceStale;
+    }
+
+    version_status
+}
+
+fn component_is_behind_default_branch(component: &Component) -> bool {
+    if component.is_file_component() {
+        return false;
+    }
+
+    let path = Path::new(&component.local_path);
+    if git_output(path, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_some() {
+        return false;
+    }
+
+    fetch_origin(path);
+    let Some(default_branch) = default_remote_branch(path) else {
+        return false;
+    };
+
+    git_output(
+        path,
+        &[
+            "rev-list",
+            "--left-only",
+            "--count",
+            &format!("{default_branch}...HEAD"),
+        ],
+    )
+    .and_then(|value| value.parse::<u32>().ok())
+    .is_some_and(|count| count > 0)
+}
+
+fn fetch_origin(path: &Path) {
+    let _ = Command::new("git")
+        .args(["fetch", "--quiet", "origin"])
+        .current_dir(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn git_output(path: &Path, args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!value.is_empty()).then_some(value)
+        })
+}
+
+fn default_remote_branch(path: &Path) -> Option<String> {
+    git_output(
+        path,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .or_else(|| {
+        ["origin/main", "origin/trunk", "origin/master"]
+            .iter()
+            .find(|branch| git_output(path, &["rev-parse", "--verify", branch]).is_some())
+            .map(|branch| (*branch).to_string())
+    })
 }
 
 /// Calculate release state for a component.
@@ -491,6 +569,48 @@ mod tests {
         assert!(matches!(
             calculate_component_status(&stale, &remote_versions),
             ComponentStatus::BehindUpstream
+        ));
+    }
+
+    #[test]
+    fn component_status_reports_source_stale_for_detached_checkout_behind_default() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("source");
+        let local = temp.path().join("local");
+        std::fs::create_dir(&source).expect("source dir");
+
+        init_source_repo(&source);
+        clone_repo(&source, &local);
+        run_git(&local, &["checkout", "--detach", "HEAD"]);
+        commit_upstream_change(&source);
+
+        let stale = versioned_component("stale", &local, "1.0.0");
+        let remote_versions = HashMap::from([("stale".to_string(), "1.0.0".to_string())]);
+
+        assert!(matches!(
+            calculate_component_status(&stale, &remote_versions),
+            ComponentStatus::SourceStale
+        ));
+    }
+
+    #[test]
+    fn component_status_reports_source_stale_for_untracked_branch_behind_default() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("source");
+        let local = temp.path().join("local");
+        std::fs::create_dir(&source).expect("source dir");
+
+        init_source_repo(&source);
+        clone_repo(&source, &local);
+        run_git(&local, &["checkout", "-b", "configured-source"]);
+        commit_upstream_change(&source);
+
+        let stale = versioned_component("stale", &local, "1.0.0");
+        let remote_versions = HashMap::from([("stale".to_string(), "1.0.0".to_string())]);
+
+        assert!(matches!(
+            calculate_component_status(&stale, &remote_versions),
+            ComponentStatus::SourceStale
         ));
     }
 
