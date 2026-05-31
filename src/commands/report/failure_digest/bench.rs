@@ -8,6 +8,8 @@ use super::{
 };
 use crate::commands::escape_markdown_table_cell;
 
+use super::budget_values;
+
 pub(super) fn render_bench_section(out: &mut String, output_dir: &Path, run_url: &str) {
     let (data, error) = super::envelope_parts(read_command_json(output_dir, "bench"));
 
@@ -85,17 +87,19 @@ fn render_budget_findings(out: &mut String, data: &Map<String, Value>) {
         let Some(finding) = finding.as_object() else {
             continue;
         };
-        let code = string_value(finding, "code").unwrap_or_else(|| "budget".to_string());
-        let subject = string_value(finding, "subject")
-            .or_else(|| string_value(finding, "context_label"))
+        let code = budget_values::string_value(finding, "code")
+            .or_else(|| string_value(finding, "rule"))
+            .unwrap_or_else(|| "budget".to_string());
+        let subject = budget_values::string_value(finding, "subject")
+            .or_else(|| budget_values::string_value(finding, "context_label"))
             .unwrap_or_else(|| "-".to_string());
-        let actual = number_value(finding, "actual")
+        let actual = budget_values::number_value(finding, "actual")
             .map(format_report_number)
             .unwrap_or_else(|| "-".to_string());
-        let expected = number_value(finding, "expected")
+        let expected = budget_values::number_value(finding, "expected")
             .map(format_report_number)
             .unwrap_or_else(|| "-".to_string());
-        let unit = string_value(finding, "unit").unwrap_or_else(|| "-".to_string());
+        let unit = budget_values::string_value(finding, "unit").unwrap_or_else(|| "-".to_string());
         let message = string_value(finding, "message").unwrap_or_default();
         let _ = writeln!(
             out,

@@ -58,8 +58,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::budget::BudgetFinding;
 use crate::core::error::{Error, Result};
+use crate::core::finding::HomeboyFinding;
 use crate::core::observation::timeline::{
     reporting_timeline, summarize_spans, ObservationEvent, ObservationSpanDefinition,
     ObservationSpanResult,
@@ -98,8 +98,12 @@ pub struct BenchResults {
     pub span_definitions: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub budget_findings: Vec<BudgetFinding>,
+    #[serde(
+        default,
+        deserialize_with = "super::budget_findings::deserialize_budget_findings",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub budget_findings: Vec<HomeboyFinding>,
     pub scenarios: Vec<BenchScenario>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metric_policies: BTreeMap<String, BenchMetricPolicy>,
@@ -1066,13 +1070,7 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("assistant_message_count gte 1"));
         assert_eq!(scenario.gate_results[0].actual, Some(0.0));
-        assert_eq!(parsed.budget_findings.len(), 1);
-        assert_eq!(parsed.budget_findings[0].category, "budget");
-        assert_eq!(
-            parsed.budget_findings[0].code,
-            "bench.gate.assistant_message_count"
-        );
-        assert!(!parsed.budget_findings[0].passed);
+        assert_eq!(parsed.budget_findings[0].metadata["passed"], false);
     }
 
     #[test]
@@ -1100,9 +1098,9 @@ mod tests {
         let failures = evaluate_gates(&mut parsed);
 
         assert_eq!(failures, vec!["REST response exceeded 250 KB budget"]);
-        assert_eq!(parsed.budget_findings[0].actual, Some(4378195.0));
-        assert_eq!(parsed.budget_findings[0].expected, 250000.0);
-        assert_eq!(parsed.budget_findings[0].unit, "bytes");
+        assert_eq!(parsed.budget_findings[0].metadata["actual"], 4378195.0);
+        assert_eq!(parsed.budget_findings[0].metadata["expected"], 250000.0);
+        assert_eq!(parsed.budget_findings[0].metadata["unit"], "bytes");
     }
 
     #[test]
@@ -1460,7 +1458,10 @@ mod tests {
         assert_eq!(parsed.scenarios[0].gates.len(), 1);
         assert_eq!(parsed.scenarios[0].gates[0].op, BenchGateOp::Lte);
         assert!(!failures.is_empty());
-        assert_eq!(parsed.budget_findings[0].code, "bench.gate.peak_rss_bytes");
+        assert_eq!(
+            parsed.budget_findings[0].rule.as_deref(),
+            Some("bench.gate.peak_rss_bytes")
+        );
     }
 
     #[test]

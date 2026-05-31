@@ -1,34 +1,14 @@
-use crate::core::budget::BudgetFinding;
-use crate::core::finding::{FindingSource, HomeboyFinding};
+use crate::core::finding::HomeboyFinding;
 
 use super::records::NewFindingRecord;
 
-fn homeboy_finding_from_budget(finding: &BudgetFinding) -> HomeboyFinding {
-    let mut normalized = HomeboyFinding::builder("budget", finding.message.clone())
-        .rule(finding.code.clone())
-        .category(finding.category.clone())
-        .severity(finding.severity.clone())
-        .fingerprint(finding.fingerprint())
-        .source(FindingSource::new("budget").label(finding.context_label.clone()))
-        .metadata("context_label", finding.context_label.clone())
-        .metadata("actual", finding.actual)
-        .metadata("expected", finding.expected)
-        .metadata("unit", finding.unit.clone())
-        .metadata("subject", finding.subject.clone())
-        .metadata("passed", finding.passed)
-        .raw(finding)
-        .build();
-    normalized.location.file = finding.file.clone();
-    normalized
-}
-
-fn finding_record_from_budget(run_id: &str, finding: &BudgetFinding) -> NewFindingRecord {
-    NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_budget(finding))
+fn finding_record_from_budget(run_id: &str, finding: &HomeboyFinding) -> NewFindingRecord {
+    NewFindingRecord::from_homeboy_finding(run_id, finding.clone())
 }
 
 pub fn finding_records_from_budget(
     run_id: &str,
-    findings: &[BudgetFinding],
+    findings: &[HomeboyFinding],
 ) -> Vec<NewFindingRecord> {
     findings
         .iter()
@@ -39,6 +19,7 @@ pub fn finding_records_from_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::budget::BudgetFinding;
 
     #[test]
     fn test_finding_record_from_budget() {
@@ -52,7 +33,8 @@ mod tests {
             Some("/wp-json/datamachine/v1/pipelines?per_page=100".to_string()),
         );
 
-        let record = finding_record_from_budget("run-1", &finding);
+        let normalized = finding.to_homeboy_finding();
+        let record = finding_record_from_budget("run-1", &normalized);
 
         assert_eq!(record.tool, "budget");
         assert_eq!(record.rule.as_deref(), Some("rest.max_response_bytes"));
@@ -74,7 +56,8 @@ mod tests {
             1000.0,
             "ms",
             Some("front-page".to_string()),
-        )];
+        )
+        .to_homeboy_finding()];
 
         let records = finding_records_from_budget("run-1", &findings);
 

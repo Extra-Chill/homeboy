@@ -7,8 +7,8 @@ use super::baseline::BenchBaselineComparison;
 use super::diagnostic::BenchDiagnostic;
 use super::parsing::BenchResults;
 use super::run::{BenchRunFailure, BenchRunWorkflowResult};
-use crate::core::budget::BudgetFinding;
 use crate::core::ci_profile::CiContext;
+use crate::core::finding::HomeboyFinding;
 use crate::core::rig::RigStateSnapshot;
 use crate::core::runner::reportable_artifact_evidence_path;
 
@@ -28,7 +28,7 @@ pub struct BenchCommandOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub results: Option<BenchResults>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub budget_findings: Vec<BudgetFinding>,
+    pub budget_findings: Vec<HomeboyFinding>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gate_failures: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

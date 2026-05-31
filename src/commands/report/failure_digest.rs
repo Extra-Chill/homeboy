@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 mod audit;
 mod bench;
+pub(super) mod budget_values;
 mod trace;
 
 use audit::render_audit_section;
