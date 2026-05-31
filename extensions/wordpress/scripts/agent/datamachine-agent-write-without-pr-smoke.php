@@ -644,7 +644,7 @@ namespace {
         fwrite( STDERR, "Expected repository token profile to be first for same-repo GitHub operations.\n" );
         exit( 1 );
     }
-    if ( 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'owner/repo', 'owner/other' ) !== ( $github_profiles[1]['allowed_repos'] ?? array() ) || array( 'pull_request_create' ) !== ( $github_profiles[1]['capabilities'] ?? array() ) || '' !== ( $github_profiles[1]['default_repo'] ?? '' ) ) {
+    if ( 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'owner/repo', 'owner/other' ) !== ( $github_profiles[1]['allowed_repos'] ?? array() ) || array( 'issues_write', 'pull_request_create' ) !== ( $github_profiles[1]['capabilities'] ?? array() ) || '' !== ( $github_profiles[1]['default_repo'] ?? '' ) ) {
         fwrite( STDERR, "Expected app token profile to remain available for PR creation across allowed repositories.\n" );
         exit( 1 );
     }
@@ -666,7 +666,7 @@ namespace {
     );
     $datamachine_settings = $GLOBALS['homeboy_datamachine_agent_fake_options']['datamachine_settings'] ?? array();
     $github_profiles      = $datamachine_settings['github_credential_profiles'] ?? array();
-    if ( 2 !== count( $github_profiles ) || 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) || 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'pull_request_create' ) !== ( $github_profiles[1]['capabilities'] ?? array() ) ) {
+    if ( 2 !== count( $github_profiles ) || 'repository-token' !== ( $github_profiles[0]['pat'] ?? '' ) || 'app-token' !== ( $github_profiles[1]['pat'] ?? '' ) || array( 'issues_write', 'pull_request_create' ) !== ( $github_profiles[1]['capabilities'] ?? array() ) ) {
         fwrite( STDERR, "Expected target-only runs to keep app token profile for pull request creation.\n" );
         exit( 1 );
     }
