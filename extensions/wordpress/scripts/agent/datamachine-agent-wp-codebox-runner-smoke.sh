@@ -92,6 +92,11 @@ for (const expected of ['wp-codebox.agent-sandbox-run', 'HOMEBOY_DATAMACHINE_AGE
 if (recipe.inputs?.extraPlugins?.some((plugin) => plugin.slug === 'php-ai-client')) {
   throw new Error('WP AI Client is provided by WordPress core and must not be mounted as a WP Codebox extra plugin')
 }
+for (const slug of ['agents-api', 'data-machine', 'data-machine-code']) {
+  if (!recipe.inputs?.extraPlugins?.some((plugin) => plugin.slug === slug && plugin.activate === true)) {
+    throw new Error(`expected ${slug} to be activated before the agent workload runs`)
+  }
+}
 if (!recipe.inputs?.mounts?.some((mount) => mount.source.endsWith('/bundle') && mount.target === '/wordpress/wp-content/plugins/bundle' && mount.mode === 'readonly')) {
   throw new Error('missing bundle readonly mount in recipe')
 }
