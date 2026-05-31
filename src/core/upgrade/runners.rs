@@ -159,7 +159,7 @@ fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptio
     RunnerExecOptions {
         cwd: None,
         project_id: None,
-        allow_ssh: true,
+        allow_diagnostic_ssh: true,
         command,
         env: runner.env.clone(),
         capture_patch: false,
@@ -222,7 +222,7 @@ mod tests {
             commands.push((
                 runner_id.to_string(),
                 options.command.clone(),
-                options.allow_ssh,
+                options.allow_diagnostic_ssh,
             ));
             let stdout = match commands.len() {
                 1 => "homeboy 0.199.1\n",
@@ -327,7 +327,7 @@ mod tests {
         RunnerExecOutput {
             command: "runner.exec",
             runner_id: runner_id.to_string(),
-            mode: RunnerExecMode::Ssh,
+            mode: RunnerExecMode::DiagnosticSsh,
             argv,
             remote_cwd: "/home/chubes/workspace".to_string(),
             exit_code,

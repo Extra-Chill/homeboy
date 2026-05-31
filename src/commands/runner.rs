@@ -253,7 +253,7 @@ enum RunnerCommand {
         #[arg(long)]
         project: Option<String>,
 
-        /// Allow explicit SSH command execution when no daemon session is connected
+        /// Allow diagnostic-only SSH command execution when no daemon session is connected
         #[arg(long)]
         ssh: bool,
 
@@ -744,7 +744,7 @@ fn exec(
     runner_id: &str,
     cwd: Option<String>,
     project_id: Option<String>,
-    allow_ssh: bool,
+    allow_diagnostic_ssh: bool,
     capture_patch: bool,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
@@ -753,7 +753,7 @@ fn exec(
         runner::RunnerExecOptions {
             cwd,
             project_id,
-            allow_ssh,
+            allow_diagnostic_ssh,
             command,
             env: Default::default(),
             capture_patch,
