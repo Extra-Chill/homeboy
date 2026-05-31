@@ -68,11 +68,11 @@ fn short_rust_behavior_test_names_not_flagged_as_orphaned() {
 
     let source = make_fp_split(
         "src/core/extension/version.rs",
-        vec!["matches", "parse_php_import_path"],
+        vec!["matches", "parse_import_path"],
         vec![
             "test_gt_matches",
             "test_lt_matches",
-            "test_parse_php_import",
+            "test_parse_import",
             "test_old_function",
         ],
     );
@@ -190,7 +190,7 @@ fn scenario_test_names_not_flagged_as_orphaned() {
             "test_apply_combined_remove_and_insert",
             "test_resolve_anchor_at_line",
             "test_resolve_anchor_file_top",
-            "test_resolve_anchor_after_imports_rust",
+            "test_resolve_anchor_after_imports_lang",
         ],
     );
 

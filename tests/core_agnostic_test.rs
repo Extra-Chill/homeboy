@@ -481,14 +481,6 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/detectors/test_coverage.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/test_coverage.rs",
-        term: "rust",
-    },
-    ViolationKey {
         path: "src/core/code_audit/requirements.rs",
         term: "composer",
     },
@@ -622,7 +614,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 105;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 102;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
