@@ -9,7 +9,7 @@ use crate::core::error::{Error, Result};
 use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::core::paths;
 
-use super::execution::daemon_api_get;
+use super::execution::{canonical_daemon_body, daemon_api_get};
 use super::Runner;
 
 pub fn is_remote_runner_artifact_path(path: &str) -> bool {
@@ -47,7 +47,7 @@ pub fn download_remote_artifact(
             encode_component(&token.artifact_id)
         ),
     )?;
-    let body = data.get("body").unwrap_or(&data);
+    let body = canonical_daemon_body(&data, "runner artifact response")?;
     let content_base64 = body
         .get("content_base64")
         .and_then(Value::as_str)
@@ -267,7 +267,7 @@ fn mirror_remote_observation_runs(
     job: &Job,
 ) -> Result<()> {
     let data = daemon_api_get(&runner.id, "/runs?limit=100")?;
-    let body = data.get("body").unwrap_or(&data);
+    let body = canonical_daemon_body(&data, "runner runs response")?;
     let Some(remote_runs) = body.get("runs").and_then(Value::as_array) else {
         return Ok(());
     };
@@ -280,7 +280,7 @@ fn mirror_remote_observation_runs(
         }
         let detail_data =
             daemon_api_get(&runner.id, &format!("/runs/{}", encode_component(run_id)))?;
-        let detail_body = detail_data.get("body").unwrap_or(&detail_data);
+        let detail_body = canonical_daemon_body(&detail_data, "runner run detail response")?;
         let Some(detail) = detail_body.get("run") else {
             continue;
         };
