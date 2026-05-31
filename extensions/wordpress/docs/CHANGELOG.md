@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.108.2] - 2026-05-31
+
+### Fixed
+- support static-source wp-codebox benches
+
 ## [2.108.1] - 2026-05-31
 
 ### Fixed
