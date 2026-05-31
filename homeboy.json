@@ -136,16 +136,15 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-31T17:50:29Z",
-      "item_count": 13,
+      "created_at": "2026-05-31T18:49:05Z",
+      "item_count": 12,
       "known_fingerprints": [
-        "artifact_portability::observation:e5d47a3d-7833-4378-857f-da2d18ddea41::NonPortableArtifactPath",
+        "artifact_portability::observation:4e5a9d26-16c4-4c76-ace6-d54d6124a8f2::NonPortableArtifactPath",
         "structural::src/commands/bench/tests.rs::HighItemCount",
         "structural::src/commands/trace.rs::GodFile",
         "structural::src/commands/trace/tests.rs::GodFile",
         "structural::src/core/code_audit/conventions.rs::GodFile",
         "structural::src/core/code_audit/core_fingerprint.rs::GodFile",
-        "structural::src/core/code_audit/detectors/test_coverage.rs::GodFile",
         "structural::src/core/code_audit/mod.rs::GodFile",
         "structural::src/core/extension/grammar.rs::GodFile",
         "structural::src/core/extension/lifecycle.rs::GodFile",
