@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.213.1] - 2026-05-31
+
+### Fixed
+- clear bench finding audit drift
+- keep review artifact extraction focused
+- normalize bench budget findings
+- consume normalized review findings
+
 ## [0.213.0] - 2026-05-31
 
 ### Added
