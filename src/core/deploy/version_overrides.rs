@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use super::permissions;
-use crate::core::component::Component;
+use crate::core::component::{Component, VersionTarget};
 use crate::core::engine::hooks::{self, HookFailureMode};
 use crate::core::engine::shell;
 use crate::core::engine::template::{render_map, TemplateVars};
@@ -117,35 +117,55 @@ fn fetch_version_from_file(
     base_path: &str,
     client: &SshClient,
 ) -> Option<String> {
-    let version_file = component
-        .version_targets
-        .as_ref()
-        .and_then(|targets| targets.first())
-        .map(|t| t.file.as_str())?;
+    let version_targets = component.version_targets.as_ref()?;
 
     let remote_dir = match project {
         Some(project) => resolve_effective_remote_path(project, component, base_path).ok()?,
         None => base_path::join_remote_path(Some(base_path), &component.remote_path).ok()?,
     };
-    let remote_path = base_path::join_remote_child(None, &remote_dir, version_file).ok()?;
-    let pattern = component
-        .version_targets
-        .as_ref()
-        .and_then(|targets| targets.first())
-        .and_then(|t| t.pattern.as_deref());
 
-    if client.is_local {
-        let content = fs::read_to_string(&remote_path).ok()?;
-        return parse_component_version(&content, pattern, version_file);
+    for target in version_targets {
+        for remote_file in remote_version_file_candidates(target) {
+            let remote_path = base_path::join_remote_child(None, &remote_dir, &remote_file).ok()?;
+            let pattern = target.pattern.as_deref();
+
+            if client.is_local {
+                if let Ok(content) = fs::read_to_string(&remote_path) {
+                    if let Some(version) = parse_component_version(&content, pattern, &remote_file)
+                    {
+                        return Some(version);
+                    }
+                }
+
+                continue;
+            }
+
+            let output = client.execute(&format!("cat '{}' 2>/dev/null", remote_path));
+            if output.success {
+                if let Some(version) =
+                    parse_component_version(&output.stdout, pattern, &remote_file)
+                {
+                    return Some(version);
+                }
+            }
+        }
     }
 
-    let output = client.execute(&format!("cat '{}' 2>/dev/null", remote_path));
+    None
+}
 
-    if output.success {
-        parse_component_version(&output.stdout, pattern, version_file)
-    } else {
-        None
+fn remote_version_file_candidates(target: &VersionTarget) -> Vec<String> {
+    let mut candidates = vec![target.file.clone()];
+    if let Some(file_name) = Path::new(&target.file)
+        .file_name()
+        .and_then(|name| name.to_str())
+    {
+        if file_name != target.file {
+            candidates.push(file_name.to_string());
+        }
     }
+
+    candidates
 }
 
 /// Try to fetch version by running `<binary> --version` on the remote server.
@@ -650,6 +670,39 @@ mod tests {
         );
 
         assert_eq!(versions.get("fixture").map(String::as_str), Some("2.3.4"));
+    }
+
+    #[test]
+    fn test_fetch_remote_versions_tries_later_target_basename() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_dir = temp.path().join("plugin");
+        fs::create_dir_all(&remote_dir).expect("remote dir");
+        fs::write(remote_dir.join("fixture.php"), "Version: 3.4.5").expect("version file");
+
+        let component = Component {
+            id: "fixture".to_string(),
+            remote_path: "plugin".to_string(),
+            version_targets: Some(vec![
+                VersionTarget {
+                    file: "package.json".to_string(),
+                    pattern: Some(r#""version":\s*"([0-9.]+)""#.to_string()),
+                },
+                VersionTarget {
+                    file: "packages/wordpress-plugin/fixture.php".to_string(),
+                    pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let versions = fetch_remote_versions_for_project(
+            &[component],
+            None,
+            temp.path().to_str().expect("base path"),
+            &local_client(),
+        );
+
+        assert_eq!(versions.get("fixture").map(String::as_str), Some("3.4.5"));
     }
 
     #[test]
