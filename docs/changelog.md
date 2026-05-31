@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.213.7] - 2026-05-31
+
+### Changed
+- extract release package preflight
+- centralize observation metadata finishing
+
+### Fixed
+- preflight release packaging before mutation
+- clarify structured sidecar manifest contract
+
 ## [0.213.6] - 2026-05-31
 
 ### Fixed
