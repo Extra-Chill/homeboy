@@ -218,6 +218,8 @@ mod tests {
             "src/main.rs",
             r#"
             fn run(command: Vec<String>) {
+                let plan = remote_capability_plan(command_kind, source_path).unwrap();
+                evaluate_remote_capabilities(target_id, &plan, &capabilities, mode);
                 execute_remote_work("remote", RemoteWorkOptions { command, capture_change: false });
             }
             "#,
