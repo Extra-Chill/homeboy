@@ -483,6 +483,11 @@ fn deploy_override_template_vars(
         .rsplit_once('/')
         .map(|(parent, _)| parent)
         .unwrap_or("");
+    let target_basename = target_dir
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
     let target_adjacent_temp_pattern = if target_parent_dir.is_empty() {
         String::new()
     } else {
@@ -493,6 +498,10 @@ fn deploy_override_template_vars(
         ("artifact".to_string(), artifact_filename.to_string()),
         ("stagingArtifact".to_string(), staging_artifact.to_string()),
         (TemplateVars::TARGET_DIR.to_string(), target_dir.to_string()),
+        (
+            TemplateVars::TARGET_BASENAME.to_string(),
+            target_basename.to_string(),
+        ),
         (
             TemplateVars::TARGET_PARENT_DIR.to_string(),
             target_parent_dir.to_string(),
@@ -619,9 +628,9 @@ mod tests {
             staging_path,
             root_must_match_target_basename: true,
             required_header: Some(DeployRequiredHeader {
-                file: None,
-                file_glob: Some("*.manifest".to_string()),
+                file: Some("{{targetBasename}}.manifest".to_string()),
                 contains: "Package Name:".to_string(),
+                file_glob: None,
             }),
             skip_permissions_fix: true,
         }
@@ -688,7 +697,7 @@ mod tests {
                     pattern: Some(r#""version":\s*"([0-9.]+)""#.to_string()),
                 },
                 VersionTarget {
-                    file: "packages/wordpress-plugin/fixture.php".to_string(),
+                    file: "packages/component/fixture.php".to_string(),
                     pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
                 },
             ]),
@@ -819,6 +828,44 @@ mod tests {
     }
 
     #[test]
+    fn test_archive_install_policy_finds_target_basename_manifest_after_nested_file() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("fixture.zip");
+        let staging = temp.path().join("staging");
+        let target = temp.path().join("packages/fixture");
+
+        write_zip(
+            &artifact,
+            &[
+                ("fixture/inc/helpers.manifest", "Helper Name: Fixture\n"),
+                ("fixture/fixture.manifest", "Package Name: Fixture\n"),
+            ],
+        );
+
+        let policy = package_archive_policy(staging.to_string_lossy().to_string());
+        let override_config = archive_install_override(&policy);
+        let verification = archive_install_verification(&policy).expect("verification");
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            Some(&verification),
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy failed: {:?}", result.error);
+        assert!(target.join("fixture.manifest").exists());
+        assert!(target.join("inc/helpers.manifest").exists());
+    }
+
+    #[test]
     fn test_archive_install_policy_verifies_required_file_header() {
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact = temp.path().join("fixture-bundle.zip");
@@ -917,6 +964,10 @@ mod tests {
             vars.get(TemplateVars::TARGET_ADJACENT_TEMP_PATTERN)
                 .map(String::as_str),
             Some("/srv/htdocs/wp-content/plugins/.homeboy-install.XXXXXX")
+        );
+        assert_eq!(
+            vars.get(TemplateVars::TARGET_BASENAME).map(String::as_str),
+            Some("wp-codebox")
         );
         assert_eq!(
             render_map(
