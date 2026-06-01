@@ -91,6 +91,7 @@ fn make_args(include_fixability: bool) -> AuditRunWorkflowArgs {
         exclude_kinds: vec![],
         only_labels: vec![],
         exclude_labels: vec![],
+        extension_overrides: vec![],
         baseline_flags: crate::core::engine::baseline::BaselineFlags {
             baseline: false,
             ignore_baseline: false,

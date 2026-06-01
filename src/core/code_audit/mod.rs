@@ -236,6 +236,7 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
         None,
         &ref_paths,
         &AuditExecutionPlan::full(),
+        &[],
     )
     .map(|audit| audit.result)
 }
@@ -244,9 +245,18 @@ pub(crate) fn audit_path_with_id_with_plan_and_analysis(
     component_id: &str,
     source_path: &str,
     plan: &AuditExecutionPlan,
+    extension_overrides: &[String],
 ) -> Result<AuditWithAnalysis> {
     let ref_paths = read_reference_paths_from_env();
-    audit_internal(component_id, source_path, None, None, &ref_paths, plan)
+    audit_internal(
+        component_id,
+        source_path,
+        None,
+        None,
+        &ref_paths,
+        plan,
+        extension_overrides,
+    )
 }
 
 /// Audit only specific files within a component path.
@@ -273,6 +283,7 @@ pub fn audit_path_scoped(
         git_ref,
         &ref_paths,
         &AuditExecutionPlan::full(),
+        &[],
     )
     .map(|audit| audit.result)
 }
@@ -283,6 +294,7 @@ pub(crate) fn audit_path_scoped_with_plan_and_analysis(
     file_filter: &[String],
     git_ref: Option<&str>,
     plan: &AuditExecutionPlan,
+    extension_overrides: &[String],
 ) -> Result<AuditWithAnalysis> {
     let ref_paths = read_reference_paths_from_env();
     audit_internal(
@@ -292,10 +304,15 @@ pub(crate) fn audit_path_scoped_with_plan_and_analysis(
         git_ref,
         &ref_paths,
         plan,
+        extension_overrides,
     )
 }
 
-fn audit_config_for(component_id: &str, root: &Path) -> AuditConfig {
+fn audit_config_for(
+    component_id: &str,
+    root: &Path,
+    extension_overrides: &[String],
+) -> AuditConfig {
     let component =
         component::discover_from_portable(root).or_else(|| component::load(component_id).ok());
     let mut audit_config = AuditConfig::default();
@@ -316,6 +333,14 @@ fn audit_config_for(component_id: &str, root: &Path) -> AuditConfig {
         }
     }
 
+    for extension_id in extension_overrides {
+        if let Ok(manifest) = crate::core::extension::load_extension(extension_id) {
+            if let Some(rules) = manifest.audit_detector_rules() {
+                audit_config.merge(rules);
+            }
+        }
+    }
+
     audit_config
 }
 
@@ -331,9 +356,10 @@ fn audit_internal(
     git_ref: Option<&str>,
     reference_paths: &[String],
     plan: &AuditExecutionPlan,
+    extension_overrides: &[String],
 ) -> Result<AuditWithAnalysis> {
     let root = Path::new(source_path);
-    let audit_config = audit_config_for(component_id, root);
+    let audit_config = audit_config_for(component_id, root, extension_overrides);
 
     if let Some(filter) = file_filter {
         log_status!(
@@ -348,7 +374,7 @@ fn audit_internal(
 
     if !plan.requires_discovery() {
         return Ok(AuditWithAnalysis {
-            result: audit_root_only(component_id, source_path, root, plan),
+            result: audit_root_only(component_id, source_path, root, plan, extension_overrides),
             analysis: AuditAnalysisContext::default(),
         });
     }
@@ -1172,8 +1198,9 @@ fn audit_root_only(
     source_path: &str,
     root: &Path,
     plan: &AuditExecutionPlan,
+    extension_overrides: &[String],
 ) -> CodeAuditResult {
-    let audit_config = audit_config_for(component_id, root);
+    let audit_config = audit_config_for(component_id, root, extension_overrides);
     let mut findings = Vec::new();
 
     if plan.run_structural() {
@@ -1660,6 +1687,38 @@ mod tests {
             plan.run_test_topology(),
             "test topology/test quality detector emits standalone vacuous_test findings"
         );
+    }
+
+    #[test]
+    fn audit_config_includes_explicit_extension_overrides() {
+        crate::test_support::with_isolated_home(|home| {
+            let mut manifest: crate::core::extension::ExtensionManifest =
+                serde_json::from_value(serde_json::json!({
+                    "name": "Fixture",
+                    "version": "0.0.0",
+                    "audit": {
+                        "detector_rules": {
+                            "convention_exception_globs": ["scripts/lint/php-fixers/fixer-helpers.php"]
+                        }
+                    }
+                }))
+                .expect("manifest");
+            manifest.id = "fixture".to_string();
+            crate::core::extension::save_manifest(&manifest).expect("save fixture extension");
+
+            let config = audit_config_for(
+                "component-without-extension",
+                home.path(),
+                &["fixture".to_string()],
+            );
+
+            assert!(
+                config
+                    .convention_exception_globs
+                    .contains(&"scripts/lint/php-fixers/fixer-helpers.php".to_string()),
+                "explicit --extension audit rules should feed audit detector config"
+            );
+        });
     }
 
     #[test]
