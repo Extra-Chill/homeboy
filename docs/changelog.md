@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.216.1] - 2026-06-01
+
+### Changed
+- apply rustfmt
+
+### Fixed
+- keep structural complexity review-only
+- refresh broken installed symlinks
+- prevent plugin dir double-nesting + correct extract-command placeholder hint
+- pass agent task provider config env
+- route nested extension settings
+
 ## [0.216.0] - 2026-06-01
 
 ### Added
