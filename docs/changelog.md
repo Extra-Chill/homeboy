@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.216.0] - 2026-06-01
+
+### Added
+- dispatch extension agent task providers
+- add bench matrix fanout command surface
+
+### Fixed
+- keep agent task provider helpers internal
+
 ## [0.215.2] - 2026-06-01
 
 ### Fixed
