@@ -344,6 +344,7 @@ fn test_compute_fixability_with_analysis() {
         "fixability-context-test",
         &root.to_string_lossy(),
         &crate::core::code_audit::AuditExecutionPlan::full(),
+        &[],
     )
     .expect("audit should run with analysis");
 

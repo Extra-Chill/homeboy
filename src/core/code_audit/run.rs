@@ -18,6 +18,7 @@ use super::report::{self, AuditCommandOutput};
 pub struct AuditRunWorkflowArgs {
     pub component_id: String,
     pub source_path: String,
+    pub reference_paths: Vec<String>,
     pub conventions: bool,
     pub only_kinds: Vec<code_audit::AuditFinding>,
     pub exclude_kinds: Vec<code_audit::AuditFinding>,
@@ -208,12 +209,14 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWit
             &changed,
             Some(git_ref),
             &plan,
+            &args.reference_paths,
         )?))
     } else {
         Ok(Some(code_audit::audit_path_with_id_with_plan_and_analysis(
             &args.component_id,
             &args.source_path,
             &plan,
+            &args.reference_paths,
         )?))
     }
 }
