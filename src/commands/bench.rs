@@ -24,6 +24,7 @@ use super::{runs, CmdResult, GlobalArgs};
 mod fanout;
 mod matrix;
 mod observation;
+mod settings_matrix;
 
 #[derive(Args)]
 pub struct BenchArgs {
@@ -50,6 +51,8 @@ impl BenchArgs {
 
 #[derive(Subcommand)]
 enum BenchCommand {
+    /// Run a local settings matrix and aggregate child bench runs
+    Matrix(BenchMatrixArgs),
     /// List declared benchmark scenarios without executing them
     List(BenchListArgs),
     /// List persisted benchmark runs for a component
@@ -58,6 +61,21 @@ enum BenchCommand {
     Distribution(BenchDistributionArgs),
     /// Compare two persisted benchmark runs
     Compare(BenchCompareArgs),
+}
+
+#[derive(Args)]
+struct BenchMatrixArgs {
+    #[command(flatten)]
+    run: BenchRunArgs,
+
+    /// Settings matrix axis in NAME=value,value form. Repeat the flag or pass
+    /// multiple axes after it, e.g. --setting-matrix clients=10,100 rounds=3.
+    #[arg(
+        long = "setting-matrix",
+        value_name = "NAME=VALUE[,VALUE...]",
+        num_args = 1..
+    )]
+    setting_matrix: Vec<String>,
 }
 
 #[derive(Args)]
@@ -131,7 +149,7 @@ struct BenchListArgs {
     args: Vec<String>,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct BenchRunArgs {
     #[command(flatten)]
     comp: PositionalComponentArgs,
@@ -312,6 +330,7 @@ pub enum BenchOutput {
     Comparison(BenchComparisonOutput),
     ComparisonSummary(BenchComparisonSummaryOutput),
     MatrixFanout(fanout::BenchMatrixFanoutOutput),
+    SettingsMatrix(settings_matrix::BenchSettingsMatrixOutput),
     List(BenchListWorkflowResult),
     Observation(runs::RunsOutput),
 }
@@ -319,6 +338,14 @@ pub enum BenchOutput {
 pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
     if let Some(command) = &args.command {
         return match command {
+            BenchCommand::Matrix(matrix_args) => {
+                let output = settings_matrix::run_settings_matrix(
+                    &matrix_args.run,
+                    &matrix_args.setting_matrix,
+                )?;
+                let exit = if output.summary.passed { 0 } else { 1 };
+                Ok((BenchOutput::SettingsMatrix(output), exit))
+            }
             BenchCommand::List(list_args) => run_list(list_args),
             BenchCommand::History(history_args) => {
                 let (output, exit_code) = runs::bench_history(
