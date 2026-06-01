@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const HOME_BIN_DIRS: &[&str] = &[".local/bin", ".cargo/bin", ".kimaki/bin"];
+const HOME_BIN_DIRS: &[&str] = &[".local/bin", ".kimaki/bin"];
 const ABSOLUTE_BIN_DIRS: &[&str] = &[
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -23,7 +23,7 @@ pub(crate) fn normalize_runner_command_env(env: &mut HashMap<String, String>) {
 }
 
 pub(crate) fn remote_shell_path_preamble() -> &'static str {
-    "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.kimaki/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}\"; for d in \"$HOME\"/.local/opt/node-*/bin \"$HOME\"/.nvm/versions/node/*/bin; do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
+    "export PATH=\"$HOME/.local/bin:$HOME/.kimaki/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}\"; for d in \"$HOME\"/.local/opt/node-*/bin \"$HOME\"/.nvm/versions/node/*/bin; do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
 }
 
 pub(crate) fn quote_runner_env_value(key: &str, value: &str) -> String {

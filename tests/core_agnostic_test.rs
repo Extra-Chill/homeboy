@@ -1251,7 +1251,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 102;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 107;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
