@@ -1134,17 +1134,16 @@ mod tests {
     #[test]
     fn previous_tag_before_current_respects_component_prefix() {
         let (dir, path) = init_repo();
-        git(&path, &["tag", "wordpress-v1.0.0"]);
+        git(&path, &["tag", "module-v1.0.0"]);
         git(&path, &["tag", "api-v9.9.9"]);
         commit_file(&dir, &path, "one.txt", "one\n", "fix: one");
-        git(&path, &["tag", "wordpress-v1.1.0"]);
+        git(&path, &["tag", "module-v1.1.0"]);
         commit_file(&dir, &path, "two.txt", "two\n", "fix: two");
-        git(&path, &["tag", "wordpress-v1.2.0"]);
+        git(&path, &["tag", "module-v1.2.0"]);
 
         assert_eq!(
-            get_previous_tag_before_with_prefix(&path, "wordpress-v1.2.0", Some("wordpress"))
-                .unwrap(),
-            Some("wordpress-v1.1.0".to_string())
+            get_previous_tag_before_with_prefix(&path, "module-v1.2.0", Some("module")).unwrap(),
+            Some("module-v1.1.0".to_string())
         );
     }
 
