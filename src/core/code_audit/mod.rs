@@ -53,9 +53,9 @@ use self::detectors::{
     aggregate_construction, artifact_portability, command_status_contracts, config_key_usage,
     core_boundary_leak, dead_guard, deprecation_age, enum_dispatch_contracts, facade_passthrough,
     field_patterns, global_env_guard, mutating_resource_access, parallel_runner_setup,
-    public_registry_exposure, redirect_validation, repeated_literal_shape, requested_detectors,
-    runner_offload_preflight, rust_test_wiring, shared_scaffolding, test_coverage, test_topology,
-    unbounded_output_capture, wrapper_inference,
+    public_registry_exposure, redirect_validation, remote_execution_preflight,
+    repeated_literal_shape, requested_detectors, rust_test_wiring, shared_scaffolding,
+    test_coverage, test_topology, unbounded_output_capture, wrapper_inference,
 };
 
 pub use checks::{CheckResult, CheckStatus};
@@ -68,7 +68,10 @@ pub(crate) use execution_plan::AuditExecutionPlan;
 pub use findings::{homeboy_finding_from_audit, Finding, FindingConfidence, Severity};
 pub use fingerprint::FileFingerprint;
 pub use report::AuditCommandOutput;
-pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs, AuditRunWorkflowResult};
+pub use run::{
+    run_main_audit_workflow, run_main_audit_workflow_with_phase_timing, AuditRunWorkflowArgs,
+    AuditRunWorkflowResult,
+};
 pub use walker::is_test_path;
 
 use crate::core::component::AuditConfig;
@@ -236,17 +239,41 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
         None,
         &ref_paths,
         &AuditExecutionPlan::full(),
+        None,
     )
     .map(|audit| audit.result)
 }
 
+pub(crate) fn audit_path_with_id_with_plan_and_analysis_with_phase_timing(
+    component_id: &str,
+    source_path: &str,
+    plan: &AuditExecutionPlan,
+    phase_timing: Option<&mut crate::core::observation::PhaseTimingRecorder>,
+) -> Result<AuditWithAnalysis> {
+    let ref_paths = read_reference_paths_from_env();
+    audit_internal(
+        component_id,
+        source_path,
+        None,
+        None,
+        &ref_paths,
+        plan,
+        phase_timing,
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn audit_path_with_id_with_plan_and_analysis(
     component_id: &str,
     source_path: &str,
     plan: &AuditExecutionPlan,
 ) -> Result<AuditWithAnalysis> {
-    let ref_paths = read_reference_paths_from_env();
-    audit_internal(component_id, source_path, None, None, &ref_paths, plan)
+    audit_path_with_id_with_plan_and_analysis_with_phase_timing(
+        component_id,
+        source_path,
+        plan,
+        None,
+    )
 }
 
 /// Audit only specific files within a component path.
@@ -273,16 +300,18 @@ pub fn audit_path_scoped(
         git_ref,
         &ref_paths,
         &AuditExecutionPlan::full(),
+        None,
     )
     .map(|audit| audit.result)
 }
 
-pub(crate) fn audit_path_scoped_with_plan_and_analysis(
+pub(crate) fn audit_path_scoped_with_plan_and_analysis_with_phase_timing(
     component_id: &str,
     source_path: &str,
     file_filter: &[String],
     git_ref: Option<&str>,
     plan: &AuditExecutionPlan,
+    phase_timing: Option<&mut crate::core::observation::PhaseTimingRecorder>,
 ) -> Result<AuditWithAnalysis> {
     let ref_paths = read_reference_paths_from_env();
     audit_internal(
@@ -292,6 +321,7 @@ pub(crate) fn audit_path_scoped_with_plan_and_analysis(
         git_ref,
         &ref_paths,
         plan,
+        phase_timing,
     )
 }
 
@@ -331,7 +361,9 @@ fn audit_internal(
     git_ref: Option<&str>,
     reference_paths: &[String],
     plan: &AuditExecutionPlan,
+    phase_timing: Option<&mut crate::core::observation::PhaseTimingRecorder>,
 ) -> Result<AuditWithAnalysis> {
+    let mut phase_timing = phase_timing;
     let root = Path::new(source_path);
     let audit_config = audit_config_for(component_id, root);
 
@@ -354,7 +386,13 @@ fn audit_internal(
     }
 
     // Phase 1: Auto-discover file groups (always full codebase for convention detection)
+    let discovery_span = phase_timing
+        .as_mut()
+        .map(|recorder| recorder.begin("discovery_fingerprinting"));
     let discovery = discovery::auto_discover_groups(root, &audit_config);
+    if let (Some(recorder), Some(span)) = (phase_timing.as_mut(), discovery_span) {
+        recorder.finish_span(span);
+    }
     let files_skipped = discovery
         .files_walked
         .saturating_sub(discovery.files_fingerprinted);
@@ -406,6 +444,10 @@ fn audit_internal(
             analysis: AuditAnalysisContext::default(),
         });
     }
+
+    let detector_span = phase_timing
+        .as_mut()
+        .map(|recorder| recorder.begin("detectors"));
 
     // Phase 2: Discover conventions for each group
     let mut discovered_conventions = Vec::new();
@@ -928,20 +970,20 @@ fn audit_internal(
         all_findings.extend(parallel_runner_findings);
     }
 
-    // Phase 4w1: Runner/offload preflight detection — remote dispatch sites
-    // that do not prove path/artifact parity before runner execution.
-    let runner_offload_findings = if plan.run_runner_offload_preflight() {
-        runner_offload_preflight::run(&all_fingerprints, &audit_config.remote_execution_safety)
+    // Phase 4w1: Remote execution preflight detection — remote dispatch sites
+    // that do not prove path/artifact parity before remote execution.
+    let remote_execution_findings = if plan.run_remote_execution_preflight() {
+        remote_execution_preflight::run(&all_fingerprints, &audit_config.remote_execution_safety)
     } else {
         Vec::new()
     };
-    if !runner_offload_findings.is_empty() {
+    if !remote_execution_findings.is_empty() {
         log_status!(
             "audit",
-            "Runner offload preflight: {} finding(s) (remote path/artifact parity gaps)",
-            runner_offload_findings.len()
+            "Remote execution preflight: {} finding(s) (remote path/artifact parity gaps)",
+            remote_execution_findings.len()
         );
-        all_findings.extend(runner_offload_findings);
+        all_findings.extend(remote_execution_findings);
     }
 
     // Phase 4w: Repeated enum-dispatch contract detection.
@@ -1077,8 +1119,14 @@ fn audit_internal(
             );
         }
     }
+    if let (Some(recorder), Some(span)) = (phase_timing.as_mut(), detector_span) {
+        recorder.finish_span(span);
+    }
 
     // Phase 5: Build report
+    let report_span = phase_timing
+        .as_mut()
+        .map(|recorder| recorder.begin("report"));
     let total_outliers: usize = discovered_conventions
         .iter()
         .map(|c| c.outliers.len())
@@ -1144,6 +1192,9 @@ fn audit_internal(
             directory_conventions.len(),
             total_dir_outliers
         );
+    }
+    if let (Some(recorder), Some(span)) = (phase_timing.as_mut(), report_span) {
+        recorder.finish_span(span);
     }
 
     Ok(AuditWithAnalysis {

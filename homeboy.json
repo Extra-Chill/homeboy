@@ -122,7 +122,64 @@
       "src/core/code_audit/detectors/test_vacuity.rs",
       "src/core/code_audit/detectors/upstream_workaround.rs"
     ],
-    "remote_execution_safety": {}
+    "remote_execution_safety": {
+      "artifact_access_markers": [
+        ".is_file()",
+        "download_remote_artifact",
+        "fs::metadata",
+        "get_artifact",
+        "is_remote_runner_artifact_path",
+        "is_reportable_artifact_evidence_path",
+        "is_retrievable_runner_artifact",
+        "reportable_artifact_evidence_path"
+      ],
+      "artifact_capture_markers": [
+        "capture_patch: true"
+      ],
+      "artifact_report_markers": [
+        "artifact.path",
+        "patch_artifact_id",
+        "patch_artifact_path",
+        "runner-artifact://"
+      ],
+      "artifact_snapshot_markers": [
+        "source_snapshot"
+      ],
+      "capability_preflight_markers": [
+        "capability_plan",
+        "capability_preflight",
+        "evaluate_lab_runner_capabilities",
+        "lab_runner_capability_plan",
+        "RunnerDoctorOutput",
+        "runner doctor"
+      ],
+      "dispatch_markers": [
+        "RunnerExecOptions",
+        "core::runner::exec",
+        "runner::exec"
+      ],
+      "extension_parity_markers": [
+        "extension_parity",
+        "required_extensions",
+        "runner_extension",
+        "validate_runner_extension",
+        "validate_runner_extension_parity"
+      ],
+      "extension_selector_markers": [
+        "--extension",
+        "extension",
+        "extension_id",
+        "extension_selector"
+      ],
+      "path_translation_markers": [
+        "remote_path",
+        "rewrite_lab_offload_args",
+        "RunnerWorkspaceSyncMode",
+        "strip_local_output",
+        "sync_workspace",
+        "translate_remote_path"
+      ]
+    }
   },
   "auto_cleanup": false,
   "autofix_verify": {
@@ -140,6 +197,20 @@
       "item_count": 14,
       "known_fingerprints": [
         "artifact_portability::observation:0c1c8a3c-0f6c-4639-9a6b-97192be09b43::NonPortableArtifactPath",
+        "artifact_portability::observation:36c9021a-9591-4d9c-85ee-91d2e1c3a233::NonPortableArtifactPath",
+        "dead_code::src/core/engine/temp.rs::UnreferencedExport",
+        "intra-method-duplication::src/core/extension/refactor_protocol.rs::IntraMethodDuplicate",
+        "remote_execution_preflight::src/commands/bench/observation.rs::RemoteExecutionPreflight",
+        "remote_execution_preflight::src/commands/observe.rs::RemoteExecutionPreflight",
+        "remote_execution_preflight::src/commands/runs/bundle.rs::RemoteExecutionPreflight",
+        "remote_execution_preflight::src/commands/trace/observations.rs::RemoteExecutionPreflight",
+        "remote_execution_preflight::src/core/code_audit/detectors/artifact_portability.rs::RemoteExecutionPreflight",
+        "remote_execution_preflight::src/core/code_audit/detectors/test_topology.rs::RemoteExecutionPreflight",
+        "remote_execution_preflight::src/core/extension/bench/report.rs::RemoteExecutionPreflight",
+        "remote_execution_preflight::src/core/extension/bench/side_by_side.rs::RemoteExecutionPreflight",
+        "remote_execution_preflight::src/core/extension/trace/report.rs::RemoteExecutionPreflight",
+        "remote_execution_preflight::src/core/observation/store.rs::RemoteExecutionPreflight",
+        "remote_execution_preflight::src/core/release/executor.rs::RemoteExecutionPreflight",
         "structural::src/commands/bench/tests.rs::HighItemCount",
         "structural::src/commands/runs/gh_actions.rs::HighItemCount",
         "structural::src/commands/trace.rs::GodFile",

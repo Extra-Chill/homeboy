@@ -186,8 +186,8 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
         requires_discovery: true,
     },
     DetectorFamily {
-        id: "runner_offload_preflight",
-        findings: &[AuditFinding::RunnerOffloadPreflight],
+        id: "remote_execution_preflight",
+        findings: &[AuditFinding::RemoteExecutionPreflight],
         requires_discovery: true,
     },
     DetectorFamily {
@@ -362,8 +362,8 @@ impl AuditExecutionPlan {
         self.detector_enabled("parallel_runner_setup")
     }
 
-    pub(crate) fn run_runner_offload_preflight(&self) -> bool {
-        self.detector_enabled("runner_offload_preflight")
+    pub(crate) fn run_remote_execution_preflight(&self) -> bool {
+        self.detector_enabled("remote_execution_preflight")
     }
 
     pub(crate) fn run_enum_dispatch_contracts(&self) -> bool {

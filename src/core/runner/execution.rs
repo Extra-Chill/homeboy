@@ -197,7 +197,7 @@ fn push_unique(items: &mut Vec<String>, item: String) {
     }
 }
 
-fn validate_runner_extension_parity(
+pub(crate) fn validate_runner_extension_parity(
     runner_id: &str,
     runner: &Runner,
     cwd: &str,

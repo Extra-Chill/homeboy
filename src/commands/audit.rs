@@ -2,12 +2,14 @@ use clap::Args;
 use std::path::Path;
 
 use homeboy::core::code_audit::{
-    self, report, run_main_audit_workflow, AuditCommandOutput, AuditRunWorkflowArgs,
+    self, report, run_main_audit_workflow_with_phase_timing, AuditCommandOutput,
+    AuditRunWorkflowArgs,
 };
 use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
-    finding_records_from_audit, ActiveObservation, NewRunRecord, RunStatus,
+    finding_records_from_audit, merge_phase_timing, ActiveObservation, NewRunRecord,
+    PhaseTimingRecorder, PhaseTimingReport, RunStatus,
 };
 
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
@@ -84,31 +86,37 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
     let resolved_path = target.source_path.to_string_lossy().to_string();
 
     let observation = start_audit_observation(&resolved_id, &resolved_path, &args);
-    let workflow = run_main_audit_workflow(AuditRunWorkflowArgs {
-        component_id: resolved_id.clone(),
-        source_path: resolved_path.clone(),
-        conventions: args.conventions,
-        only_kinds,
-        exclude_kinds,
-        only_labels: args.only,
-        exclude_labels: args.exclude,
-        baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
-            baseline: args.baseline_args.baseline,
-            ignore_baseline: args.baseline_args.ignore_baseline,
-            ratchet: args.baseline_args.ratchet,
+    let mut phase_timing = PhaseTimingRecorder::start();
+    let workflow = run_main_audit_workflow_with_phase_timing(
+        AuditRunWorkflowArgs {
+            component_id: resolved_id.clone(),
+            source_path: resolved_path.clone(),
+            conventions: args.conventions,
+            only_kinds,
+            exclude_kinds,
+            only_labels: args.only,
+            exclude_labels: args.exclude,
+            baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
+                baseline: args.baseline_args.baseline,
+                ignore_baseline: args.baseline_args.ignore_baseline,
+                ratchet: args.baseline_args.ratchet,
+            },
+            changed_since: args.changed_since,
+            json_summary: args.json_summary,
+            include_fixability: args.fixability,
         },
-        changed_since: args.changed_since,
-        json_summary: args.json_summary,
-        include_fixability: args.fixability,
-    });
+        &mut phase_timing,
+    );
 
     let workflow = match workflow {
         Ok(workflow) => {
-            finish_audit_observation(observation, &workflow);
+            let timing = phase_timing.finish();
+            finish_audit_observation(observation, &workflow, timing);
             workflow
         }
         Err(error) => {
-            finish_audit_observation_error(observation, &error);
+            let timing = phase_timing.finish();
+            finish_audit_observation_error(observation, &error, timing);
             return Err(error);
         }
     };
@@ -141,16 +149,20 @@ fn start_audit_observation(
 fn finish_audit_observation(
     observation: Option<AuditObservation>,
     workflow: &code_audit::AuditRunWorkflowResult,
+    phase_timing: PhaseTimingReport,
 ) {
     let Some(observation) = observation else {
         return;
     };
 
-    let metadata = serde_json::json!({
-        "observation_status": if workflow.exit_code == 0 { "pass" } else { "fail" },
-        "exit_code": workflow.exit_code,
-        "summary": audit_observation_summary(&workflow.output),
-    });
+    let metadata = merge_phase_timing(
+        serde_json::json!({
+            "observation_status": if workflow.exit_code == 0 { "pass" } else { "fail" },
+            "exit_code": workflow.exit_code,
+            "summary": audit_observation_summary(&workflow.output),
+        }),
+        phase_timing,
+    );
     let records = finding_records_from_audit(observation.0.run_id(), &workflow.findings);
     observation.0.record_findings(&records);
     let status = if workflow.exit_code == 0 {
@@ -164,17 +176,20 @@ fn finish_audit_observation(
 fn finish_audit_observation_error(
     observation: Option<AuditObservation>,
     error: &homeboy::core::Error,
+    phase_timing: PhaseTimingReport,
 ) {
     let Some(observation) = observation else {
         return;
     };
 
-    observation
-        .0
-        .finish_error_with_merged_metadata(serde_json::json!({
+    let metadata = merge_phase_timing(
+        serde_json::json!({
             "observation_status": "error",
             "error": error.to_string(),
-        }));
+        }),
+        phase_timing,
+    );
+    observation.0.finish_error_with_merged_metadata(metadata);
 }
 
 fn audit_observation_command(component_id: &str, args: &AuditArgs) -> String {
@@ -487,6 +502,7 @@ mod tests {
                     None,
                     None,
                 ),
+                PhaseTimingRecorder::start().finish(),
             );
 
             let store = ObservationStore::open_initialized().expect("store");
@@ -500,6 +516,10 @@ mod tests {
             assert_eq!(run.component_id.as_deref(), Some("homeboy"));
             assert_eq!(run.metadata_json["changed_since"], "origin/main");
             assert_eq!(run.metadata_json["observation_status"], "error");
+            assert_eq!(
+                run.metadata_json["phase_timing"]["schema"],
+                homeboy::core::observation::PHASE_TIMING_SCHEMA
+            );
         });
     }
 
@@ -545,7 +565,11 @@ mod tests {
                 findings: vec![finding],
             };
 
-            finish_audit_observation(Some(observation), &workflow);
+            finish_audit_observation(
+                Some(observation),
+                &workflow,
+                PhaseTimingRecorder::start().finish(),
+            );
 
             let store = ObservationStore::open_initialized().expect("store");
             let findings = store

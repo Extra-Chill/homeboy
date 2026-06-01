@@ -231,9 +231,10 @@ pub enum AuditFinding {
     /// Command-family files independently assemble the same generic execution
     /// contract phases and contract-call shape.
     ParallelRunnerSetup,
-    /// Remote runner dispatch lacks an explicit preflight for path/artifact
-    /// translation before handing arguments to the runner.
-    RunnerOffloadPreflight,
+    /// Remote execution dispatch lacks an explicit preflight for path/artifact
+    /// translation before handing arguments to another execution environment.
+    #[serde(alias = "runner_offload_preflight")]
+    RemoteExecutionPreflight,
     /// Repeated exhaustive match blocks over the same enum duplicate a
     /// label/getter/policy contract that should likely live on the enum.
     RepeatedEnumDispatchContract,
@@ -333,6 +334,7 @@ impl AuditFinding {
             "global_env_mutation_guard",
             "unwired_nested_rust_test",
             "parallel_runner_setup",
+            "remote_execution_preflight",
             "repeated_enum_dispatch_contract",
             "direct_aggregate_construction",
             "write_only_config_key",
@@ -359,6 +361,12 @@ impl std::str::FromStr for AuditFinding {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+        // Temporary migration alias for audit filters and persisted sidecars
+        // produced before 2026-05-31. Remove after downstream baselines have
+        // rotated to remote_execution_preflight.
+        if normalized == "runner_offload_preflight" {
+            return Ok(Self::RemoteExecutionPreflight);
+        }
         let json = format!("\"{}\"", normalized);
         serde_json::from_str(&json).map_err(|_| {
             format!(

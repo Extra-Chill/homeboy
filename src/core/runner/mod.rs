@@ -38,7 +38,7 @@ pub use evidence::{
     download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,
 };
-pub(crate) use execution::daemon_api_get;
+pub(crate) use execution::{daemon_api_get, validate_runner_extension_parity};
 pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
 pub use lab::{
     execute_lab_offload, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
