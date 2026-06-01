@@ -613,29 +613,29 @@ mod tests {
         zip.finish().expect("finish zip");
     }
 
-    fn plugin_archive_policy(staging_path: String) -> DeployArchiveInstallPolicy {
+    fn package_archive_policy(staging_path: String) -> DeployArchiveInstallPolicy {
         DeployArchiveInstallPolicy {
-            path_pattern: "/wp-content/plugins/".to_string(),
+            path_pattern: "/packages/".to_string(),
             staging_path,
             root_must_match_target_basename: true,
             required_header: Some(DeployRequiredHeader {
                 file: None,
-                file_glob: Some("*.php".to_string()),
-                contains: "Plugin Name:".to_string(),
+                file_glob: Some("*.manifest".to_string()),
+                contains: "Package Name:".to_string(),
             }),
             skip_permissions_fix: true,
         }
     }
 
-    fn theme_archive_policy(staging_path: String) -> DeployArchiveInstallPolicy {
+    fn bundle_archive_policy(staging_path: String) -> DeployArchiveInstallPolicy {
         DeployArchiveInstallPolicy {
-            path_pattern: "/wp-content/themes/".to_string(),
+            path_pattern: "/bundles/".to_string(),
             staging_path,
             root_must_match_target_basename: true,
             required_header: Some(DeployRequiredHeader {
-                file: Some("style.css".to_string()),
+                file: Some("bundle.manifest".to_string()),
                 file_glob: None,
-                contains: "Theme Name:".to_string(),
+                contains: "Bundle Name:".to_string(),
             }),
             skip_permissions_fix: true,
         }
@@ -785,19 +785,16 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact = temp.path().join("fixture.zip");
         let staging = temp.path().join("staging");
-        let target = temp.path().join("wp-content/plugins/fixture");
+        let target = temp.path().join("packages/fixture");
 
         fs::create_dir_all(&target).expect("target dir");
         fs::write(target.join("stale.php"), "stale").expect("stale file");
         write_zip(
             &artifact,
-            &[(
-                "fixture/fixture.php",
-                "<?php\n/*\nPlugin Name: Fixture\n*/\n",
-            )],
+            &[("fixture/fixture.manifest", "Package Name: Fixture\n")],
         );
 
-        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let policy = package_archive_policy(staging.to_string_lossy().to_string());
         let override_config = archive_install_override(&policy);
         let verification = archive_install_verification(&policy).expect("verification");
 
@@ -816,7 +813,7 @@ mod tests {
         .expect("deploy result");
 
         assert!(result.success, "deploy failed: {:?}", result.error);
-        assert!(target.join("fixture.php").exists());
+        assert!(target.join("fixture.manifest").exists());
         assert!(!target.join("stale.php").exists());
         assert!(!staging.join("fixture.zip").exists());
     }
@@ -824,19 +821,19 @@ mod tests {
     #[test]
     fn test_archive_install_policy_verifies_required_file_header() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let artifact = temp.path().join("fixture-theme.zip");
+        let artifact = temp.path().join("fixture-bundle.zip");
         let staging = temp.path().join("staging");
-        let target = temp.path().join("wp-content/themes/fixture-theme");
+        let target = temp.path().join("bundles/fixture-bundle");
 
         write_zip(
             &artifact,
             &[(
-                "fixture-theme/style.css",
-                "/*\nTheme Name: Fixture Theme\n*/\n",
+                "fixture-bundle/bundle.manifest",
+                "Bundle Name: Fixture Bundle\n",
             )],
         );
 
-        let policy = theme_archive_policy(staging.to_string_lossy().to_string());
+        let policy = bundle_archive_policy(staging.to_string_lossy().to_string());
         let override_config = archive_install_override(&policy);
         let verification = archive_install_verification(&policy).expect("verification");
 
@@ -855,7 +852,7 @@ mod tests {
         .expect("deploy result");
 
         assert!(result.success, "deploy failed: {:?}", result.error);
-        assert!(target.join("style.css").exists());
+        assert!(target.join("bundle.manifest").exists());
     }
 
     #[test]
@@ -863,14 +860,14 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact = temp.path().join("fixture.zip");
         let staging = temp.path().join("staging");
-        let target = temp.path().join("wp-content/plugins/fixture");
+        let target = temp.path().join("packages/fixture");
 
         write_zip(
             &artifact,
-            &[("other/fixture.php", "<?php\n/*\nPlugin Name: Fixture\n*/\n")],
+            &[("other/fixture.manifest", "Package Name: Fixture\n")],
         );
 
-        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let policy = package_archive_policy(staging.to_string_lossy().to_string());
         let override_config = archive_install_override(&policy);
         let verification = archive_install_verification(&policy).expect("verification");
 

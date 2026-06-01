@@ -1062,6 +1062,7 @@ mod tests {
                     artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
+                    workflow: None,
                     follow_up: None,
                     metadata: json!({}),
                 })
@@ -1100,6 +1101,7 @@ mod tests {
                     artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
+                    workflow: None,
                     follow_up: None,
                     metadata: json!({}),
                 })
@@ -1217,6 +1219,7 @@ mod tests {
                     artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
+                    workflow: None,
                     follow_up: None,
                     metadata: json!({}),
                 })
