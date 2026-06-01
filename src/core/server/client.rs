@@ -9,6 +9,7 @@ use crate::core::engine::invocation;
 use crate::core::engine::resource::{ChildProcessIdentity, ExtensionChildResourceSummary};
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
+use crate::core::runner::remote_shell_path_preamble;
 use chrono::Utc;
 
 use super::{
@@ -43,6 +44,21 @@ pub struct CommandOutput {
     pub success: bool,
     pub exit_code: i32,
     pub child_resource: Option<ExtensionChildResourceSummary>,
+}
+
+fn quote_env_value(key: &str, value: &str) -> String {
+    if key == "PATH" {
+        return format!("\"{}\"", escape_double_quoted_env_value(value));
+    }
+
+    shell::quote_arg(value)
+}
+
+fn escape_double_quoted_env_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
 }
 
 impl SshClient {
@@ -310,17 +326,16 @@ impl SshClient {
         self.execute_with_stdin(&effective, None)
     }
 
-    /// Build an env preamble that sets configured variables via `export`.
-    /// Values are quoted but allow shell expansion (e.g. `$PATH`).
+    /// Build an env preamble that normalizes runner command lookup and sets
+    /// configured variables via `export`. PATH values allow shell expansion
+    /// so configs can append/prepend `$PATH`.
     fn prepend_env(&self, command: &str) -> String {
-        if self.env.is_empty() {
-            return command.to_string();
-        }
-        let exports: Vec<String> = self
-            .env
-            .iter()
-            .map(|(k, v)| format!("export {}={}", k, shell::quote_arg(v)))
-            .collect();
+        let mut exports = vec![remote_shell_path_preamble().to_string()];
+        exports.extend(
+            self.env
+                .iter()
+                .map(|(k, v)| format!("export {}={}", k, quote_env_value(k, v))),
+        );
         format!("{} && {}", exports.join(" && "), command)
     }
 
@@ -1180,6 +1195,43 @@ fn is_transient_ssh_error(output: &CommandOutput) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_command_prepends_runner_tool_path() {
+        let client = SshClient {
+            host: "runner.example.test".to_string(),
+            user: "tester".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: false,
+            env: HashMap::new(),
+        };
+
+        let command = client.prepend_env("command -v node");
+
+        assert!(command.starts_with("export PATH=\"$HOME/.local/bin"));
+        assert!(command.contains("$HOME\"/.local/opt/node-*/bin"));
+        assert!(command.contains("$HOME\"/.nvm/versions/node/*/bin"));
+        assert!(command.ends_with("&& command -v node"));
+    }
+
+    #[test]
+    fn ssh_command_allows_configured_path_to_expand_existing_path() {
+        let client = SshClient {
+            host: "runner.example.test".to_string(),
+            user: "tester".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: false,
+            env: HashMap::from([("PATH".to_string(), "$PATH:/custom/bin".to_string())]),
+        };
+
+        let command = client.prepend_env("command -v homeboy");
+
+        assert!(command.contains("export PATH=\"$PATH:/custom/bin\""));
+    }
 
     #[test]
     fn test_non_local_hosts() {

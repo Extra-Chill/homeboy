@@ -12,6 +12,7 @@ use crate::core::server::{self, RunnerPolicy, RunnerSettings, ServerRunner};
 mod apply;
 mod broker_http;
 mod capabilities;
+mod command_path;
 mod connection;
 mod evidence;
 mod execution;
@@ -33,6 +34,7 @@ pub use capabilities::{
     lab_runner_capability_preflight, LabRunnerCapabilityContract, LabRunnerCapabilityPlan,
     LabRunnerGateDecision, LabRunnerGateMode, RunnerCapabilityPreflight, RunnerRequiredTool,
 };
+pub(crate) use command_path::{normalize_runner_command_env, remote_shell_path_preamble};
 pub use connection::{connect, connect_reverse, disconnect, status, statuses};
 pub use evidence::{
     download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,

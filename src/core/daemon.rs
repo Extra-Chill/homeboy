@@ -13,7 +13,7 @@ use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetail
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
 use crate::core::paths;
 use crate::core::process::pid_is_running;
-use crate::core::runner::measured_command_output;
+use crate::core::runner::{measured_command_output, normalize_runner_command_env};
 use crate::core::source_snapshot::SourceSnapshot;
 
 mod artifact_download;
@@ -362,10 +362,12 @@ fn enqueue_exec_job(
             } else {
                 None
             };
+            let mut env = request.env.clone();
+            normalize_runner_command_env(&mut env);
             let mut command = Command::new(&request.command[0]);
             command
                 .args(&request.command[1..])
-                .envs(request.env.iter())
+                .envs(env.iter())
                 .current_dir(&request.cwd);
             if let Some(snapshot) = &source_snapshot {
                 command.env(

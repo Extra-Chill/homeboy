@@ -15,6 +15,7 @@ use crate::core::source_snapshot::SourceSnapshot;
 use super::broker_http;
 use super::capabilities::{runner_capability_snapshot, validate_runner_capability_preflight};
 use super::evidence::mirror_daemon_evidence;
+use super::normalize_runner_command_env;
 use super::resource_metrics::{measured_command_output, RunnerResourceMetrics};
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
 
@@ -104,6 +105,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     let connected = status(runner_id)?;
     let mut request_env = runner.env.clone();
     request_env.extend(options.env.clone());
+    normalize_runner_command_env(&mut request_env);
     let required_extensions =
         required_extensions_for_command(&options.command, &options.required_extensions);
 
@@ -145,7 +147,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     }
 
     match runner.kind {
-        RunnerKind::Local => exec_local(&runner, cwd, options.command, options.env),
+        RunnerKind::Local => exec_local(&runner, cwd, options.command, request_env),
         RunnerKind::Ssh if options.allow_diagnostic_ssh => {
             preflight_runner_capability_plan(
                 &runner,
