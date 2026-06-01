@@ -49,7 +49,8 @@ the other capabilities.
   runner instances. Forwarded to workloads via
   `$HOMEBOY_BENCH_SHARED_STATE`.
 - `--concurrency <N>`: Number of parallel bench runner instances to spawn
-  (default `1`). Values greater than `1` require `--shared-state`.
+  (default `1`). Values greater than `1` require `--shared-state`. With
+  `--matrix`, this controls generic scheduler task concurrency instead.
 - `--setting <key=value>`: Override component settings (may be repeated).
 - `--setting-json <key=json>`: Override component settings with typed JSON
   values for arrays, objects, numbers, booleans, or null.
@@ -70,10 +71,17 @@ the other capabilities.
 - `--rig-concurrency <N>`: For multi-rig comparisons, run up to `N` rigs
   concurrently. Default `1` preserves sequential CI behavior. Values greater
   than `1` are opt-in and preserve output ordering by the selected rig order.
-- Future `--matrix <axis=value[,value...]>` expansion should use the generic
-  `core::agent_task` matrix plan schema for plan inspection and fan-out. The
-  scheduler/executor pieces are tracked separately so bench does not grow its
-  own task runner.
+- `--matrix <axis=value[,value...]>`: Add an agent-task matrix axis. Repeat for
+  multiple axes. When present, `homeboy bench` builds a generic
+  `homeboy/agent-task-matrix-plan/v1`, dispatches cells through the generic
+  scheduler, and returns both scheduler and matrix aggregate metadata.
+- `--runner-pool <BACKEND>`: Executor backend string for matrix cells. Core keeps
+  this as data so concrete backends such as Codebox remain extension-owned.
+  Omit to use the local no-op executor for plan/scheduler smoke checks.
+- `--max-tasks <N>` / `--max-queue-depth <N>`: Scheduler backpressure limits for
+  matrix cells.
+- `--expect-artifact <NAME>`: Record an expected artifact name on each matrix
+  task request. Repeat to declare multiple expected artifacts.
 - `--scenario <SCENARIO_ID>`: Run or list only the exact scenario id. May
   be repeated. Homeboy validates selected ids against discovery before
   execution and forwards the comma-separated selector to runners via
@@ -87,6 +95,34 @@ the other capabilities.
 
 Arguments after `--` are passed verbatim to the extension's bench runner
 script.
+
+## Matrix Fan-Out
+
+Matrix fan-out is the operator-facing path over Homeboy's generic agent-task
+substrate. It is intentionally executor-neutral: the CLI turns product inputs
+into `AgentTaskRequest` cells, the scheduler owns concurrency/backpressure, and
+backend-specific execution remains outside Homeboy core.
+
+```bash
+homeboy bench studio-web \
+  --rig studio-web-evals \
+  --matrix model=gpt-5.5,kimi,claude \
+  --matrix prompt=site-a,site-b,site-c \
+  --runner-pool codebox \
+  --concurrency 8 \
+  --max-queue-depth 16 \
+  --expect-artifact bench-results \
+  --report side-by-side
+```
+
+The JSON output uses the `matrix_fanout` bench variant and includes:
+
+- `scheduler`: `homeboy/agent-task-aggregate/v1` scheduler totals, events,
+  queue state, outcomes, and backpressure.
+- `matrix`: `homeboy/agent-task-matrix-aggregate/v1` cells with axes, status,
+  artifacts, evidence refs, diagnostics, and metadata.
+- `report`: compact product metadata for the selected report format plus
+  succeeded, blocked, failed, cancelled-cell, and timed-out-cell totals.
 
 When `--ci-profile <ID>` is used, args declared on that profile's bench job
 are forwarded before explicit CLI passthrough arguments, and job env is passed

@@ -254,7 +254,11 @@ fn list_args(component: Option<&str>, rig: Vec<String>) -> BenchListArgs {
     }
 }
 
-fn run_args(component: Option<&str>, rig: Vec<String>, scenario_ids: Vec<String>) -> BenchArgs {
+pub(super) fn run_args(
+    component: Option<&str>,
+    rig: Vec<String>,
+    scenario_ids: Vec<String>,
+) -> BenchArgs {
     BenchArgs {
         command: None,
         run: BenchRunArgs {
@@ -268,6 +272,11 @@ fn run_args(component: Option<&str>, rig: Vec<String>, scenario_ids: Vec<String>
             runs: 1,
             shared_state: None,
             concurrency: 1,
+            matrix: Vec::new(),
+            runner_pool: None,
+            matrix_max_tasks: None,
+            matrix_max_queue_depth: None,
+            expected_artifact: Vec::new(),
             baseline_args: BaselineArgs {
                 baseline: false,
                 ignore_baseline: true,
@@ -297,58 +306,10 @@ fn run_args_with_profile(component: Option<&str>, rig: Vec<String>, profile: &st
 }
 
 #[test]
-fn parses_ci_profile_flag() {
-    let cli = TestCli::try_parse_from(["bench", "homeboy", "--ci-profile", "perf"])
-        .expect("bench should parse --ci-profile");
-
-    assert_eq!(cli.bench.run.ci_profile.as_deref(), Some("perf"));
-}
-
-#[test]
 fn filter_strips_boolean_flags() {
     let args = vec!["--ratchet".to_string(), "--filter=Scenario".to_string()];
     let result = filter_homeboy_flags(&args);
     assert_eq!(result, vec!["--filter=Scenario"]);
-}
-
-#[test]
-fn parses_bench_list_rig_flag() {
-    let cli = TestCli::try_parse_from(["bench", "list", "--rig", "studio-bfb"])
-        .expect("bench list --rig should parse");
-
-    match cli.bench.command.expect("list command") {
-        BenchCommand::List(args) => assert_eq!(args.rig, vec!["studio-bfb".to_string()]),
-        _ => panic!("expected bench list command"),
-    }
-}
-
-#[test]
-fn parses_repeated_scenario_flags() {
-    let cli = TestCli::try_parse_from([
-        "bench",
-        "homeboy",
-        "--scenario",
-        "studio-agent-runtime",
-        "--scenario",
-        "wp-admin-load",
-    ])
-    .expect("bench --scenario should parse");
-
-    assert_eq!(
-        cli.bench.run.scenario_ids,
-        vec![
-            "studio-agent-runtime".to_string(),
-            "wp-admin-load".to_string()
-        ]
-    );
-}
-
-#[test]
-fn parses_profile_flag() {
-    let cli = TestCli::try_parse_from(["bench", "--rig", "studio-bfb", "--profile", "smoke"])
-        .expect("bench --profile should parse");
-
-    assert_eq!(cli.bench.run.profile.as_deref(), Some("smoke"));
 }
 
 #[test]
@@ -388,24 +349,6 @@ fn parses_force_hot_after_bench_without_losing_settings() {
         !args.run.args.iter().any(|arg| arg == "--force-hot"),
         "--force-hot must not be forwarded to bench workloads"
     );
-}
-
-#[test]
-fn scenario_and_profile_conflict() {
-    let err = match TestCli::try_parse_from([
-        "bench",
-        "--rig",
-        "studio-bfb",
-        "--profile",
-        "smoke",
-        "--scenario",
-        "boot",
-    ]) {
-        Ok(_) => panic!("--scenario and --profile should conflict"),
-        Err(err) => err,
-    };
-
-    assert!(err.to_string().contains("cannot be used with"));
 }
 
 #[test]

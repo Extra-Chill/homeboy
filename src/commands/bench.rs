@@ -21,6 +21,7 @@ use super::utils::args::{
 };
 use super::{runs, CmdResult, GlobalArgs};
 
+mod fanout;
 mod matrix;
 mod observation;
 
@@ -163,8 +164,29 @@ pub struct BenchRunArgs {
     shared_state: Option<PathBuf>,
 
     /// Number of concurrent bench runner instances.
+    /// When `--matrix` is used, this controls scheduler task concurrency.
     #[arg(long, default_value_t = 1)]
     concurrency: u32,
+
+    /// Matrix axis in NAME=value,value form. Repeat for multiple axes.
+    #[arg(long = "matrix", value_name = "NAME=VALUE[,VALUE...]")]
+    matrix: Vec<String>,
+
+    /// Generic agent-task executor backend/runner pool for matrix fan-out.
+    #[arg(long = "runner-pool", value_name = "BACKEND")]
+    runner_pool: Option<String>,
+
+    /// Cap the number of matrix cells accepted by the scheduler.
+    #[arg(long = "max-tasks", value_name = "N")]
+    matrix_max_tasks: Option<usize>,
+
+    /// Cap the scheduler queue depth for matrix cells.
+    #[arg(long = "max-queue-depth", value_name = "N")]
+    matrix_max_queue_depth: Option<usize>,
+
+    /// Artifact name expected from each matrix cell.
+    #[arg(long = "expect-artifact", value_name = "NAME")]
+    expected_artifact: Vec<String>,
 
     #[command(flatten)]
     baseline_args: BaselineArgs,
@@ -265,7 +287,8 @@ pub enum BenchRigOrder {
     Reverse,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
 pub enum BenchReportFormat {
     SideBySide,
 }
@@ -288,6 +311,7 @@ pub enum BenchOutput {
     Single(BenchCommandOutput),
     Comparison(BenchComparisonOutput),
     ComparisonSummary(BenchComparisonSummaryOutput),
+    MatrixFanout(fanout::BenchMatrixFanoutOutput),
     List(BenchListWorkflowResult),
     Observation(runs::RunsOutput),
 }
@@ -326,6 +350,12 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
                 Ok((BenchOutput::Observation(output), exit_code))
             }
         };
+    }
+
+    if !args.run.matrix.is_empty() {
+        let output = fanout::run_matrix_fanout(&args.run)?;
+        let exit = if output.matrix.passed { 0 } else { 1 };
+        return Ok((BenchOutput::MatrixFanout(output), exit));
     }
 
     // No --rig: single component run. No rig pinning, no rig
@@ -822,5 +852,7 @@ fn maybe_expand_default_baseline(
     }))
 }
 
+#[cfg(test)]
+mod parse_tests;
 #[cfg(test)]
 mod tests;
