@@ -18,6 +18,8 @@ pub struct AgentTaskArgs {
 pub enum AgentTaskCommand {
     /// Run an agent-task plan through extension-declared executor providers.
     RunPlan(RunPlanArgs),
+    /// Execute a previously submitted durable agent-task run.
+    Run(StatusArgs),
     /// Persist an agent-task plan and return a durable run id without executing it.
     Submit(SubmitArgs),
     /// Read durable agent-task run status.
@@ -59,6 +61,7 @@ pub struct StatusArgs {
 pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::RunPlan(run_args) => run_plan(run_args),
+        AgentTaskCommand::Run(status_args) => run_submitted(status_args),
         AgentTaskCommand::Submit(submit_args) => submit(submit_args),
         AgentTaskCommand::Status(status_args) => status(status_args),
         AgentTaskCommand::Logs(status_args) => logs(status_args),
@@ -74,6 +77,26 @@ fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
     if let Some(run_id) = args.record_run_id.as_deref() {
         agent_task_lifecycle::record_completed_run(&plan, &aggregate, Some(run_id))?;
     }
+    let exit_code = if aggregate.totals.failed == 0
+        && aggregate.totals.cancelled == 0
+        && aggregate.totals.timed_out == 0
+    {
+        0
+    } else {
+        1
+    };
+    Ok((
+        serde_json::to_value(aggregate).unwrap_or(Value::Null),
+        exit_code,
+    ))
+}
+
+fn run_submitted(args: StatusArgs) -> CmdResult<Value> {
+    let plan = agent_task_lifecycle::load_plan(&args.run_id)?;
+    agent_task_lifecycle::mark_running(&args.run_id)?;
+    let scheduler = AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::discover());
+    let aggregate = scheduler.run(plan.clone());
+    agent_task_lifecycle::record_run_aggregate(&args.run_id, &plan, &aggregate)?;
     let exit_code = if aggregate.totals.failed == 0
         && aggregate.totals.cancelled == 0
         && aggregate.totals.timed_out == 0

@@ -130,6 +130,41 @@ pub fn record_completed_run(
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
     let mut record = submit_plan(plan, requested_run_id)?;
+    record_aggregate(&mut record, plan, aggregate)
+}
+
+pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
+    let record = read_record(&sanitize_run_id(run_id))?;
+    read_plan_path(&PathBuf::from(record.plan_path))
+}
+
+pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let mut record = read_record(&sanitize_run_id(run_id))?;
+    record.state = AgentTaskRunState::Running;
+    record.updated_at = Some(now_timestamp());
+    for task in &mut record.tasks {
+        if task.state == AgentTaskState::Queued {
+            task.state = AgentTaskState::Running;
+        }
+    }
+    write_record(&record)?;
+    Ok(record)
+}
+
+pub fn record_run_aggregate(
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    aggregate: &AgentTaskAggregate,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = read_record(&sanitize_run_id(run_id))?;
+    record_aggregate(&mut record, plan, aggregate)
+}
+
+fn record_aggregate(
+    record: &mut AgentTaskRunRecord,
+    plan: &AgentTaskPlan,
+    aggregate: &AgentTaskAggregate,
+) -> Result<AgentTaskRunRecord> {
     let aggregate_path = run_dir(&record.run_id)?.join("aggregate.json");
     write_json(&aggregate_path, aggregate)?;
     record.state = run_state_for_aggregate(aggregate);
@@ -138,7 +173,7 @@ pub fn record_completed_run(
     record.tasks = tasks_for_aggregate(plan, aggregate);
     record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);
     write_record(&record)?;
-    Ok(record)
+    Ok(record.clone())
 }
 
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -297,6 +332,17 @@ fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
 
 fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
     let path = run_dir(run_id)?.join("aggregate.json");
+    read_aggregate_path(&path)
+}
+
+fn read_plan_path(path: &PathBuf) -> Result<AgentTaskPlan> {
+    let raw = fs::read_to_string(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    serde_json::from_str(&raw)
+        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
+}
+
+fn read_aggregate_path(path: &PathBuf) -> Result<AgentTaskAggregate> {
     let raw = fs::read_to_string(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     serde_json::from_str(&raw)
@@ -446,6 +492,57 @@ mod tests {
             assert_eq!(log.events[0].state, AgentTaskState::Succeeded);
             assert_eq!(artifacts.artifacts[0].id, "patch");
             assert_eq!(artifacts.evidence_refs[0].kind, "transcript");
+        });
+    }
+
+    #[test]
+    fn submitted_run_can_be_loaded_marked_running_and_completed() {
+        with_temp_home(|| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-execute")).expect("submitted");
+
+            let loaded_plan = load_plan("run-execute").expect("plan loaded");
+            let running = mark_running("run-execute").expect("marked running");
+            let aggregate = AgentTaskAggregate {
+                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: loaded_plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::Succeeded,
+                totals: AgentTaskAggregateTotals {
+                    queued: 1,
+                    succeeded: 1,
+                    ..AgentTaskAggregateTotals::default()
+                },
+                outcomes: vec![AgentTaskOutcome {
+                    schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "task-a".to_string(),
+                    status: crate::core::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                    summary: Some("ok".to_string()),
+                    failure_classification: None,
+                    artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    workflow: None,
+                    follow_up: None,
+                    metadata: Value::Null,
+                }],
+                events: vec![AgentTaskProgressEvent {
+                    task_id: "task-a".to_string(),
+                    state: AgentTaskState::Succeeded,
+                    attempt: 1,
+                    message: Some("ok".to_string()),
+                }],
+                queue: Default::default(),
+            };
+
+            let completed =
+                record_run_aggregate("run-execute", &loaded_plan, &aggregate).expect("completed");
+
+            assert_eq!(loaded_plan.plan_id, "plan-a");
+            assert_eq!(running.state, AgentTaskRunState::Running);
+            assert_eq!(running.tasks[0].state, AgentTaskState::Running);
+            assert_eq!(completed.state, AgentTaskRunState::Succeeded);
+            assert_eq!(completed.tasks[0].state, AgentTaskState::Succeeded);
+            assert!(completed.aggregate_path.is_some());
         });
     }
 
