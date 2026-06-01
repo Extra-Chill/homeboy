@@ -596,7 +596,6 @@ impl AgentTaskScheduleSupport {
             }],
             workflow: None,
             follow_up: None,
-            workflow: None,
             metadata: Value::Null,
         }
     }
