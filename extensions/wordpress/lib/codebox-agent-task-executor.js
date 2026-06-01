@@ -172,7 +172,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     diagnostics: (result.diagnostics || []).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
-      data: diagnostic.data || {},
+      data: sanitizePublicMetadata(diagnostic.data || {}),
     })),
     metadata: {
       provider: 'wordpress.codebox-agent-task-executor',

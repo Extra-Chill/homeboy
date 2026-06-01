@@ -145,12 +145,22 @@ const codexOutcome = agentTaskOutcomeFromCodeboxResult(request, {
       AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'codex-refresh-token-value',
     },
   },
+  diagnostics: [{
+    class: 'codex',
+    message: 'Codex token diagnostics.',
+    data: {
+      secretEnvValues: {
+        AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'diagnostic-access-token-value',
+      },
+    },
+  }],
 });
 const serializedCodexOutcome = JSON.stringify(codexOutcome);
 assert(serializedCodexOutcome.includes('AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN'));
 assert(!serializedCodexOutcome.includes('codex-access-token-value'));
 assert(!serializedCodexOutcome.includes('codex-refresh-token-value'));
 assert(!serializedCodexOutcome.includes('artifact-access-token-value'));
+assert(!serializedCodexOutcome.includes('diagnostic-access-token-value'));
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-executor-'));
 try {
