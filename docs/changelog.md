@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.215.0] - 2026-06-01
+
+### Added
+- add bounded sandbox tool API
+- add agent task backpressure policy
+- add agent task matrix fanout plan
+- reconcile aggregate agent task outcomes
+- add core agent task scheduler
+- define agent task executor adapter
+- add agent task workflow evidence
+
+### Changed
+- split agent task matrix module
+- mark archive guard as validation
+- guard deploy archive semantics
+
+### Fixed
+- reconcile agent task matrix merge
+- keep archive verification selectors generic
+- update outcome reconciliation after scheduler merge
+- verify packaged plugin header files
+
 ## [0.214.0] - 2026-05-31
 
 ### Added
