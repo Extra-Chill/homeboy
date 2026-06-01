@@ -260,13 +260,12 @@ pub(super) fn deploy_artifact(
 
             // Step 2b: Flatten an accidental single top-level directory.
             //
-            // Build ZIPs commonly contain a single top-level directory named after
-            // the component (e.g. `extrachill-users/extrachill-users.php`). When the
-            // component's remote_path already points AT that directory
-            // (`wp-content/plugins/extrachill-users`), extracting in place produces a
-            // double-nested layout (`.../extrachill-users/extrachill-users/...`) that
-            // WordPress cannot load. Detect that signature and lift the inner
-            // directory's contents up one level so the artifact lands flat.
+            // Build archives commonly contain a single top-level directory named
+            // after the component. When the component's remote_path already points
+            // at that directory, extracting in place produces a double-nested layout
+            // (`.../component/component/...`) that runtimes cannot load. Detect that
+            // signature and lift the inner directory's contents up one level so the
+            // artifact lands flat.
             if let Some(result) = flatten_double_nested_dir(ssh_client, remote_path)? {
                 return Ok(result);
             }
@@ -319,7 +318,7 @@ pub(super) fn deploy_artifact(
 
 /// Return the final path segment of `remote_path` (its basename), if any.
 ///
-/// e.g. `wp-content/plugins/extrachill-users` -> `extrachill-users`.
+/// For example, `/srv/app/components/example` -> `example`.
 fn remote_basename(remote_path: &str) -> Option<&str> {
     remote_path
         .trim_end_matches('/')
@@ -333,7 +332,7 @@ fn remote_basename(remote_path: &str) -> Option<&str> {
 ///
 /// The signature we repair is: after extraction, `remote_path` contains exactly
 /// one entry, and that entry is a directory whose name equals `basename(remote_path)`
-/// (e.g. `.../extrachill-users/extrachill-users/`). When that holds, the inner
+/// (e.g. `.../component/component/`). When that holds, the inner
 /// directory's contents (including dotfiles) are lifted up into `remote_path` and
 /// the now-empty inner directory is removed.
 ///
@@ -382,11 +381,10 @@ fn flatten_double_nested_dir(
     );
 
     // Move the inner directory aside, then lift its contents (including dotfiles)
-    // up into remote_path, then remove the now-empty staging directory.
-    //
-    // Using a temp staging name avoids the "cannot move a directory into itself"
-    // problem when the inner dir shares the basename with its parent.
-    let staging = format!("{}/.homeboy-flatten-staging", normalized);
+    // up into remote_path, then remove the now-empty staging directory. Using a
+    // temp staging name avoids the "cannot move a directory into itself" problem
+    // when the inner dir shares the basename with its parent.
+    let staging = format!("{}/.artifact-flatten-staging", normalized);
     let flatten_cmd = format!(
         "cd {target} && rm -rf {staging} && mv {nested} {staging} && \
          find {staging} -mindepth 1 -maxdepth 1 -exec mv -t {target} {{}} + && \
@@ -434,8 +432,8 @@ fn ensure_not_double_nested(ssh_client: &SshClient, remote_path: &str) -> Option
             1,
             format!(
                 "Deploy produced a double-nested layout: '{nested}' exists, so the artifact \
-                 landed at '{nested}/...' instead of '{target}/...'. WordPress (and most \
-                 frameworks) cannot load a plugin/theme nested one level too deep. Refusing to \
+                 landed at '{nested}/...' instead of '{target}/...'. Runtimes generally cannot \
+                 load a component nested one level too deep. Refusing to \
                  report success. Set the component's remote_path to the parent directory, or \
                  adjust the build so the archive does not contain a redundant top-level '{base}/' \
                  directory.",
@@ -698,7 +696,7 @@ mod tests {
             "double-nested directory must not exist after flatten"
         );
         // Extract artifact and flatten staging cleaned up.
-        assert!(!target.join(".homeboy-flatten-staging").exists());
+        assert!(!target.join(".artifact-flatten-staging").exists());
     }
 
     /// A normal (non-nested) archive must extract in place untouched.

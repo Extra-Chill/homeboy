@@ -4,7 +4,7 @@
 
 use super::{
     apply_finding_filters, build_comparison_output, compute_fixability_if_requested,
-    scope_convention_outliers_to_findings, AuditRunWorkflowArgs,
+    default_audit_exit_code, scope_convention_outliers_to_findings, AuditRunWorkflowArgs,
 };
 use crate::core::code_audit::checks::CheckStatus;
 use crate::core::code_audit::conventions::{Deviation, Outlier};
@@ -217,6 +217,59 @@ fn only_with_no_matches_leaves_zero_findings_and_clean_exit() {
 
     assert!(result.findings.is_empty());
     assert_eq!(result.summary.outliers_found, 0);
+}
+
+mod full_audit_structural_complexity_tests {
+    use super::*;
+
+    #[test]
+    fn full_audit_keeps_structural_complexity_findings_review_only() {
+        let result = make_result(vec![
+            make_finding(AuditFinding::GodFile, "src/large.rs"),
+            make_finding(AuditFinding::HighItemCount, "src/items.rs"),
+            make_finding(AuditFinding::DirectorySprawl, "src/flat"),
+        ]);
+
+        assert_eq!(default_audit_exit_code(&result, false), 0);
+    }
+
+    #[test]
+    fn full_audit_still_blocks_on_non_structural_complexity_findings() {
+        let result = make_result(vec![make_finding(
+            AuditFinding::UnreferencedExport,
+            "src/dead.rs",
+        )]);
+
+        assert_eq!(default_audit_exit_code(&result, false), 1);
+    }
+
+    #[test]
+    fn full_audit_baseline_comparison_keeps_structural_complexity_review_only() {
+        let mut result = make_result(vec![make_finding(
+            AuditFinding::DirectorySprawl,
+            "src/commands",
+        )]);
+        result.findings[0].convention = "structural".to_string();
+        let baseline = make_baseline(vec![]);
+
+        let workflow =
+            build_comparison_output(result, &make_analysis(), baseline, &make_args(false))
+                .expect("comparison output builds");
+
+        assert_eq!(workflow.exit_code, 0);
+        match workflow.output {
+            crate::core::code_audit::report::AuditCommandOutput::Compared {
+                passed,
+                baseline_comparison,
+                ..
+            } => {
+                assert!(passed);
+                assert!(!baseline_comparison.drift_increased);
+                assert_eq!(baseline_comparison.new_items.len(), 1);
+            }
+            _ => panic!("expected compared output"),
+        }
+    }
 }
 
 #[test]
