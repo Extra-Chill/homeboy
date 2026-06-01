@@ -136,11 +136,12 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-05-31T19:47:37Z",
-      "item_count": 13,
+      "created_at": "2026-06-01T03:40:08Z",
+      "item_count": 14,
       "known_fingerprints": [
-        "artifact_portability::observation:8f107b58-2375-43e0-99e4-3b6baf7485a3::NonPortableArtifactPath",
+        "artifact_portability::observation:0c1c8a3c-0f6c-4639-9a6b-97192be09b43::NonPortableArtifactPath",
         "structural::src/commands/bench/tests.rs::HighItemCount",
+        "structural::src/commands/runs/gh_actions.rs::HighItemCount",
         "structural::src/commands/trace.rs::GodFile",
         "structural::src/commands/trace/tests.rs::GodFile",
         "structural::src/core/code_audit/conventions.rs::GodFile",
