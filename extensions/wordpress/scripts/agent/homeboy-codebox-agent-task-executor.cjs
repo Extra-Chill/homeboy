@@ -43,19 +43,34 @@ function readRequest() {
   return JSON.parse(raw);
 }
 
+function requestTimeoutMs(request) {
+  const timeout = request?.limits?.timeout_ms || request?.limits?.max_runtime_ms;
+  const parsed = Number.parseInt(timeout, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function runTaskRunner(request) {
   const runner = argValue('--task-runner') || `${__dirname}/homeboy-wp-codebox-task-runner.cjs`;
+  const config = request.executor?.config || {};
+  const configArgs = [
+    ['--agents-api', config.agents_api_path || config.agentsApiPath],
+    ['--data-machine', config.data_machine_path || config.dataMachinePath],
+    ['--data-machine-code', config.data_machine_code_path || config.dataMachineCodePath],
+    ['--homeboy', config.homeboy_path || config.homeboyPath],
+    ['--homeboy-extensions', config.homeboy_extensions_path || config.homeboyExtensionsPath],
+  ].flatMap(([name, value]) => (value ? [name, value] : []));
   const args = process.argv.slice(2).filter((arg, index, all) => {
     if (arg === '--task-runner' || all[index - 1] === '--task-runner' || arg === '--print-contract') {
       return false;
     }
     return true;
   });
-  const result = spawnSync(process.execPath, [runner, ...args], {
+  const result = spawnSync(process.execPath, [runner, ...args, ...configArgs], {
     encoding: 'utf8',
     input: JSON.stringify(codeboxTaskRequestFromAgentTaskRequest(request)),
     env: process.env,
     maxBuffer: 1024 * 1024 * 20,
+    timeout: requestTimeoutMs(request),
   });
 
   if (result.stderr) {
@@ -63,6 +78,19 @@ function runTaskRunner(request) {
   }
 
   let payload = {};
+  if (result.error && result.error.code === 'ETIMEDOUT') {
+    payload = {
+      success: false,
+      timeout: true,
+      summary: `WP Codebox agent task timed out after ${requestTimeoutMs(request)}ms.`,
+      diagnostics: [{
+        class: 'codebox.timeout',
+        message: 'Task runner exceeded the AgentTaskRequest timeout.',
+        data: { timeout_ms: requestTimeoutMs(request) },
+      }],
+    };
+    return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: 1 });
+  }
   if (result.stdout.trim()) {
     try {
       payload = JSON.parse(result.stdout);

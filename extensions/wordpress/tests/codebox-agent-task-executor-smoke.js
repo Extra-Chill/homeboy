@@ -32,6 +32,16 @@ process.stdout.write(JSON.stringify({
   return { fixture, capture };
 }
 
+function writeHangingTaskRunner(root) {
+  const fixture = path.join(root, 'hanging-task-runner.cjs');
+  fs.writeFileSync(fixture, `#!/usr/bin/env node
+'use strict';
+setInterval(() => {}, 1000);
+`);
+  fs.chmodSync(fixture, 0o755);
+  return fixture;
+}
+
 const request = {
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'task-123',
@@ -126,6 +136,26 @@ try {
   ], { encoding: 'utf8' });
   assert.equal(contractResult.status, 0, contractResult.stderr || contractResult.stdout);
   assert.equal(JSON.parse(contractResult.stdout).id, 'wordpress.codebox-agent-task-executor');
+
+  const hangingRequest = {
+    ...request,
+    task_id: 'task-timeout',
+    limits: { timeout_ms: 50 },
+  };
+  const timeoutResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    writeHangingTaskRunner(root),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(hangingRequest),
+    timeout: 2000,
+  });
+  assert.equal(timeoutResult.status, 1, timeoutResult.stderr || timeoutResult.stdout);
+  const timeoutOutcome = JSON.parse(timeoutResult.stdout);
+  assert.equal(timeoutOutcome.status, 'timeout');
+  assert.equal(timeoutOutcome.failure_classification, 'timeout');
+  assert.equal(timeoutOutcome.diagnostics[0].class, 'codebox.timeout');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
