@@ -66,6 +66,25 @@ calls `normalize_outcome()` and appends `collect_artifacts()` output. If polling
 exceeds the scheduler's configured poll budget, the scheduler calls
 `cancel_task()` and returns that normalized cancellation outcome.
 
+## Fleet scheduling policy
+
+Fleet plans use conservative scheduler defaults: one task runs at a time unless
+the caller explicitly raises `max_concurrency`. Callers may also set
+`max_tasks`/`max_queue_depth` to cap accepted queue depth, and
+`per_executor_concurrency` to keep one backend or runner selector from consuming
+all global capacity. Per-executor keys are the backend string, or
+`backend:selector` when a selector is present.
+
+Backpressure is reported in the aggregate `queue` object. Queue-depth rejections
+produce blocked task events, scheduler diagnostics, and normalized failed
+outcomes with `PolicyDenied` failure classification so operators can see which
+tasks were not started and why.
+
+Retry policy stays executor-agnostic. `max_attempts` bounds per-task attempts,
+`max_retries_total` provides a fleet-level retry budget, and
+`retryable_failure_classifications` lets callers retry only normalized failure
+classes such as `Provider` or `ExecutionFailed`.
+
 ## Provider payloads
 
 Provider payloads are intentionally opaque `serde_json::Value` objects until
