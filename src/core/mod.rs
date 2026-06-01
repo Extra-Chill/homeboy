@@ -2,6 +2,7 @@
 #[macro_use]
 pub mod config;
 pub mod agent_task;
+pub mod agent_task_scheduler;
 pub mod api_jobs;
 pub mod artifact_manifest;
 pub(crate) mod artifact_metadata;
