@@ -771,35 +771,11 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_tag_for_filename_preserves_safe_chars() {
-        assert_eq!(
-            github_release::sanitize_tag_for_filename("v1.2.3"),
-            "v1.2.3"
-        );
-        assert_eq!(
-            github_release::sanitize_tag_for_filename("data-machine-v0.70.2"),
-            "data-machine-v0.70.2"
-        );
-    }
-
-    #[test]
-    fn sanitize_tag_for_filename_strips_unsafe_chars() {
-        assert_eq!(
-            github_release::sanitize_tag_for_filename("v1.2.3 rc1"),
-            "v1.2.3-rc1"
-        );
-        assert_eq!(
-            github_release::sanitize_tag_for_filename("feat/foo@1"),
-            "feat-foo-1"
-        );
-    }
-
-    #[test]
     fn fallback_gh_command_includes_tag_twice() {
         let cmd = github_release::fallback_gh_command("v1.2.3");
         assert!(cmd.contains("gh release create v1.2.3"));
         assert!(cmd.contains("--title v1.2.3"));
-        assert!(cmd.contains("--notes-file"));
+        assert!(cmd.contains("--generate-notes"));
     }
 
     #[test]
