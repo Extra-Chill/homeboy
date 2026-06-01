@@ -221,33 +221,25 @@ pub fn resolve_with_component(
     component_override: Option<Component>,
 ) -> Result<ExecutionContext> {
     // 1. Resolve component
-    let mut component = if let Some(mut component) = component_override {
-        if let Some(path) = options.path_override.as_deref() {
-            component.local_path = path.to_string();
-        }
-        component
+    let target = if let Some(component) = component_override {
+        component::resolve_target_from_component(component, options.path_override.as_deref())
     } else {
         component::resolve_target(component::TargetSpec::new(
             options.component_id.as_deref(),
             options.path_override.as_deref(),
         ))?
-        .component
     };
+    let component::ResolvedTarget {
+        mut component,
+        source_path,
+        git_root,
+        ..
+    } = target;
 
     let declared_extension_ids = declared_extension_ids(&component);
     apply_extension_overrides(&mut component, &options.extension_overrides);
 
-    // 2. Resolve source path
-    let target = component::resolve_target(component::TargetSpec::new(
-        Some(&component.id),
-        Some(&component.local_path),
-    ))?;
-    let source_path = target.source_path;
-
-    // 3. Detect git root
-    let git_root = target.git_root;
-
-    // 4. Optionally resolve extension context
+    // 2. Optionally resolve extension context
     let (extension_id, extension_path, settings) = if let Some(capability) = options.capability {
         let ext_context =
             extension::resolve_execution_context(&component, capability).map_err(|err| {
@@ -492,6 +484,114 @@ mod tests {
         assert_eq!(ctx.component_id, "rig-owned");
         assert_eq!(ctx.source_path, root);
         assert!(ctx.extension_id.is_none());
+    }
+
+    #[test]
+    fn resolve_with_component_preserves_in_memory_extension_config() {
+        with_isolated_home(|home| {
+            write_extension(
+                home,
+                "rig-node",
+                r#""lint": { "extension_script": "lint.sh" }"#,
+            );
+            write_extension(
+                home,
+                "portable-node",
+                r#""lint": { "extension_script": "lint.sh" }"#,
+            );
+            let dir = TempDir::new().expect("temp dir");
+            let root = dir.path();
+            fs::write(
+                root.join("homeboy.json"),
+                r#"{"id":"rig-owned","extensions":{"portable-node":{"marker":"portable"}}}"#,
+            )
+            .expect("write portable config");
+            let extensions = HashMap::from([(
+                "rig-node".to_string(),
+                ScopedExtensionConfig {
+                    settings: HashMap::from([(
+                        "marker".to_string(),
+                        serde_json::json!("in-memory"),
+                    )]),
+                    ..ScopedExtensionConfig::default()
+                },
+            )]);
+            let component = Component {
+                id: "rig-owned".to_string(),
+                local_path: root.to_string_lossy().to_string(),
+                extensions: Some(extensions),
+                ..Component::default()
+            };
+            let options = ResolveOptions::with_capability(
+                "rig-owned",
+                None,
+                ExtensionCapability::Lint,
+                Vec::new(),
+            );
+
+            let ctx = resolve_with_component(&options, Some(component))
+                .expect("in-memory component should stay authoritative");
+
+            assert_eq!(ctx.extension_id.as_deref(), Some("rig-node"));
+            assert!(ctx
+                .component
+                .extensions
+                .as_ref()
+                .is_some_and(|extensions| extensions.contains_key("rig-node")
+                    && !extensions.contains_key("portable-node")));
+            assert!(ctx
+                .settings
+                .iter()
+                .any(|(key, value)| key == "marker" && value == "in-memory"));
+        });
+    }
+
+    #[test]
+    fn resolve_with_component_applies_path_override_without_rediscovery() {
+        with_isolated_home(|home| {
+            write_extension(
+                home,
+                "rig-node",
+                r#""lint": { "extension_script": "lint.sh" }"#,
+            );
+            let dir = TempDir::new().expect("temp dir");
+            let original = dir.path().join("original");
+            let override_path = dir.path().join("override");
+            fs::create_dir_all(&original).expect("create original");
+            fs::create_dir_all(&override_path).expect("create override");
+            fs::write(
+                override_path.join("homeboy.json"),
+                r#"{"id":"rig-owned","extensions":{"portable-node":{}}}"#,
+            )
+            .expect("write portable config");
+            let extensions =
+                HashMap::from([("rig-node".to_string(), ScopedExtensionConfig::default())]);
+            let component = Component {
+                id: "rig-owned".to_string(),
+                local_path: original.to_string_lossy().to_string(),
+                extensions: Some(extensions),
+                ..Component::default()
+            };
+            let options = ResolveOptions::with_capability(
+                "rig-owned",
+                Some(override_path.to_string_lossy().to_string()),
+                ExtensionCapability::Lint,
+                Vec::new(),
+            );
+
+            let ctx = resolve_with_component(&options, Some(component))
+                .expect("path override should not trigger portable rediscovery");
+
+            assert_eq!(ctx.source_path, override_path);
+            assert_eq!(ctx.component.local_path, override_path.to_string_lossy());
+            assert_eq!(ctx.extension_id.as_deref(), Some("rig-node"));
+            assert!(ctx
+                .component
+                .extensions
+                .as_ref()
+                .is_some_and(|extensions| extensions.contains_key("rig-node")
+                    && !extensions.contains_key("portable-node")));
+        });
     }
 
     #[test]
