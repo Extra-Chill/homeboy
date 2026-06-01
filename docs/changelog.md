@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.216.2] - 2026-06-01
+
+### Fixed
+- fail zero-finding producer errors
+
 ## [0.216.1] - 2026-06-01
 
 ### Changed
