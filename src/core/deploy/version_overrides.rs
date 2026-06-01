@@ -280,6 +280,7 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
 
 fn archive_install_verification(policy: &DeployArchiveInstallPolicy) -> Option<DeployVerification> {
     let header = policy.required_header.as_ref()?;
+    let contains = shell::quote_arg(&header.contains);
     let selector = if let Some(file) = header.file.as_deref() {
         format!(
             "candidate=$(printf '%s\\n' \"$entries\" | awk -v required={} '{{ slash = index($0, \"/\"); rel = slash ? substr($0, slash + 1) : $0; if (rel == required) {{ print $0; exit }} }}')",
@@ -288,8 +289,9 @@ fn archive_install_verification(policy: &DeployArchiveInstallPolicy) -> Option<D
     } else if let Some(file_glob) = header.file_glob.as_deref() {
         let file_regex = glob_to_awk_regex(file_glob);
         format!(
-            "candidate=$(printf '%s\\n' \"$entries\" | awk -v pattern={} '{{ slash = index($0, \"/\"); rel = slash ? substr($0, slash + 1) : $0; count = split(rel, parts, \"/\"); base = parts[count]; if (base ~ pattern) {{ print $0; exit }} }}')",
-            shell::quote_arg(&file_regex)
+            "candidate=$(printf '%s\\n' \"$entries\" | awk -v pattern={} '{{ slash = index($0, \"/\"); rel = slash ? substr($0, slash + 1) : $0; count = split(rel, parts, \"/\"); base = parts[count]; if (base ~ pattern) {{ print $0 }} }}' | while IFS= read -r entry; do unzip -p \"{{{{stagingArtifact}}}}\" \"$entry\" 2>/dev/null | grep -F -q {} && {{ printf '%s\\n' \"$entry\"; break; }}; done)",
+            shell::quote_arg(&file_regex),
+            contains
         )
     } else {
         return None;
@@ -300,8 +302,6 @@ fn archive_install_verification(policy: &DeployArchiveInstallPolicy) -> Option<D
     } else {
         ""
     };
-    let contains = shell::quote_arg(&header.contains);
-
     Some(DeployVerification {
         path_pattern: policy.path_pattern.clone(),
         verify_command: Some(format!(
@@ -819,6 +819,56 @@ mod tests {
         assert!(target.join("fixture.php").exists());
         assert!(!target.join("stale.php").exists());
         assert!(!staging.join("fixture.zip").exists());
+    }
+
+    #[test]
+    fn test_archive_install_policy_finds_plugin_header_after_nested_php() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("fixture.zip");
+        let staging = temp.path().join("staging");
+        let target = temp.path().join("wp-content/plugins/fixture");
+
+        write_zip(
+            &artifact,
+            &[
+                (
+                    "fixture/inc/helpers.php",
+                    "<?php
+function fixture_helper() {}
+",
+                ),
+                (
+                    "fixture/fixture.php",
+                    "<?php
+/*
+Plugin Name: Fixture
+*/
+",
+                ),
+            ],
+        );
+
+        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let override_config = archive_install_override(&policy);
+        let verification = archive_install_verification(&policy).expect("verification");
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            Some(&verification),
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy failed: {:?}", result.error);
+        assert!(target.join("fixture.php").exists());
+        assert!(target.join("inc/helpers.php").exists());
     }
 
     #[test]
