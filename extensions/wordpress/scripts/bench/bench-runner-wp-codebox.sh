@@ -84,6 +84,50 @@ homeboy_wp_codebox_component_relative_path() {
     fi
 }
 
+homeboy_wp_codebox_compile_bootstrap_files() {
+    local entries_json
+    entries_json=$(printf '%s' "$settings_json" | jq -c '
+        .wp_codebox_bootstrap_files // []
+        | if type == "array" then . elif type == "string" then [.] else [] end
+    ' 2>/dev/null || echo '[]')
+
+    WP_CODEBOX_BOOTSTRAP_FILES_JSON="[]"
+    if ! printf '%s' "$entries_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local index=0
+    while IFS= read -r bootstrap_ref; do
+        [ -n "$bootstrap_ref" ] || continue
+        if [[ "$bootstrap_ref" == *..* ]]; then
+            echo "Error: wp_codebox_bootstrap_files[$index] must stay under component root: $bootstrap_ref" >&2
+            FAILED_STEP="WP Codebox bootstrap file setup"
+            exit 1
+        fi
+
+        local bootstrap_host
+        bootstrap_host=$(homeboy_wp_codebox_resolve_host_path "$PLUGIN_PATH" "$bootstrap_ref")
+        if [[ "$bootstrap_host" = /* && "$bootstrap_host" != "$PLUGIN_PATH"/* ]]; then
+            echo "Error: wp_codebox_bootstrap_files[$index] must stay under component root: $bootstrap_ref" >&2
+            FAILED_STEP="WP Codebox bootstrap file setup"
+            exit 1
+        fi
+        if [ ! -f "$bootstrap_host" ]; then
+            index=$((index + 1))
+            continue
+        fi
+
+        local bootstrap_rel
+        bootstrap_rel=$(homeboy_wp_codebox_component_relative_path "$bootstrap_host")
+        WP_CODEBOX_BOOTSTRAP_FILES_JSON=$(jq -nc --arg file "$bootstrap_rel" '[$file]')
+        return 0
+    done < <(printf '%s' "$entries_json" | jq -r '.[] | select(type == "string" and . != "")')
+
+    echo "Error: no wp_codebox_bootstrap_files entries exist under component root." >&2
+    FAILED_STEP="WP Codebox bootstrap file setup"
+    exit 1
+}
+
 homeboy_wp_codebox_mount_extra_bench_workloads() {
     local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
     [ -n "$workloads_value" ] || return 0
@@ -310,6 +354,7 @@ homeboy_wp_codebox_compile_scenario_manifests() {
 }
 
 homeboy_wp_codebox_compile_scenario_manifests
+homeboy_wp_codebox_compile_bootstrap_files
 
 WP_CODEBOX_WORDPRESS_VERSION="7.0"
 if [ "$settings_json" != "{}" ]; then
@@ -493,6 +538,7 @@ WORKFLOW_STEP_JSON=$(jq -nc \
     --arg warmup "$WARMUP_ITERATIONS" \
     --arg dependencySlugs "$DEPENDENCY_SLUGS_CSV" \
     --argjson env "$BENCH_ENV_JSON" \
+    --argjson bootstrapFiles "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" \
     --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" '
     {
         command: "wordpress.bench",
@@ -503,6 +549,7 @@ WORKFLOW_STEP_JSON=$(jq -nc \
             "warmup=" + $warmup,
             "dependency-slugs=" + $dependencySlugs,
             "env-json=" + ($env | tostring),
+            "bootstrap-files-json=" + ($bootstrapFiles | tostring),
             "workloads-json=" + ($workloads | tostring)
         ]
     }

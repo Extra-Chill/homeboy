@@ -995,6 +995,13 @@
       "description": "Config-declared WordPress bench workloads passed to wordpress.bench through the generated WP Codebox recipe after dependency mounts and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file}, {type: 'ability', ability|name, input}, or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata. Step returns use the same {metrics, artifacts, metadata} shape as Node.js bench workloads."
     },
     {
+      "id": "wp_codebox_bootstrap_files",
+      "label": "WP Codebox bench bootstrap files",
+      "type": "array",
+      "default": [],
+      "description": "Component-relative bootstrap file fallbacks for WP Codebox bench workloads. The runner resolves the list against the mounted component and passes the first existing file to wordpress.bench so it loads before workloads execute."
+    },
+    {
       "id": "wp_codebox_scenario_manifests",
       "label": "WP Codebox scenario manifests",
       "type": "array",
