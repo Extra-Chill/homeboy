@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.111.1] - 2026-06-01
+
+### Fixed
+- respect component PHPStan config
+
 ## [2.111.0] - 2026-06-01
 
 ### Added
