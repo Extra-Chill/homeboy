@@ -478,6 +478,22 @@ on failure, including step-level Blueprint errors and PHP fatals surfaced by the
 WP Codebox Playground runtime. Set `HOMEBOY_WP_CODEBOX_BIN` to validate with a
 specific wp-codebox binary.
 
+## WP Codebox Doctor
+
+Use `scripts/doctor/wp-codebox-doctor.sh` when the WordPress runner looks stuck
+or the Playground runtime cache may be bad:
+
+```bash
+wordpress/scripts/doctor/wp-codebox-doctor.sh doctor
+wordpress/scripts/doctor/wp-codebox-doctor.sh cleanup --stale-after-seconds 3600
+```
+
+The doctor reports the configured `wp-codebox` binary/source SHA, Node/npm
+availability, stale `recipe-run` processes, and corrupt `.zip` files in known WP
+Codebox/WordPress Playground cache roots. `cleanup` sends `TERM` to stale
+recipe-run processes and removes corrupt archives so the next runner invocation
+rebuilds them.
+
 ## Environment variables
 
 | Variable | Purpose |
