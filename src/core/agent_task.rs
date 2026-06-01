@@ -7,6 +7,7 @@ use crate::core::redaction::RedactionPolicy;
 pub const AGENT_TASK_REQUEST_SCHEMA: &str = "homeboy/agent-task-request/v1";
 pub const AGENT_TASK_OUTCOME_SCHEMA: &str = "homeboy/agent-task-outcome/v1";
 pub const AGENT_TASK_ARTIFACT_SCHEMA: &str = "homeboy/agent-task-artifact/v1";
+pub const AGENT_TASK_WORKFLOW_SCHEMA: &str = "homeboy/agent-task-workflow/v1";
 
 /// Provider-neutral executor adapter contract for agent task backends.
 ///
@@ -361,6 +362,8 @@ pub struct AgentTaskOutcome {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<AgentTaskDiagnostic>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<AgentTaskWorkflowEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<AgentTaskFollowUp>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
@@ -382,6 +385,9 @@ impl AgentTaskOutcome {
             .into_iter()
             .map(|diagnostic| diagnostic.redacted_with(&policy))
             .collect();
+        redacted.workflow = redacted
+            .workflow
+            .map(|workflow| workflow.redacted_with(&policy));
         redacted.metadata = policy.redact_json(&redacted.metadata);
         redacted
     }
@@ -480,6 +486,110 @@ pub struct AgentTaskFollowUp {
     pub uri: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskWorkflowEvidence {
+    #[serde(default = "workflow_schema")]
+    pub schema: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<AgentTaskWorkflowStepEvidence>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+#[cfg(test)]
+impl AgentTaskWorkflowEvidence {
+    fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
+        self.label = self.label.map(|value| policy.redact_string(&value));
+        self.steps = self
+            .steps
+            .into_iter()
+            .map(|step| step.redacted_with(policy))
+            .collect();
+        self.metadata = policy.redact_json(&self.metadata);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskWorkflowStepEvidence {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub status: AgentTaskWorkflowStepStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metrics: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<AgentTaskEvidenceRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AgentTaskDiagnostic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<AgentTaskWorkflowStepSuggestion>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+#[cfg(test)]
+impl AgentTaskWorkflowStepEvidence {
+    fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
+        self.label = self.label.map(|value| policy.redact_string(&value));
+        self.diagnostics = self
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.redacted_with(policy))
+            .collect();
+        self.suggestions = self
+            .suggestions
+            .into_iter()
+            .map(|suggestion| suggestion.redacted_with(policy))
+            .collect();
+        self.metrics = policy.redact_json(&self.metrics);
+        self.metadata = policy.redact_json(&self.metadata);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskWorkflowStepStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskWorkflowStepSuggestion {
+    pub kind: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+}
+
+#[cfg(test)]
+impl AgentTaskWorkflowStepSuggestion {
+    fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
+        self.title = policy.redact_string(&self.title);
+        self.body = self.body.map(|value| policy.redact_string(&value));
+        self.uri = self.uri.map(|value| policy.redact_url(&value));
+        self
+    }
+}
+
 fn request_schema() -> String {
     AGENT_TASK_REQUEST_SCHEMA.to_string()
 }
@@ -490,6 +600,10 @@ fn outcome_schema() -> String {
 
 fn artifact_schema() -> String {
     AGENT_TASK_ARTIFACT_SCHEMA.to_string()
+}
+
+fn workflow_schema() -> String {
+    AGENT_TASK_WORKFLOW_SCHEMA.to_string()
 }
 
 fn default_read_policy() -> String {
@@ -604,6 +718,7 @@ mod tests {
                     message: "provider returned retryable error".to_string(),
                     data: json!({}),
                 }],
+                workflow: None,
                 follow_up: Some(AgentTaskFollowUp {
                     kind: "issue_report".to_string(),
                     title: "Needs human decision".to_string(),
@@ -620,6 +735,98 @@ mod tests {
             assert_eq!(decoded.schema, AGENT_TASK_OUTCOME_SCHEMA);
             assert_eq!(decoded.artifacts[0].schema, AGENT_TASK_ARTIFACT_SCHEMA);
         }
+    }
+
+    #[test]
+    fn outcome_round_trips_nested_workflow_step_evidence() {
+        let outcome = AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: "model-kimi-site-a".to_string(),
+            status: AgentTaskOutcomeStatus::Failed,
+            summary: Some("diagnose step failed".to_string()),
+            failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
+            artifacts: vec![AgentTaskArtifact {
+                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "screenshot-1".to_string(),
+                kind: "screenshot".to_string(),
+                name: Some("homepage.png".to_string()),
+                path: Some("artifacts/homepage.png".to_string()),
+                url: None,
+                mime: Some("image/png".to_string()),
+                size_bytes: Some(2048),
+                sha256: Some("sha256:def".to_string()),
+                metadata: json!({ "viewport": "desktop" }),
+            }],
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            workflow: Some(AgentTaskWorkflowEvidence {
+                schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
+                id: "site-build".to_string(),
+                label: Some("Site build".to_string()),
+                steps: vec![
+                    AgentTaskWorkflowStepEvidence {
+                        id: "generate".to_string(),
+                        label: Some("Generate artifact".to_string()),
+                        status: AgentTaskWorkflowStepStatus::Succeeded,
+                        depends_on: Vec::new(),
+                        started_at: Some("2026-05-31T23:00:00Z".to_string()),
+                        finished_at: Some("2026-05-31T23:00:03Z".to_string()),
+                        duration_ms: Some(3_000),
+                        metrics: json!({ "tokens": 1200 }),
+                        artifact_refs: Vec::new(),
+                        diagnostics: Vec::new(),
+                        suggestions: Vec::new(),
+                        metadata: json!({}),
+                    },
+                    AgentTaskWorkflowStepEvidence {
+                        id: "diagnose".to_string(),
+                        label: Some("Diagnose imported site".to_string()),
+                        status: AgentTaskWorkflowStepStatus::Failed,
+                        depends_on: vec!["generate".to_string(), "screenshot".to_string()],
+                        started_at: Some("2026-05-31T23:00:04Z".to_string()),
+                        finished_at: Some("2026-05-31T23:00:05Z".to_string()),
+                        duration_ms: Some(1_000),
+                        metrics: json!({ "fallback_blocks": 2 }),
+                        artifact_refs: vec![AgentTaskEvidenceRef {
+                            kind: "artifact".to_string(),
+                            uri: "artifact://screenshot-1".to_string(),
+                            label: Some("Desktop screenshot".to_string()),
+                        }],
+                        diagnostics: vec![AgentTaskDiagnostic {
+                            class: "visual_regression".to_string(),
+                            message: "fallback blocks remain".to_string(),
+                            data: json!({ "count": 2 }),
+                        }],
+                        suggestions: vec![AgentTaskWorkflowStepSuggestion {
+                            kind: "repair".to_string(),
+                            title: "Run import repair".to_string(),
+                            body: Some("Repair unsupported fallback blocks.".to_string()),
+                            uri: Some("homeboy://tasks/model-kimi-site-a/repair".to_string()),
+                        }],
+                        metadata: json!({ "phase": "diagnostics" }),
+                    },
+                ],
+                metadata: json!({ "executor": "wp-codebox" }),
+            }),
+            follow_up: None,
+            metadata: json!({}),
+        };
+
+        let value = serde_json::to_value(&outcome).expect("serialize outcome");
+        let decoded: AgentTaskOutcome = serde_json::from_value(value).expect("decode outcome");
+
+        assert_eq!(decoded, outcome);
+        let workflow = decoded.workflow.expect("workflow evidence");
+        assert_eq!(workflow.schema, AGENT_TASK_WORKFLOW_SCHEMA);
+        assert_eq!(
+            workflow.steps[0].status,
+            AgentTaskWorkflowStepStatus::Succeeded
+        );
+        assert_eq!(workflow.steps[1].depends_on, vec!["generate", "screenshot"]);
+        assert_eq!(
+            workflow.steps[1].artifact_refs[0].uri,
+            "artifact://screenshot-1"
+        );
     }
 
     #[test]
@@ -680,6 +887,35 @@ mod tests {
                 message: "Authorization: Bearer abc123".to_string(),
                 data: json!({ "client_secret": "secret" }),
             }],
+            workflow: Some(AgentTaskWorkflowEvidence {
+                schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
+                id: "secret-workflow".to_string(),
+                label: Some("Use token=abc123".to_string()),
+                steps: vec![AgentTaskWorkflowStepEvidence {
+                    id: "diagnose".to_string(),
+                    label: Some("Inspect password=hunter2".to_string()),
+                    status: AgentTaskWorkflowStepStatus::Failed,
+                    depends_on: Vec::new(),
+                    started_at: None,
+                    finished_at: None,
+                    duration_ms: None,
+                    metrics: json!({ "api_key": "secret-value" }),
+                    artifact_refs: Vec::new(),
+                    diagnostics: vec![AgentTaskDiagnostic {
+                        class: "workflow".to_string(),
+                        message: "Authorization: Bearer abc123".to_string(),
+                        data: json!({ "password": "hunter2" }),
+                    }],
+                    suggestions: vec![AgentTaskWorkflowStepSuggestion {
+                        kind: "repair".to_string(),
+                        title: "Use token=abc123".to_string(),
+                        body: Some("password=hunter2".to_string()),
+                        uri: Some("https://example.test/repair?token=abc123".to_string()),
+                    }],
+                    metadata: json!({ "refresh_token": "secret-refresh" }),
+                }],
+                metadata: json!({ "client_secret": "secret" }),
+            }),
             follow_up: None,
             metadata: json!({ "safe": "value", "password": "hunter2" }),
         };
