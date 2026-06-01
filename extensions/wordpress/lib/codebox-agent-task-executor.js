@@ -44,8 +44,9 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertAgentTaskRequest(request);
   const config = request.executor.config || {};
   const inputs = request.inputs || {};
+  const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
-  const timeoutSeconds = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
+  const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
 
   return {
     schema: WP_CODEBOX_TASK_REQUEST_SCHEMA,
@@ -56,7 +57,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || [],
     secret_env: config.secret_env || options.secretEnv || [],
     max_turns: config.max_turns || options.maxTurns,
-    task_timeout_seconds: config.task_timeout_seconds || timeoutSeconds || options.taskTimeoutSeconds,
+    task_timeout_seconds: config.task_timeout_seconds || timeoutSeconds || timeoutFromMs || options.taskTimeoutSeconds,
     orchestrator: {
       ...(inputs.orchestrator || {}),
       agent_task_id: request.task_id,

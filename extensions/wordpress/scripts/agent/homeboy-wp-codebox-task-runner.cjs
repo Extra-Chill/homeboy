@@ -258,6 +258,11 @@ function writeRecipe(recipe) {
   return recipePath;
 }
 
+function requestTimeoutMs(request) {
+  const seconds = Number.parseInt(request.task_timeout_seconds || request.taskTimeoutSeconds || argValue('--task-timeout-seconds'), 10);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
+}
+
 function executable(filePath) {
   try {
     fs.accessSync(filePath, fs.constants.X_OK);
@@ -274,7 +279,44 @@ function resolveCommand(command, args) {
   return { command, args };
 }
 
-function runWpCodebox(recipePath) {
+function writePreflightEvidence(artifacts, evidence) {
+  try {
+    fs.mkdirSync(artifacts, { recursive: true });
+    const evidencePath = path.join(artifacts, 'homeboy-codebox-task-runner.json');
+    fs.writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
+    return evidencePath;
+  } catch {
+    return '';
+  }
+}
+
+function timeoutPayload(timeoutMs, artifacts, evidencePath, recipePath, command, args) {
+  const artifact = evidencePath ? [{
+    id: 'homeboy-codebox-task-runner-preflight',
+    kind: 'codebox-task-runner-preflight',
+    path: evidencePath,
+    metadata: { recipePath, artifacts, command, args },
+  }] : [];
+  return {
+    success: false,
+    timeout: true,
+    summary: `WP Codebox recipe-run timed out after ${timeoutMs}ms.`,
+    artifacts: artifact,
+    evidence_refs: evidencePath ? [{
+      kind: 'codebox-task-runner-preflight',
+      uri: evidencePath,
+      label: 'WP Codebox task runner preflight evidence',
+    }] : [],
+    diagnostics: [{
+      class: 'codebox.recipe_run.timeout',
+      message: 'wp-codebox recipe-run exceeded the configured task timeout.',
+      data: { timeout_ms: timeoutMs, recipePath, artifacts },
+    }],
+    metadata: { timeout_ms: timeoutMs, recipePath, artifacts, command, args },
+  };
+}
+
+function runWpCodebox(recipePath, request) {
   const wpCodeboxBin = argValue('--wp-codebox-bin') || 'wp-codebox';
   const args = ['recipe-run', '--recipe', recipePath, '--json'];
   const explicitArtifacts = argValue('--artifacts');
@@ -298,11 +340,28 @@ function runWpCodebox(recipePath) {
   }
 
   const resolved = resolveCommand(wpCodeboxBin, args);
+  const timeoutMs = requestTimeoutMs(request);
+  const evidencePath = writePreflightEvidence(artifacts, {
+    schema: 'homeboy/wp-codebox-task-runner-preflight/v1',
+    recipePath,
+    artifacts,
+    command: resolved.command,
+    args: resolved.args,
+    timeout_ms: timeoutMs,
+    task_id: request.orchestrator?.agent_task_id,
+    sandbox_session_id: request.sandbox_session_id,
+  });
   const result = spawnSync(resolved.command, resolved.args, {
     encoding: 'utf8',
     env: process.env,
     maxBuffer: 1024 * 1024 * 20,
+    timeout: timeoutMs,
   });
+
+  if (result.error && result.error.code === 'ETIMEDOUT') {
+    process.stdout.write(`${JSON.stringify(timeoutPayload(timeoutMs, artifacts, evidencePath, recipePath, resolved.command, resolved.args), null, 2)}\n`);
+    return 1;
+  }
 
   if (result.stdout) {
     process.stdout.write(result.stdout);
@@ -333,7 +392,7 @@ try {
     console.error(JSON.stringify({ recipePath, recipe }, null, 2));
   }
 
-  process.exitCode = runWpCodebox(recipePath);
+  process.exitCode = runWpCodebox(recipePath, request);
 } catch (error) {
   console.error(error && error.message ? error.message : String(error));
   process.exitCode = 1;

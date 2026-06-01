@@ -32,6 +32,16 @@ process.stdout.write(JSON.stringify({
   return { fixture, capture };
 }
 
+function writeHangingTaskRunner(root) {
+  const fixture = path.join(root, 'hanging-task-runner.cjs');
+  fs.writeFileSync(fixture, `#!/usr/bin/env node
+'use strict';
+setInterval(() => {}, 1000);
+`);
+  fs.chmodSync(fixture, 0o755);
+  return fixture;
+}
+
 const request = {
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'task-123',
@@ -112,6 +122,10 @@ assert.deepEqual(codexRequest.secret_env, [
   'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
 ]);
 assert(!JSON.stringify(codexRequest).includes('wp-ai-gateway'));
+assert.equal(codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  limits: { task_timeout_seconds: 7 },
+}).task_timeout_seconds, 7);
 
 const outcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,
@@ -220,6 +234,32 @@ try {
   ], { encoding: 'utf8' });
   assert.equal(contractResult.status, 0, contractResult.stderr || contractResult.stdout);
   assert.equal(JSON.parse(contractResult.stdout).id, 'wordpress.codebox-agent-task-executor');
+
+  const artifactRoot = path.join(root, 'timeout-artifacts');
+  const hangingRequest = {
+    ...request,
+    task_id: 'task-timeout',
+    limits: { task_timeout_seconds: 1 },
+  };
+  const timeoutResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    writeHangingTaskRunner(root),
+    '--artifacts',
+    artifactRoot,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(hangingRequest),
+    timeout: 3000,
+  });
+  assert.equal(timeoutResult.status, 1, timeoutResult.stderr || timeoutResult.stdout);
+  const timeoutOutcome = JSON.parse(timeoutResult.stdout);
+  assert.equal(timeoutOutcome.status, 'timeout');
+  assert.equal(timeoutOutcome.failure_classification, 'timeout');
+  assert.equal(timeoutOutcome.diagnostics[0].class, 'codebox.timeout');
+  assert.equal(timeoutOutcome.diagnostics[0].data.timeout_ms, 1000);
+  assert.equal(timeoutOutcome.artifacts[0].path, artifactRoot);
+  assert.equal(timeoutOutcome.metadata.codebox.evidence_path, path.join(artifactRoot, 'homeboy-codebox-task-runner.json'));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
