@@ -45,6 +45,11 @@ fn make_args(
             runs: 1,
             shared_state: None,
             concurrency: 1,
+            matrix: Vec::new(),
+            runner_pool: None,
+            matrix_max_tasks: None,
+            matrix_max_queue_depth: None,
+            expected_artifact: Vec::new(),
             baseline_args: BaselineArgs {
                 baseline,
                 ignore_baseline: false,
