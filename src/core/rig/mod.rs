@@ -48,7 +48,7 @@ pub use runner::{
 };
 pub use service::{DiscoveredProcess, ServiceStatus};
 pub use source::{
-    list_sources, remove_source, update_all_sources, update_source_for_rig,
+    list_sources, remove_source, update_all_sources, update_source, update_source_for_rig,
     InvalidRigSourceMetadata, RemovedRigSourceRig, RemovedRigSourceStack, RigSourceGroup,
     RigSourceListResult, RigSourceRemoveResult, RigSourceRig, RigSourceStack,
     RigSourceUpdateResult, RigSourceUpdatedRig, RigSourceUpdatedStack, SkippedRigSourceRig,

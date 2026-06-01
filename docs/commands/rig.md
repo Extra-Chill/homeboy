@@ -42,7 +42,7 @@ rig package / local spec
 | `runs <id>` | List persisted observation runs for the rig. |
 | `install <source>` | Install rigs from a local package path or git URL. |
 | `update [id]` | Pull and refresh git-backed installed rig packages. |
-| `sources ...` | Inspect or remove installed rig source packages. |
+| `sources ...` | Inspect, refresh, or remove installed rig source packages. |
 | `app ...` | Install, update, or remove a rig's desktop launcher. |
 
 All subcommands support `--output <path>` for structured JSON output in addition to stdout.
@@ -150,10 +150,12 @@ If the user replaced an installed config file with their own file, update preser
 
 ```sh
 homeboy rig sources list
+homeboy rig sources refresh
+homeboy rig sources refresh chubes4-homeboy-rigs
 homeboy rig sources remove chubes4-homeboy-rigs
 ```
 
-`sources list` groups installed rigs and stacks by package source, package path, revision, and ownership. `sources remove` removes Homeboy-owned config links and metadata for one source package; it also removes cloned git packages, while linked local package directories are left in place.
+`sources list` groups installed rigs and stacks by package source, package path, revision, and ownership. `sources refresh` pulls recorded git-backed package paths, refreshes Homeboy-owned installed rig and stack specs, and reports source, before/after revisions, installed config path, and source spec path. `sources remove` removes Homeboy-owned config links and metadata for one source package; it also removes cloned git packages, while linked local package directories are left in place.
 
 ## Stack Sync
 
