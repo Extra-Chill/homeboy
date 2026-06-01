@@ -174,6 +174,14 @@ Rules:
   to one base rig at a time; mixing explicit cross-rig lists with cartesian
   expansion is a later design if a real use case appears.
 
+For agent-runner fan-out, matrix expansion should also be representable as a
+generic `core::agent_task` plan. The plan-only shape is
+`homeboy/agent-task-matrix-plan/v1`: each cartesian cell becomes an
+`AgentTaskRequest` with stable `task_id`, `parent_plan_id`, `group_key`, and
+matrix axis metadata. Once the generic scheduler and executor adapter contracts
+from #3208 and #3209 exist, that same plan is the handoff boundary for executing
+cells without adding a bench-specific scheduler.
+
 ## Derived Rig Identity
 
 Derived rigs are ephemeral values, but they need stable ids for output, state,

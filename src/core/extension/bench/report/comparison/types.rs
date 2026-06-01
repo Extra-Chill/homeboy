@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::super::BenchArtifactRef;
+use crate::core::agent_task::{AgentTaskMatrixAggregate, AgentTaskMatrixPlan};
 use crate::core::extension::bench::diagnostic::BenchDiagnostic;
 use crate::core::extension::bench::parsing::{BenchMetricPhase, BenchMetricPolicy, BenchResults};
 use crate::core::extension::bench::run::BenchRunFailure;
@@ -50,6 +51,13 @@ pub struct BenchComparisonOutput {
     /// declared axis while all other axis values match.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub axis_diffs: Vec<BenchAxisComparison>,
+    /// Generic agent-task fan-out plan for matrix-shaped rig comparisons.
+    /// Present when compared rigs declare `bench.axes` metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_task_plan: Option<AgentTaskMatrixPlan>,
+    /// Generic aggregate envelope keyed by the matrix plan's cell ids.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_task_aggregate: Option<AgentTaskMatrixAggregate>,
     /// Per-scenario run summary table. Promotes the variance-aware data
     /// already present under each scenario's `runs_summary` into a direct
     /// cross-rig comparison shape.
