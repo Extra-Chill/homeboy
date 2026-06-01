@@ -31,7 +31,7 @@ function hasFlag(name) {
 }
 
 function usage() {
-  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--homeboy <path>] [--homeboy-extensions <path>] [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--max-turns <n>] [--task-timeout-seconds <n>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--artifacts <dir>]');
+  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--homeboy <path>] [--homeboy-extensions <path>] [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--max-turns <n>] [--task-timeout-seconds <n>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--runtime-stack-mount <host:vfs[:mode]>] [--artifacts <dir>]');
   process.exit(1);
 }
 
@@ -112,19 +112,28 @@ function assertRequiredSecretEnvAvailable(request) {
   }
 }
 
+function mountEntryFromValue(value, metadata) {
+  const [source, target, mode = 'readwrite'] = value.split(':');
+  if (!source || !target) {
+    throw new Error(`Invalid --mount value: ${value}`);
+  }
+  return {
+    source,
+    target,
+    mode,
+    metadata,
+  };
+}
+
 function mountEntries() {
-  return argValues('--mount').map((value) => {
-    const [source, target, mode = 'readwrite'] = value.split(':');
-    if (!source || !target) {
-      throw new Error(`Invalid --mount value: ${value}`);
-    }
-    return {
-      source,
-      target,
-      mode,
-      metadata: { kind: 'homeboy-audit-fanout' },
-    };
-  });
+  return argValues('--mount').map((value) => mountEntryFromValue(value, { kind: 'homeboy-audit-fanout' }));
+}
+
+function runtimeStackMountEntries(request) {
+  return [
+    ...(request.runtime_stack_mounts || []),
+    ...argValues('--runtime-stack-mount').map((value) => mountEntryFromValue(value, { kind: 'homeboy-runtime-stack' })),
+  ];
 }
 
 function realPathForContainment(filePath) {
@@ -222,12 +231,18 @@ function recipeForRequest(request, options) {
     stepArgs.push(`timeout-seconds=${taskTimeoutSeconds}`);
   }
 
+  const runtimeStackMounts = runtimeStackMountEntries(request);
+  const runtime = {
+    wp: argValue('--wp') || 'latest',
+    blueprint: { steps: [] },
+  };
+  if (runtimeStackMounts.length > 0) {
+    runtime.stack = { mounts: runtimeStackMounts };
+  }
+
   return {
     schema: 'wp-codebox/workspace-recipe/v1',
-    runtime: {
-      wp: argValue('--wp') || 'latest',
-      blueprint: { steps: [] },
-    },
+    runtime,
     inputs: {
       workspaces: recipeWorkspaces(options),
       mounts: mountEntries(),
