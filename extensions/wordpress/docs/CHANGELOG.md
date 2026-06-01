@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.110.7] - 2026-06-01
+
+### Fixed
+- pass Codebox provider paths from task config
+
 ## [2.110.6] - 2026-06-01
 
 ### Fixed
