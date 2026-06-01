@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="${SCRIPT_DIR}/update-wp-codebox-cache.sh"
+TMPDIR="${TMPDIR:-/tmp}"
+WORK_DIR="$(mktemp -d "${TMPDIR%/}/homeboy-wp-codebox-cache.XXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+REMOTE_REPO="${WORK_DIR}/wp-codebox.git"
+SOURCE_WORK="${WORK_DIR}/source-work"
+CACHE_DIR="${WORK_DIR}/cache/source"
+FAKE_BIN="${WORK_DIR}/bin"
+
+mkdir -p "$FAKE_BIN"
+
+cat > "${FAKE_BIN}/npm" <<'NPM'
+#!/usr/bin/env bash
+set -euo pipefail
+prefix=""
+args=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --prefix)
+            prefix="${2:-}"
+            shift 2
+            ;;
+        *)
+            args+=("$1")
+            shift
+            ;;
+    esac
+done
+[ -n "$prefix" ] || { echo "missing --prefix" >&2; exit 2; }
+case "${args[*]}" in
+    install*)
+        touch "${prefix}/npm-install-ran"
+        ;;
+    "run build")
+        mkdir -p "${prefix}/packages/cli/dist"
+        printf '%s\n' 'built' > "${prefix}/packages/cli/dist/index.js"
+        ;;
+    *)
+        echo "unexpected npm args: ${args[*]}" >&2
+        exit 2
+        ;;
+esac
+NPM
+chmod +x "${FAKE_BIN}/npm"
+
+git init --bare --quiet "$REMOTE_REPO"
+git clone --quiet "$REMOTE_REPO" "$SOURCE_WORK"
+git -C "$SOURCE_WORK" config user.email smoke@example.com
+git -C "$SOURCE_WORK" config user.name Smoke
+printf '%s\n' '{"scripts":{"build":"node -e 0"}}' > "${SOURCE_WORK}/package.json"
+git -C "$SOURCE_WORK" add package.json
+git -C "$SOURCE_WORK" commit --quiet -m 'initial wp-codebox fixture'
+INITIAL_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
+git -C "$SOURCE_WORK" push --quiet origin HEAD:main
+
+printf '%s\n' 'updated' > "${SOURCE_WORK}/fixture.txt"
+git -C "$SOURCE_WORK" add fixture.txt
+git -C "$SOURCE_WORK" commit --quiet -m 'updated wp-codebox fixture'
+UPDATED_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
+git -C "$SOURCE_WORK" tag fixture-ref
+git -C "$SOURCE_WORK" push --quiet origin HEAD:main fixture-ref
+
+OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR")"
+case "$OUTPUT" in
+    *"WP Codebox cache SHA: ${INITIAL_SHA}"*) ;;
+    *)
+        echo "Expected initial SHA in output" >&2
+        echo "$OUTPUT" >&2
+        exit 1
+        ;;
+esac
+[ -f "${CACHE_DIR}/npm-install-ran" ] || { echo "npm install marker missing" >&2; exit 1; }
+[ -f "${CACHE_DIR}/packages/cli/dist/index.js" ] || { echo "build artifact missing" >&2; exit 1; }
+
+OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR")"
+case "$OUTPUT" in
+    *"WP Codebox cache SHA: ${UPDATED_SHA}"*) ;;
+    *)
+        echo "Expected updated SHA in output" >&2
+        echo "$OUTPUT" >&2
+        exit 1
+        ;;
+esac
+
+DRY_RUN_OUTPUT="$("$SCRIPT" --runner homeboy-lab --source "$REMOTE_REPO" --ref fixture-ref --dry-run)"
+case "$DRY_RUN_OUTPUT" in
+    *"# Target: homeboy-lab"*"REQUESTED_REF='fixture-ref'"*) ;;
+    *)
+        echo "Dry-run output did not include target and ref" >&2
+        echo "$DRY_RUN_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+
+echo "WP Codebox cache update smoke passed"

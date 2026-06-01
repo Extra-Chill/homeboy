@@ -133,3 +133,29 @@ ssh homeboy-lab 'homeboy extension show swift'
 For a real offload check, run a Homeboy command for a component that requires one
 of the installed extensions and confirm preflight no longer reports the runner as
 missing that extension.
+
+## Refresh WP Codebox Cache
+
+WordPress test and bench workloads use the runner-side WP Codebox cache at
+`~/.cache/homeboy/wp-codebox/source` when WP Codebox is installed from source.
+Refresh that cache before collecting lab evidence that must point at a known WP
+Codebox revision:
+
+```bash
+wordpress/scripts/build/update-wp-codebox-cache.sh --runner homeboy-lab --ref main
+```
+
+The helper runs this sequence on the runner:
+
+```text
+git clone/fetch -> git reset --hard FETCH_HEAD -> npm install -> npm run build
+```
+
+On success it prints the resulting revision:
+
+```text
+WP Codebox cache SHA: <sha>
+```
+
+Use `--source`, `--ref`, and `--cache-dir` to target a fork, branch, tag, commit,
+or non-default cache location. Omit `--runner` to run the same update locally.
