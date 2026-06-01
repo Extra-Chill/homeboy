@@ -14,6 +14,16 @@ pub const AGENT_TASK_REQUEST_SCHEMA: &str = "homeboy/agent-task-request/v1";
 pub const AGENT_TASK_OUTCOME_SCHEMA: &str = "homeboy/agent-task-outcome/v1";
 pub const AGENT_TASK_ARTIFACT_SCHEMA: &str = "homeboy/agent-task-artifact/v1";
 pub const AGENT_TASK_WORKFLOW_SCHEMA: &str = "homeboy/agent-task-workflow/v1";
+pub const AGENT_TASK_MATRIX_PLAN_SCHEMA: &str = "homeboy/agent-task-matrix-plan/v1";
+pub const AGENT_TASK_MATRIX_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-matrix-aggregate/v1";
+
+mod matrix;
+
+pub(crate) use matrix::expand_agent_task_matrix;
+pub use matrix::{
+    AgentTaskMatrixAggregate, AgentTaskMatrixAggregateCell, AgentTaskMatrixAxis,
+    AgentTaskMatrixCell, AgentTaskMatrixError, AgentTaskMatrixPlan,
+};
 
 /// Provider-neutral executor adapter contract for agent task backends.
 ///

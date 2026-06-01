@@ -70,6 +70,10 @@ the other capabilities.
 - `--rig-concurrency <N>`: For multi-rig comparisons, run up to `N` rigs
   concurrently. Default `1` preserves sequential CI behavior. Values greater
   than `1` are opt-in and preserve output ordering by the selected rig order.
+- Future `--matrix <axis=value[,value...]>` expansion should use the generic
+  `core::agent_task` matrix plan schema for plan inspection and fan-out. The
+  scheduler/executor pieces are tracked separately so bench does not grow its
+  own task runner.
 - `--scenario <SCENARIO_ID>`: Run or list only the exact scenario id. May
   be repeated. Homeboy validates selected ids against discovery before
   execution and forwards the comma-separated selector to runners via
