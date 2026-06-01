@@ -55,10 +55,9 @@ function readTaskRequest() {
   return request;
 }
 
-function requireArg(name) {
-  const value = argValue(name);
+function requireValue(name, value) {
   if (!value) {
-    usage();
+    throw new Error(`Required WP Codebox task runner option missing: ${name}`);
   }
   return value;
 }
@@ -317,9 +316,9 @@ function timeoutPayload(timeoutMs, artifacts, evidencePath, recipePath, command,
 }
 
 function runWpCodebox(recipePath, request) {
-  const wpCodeboxBin = argValue('--wp-codebox-bin') || 'wp-codebox';
+  const wpCodeboxBin = argValue('--wp-codebox-bin') || request.wp_codebox_bin || 'wp-codebox';
   const args = ['recipe-run', '--recipe', recipePath, '--json'];
-  const explicitArtifacts = argValue('--artifacts');
+  const explicitArtifacts = argValue('--artifacts') || request.artifacts || '';
   const artifacts = explicitArtifacts || fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-artifacts-'));
   args.push('--artifacts', artifacts);
   if (explicitArtifacts) {
@@ -379,11 +378,11 @@ try {
   const request = readTaskRequest();
   assertRequiredSecretEnvAvailable(request);
   const options = {
-    agentsApi: requireArg('--agents-api'),
-    dataMachine: requireArg('--data-machine'),
-    dataMachineCode: requireArg('--data-machine-code'),
-    homeboy: argValue('--homeboy'),
-    homeboyExtensions: argValue('--homeboy-extensions'),
+    agentsApi: requireValue('--agents-api', argValue('--agents-api') || request.agents_api),
+    dataMachine: requireValue('--data-machine', argValue('--data-machine') || request.data_machine),
+    dataMachineCode: requireValue('--data-machine-code', argValue('--data-machine-code') || request.data_machine_code),
+    homeboy: argValue('--homeboy') || request.homeboy,
+    homeboyExtensions: argValue('--homeboy-extensions') || request.homeboy_extensions,
   };
   const recipe = recipeForRequest(request, options);
   const recipePath = writeRecipe(recipe);

@@ -106,6 +106,12 @@ const codexAgentRequest = {
         'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
         'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
       ],
+      agents_api: '/components/agents-api',
+      data_machine: '/components/data-machine',
+      data_machine_code: '/components/data-machine-code',
+      homeboy: '/components/homeboy',
+      homeboy_extensions: '/components/homeboy-extensions',
+      wp_codebox_bin: '/bin/wp-codebox',
       max_turns: 8,
     },
   },
@@ -114,6 +120,12 @@ const codexRequest = codeboxTaskRequestFromAgentTaskRequest(codexAgentRequest);
 assert.equal(codexRequest.provider, 'codex');
 assert.equal(codexRequest.model, 'gpt-5.5');
 assert.deepEqual(codexRequest.provider_plugin_paths, ['/components/ai-provider-for-openai']);
+assert.equal(codexRequest.agents_api, '/components/agents-api');
+assert.equal(codexRequest.data_machine, '/components/data-machine');
+assert.equal(codexRequest.data_machine_code, '/components/data-machine-code');
+assert.equal(codexRequest.homeboy, '/components/homeboy');
+assert.equal(codexRequest.homeboy_extensions, '/components/homeboy-extensions');
+assert.equal(codexRequest.wp_codebox_bin, '/bin/wp-codebox');
 assert.deepEqual(codexRequest.secret_env, [
   'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
   'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -219,6 +231,11 @@ try {
   assert.equal(capturedCodex.request.provider, 'codex');
   assert.equal(capturedCodex.request.model, 'gpt-5.5');
   assert.deepEqual(capturedCodex.request.provider_plugin_paths, ['/components/ai-provider-for-openai']);
+  assert.equal(capturedCodex.request.agents_api, '/components/agents-api');
+  assert.equal(capturedCodex.request.data_machine, '/components/data-machine');
+  assert.equal(capturedCodex.request.data_machine_code, '/components/data-machine-code');
+  assert.equal(capturedCodex.request.homeboy, '/components/homeboy');
+  assert.equal(capturedCodex.request.homeboy_extensions, '/components/homeboy-extensions');
   assert.deepEqual(capturedCodex.request.secret_env, [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
     'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
