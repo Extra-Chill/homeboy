@@ -67,20 +67,30 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
     };
 
     let cwd_str = cwd.to_string_lossy().to_string();
-    let git_root = detect_git_root(&cwd);
+    let resolved_target = component::resolve_target(component::TargetSpec {
+        path_override: Some(&cwd_str),
+        allow_synthetic: true,
+        accept_bare_directory: true,
+        ..component::TargetSpec::default()
+    })?;
+    let git_root = resolved_target
+        .git_root
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
 
     let components = component::inventory().unwrap_or_default();
     let matched_components: Vec<String> = components
         .iter()
-        .filter(|c| path_matches(&cwd, &c.local_path))
+        .filter(|c| component::resolution::component_contains_path(c, &cwd))
         .map(|c| c.id.clone())
         .collect();
 
-    let matched: Vec<String> = matched_components
-        .into_iter()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let mut matched_set: HashSet<String> = matched_components.into_iter().collect();
+    if !resolved_target.synthetic {
+        matched_set.insert(resolved_target.component_id.clone());
+    }
+    let mut matched: Vec<String> = matched_set.into_iter().collect();
+    matched.sort();
 
     let managed = !matched.is_empty();
 
@@ -89,7 +99,7 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
 
     let contained: Vec<&component::Component> = all_local_components
         .iter()
-        .filter(|c| path_is_parent_of(&cwd, &c.local_path))
+        .filter(|c| component::resolution::component_is_contained_in_path(c, &cwd))
         .collect();
 
     let contained_ids: Vec<String> = contained.iter().map(|c| c.id.clone()).collect();
@@ -196,46 +206,6 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
         },
         0,
     ))
-}
-
-fn detect_git_root(cwd: &PathBuf) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(path);
-        }
-    }
-    None
-}
-
-fn path_matches(cwd: &Path, local_path: &str) -> bool {
-    let local = PathBuf::from(local_path);
-
-    let cwd_canonical = cwd.canonicalize().ok();
-    let local_canonical = local.canonicalize().ok();
-
-    match (cwd_canonical, local_canonical) {
-        (Some(cwd_path), Some(local_path)) => {
-            cwd_path == local_path || cwd_path.starts_with(&local_path)
-        }
-        _ => false,
-    }
-}
-
-pub fn path_is_parent_of(parent: &Path, child_path: &str) -> bool {
-    let child = PathBuf::from(child_path);
-    match (parent.canonicalize().ok(), child.canonicalize().ok()) {
-        (Some(parent_canonical), Some(child_canonical)) => {
-            child_canonical.starts_with(&parent_canonical) && child_canonical != parent_canonical
-        }
-        _ => false,
-    }
 }
 
 fn find_project_for_components(component_ids: &[String]) -> Option<project::Project> {
@@ -473,6 +443,7 @@ pub fn resolve_project_ssh_with_base_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_isolated_home;
 
     fn manifest(id: &str, markers: serde_json::Value) -> ExtensionManifest {
         let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
@@ -528,5 +499,140 @@ mod tests {
         );
 
         assert_eq!(suggestions, vec!["node-like", "typescript-like"]);
+    }
+
+    fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
+        let dir = home.join(".config/homeboy/components");
+        std::fs::create_dir_all(&dir).expect("components dir");
+        std::fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "local_path": local_path,
+                "remote_path": format!("wp-content/plugins/{id}")
+            })
+            .to_string(),
+        )
+        .expect("component registration");
+    }
+
+    fn write_project(home: &Path, id: &str, component_ids: &[&str]) {
+        let dir = home.join(".config/homeboy/projects").join(id);
+        std::fs::create_dir_all(&dir).expect("project dir");
+        let components: Vec<_> = component_ids
+            .iter()
+            .map(|component_id| {
+                serde_json::json!({
+                    "id": component_id,
+                    "local_path": ""
+                })
+            })
+            .collect();
+        std::fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "domain": "example.test",
+                "components": components
+            })
+            .to_string(),
+        )
+        .expect("project registration");
+    }
+
+    fn init_git(path: &Path) {
+        let output = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(path)
+            .output()
+            .expect("git init");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn context_uses_registered_component_resolution_for_cwd_inside_component() {
+        with_isolated_home(|home| {
+            let repo = home.path().join("registered-component");
+            let nested = repo.join("src");
+            std::fs::create_dir_all(&nested).expect("nested dir");
+            init_git(&repo);
+            write_component_registration(home.path(), "registered-component", &repo);
+
+            let (output, status) = run(Some(nested.to_str().expect("utf8 path"))).expect("context");
+
+            assert_eq!(status, 0);
+            assert!(output.managed);
+            assert_eq!(output.matched_components, vec!["registered-component"]);
+            assert_eq!(
+                output.git_root,
+                Some(repo.canonicalize().unwrap().to_string_lossy().to_string())
+            );
+            assert_eq!(output.suggestion, None);
+        });
+    }
+
+    #[test]
+    fn context_uses_portable_config_resolution_for_unregistered_cwd() {
+        with_isolated_home(|home| {
+            let repo = home.path().join("portable-component");
+            let nested = repo.join("lib");
+            std::fs::create_dir_all(&nested).expect("nested dir");
+            init_git(&repo);
+            std::fs::write(
+                repo.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "portable-component",
+                    "remote_path": "wp-content/plugins/portable-component"
+                })
+                .to_string(),
+            )
+            .expect("portable config");
+
+            let (output, status) = run(Some(nested.to_str().expect("utf8 path"))).expect("context");
+
+            assert_eq!(status, 0);
+            assert!(output.managed);
+            assert_eq!(output.matched_components, vec!["portable-component"]);
+            assert_eq!(
+                output.git_root,
+                Some(repo.canonicalize().unwrap().to_string_lossy().to_string())
+            );
+            assert_eq!(output.suggestion, None);
+        });
+    }
+
+    #[test]
+    fn context_preserves_monorepo_contained_component_suggestion() {
+        with_isolated_home(|home| {
+            let monorepo = home.path().join("monorepo");
+            let plugin = monorepo.join("plugins/demo-plugin");
+            let theme = monorepo.join("themes/demo-theme");
+            std::fs::create_dir_all(&plugin).expect("plugin dir");
+            std::fs::create_dir_all(&theme).expect("theme dir");
+            init_git(&monorepo);
+            write_component_registration(home.path(), "demo-plugin", &plugin);
+            write_component_registration(home.path(), "demo-theme", &theme);
+            write_project(home.path(), "demo-site", &["demo-plugin", "demo-theme"]);
+
+            let (output, status) =
+                run(Some(monorepo.to_str().expect("utf8 path"))).expect("context");
+
+            assert_eq!(status, 0);
+            assert!(!output.managed);
+            assert_eq!(output.contained_components.len(), 2);
+            assert_eq!(
+                output.project.as_ref().map(|project| project.id.as_str()),
+                Some("demo-site")
+            );
+            assert_eq!(
+                output.suggestion,
+                Some(
+                    "Monorepo root for project demo-site with 2 components. Use `homeboy project show demo-site` for full details."
+                        .to_string()
+                )
+            );
+        });
     }
 }
