@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.112.1] - 2026-06-01
+
+### Fixed
+- add WP Codebox cache refresh helper
+- support Codebox bench bootstrap files
+
 ## [2.112.0] - 2026-06-01
 
 ### Added
