@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,6 +46,12 @@ pub struct AgentTaskScheduleOptions {
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tasks: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_queue_depth: Option<usize>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_executor_concurrency: HashMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub retry: AgentTaskRetryPolicy,
@@ -55,6 +61,9 @@ impl Default for AgentTaskScheduleOptions {
     fn default() -> Self {
         Self {
             max_concurrency: default_max_concurrency(),
+            max_tasks: None,
+            max_queue_depth: None,
+            per_executor_concurrency: HashMap::new(),
             timeout_ms: None,
             retry: AgentTaskRetryPolicy::default(),
         }
@@ -65,6 +74,10 @@ impl Default for AgentTaskScheduleOptions {
 pub struct AgentTaskRetryPolicy {
     #[serde(default)]
     pub max_attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries_total: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retryable_failure_classifications: Vec<AgentTaskFailureClassification>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,6 +91,8 @@ pub struct AgentTaskAggregate {
     pub outcomes: Vec<AgentTaskOutcome>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<AgentTaskProgressEvent>,
+    #[serde(default)]
+    pub queue: AgentTaskQueueStatus,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,6 +108,7 @@ pub enum AgentTaskAggregateStatus {
 pub struct AgentTaskAggregateTotals {
     pub queued: usize,
     pub running: usize,
+    pub blocked: usize,
     pub succeeded: usize,
     pub failed: usize,
     pub cancelled: usize,
@@ -113,11 +129,39 @@ pub struct AgentTaskProgressEvent {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskState {
     Queued,
+    Blocked,
     Running,
     Succeeded,
     Failed,
     Cancelled,
     TimedOut,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskQueueStatus {
+    pub max_concurrency: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tasks: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_queue_depth: Option<usize>,
+    pub queued: usize,
+    pub running: usize,
+    pub blocked: usize,
+    pub completed: usize,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_executor_concurrency: HashMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backpressure: Vec<AgentTaskBackpressureStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_budget_remaining: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskBackpressureStatus {
+    pub kind: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -178,6 +222,19 @@ where
     ) -> AgentTaskAggregate {
         let max_concurrency = plan.options.max_concurrency.max(1);
         let total_tasks = plan.tasks.len();
+        let max_queue_depth = plan.options.max_queue_depth.or(plan.options.max_tasks);
+        let retry_budget_total = plan.options.retry.max_retries_total;
+        let mut retry_budget_used = 0;
+        let mut backpressure = Vec::new();
+        let mut blocked_count = 0;
+        let accepted_tasks = max_queue_depth
+            .map(|max_queue_depth| max_queue_depth.min(plan.tasks.len()))
+            .unwrap_or(plan.tasks.len());
+        let blocked_tasks = if accepted_tasks < plan.tasks.len() {
+            plan.tasks.split_off(accepted_tasks)
+        } else {
+            Vec::new()
+        };
         let mut queued: VecDeque<ScheduledTask> = plan
             .tasks
             .drain(..)
@@ -202,6 +259,29 @@ where
             ));
         }
 
+        for request in blocked_tasks {
+            blocked_count += 1;
+            let message = format!(
+                "task blocked by max_queue_depth={}",
+                max_queue_depth.unwrap_or_default()
+            );
+            backpressure.push(AgentTaskBackpressureStatus {
+                kind: "queue_depth".to_string(),
+                message: message.clone(),
+                task_id: Some(request.task_id.clone()),
+            });
+            events.push(event(
+                &request.task_id,
+                AgentTaskState::Blocked,
+                1,
+                Some(message.clone()),
+            ));
+            outcomes.push(AgentTaskScheduleSupport::blocked_outcome(
+                request.task_id,
+                message,
+            ));
+        }
+
         while !queued.is_empty() || !running.is_empty() {
             if cancellation.is_cancelled() {
                 AgentTaskScheduleSupport::cancel_queued(&mut queued, &mut outcomes, &mut events);
@@ -217,9 +297,25 @@ where
                 && !queued.is_empty()
                 && !cancellation.is_cancelled()
             {
-                let scheduled = queued.pop_front().expect("queued task");
+                let Some(next_index) = AgentTaskScheduleSupport::next_dispatchable_index(
+                    &queued,
+                    &running,
+                    &plan.options.per_executor_concurrency,
+                ) else {
+                    if running.is_empty() {
+                        break;
+                    }
+                    backpressure.push(AgentTaskBackpressureStatus {
+                        kind: "per_executor_concurrency".to_string(),
+                        message: "queued tasks are waiting for executor capacity".to_string(),
+                        task_id: queued.front().map(|task| task.request.task_id.clone()),
+                    });
+                    break;
+                };
+                let scheduled = queued.remove(next_index).expect("queued task");
                 let request = scheduled.request;
                 let task_id = request.task_id.clone();
+                let executor_key = executor_key(&request);
                 let executor = Arc::clone(&self.executor);
                 let plan_id = plan.plan_id.clone();
                 let task_timeout_ms = request.limits.timeout_ms.or(plan.options.timeout_ms);
@@ -235,6 +331,7 @@ where
                 running.push(RunningTask {
                     task_id: task_id.clone(),
                     request: request.clone(),
+                    executor_key,
                     attempt,
                     started_at: Instant::now(),
                     timeout_ms: task_timeout_ms,
@@ -290,7 +387,11 @@ where
                         &outcome,
                         result.attempt,
                         max_attempts,
+                        retry_budget_total,
+                        retry_budget_used,
+                        &plan.options.retry.retryable_failure_classifications,
                     ) {
+                        retry_budget_used += 1;
                         let mut request = running_task.request;
                         request.parent_plan_id = Some(plan.plan_id.clone());
                         let next_attempt = result.attempt + 1;
@@ -318,6 +419,16 @@ where
             plan_id: plan.plan_id,
             status: AgentTaskScheduleSupport::aggregate_status(&outcomes),
             totals: AgentTaskScheduleSupport::totals(total_tasks, &outcomes),
+            queue: AgentTaskScheduleSupport::queue_status(
+                max_concurrency,
+                plan.options.max_tasks,
+                plan.options.max_queue_depth,
+                blocked_count,
+                &outcomes,
+                &plan.options.per_executor_concurrency,
+                &backpressure,
+                retry_budget_total.map(|budget| budget.saturating_sub(retry_budget_used)),
+            ),
             outcomes,
             events,
         }
@@ -334,6 +445,7 @@ struct ScheduledTask {
 struct RunningTask {
     task_id: String,
     request: AgentTaskRequest,
+    executor_key: String,
     attempt: u32,
     started_at: Instant,
     timeout_ms: Option<u64>,
@@ -348,6 +460,27 @@ struct TaskResult {
 struct AgentTaskScheduleSupport;
 
 impl AgentTaskScheduleSupport {
+    fn next_dispatchable_index(
+        queued: &VecDeque<ScheduledTask>,
+        running: &[RunningTask],
+        per_executor_concurrency: &HashMap<String, usize>,
+    ) -> Option<usize> {
+        queued.iter().position(|task| {
+            let executor_key = executor_key(&task.request);
+            let limit = per_executor_concurrency
+                .get(&executor_key)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .max(1);
+            let running_for_executor = running
+                .iter()
+                .filter(|running| running.executor_key == executor_key)
+                .count();
+
+            running_for_executor < limit
+        })
+    }
+
     fn cancel_queued(
         queued: &mut VecDeque<ScheduledTask>,
         outcomes: &mut Vec<AgentTaskOutcome>,
@@ -437,6 +570,7 @@ impl AgentTaskScheduleSupport {
                 label: Some("scheduler cancellation".to_string()),
             }],
             diagnostics: Vec::new(),
+            workflow: None,
             follow_up: None,
             metadata: Value::Null,
         }
@@ -461,12 +595,54 @@ impl AgentTaskScheduleSupport {
                 data: Value::Null,
             }],
             follow_up: None,
+            workflow: None,
             metadata: Value::Null,
         }
     }
 
-    fn should_retry(outcome: &AgentTaskOutcome, attempt: u32, max_attempts: u32) -> bool {
+    fn blocked_outcome(task_id: String, summary: String) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id,
+            status: AgentTaskOutcomeStatus::Failed,
+            summary: Some(summary.clone()),
+            failure_classification: Some(AgentTaskFailureClassification::PolicyDenied),
+            artifacts: Vec::new(),
+            evidence_refs: vec![AgentTaskEvidenceRef {
+                kind: "scheduler".to_string(),
+                uri: "homeboy://agent-task/backpressure".to_string(),
+                label: Some("scheduler backpressure".to_string()),
+            }],
+            diagnostics: vec![AgentTaskDiagnostic {
+                class: "backpressure".to_string(),
+                message: summary,
+                data: Value::Null,
+            }],
+            follow_up: None,
+            metadata: Value::Null,
+            workflow: None,
+        }
+    }
+
+    fn should_retry(
+        outcome: &AgentTaskOutcome,
+        attempt: u32,
+        max_attempts: u32,
+        retry_budget_total: Option<u32>,
+        retry_budget_used: u32,
+        retryable_failure_classifications: &[AgentTaskFailureClassification],
+    ) -> bool {
         attempt < max_attempts
+            && retry_budget_total
+                .map(|budget| retry_budget_used < budget)
+                .unwrap_or(true)
+            && (retryable_failure_classifications.is_empty()
+                || outcome
+                    .failure_classification
+                    .map(|classification| {
+                        retryable_failure_classifications.contains(&classification)
+                    })
+                    .unwrap_or(false))
             && !matches!(
                 outcome.status,
                 AgentTaskOutcomeStatus::Succeeded
@@ -489,6 +665,35 @@ impl AgentTaskScheduleSupport {
             AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
             AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
             _ => AgentTaskState::Failed,
+        }
+    }
+
+    fn queue_status(
+        max_concurrency: usize,
+        max_tasks: Option<usize>,
+        max_queue_depth: Option<usize>,
+        blocked_count: usize,
+        outcomes: &[AgentTaskOutcome],
+        per_executor_concurrency: &HashMap<String, usize>,
+        backpressure: &[AgentTaskBackpressureStatus],
+        retry_budget_remaining: Option<u32>,
+    ) -> AgentTaskQueueStatus {
+        let per_executor_concurrency = per_executor_concurrency
+            .iter()
+            .map(|(executor, max_concurrency)| (executor.clone(), (*max_concurrency).max(1)))
+            .collect();
+
+        AgentTaskQueueStatus {
+            max_concurrency,
+            max_tasks,
+            max_queue_depth,
+            queued: 0,
+            running: 0,
+            blocked: blocked_count,
+            completed: outcomes.len(),
+            per_executor_concurrency,
+            backpressure: backpressure.to_vec(),
+            retry_budget_remaining,
         }
     }
 
@@ -533,11 +738,28 @@ impl AgentTaskScheduleSupport {
                 }
                 AgentTaskOutcomeStatus::Timeout => totals.timed_out += 1,
                 AgentTaskOutcomeStatus::Cancelled => totals.cancelled += 1,
+                AgentTaskOutcomeStatus::Failed
+                    if outcome.failure_classification
+                        == Some(AgentTaskFailureClassification::PolicyDenied)
+                        && outcome
+                            .diagnostics
+                            .iter()
+                            .any(|diagnostic| diagnostic.class == "backpressure") =>
+                {
+                    totals.blocked += 1
+                }
                 _ => totals.failed += 1,
             }
         }
 
         totals
+    }
+}
+
+fn executor_key(request: &AgentTaskRequest) -> String {
+    match &request.executor.selector {
+        Some(selector) => format!("{}:{selector}", request.executor.backend),
+        None => request.executor.backend.clone(),
     }
 }
 
@@ -658,6 +880,73 @@ mod tests {
         assert!(aggregate.events.iter().any(|event| {
             event.task_id == "task-1" && event.state == AgentTaskState::Queued && event.attempt == 2
         }));
+    }
+
+    #[test]
+    fn blocks_tasks_over_queue_depth_and_reports_backpressure() {
+        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+            HashMap::new(),
+            Duration::from_millis(0),
+        ));
+        let mut plan = plan_with_tasks(3);
+        plan.options.max_queue_depth = Some(2);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::PartialFailure);
+        assert_eq!(aggregate.totals.succeeded, 2);
+        assert_eq!(aggregate.totals.blocked, 1);
+        assert_eq!(aggregate.queue.blocked, 1);
+        assert_eq!(aggregate.queue.max_queue_depth, Some(2));
+        assert!(aggregate
+            .queue
+            .backpressure
+            .iter()
+            .any(|status| status.kind == "queue_depth"));
+        assert!(aggregate
+            .events
+            .iter()
+            .any(|event| { event.task_id == "task-3" && event.state == AgentTaskState::Blocked }));
+    }
+
+    #[test]
+    fn applies_per_executor_concurrency_below_global_limit() {
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(3);
+        plan.options.max_concurrency = 3;
+        plan.options
+            .per_executor_concurrency
+            .insert("test".to_string(), 1);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert!(max_seen.load(Ordering::SeqCst) <= 1);
+        assert_eq!(
+            aggregate.queue.per_executor_concurrency.get("test"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn retry_budget_and_failure_classifications_gate_retries() {
+        let executor = RetryOnceExecutor::default();
+        let attempts = Arc::clone(&executor.attempts);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.retry.max_attempts = 3;
+        plan.options.retry.max_retries_total = Some(0);
+        plan.options.retry.retryable_failure_classifications =
+            vec![AgentTaskFailureClassification::Provider];
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(aggregate.queue.retry_budget_remaining, Some(0));
     }
 
     #[test]
@@ -811,6 +1100,7 @@ mod tests {
                 label: Some("task log".to_string()),
             }],
             diagnostics: Vec::new(),
+            workflow: None,
             follow_up: None,
             metadata: json!({}),
         }
