@@ -15,7 +15,8 @@
     "./codebox-memory-report": "./lib/codebox-memory-report.js",
     "./wp-codebox-apply-adapter": "./lib/wp-codebox-apply-adapter.js",
     "./wp-codebox-browser-metrics": "./lib/wp-codebox-browser-metrics.js",
-    "./audit-wp-codebox-fanout": "./lib/audit-wp-codebox-fanout.js"
+    "./audit-wp-codebox-fanout": "./lib/audit-wp-codebox-fanout.js",
+    "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js"
   },
   "scripts": {
     "lint:js": "eslint --ext .js,.jsx,.ts,.tsx",
@@ -36,6 +37,7 @@
     "test:audit-wp-codebox-fanout": "node tests/audit-wp-codebox-fanout-smoke.js",
     "test:audit-wp-codebox-execute": "node tests/audit-wp-codebox-fanout-smoke.js",
     "test:wp-codebox-task-runner": "node tests/wp-codebox-task-runner-smoke.js",
+    "test:codebox-agent-task-executor": "node tests/codebox-agent-task-executor-smoke.js",
     "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js"
   },
   "devDependencies": {

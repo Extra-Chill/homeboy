@@ -18,6 +18,26 @@
     "trace.results": true,
     "annotations": false
   },
+  "agent_task_executors": [
+    {
+      "schema": "homeboy/agent-task-executor-provider/v1",
+      "id": "wordpress.codebox-agent-task-executor",
+      "label": "WP Codebox agent task executor",
+      "backend": "codebox",
+      "command": "node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
+      "request_schema": "homeboy/agent-task-request/v1",
+      "outcome_schema": "homeboy/agent-task-outcome/v1",
+      "capabilities": [
+        "browser_runtime",
+        "wordpress_sandbox",
+        "artifact_materialization",
+        "screenshots",
+        "structured_outcome"
+      ],
+      "status": "preparatory",
+      "upstream_dependency": "https://github.com/chubes4/wp-codebox/issues/392"
+    }
+  ],
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.py",

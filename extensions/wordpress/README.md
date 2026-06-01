@@ -421,6 +421,25 @@ report into one `homeboy/wp-codebox-task-request/v1` request per fix batch. With
 `scripts/agent/homeboy-wp-codebox-task-runner.cjs`, which builds a
 provider-configured `wp-codebox/workspace-recipe/v1` recipe.
 
+### WP Codebox agent-task executor
+
+The WordPress extension declares `wordpress.codebox-agent-task-executor` in
+`wordpress.json` under `agent_task_executors`. The provider contract advertises a
+Codebox backend with browser runtime, WordPress sandbox, artifact materialization,
+screenshots, and structured outcome capabilities without adding Codebox imports or
+WordPress assumptions to Homeboy core.
+
+`scripts/agent/homeboy-codebox-agent-task-executor.cjs` accepts a generic
+`homeboy/agent-task-request/v1` request, maps it into the existing WP Codebox task
+runner request, invokes the Codebox recipe runner, and emits a
+`homeboy/agent-task-outcome/v1` outcome with normalized status, artifacts,
+evidence refs, diagnostics, and failure classification.
+
+The richer sandbox-agent host-tool registration surface is blocked on
+https://github.com/chubes4/wp-codebox/issues/392. Until that lands, this provider
+is a preparatory contract plus request/outcome adapter around the current
+`wp-codebox.agent-sandbox-run` command boundary.
+
 Approved artifact-map entries become `apply_back` records for the reviewed
 apply adapter. Rejected entries with `approved: false` become `issue_reports`
 records instead, preserving the finding IDs, artifact evidence, disposition,
