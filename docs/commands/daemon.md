@@ -100,6 +100,9 @@ contract and return the same JSON envelope shape as other daemon responses.
 - `GET /jobs/:id`
 - `GET /jobs/:id/events`
 - `POST /jobs/:id/cancel`
+- `GET /tools`
+- `GET /tools/:id`
+- `POST /tools/:id/run`
 - `POST /runner/sessions`
 - `POST /runner/jobs`
 - `POST /runner/jobs/claim`
@@ -118,6 +121,18 @@ logic in the HTTP API contract.
 The analysis entry points `POST /audit`, `POST /lint`, `POST /test`, and
 `POST /bench` enqueue daemon jobs. Clients inspect those jobs through
 `GET /jobs/:id` and `GET /jobs/:id/events` instead of parsing terminal output.
+
+Sandbox agents should prefer the typed tool surface over command-shaped routes:
+
+- `GET /tools` returns the bounded Homeboy tool allowlist.
+- Each tool declares its required capability, risk category, job behavior, and
+  accepted JSON request fields.
+- `POST /tools/homeboy.audit/run`, `POST /tools/homeboy.lint/run`,
+  `POST /tools/homeboy.test/run`, `POST /tools/homeboy.bench/run`,
+  `POST /tools/homeboy.build/run`, and `POST /tools/homeboy.review/run` enqueue
+  jobs through the same job/event/result contract.
+- Tool IDs that are not in the allowlist, including deploy, release, SSH, auth,
+  keychain, and DB operations, are rejected before execution.
 
 Mutating operations such as deploy, release, rig up/down, stack apply, git
 writes, and SSH execution are not exposed by this daemon slice.
