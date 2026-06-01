@@ -413,6 +413,16 @@ impl PlanStepBuilder {
         self
     }
 
+    pub(crate) fn output_value(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.step.outputs.insert(key.into(), value);
+        self
+    }
+
+    pub(crate) fn missing(mut self, missing: impl IntoIterator<Item = String>) -> Self {
+        self.step.missing.extend(missing);
+        self
+    }
+
     pub(crate) fn skip_reason(mut self, reason: impl Into<String>) -> Self {
         self.step.skip_reason = Some(reason.into());
         self
