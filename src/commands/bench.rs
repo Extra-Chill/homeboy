@@ -52,7 +52,7 @@ impl BenchArgs {
 #[derive(Subcommand)]
 enum BenchCommand {
     /// Run a local settings matrix and aggregate child bench runs
-    Matrix(BenchMatrixArgs),
+    Matrix(settings_matrix::BenchMatrixArgs),
     /// List declared benchmark scenarios without executing them
     List(BenchListArgs),
     /// List persisted benchmark runs for a component
@@ -61,21 +61,6 @@ enum BenchCommand {
     Distribution(BenchDistributionArgs),
     /// Compare two persisted benchmark runs
     Compare(BenchCompareArgs),
-}
-
-#[derive(Args)]
-struct BenchMatrixArgs {
-    #[command(flatten)]
-    run: BenchRunArgs,
-
-    /// Settings matrix axis in NAME=value,value form. Repeat the flag or pass
-    /// multiple axes after it, e.g. --setting-matrix clients=10,100 rounds=3.
-    #[arg(
-        long = "setting-matrix",
-        value_name = "NAME=VALUE[,VALUE...]",
-        num_args = 1..
-    )]
-    setting_matrix: Vec<String>,
 }
 
 #[derive(Args)]
@@ -339,10 +324,7 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
     if let Some(command) = &args.command {
         return match command {
             BenchCommand::Matrix(matrix_args) => {
-                let output = settings_matrix::run_settings_matrix(
-                    &matrix_args.run,
-                    &matrix_args.setting_matrix,
-                )?;
+                let output = settings_matrix::run_settings_matrix(matrix_args)?;
                 let exit = if output.summary.passed { 0 } else { 1 };
                 Ok((BenchOutput::SettingsMatrix(output), exit))
             }

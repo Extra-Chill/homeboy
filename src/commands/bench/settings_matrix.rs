@@ -1,10 +1,26 @@
 use std::collections::BTreeMap;
 
+use clap::Args;
 use serde::Serialize;
 
 use homeboy::core::extension::bench::{BenchCommandOutput, BenchScenario};
 
 use super::{filter_homeboy_flags, matrix as bench_runner, BenchRunArgs};
+
+#[derive(Args)]
+pub(super) struct BenchMatrixArgs {
+    #[command(flatten)]
+    run: BenchRunArgs,
+
+    /// Settings matrix axis in NAME=value,value form. Repeat the flag or pass
+    /// multiple axes after it, e.g. --setting-matrix clients=10,100 rounds=3.
+    #[arg(
+        long = "setting-matrix",
+        value_name = "NAME=VALUE[,VALUE...]",
+        num_args = 1..
+    )]
+    setting_matrix: Vec<String>,
+}
 
 #[derive(Serialize)]
 pub struct BenchSettingsMatrixOutput {
@@ -55,9 +71,10 @@ pub struct BenchSettingsMatrixSummary {
 }
 
 pub(super) fn run_settings_matrix(
-    run_args: &BenchRunArgs,
-    raw_axes: &[String],
+    args: &BenchMatrixArgs,
 ) -> homeboy::core::Result<BenchSettingsMatrixOutput> {
+    let run_args = &args.run;
+    let raw_axes = &args.setting_matrix;
     if run_args.baseline_args.baseline || run_args.baseline_args.ratchet {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "setting-matrix",
