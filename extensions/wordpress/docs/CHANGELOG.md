@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.110.6] - 2026-06-01
+
+### Fixed
+- make phpcs-ignore-fixer string-literal-aware so phpcs:enable is never injected into multi-line SQL
+
 ## [2.110.5] - 2026-06-01
 
 ### Fixed
