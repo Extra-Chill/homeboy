@@ -568,7 +568,7 @@ fn resolve_preflight_artifact_path(
             remote_version,
             format!(
                 "Archive artifact '{}' requires an extractCommand. \
-                 Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{{{artifact}}}} && rm {{{{artifact}}}}\"}}'",
+                 Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{artifact}} && rm {{artifact}}\"}}'",
                 artifact_path.display()
             ),
         )
