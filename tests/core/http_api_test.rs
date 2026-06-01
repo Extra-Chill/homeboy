@@ -143,6 +143,26 @@ fn routes_job_ready_analysis_endpoints_without_executing_them() {
 }
 
 #[test]
+fn routes_sandbox_tool_endpoints() {
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/tools").expect("route"),
+        HttpEndpoint::SandboxTools
+    );
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/tools/homeboy.audit").expect("route"),
+        HttpEndpoint::SandboxTool {
+            id: "homeboy.audit".to_string()
+        }
+    );
+    assert_eq!(
+        http_api::route(HttpMethod::Post, "/tools/homeboy.review/run").expect("route"),
+        HttpEndpoint::SandboxToolRun {
+            id: "homeboy.review".to_string()
+        }
+    );
+}
+
+#[test]
 fn routes_observation_run_readers() {
     assert_eq!(
         http_api::route(HttpMethod::Get, "/runs?kind=bench").expect("route"),
@@ -362,6 +382,84 @@ fn rejects_mutating_endpoint_shapes() {
     assert!(http_api::route(HttpMethod::Post, "/stacks/studio/apply").is_err());
     assert!(http_api::route(HttpMethod::Post, "/deploy").is_err());
     assert!(http_api::route(HttpMethod::Post, "/release").is_err());
+}
+
+#[test]
+fn sandbox_tools_declare_capabilities_and_allowed_arguments() {
+    let response = http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Get,
+            path: "/tools".to_string(),
+            body: None,
+        },
+        &JobStore::default(),
+    )
+    .expect("list tools");
+
+    assert_eq!(response.endpoint, "tools.list");
+    let tools = response.body["tools"].as_array().expect("tools");
+    assert!(tools.iter().any(|tool| {
+        tool["id"] == "homeboy.review"
+            && tool["required_capability"] == "run:review"
+            && tool["risk"] == "bounded_local_run"
+    }));
+    assert!(tools.iter().all(|tool| {
+        !tool["required_capability"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("operator:")
+    }));
+}
+
+#[test]
+fn sandbox_tool_run_enqueues_allowlisted_job() {
+    let store = JobStore::default();
+    let response = http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Post,
+            path: "/tools/homeboy.build/run".to_string(),
+            body: Some(serde_json::json!({
+                "component": "missing-component",
+                "path": "/tmp/homeboy-missing-component"
+            })),
+        },
+        &store,
+    )
+    .expect("build tool job enqueued");
+
+    assert_eq!(response.endpoint, "tools.run");
+    assert_eq!(response.body["command"], "api.tools.run.enqueue");
+    assert_eq!(response.body["tool"]["id"], "homeboy.build");
+    assert_eq!(response.body["request"]["kind"], "build");
+    let args = response.body["request"]["args"].as_array().expect("args");
+    assert!(args.iter().any(|arg| arg == "build"));
+    assert!(args.iter().any(|arg| arg == "--path"));
+    assert_eq!(store.list().len(), 1);
+}
+
+#[test]
+fn sandbox_tool_run_rejects_unallowlisted_tool_and_arguments() {
+    let unknown = http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Post,
+            path: "/tools/homeboy.deploy/run".to_string(),
+            body: Some(serde_json::json!({})),
+        },
+        &JobStore::default(),
+    )
+    .expect_err("deploy tool is not allowlisted");
+    assert!(unknown.to_string().contains("not allowlisted"));
+
+    let mutating = http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Post,
+            path: "/tools/homeboy.review/run".to_string(),
+            body: Some(serde_json::json!({ "report": "pr-comment" })),
+        },
+        &JobStore::default(),
+    )
+    .expect_err("review report output is rejected");
+    assert!(mutating.to_string().contains("JSON output"));
 }
 
 #[test]

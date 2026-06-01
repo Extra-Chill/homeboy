@@ -17,6 +17,7 @@ The daemon owns a loopback-only HTTP contract for:
 - local client discovery and health checks
 - read-only component, rig, stack, run, artifact, and finding inspection
 - long-running lint, test, audit, and bench jobs
+- typed, allowlisted sandbox-agent Homeboy tool jobs
 - structured job events and final results
 - future mutating operations behind explicit capabilities and confirmations
 
@@ -97,6 +98,8 @@ A useful headless UI can be built from this read/query surface:
 - `GET /audit/runs` and `GET /bench/runs` for analysis-specific run history
 - `GET /jobs`, `GET /jobs/:id`, `GET /jobs/:id/events`, and
   `POST /jobs/:id/cancel` for long-running work
+- `GET /tools`, `GET /tools/:id`, and `POST /tools/:id/run` for sandbox agents
+  that need typed Homeboy tool execution without arbitrary shell access
 
 This is enough for a dashboard that lists components, shows selected checkout
 state, displays rigs/stacks, starts analysis jobs, streams progress, and renders
@@ -122,6 +125,42 @@ Events are append-only records. They are safe for UIs to render incrementally an
 safe for runners to mirror as evidence. The final result event carries the same
 structured result shape as the corresponding CLI command, including artifacts,
 findings, summaries, and CI context when a CI profile/job selector was used.
+
+## Sandbox Tool Surface
+
+Sandbox agents use `/tools` instead of `/exec`. The surface is an allowlist, not a
+shell command proxy.
+
+```text
+GET /tools
+        |
+        +-- [{ id, command, required_capability, risk, runs_as_job,
+              allowed_arguments }]
+
+POST /tools/homeboy.review/run
+        |
+        +-- validates the tool id and JSON body fields
+        +-- enqueues a daemon job
+        +-- returns poll links for /jobs/:id and /jobs/:id/events
+```
+
+The first bounded slice exposes these executable tool IDs:
+
+- `homeboy.audit` with `run:audit`
+- `homeboy.lint` with `run:lint`
+- `homeboy.test` with `run:test`
+- `homeboy.bench` with `run:bench`
+- `homeboy.build` with `run:build`
+- `homeboy.review` with `run:review`
+
+Each tool accepts only its declared JSON arguments. Mutating or operator-shaped
+fields such as lint `fix`, baseline writes, ratchets, free-form build JSON,
+review markdown report output, and review banners are rejected. Non-allowlisted
+tool IDs such as deploy, release, SSH, auth, keychain, and DB operations are
+rejected before any job starts.
+
+`POST /exec` remains a daemon-internal structured execution route for existing
+runner plumbing. It is not the sandbox-agent contract.
 
 The packaged broker service sets `HOME=/var/lib/homeboy`, so the daemon durable
 job store is `/var/lib/homeboy/.config/homeboy/daemon/jobs.json`. The store keeps
