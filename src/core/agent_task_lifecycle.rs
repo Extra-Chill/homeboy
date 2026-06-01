@@ -18,7 +18,6 @@ pub const AGENT_TASK_RUN_ARTIFACTS_SCHEMA: &str = "homeboy/agent-task-run-artifa
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunRecord {
-    #[serde(default = "run_schema")]
     pub schema: String,
     pub run_id: String,
     pub plan_id: String,
@@ -72,7 +71,6 @@ pub struct AgentTaskArtifactRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunLog {
-    #[serde(default = "run_log_schema")]
     pub schema: String,
     pub run_id: String,
     pub events: Vec<AgentTaskProgressEvent>,
@@ -80,7 +78,6 @@ pub struct AgentTaskRunLog {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunArtifacts {
-    #[serde(default = "run_artifacts_schema")]
     pub schema: String,
     pub run_id: String,
     pub artifacts: Vec<AgentTaskArtifact>,
@@ -165,27 +162,33 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     Ok(AgentTaskRunArtifacts {
         schema: AGENT_TASK_RUN_ARTIFACTS_SCHEMA.to_string(),
         run_id,
-        artifacts: aggregate
-            .as_ref()
-            .map(|aggregate| {
-                aggregate
-                    .outcomes
-                    .iter()
-                    .flat_map(|outcome| outcome.artifacts.clone())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        evidence_refs: aggregate
-            .as_ref()
-            .map(|aggregate| {
-                aggregate
-                    .outcomes
-                    .iter()
-                    .flat_map(|outcome| outcome.evidence_refs.clone())
-                    .collect()
-            })
-            .unwrap_or_default(),
+        artifacts: aggregate_artifacts(aggregate.as_ref()),
+        evidence_refs: aggregate_evidence_refs(aggregate.as_ref()),
     })
+}
+
+fn aggregate_artifacts(aggregate: Option<&AgentTaskAggregate>) -> Vec<AgentTaskArtifact> {
+    aggregate
+        .map(|aggregate| {
+            aggregate
+                .outcomes
+                .iter()
+                .flat_map(|outcome| outcome.artifacts.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn aggregate_evidence_refs(aggregate: Option<&AgentTaskAggregate>) -> Vec<AgentTaskEvidenceRef> {
+    aggregate
+        .map(|aggregate| {
+            aggregate
+                .outcomes
+                .iter()
+                .flat_map(|outcome| outcome.evidence_refs.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn queued_task(request: &crate::core::agent_task::AgentTaskRequest) -> AgentTaskRunTask {
@@ -342,18 +345,6 @@ fn sanitize_run_id(run_id: &str) -> String {
     } else {
         sanitized
     }
-}
-
-fn run_schema() -> String {
-    AGENT_TASK_RUN_SCHEMA.to_string()
-}
-
-fn run_log_schema() -> String {
-    AGENT_TASK_RUN_LOG_SCHEMA.to_string()
-}
-
-fn run_artifacts_schema() -> String {
-    AGENT_TASK_RUN_ARTIFACTS_SCHEMA.to_string()
 }
 
 #[cfg(test)]
