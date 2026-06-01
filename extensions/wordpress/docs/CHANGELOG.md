@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.0] - 2026-06-01
+
+### Added
+- add WP Codebox runner doctor
+
 ## [2.112.1] - 2026-06-01
 
 ### Fixed
