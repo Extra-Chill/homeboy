@@ -327,6 +327,50 @@ pub fn get_latest_tag_with_prefix(path: &str, tag_prefix: Option<&str>) -> Resul
         .map(|(tag, _)| tag))
 }
 
+/// Get the previous release tag reachable from `current_tag`.
+///
+/// In monorepos, `tag_prefix` scopes the search to the component tag namespace.
+pub fn get_previous_tag_before_with_prefix(
+    path: &str,
+    current_tag: &str,
+    tag_prefix: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(current_version) = exact_release_version_from_tag(current_tag, tag_prefix) else {
+        return Ok(None);
+    };
+
+    let Some(tags) = command::run_in_optional(
+        path,
+        "git",
+        &[
+            "tag",
+            "--merged",
+            current_tag,
+            "--sort=-v:refname",
+            "--list",
+        ],
+    ) else {
+        return Ok(None);
+    };
+
+    Ok(tags
+        .lines()
+        .filter_map(|tag| {
+            let tag = tag.trim();
+            if tag == current_tag {
+                return None;
+            }
+            let version = exact_release_version_from_tag(tag, tag_prefix)?;
+            if version < current_version {
+                Some((tag.to_string(), version))
+            } else {
+                None
+            }
+        })
+        .max_by(|(_, a), (_, b)| a.cmp(b))
+        .map(|(tag, _)| tag))
+}
+
 fn exact_release_version_from_tag(tag: &str, tag_prefix: Option<&str>) -> Option<Version> {
     let tag = match tag_prefix {
         Some(prefix) => tag.strip_prefix(&format!("{}-", prefix))?,
@@ -1084,6 +1128,23 @@ mod tests {
         assert_eq!(
             get_latest_tag_with_prefix(&path, Some("wordpress")).unwrap(),
             Some("wordpress-v1.4.0".to_string())
+        );
+    }
+
+    #[test]
+    fn previous_tag_before_current_respects_component_prefix() {
+        let (dir, path) = init_repo();
+        git(&path, &["tag", "wordpress-v1.0.0"]);
+        git(&path, &["tag", "api-v9.9.9"]);
+        commit_file(&dir, &path, "one.txt", "one\n", "fix: one");
+        git(&path, &["tag", "wordpress-v1.1.0"]);
+        commit_file(&dir, &path, "two.txt", "two\n", "fix: two");
+        git(&path, &["tag", "wordpress-v1.2.0"]);
+
+        assert_eq!(
+            get_previous_tag_before_with_prefix(&path, "wordpress-v1.2.0", Some("wordpress"))
+                .unwrap(),
+            Some("wordpress-v1.1.0".to_string())
         );
     }
 

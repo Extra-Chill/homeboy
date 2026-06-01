@@ -174,19 +174,7 @@ pub(crate) fn run_github_release(
     } else {
         notes
     };
-
-    let tmp_dir = crate::core::engine::temp::runtime_temp_dir("github-release")?;
-    let notes_path = tmp_dir.join(format!("notes-{}.md", sanitize_tag_for_filename(&tag)));
-    std::fs::write(&notes_path, &notes_body).map_err(|e| {
-        Error::internal_io(
-            format!("Failed to write release notes file: {}", e),
-            Some(notes_path.display().to_string()),
-        )
-    })?;
-
-    let notes_path_str = notes_path.to_str().ok_or_else(|| {
-        Error::internal_unexpected("github.release: notes-file path is not valid UTF-8".to_string())
-    })?;
+    let notes_start_tag = github_generated_notes_start_tag(component, &tag)?;
 
     log_status!(
         "release",
@@ -205,11 +193,15 @@ pub(crate) fn run_github_release(
         &tag,
         "--title",
         &tag,
-        "--notes-file",
-        notes_path_str,
+        "--generate-notes",
+        "--notes",
+        &notes_body,
         "-R",
         &repo_flag,
     ];
+    if let Some(previous_tag) = notes_start_tag.as_deref() {
+        create_args.extend_from_slice(&["--notes-start-tag", previous_tag]);
+    }
     for path in &artifact_paths {
         create_args.push(path);
     }
@@ -260,9 +252,20 @@ pub(crate) fn run_github_release(
             "repo": github.repo,
             "url": url,
             "artifact_count": artifact_paths.len(),
+            "generated_notes": true,
+            "notes_start_tag": notes_start_tag,
         })),
         Vec::new(),
     ))
+}
+
+fn github_generated_notes_start_tag(component: &Component, tag: &str) -> Result<Option<String>> {
+    let monorepo = crate::core::git::MonorepoContext::detect(&component.local_path, &component.id);
+    let (git_root, tag_prefix) = match monorepo.as_ref() {
+        Some(ctx) => (ctx.git_root.as_str(), Some(ctx.tag_prefix.as_str())),
+        None => (component.local_path.as_str(), None),
+    };
+    crate::core::git::get_previous_tag_before_with_prefix(git_root, tag, tag_prefix)
 }
 
 pub(super) fn skipped_result(
@@ -342,19 +345,7 @@ pub(super) fn gh_release_exists(tag: &str, repo_flag: &str) -> bool {
 
 pub(super) fn fallback_gh_command(tag: &str) -> String {
     format!(
-        "gh release create {} --title {} --notes-file <path-to-release-notes>",
+        "gh release create {} --title {} --generate-notes --notes <release-notes>",
         tag, tag
     )
-}
-
-pub(super) fn sanitize_tag_for_filename(tag: &str) -> String {
-    tag.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
 }
