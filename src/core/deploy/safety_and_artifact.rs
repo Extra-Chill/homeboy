@@ -643,12 +643,7 @@ mod tests {
 
         let archive = temp.join(archive_name);
         let status = std::process::Command::new("zip")
-            .args([
-                "-q",
-                "-r",
-                archive.to_str().expect("archive path"),
-                top_dir,
-            ])
+            .args(["-q", "-r", archive.to_str().expect("archive path"), top_dir])
             .current_dir(&staging)
             .status()
             .expect("run zip");
@@ -776,7 +771,10 @@ mod tests {
 
         let result = flatten_double_nested_dir(&local_client(), target.to_str().expect("target"))
             .expect("ok");
-        assert!(result.is_none(), "flatten should be a no-op on a flat layout");
+        assert!(
+            result.is_none(),
+            "flatten should be a no-op on a flat layout"
+        );
         assert!(target.join("plugin.php").is_file());
     }
 

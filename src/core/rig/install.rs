@@ -9,6 +9,7 @@ use crate::core::error::{Error, Result};
 use crate::core::{extension, git, paths, stack};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,8 +173,16 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
 }
 
 fn ensure_rig_refreshable(rig: &DiscoveredRig, target: &Path) -> Result<()> {
-    let content = fs::read_to_string(target)
-        .map_err(|e| Error::internal_io(e.to_string(), Some("read existing rig spec".into())))?;
+    let content = match fs::read_to_string(target) {
+        Ok(content) => content,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("read existing rig spec".into()),
+            ));
+        }
+    };
     let mut spec: super::RigSpec = serde_json::from_str(&content).map_err(|e| {
         Error::validation_invalid_json(
             e,
