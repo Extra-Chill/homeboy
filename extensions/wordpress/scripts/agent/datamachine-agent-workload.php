@@ -2606,7 +2606,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_configure_settings' ) ) {
                     'pat'           => $github_token,
                     'default_repo'  => '' !== $github_repository_token ? '' : $target_repo,
                     'allowed_repos' => $app_allowed_repos,
-                    'capabilities'  => array( 'issues_write', 'pull_request_create' ),
+                    'capabilities'  => array( 'issues_read', 'issues_write', 'pull_request_create' ),
                 );
             }
             $settings['github_credential_profiles'] = $profiles;
