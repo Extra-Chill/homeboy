@@ -199,7 +199,7 @@ fn runs_drift_reports_dominant_value_above_threshold() {
 fn import_from_gh_actions_requires_gh_specific_arguments() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
-        // Without --component, --repo, --workflow, --artifact-glob, the
+        // Without --component, --repo, --workflow/--run-id, --artifact-glob, the
         // gh-actions branch must reject with a missing-argument error.
         let err = import_runs(RunsImportArgs {
             input: None,
@@ -208,6 +208,24 @@ fn import_from_gh_actions_requires_gh_specific_arguments() {
         })
         .err()
         .expect("must fail without required gh-actions args");
+        assert_eq!(err.code.as_str(), "validation.missing_argument");
+    });
+}
+
+#[test]
+fn import_from_gh_actions_requires_workflow_or_run_id() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let err = import_runs(RunsImportArgs {
+            input: None,
+            from_gh_actions: true,
+            component_id: Some("wp-site-generator".into()),
+            repo: Some("chubes4/wp-site-generator".into()),
+            artifact_glob: Some("php-transformer-iterator-transcript-*".into()),
+            ..RunsImportArgs::default()
+        })
+        .err()
+        .expect("must fail without workflow or run id");
         assert_eq!(err.code.as_str(), "validation.missing_argument");
     });
 }

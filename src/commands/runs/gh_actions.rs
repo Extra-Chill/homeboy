@@ -20,7 +20,7 @@
 //! `runs drift` primitives project arbitrary JSONPath expressions over the
 //! resulting artifact corpus.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
@@ -61,7 +61,10 @@ pub struct GhActionsImportArgs {
     pub repo: String,
     /// Workflow filename (e.g. `static-site-validation.yml`) or workflow name.
     #[arg(long)]
-    pub workflow: String,
+    pub workflow: Option<String>,
+    /// Exact GitHub Actions run id.
+    #[arg(long = "run-id")]
+    pub run_id: Option<u64>,
     /// Artifact name glob — matched against the GitHub artifact name.
     /// Examples: `'design-distribution-*'`, `'*.json'`, `'ssi-validation-*'`.
     #[arg(long = "artifact-glob")]
@@ -79,7 +82,8 @@ pub struct GhActionsImportOutput {
     pub command: &'static str,
     pub component_id: String,
     pub repo: String,
-    pub workflow: String,
+    pub workflow: Option<String>,
+    pub run_id: Option<u64>,
     pub artifact_glob: String,
     pub runs_inspected: usize,
     pub runs_imported: usize,
@@ -88,6 +92,26 @@ pub struct GhActionsImportOutput {
     pub artifacts_skipped_existing: usize,
     pub artifacts_skipped_non_json: usize,
     pub etag_cache_hit: bool,
+    pub artifacts: Vec<GhActionsImportedArtifact>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct GhActionsImportedArtifact {
+    pub run_id: String,
+    pub gh_run_id: u64,
+    pub artifact_id: String,
+    pub gh_artifact_id: u64,
+    pub artifact_name: String,
+    pub file_name: String,
+    pub path: String,
+    pub status: GhActionsImportedArtifactStatus,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GhActionsImportedArtifactStatus {
+    Imported,
+    Existing,
 }
 
 pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput> {
@@ -103,7 +127,14 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
     let store = ObservationStore::open_initialized()?;
     let pattern = compile_glob(&args.artifact_glob)?;
 
-    let (runs, etag_cache_hit) = list_workflow_runs(&args.repo, &args.workflow, &args.since)?;
+    let (runs, etag_cache_hit) = if let Some(run_id) = args.run_id {
+        (vec![get_workflow_run(&args.repo, run_id)?], false)
+    } else {
+        let workflow = args.workflow.as_deref().ok_or_else(|| {
+            Error::validation_missing_argument(vec!["--workflow or --run-id".to_string()])
+        })?;
+        list_workflow_runs(&args.repo, workflow, &args.since)?
+    };
     let runs_inspected = runs.len().min(args.limit);
     let runs_to_process: Vec<&GhWorkflowRun> = runs.iter().take(args.limit).collect();
 
@@ -112,6 +143,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
     let mut artifacts_imported = 0usize;
     let mut artifacts_skipped_existing = 0usize;
     let mut artifacts_skipped_non_json = 0usize;
+    let mut artifact_rows = Vec::new();
 
     for gh_run in runs_to_process {
         let homeboy_run_id = deterministic_run_id(&args.repo, gh_run.id);
@@ -130,10 +162,10 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
         // ingested. Existing artifact rows are detected via deterministic
         // (run_id, gh_artifact_id, file_name) IDs.
         let artifacts = list_run_artifacts(&args.repo, gh_run.id)?;
-        let existing_artifact_ids: HashSet<String> = store
+        let existing_artifacts: HashMap<String, homeboy::core::observation::ArtifactRecord> = store
             .list_artifacts(&homeboy_run_id)?
             .into_iter()
-            .map(|a| a.id)
+            .map(|a| (a.id.clone(), a))
             .collect();
 
         for artifact in artifacts {
@@ -158,8 +190,18 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                 }
                 let artifact_id =
                     deterministic_artifact_id(&homeboy_run_id, artifact.id, &file_name);
-                if existing_artifact_ids.contains(&artifact_id) {
+                if let Some(existing) = existing_artifacts.get(&artifact_id) {
                     artifacts_skipped_existing += 1;
+                    artifact_rows.push(GhActionsImportedArtifact {
+                        run_id: homeboy_run_id.clone(),
+                        gh_run_id: gh_run.id,
+                        artifact_id,
+                        gh_artifact_id: artifact.id,
+                        artifact_name: artifact.name.clone(),
+                        file_name,
+                        path: existing.path.clone(),
+                        status: GhActionsImportedArtifactStatus::Existing,
+                    });
                     continue;
                 }
 
@@ -180,6 +222,16 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                     created_at: chrono::Utc::now().to_rfc3339(),
                 };
                 store.import_artifact(&artifact_record)?;
+                artifact_rows.push(GhActionsImportedArtifact {
+                    run_id: homeboy_run_id.clone(),
+                    gh_run_id: gh_run.id,
+                    artifact_id: artifact_record.id.clone(),
+                    gh_artifact_id: artifact.id,
+                    artifact_name: artifact.name.clone(),
+                    file_name,
+                    path: artifact_record.path.clone(),
+                    status: GhActionsImportedArtifactStatus::Imported,
+                });
                 artifacts_imported += 1;
             }
         }
@@ -191,6 +243,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
             component_id: args.component_id,
             repo: args.repo,
             workflow: args.workflow,
+            run_id: args.run_id,
             artifact_glob: args.artifact_glob,
             runs_inspected,
             runs_imported,
@@ -199,6 +252,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
             artifacts_skipped_existing,
             artifacts_skipped_non_json,
             etag_cache_hit,
+            artifacts: artifact_rows,
         }),
         0,
     ))
@@ -246,8 +300,8 @@ fn build_run_record(
         finished_at: gh_run.updated_at.clone(),
         status: map_gh_conclusion_to_status(gh_run),
         command: Some(format!(
-            "homeboy runs import --from-gh-actions --repo {repo} --workflow {}",
-            gh_run.workflow_name.clone().unwrap_or_default()
+            "homeboy runs import --from-gh-actions --repo {repo} --run-id {}",
+            gh_run.id
         )),
         cwd: None,
         homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -274,6 +328,25 @@ fn map_gh_conclusion_to_status(gh_run: &GhWorkflowRun) -> String {
 }
 
 // ── GitHub API listing (via `gh` CLI) ───────────────────────────────────────
+
+fn get_workflow_run(repo: &str, run_id: u64) -> homeboy::core::Result<GhWorkflowRun> {
+    let api_path = format!("repos/{repo}/actions/runs/{run_id}");
+    let output = Command::new("gh")
+        .args(["api", &api_path])
+        .output()
+        .map_err(|e| Error::internal_io(format!("Failed to invoke gh: {e}"), Some("gh".into())))?;
+    if !output.status.success() {
+        return Err(Error::internal_io(
+            format!(
+                "gh api workflow run failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some(format!("gh api {api_path}")),
+        ));
+    }
+
+    parse_run_payload(&output.stdout)
+}
 
 /// One GitHub Actions workflow run, projected to the fields we persist.
 #[derive(Debug, Clone, Deserialize)]
@@ -509,6 +582,12 @@ fn parse_runs_payload(body: &[u8]) -> homeboy::core::Result<Vec<GhWorkflowRun>> 
         runs.extend(page.workflow_runs.into_iter().map(GhWorkflowRun::from));
     }
     Ok(runs)
+}
+
+fn parse_run_payload(body: &[u8]) -> homeboy::core::Result<GhWorkflowRun> {
+    let raw: GhWorkflowRunRaw = serde_json::from_slice(body)
+        .map_err(|e| Error::internal_json(e.to_string(), Some("parse workflow run".into())))?;
+    Ok(GhWorkflowRun::from(raw))
 }
 
 /// Drop runs whose `created_at` is older than the `--since` window.
@@ -831,6 +910,36 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id, 100);
         assert_eq!(runs[0].pull_request_numbers, vec![98]);
+    }
+
+    #[test]
+    fn parse_run_payload_handles_single_run_response() {
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "id": 26731420339u64,
+            "run_number": 42,
+            "name": "Static site validation iterator",
+            "workflow_id": 123,
+            "head_branch": "main",
+            "head_sha": "deadbeef",
+            "event": "workflow_dispatch",
+            "status": "completed",
+            "conclusion": "failure",
+            "run_started_at": "2026-05-31T10:00:00Z",
+            "created_at": "2026-05-31T09:59:00Z",
+            "updated_at": "2026-05-31T10:05:00Z",
+            "run_attempt": 1,
+            "pull_requests": []
+        }))
+        .unwrap();
+
+        let run = parse_run_payload(&raw).expect("parse run");
+        assert_eq!(run.id, 26731420339);
+        assert_eq!(
+            run.workflow_name.as_deref(),
+            Some("Static site validation iterator")
+        );
+        assert_eq!(run.workflow_id, Some(123));
+        assert_eq!(map_gh_conclusion_to_status(&run), "fail");
     }
 
     #[test]
