@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.111.0] - 2026-06-01
+
+### Added
+- pass Codebox runtime stack mounts
+
 ## [2.110.9] - 2026-06-01
 
 ### Fixed
