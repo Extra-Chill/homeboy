@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.110.4] - 2026-06-01
+
+### Changed
+- harden Codebox Codex secret redaction
+- prove Codebox Codex task requests
+
 ## [2.110.3] - 2026-06-01
 
 ### Fixed
