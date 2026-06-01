@@ -56,9 +56,10 @@ pub struct ScopedExtensionConfig {
     pub version: Option<String>,
     /// Settings passed to the extension at runtime.
     ///
-    /// Populated from flat keys that aren't reserved struct fields:
+    /// Populated from `settings` and flat keys that aren't reserved struct fields:
     ///
     /// ```json
+    /// { "settings": { "database_type": "mysql" } }
     /// { "database_type": "mysql", "mysql_host": "localhost" }
     /// ```
     pub settings: HashMap<String, serde_json::Value>,
@@ -95,7 +96,16 @@ impl<'de> serde::Deserialize<'de> for ScopedExtensionConfig {
             .remove("version")
             .and_then(|v| v.as_str().map(String::from));
 
-        let settings = map.into_iter().collect();
+        let mut settings = map
+            .remove("settings")
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+
+        // Flat keys are the existing convention and retain precedence when both
+        // shapes are present.
+        settings.extend(map);
 
         Ok(ScopedExtensionConfig { version, settings })
     }
@@ -1179,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_extension_config_treats_settings_as_flat_key() {
+    fn scoped_extension_config_captures_nested_settings() {
         let json = serde_json::json!({
             "version": ">=2.0.0",
             "settings": {
@@ -1193,17 +1203,19 @@ mod tests {
         assert_eq!(
             config
                 .settings
-                .get("settings")
-                .and_then(|v| v.as_object())
-                .and_then(|settings| settings.get("database_type"))
+                .get("database_type")
                 .and_then(|v| v.as_str()),
             Some("mysql")
         );
-        assert!(config.settings.get("database_type").is_none());
+        assert_eq!(
+            config.settings.get("mysql_host").and_then(|v| v.as_str()),
+            Some("localhost")
+        );
+        assert!(config.settings.get("settings").is_none());
     }
 
     #[test]
-    fn scoped_extension_config_does_not_merge_nested_settings() {
+    fn scoped_extension_config_flat_settings_override_nested_settings() {
         let json = serde_json::json!({
             "settings": {
                 "database_type": "mysql"
@@ -1225,7 +1237,39 @@ mod tests {
             config.settings.get("mysql_host").and_then(|v| v.as_str()),
             Some("localhost")
         );
-        assert!(config.settings.get("settings").is_some());
+        assert!(config.settings.get("settings").is_none());
+    }
+
+    #[test]
+    fn component_homeboy_json_routes_nested_wordpress_test_backend_setting() {
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "roadie",
+            "local_path": "/tmp/roadie",
+            "extensions": {
+                "wordpress": {
+                    "settings": {
+                        "test_backend": "host-smoke"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let wordpress_settings = component
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("wordpress"))
+            .expect("wordpress extension config")
+            .settings
+            .clone();
+
+        assert_eq!(
+            wordpress_settings
+                .get("test_backend")
+                .and_then(|value| value.as_str()),
+            Some("host-smoke")
+        );
+        assert!(wordpress_settings.get("settings").is_none());
     }
 
     #[test]

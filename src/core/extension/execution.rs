@@ -790,6 +790,8 @@ fn build_exec_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::component::Component;
+    use crate::core::extension::extract_component_extension_settings;
 
     #[test]
     fn build_exec_env_includes_runtime_runner_helper_path() {
@@ -921,6 +923,35 @@ mod tests {
 
         // Array default from manifest is preserved
         assert_eq!(parsed["array_default"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn build_settings_json_includes_nested_homeboy_json_extension_settings() {
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "roadie",
+            "local_path": "/tmp/roadie",
+            "extensions": {
+                "wordpress": {
+                    "settings": {
+                        "test_backend": "host-smoke"
+                    }
+                }
+            }
+        }))
+        .expect("component config");
+        let manifest = serde_json::json!({
+            "settings": [
+                { "id": "test_backend", "default": "wp-codebox" }
+            ]
+        });
+        let extension_settings = extract_component_extension_settings(&component, "wordpress");
+
+        let json = build_settings_json_from_manifest(&manifest, &extension_settings, &[], &[])
+            .expect("settings json");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse settings json");
+
+        assert_eq!(parsed["test_backend"], serde_json::json!("host-smoke"));
+        assert!(parsed.get("settings").is_none());
     }
 
     #[test]
