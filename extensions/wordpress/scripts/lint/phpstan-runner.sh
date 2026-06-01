@@ -929,8 +929,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     fi
 
     # Write PHPStan lint findings sidecar for homeboy baseline ratchet.
-    # Transforms PHPStan JSON into the same LintFinding format PHPCS uses:
-    #   [{id: "file::identifier::line", message: "...", category: "phpstan"}]
+    # Transforms PHPStan JSON into the same current LintFinding shape PHPCS uses.
     # The lint-runner merges these with PHPCS findings into the final baseline.
     if [ -n "${_HOMEBOY_PHPSTAN_FINDINGS_FILE:-}" ] && [ -n "$json_output" ]; then
         _PHPSTAN_FINDINGS_OUTPUT_TMPFILE=$(homeboy_mktemp 'phpstan-findings.XXXXXX')
@@ -968,7 +967,6 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                         "line" => $line,
                         "column" => null,
                         "severity" => "error",
-                        "source" => "phpstan",
                         "code" => $code,
                         "rule" => $code,
                         "category" => "phpstan",

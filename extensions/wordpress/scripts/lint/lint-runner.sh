@@ -102,12 +102,23 @@ merge_findings_into_sidecar() {
     local extra_file="$1"
     [ ! -f "$extra_file" ] && return 0
 
-    if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
-        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
-        return 1
+    if type homeboy_sidecar_merge >/dev/null 2>&1; then
+        homeboy_sidecar_merge lint.findings "$extra_file"
+        return $?
     fi
 
-    homeboy_sidecar_merge lint.findings "$extra_file"
+    if type homeboy_merge_lint_findings >/dev/null 2>&1; then
+        homeboy_merge_lint_findings "$extra_file"
+        return $?
+    fi
+
+    if type homeboy_sidecar_merge_json_array >/dev/null 2>&1; then
+        homeboy_sidecar_merge_json_array "${HOMEBOY_LINT_FINDINGS_FILE:-}" "$extra_file"
+        return $?
+    fi
+
+    echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
+    return 1
 }
 
 write_lint_producers_sidecar() {
@@ -819,14 +830,10 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
     fi
 
     # Write lint findings sidecar for homeboy baseline and categorized issues.
-    # Transforms PHPCS JSON report into the LintFinding format homeboy expects:
-    #   [{id: "file::source::line", message: "...", category: "..."}]
+    # Transforms PHPCS JSON report into the current LintFinding shape; Homeboy
+    # owns structured source metadata outside this sidecar payload.
     # Category is derived from the top-level PHPCS source namespace.
     if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
-        if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
-            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
-            exit 1
-        fi
         _PHPCS_FINDINGS_TMPFILE=$(homeboy_mktemp 'phpcs-findings.XXXXXX')
         echo "$json_output" | php -r '
             ini_set("memory_limit", "-1");
@@ -891,7 +898,6 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
                         "line" => $line,
                         "column" => $column,
                         "severity" => strtolower($msg["type"] ?? "error"),
-                        "source" => "phpcs",
                         "code" => $code,
                         "rule" => $code,
                         "category" => $category,
@@ -904,7 +910,7 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
             }
             file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");
         ' "$PLUGIN_PATH" "$_PHPCS_FINDINGS_TMPFILE" 2>/dev/null || true
-        homeboy_sidecar_merge lint.findings "$_PHPCS_FINDINGS_TMPFILE"
+        merge_findings_into_sidecar "$_PHPCS_FINDINGS_TMPFILE" || exit 1
         rm -f "$_PHPCS_FINDINGS_TMPFILE"
     fi
 fi
