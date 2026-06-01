@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.215.1] - 2026-06-01
+
+### Changed
+- prove agent task matrix scheduler fanout
+
+### Fixed
+- render deploy artifact templates
+
 ## [0.215.0] - 2026-06-01
 
 ### Added
