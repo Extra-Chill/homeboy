@@ -386,6 +386,30 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
     Ok(target)
 }
 
+pub(crate) fn component_contains_path(component: &Component, path: &Path) -> bool {
+    let expanded = shellexpand::tilde(&component.local_path);
+    path_is_at_or_inside(Path::new(expanded.as_ref()), path)
+}
+
+pub(crate) fn component_is_contained_in_path(component: &Component, path: &Path) -> bool {
+    let expanded = shellexpand::tilde(&component.local_path);
+    path_strictly_contains(path, Path::new(expanded.as_ref()))
+}
+
+fn path_is_at_or_inside(parent: &Path, path: &Path) -> bool {
+    match (parent.canonicalize().ok(), path.canonicalize().ok()) {
+        (Some(parent), Some(path)) => path == parent || path.starts_with(&parent),
+        _ => false,
+    }
+}
+
+fn path_strictly_contains(parent: &Path, child: &Path) -> bool {
+    match (parent.canonicalize().ok(), child.canonicalize().ok()) {
+        (Some(parent), Some(child)) => child.starts_with(&parent) && child != parent,
+        _ => false,
+    }
+}
+
 /// Find the git root directory for a given path.
 pub(crate) fn detect_git_root(dir: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("git")
