@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.109.2] - 2026-06-01
+
+### Fixed
+- select plugin archive headers by target basename
+
 ## [2.109.1] - 2026-06-01
 
 ### Fixed
