@@ -33,6 +33,7 @@ COMPONENT_DIR="$TMP_DIR/example-plugin"
 FAKE_EXTENSION="$TMP_DIR/fake-wordpress-extension"
 ESLINT_ARGS_FILE="$TMP_DIR/eslint-args.txt"
 FINDINGS_FILE="$TMP_DIR/eslint-findings.json"
+SIDECAR_WRITER="$TMP_DIR/sidecar-writer.sh"
 
 mkdir -p "$COMPONENT_DIR/inc" "$COMPONENT_DIR/assets" "$COMPONENT_DIR/docs" "$FAKE_EXTENSION/node_modules/.bin"
 
@@ -66,6 +67,14 @@ MD
 cat > "$FAKE_EXTENSION/.eslintrc.json" <<'JSON'
 {}
 JSON
+
+cat > "$SIDECAR_WRITER" <<'SH'
+homeboy_sidecar_merge_json_array() {
+    local target="$1"
+    local source="$2"
+    cp "$source" "$target"
+}
+SH
 
 cat > "$FAKE_EXTENSION/node_modules/.bin/eslint" <<'SH'
 #!/usr/bin/env bash
@@ -142,6 +151,9 @@ HOMEBOY_LINT_FILE='assets/admin.js' \
 
 assert_contains "$TMP_DIR/js-success.out" "Linting single file: assets/admin.js"
 assert_contains "$TMP_DIR/js-success.out" "ESLint linting passed"
+assert_contains "$ESLINT_ARGS_FILE" "--no-eslintrc"
+assert_contains "$ESLINT_ARGS_FILE" "--resolve-plugins-relative-to"
+assert_contains "$ESLINT_ARGS_FILE" "$FAKE_EXTENSION"
 assert_contains "$ESLINT_ARGS_FILE" "assets/admin.js"
 
 cat > "$COMPONENT_DIR/assets/bad.js" <<'JS'
@@ -155,6 +167,7 @@ HOMEBOY_COMPONENT_ID="example-plugin" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
 ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
 HOMEBOY_LINT_FINDINGS_FILE="$FINDINGS_FILE" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER" \
 HOMEBOY_LINT_FILE='assets/bad.js' \
     bash "$RUNNER" > "$TMP_DIR/js-failure.out" 2>&1
 failure_status=$?

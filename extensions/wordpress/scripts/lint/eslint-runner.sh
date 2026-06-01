@@ -155,8 +155,9 @@ if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
 fi
 
-# Build base ESLint arguments
-eslint_base_args=(--config "$ESLINT_CONFIG" --ext .js,.jsx,.ts,.tsx)
+# Build base ESLint arguments. Keep config and plugin resolution anchored to
+# this extension so worktree targets do not also load a primary-checkout config.
+eslint_base_args=(--no-eslintrc --config "$ESLINT_CONFIG" --resolve-plugins-relative-to "$EXTENSION_PATH" --ext .js,.jsx,.ts,.tsx)
 
 if [ -n "$TEXT_DOMAIN" ]; then
     eslint_base_args+=(--rule "@wordpress/i18n-text-domain: [error, { allowedTextDomain: \"$TEXT_DOMAIN\" }]")
