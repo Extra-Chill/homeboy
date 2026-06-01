@@ -28,7 +28,7 @@ pub use records::{
 };
 pub use store::{
     ObservationDbStatus, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,
-    SOURCE_SNAPSHOT_METADATA_ENV,
+    PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV, SOURCE_SNAPSHOT_METADATA_ENV,
 };
 pub(crate) use test_findings::{
     finding_records_from_failure_clusters, finding_records_from_test_analysis_input,

@@ -51,6 +51,8 @@ pub struct PerformanceDigestReport {
     pub host_pressure: Option<HostPressureDigest>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub lab_offload: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub preview: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<String>,
 }
@@ -157,6 +159,9 @@ pub fn performance_digest_from_args(
     let lab_offload = find_object_recursive(&metadata, "lab_offload")
         .map(scalar_object)
         .unwrap_or_default();
+    let preview = find_object_recursive(&metadata, "preview")
+        .map(scalar_object)
+        .unwrap_or_default();
 
     let mut baseline_health =
         collect_baseline_health(&bench_data, args.min_samples, args.max_cv_pct);
@@ -182,6 +187,7 @@ pub fn performance_digest_from_args(
         &baseline_health,
         host_pressure.as_ref(),
         &lab_offload,
+        &preview,
         &gaps,
         args.run_url.as_deref().unwrap_or_default(),
     );
@@ -194,6 +200,7 @@ pub fn performance_digest_from_args(
         baseline_health,
         host_pressure,
         lab_offload,
+        preview,
         gaps,
     })
 }
@@ -569,6 +576,7 @@ mod helpers {
         baseline_health: &[BaselineHealthDiagnostic],
         host_pressure: Option<&HostPressureDigest>,
         lab_offload: &BTreeMap<String, String>,
+        preview: &BTreeMap<String, String>,
         gaps: &[String],
         run_url: &str,
     ) -> String {
@@ -580,6 +588,7 @@ mod helpers {
         render_baseline_health(&mut out, baseline_health);
         render_host_pressure(&mut out, host_pressure);
         render_lab_offload(&mut out, lab_offload);
+        render_preview(&mut out, preview);
         render_gaps(&mut out, gaps);
         if !run_url.is_empty() {
             let _ = writeln!(out, "### Full run\n- {}\n", run_url);
@@ -754,6 +763,43 @@ mod helpers {
         out.push_str("### Lab Offload\n");
         for (key, value) in lab_offload {
             let _ = writeln!(out, "- {}: `{}`", key, value);
+        }
+        out.push('\n');
+    }
+
+    pub(super) fn render_preview(out: &mut String, preview: &BTreeMap<String, String>) {
+        if preview.is_empty() {
+            return;
+        }
+        out.push_str("### Preview\n");
+        for key in [
+            "status",
+            "local_url",
+            "public_url",
+            "hold_seconds",
+            "expires_at",
+            "process_id",
+            "runtime_id",
+            "cleanup_status",
+        ] {
+            if let Some(value) = preview.get(key) {
+                let _ = writeln!(out, "- {}: `{}`", key, value);
+            }
+        }
+        for (key, value) in preview {
+            if !matches!(
+                key.as_str(),
+                "status"
+                    | "local_url"
+                    | "public_url"
+                    | "hold_seconds"
+                    | "expires_at"
+                    | "process_id"
+                    | "runtime_id"
+                    | "cleanup_status"
+            ) {
+                let _ = writeln!(out, "- {}: `{}`", key, value);
+            }
         }
         out.push('\n');
     }

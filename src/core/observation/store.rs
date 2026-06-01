@@ -10,7 +10,10 @@ mod schema;
 mod triage_items;
 
 use super::context::RunContext;
-pub use super::context::{LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV};
+pub use super::context::{
+    LAB_OFFLOAD_METADATA_ENV, PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV,
+    SOURCE_SNAPSHOT_METADATA_ENV,
+};
 use super::records::{
     ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, FindingListFilter,
     FindingRecord, NewFindingRecord, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord,
@@ -883,6 +886,9 @@ fn with_run_context_metadata(
     }
     if let Some(lab_offload) = &context.provenance.lab_offload {
         additions.push(("lab_offload".to_string(), lab_offload.clone()));
+    }
+    if let Some(preview) = &context.provenance.preview {
+        additions.push(("preview".to_string(), preview.clone()));
     }
     if let Some(artifact_mirror) = &context.provenance.artifact_mirror {
         additions.push(("artifact_mirror".to_string(), artifact_mirror.clone()));
