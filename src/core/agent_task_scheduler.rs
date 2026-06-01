@@ -793,7 +793,8 @@ fn default_max_concurrency() -> usize {
 mod tests {
     use super::*;
     use crate::core::agent_task::{
-        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
+        expand_agent_task_matrix, AgentTaskExecutor, AgentTaskLimits, AgentTaskMatrixAggregate,
+        AgentTaskMatrixAxis, AgentTaskPolicy, AgentTaskWorkspace,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -928,6 +929,58 @@ mod tests {
             aggregate.queue.per_executor_concurrency.get("test"),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn runs_matrix_cells_through_generic_scheduler_and_preserves_axes() {
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            "fanout/site-smoke[model=gpt-5.5,prompt=site-b]".to_string(),
+            AgentTaskOutcomeStatus::Failed,
+        );
+        let scheduler =
+            AgentTaskScheduler::new(RecordingExecutor::new(statuses, Duration::from_millis(0)));
+        let matrix_plan = expand_agent_task_matrix(
+            "fanout/site-smoke",
+            vec![
+                AgentTaskMatrixAxis {
+                    name: "model".to_string(),
+                    values: vec!["gpt-5.5".to_string(), "claude".to_string()],
+                },
+                AgentTaskMatrixAxis {
+                    name: "prompt".to_string(),
+                    values: vec!["site-a".to_string(), "site-b".to_string()],
+                },
+            ],
+            request("template"),
+        )
+        .expect("matrix expands");
+        let mut schedule_plan = AgentTaskPlan::new(
+            matrix_plan.plan_id.clone(),
+            matrix_plan
+                .cells
+                .iter()
+                .map(|cell| cell.task.clone())
+                .collect(),
+        );
+        schedule_plan.options.max_concurrency = 2;
+
+        let schedule = scheduler.run(schedule_plan);
+        let matrix = AgentTaskMatrixAggregate::from_outcomes(&matrix_plan, &schedule.outcomes);
+
+        assert_eq!(schedule.plan_id, "fanout/site-smoke");
+        assert_eq!(schedule.totals.succeeded, 3);
+        assert_eq!(schedule.totals.failed, 1);
+        assert_eq!(matrix.cells.len(), 4);
+        assert!(!matrix.passed);
+        let failed = matrix
+            .cells
+            .iter()
+            .find(|cell| cell.status == Some(AgentTaskOutcomeStatus::Failed))
+            .expect("failed matrix cell");
+        assert_eq!(failed.axes["model"], "gpt-5.5");
+        assert_eq!(failed.axes["prompt"], "site-b");
+        assert_eq!(failed.evidence_refs[0].kind, "log");
     }
 
     #[test]
