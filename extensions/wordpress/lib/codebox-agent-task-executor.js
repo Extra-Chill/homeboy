@@ -55,6 +55,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     provider: config.provider || options.provider || '',
     model: request.executor.model || config.model || options.model || '',
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || [],
+    runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     secret_env: config.secret_env || options.secretEnv || [],
     agents_api: config.agents_api || options.agentsApi || '',
     data_machine: config.data_machine || options.dataMachine || '',

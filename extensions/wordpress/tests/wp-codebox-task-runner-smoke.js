@@ -61,6 +61,13 @@ try {
     provider: 'opencode',
     model: 'opencode-go/kimi-k2.6',
     provider_plugin_paths: [providerPluginPath],
+    runtime_stack_mounts: [{
+      type: 'directory',
+      source: '/components/php-ai-client',
+      target: '/wordpress/wp-includes/php-ai-client',
+      mode: 'readonly',
+      metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
+    }],
     secret_env: ['OPENCODE_API_KEY'],
     orchestrator: {
       id: 'homeboy-extensions/audit-wp-codebox-fanout',
@@ -100,6 +107,8 @@ try {
     '/components/homeboy-extensions',
     '--mount',
     '/repo/plugin:/wordpress/wp-content/plugins/plugin:readwrite',
+    '--runtime-stack-mount',
+    '/components/wordpress-develop:/wordpress:readonly',
     '--max-turns',
     '80',
     '--task-timeout-seconds',
@@ -151,6 +160,12 @@ try {
   ]);
   assert.deepEqual(recipe.inputs.secretEnv, ['OPENCODE_API_KEY']);
   assert.equal(recipe.inputs.mounts[0].source, '/repo/plugin');
+  assert.equal(recipe.runtime.stack.mounts[0].source, '/components/php-ai-client');
+  assert.equal(recipe.runtime.stack.mounts[0].target, '/wordpress/wp-includes/php-ai-client');
+  assert.equal(recipe.runtime.stack.mounts[0].metadata.component, 'php-ai-client');
+  assert.equal(recipe.runtime.stack.mounts[1].source, '/components/wordpress-develop');
+  assert.equal(recipe.runtime.stack.mounts[1].target, '/wordpress');
+  assert.equal(recipe.runtime.stack.mounts[1].metadata.kind, 'homeboy-runtime-stack');
   assert.equal(recipe.inputs.extraPlugins[0].slug, 'agents-api');
   assert.equal(recipe.inputs.extraPlugins[1].slug, 'data-machine');
   assert.equal(recipe.inputs.extraPlugins[2].slug, 'data-machine-code');

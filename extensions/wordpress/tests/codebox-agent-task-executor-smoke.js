@@ -52,6 +52,13 @@ const request = {
     config: {
       provider: 'openai',
       provider_plugin_paths: ['/providers/openai'],
+      runtime_stack_mounts: [{
+        type: 'directory',
+        source: '/components/php-ai-client',
+        target: '/wordpress/wp-includes/php-ai-client',
+        mode: 'readonly',
+        metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
+      }],
       secret_env: ['OPENAI_API_KEY'],
       max_turns: 8,
     },
@@ -82,6 +89,13 @@ assert.equal(codeboxRequest.sandbox_session_id, 'task-123');
 assert.equal(codeboxRequest.provider, 'openai');
 assert.equal(codeboxRequest.model, 'gpt-5.5');
 assert.deepEqual(codeboxRequest.provider_plugin_paths, ['/providers/openai']);
+assert.deepEqual(codeboxRequest.runtime_stack_mounts, [{
+  type: 'directory',
+  source: '/components/php-ai-client',
+  target: '/wordpress/wp-includes/php-ai-client',
+  mode: 'readonly',
+  metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
+}]);
 assert.deepEqual(codeboxRequest.secret_env, ['OPENAI_API_KEY']);
 assert.equal(codeboxRequest.max_turns, 8);
 assert.equal(codeboxRequest.task_timeout_seconds, 120);
