@@ -56,6 +56,13 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     model: request.executor.model || config.model || options.model || '',
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || [],
     secret_env: config.secret_env || options.secretEnv || [],
+    agents_api: config.agents_api || options.agentsApi || '',
+    data_machine: config.data_machine || options.dataMachine || '',
+    data_machine_code: config.data_machine_code || options.dataMachineCode || '',
+    homeboy: config.homeboy || options.homeboy || '',
+    homeboy_extensions: config.homeboy_extensions || options.homeboyExtensions || '',
+    wp_codebox_bin: config.wp_codebox_bin || options.wpCodeboxBin || '',
+    artifacts: config.artifacts || options.artifacts || '',
     max_turns: config.max_turns || options.maxTurns,
     task_timeout_seconds: config.task_timeout_seconds || timeoutSeconds || timeoutFromMs || options.taskTimeoutSeconds,
     orchestrator: {
