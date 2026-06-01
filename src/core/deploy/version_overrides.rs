@@ -688,7 +688,7 @@ mod tests {
                     pattern: Some(r#""version":\s*"([0-9.]+)""#.to_string()),
                 },
                 VersionTarget {
-                    file: "packages/wordpress-plugin/fixture.php".to_string(),
+                    file: "packages/packaged-plugin/fixture.php".to_string(),
                     pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
                 },
             ]),
