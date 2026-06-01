@@ -194,8 +194,11 @@ mod tests {
 
     fn policy_config() -> RemoteExecutionSafetyConfig {
         RemoteExecutionSafetyConfig {
-            dispatch_markers: vec!["runner::exec".to_string(), "RunnerExecOptions".to_string()],
-            path_translation_markers: vec!["rewrite_component_remote_args".to_string()],
+            dispatch_markers: vec![
+                "execute_remote_work".to_string(),
+                "RemoteWorkOptions".to_string(),
+            ],
+            path_translation_markers: vec!["translate_remote_args".to_string()],
             capability_preflight_markers: vec![
                 "remote_capability_plan".to_string(),
                 "evaluate_remote_capabilities".to_string(),
@@ -205,7 +208,7 @@ mod tests {
             extension_selector_markers: vec!["extension_selector".to_string()],
             extension_parity_markers: vec!["required_extensions".to_string()],
             artifact_report_markers: vec!["change_artifact_path".to_string()],
-            artifact_access_markers: vec!["is_retrievable_runner_artifact".to_string()],
+            artifact_access_markers: vec!["is_retrievable_remote_artifact".to_string()],
         }
     }
 
@@ -215,7 +218,7 @@ mod tests {
             "src/main.rs",
             r#"
             fn run(command: Vec<String>) {
-                runner::exec("remote", RunnerExecOptions { command, capture_change: false });
+                execute_remote_work("remote", RemoteWorkOptions { command, capture_change: false });
             }
             "#,
         );
@@ -223,7 +226,10 @@ mod tests {
         assert!(run(&[&fp], &policy_config()).is_empty());
 
         let config = RemoteExecutionSafetyConfig {
-            dispatch_markers: vec!["runner::exec".to_string(), "RunnerExecOptions".to_string()],
+            dispatch_markers: vec![
+                "execute_remote_work".to_string(),
+                "RemoteWorkOptions".to_string(),
+            ],
             ..Default::default()
         };
 
@@ -349,7 +355,7 @@ mod tests {
             "src/main.rs",
             r#"
             fn run(command: Vec<String>, extension_selector: &str) {
-                runner::exec("remote", RunnerExecOptions { command, capture_change: false });
+                execute_remote_work("remote", RemoteWorkOptions { command, capture_change: false });
             }
             "#,
         );
